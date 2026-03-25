@@ -1,4 +1,4 @@
-﻿pub const HEADER_LEN: usize = 14;
+pub const HEADER_LEN: usize = 14;
 pub const MAGIC: u16 = 0xCAFE;
 pub const VERSION: u8 = 1;
 
@@ -21,7 +21,14 @@ pub enum MessageType {
     RoomLeaveRes = 1104,
     RoomReadyReq = 1105,
     RoomReadyRes = 1106,
+    RoomStartReq = 1107,
+    RoomStartRes = 1108,
+    PlayerInputReq = 1111,
+    PlayerInputRes = 1112,
+    RoomEndReq = 1113,
+    RoomEndRes = 1114,
     RoomStatePush = 1201,
+    GameMessagePush = 1202,
     ErrorRes = 9000,
 }
 
@@ -38,7 +45,14 @@ impl MessageType {
             1104 => Some(Self::RoomLeaveRes),
             1105 => Some(Self::RoomReadyReq),
             1106 => Some(Self::RoomReadyRes),
+            1107 => Some(Self::RoomStartReq),
+            1108 => Some(Self::RoomStartRes),
+            1111 => Some(Self::PlayerInputReq),
+            1112 => Some(Self::PlayerInputRes),
+            1113 => Some(Self::RoomEndReq),
+            1114 => Some(Self::RoomEndRes),
             1201 => Some(Self::RoomStatePush),
+            1202 => Some(Self::GameMessagePush),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }

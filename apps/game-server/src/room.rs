@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
@@ -9,6 +9,12 @@ pub struct OutboundMessage {
     pub message_type: crate::protocol::MessageType,
     pub seq: u32,
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomPhase {
+    Waiting,
+    InGame,
 }
 
 #[derive(Clone)]
@@ -22,6 +28,7 @@ pub struct RoomMemberState {
 pub struct Room {
     pub room_id: String,
     pub owner_player_id: String,
+    pub phase: RoomPhase,
     pub members: HashMap<String, RoomMemberState>,
 }
 
@@ -45,15 +52,71 @@ impl Room {
         }
     }
 
-    fn state_name(&self) -> String {
-        if self.members.is_empty() {
-            return "empty".to_string();
+    pub fn state_name(&self) -> String {
+        match self.phase {
+            RoomPhase::InGame => "in_game".to_string(),
+            RoomPhase::Waiting => {
+                if self.members.is_empty() {
+                    return "empty".to_string();
+                }
+
+                if self.members.values().all(|member| member.ready) {
+                    return "ready".to_string();
+                }
+
+                "waiting".to_string()
+            }
+        }
+    }
+
+    pub fn can_start_game(&self, player_id: &str, min_players: usize) -> Result<(), &'static str> {
+        if self.phase == RoomPhase::InGame {
+            return Err("ROOM_ALREADY_IN_GAME");
         }
 
-        if self.members.values().all(|member| member.ready) {
-            return "ready".to_string();
+        if self.owner_player_id != player_id {
+            return Err("ONLY_OWNER_CAN_START");
         }
 
-        "waiting".to_string()
+        if self.members.len() < min_players {
+            return Err("ROOM_NOT_ENOUGH_PLAYERS");
+        }
+
+        if self.members.values().any(|member| !member.ready) {
+            return Err("ROOM_NOT_READY");
+        }
+
+        Ok(())
+    }
+
+    pub fn can_send_input(&self, player_id: &str) -> Result<(), &'static str> {
+        if self.phase != RoomPhase::InGame {
+            return Err("ROOM_NOT_IN_GAME");
+        }
+
+        if !self.members.contains_key(player_id) {
+            return Err("ROOM_MEMBER_NOT_FOUND");
+        }
+
+        Ok(())
+    }
+
+    pub fn can_end_game(&self, player_id: &str) -> Result<(), &'static str> {
+        if self.phase != RoomPhase::InGame {
+            return Err("ROOM_NOT_IN_GAME");
+        }
+
+        if self.owner_player_id != player_id {
+            return Err("ONLY_OWNER_CAN_END_GAME");
+        }
+
+        Ok(())
+    }
+
+    pub fn reset_to_waiting(&mut self) {
+        self.phase = RoomPhase::Waiting;
+        for member in self.members.values_mut() {
+            member.ready = false;
+        }
     }
 }

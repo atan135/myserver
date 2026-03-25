@@ -1,4 +1,4 @@
-﻿# 协议设计 v0.1
+# 协议设计 v0.1
 
 ## 玩家 TCP 包结构
 
@@ -28,7 +28,14 @@
 - `1104 ROOM_LEAVE_RES`
 - `1105 ROOM_READY_REQ`
 - `1106 ROOM_READY_RES`
+- `1107 ROOM_START_REQ`
+- `1108 ROOM_START_RES`
+- `1111 PLAYER_INPUT_REQ`
+- `1112 PLAYER_INPUT_RES`
+- `1113 ROOM_END_REQ`
+- `1114 ROOM_END_RES`
 - `1201 ROOM_STATE_PUSH`
+- `1202 GAME_MESSAGE_PUSH`
 - `9000 ERROR_RES`
 
 ## 房间核心消息
@@ -64,6 +71,45 @@
 - `ready: bool`
 - `error_code: string`
 
+`ROOM_START_REQ`
+
+- 空消息体
+
+`ROOM_START_RES`
+
+- `ok: bool`
+- `room_id: string`
+- `error_code: string`
+
+`PLAYER_INPUT_REQ`
+
+- `action: string`
+- `payload_json: string`
+
+`PLAYER_INPUT_RES`
+
+- `ok: bool`
+- `room_id: string`
+- `error_code: string`
+
+`GAME_MESSAGE_PUSH`
+
+- `event: string`
+- `room_id: string`
+- `player_id: string`
+- `action: string`
+- `payload_json: string`
+
+`ROOM_END_REQ`
+
+- `reason: string`
+
+`ROOM_END_RES`
+
+- `ok: bool`
+- `room_id: string`
+- `error_code: string`
+
 `ROOM_STATE_PUSH`
 
 - `event: string`
@@ -90,6 +136,14 @@
 - `owner` 离开后，房主转移给当前房间内的下一个成员
 - 所有成员 `ready=true` 时，房间状态变为 `ready`
 - 只要有成员未准备，房间状态为 `waiting`
+- 房主才能开始游戏
+- 开始游戏至少需要 `2` 名成员
+- 开始游戏前必须全员 `ready`
+- 开始后房间状态变为 `in_game`
+- 只有 `in_game` 状态允许发送 `PLAYER_INPUT_REQ`
+- 只有房主可以发送 `ROOM_END_REQ`
+- `ROOM_END_REQ` 后房间回到 `waiting`，并将所有成员 `ready` 重置为 `false`
+- 对局中如果有人离开，房间也会回退到 `waiting`，并将剩余成员 `ready` 重置为 `false`
 
 ## 房间事件广播
 
@@ -99,6 +153,14 @@
 - `ready_changed`
 - `member_left`
 - `member_disconnected`
+- `game_started`
+- `game_ended`
+
+## 游戏中消息广播
+
+当前会广播以下对局消息：
+
+- `player_input`
 
 ## 状态约束
 

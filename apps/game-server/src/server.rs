@@ -14,15 +14,16 @@ use tracing::{info, warn};
 use crate::config::Config;
 use crate::mysql_store::MySqlAuditStore;
 use crate::pb::{
-    AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq,
-    RoomReadyRes, RoomSnapshot, RoomStatePush,
+    AuthReq, AuthRes, ErrorRes, GameMessagePush, PingRes, PlayerInputReq, PlayerInputRes,
+    RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes,
+    RoomSnapshot, RoomStartRes, RoomStatePush,
 };
 use crate::protocol::{HEADER_LEN, MessageType, encode_packet, parse_header};
-use crate::room::{OutboundMessage, Room, RoomMemberState};
+use crate::room::{OutboundMessage, Room, RoomMemberState, RoomPhase};
 use crate::session::{Session, SessionState};
 use crate::ticket::verify_ticket;
-
 type SharedRooms = Arc<Mutex<HashMap<String, Room>>>;
+const MIN_START_PLAYERS: usize = 2;
 
 pub async fn run(
     config: &Config,
@@ -559,6 +560,223 @@ async fn handle_connection(
                     }
                 }
             }
+            MessageType::RoomStartReq => {
+                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
+                    continue;
+                };
+                let Some(room_id) = session.room_id.clone() else {
+                    queue_message(
+                        &tx,
+                        MessageType::RoomStartRes,
+                        header.seq,
+                        RoomStartRes {
+                            ok: false,
+                            room_id: String::new(),
+                            error_code: "ROOM_NOT_JOINED".to_string(),
+                        },
+                    )?;
+                    continue;
+                };
+
+                let start_result = {
+                    let mut rooms_guard = rooms.lock().await;
+                    start_game(&mut rooms_guard, &room_id, &player_id)
+                };
+
+                match start_result {
+                    Ok(snapshot) => {
+                        queue_message(
+                            &tx,
+                            MessageType::RoomStartRes,
+                            header.seq,
+                            RoomStartRes {
+                                ok: true,
+                                room_id: room_id.clone(),
+                                error_code: String::new(),
+                            },
+                        )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                Some(&snapshot.owner_player_id),
+                                "game_started",
+                                Some(&snapshot.state),
+                                snapshot.members.len(),
+                                Some(json!({ "seq": header.seq })),
+                            )
+                            .await;
+                        broadcast_snapshot(&rooms, &room_id, "game_started", snapshot).await?;
+                    }
+                    Err(error_code) => {
+                        queue_message(
+                            &tx,
+                            MessageType::RoomStartRes,
+                            header.seq,
+                            RoomStartRes {
+                                ok: false,
+                                room_id,
+                                error_code: error_code.to_string(),
+                            },
+                        )?;
+                    }
+                }
+            }
+            MessageType::PlayerInputReq => {
+                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
+                    continue;
+                };
+                let Some(room_id) = session.room_id.clone() else {
+                    queue_message(
+                        &tx,
+                        MessageType::PlayerInputRes,
+                        header.seq,
+                        PlayerInputRes {
+                            ok: false,
+                            room_id: String::new(),
+                            error_code: "ROOM_NOT_JOINED".to_string(),
+                        },
+                    )?;
+                    continue;
+                };
+
+                let request = match PlayerInputReq::decode(body.as_slice()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        queue_error(&tx, header.seq, "INVALID_PLAYER_INPUT_BODY", "invalid player input body")?;
+                        continue;
+                    }
+                };
+
+                let input_result = {
+                    let rooms_guard = rooms.lock().await;
+                    apply_player_input(&rooms_guard, &room_id, &player_id)
+                };
+
+                match input_result {
+                    Ok(_) => {
+                        queue_message(
+                            &tx,
+                            MessageType::PlayerInputRes,
+                            header.seq,
+                            PlayerInputRes {
+                                ok: true,
+                                room_id: room_id.clone(),
+                                error_code: String::new(),
+                            },
+                        )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                None,
+                                "player_input",
+                                Some("in_game"),
+                                0,
+                                Some(json!({
+                                    "seq": header.seq,
+                                    "action": request.action,
+                                    "payloadJson": request.payload_json
+                                })),
+                            )
+                            .await;
+                        broadcast_game_message(
+                            &rooms,
+                            &room_id,
+                            "player_input",
+                            &player_id,
+                            &request.action,
+                            &request.payload_json,
+                        )
+                        .await?;
+                    }
+                    Err(error_code) => {
+                        queue_message(
+                            &tx,
+                            MessageType::PlayerInputRes,
+                            header.seq,
+                            PlayerInputRes {
+                                ok: false,
+                                room_id,
+                                error_code: error_code.to_string(),
+                            },
+                        )?;
+                    }
+                }
+            }
+            MessageType::RoomEndReq => {
+                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
+                    continue;
+                };
+                let Some(room_id) = session.room_id.clone() else {
+                    queue_message(
+                        &tx,
+                        MessageType::RoomEndRes,
+                        header.seq,
+                        RoomEndRes {
+                            ok: false,
+                            room_id: String::new(),
+                            error_code: "ROOM_NOT_JOINED".to_string(),
+                        },
+                    )?;
+                    continue;
+                };
+
+                let request = match RoomEndReq::decode(body.as_slice()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        queue_error(&tx, header.seq, "INVALID_ROOM_END_BODY", "invalid room end body")?;
+                        continue;
+                    }
+                };
+
+                let end_result = {
+                    let mut rooms_guard = rooms.lock().await;
+                    end_game(&mut rooms_guard, &room_id, &player_id)
+                };
+
+                match end_result {
+                    Ok(snapshot) => {
+                        queue_message(
+                            &tx,
+                            MessageType::RoomEndRes,
+                            header.seq,
+                            RoomEndRes {
+                                ok: true,
+                                room_id: room_id.clone(),
+                                error_code: String::new(),
+                            },
+                        )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                Some(&snapshot.owner_player_id),
+                                "game_ended",
+                                Some(&snapshot.state),
+                                snapshot.members.len(),
+                                Some(json!({
+                                    "seq": header.seq,
+                                    "reason": request.reason
+                                })),
+                            )
+                            .await;
+                        broadcast_snapshot(&rooms, &room_id, "game_ended", snapshot).await?;
+                    }
+                    Err(error_code) => {
+                        queue_message(
+                            &tx,
+                            MessageType::RoomEndRes,
+                            header.seq,
+                            RoomEndRes {
+                                ok: false,
+                                room_id,
+                                error_code: error_code.to_string(),
+                            },
+                        )?;
+                    }
+                }
+            }
             _ => {
                 queue_error(&tx, header.seq, "MESSAGE_NOT_SUPPORTED", "message not supported in this phase")?;
             }
@@ -614,8 +832,13 @@ fn join_room(
     let room = rooms.entry(room_id.to_string()).or_insert_with(|| Room {
         room_id: room_id.to_string(),
         owner_player_id: player_id.to_string(),
+        phase: RoomPhase::Waiting,
         members: HashMap::new(),
     });
+
+    if room.phase == RoomPhase::InGame && !room.members.contains_key(player_id) {
+        return Err("ROOM_ALREADY_IN_GAME");
+    }
 
     if room.members.len() >= 10 && !room.members.contains_key(player_id) {
         return Err("ROOM_FULL");
@@ -652,6 +875,9 @@ fn leave_room(
         }
     }
 
+    // Once a member leaves mid-game, fall back to waiting so the room can be re-formed.
+    room.reset_to_waiting();
+
     Some(room.snapshot())
 }
 
@@ -662,11 +888,51 @@ fn set_ready_state(
     ready: bool,
 ) -> Result<RoomSnapshot, &'static str> {
     let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+    if room.phase == RoomPhase::InGame {
+        return Err("ROOM_ALREADY_IN_GAME");
+    }
+
     let member = room
         .members
         .get_mut(player_id)
         .ok_or("ROOM_MEMBER_NOT_FOUND")?;
     member.ready = ready;
+    Ok(room.snapshot())
+}
+
+fn start_game(
+    rooms: &mut HashMap<String, Room>,
+    room_id: &str,
+    player_id: &str,
+) -> Result<RoomSnapshot, &'static str> {
+    let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+    // Keep start-game validation centralized so room state transitions stay consistent.
+    room.can_start_game(player_id, MIN_START_PLAYERS)?;
+    room.phase = RoomPhase::InGame;
+
+    Ok(room.snapshot())
+}
+
+fn apply_player_input(
+    rooms: &HashMap<String, Room>,
+    room_id: &str,
+    player_id: &str,
+) -> Result<(), &'static str> {
+    let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+    room.can_send_input(player_id)
+}
+
+fn end_game(
+    rooms: &mut HashMap<String, Room>,
+    room_id: &str,
+    player_id: &str,
+) -> Result<RoomSnapshot, &'static str> {
+    let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+    // Ending the game also resets member ready state for the next round.
+    room.can_end_game(player_id)?;
+    room.reset_to_waiting();
     Ok(room.snapshot())
 }
 
@@ -696,6 +962,45 @@ async fn broadcast_snapshot(
     for sender in senders {
         let _ = sender.send(OutboundMessage {
             message_type: MessageType::RoomStatePush,
+            seq: 0,
+            body: body.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+async fn broadcast_game_message(
+    rooms: &SharedRooms,
+    room_id: &str,
+    event: &str,
+    player_id: &str,
+    action: &str,
+    payload_json: &str,
+) -> Result<(), std::io::Error> {
+    let body = encode_body(GameMessagePush {
+        event: event.to_string(),
+        room_id: room_id.to_string(),
+        player_id: player_id.to_string(),
+        action: action.to_string(),
+        payload_json: payload_json.to_string(),
+    });
+
+    let senders = {
+        let rooms_guard = rooms.lock().await;
+        let Some(room) = rooms_guard.get(room_id) else {
+            return Ok(());
+        };
+
+        room.members
+            .values()
+            .map(|member| member.sender.clone())
+            .collect::<Vec<_>>()
+    };
+
+    for sender in senders {
+        let _ = sender.send(OutboundMessage {
+            message_type: MessageType::GameMessagePush,
             seq: 0,
             body: body.clone(),
         });
@@ -748,3 +1053,8 @@ fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
+
+
+
+
+

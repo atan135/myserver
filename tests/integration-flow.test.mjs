@@ -107,4 +107,34 @@ test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t
       roomId: randomId("room-multi")
     });
   });
+
+  await t.test("start-game-single-client", async () => {
+    await runMockClientScenario({
+      scenario: "start-game-single-client",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-start-single")
+    });
+  });
+
+  await t.test("start-game-ready-room", async () => {
+    await runMockClientScenario({
+      scenario: "start-game-ready-room",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-start-ready")
+    });
+  });
+
+  await t.test("gameplay-roundtrip", async () => {
+    await runMockClientScenario({
+      scenario: "gameplay-roundtrip",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-gameplay")
+    });
+  });
 });

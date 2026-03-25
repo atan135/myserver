@@ -1,4 +1,4 @@
-﻿import net from "node:net";
+import net from "node:net";
 import process from "node:process";
 
 const MAGIC = 0xcafe;
@@ -16,7 +16,14 @@ const MESSAGE_TYPE = {
   ROOM_LEAVE_RES: 1104,
   ROOM_READY_REQ: 1105,
   ROOM_READY_RES: 1106,
+  ROOM_START_REQ: 1107,
+  ROOM_START_RES: 1108,
+  PLAYER_INPUT_REQ: 1111,
+  PLAYER_INPUT_RES: 1112,
+  ROOM_END_REQ: 1113,
+  ROOM_END_RES: 1114,
   ROOM_STATE_PUSH: 1201,
+  GAME_MESSAGE_PUSH: 1202,
   ERROR_RES: 9000
 };
 
@@ -26,7 +33,10 @@ const SCENARIO = {
   UNAUTH_ROOM_JOIN: "unauth-room-join",
   UNKNOWN_MESSAGE: "unknown-message",
   OVERSIZED_ROOM_JOIN: "oversized-room-join",
-  TWO_CLIENT_ROOM: "two-client-room"
+  TWO_CLIENT_ROOM: "two-client-room",
+  START_GAME_SINGLE_CLIENT: "start-game-single-client",
+  START_GAME_READY_ROOM: "start-game-ready-room",
+  GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip"
 };
 
 function parseArgs(argv) {
@@ -142,6 +152,21 @@ function encodeRoomLeaveReq() {
 
 function encodeRoomReadyReq(ready) {
   return encodeBoolField(1, ready);
+}
+
+function encodeRoomStartReq() {
+  return Buffer.alloc(0);
+}
+
+function encodePlayerInputReq(action, payloadJson) {
+  return Buffer.concat([
+    encodeStringField(1, action),
+    encodeStringField(2, payloadJson)
+  ]);
+}
+
+function encodeRoomEndReq(reason) {
+  return encodeStringField(1, reason);
 }
 
 function appendField(fields, fieldNumber, value) {
@@ -265,10 +290,36 @@ function decodeByMessageType(messageType, body) {
         ready: readBool(fields, 3),
         errorCode: readString(fields, 4)
       };
+    case MESSAGE_TYPE.ROOM_START_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.PLAYER_INPUT_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.ROOM_END_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
     case MESSAGE_TYPE.ROOM_STATE_PUSH:
       return {
         event: readString(fields, 1),
         snapshot: fields.get(2) ? decodeRoomSnapshot(fields.get(2)) : null
+      };
+    case MESSAGE_TYPE.GAME_MESSAGE_PUSH:
+      return {
+        event: readString(fields, 1),
+        roomId: readString(fields, 2),
+        playerId: readString(fields, 3),
+        action: readString(fields, 4),
+        payloadJson: readString(fields, 5)
       };
     case MESSAGE_TYPE.ERROR_RES:
       return {
@@ -484,6 +535,201 @@ async function runHappyPath(client, options, login) {
   }
 }
 
+async function runStartGameSingleClient(client, options, login) {
+  await authenticateClient(client, options, login, 1);
+
+  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+  const joinRes = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  if (!joinRes.ok) {
+    throw new Error(`room join failed: ${joinRes.errorCode}`);
+  }
+  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  if (!readyRes.ok) {
+    throw new Error(`room ready failed: ${readyRes.errorCode}`);
+  }
+  printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
+  const startRes = printResponse(`${client.label}.roomStart`, await client.readNextPacket(options.timeoutMs));
+  if (startRes.ok) {
+    throw new Error("expected single-client start game to fail");
+  }
+  if (startRes.errorCode !== "ROOM_NOT_ENOUGH_PLAYERS") {
+    throw new Error(`expected ROOM_NOT_ENOUGH_PLAYERS, got ${startRes.errorCode}`);
+  }
+}
+
+async function runGameplayRoundtrip(options) {
+  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
+  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    printResponse("clientA.roomReady", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(ready1)", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(ready1)", await clientB.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    printResponse("clientB.roomReady", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(ready2)", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(ready2)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
+    const startRes = printResponse("clientA.roomStart", await clientA.readNextPacket(options.timeoutMs));
+    if (!startRes.ok) {
+      throw new Error(`clientA room start failed: ${startRes.errorCode}`);
+    }
+    printResponse("clientA.roomStatePush(gameStarted)", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
+
+    const payloadJson = JSON.stringify({ x: 4, y: 7, frame: 1 });
+    await clientA.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 5, encodePlayerInputReq("move", payloadJson));
+    const inputRes = printResponse("clientA.playerInput", await clientA.readNextPacket(options.timeoutMs));
+    if (!inputRes.ok) {
+      throw new Error(`clientA player input failed: ${inputRes.errorCode}`);
+    }
+
+    const gamePushA = printResponse("clientA.gameMessagePush", await clientA.readNextPacket(options.timeoutMs));
+    const gamePushB = printResponse("clientB.gameMessagePush", await clientB.readNextPacket(options.timeoutMs));
+    if (gamePushA.action !== "move" || gamePushB.action !== "move") {
+      throw new Error("expected game message push action to be move");
+    }
+    if (gamePushA.payloadJson !== payloadJson || gamePushB.payloadJson !== payloadJson) {
+      throw new Error("expected game message push payload to match input payload");
+    }
+    if (gamePushA.playerId !== loginA.playerId || gamePushB.playerId !== loginA.playerId) {
+      throw new Error("expected game message push playerId to be the input sender");
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_END_REQ, 6, encodeRoomEndReq("round-complete"));
+    const endRes = printResponse("clientA.roomEnd", await clientA.readNextPacket(options.timeoutMs));
+    if (!endRes.ok) {
+      throw new Error(`clientA room end failed: ${endRes.errorCode}`);
+    }
+
+    const endPushA = printResponse("clientA.roomStatePush(gameEnded)", await clientA.readNextPacket(options.timeoutMs));
+    const endPushB = printResponse("clientB.roomStatePush(gameEnded)", await clientB.readNextPacket(options.timeoutMs));
+    if (endPushA.event !== "game_ended" || endPushB.event !== "game_ended") {
+      throw new Error("expected game_ended room state push");
+    }
+    if (endPushA.snapshot?.state !== "waiting" || endPushB.snapshot?.state !== "waiting") {
+      throw new Error("expected room to return to waiting after game end");
+    }
+    if (endPushA.snapshot?.members?.some((member) => member.ready) || endPushB.snapshot?.members?.some((member) => member.ready)) {
+      throw new Error("expected all members ready state to reset after game end");
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 7, encodeRoomLeaveReq());
+    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    if (!leaveA.ok) {
+      throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
+    }
+    printResponse("clientB.roomStatePush(afterOwnerLeave)", await clientB.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 7, encodeRoomLeaveReq());
+    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    if (!leaveB.ok) {
+      throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
+    }
+  } finally {
+    clientA.close();
+    clientB.close();
+  }
+}
+
+async function runStartGameReadyRoom(options) {
+  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
+  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    printResponse("clientA.roomReady", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(ready1)", await clientA.readNextPacket(options.timeoutMs));
+    printResponse("clientB.roomStatePush(ready1)", await clientB.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    printResponse("clientB.roomReady", await clientB.readNextPacket(options.timeoutMs));
+    const readyPushB = printResponse("clientB.roomStatePush(ready2)", await clientB.readNextPacket(options.timeoutMs));
+    const readyPushA = printResponse("clientA.roomStatePush(ready2)", await clientA.readNextPacket(options.timeoutMs));
+    if (readyPushA.snapshot?.state !== "ready" || readyPushB.snapshot?.state !== "ready") {
+      throw new Error("expected room state to become ready before start");
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
+    const startRes = printResponse("clientA.roomStart", await clientA.readNextPacket(options.timeoutMs));
+    if (!startRes.ok) {
+      throw new Error(`clientA room start failed: ${startRes.errorCode}`);
+    }
+
+    const startPushA = printResponse("clientA.roomStatePush(gameStarted)", await clientA.readNextPacket(options.timeoutMs));
+    const startPushB = printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
+    if (startPushA.event !== "game_started" || startPushB.event !== "game_started") {
+      throw new Error("expected game_started room state push");
+    }
+    if (startPushA.snapshot?.state !== "in_game" || startPushB.snapshot?.state !== "in_game") {
+      throw new Error("expected room state to become in_game");
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
+    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    if (!leaveA.ok) {
+      throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
+    }
+    printResponse("clientB.roomStatePush(afterOwnerLeave)", await clientB.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
+    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    if (!leaveB.ok) {
+      throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
+    }
+  } finally {
+    clientA.close();
+    clientB.close();
+  }
+}
 async function runTwoClientRoom(options) {
   const loginA = await fetchTicket(options, `${options.roomId}-owner`);
   const loginB = await fetchTicket(options, `${options.roomId}-member`);
@@ -584,7 +830,24 @@ async function main() {
     return;
   }
 
-  const needsLogin = [SCENARIO.HAPPY, SCENARIO.INVALID_TICKET, SCENARIO.OVERSIZED_ROOM_JOIN].includes(options.scenario) || Boolean(options.ticket);
+  if (options.scenario === SCENARIO.START_GAME_READY_ROOM) {
+    await runStartGameReadyRoom(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.GAMEPLAY_ROUNDTRIP) {
+    await runGameplayRoundtrip(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  const needsLogin = [
+    SCENARIO.HAPPY,
+    SCENARIO.INVALID_TICKET,
+    SCENARIO.OVERSIZED_ROOM_JOIN,
+    SCENARIO.START_GAME_SINGLE_CLIENT
+  ].includes(options.scenario) || Boolean(options.ticket);
   const login = needsLogin ? await fetchTicket(options) : null;
 
   if (login) {
@@ -615,6 +878,9 @@ async function main() {
       case SCENARIO.OVERSIZED_ROOM_JOIN:
         await runOversizedRoomJoin(client, options, login);
         break;
+      case SCENARIO.START_GAME_SINGLE_CLIENT:
+        await runStartGameSingleClient(client, options, login);
+        break;
       default:
         throw new Error(`unknown scenario: ${options.scenario}`);
     }
@@ -629,3 +895,4 @@ main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
 });
+
