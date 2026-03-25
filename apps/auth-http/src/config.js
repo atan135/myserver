@@ -1,4 +1,4 @@
-﻿function parseBoolean(value, fallback) {
+function parseBoolean(value, fallback) {
   if (value === undefined) {
     return fallback;
   }
@@ -17,6 +17,7 @@ export function getConfig() {
     logEnableFile: parseBoolean(process.env.LOG_ENABLE_FILE, true),
     logDir: process.env.LOG_DIR || "logs/auth-http",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
+    redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
     sessionTtlSeconds: Number.parseInt(
       process.env.SESSION_TTL_SECONDS || "86400",
       10

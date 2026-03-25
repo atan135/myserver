@@ -1,4 +1,4 @@
-﻿import crypto from "node:crypto";
+import crypto from "node:crypto";
 
 function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64url");
@@ -29,6 +29,10 @@ export class AuthStore {
     this.redis = redis;
   }
 
+  prefixedKey(key) {
+    return `${this.config.redisKeyPrefix || ""}${key}`;
+  }
+
   async createGuestSession(guestId) {
     const normalizedGuestId = guestId || `guest-${crypto.randomUUID()}`;
     const playerId = `player-${crypto.randomUUID()}`;
@@ -42,7 +46,7 @@ export class AuthStore {
     const gameTicket = await this.issueGameTicket(playerId);
 
     await this.redis.set(
-      sessionKey(accessToken),
+      this.prefixedKey(sessionKey(accessToken)),
       JSON.stringify(session),
       "EX",
       this.config.sessionTtlSeconds
@@ -55,7 +59,7 @@ export class AuthStore {
   }
 
   async getSessionByAccessToken(accessToken) {
-    const raw = await this.redis.get(sessionKey(accessToken));
+    const raw = await this.redis.get(this.prefixedKey(sessionKey(accessToken)));
     if (!raw) {
       return null;
     }
@@ -77,7 +81,7 @@ export class AuthStore {
     const ticket = `${payloadB64}.${signature}`;
 
     await this.redis.set(
-      ticketKey(ticket),
+      this.prefixedKey(ticketKey(ticket)),
       playerId,
       "EX",
       this.config.ticketTtlSeconds

@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -127,7 +127,7 @@ async fn handle_connection(
 
                 match verify_ticket(&config.ticket_secret, &request.ticket) {
                     Ok(player_id) => {
-                        let ticket_key = format!("ticket:{}", crate::ticket::hash_ticket(&request.ticket));
+                        let ticket_key = format!("{}ticket:{}", config.redis_key_prefix, crate::ticket::hash_ticket(&request.ticket));
                         let ticket_owner: Option<String> = redis.get(ticket_key).await?;
 
                         if ticket_owner.as_deref() != Some(player_id.as_str()) {
@@ -545,3 +545,4 @@ fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
+

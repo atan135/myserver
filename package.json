@@ -10,6 +10,9 @@
     "dev:auth": "npm run dev --workspace auth-http",
     "start:auth": "npm run start --workspace auth-http",
     "dev:mock-client": "npm run dev --workspace mock-client",
-    "flow:mock-client": "npm run flow --workspace mock-client --"
+    "flow:mock-client": "npm run flow --workspace mock-client --",
+    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",
+    "test:auth-http": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/auth-http.test.mjs",
+    "test:integration": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/integration-flow.test.mjs"
   }
 }

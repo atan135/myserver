@@ -1,4 +1,4 @@
-﻿use std::env;
+use std::env;
 
 #[derive(Clone)]
 pub struct Config {
@@ -9,6 +9,7 @@ pub struct Config {
     pub log_enable_file: bool,
     pub log_dir: String,
     pub redis_url: String,
+    pub redis_key_prefix: String,
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
@@ -33,6 +34,7 @@ impl Config {
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
         let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "logs/game-server".to_string());
         let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
         let ticket_secret =
             env::var("TICKET_SECRET").unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let heartbeat_timeout_secs = env::var("HEARTBEAT_TIMEOUT_SECS")
@@ -52,6 +54,7 @@ impl Config {
             log_enable_file,
             log_dir,
             redis_url,
+            redis_key_prefix,
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,
