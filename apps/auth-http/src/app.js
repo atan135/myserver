@@ -1,8 +1,10 @@
-﻿import express from "express";
+import express from "express";
 
 import { AuthStore } from "./auth-store.js";
 import { getConfig } from "./config.js";
 import { configureLogger, log } from "./logger.js";
+import { createMySqlPool } from "./mysql-client.js";
+import { MySqlAuthStore } from "./mysql-store.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 
@@ -10,7 +12,17 @@ export async function createApp() {
   const config = getConfig();
   configureLogger(config);
   const redis = await createRedisClient(config);
-  const authStore = new AuthStore(config, redis);
+  let mysqlPool = null;
+
+  try {
+    mysqlPool = await createMySqlPool(config);
+  } catch (error) {
+    await redis.quit();
+    throw error;
+  }
+
+  const mysqlStore = new MySqlAuthStore(mysqlPool);
+  const authStore = new AuthStore(config, redis, mysqlStore);
   const app = express();
 
   app.disable("x-powered-by");
@@ -44,5 +56,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis };
+  return { app, config, redis, mysqlPool };
 }

@@ -1,3 +1,13 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import dotenv from "dotenv";
+
+const envPath = path.resolve(process.cwd(), ".env");
+if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+}
+
 function parseBoolean(value, fallback) {
   if (value === undefined) {
     return fallback;
@@ -18,6 +28,11 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/auth-http",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    mysqlEnabled: parseBoolean(process.env.MYSQL_ENABLED, false),
+    mysqlUrl:
+      process.env.MYSQL_URL ||
+      "mysql://root:password@127.0.0.1:3306/myserver_auth",
+    mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
     sessionTtlSeconds: Number.parseInt(
       process.env.SESSION_TTL_SECONDS || "86400",
       10

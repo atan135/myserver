@@ -82,6 +82,7 @@ export async function startAuthHttpServer({
     LOG_DIR: "logs/test-auth-http",
     REDIS_URL: redisUrl,
     REDIS_KEY_PREFIX: redisKeyPrefix,
+    MYSQL_ENABLED: "false",
     TICKET_SECRET: ticketSecret,
     SESSION_TTL_SECONDS: "600",
     TICKET_TTL_SECONDS: "300"
@@ -89,7 +90,7 @@ export async function startAuthHttpServer({
 
   try {
     const { createApp } = await import(pathToFileURL(path.join(projectRoot, "apps", "auth-http", "src", "app.js")));
-    const { app, config, redis } = await createApp();
+    const { app, config, redis, mysqlPool } = await createApp();
 
     const httpServer = await new Promise((resolve, reject) => {
       const instance = app.listen(config.port, config.host, () => resolve(instance));
@@ -116,6 +117,9 @@ export async function startAuthHttpServer({
           });
         });
         await redis.quit();
+        if (mysqlPool) {
+          await mysqlPool.end();
+        }
         restoreEnv();
       }
     };
@@ -234,6 +238,7 @@ export async function startGameServer({
     LOG_DIR: "logs/test-game-server",
     REDIS_URL: redisUrl,
     REDIS_KEY_PREFIX: redisKeyPrefix,
+    MYSQL_ENABLED: "false",
     CARGO_TARGET_DIR: cargoTargetDir,
     TICKET_SECRET: ticketSecret,
     HEARTBEAT_TIMEOUT_SECS: "10",

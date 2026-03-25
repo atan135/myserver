@@ -24,26 +24,32 @@ function ticketKey(ticket) {
 }
 
 export class AuthStore {
-  constructor(config, redis) {
+  constructor(config, redis, mysqlStore = null) {
     this.config = config;
     this.redis = redis;
+    this.mysqlStore = mysqlStore;
   }
 
   prefixedKey(key) {
     return `${this.config.redisKeyPrefix || ""}${key}`;
   }
 
-  async createGuestSession(guestId) {
+  async createGuestSession(guestId, clientIp = null) {
     const normalizedGuestId = guestId || `guest-${crypto.randomUUID()}`;
-    const playerId = `player-${crypto.randomUUID()}`;
+    const account = this.mysqlStore
+      ? await this.mysqlStore.findOrCreateGuestPlayer(normalizedGuestId)
+      : {
+          playerId: `player-${crypto.randomUUID()}`,
+          guestId: normalizedGuestId
+        };
     const accessToken = crypto.randomBytes(24).toString("hex");
     const session = {
       accessToken,
-      guestId: normalizedGuestId,
-      playerId,
+      guestId: account.guestId,
+      playerId: account.playerId,
       createdAt: new Date().toISOString()
     };
-    const gameTicket = await this.issueGameTicket(playerId);
+    const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
 
     await this.redis.set(
       this.prefixedKey(sessionKey(accessToken)),
@@ -51,6 +57,18 @@ export class AuthStore {
       "EX",
       this.config.sessionTtlSeconds
     );
+
+    await this.mysqlStore?.appendAuthAudit({
+      playerId: account.playerId,
+      guestId: account.guestId,
+      eventType: "guest_login",
+      accessToken,
+      ticket: gameTicket.value,
+      clientIp,
+      details: {
+        sessionCreatedAt: session.createdAt
+      }
+    });
 
     return {
       ...session,
@@ -67,7 +85,7 @@ export class AuthStore {
     return JSON.parse(raw);
   }
 
-  async issueGameTicket(playerId) {
+  async issueGameTicket(playerId, clientIp = null) {
     const expiresAt = new Date(
       Date.now() + this.config.ticketTtlSeconds * 1000
     ).toISOString();
@@ -86,6 +104,16 @@ export class AuthStore {
       "EX",
       this.config.ticketTtlSeconds
     );
+
+    await this.mysqlStore?.appendAuthAudit({
+      playerId,
+      eventType: "issue_ticket",
+      ticket,
+      clientIp,
+      details: {
+        expiresAt
+      }
+    });
 
     return {
       value: ticket,

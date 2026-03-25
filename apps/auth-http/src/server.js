@@ -1,4 +1,4 @@
-﻿import { createApp } from "./app.js";
+import { createApp } from "./app.js";
 import { log } from "./logger.js";
 
 async function main() {
@@ -10,7 +10,8 @@ async function main() {
       port: config.port,
       logEnableConsole: config.logEnableConsole,
       logEnableFile: config.logEnableFile,
-      logDir: config.logDir
+      logDir: config.logDir,
+      mysqlEnabled: config.mysqlEnabled
     });
   });
 }

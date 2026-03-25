@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 
 import { badRequest, unauthorized } from "./http-errors.js";
 
@@ -11,6 +11,15 @@ function getBearerToken(req) {
   return authorization.slice("Bearer ".length).trim();
 }
 
+function getClientIp(req) {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
+    return forwardedFor.split(",")[0].trim();
+  }
+
+  return req.socket.remoteAddress || null;
+}
+
 export function createRoutes(config, authStore) {
   const router = Router();
 
@@ -19,7 +28,7 @@ export function createRoutes(config, authStore) {
       ok: true,
       service: config.appName,
       env: config.env,
-      storage: "redis"
+      storage: config.mysqlEnabled ? "redis+mysql" : "redis"
     });
   });
 
@@ -29,9 +38,9 @@ export function createRoutes(config, authStore) {
       service: config.appName,
       stage: "minimum-flow",
       protocol: "json",
-      storage: "redis",
+      storage: config.mysqlEnabled ? "redis+mysql" : "redis",
       nextSteps: [
-        "db-integration",
+        "room-game-loop",
         "rate-limit",
         "admin-control-plane"
       ]
@@ -44,7 +53,7 @@ export function createRoutes(config, authStore) {
       return badRequest(res, "INVALID_GUEST_ID", "guestId must be a string");
     }
 
-    const session = await authStore.createGuestSession(guestId);
+    const session = await authStore.createGuestSession(guestId, getClientIp(req));
 
     return res.status(201).json({
       ok: true,
@@ -86,7 +95,7 @@ export function createRoutes(config, authStore) {
       return unauthorized(res, "INVALID_ACCESS_TOKEN");
     }
 
-    const ticket = await authStore.issueGameTicket(session.playerId);
+    const ticket = await authStore.issueGameTicket(session.playerId, getClientIp(req));
 
     return res.status(201).json({
       ok: true,

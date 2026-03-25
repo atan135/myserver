@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "auth-http",
   "version": "0.1.0",
   "private": true,
@@ -8,8 +8,10 @@
     "start": "node src/server.js"
   },
   "dependencies": {
+    "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "ioredis": "^5.7.0",
-    "log4js": "^6.9.1"
+    "log4js": "^6.9.1",
+    "mysql2": "^3.15.3"
   }
 }

@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use prost::Message;
 use redis::AsyncCommands;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
@@ -11,6 +12,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::mysql_store::MySqlAuditStore;
 use crate::pb::{
     AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq,
     RoomReadyRes, RoomSnapshot, RoomStatePush,
@@ -22,11 +24,14 @@ use crate::ticket::verify_ticket;
 
 type SharedRooms = Arc<Mutex<HashMap<String, Room>>>;
 
-pub async fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    config: &Config,
+    mysql_store: MySqlAuditStore,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(config.bind_addr()).await?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let rooms: SharedRooms = Arc::new(Mutex::new(HashMap::new()));
-    info!(addr = %config.bind_addr(), redis = %config.redis_url, "game server listening");
+    info!(addr = %config.bind_addr(), redis = %config.redis_url, mysql_enabled = mysql_store.enabled(), "game server listening");
 
     let mut next_session_id: u64 = 1;
 
@@ -36,13 +41,31 @@ pub async fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         next_session_id += 1;
 
         info!(session_id = session_id, peer = %peer_addr, "accepted tcp connection");
+        mysql_store
+            .append_connection_event(
+                session_id,
+                None,
+                Some(&peer_addr.to_string()),
+                "tcp_connected",
+                None,
+            )
+            .await;
 
         let connection_config = config.clone();
         let redis_client = redis_client.clone();
         let rooms = rooms.clone();
+        let mysql_store = mysql_store.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_connection(socket, session_id, &connection_config, redis_client, rooms).await
+            if let Err(error) = handle_connection(
+                socket,
+                peer_addr.to_string(),
+                session_id,
+                &connection_config,
+                redis_client,
+                mysql_store,
+                rooms,
+            )
+            .await
             {
                 warn!(session_id = session_id, error = %error, "connection task failed");
             }
@@ -52,9 +75,11 @@ pub async fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_connection(
     socket: TcpStream,
+    peer_addr: String,
     session_id: u64,
     config: &Config,
     redis_client: redis::Client,
+    mysql_store: MySqlAuditStore,
     rooms: SharedRooms,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new(session_id);
@@ -85,11 +110,29 @@ async fn handle_connection(
             Ok(Ok(_)) => {}
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!(session_id = session.id, "peer closed connection");
+                mysql_store
+                    .append_connection_event(
+                        session.id,
+                        session.player_id.as_deref(),
+                        Some(&peer_addr),
+                        "tcp_closed",
+                        None,
+                    )
+                    .await;
                 break;
             }
             Ok(Err(error)) => return Err(Box::new(error)),
             Err(_) => {
                 queue_error(&tx, 0, "HEARTBEAT_TIMEOUT", "connection timed out")?;
+                mysql_store
+                    .append_connection_event(
+                        session.id,
+                        session.player_id.as_deref(),
+                        Some(&peer_addr),
+                        "heartbeat_timeout",
+                        None,
+                    )
+                    .await;
                 break;
             }
         }
@@ -98,12 +141,34 @@ async fn handle_connection(
             Ok(value) => value,
             Err(error_code) => {
                 queue_error(&tx, 0, error_code, "invalid header")?;
+                mysql_store
+                    .append_connection_event(
+                        session.id,
+                        session.player_id.as_deref(),
+                        Some(&peer_addr),
+                        "invalid_header",
+                        Some(json!({ "errorCode": error_code })),
+                    )
+                    .await;
                 break;
             }
         };
 
         if header.body_len as usize > config.max_body_len {
             queue_error(&tx, header.seq, "BODY_TOO_LARGE", "body too large")?;
+            mysql_store
+                .append_connection_event(
+                    session.id,
+                    session.player_id.as_deref(),
+                    Some(&peer_addr),
+                    "body_too_large",
+                    Some(json!({
+                        "seq": header.seq,
+                        "bodyLen": header.body_len,
+                        "maxBodyLen": config.max_body_len
+                    })),
+                )
+                .await;
             break;
         }
 
@@ -112,6 +177,15 @@ async fn handle_connection(
 
         let Some(message_type) = MessageType::from_u16(header.msg_type) else {
             queue_error(&tx, header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type")?;
+            mysql_store
+                .append_connection_event(
+                    session.id,
+                    session.player_id.as_deref(),
+                    Some(&peer_addr),
+                    "unknown_message_type",
+                    Some(json!({ "msgType": header.msg_type, "seq": header.seq })),
+                )
+                .await;
             continue;
         };
 
@@ -121,13 +195,26 @@ async fn handle_connection(
                     Ok(value) => value,
                     Err(_) => {
                         queue_error(&tx, header.seq, "INVALID_AUTH_BODY", "invalid auth body")?;
+                        mysql_store
+                            .append_connection_event(
+                                session.id,
+                                session.player_id.as_deref(),
+                                Some(&peer_addr),
+                                "invalid_auth_body",
+                                Some(json!({ "seq": header.seq })),
+                            )
+                            .await;
                         continue;
                     }
                 };
 
                 match verify_ticket(&config.ticket_secret, &request.ticket) {
                     Ok(player_id) => {
-                        let ticket_key = format!("{}ticket:{}", config.redis_key_prefix, crate::ticket::hash_ticket(&request.ticket));
+                        let ticket_key = format!(
+                            "{}ticket:{}",
+                            config.redis_key_prefix,
+                            crate::ticket::hash_ticket(&request.ticket)
+                        );
                         let ticket_owner: Option<String> = redis.get(ticket_key).await?;
 
                         if ticket_owner.as_deref() != Some(player_id.as_str()) {
@@ -141,6 +228,15 @@ async fn handle_connection(
                                     error_code: "TICKET_NOT_FOUND".to_string(),
                                 },
                             )?;
+                            mysql_store
+                                .append_connection_event(
+                                    session.id,
+                                    Some(&player_id),
+                                    Some(&peer_addr),
+                                    "auth_ticket_not_found",
+                                    Some(json!({ "seq": header.seq })),
+                                )
+                                .await;
                             continue;
                         }
 
@@ -153,10 +249,19 @@ async fn handle_connection(
                             header.seq,
                             AuthRes {
                                 ok: true,
-                                player_id,
+                                player_id: player_id.clone(),
                                 error_code: String::new(),
                             },
                         )?;
+                        mysql_store
+                            .append_connection_event(
+                                session.id,
+                                Some(&player_id),
+                                Some(&peer_addr),
+                                "auth_success",
+                                Some(json!({ "seq": header.seq })),
+                            )
+                            .await;
                     }
                     Err(error_code) => {
                         queue_message(
@@ -169,6 +274,18 @@ async fn handle_connection(
                                 error_code: error_code.to_string(),
                             },
                         )?;
+                        mysql_store
+                            .append_connection_event(
+                                session.id,
+                                None,
+                                Some(&peer_addr),
+                                "auth_failed",
+                                Some(json!({
+                                    "seq": header.seq,
+                                    "errorCode": error_code
+                                })),
+                            )
+                            .await;
                     }
                 }
             }
@@ -247,6 +364,24 @@ async fn handle_connection(
                                 error_code: String::new(),
                             },
                         )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                Some(&snapshot.owner_player_id),
+                                "room_joined",
+                                Some(&snapshot.state),
+                                snapshot.members.len(),
+                                Some(json!({
+                                    "seq": header.seq,
+                                    "members": snapshot.members.iter().map(|member| json!({
+                                        "playerId": member.player_id,
+                                        "ready": member.ready,
+                                        "isOwner": member.is_owner
+                                    })).collect::<Vec<_>>()
+                                })),
+                            )
+                            .await;
                         broadcast_snapshot(&rooms, &room_id, "member_joined", snapshot).await?;
                     }
                     Err(error_code) => {
@@ -256,10 +391,21 @@ async fn handle_connection(
                             header.seq,
                             RoomJoinRes {
                                 ok: false,
-                                room_id,
+                                room_id: room_id.clone(),
                                 error_code: error_code.to_string(),
                             },
                         )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                None,
+                                "room_join_failed",
+                                None,
+                                0,
+                                Some(json!({ "errorCode": error_code, "seq": header.seq })),
+                            )
+                            .await;
                     }
                 }
             }
@@ -302,7 +448,30 @@ async fn handle_connection(
                 )?;
 
                 if let Some(snapshot) = snapshot {
+                    mysql_store
+                        .append_room_event(
+                            &room_id,
+                            Some(&player_id),
+                            Some(&snapshot.owner_player_id),
+                            "room_left",
+                            Some(&snapshot.state),
+                            snapshot.members.len(),
+                            None,
+                        )
+                        .await;
                     broadcast_snapshot(&rooms, &room_id, "member_left", snapshot).await?;
+                } else {
+                    mysql_store
+                        .append_room_event(
+                            &room_id,
+                            Some(&player_id),
+                            None,
+                            "room_disbanded",
+                            None,
+                            0,
+                            None,
+                        )
+                        .await;
                 }
             }
             MessageType::RoomReadyReq => {
@@ -350,6 +519,17 @@ async fn handle_connection(
                                 error_code: String::new(),
                             },
                         )?;
+                        mysql_store
+                            .append_room_event(
+                                &room_id,
+                                Some(&player_id),
+                                Some(&snapshot.owner_player_id),
+                                "room_ready_changed",
+                                Some(&snapshot.state),
+                                snapshot.members.len(),
+                                Some(json!({ "ready": request.ready, "seq": header.seq })),
+                            )
+                            .await;
                         broadcast_snapshot(&rooms, &room_id, "ready_changed", snapshot).await?;
                     }
                     Err(error_code) => {
@@ -380,6 +560,17 @@ async fn handle_connection(
         };
 
         if let Some(snapshot) = snapshot {
+            mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    Some(&snapshot.owner_player_id),
+                    "member_disconnected",
+                    Some(&snapshot.state),
+                    snapshot.members.len(),
+                    None,
+                )
+                .await;
             let _ = broadcast_snapshot(&rooms, &room_id, "member_disconnected", snapshot).await;
         }
     }
@@ -545,4 +736,3 @@ fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
-

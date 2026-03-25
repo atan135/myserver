@@ -10,6 +10,9 @@ pub struct Config {
     pub log_dir: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub mysql_enabled: bool,
+    pub mysql_url: String,
+    pub mysql_pool_size: usize,
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
@@ -35,6 +38,13 @@ impl Config {
         let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "logs/game-server".to_string());
         let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let mysql_enabled = parse_bool("MYSQL_ENABLED", false);
+        let mysql_url = env::var("MYSQL_URL")
+            .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/myserver_game".to_string());
+        let mysql_pool_size = env::var("MYSQL_POOL_SIZE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(10);
         let ticket_secret =
             env::var("TICKET_SECRET").unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let heartbeat_timeout_secs = env::var("HEARTBEAT_TIMEOUT_SECS")
@@ -55,6 +65,9 @@ impl Config {
             log_dir,
             redis_url,
             redis_key_prefix,
+            mysql_enabled,
+            mysql_url,
+            mysql_pool_size,
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,

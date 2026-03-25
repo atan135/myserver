@@ -1,8 +1,9 @@
-﻿mod config;
+mod config;
 #[allow(dead_code)]
 mod pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
 }
+mod mysql_store;
 mod protocol;
 mod room;
 mod server;
@@ -12,6 +13,7 @@ mod ticket;
 use std::fs;
 
 use config::Config;
+use mysql_store::MySqlAuditStore;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -63,6 +65,8 @@ fn init_logging(config: &Config) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
+
     let config = Config::from_env();
     init_logging(&config);
 
@@ -70,8 +74,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_enable_console = config.log_enable_console,
         log_enable_file = config.log_enable_file,
         log_dir = %config.log_dir,
+        mysql_enabled = config.mysql_enabled,
         "game-server logging initialized"
     );
 
-    server::run(&config).await
+    let mysql_store = MySqlAuditStore::new(&config).await?;
+    let result = server::run(&config, mysql_store.clone()).await;
+    let _ = mysql_store.close().await;
+    result
 }
