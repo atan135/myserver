@@ -4,11 +4,29 @@ $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
 Push-Location "$PSScriptRoot\..\apps\game-server"
 try {
   if (Test-Path $cargo) {
-    & $cargo run
+    & $cargo build
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
+
+    $binary = Join-Path (Get-Location) "target\debug\game-server.exe"
+    if (-not (Test-Path $binary)) {
+      Write-Error "game-server.exe not found at $binary"
+    }
+
+    & $binary
+
+    if ($LASTEXITCODE -eq -1073741510) {
+      Write-Host "game-server stopped by Ctrl+C"
+      exit 0
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
   } else {
     Write-Error "cargo.exe not found at $cargo"
   }
 } finally {
   Pop-Location
 }
-

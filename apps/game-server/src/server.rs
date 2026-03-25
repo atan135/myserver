@@ -36,7 +36,16 @@ pub async fn run(
     let mut next_session_id: u64 = 1;
 
     loop {
-        let (socket, peer_addr) = listener.accept().await?;
+        let accept_result = tokio::select! {
+            result = listener.accept() => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
+        };
+
+        let Some((socket, peer_addr)) = accept_result.transpose()? else {
+            info!("shutdown signal received, stopping game server accept loop");
+            break;
+        };
+
         let session_id = next_session_id;
         next_session_id += 1;
 
@@ -71,6 +80,9 @@ pub async fn run(
             }
         });
     }
+
+    info!("game server shutdown completed");
+    Ok(())
 }
 
 async fn handle_connection(
