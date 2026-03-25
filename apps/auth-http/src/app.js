@@ -2,12 +2,13 @@
 
 import { AuthStore } from "./auth-store.js";
 import { getConfig } from "./config.js";
-import { log } from "./logger.js";
+import { configureLogger, log } from "./logger.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 
 export async function createApp() {
   const config = getConfig();
+  configureLogger(config);
   const redis = await createRedisClient(config);
   const authStore = new AuthStore(config, redis);
   const app = express();

@@ -9,15 +9,84 @@
 - `scripts`：环境检查与本地启动辅助脚本
 - `tools/mock-client`：无真实客户端依赖的联调工具
 
+## 统一日志方案
+
+当前两边统一采用相同的日志配置思想：
+
+- `LOG_LEVEL`
+- `LOG_ENABLE_CONSOLE`
+- `LOG_ENABLE_FILE`
+- `LOG_DIR`
+
+### auth-http
+
+- 使用 `log4js`
+- 支持 console 输出
+- 支持按天滚动文件输出
+
+### game-server
+
+- 使用 `tracing + tracing-subscriber + tracing-appender`
+- 支持 console 输出
+- 支持按天滚动文件输出
+- 保留 Rust 异步服务里更合适的结构化日志能力
+
+Rust 侧我推荐继续用 `tracing`，而不是强行找一个和 Node 完全同名的日志库。原因很直接：
+
+- `tracing` 是 Rust 异步网络服务更合适的日志/事件体系
+- 对字段化日志、span、异步上下文更友好
+- 和当前 `game-server` 的写法最兼容
+- 同时仍然可以实现和 `auth-http` 一样的 console/file 双输出与目录配置
+
 ## 当前已完成
 
-- 单仓库多服务结构
 - HTTP 登录、access token、game ticket
 - Redis 会话与 ticket 存储
 - Rust TCP 鉴权、心跳、错误响应
 - 房间核心闭环：加入、离开、准备、房间快照广播、owner 转移
 - Node mock client 单客户端与双客户端联调场景
+- 统一日志配置模型
 - 协议与使用文档
+
+## 日志配置
+
+### auth-http
+
+参考 [apps/auth-http/.env.example](./apps/auth-http/.env.example)
+
+- `LOG_LEVEL=info`
+- `LOG_ENABLE_CONSOLE=true`
+- `LOG_ENABLE_FILE=true`
+- `LOG_DIR=logs/auth-http`
+
+### game-server
+
+参考 [apps/game-server/.env.example](./apps/game-server/.env.example)
+
+- `LOG_LEVEL=info`
+- `LOG_ENABLE_CONSOLE=true`
+- `LOG_ENABLE_FILE=true`
+- `LOG_DIR=logs/game-server`
+
+## 安装依赖
+
+### auth-http
+
+因为新增了 `log4js`，如果你还没安装新依赖，需要执行：
+
+```powershell
+cd apps/auth-http
+npm install
+```
+
+### game-server
+
+因为新增了 `tracing-appender`，如果你要重新验证编译，需要执行：
+
+```powershell
+cd apps/game-server
+cargo check
+```
 
 ## 正常房间流验证
 
@@ -27,40 +96,8 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 
 ## 双客户端房间联调
 
-用于验证：
-
-- 第二人加入房间
-- 双方收到房间快照广播
-- 房主离开后 owner 自动转移
-
 ```powershell
 npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-b
-```
-
-## 异常流验证
-
-### 无效 ticket
-
-```powershell
-npm run flow:mock-client -- --scenario invalid-ticket --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000
-```
-
-### 未鉴权直接加房
-
-```powershell
-npm run flow:mock-client -- --scenario unauth-room-join --host 127.0.0.1 --port 7000
-```
-
-### 未知消息号
-
-```powershell
-npm run flow:mock-client -- --scenario unknown-message --host 127.0.0.1 --port 7000
-```
-
-### 超长消息体
-
-```powershell
-npm run flow:mock-client -- --scenario oversized-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --max-body-len 4096
 ```
 
 ## 下一步建议

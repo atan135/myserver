@@ -7,14 +7,15 @@ async function main() {
   app.listen(config.port, config.host, () => {
     log("info", "http.server_started", {
       host: config.host,
-      port: config.port
+      port: config.port,
+      logEnableConsole: config.logEnableConsole,
+      logEnableFile: config.logEnableFile,
+      logDir: config.logDir
     });
   });
 }
 
 main().catch((error) => {
-  log("error", "http.server_start_failed", {
-    error: error.message
-  });
+  console.error(error);
   process.exitCode = 1;
 });
