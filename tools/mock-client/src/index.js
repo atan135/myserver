@@ -12,6 +12,11 @@ const MESSAGE_TYPE = {
   PING_RES: 1004,
   ROOM_JOIN_REQ: 1101,
   ROOM_JOIN_RES: 1102,
+  ROOM_LEAVE_REQ: 1103,
+  ROOM_LEAVE_RES: 1104,
+  ROOM_READY_REQ: 1105,
+  ROOM_READY_RES: 1106,
+  ROOM_STATE_PUSH: 1201,
   ERROR_RES: 9000
 };
 
@@ -20,7 +25,8 @@ const SCENARIO = {
   INVALID_TICKET: "invalid-ticket",
   UNAUTH_ROOM_JOIN: "unauth-room-join",
   UNKNOWN_MESSAGE: "unknown-message",
-  OVERSIZED_ROOM_JOIN: "oversized-room-join"
+  OVERSIZED_ROOM_JOIN: "oversized-room-join",
+  TWO_CLIENT_ROOM: "two-client-room"
 };
 
 function parseArgs(argv) {
@@ -76,12 +82,10 @@ function parseArgs(argv) {
 function encodeVarint(value) {
   let current = BigInt(value);
   const bytes = [];
-
   while (current >= 0x80n) {
     bytes.push(Number((current & 0x7fn) | 0x80n));
     current >>= 7n;
   }
-
   bytes.push(Number(current));
   return Buffer.from(bytes);
 }
@@ -95,11 +99,9 @@ function decodeVarint(buffer, offset) {
     const byte = BigInt(buffer[position]);
     result |= (byte & 0x7fn) << shift;
     position += 1;
-
     if ((byte & 0x80n) === 0n) {
       return { value: result, nextOffset: position };
     }
-
     shift += 7n;
   }
 
@@ -109,12 +111,12 @@ function decodeVarint(buffer, offset) {
 function encodeStringField(fieldNumber, value) {
   const fieldKey = (fieldNumber << 3) | 2;
   const data = Buffer.from(value, "utf8");
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(data.length), data]);
+}
 
-  return Buffer.concat([
-    encodeVarint(fieldKey),
-    encodeVarint(data.length),
-    data
-  ]);
+function encodeBoolField(fieldNumber, value) {
+  const fieldKey = fieldNumber << 3;
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value ? 1 : 0)]);
 }
 
 function encodeInt64Field(fieldNumber, value) {
@@ -134,7 +136,28 @@ function encodeRoomJoinReq(roomId) {
   return encodeStringField(1, roomId);
 }
 
-function decodeFields(buffer) {
+function encodeRoomLeaveReq() {
+  return Buffer.alloc(0);
+}
+
+function encodeRoomReadyReq(ready) {
+  return encodeBoolField(1, ready);
+}
+
+function appendField(fields, fieldNumber, value) {
+  const current = fields.get(fieldNumber);
+  if (current === undefined) {
+    fields.set(fieldNumber, value);
+    return;
+  }
+  if (Array.isArray(current)) {
+    current.push(value);
+    return;
+  }
+  fields.set(fieldNumber, [current, value]);
+}
+
+function decodeFieldsWithRepeated(buffer) {
   const fields = new Map();
   let offset = 0;
 
@@ -146,7 +169,7 @@ function decodeFields(buffer) {
 
     if (wireType === 0) {
       const value = decodeVarint(buffer, offset);
-      fields.set(fieldNumber, value.value);
+      appendField(fields, fieldNumber, value.value);
       offset = value.nextOffset;
       continue;
     }
@@ -155,7 +178,7 @@ function decodeFields(buffer) {
       const length = decodeVarint(buffer, offset);
       offset = length.nextOffset;
       const end = offset + Number(length.value);
-      fields.set(fieldNumber, buffer.subarray(offset, end));
+      appendField(fields, fieldNumber, buffer.subarray(offset, end));
       offset = end;
       continue;
     }
@@ -168,11 +191,7 @@ function decodeFields(buffer) {
 
 function readString(fields, fieldNumber) {
   const value = fields.get(fieldNumber);
-  if (!value) {
-    return "";
-  }
-
-  return Buffer.from(value).toString("utf8");
+  return value ? Buffer.from(value).toString("utf8") : "";
 }
 
 function readBool(fields, fieldNumber) {
@@ -180,12 +199,41 @@ function readBool(fields, fieldNumber) {
 }
 
 function readInt64(fields, fieldNumber) {
-  const value = fields.get(fieldNumber) || 0n;
-  return Number(value);
+  return Number(fields.get(fieldNumber) || 0n);
+}
+
+function decodeRoomMember(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    playerId: readString(fields, 1),
+    ready: readBool(fields, 2),
+    isOwner: readBool(fields, 3)
+  };
+}
+
+function decodeRoomSnapshot(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  const membersRaw = fields.get(4);
+  let members = [];
+
+  if (membersRaw) {
+    if (Array.isArray(membersRaw)) {
+      members = membersRaw.map(decodeRoomMember);
+    } else {
+      members = [decodeRoomMember(membersRaw)];
+    }
+  }
+
+  return {
+    roomId: readString(fields, 1),
+    ownerPlayerId: readString(fields, 2),
+    state: readString(fields, 3),
+    members
+  };
 }
 
 function decodeByMessageType(messageType, body) {
-  const fields = decodeFields(body);
+  const fields = decodeFieldsWithRepeated(body);
 
   switch (messageType) {
     case MESSAGE_TYPE.AUTH_RES:
@@ -204,15 +252,31 @@ function decodeByMessageType(messageType, body) {
         roomId: readString(fields, 2),
         errorCode: readString(fields, 3)
       };
+    case MESSAGE_TYPE.ROOM_LEAVE_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.ROOM_READY_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        ready: readBool(fields, 3),
+        errorCode: readString(fields, 4)
+      };
+    case MESSAGE_TYPE.ROOM_STATE_PUSH:
+      return {
+        event: readString(fields, 1),
+        snapshot: fields.get(2) ? decodeRoomSnapshot(fields.get(2)) : null
+      };
     case MESSAGE_TYPE.ERROR_RES:
       return {
         errorCode: readString(fields, 1),
         message: readString(fields, 2)
       };
     default:
-      return {
-        rawHex: body.toString("hex")
-      };
+      return { rawHex: body.toString("hex") };
   }
 }
 
@@ -224,13 +288,13 @@ function encodePacket(messageType, seq, body) {
   header.writeUInt16BE(messageType, 4);
   header.writeUInt32BE(seq, 6);
   header.writeUInt32BE(body.length, 10);
-
   return Buffer.concat([header, body]);
 }
 
 class TcpProtocolClient {
-  constructor(options) {
+  constructor(options, label = "client") {
     this.options = options;
+    this.label = label;
     this.socket = new net.Socket();
     this.buffer = Buffer.alloc(0);
     this.packetQueue = [];
@@ -245,15 +309,13 @@ class TcpProtocolClient {
 
     this.socket.on("error", (error) => {
       while (this.waiters.length > 0) {
-        const waiter = this.waiters.shift();
-        waiter.reject(error);
+        this.waiters.shift().reject(error);
       }
     });
 
     this.socket.on("close", () => {
       while (this.waiters.length > 0) {
-        const waiter = this.waiters.shift();
-        waiter.reject(new Error("TCP connection closed"));
+        this.waiters.shift().reject(new Error(`${this.label} TCP connection closed`));
       }
     });
 
@@ -274,7 +336,6 @@ class TcpProtocolClient {
       const seq = this.buffer.readUInt32BE(6);
       const bodyLen = this.buffer.readUInt32BE(10);
       const packetLen = HEADER_LEN + bodyLen;
-
       if (this.buffer.length < packetLen) {
         return;
       }
@@ -285,8 +346,7 @@ class TcpProtocolClient {
     }
 
     while (this.packetQueue.length > 0 && this.waiters.length > 0) {
-      const waiter = this.waiters.shift();
-      waiter.resolve(this.packetQueue.shift());
+      this.waiters.shift().resolve(this.packetQueue.shift());
     }
   }
 
@@ -298,7 +358,6 @@ class TcpProtocolClient {
           reject(error);
           return;
         }
-
         resolve();
       });
     });
@@ -316,7 +375,7 @@ class TcpProtocolClient {
         if (index >= 0) {
           this.waiters.splice(index, 1);
         }
-        reject(new Error(`Timed out waiting for TCP packet after ${timeoutMs}ms`));
+        reject(new Error(`Timed out waiting for ${this.label} packet after ${timeoutMs}ms`));
       }, timeoutMs);
 
       waiter = {
@@ -340,23 +399,15 @@ class TcpProtocolClient {
   }
 }
 
-async function fetchTicket(options) {
+async function fetchTicket(options, guestIdOverride = "") {
   if (options.ticket) {
-    return {
-      playerId: "manual-ticket",
-      accessToken: "",
-      ticket: options.ticket
-    };
+    return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket };
   }
 
   const response = await fetch(`${options.httpBaseUrl}/api/v1/auth/guest-login`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(
-      options.guestId ? { guestId: options.guestId } : {}
-    )
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(guestIdOverride || options.guestId ? { guestId: guestIdOverride || options.guestId } : {})
   });
 
   if (!response.ok) {
@@ -373,12 +424,7 @@ async function fetchTicket(options) {
 
 function printResponse(label, packet) {
   const decoded = decodeByMessageType(packet.messageType, packet.body);
-  console.log(`${label}:`, JSON.stringify({
-    messageType: packet.messageType,
-    seq: packet.seq,
-    decoded
-  }, null, 2));
-
+  console.log(`${label}:`, JSON.stringify({ messageType: packet.messageType, seq: packet.seq, decoded }, null, 2));
   return decoded;
 }
 
@@ -387,9 +433,9 @@ function tamperTicket(ticket) {
   return `${ticket.slice(0, -1)}${last}`;
 }
 
-async function expectErrorPacket(client, timeoutMs, expectedErrorCode) {
+async function expectErrorPacket(client, timeoutMs, expectedErrorCode, label = "error") {
   const packet = await client.readNextPacket(timeoutMs);
-  const decoded = printResponse("error", packet);
+  const decoded = printResponse(`${client.label}.${label}`, packet);
   if (packet.messageType !== MESSAGE_TYPE.ERROR_RES) {
     throw new Error(`expected ERROR_RES, got ${packet.messageType}`);
   }
@@ -398,30 +444,115 @@ async function expectErrorPacket(client, timeoutMs, expectedErrorCode) {
   }
 }
 
-async function runHappyPath(client, options, login) {
-  await client.send(MESSAGE_TYPE.AUTH_REQ, 1, encodeAuthReq(login.ticket));
-  const authPacket = await client.readNextPacket(options.timeoutMs);
-  const auth = printResponse("auth", authPacket);
+async function authenticateClient(client, options, login, seq = 1) {
+  await client.send(MESSAGE_TYPE.AUTH_REQ, seq, encodeAuthReq(login.ticket));
+  const auth = printResponse(`${client.label}.auth`, await client.readNextPacket(options.timeoutMs));
   if (!auth.ok) {
-    throw new Error(`auth failed: ${auth.errorCode}`);
+    throw new Error(`${client.label} auth failed: ${auth.errorCode}`);
   }
+}
+
+async function runHappyPath(client, options, login) {
+  await authenticateClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.PING_REQ, 2, encodePingReq(Date.now()));
-  const pingPacket = await client.readNextPacket(options.timeoutMs);
-  printResponse("ping", pingPacket);
+  printResponse(`${client.label}.ping`, await client.readNextPacket(options.timeoutMs));
 
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 3, encodeRoomJoinReq(options.roomId));
-  const roomPacket = await client.readNextPacket(options.timeoutMs);
-  const room = printResponse("roomJoin", roomPacket);
-  if (!room.ok) {
-    throw new Error(`room join failed: ${room.errorCode}`);
+  const roomJoin = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  if (!roomJoin.ok) {
+    throw new Error(`room join failed: ${roomJoin.errorCode}`);
+  }
+
+  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
+  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  if (!readyRes.ok) {
+    throw new Error(`room ready failed: ${readyRes.errorCode}`);
+  }
+
+  const readyPush = printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+  if (readyPush.snapshot?.state !== "ready") {
+    throw new Error("expected room state to become ready");
+  }
+
+  await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
+  const leaveRes = printResponse(`${client.label}.roomLeave`, await client.readNextPacket(options.timeoutMs));
+  if (!leaveRes.ok) {
+    throw new Error(`room leave failed: ${leaveRes.errorCode}`);
+  }
+}
+
+async function runTwoClientRoom(options) {
+  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
+  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    if (!joinA.ok) {
+      throw new Error(`clientA room join failed: ${joinA.errorCode}`);
+    }
+    const pushA1 = printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
+    if (pushA1.snapshot?.ownerPlayerId !== loginA.playerId) {
+      throw new Error("clientA should be initial owner");
+    }
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    if (!joinB.ok) {
+      throw new Error(`clientB room join failed: ${joinB.errorCode}`);
+    }
+
+    const pushB1 = printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    const pushA2 = printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+    if (pushA2.snapshot?.members?.length !== 2 || pushB1.snapshot?.members?.length !== 2) {
+      throw new Error("expected both clients to observe two room members");
+    }
+    if (pushA2.snapshot?.ownerPlayerId !== loginA.playerId) {
+      throw new Error("owner should remain clientA before leave");
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 3, encodeRoomLeaveReq());
+    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    if (!leaveA.ok) {
+      throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
+    }
+
+    const pushB2 = printResponse("clientB.roomStatePush(ownerTransfer)", await clientB.readNextPacket(options.timeoutMs));
+    if (pushB2.snapshot?.ownerPlayerId !== loginB.playerId) {
+      throw new Error("expected owner to transfer to clientB");
+    }
+    if (pushB2.snapshot?.members?.length !== 1) {
+      throw new Error("expected only one member after owner leave");
+    }
+
+    await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 3, encodeRoomLeaveReq());
+    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    if (!leaveB.ok) {
+      throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
+    }
+  } finally {
+    clientA.close();
+    clientB.close();
   }
 }
 
 async function runInvalidTicket(client, options, login) {
   await client.send(MESSAGE_TYPE.AUTH_REQ, 1, encodeAuthReq(tamperTicket(login.ticket)));
-  const authPacket = await client.readNextPacket(options.timeoutMs);
-  const auth = printResponse("auth", authPacket);
+  const auth = printResponse(`${client.label}.auth`, await client.readNextPacket(options.timeoutMs));
   if (auth.ok) {
     throw new Error("expected invalid ticket auth failure");
   }
@@ -438,13 +569,7 @@ async function runUnknownMessage(client, options) {
 }
 
 async function runOversizedRoomJoin(client, options, login) {
-  await client.send(MESSAGE_TYPE.AUTH_REQ, 1, encodeAuthReq(login.ticket));
-  const authPacket = await client.readNextPacket(options.timeoutMs);
-  const auth = printResponse("auth", authPacket);
-  if (!auth.ok) {
-    throw new Error(`auth failed: ${auth.errorCode}`);
-  }
-
+  await authenticateClient(client, options, login, 1);
   const oversizedRoomId = "r".repeat(options.maxBodyLen + 64);
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(oversizedRoomId));
   await expectErrorPacket(client, options.timeoutMs, "BODY_TOO_LARGE");
@@ -452,6 +577,13 @@ async function runOversizedRoomJoin(client, options, login) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+
+  if (options.scenario === SCENARIO.TWO_CLIENT_ROOM) {
+    await runTwoClientRoom(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
   const needsLogin = [SCENARIO.HAPPY, SCENARIO.INVALID_TICKET, SCENARIO.OVERSIZED_ROOM_JOIN].includes(options.scenario) || Boolean(options.ticket);
   const login = needsLogin ? await fetchTicket(options) : null;
 
@@ -463,7 +595,7 @@ async function main() {
     }, null, 2));
   }
 
-  const client = new TcpProtocolClient(options);
+  const client = new TcpProtocolClient(options, "client");
   await client.connect();
 
   try {

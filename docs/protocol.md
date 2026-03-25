@@ -16,7 +16,7 @@
 - `bodyLen`：消息体长度
 - `body`：Protobuf 序列化内容
 
-## 第一版基础消息
+## 当前消息号
 
 - `1001 AUTH_REQ`
 - `1002 AUTH_RES`
@@ -24,27 +24,14 @@
 - `1004 PING_RES`
 - `1101 ROOM_JOIN_REQ`
 - `1102 ROOM_JOIN_RES`
+- `1103 ROOM_LEAVE_REQ`
+- `1104 ROOM_LEAVE_RES`
+- `1105 ROOM_READY_REQ`
+- `1106 ROOM_READY_RES`
+- `1201 ROOM_STATE_PUSH`
 - `9000 ERROR_RES`
 
-## 第一版消息体
-
-`AUTH_REQ`
-
-- `ticket: string`
-
-`AUTH_RES`
-
-- `ok: bool`
-- `player_id: string`
-- `error_code: string`
-
-`PING_REQ`
-
-- `client_time: int64`
-
-`PING_RES`
-
-- `server_time: int64`
+## 房间核心消息
 
 `ROOM_JOIN_REQ`
 
@@ -56,10 +43,62 @@
 - `room_id: string`
 - `error_code: string`
 
-`ERROR_RES`
+`ROOM_LEAVE_REQ`
 
+- 空消息体
+
+`ROOM_LEAVE_RES`
+
+- `ok: bool`
+- `room_id: string`
 - `error_code: string`
-- `message: string`
+
+`ROOM_READY_REQ`
+
+- `ready: bool`
+
+`ROOM_READY_RES`
+
+- `ok: bool`
+- `room_id: string`
+- `ready: bool`
+- `error_code: string`
+
+`ROOM_STATE_PUSH`
+
+- `event: string`
+- `snapshot: RoomSnapshot`
+
+`RoomSnapshot`
+
+- `room_id: string`
+- `owner_player_id: string`
+- `state: string`
+- `members: RoomMember[]`
+
+`RoomMember`
+
+- `player_id: string`
+- `ready: bool`
+- `is_owner: bool`
+
+## 当前房间规则
+
+- 一个连接同一时刻只能在一个房间中
+- 房间最大人数为 `10`
+- 第一个进入房间的玩家为 `owner`
+- `owner` 离开后，房主转移给当前房间内的下一个成员
+- 所有成员 `ready=true` 时，房间状态变为 `ready`
+- 只要有成员未准备，房间状态为 `waiting`
+
+## 房间事件广播
+
+当前会广播以下事件：
+
+- `member_joined`
+- `ready_changed`
+- `member_left`
+- `member_disconnected`
 
 ## 状态约束
 
@@ -76,16 +115,6 @@ HTTP 登录服签发的 `ticket` 格式如下：
 ```text
 base64url(payload_json).base64url(hmac_sha256_signature)
 ```
-
-`payload_json` 当前包含：
-
-- `playerId`
-- `nonce`
-- `exp`
-
-签名算法：
-
-- `HMAC-SHA256`
 
 验证规则：
 

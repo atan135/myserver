@@ -17,6 +17,11 @@ pub enum MessageType {
     PingRes = 1004,
     RoomJoinReq = 1101,
     RoomJoinRes = 1102,
+    RoomLeaveReq = 1103,
+    RoomLeaveRes = 1104,
+    RoomReadyReq = 1105,
+    RoomReadyRes = 1106,
+    RoomStatePush = 1201,
     ErrorRes = 9000,
 }
 
@@ -29,6 +34,11 @@ impl MessageType {
             1004 => Some(Self::PingRes),
             1101 => Some(Self::RoomJoinReq),
             1102 => Some(Self::RoomJoinRes),
+            1103 => Some(Self::RoomLeaveReq),
+            1104 => Some(Self::RoomLeaveRes),
+            1105 => Some(Self::RoomReadyReq),
+            1106 => Some(Self::RoomReadyRes),
+            1201 => Some(Self::RoomStatePush),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }

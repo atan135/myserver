@@ -1,4 +1,4 @@
-syntax = "proto3";
+﻿syntax = "proto3";
 
 package myserver.game;
 
@@ -30,8 +30,44 @@ message RoomJoinRes {
   string error_code = 3;
 }
 
+message RoomLeaveReq {}
+
+message RoomLeaveRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+}
+
+message RoomReadyReq {
+  bool ready = 1;
+}
+
+message RoomReadyRes {
+  bool ok = 1;
+  string room_id = 2;
+  bool ready = 3;
+  string error_code = 4;
+}
+
+message RoomMember {
+  string player_id = 1;
+  bool ready = 2;
+  bool is_owner = 3;
+}
+
+message RoomSnapshot {
+  string room_id = 1;
+  string owner_player_id = 2;
+  string state = 3;
+  repeated RoomMember members = 4;
+}
+
+message RoomStatePush {
+  string event = 1;
+  RoomSnapshot snapshot = 2;
+}
+
 message ErrorRes {
   string error_code = 1;
   string message = 2;
 }
-

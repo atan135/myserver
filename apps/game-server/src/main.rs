@@ -4,6 +4,7 @@ mod pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
 }
 mod protocol;
+mod room;
 mod server;
 mod session;
 mod ticket;
