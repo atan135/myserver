@@ -1,0 +1,15 @@
+﻿{
+  "name": "myserver",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/auth-http",
+    "tools/mock-client"
+  ],
+  "scripts": {
+    "dev:auth": "npm run dev --workspace auth-http",
+    "start:auth": "npm run start --workspace auth-http",
+    "dev:mock-client": "npm run dev --workspace mock-client",
+    "flow:mock-client": "npm run flow --workspace mock-client --"
+  }
+}

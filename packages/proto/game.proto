@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package myserver.game;
+
+message AuthReq {
+  string ticket = 1;
+}
+
+message AuthRes {
+  bool ok = 1;
+  string player_id = 2;
+  string error_code = 3;
+}
+
+message PingReq {
+  int64 client_time = 1;
+}
+
+message PingRes {
+  int64 server_time = 1;
+}
+
+message RoomJoinReq {
+  string room_id = 1;
+}
+
+message RoomJoinRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+}
+
+message ErrorRes {
+  string error_code = 1;
+  string message = 2;
+}
+

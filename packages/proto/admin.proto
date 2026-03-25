@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package myserver.admin;
+
+message ServerStatusReq {}
+
+message ServerStatusRes {
+  uint64 connection_count = 1;
+  uint64 room_count = 2;
+  string status = 3;
+}
+
+message UpdateConfigReq {
+  string key = 1;
+  string value = 2;
+}
+
+message UpdateConfigRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
