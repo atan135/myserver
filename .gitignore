@@ -9,3 +9,20 @@ coverage/
 .tmp/
 .DS_Store
 Thumbs.db
+
+# Unity simple-client
+apps/simple-client/[Ll]ibrary/
+apps/simple-client/[Tt]emp/
+apps/simple-client/[Oo]bj/
+apps/simple-client/[Ll]ogs/
+apps/simple-client/[Uu]ser[Ss]ettings/
+apps/simple-client/[Mm]emoryCaptures/
+apps/simple-client/[Rr]ecordings/
+apps/simple-client/.vs/
+apps/simple-client/*.csproj
+apps/simple-client/*.sln
+apps/simple-client/*.suo
+apps/simple-client/*.tmp
+apps/simple-client/*.user
+apps/simple-client/*.userprefs
+apps/simple-client/.vsconfig
