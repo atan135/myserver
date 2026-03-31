@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use prost::Message;
 use redis::AsyncCommands;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,7 +17,7 @@ use crate::pb::{
     RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes,
     RoomSnapshot, RoomStartRes, RoomStatePush,
 };
-use crate::protocol::{HEADER_LEN, MessageType, encode_packet, parse_header};
+use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::room::{OutboundMessage, Room, RoomMemberState, RoomPhase};
 use crate::session::{Session, SessionState};
 use crate::ticket::verify_ticket;
@@ -187,8 +186,9 @@ async fn handle_connection(
 
         let mut body = vec![0u8; header.body_len as usize];
         reader.read_exact(&mut body).await?;
+        let packet = Packet::new(header, body);
 
-        let Some(message_type) = MessageType::from_u16(header.msg_type) else {
+        let Some(message_type) = packet.message_type() else {
             queue_error(&tx, header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type")?;
             mysql_store
                 .append_connection_event(
@@ -196,7 +196,7 @@ async fn handle_connection(
                     session.player_id.as_deref(),
                     Some(&peer_addr),
                     "unknown_message_type",
-                    Some(json!({ "msgType": header.msg_type, "seq": header.seq })),
+                    Some(json!({ "msgType": packet.header.msg_type, "seq": packet.header.seq })),
                 )
                 .await;
             continue;
@@ -204,10 +204,10 @@ async fn handle_connection(
 
         match message_type {
             MessageType::AuthReq => {
-                let request = match AuthReq::decode(body.as_slice()) {
+                let request = match packet.decode_body::<AuthReq>("INVALID_AUTH_BODY") {
                     Ok(value) => value,
-                    Err(_) => {
-                        queue_error(&tx, header.seq, "INVALID_AUTH_BODY", "invalid auth body")?;
+                    Err(error_code) => {
+                        queue_error(&tx, header.seq, error_code, "invalid auth body")?;
                         mysql_store
                             .append_connection_event(
                                 session.id,
@@ -317,10 +317,10 @@ async fn handle_connection(
                     continue;
                 };
 
-                let request = match RoomJoinReq::decode(body.as_slice()) {
+                let request = match packet.decode_body::<RoomJoinReq>("INVALID_ROOM_JOIN_BODY") {
                     Ok(value) => value,
-                    Err(_) => {
-                        queue_error(&tx, header.seq, "INVALID_ROOM_JOIN_BODY", "invalid room join body")?;
+                    Err(error_code) => {
+                        queue_error(&tx, header.seq, error_code, "invalid room join body")?;
                         continue;
                     }
                 };
@@ -506,10 +506,10 @@ async fn handle_connection(
                     continue;
                 };
 
-                let request = match RoomReadyReq::decode(body.as_slice()) {
+                let request = match packet.decode_body::<RoomReadyReq>("INVALID_ROOM_READY_BODY") {
                     Ok(value) => value,
-                    Err(_) => {
-                        queue_error(&tx, header.seq, "INVALID_ROOM_READY_BODY", "invalid room ready body")?;
+                    Err(error_code) => {
+                        queue_error(&tx, header.seq, error_code, "invalid room ready body")?;
                         continue;
                     }
                 };
@@ -640,10 +640,10 @@ async fn handle_connection(
                     continue;
                 };
 
-                let request = match PlayerInputReq::decode(body.as_slice()) {
+                let request = match packet.decode_body::<PlayerInputReq>("INVALID_PLAYER_INPUT_BODY") {
                     Ok(value) => value,
-                    Err(_) => {
-                        queue_error(&tx, header.seq, "INVALID_PLAYER_INPUT_BODY", "invalid player input body")?;
+                    Err(error_code) => {
+                        queue_error(&tx, header.seq, error_code, "invalid player input body")?;
                         continue;
                     }
                 };
@@ -722,10 +722,10 @@ async fn handle_connection(
                     continue;
                 };
 
-                let request = match RoomEndReq::decode(body.as_slice()) {
+                let request = match packet.decode_body::<RoomEndReq>("INVALID_ROOM_END_BODY") {
                     Ok(value) => value,
-                    Err(_) => {
-                        queue_error(&tx, header.seq, "INVALID_ROOM_END_BODY", "invalid room end body")?;
+                    Err(error_code) => {
+                        queue_error(&tx, header.seq, error_code, "invalid room end body")?;
                         continue;
                     }
                 };
@@ -942,7 +942,7 @@ async fn broadcast_snapshot(
     event: &str,
     snapshot: RoomSnapshot,
 ) -> Result<(), std::io::Error> {
-    let body = encode_body(RoomStatePush {
+    let body = encode_body(&RoomStatePush {
         event: event.to_string(),
         snapshot: Some(snapshot.clone()),
     });
@@ -978,7 +978,7 @@ async fn broadcast_game_message(
     action: &str,
     payload_json: &str,
 ) -> Result<(), std::io::Error> {
-    let body = encode_body(GameMessagePush {
+    let body = encode_body(&GameMessagePush {
         event: event.to_string(),
         room_id: room_id.to_string(),
         player_id: player_id.to_string(),
@@ -1026,25 +1026,19 @@ fn queue_error(
     )
 }
 
-fn queue_message<M: Message>(
+fn queue_message<M: prost::Message>(
     tx: &mpsc::UnboundedSender<OutboundMessage>,
     message_type: MessageType,
     seq: u32,
     message: M,
 ) -> Result<(), std::io::Error> {
-    let body = encode_body(message);
+    let body = encode_body(&message);
     tx.send(OutboundMessage {
         message_type,
         seq,
         body,
     })
     .map_err(|_| std::io::Error::other("failed to queue outbound"))
-}
-
-fn encode_body<M: Message>(message: M) -> Vec<u8> {
-    let mut body = Vec::new();
-    message.encode(&mut body).expect("protobuf encode failed");
-    body
 }
 
 fn current_unix_ms() -> i64 {
