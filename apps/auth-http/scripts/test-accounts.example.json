@@ -1,0 +1,18 @@
+[
+  {
+    "loginName": "test001",
+    "password": "Passw0rd!",
+    "displayName": "Test User 001"
+  },
+  {
+    "loginName": "test002",
+    "password": "Passw0rd!",
+    "displayName": "Test User 002"
+  },
+  {
+    "loginName": "gm001",
+    "password": "AdminPass123!",
+    "displayName": "Game Master 001",
+    "status": "active"
+  }
+]

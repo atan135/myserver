@@ -2,6 +2,7 @@ import express from "express";
 
 import { AuthStore } from "./auth-store.js";
 import { getConfig } from "./config.js";
+import { GameAdminClient } from "./game-admin-client.js";
 import { configureLogger, log } from "./logger.js";
 import { createMySqlPool } from "./mysql-client.js";
 import { MySqlAuthStore } from "./mysql-store.js";
@@ -23,6 +24,7 @@ export async function createApp() {
 
   const mysqlStore = new MySqlAuthStore(mysqlPool);
   const authStore = new AuthStore(config, redis, mysqlStore);
+  const gameAdminClient = new GameAdminClient(config);
   const app = express();
 
   app.disable("x-powered-by");
@@ -36,7 +38,7 @@ export async function createApp() {
     next();
   });
 
-  app.use(createRoutes(config, authStore));
+  app.use(createRoutes(config, authStore, gameAdminClient));
 
   app.use((req, res) => {
     res.status(404).json({

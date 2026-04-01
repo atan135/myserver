@@ -37,6 +37,10 @@ pub enum MessageType {
     RoomEndRes = 1114,
     RoomStatePush = 1201,
     GameMessagePush = 1202,
+    AdminServerStatusReq = 2001,
+    AdminServerStatusRes = 2002,
+    AdminUpdateConfigReq = 2003,
+    AdminUpdateConfigRes = 2004,
     ErrorRes = 9000,
 }
 
@@ -61,6 +65,10 @@ impl MessageType {
             1114 => Some(Self::RoomEndRes),
             1201 => Some(Self::RoomStatePush),
             1202 => Some(Self::GameMessagePush),
+            2001 => Some(Self::AdminServerStatusReq),
+            2002 => Some(Self::AdminServerStatusRes),
+            2003 => Some(Self::AdminUpdateConfigReq),
+            2004 => Some(Self::AdminUpdateConfigRes),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }
@@ -131,6 +139,7 @@ pub fn encode_packet(msg_type: MessageType, seq: u32, body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin_pb::{ServerStatusReq, ServerStatusRes};
     use crate::pb::{AuthReq, RoomMember, RoomSnapshot, RoomStatePush};
 
     #[test]
@@ -190,6 +199,35 @@ mod tests {
             .decode_body::<RoomStatePush>("INVALID_ROOM_STATE_PUSH_BODY")
             .unwrap();
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn admin_server_status_round_trip() {
+        let request = ServerStatusReq {};
+        let request_body = encode_body(&request);
+        let request_packet = encode_packet(MessageType::AdminServerStatusReq, 9, &request_body);
+        let request_header = parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let packet = Packet::new(request_header, request_packet[HEADER_LEN..].to_vec());
+        let decoded = packet
+            .decode_body::<ServerStatusReq>("INVALID_ADMIN_STATUS_BODY")
+            .unwrap();
+        assert_eq!(decoded, request);
+
+        let response = ServerStatusRes {
+            connection_count: 3,
+            room_count: 1,
+            status: "ok".to_string(),
+            max_body_len: 4096,
+            heartbeat_timeout_secs: 30,
+        };
+        let response_body = encode_body(&response);
+        let response_packet = encode_packet(MessageType::AdminServerStatusRes, 9, &response_body);
+        let response_header = parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let response_packet = Packet::new(response_header, response_packet[HEADER_LEN..].to_vec());
+        let decoded = response_packet
+            .decode_body::<ServerStatusRes>("INVALID_ADMIN_STATUS_RES_BODY")
+            .unwrap();
+        assert_eq!(decoded, response);
     }
 
     #[test]

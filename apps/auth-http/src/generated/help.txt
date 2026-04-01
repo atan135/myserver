@@ -1,0 +1,2 @@
+生成指令：
+protoc --js_out=import_style=commonjs,binary:apps\auth-http\src\generated --proto_path=packages\proto packages\proto\admin.proto

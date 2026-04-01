@@ -4,6 +4,8 @@ use std::env;
 pub struct Config {
     pub host: String,
     pub port: u16,
+    pub admin_host: String,
+    pub admin_port: u16,
     pub log_level: String,
     pub log_enable_console: bool,
     pub log_enable_file: bool,
@@ -32,6 +34,11 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7000);
+        let admin_host = env::var("ADMIN_HOST").unwrap_or_else(|_| host.clone());
+        let admin_port = env::var("ADMIN_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(7001);
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let log_enable_console = parse_bool("LOG_ENABLE_CONSOLE", true);
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
@@ -59,6 +66,8 @@ impl Config {
         Self {
             host,
             port,
+            admin_host,
+            admin_port,
             log_level,
             log_enable_console,
             log_enable_file,
@@ -76,5 +85,9 @@ impl Config {
 
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    pub fn admin_bind_addr(&self) -> String {
+        format!("{}:{}", self.admin_host, self.admin_port)
     }
 }

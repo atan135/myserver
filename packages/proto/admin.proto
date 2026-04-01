@@ -8,6 +8,8 @@ message ServerStatusRes {
   uint64 connection_count = 1;
   uint64 room_count = 2;
   string status = 3;
+  uint64 max_body_len = 4;
+  uint64 heartbeat_timeout_secs = 5;
 }
 
 message UpdateConfigReq {
@@ -19,4 +21,3 @@ message UpdateConfigRes {
   bool ok = 1;
   string error_code = 2;
 }
-

@@ -7,12 +7,18 @@ CREATE TABLE IF NOT EXISTS player_accounts (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   player_id VARCHAR(64) NOT NULL,
   guest_id VARCHAR(128) NULL,
+  login_name VARCHAR(64) NULL,
+  display_name VARCHAR(64) NULL,
   account_type VARCHAR(32) NOT NULL DEFAULT 'guest',
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  password_algo VARCHAR(32) NULL,
+  password_salt VARCHAR(128) NULL,
+  password_hash CHAR(128) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_login_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uk_player_accounts_player_id (player_id),
   UNIQUE KEY uk_player_accounts_guest_id (guest_id),
+  UNIQUE KEY uk_player_accounts_login_name (login_name),
   KEY idx_player_accounts_last_login_at (last_login_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

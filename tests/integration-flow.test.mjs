@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import {
@@ -19,21 +20,25 @@ let gameServer;
 before(async () => {
   const authPort = await findFreePort();
   const gamePort = await findFreePort();
+  const adminPort = await findFreePort();
+
+  gameServer = await startGameServer({
+    host: "127.0.0.1",
+    port: gamePort,
+    adminPort,
+    ticketSecret,
+    redisUrl,
+    redisKeyPrefix
+  });
 
   authServer = await startAuthHttpServer({
     host: "127.0.0.1",
     port: authPort,
     ticketSecret,
     redisUrl,
-    redisKeyPrefix
-  });
-
-  gameServer = await startGameServer({
-    host: "127.0.0.1",
-    port: gamePort,
-    ticketSecret,
-    redisUrl,
-    redisKeyPrefix
+    redisKeyPrefix,
+    gameServerAdminHost: "127.0.0.1",
+    gameServerAdminPort: adminPort
   });
 });
 
@@ -45,6 +50,33 @@ after(async () => {
     await authServer.close();
   }
   await cleanupRedisPrefix(redisUrl, redisKeyPrefix);
+});
+
+test("auth-http proxies protobuf admin calls to game-server", async () => {
+  const statusResponse = await fetch(`${authServer.baseUrl}/api/v1/internal/game-server/status`);
+  assert.equal(statusResponse.status, 200);
+  const statusPayload = await statusResponse.json();
+  assert.equal(statusPayload.ok, true);
+  assert.equal(statusPayload.status, "ok");
+  assert.equal(statusPayload.maxBodyLen, 4096);
+  assert.equal(statusPayload.heartbeatTimeoutSecs, 10);
+
+  const updateResponse = await fetch(`${authServer.baseUrl}/api/v1/internal/game-server/config`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: "max_body_len", value: "8192" })
+  });
+  assert.equal(updateResponse.status, 200);
+  assert.deepEqual(await updateResponse.json(), {
+    ok: true,
+    errorCode: ""
+  });
+
+  const updatedStatusResponse = await fetch(`${authServer.baseUrl}/api/v1/internal/game-server/status`);
+  assert.equal(updatedStatusResponse.status, 200);
+  const updatedStatusPayload = await updatedStatusResponse.json();
+  assert.equal(updatedStatusPayload.ok, true);
+  assert.equal(updatedStatusPayload.maxBodyLen, 8192);
 });
 
 test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t) => {
@@ -94,7 +126,7 @@ test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t
       host: gameServer.host,
       port: gameServer.port,
       roomId: randomId("room-oversized"),
-      maxBodyLen: 4096
+      maxBodyLen: 8192
     });
   });
 

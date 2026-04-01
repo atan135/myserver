@@ -32,12 +32,7 @@ export class MySqlAuthStore {
     if (rows.length > 0) {
       const existing = rows[0];
 
-      await this.pool.execute(
-        `UPDATE player_accounts
-         SET last_login_at = CURRENT_TIMESTAMP(3)
-         WHERE player_id = ?`,
-        [existing.player_id]
-      );
+      await this.touchPlayerLastLogin(existing.player_id);
 
       return {
         playerId: existing.player_id,
@@ -62,6 +57,141 @@ export class MySqlAuthStore {
     return {
       playerId,
       guestId
+    };
+  }
+
+  async findPasswordAccountByLoginName(loginName) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const [rows] = await this.pool.execute(
+      `SELECT player_id,
+              login_name,
+              display_name,
+              account_type,
+              status,
+              password_algo,
+              password_salt,
+              password_hash
+       FROM player_accounts
+       WHERE login_name = ?
+         AND account_type = 'password'
+       LIMIT 1`,
+      [loginName]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const account = rows[0];
+    return {
+      playerId: account.player_id,
+      loginName: account.login_name,
+      displayName: account.display_name,
+      accountType: account.account_type,
+      status: account.status,
+      passwordAlgo: account.password_algo,
+      passwordSalt: account.password_salt,
+      passwordHash: account.password_hash
+    };
+  }
+
+  async touchPlayerLastLogin(playerId) {
+    if (!this.enabled) {
+      return;
+    }
+
+    await this.pool.execute(
+      `UPDATE player_accounts
+       SET last_login_at = CURRENT_TIMESTAMP(3)
+       WHERE player_id = ?`,
+      [playerId]
+    );
+  }
+
+  async upsertPasswordAccount({
+    loginName,
+    displayName = null,
+    status = "active",
+    passwordAlgo = "scrypt",
+    passwordSalt,
+    passwordHash
+  }) {
+    if (!this.enabled) {
+      throw new Error("MySQL auth store is disabled");
+    }
+
+    const [rows] = await this.pool.execute(
+      `SELECT player_id
+       FROM player_accounts
+       WHERE login_name = ?
+       LIMIT 1`,
+      [loginName]
+    );
+
+    if (rows.length > 0) {
+      const existing = rows[0];
+
+      await this.pool.execute(
+        `UPDATE player_accounts
+         SET display_name = ?,
+             account_type = 'password',
+             status = ?,
+             password_algo = ?,
+             password_salt = ?,
+             password_hash = ?
+         WHERE player_id = ?`,
+        [
+          displayName,
+          status,
+          passwordAlgo,
+          passwordSalt,
+          passwordHash,
+          existing.player_id
+        ]
+      );
+
+      return {
+        created: false,
+        playerId: existing.player_id,
+        loginName,
+        displayName
+      };
+    }
+
+    const playerId = `player-${crypto.randomUUID()}`;
+
+    await this.pool.execute(
+      `INSERT INTO player_accounts (
+         player_id,
+         login_name,
+         display_name,
+         account_type,
+         status,
+         password_algo,
+         password_salt,
+         password_hash,
+         created_at,
+         last_login_at
+       ) VALUES (?, ?, ?, 'password', ?, ?, ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
+      [
+        playerId,
+        loginName,
+        displayName,
+        status,
+        passwordAlgo,
+        passwordSalt,
+        passwordHash
+      ]
+    );
+
+    return {
+      created: true,
+      playerId,
+      loginName,
+      displayName
     };
   }
 

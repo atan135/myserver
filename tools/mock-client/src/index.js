@@ -46,6 +46,12 @@ function parseArgs(argv) {
     httpBaseUrl: "http://127.0.0.1:3000",
     roomId: "room-default",
     guestId: "",
+    loginName: "",
+    password: "",
+    loginNameA: "",
+    passwordA: "",
+    loginNameB: "",
+    passwordB: "",
     ticket: "",
     timeoutMs: 5000,
     scenario: SCENARIO.HAPPY,
@@ -70,6 +76,24 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--guest-id" && next) {
       result.guestId = next;
+      index += 1;
+    } else if (arg === "--login-name" && next) {
+      result.loginName = next;
+      index += 1;
+    } else if (arg === "--password" && next) {
+      result.password = next;
+      index += 1;
+    } else if (arg === "--login-name-a" && next) {
+      result.loginNameA = next;
+      index += 1;
+    } else if (arg === "--password-a" && next) {
+      result.passwordA = next;
+      index += 1;
+    } else if (arg === "--login-name-b" && next) {
+      result.loginNameB = next;
+      index += 1;
+    } else if (arg === "--password-b" && next) {
+      result.passwordB = next;
       index += 1;
     } else if (arg === "--ticket" && next) {
       result.ticket = next;
@@ -450,15 +474,92 @@ class TcpProtocolClient {
   }
 }
 
-async function fetchTicket(options, guestIdOverride = "") {
-  if (options.ticket) {
+function resolveAccountCredentials(options, overrides = {}) {
+  const loginName = overrides.loginName ?? options.loginName;
+  const password = overrides.password ?? options.password;
+
+  if (!loginName && !password) {
+    return null;
+  }
+
+  if (!loginName || !password) {
+    throw new Error("account login requires both loginName and password");
+  }
+
+  return {
+    loginName,
+    password
+  };
+}
+
+function resolveMultiClientLoginOverrides(options, clientSuffix, guestId) {
+  const loginNameKey = `loginName${clientSuffix}`;
+  const passwordKey = `password${clientSuffix}`;
+  const loginName = options[loginNameKey];
+  const password = options[passwordKey];
+
+  if (loginName || password) {
+    if (!loginName || !password) {
+      throw new Error(
+        `client${clientSuffix} account login requires both --login-name-${clientSuffix.toLowerCase()} and --password-${clientSuffix.toLowerCase()}`
+      );
+    }
+
+    return {
+      loginName,
+      password
+    };
+  }
+
+  if (options.loginName || options.password) {
+    throw new Error(
+      "multi-client account login requires --login-name-a/--password-a and --login-name-b/--password-b"
+    );
+  }
+
+  return { guestId };
+}
+
+function formatLoginSummary(login) {
+  return {
+    playerId: login.playerId,
+    loginName: login.loginName || null,
+    guestId: login.guestId || null,
+    hasAccessToken: Boolean(login.accessToken),
+    ticketPreview: login.ticket ? `${login.ticket.slice(0, 16)}...` : null
+  };
+}
+
+async function fetchTicket(options, overrides = {}) {
+  if (options.ticket && Object.keys(overrides).length === 0) {
     return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket };
   }
 
+  const accountCredentials = resolveAccountCredentials(options, overrides);
+  if (accountCredentials) {
+    const response = await fetch(`${options.httpBaseUrl}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(accountCredentials)
+    });
+
+    if (!response.ok) {
+      throw new Error(`account login failed with status ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (!payload.ok) {
+      throw new Error(`account login failed: ${JSON.stringify(payload)}`);
+    }
+
+    return payload;
+  }
+
+  const guestId = overrides.guestId || options.guestId;
   const response = await fetch(`${options.httpBaseUrl}/api/v1/auth/guest-login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(guestIdOverride || options.guestId ? { guestId: guestIdOverride || options.guestId } : {})
+    body: JSON.stringify(guestId ? { guestId } : {})
   });
 
   if (!response.ok) {

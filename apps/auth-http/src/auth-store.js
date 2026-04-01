@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { normalizeLoginName, verifyPassword } from "./password-utils.js";
+
 function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64url");
 }
@@ -23,6 +25,12 @@ function ticketKey(ticket) {
   return `ticket:${hashTicket(ticket)}`;
 }
 
+function createAuthError(code, message = code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 export class AuthStore {
   constructor(config, redis, mysqlStore = null) {
     this.config = config;
@@ -42,11 +50,80 @@ export class AuthStore {
           playerId: `player-${crypto.randomUUID()}`,
           guestId: normalizedGuestId
         };
+
+    return this.createSessionForAccount(account, {
+      clientIp,
+      eventType: "guest_login"
+    });
+  }
+
+  async createPasswordSession(loginName, password, clientIp = null) {
+    if (!this.mysqlStore?.enabled) {
+      throw createAuthError("PASSWORD_LOGIN_UNAVAILABLE");
+    }
+
+    const normalizedLoginName = normalizeLoginName(loginName);
+    const account = await this.mysqlStore.findPasswordAccountByLoginName(
+      normalizedLoginName
+    );
+
+    if (!account) {
+      await this.mysqlStore.appendAuthAudit({
+        eventType: "password_login_failed",
+        clientIp,
+        details: {
+          loginName: normalizedLoginName,
+          reason: "not_found"
+        }
+      });
+      throw createAuthError("INVALID_LOGIN_CREDENTIALS");
+    }
+
+    if (account.status !== "active") {
+      await this.mysqlStore.appendAuthAudit({
+        playerId: account.playerId,
+        eventType: "password_login_failed",
+        clientIp,
+        details: {
+          loginName: account.loginName,
+          reason: `status:${account.status}`
+        }
+      });
+      throw createAuthError("ACCOUNT_DISABLED");
+    }
+
+    const passwordMatches =
+      account.passwordAlgo === "scrypt" &&
+      verifyPassword(password, account.passwordSalt, account.passwordHash);
+
+    if (!passwordMatches) {
+      await this.mysqlStore.appendAuthAudit({
+        playerId: account.playerId,
+        eventType: "password_login_failed",
+        clientIp,
+        details: {
+          loginName: account.loginName,
+          reason: "invalid_password"
+        }
+      });
+      throw createAuthError("INVALID_LOGIN_CREDENTIALS");
+    }
+
+    await this.mysqlStore.touchPlayerLastLogin(account.playerId);
+
+    return this.createSessionForAccount(account, {
+      clientIp,
+      eventType: "password_login"
+    });
+  }
+
+  async createSessionForAccount(account, { clientIp = null, eventType }) {
     const accessToken = crypto.randomBytes(24).toString("hex");
     const session = {
       accessToken,
-      guestId: account.guestId,
       playerId: account.playerId,
+      guestId: account.guestId || null,
+      loginName: account.loginName || null,
       createdAt: new Date().toISOString()
     };
     const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
@@ -60,13 +137,14 @@ export class AuthStore {
 
     await this.mysqlStore?.appendAuthAudit({
       playerId: account.playerId,
-      guestId: account.guestId,
-      eventType: "guest_login",
+      guestId: account.guestId || null,
+      eventType,
       accessToken,
       ticket: gameTicket.value,
       clientIp,
       details: {
-        sessionCreatedAt: session.createdAt
+        sessionCreatedAt: session.createdAt,
+        loginName: account.loginName || null
       }
     });
 

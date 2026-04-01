@@ -42,6 +42,11 @@ export function getConfig() {
     ticketTtlSeconds: Number.parseInt(
       process.env.TICKET_TTL_SECONDS || "300",
       10
+    ),
+    gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
+    gameServerAdminPort: Number.parseInt(
+      process.env.GAME_SERVER_ADMIN_PORT || "7001",
+      10
     )
   };
 }

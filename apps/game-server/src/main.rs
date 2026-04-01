@@ -1,7 +1,12 @@
+mod admin_server;
 mod config;
 #[allow(dead_code)]
 mod pb {
     include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
+}
+#[allow(dead_code)]
+mod admin_pb {
+    include!(concat!(env!("OUT_DIR"), "/myserver.admin.rs"));
 }
 mod mysql_store;
 mod protocol;
@@ -75,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_enable_file = config.log_enable_file,
         log_dir = %config.log_dir,
         mysql_enabled = config.mysql_enabled,
+        game_addr = %config.bind_addr(),
+        admin_addr = %config.admin_bind_addr(),
         "game-server logging initialized"
     );
 

@@ -70,7 +70,9 @@ export async function startAuthHttpServer({
   port,
   ticketSecret,
   redisUrl,
-  redisKeyPrefix
+  redisKeyPrefix,
+  gameServerAdminHost = "127.0.0.1",
+  gameServerAdminPort = 7001
 }) {
   const restoreEnv = setEnvVars({
     NODE_ENV: "test",
@@ -85,7 +87,9 @@ export async function startAuthHttpServer({
     MYSQL_ENABLED: "false",
     TICKET_SECRET: ticketSecret,
     SESSION_TTL_SECONDS: "600",
-    TICKET_TTL_SECONDS: "300"
+    TICKET_TTL_SECONDS: "300",
+    GAME_SERVER_ADMIN_HOST: gameServerAdminHost,
+    GAME_SERVER_ADMIN_PORT: String(gameServerAdminPort)
   });
 
   try {
@@ -219,6 +223,7 @@ async function runProcess({ command, args, cwd, env, timeoutMs = 240000 }) {
 export async function startGameServer({
   host = "127.0.0.1",
   port,
+  adminPort,
   ticketSecret,
   redisUrl,
   redisKeyPrefix
@@ -232,6 +237,8 @@ export async function startGameServer({
     ...process.env,
     GAME_HOST: host,
     GAME_PORT: String(port),
+    ADMIN_HOST: host,
+    ADMIN_PORT: String(adminPort),
     LOG_LEVEL: "error",
     LOG_ENABLE_CONSOLE: "false",
     LOG_ENABLE_FILE: "false",
@@ -295,9 +302,12 @@ export async function startGameServer({
     throw new Error(`${error.message}\n[game-server stdout]\n${stdout.join("")}\n[game-server stderr]\n${stderr.join("")}`);
   }
 
+  await waitForTcpPort({ host, port: adminPort });
+
   return {
     host,
     port,
+    adminPort,
     stdout,
     stderr,
     async close() {
@@ -315,6 +325,13 @@ export async function runMockClientScenario({
   host,
   port,
   roomId,
+  guestId,
+  loginName,
+  password,
+  loginNameA,
+  passwordA,
+  loginNameB,
+  passwordB,
   timeoutMs = 5000,
   maxBodyLen = 4096
 }) {
@@ -336,6 +353,34 @@ export async function runMockClientScenario({
 
   if (roomId) {
     args.push("--room-id", roomId);
+  }
+
+  if (guestId) {
+    args.push("--guest-id", guestId);
+  }
+
+  if (loginName) {
+    args.push("--login-name", loginName);
+  }
+
+  if (password) {
+    args.push("--password", password);
+  }
+
+  if (loginNameA) {
+    args.push("--login-name-a", loginNameA);
+  }
+
+  if (passwordA) {
+    args.push("--password-a", passwordA);
+  }
+
+  if (loginNameB) {
+    args.push("--login-name-b", loginNameB);
+  }
+
+  if (passwordB) {
+    args.push("--password-b", passwordB);
   }
 
   const child = spawn(process.execPath, args, {

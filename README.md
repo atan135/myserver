@@ -95,6 +95,46 @@ mysql -uroot -p < db/init.sql
 - Redis：session、ticket、短期在线态
 - MariaDB：玩家账号、认证审计、TCP 连接审计、房间事件审计
 
+
+## auth-http 测试账号录入
+
+前提：
+
+- `apps/auth-http/.env` 里把 `MYSQL_ENABLED=true`
+- `MYSQL_URL` 指向你的 `myserver_auth` 库
+- 首次可先执行 `mysql -uroot -p < db/init.sql`
+
+一键录入内置测试账号：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1
+```
+
+默认会写入这些账号：
+
+- `test001 / Passw0rd!`
+- `test002 / Passw0rd!`
+- `gm001 / AdminPass123!`
+
+录入单个账号：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1 -Account test003 -Password Passw0rd! -DisplayName "Test User 003"
+```
+
+从 JSON 批量导入：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1 -File .\apps\auth-http\scripts\test-accounts.example.json
+```
+
+也可以直接在 `apps/auth-http` 下执行：
+
+```powershell
+npm run seed:test-accounts
+```
+
+当前脚本会自动创建或更新 `player_accounts` 中的密码账号字段：`login_name`、`display_name`、`password_algo`、`password_salt`、`password_hash`。这一步先解决“测试账号入库”，后续再把真实账号登录接口接上即可直接复用。
 ## 自动化测试
 
 当前已补两层自动化测试：
@@ -163,3 +203,20 @@ npm run flow:mock-client -- --scenario two-client-room --http-base-url http://12
 1. 增加限流和风控
 2. 增加内部控制面
 3. 增加开始游戏 / 结束游戏状态流转
+
+
+## mock-client 账号密码登录
+
+单客户端场景可以直接走真实账号登录：
+
+```powershell
+npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-account --login-name test001 --password Passw0rd!
+```
+
+双客户端场景可以分别指定 A/B 两套账号：
+
+```powershell
+npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-account-multi --login-name-a test001 --password-a Passw0rd! --login-name-b test002 --password-b Passw0rd!
+```
+
+不传账号参数时，`mock-client` 仍默认走 guest 登录。

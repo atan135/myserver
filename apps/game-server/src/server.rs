@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis::AsyncCommands;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
@@ -21,17 +22,53 @@ use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packe
 use crate::room::{OutboundMessage, Room, RoomMemberState, RoomPhase};
 use crate::session::{Session, SessionState};
 use crate::ticket::verify_ticket;
-type SharedRooms = Arc<Mutex<HashMap<String, Room>>>;
+pub type SharedRooms = Arc<Mutex<HashMap<String, Room>>>;
+pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 const MIN_START_PLAYERS: usize = 2;
+
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeConfig {
+    pub heartbeat_timeout_secs: u64,
+    pub max_body_len: usize,
+}
+
+struct ConnectionCountGuard {
+    connection_count: Arc<AtomicU64>,
+}
+
+impl Drop for ConnectionCountGuard {
+    fn drop(&mut self) {
+        self.connection_count.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 pub async fn run(
     config: &Config,
     mysql_store: MySqlAuditStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(config.bind_addr()).await?;
+    let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let rooms: SharedRooms = Arc::new(Mutex::new(HashMap::new()));
-    info!(addr = %config.bind_addr(), redis = %config.redis_url, mysql_enabled = mysql_store.enabled(), "game server listening");
+    let runtime_config: SharedRuntimeConfig = Arc::new(RwLock::new(RuntimeConfig {
+        heartbeat_timeout_secs: config.heartbeat_timeout_secs,
+        max_body_len: config.max_body_len,
+    }));
+    let connection_count = Arc::new(AtomicU64::new(0));
+    info!(
+        addr = %config.bind_addr(),
+        admin_addr = %config.admin_bind_addr(),
+        redis = %config.redis_url,
+        mysql_enabled = mysql_store.enabled(),
+        "game server listening"
+    );
+
+    let admin_task = tokio::spawn(crate::admin_server::run_listener(
+        admin_listener,
+        rooms.clone(),
+        runtime_config.clone(),
+        connection_count.clone(),
+    ));
 
     let mut next_session_id: u64 = 1;
 
@@ -49,6 +86,7 @@ pub async fn run(
         let session_id = next_session_id;
         next_session_id += 1;
 
+        connection_count.fetch_add(1, Ordering::Relaxed);
         info!(session_id = session_id, peer = %peer_addr, "accepted tcp connection");
         mysql_store
             .append_connection_event(
@@ -64,7 +102,10 @@ pub async fn run(
         let redis_client = redis_client.clone();
         let rooms = rooms.clone();
         let mysql_store = mysql_store.clone();
+        let runtime_config = runtime_config.clone();
+        let connection_count = connection_count.clone();
         tokio::spawn(async move {
+            let _connection_guard = ConnectionCountGuard { connection_count };
             if let Err(error) = handle_connection(
                 socket,
                 peer_addr.to_string(),
@@ -73,6 +114,7 @@ pub async fn run(
                 redis_client,
                 mysql_store,
                 rooms,
+                runtime_config,
             )
             .await
             {
@@ -80,6 +122,9 @@ pub async fn run(
             }
         });
     }
+
+    admin_task.abort();
+    let _ = admin_task.await;
 
     info!("game server shutdown completed");
     Ok(())
@@ -93,6 +138,7 @@ async fn handle_connection(
     redis_client: redis::Client,
     mysql_store: MySqlAuditStore,
     rooms: SharedRooms,
+    runtime_config: SharedRuntimeConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new(session_id);
     let mut redis = redis_client.get_multiplexed_async_connection().await?;
@@ -111,9 +157,10 @@ async fn handle_connection(
     });
 
     loop {
+        let runtime = *runtime_config.read().await;
         let mut header_buf = [0u8; HEADER_LEN];
         let read_header = timeout(
-            Duration::from_secs(config.heartbeat_timeout_secs),
+            Duration::from_secs(runtime.heartbeat_timeout_secs),
             reader.read_exact(&mut header_buf),
         )
         .await;
@@ -166,7 +213,7 @@ async fn handle_connection(
             }
         };
 
-        if header.body_len as usize > config.max_body_len {
+        if header.body_len as usize > runtime.max_body_len {
             queue_error(&tx, header.seq, "BODY_TOO_LARGE", "body too large")?;
             mysql_store
                 .append_connection_event(
@@ -177,7 +224,7 @@ async fn handle_connection(
                     Some(json!({
                         "seq": header.seq,
                         "bodyLen": header.body_len,
-                        "maxBodyLen": config.max_body_len
+                        "maxBodyLen": runtime.max_body_len
                     })),
                 )
                 .await;
