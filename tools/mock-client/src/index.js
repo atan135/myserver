@@ -23,6 +23,8 @@ const MESSAGE_TYPE = {
   ROOM_END_REQ: 1113,
   ROOM_END_RES: 1114,
   ROOM_STATE_PUSH: 1201,
+  GET_ROOM_DATA_REQ: 1301,
+  GET_ROOM_DATA_RES: 1302,
   GAME_MESSAGE_PUSH: 1202,
   ERROR_RES: 9000
 };
@@ -36,7 +38,8 @@ const SCENARIO = {
   TWO_CLIENT_ROOM: "two-client-room",
   START_GAME_SINGLE_CLIENT: "start-game-single-client",
   START_GAME_READY_ROOM: "start-game-ready-room",
-  GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip"
+  GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip",
+  GET_ROOM_DATA: "get-room-data"
 };
 
 function parseArgs(argv) {
@@ -55,7 +58,9 @@ function parseArgs(argv) {
     ticket: "",
     timeoutMs: 5000,
     scenario: SCENARIO.HAPPY,
-    maxBodyLen: 4096
+    maxBodyLen: 4096,
+    idStart: 1000,
+    idEnd: 1000
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -106,6 +111,12 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--max-body-len" && next) {
       result.maxBodyLen = Number.parseInt(next, 10);
+      index += 1;
+    } else if (arg === "--id-start" && next) {
+      result.idStart = Number.parseInt(next, 10);
+      index += 1;
+    } else if (arg === "--id-end" && next) {
+      result.idEnd = Number.parseInt(next, 10);
       index += 1;
     }
   }
@@ -193,6 +204,18 @@ function encodeRoomEndReq(reason) {
   return encodeStringField(1, reason);
 }
 
+function encodeInt32Field(fieldNumber, value) {
+  const fieldKey = fieldNumber << 3;
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value)]);
+}
+
+function encodeGetRoomDataReq(idStart, idEnd) {
+  return Buffer.concat([
+    encodeInt32Field(1, idStart),
+    encodeInt32Field(2, idEnd)
+  ]);
+}
+
 function appendField(fields, fieldNumber, value) {
   const current = fields.get(fieldNumber);
   if (current === undefined) {
@@ -243,6 +266,16 @@ function readString(fields, fieldNumber) {
   return value ? Buffer.from(value).toString("utf8") : "";
 }
 
+function readStringList(fields, fieldNumber) {
+  const value = fields.get(fieldNumber);
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => Buffer.from(entry).toString("utf8"));
+  }
+  return [Buffer.from(value).toString("utf8")];
+}
 function readBool(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n) !== 0;
 }
@@ -330,6 +363,12 @@ function decodeByMessageType(messageType, body) {
       return {
         ok: readBool(fields, 1),
         roomId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GET_ROOM_DATA_RES:
+      return {
+        ok: readBool(fields, 1),
+        field0List: readStringList(fields, 2),
         errorCode: readString(fields, 3)
       };
     case MESSAGE_TYPE.ROOM_STATE_PUSH:
@@ -663,6 +702,24 @@ async function runStartGameSingleClient(client, options, login) {
   }
 }
 
+async function runGetRoomData(client, options, login) {
+  await authenticateClient(client, options, login, 1);
+
+  await client.send(
+    MESSAGE_TYPE.GET_ROOM_DATA_REQ,
+    2,
+    encodeGetRoomDataReq(options.idStart, options.idEnd)
+  );
+  const response = printResponse(`${client.label}.getRoomData`, await client.readNextPacket(options.timeoutMs));
+  if (!response.ok) {
+    throw new Error(`get room data failed: ${response.errorCode}`);
+  }
+  if (response.field0List.length === 0) {
+    throw new Error("expected field0List to contain at least one string");
+  }
+
+  console.log(`${client.label}.getRoomData.field0List:`, JSON.stringify(response.field0List, null, 2));
+}
 async function runGameplayRoundtrip(options) {
   const loginA = await fetchTicket(options, `${options.roomId}-owner`);
   const loginB = await fetchTicket(options, `${options.roomId}-member`);
@@ -947,7 +1004,8 @@ async function main() {
     SCENARIO.HAPPY,
     SCENARIO.INVALID_TICKET,
     SCENARIO.OVERSIZED_ROOM_JOIN,
-    SCENARIO.START_GAME_SINGLE_CLIENT
+    SCENARIO.START_GAME_SINGLE_CLIENT,
+    SCENARIO.GET_ROOM_DATA
   ].includes(options.scenario) || Boolean(options.ticket);
   const login = needsLogin ? await fetchTicket(options) : null;
 
@@ -982,6 +1040,9 @@ async function main() {
       case SCENARIO.START_GAME_SINGLE_CLIENT:
         await runStartGameSingleClient(client, options, login);
         break;
+      case SCENARIO.GET_ROOM_DATA:
+        await runGetRoomData(client, options, login);
+        break;
       default:
         throw new Error(`unknown scenario: ${options.scenario}`);
     }
@@ -996,4 +1057,16 @@ main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
 });
+
+
+
+
+
+
+
+
+
+
+
+
 

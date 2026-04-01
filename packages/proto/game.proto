@@ -68,6 +68,16 @@ message PlayerInputRes {
   string error_code = 3;
 }
 
+message GetRoomDataReq {
+  int32 id_start = 1;
+  int32 id_end = 2;
+}
+
+message GetRoomDataRes {
+  bool ok = 1;
+  repeated string field_0_list = 2;
+  string error_code = 3;
+}
 message GameMessagePush {
   string event = 1;
   string room_id = 2;
@@ -108,3 +118,5 @@ message ErrorRes {
   string error_code = 1;
   string message = 2;
 }
+
+

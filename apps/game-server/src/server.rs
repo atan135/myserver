@@ -12,11 +12,12 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::config_table::ConfigTableRuntime;
 use crate::mysql_store::MySqlAuditStore;
 use crate::pb::{
-    AuthReq, AuthRes, ErrorRes, GameMessagePush, PingRes, PlayerInputReq, PlayerInputRes,
-    RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes,
-    RoomSnapshot, RoomStartRes, RoomStatePush,
+    AuthReq, AuthRes, ErrorRes, GameMessagePush, GetRoomDataReq, GetRoomDataRes, PingRes,
+    PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes,
+    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomSnapshot, RoomStartRes, RoomStatePush,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::room::{OutboundMessage, Room, RoomMemberState, RoomPhase};
@@ -45,6 +46,7 @@ impl Drop for ConnectionCountGuard {
 pub async fn run(
     config: &Config,
     mysql_store: MySqlAuditStore,
+    config_tables: ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
@@ -103,6 +105,7 @@ pub async fn run(
         let rooms = rooms.clone();
         let mysql_store = mysql_store.clone();
         let runtime_config = runtime_config.clone();
+        let config_tables = config_tables.clone();
         let connection_count = connection_count.clone();
         tokio::spawn(async move {
             let _connection_guard = ConnectionCountGuard { connection_count };
@@ -115,6 +118,7 @@ pub async fn run(
                 mysql_store,
                 rooms,
                 runtime_config,
+                config_tables,
             )
             .await
             {
@@ -139,6 +143,7 @@ async fn handle_connection(
     mysql_store: MySqlAuditStore,
     rooms: SharedRooms,
     runtime_config: SharedRuntimeConfig,
+    config_tables: ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new(session_id);
     let mut redis = redis_client.get_multiplexed_async_connection().await?;
@@ -359,7 +364,77 @@ async fn handle_connection(
                     },
                 )?;
             }
-            MessageType::RoomJoinReq => {
+            MessageType::GetRoomDataReq => {
+                let Some(_player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
+                    continue;
+                };
+
+                let request =
+                    match packet.decode_body::<GetRoomDataReq>("INVALID_GET_ROOM_DATA_BODY") {
+                        Ok(value) => value,
+                        Err(error_code) => {
+                            queue_error(
+                                &tx,
+                                header.seq,
+                                error_code,
+                                "invalid get room data body",
+                            )?;
+                            continue;
+                        }
+                    };
+
+                if request.id_start > request.id_end {
+                    queue_message(
+                        &tx,
+                        MessageType::GetRoomDataRes,
+                        header.seq,
+                        GetRoomDataRes {
+                            ok: false,
+                            field_0_list: Vec::new(),
+                            error_code: "INVALID_ID_RANGE".to_string(),
+                        },
+                    )?;
+                    continue;
+                }
+
+                let tables = config_tables.snapshot().await;
+                let table = &tables.testtable_100;
+                let mut field_0_list = Vec::new();
+
+                for id in request.id_start..=request.id_end {
+                    if let Some(row) = table.get(id) {
+                        for key in &row.field_0 {
+                            field_0_list.push(
+                                table.resolve_string(*key).unwrap_or_default().to_string(),
+                            );
+                        }
+                    }
+                }
+
+                if field_0_list.is_empty() {
+                    queue_message(
+                        &tx,
+                        MessageType::GetRoomDataRes,
+                        header.seq,
+                        GetRoomDataRes {
+                            ok: false,
+                            field_0_list,
+                            error_code: "CONFIG_NOT_FOUND".to_string(),
+                        },
+                    )?;
+                } else {
+                    queue_message(
+                        &tx,
+                        MessageType::GetRoomDataRes,
+                        header.seq,
+                        GetRoomDataRes {
+                            ok: true,
+                            field_0_list,
+                            error_code: String::new(),
+                        },
+                    )?;
+                }
+            }            MessageType::RoomJoinReq => {
                 let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
                     continue;
                 };
@@ -1094,6 +1169,14 @@ fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
+
+
+
+
+
+
+
+
 
 
 

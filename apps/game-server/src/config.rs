@@ -4,6 +4,9 @@ use std::env;
 pub struct Config {
     pub host: String,
     pub port: u16,
+    pub csv_dir: String,
+    pub csv_reload_enabled: bool,
+    pub csv_reload_interval_secs: u64,
     pub admin_host: String,
     pub admin_port: u16,
     pub log_level: String,
@@ -34,6 +37,13 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7000);
+        let csv_dir = env::var("CSV_DIR").unwrap_or_else(|_| "csv".to_string());
+        let csv_reload_enabled = parse_bool("CSV_RELOAD_ENABLED", true);
+        let csv_reload_interval_secs = env::var("CSV_RELOAD_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(3);
         let admin_host = env::var("ADMIN_HOST").unwrap_or_else(|_| host.clone());
         let admin_port = env::var("ADMIN_PORT")
             .ok()
@@ -66,6 +76,9 @@ impl Config {
         Self {
             host,
             port,
+            csv_dir,
+            csv_reload_enabled,
+            csv_reload_interval_secs,
             admin_host,
             admin_port,
             log_level,

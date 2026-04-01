@@ -35,6 +35,8 @@ pub enum MessageType {
     PlayerInputRes = 1112,
     RoomEndReq = 1113,
     RoomEndRes = 1114,
+    GetRoomDataReq = 1301,
+    GetRoomDataRes = 1302,
     RoomStatePush = 1201,
     GameMessagePush = 1202,
     AdminServerStatusReq = 2001,
@@ -65,6 +67,8 @@ impl MessageType {
             1114 => Some(Self::RoomEndRes),
             1201 => Some(Self::RoomStatePush),
             1202 => Some(Self::GameMessagePush),
+            1301 => Some(Self::GetRoomDataReq),
+            1302 => Some(Self::GetRoomDataRes),
             2001 => Some(Self::AdminServerStatusReq),
             2002 => Some(Self::AdminServerStatusRes),
             2003 => Some(Self::AdminUpdateConfigReq),
@@ -135,12 +139,11 @@ pub fn encode_packet(msg_type: MessageType, seq: u32, body: &[u8]) -> Vec<u8> {
     packet
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::admin_pb::{ServerStatusReq, ServerStatusRes};
-    use crate::pb::{AuthReq, RoomMember, RoomSnapshot, RoomStatePush};
+    use crate::pb::{AuthReq, GetRoomDataReq, GetRoomDataRes, RoomMember, RoomSnapshot, RoomStatePush};
 
     #[test]
     fn auth_req_round_trip_through_packet() {
@@ -202,6 +205,36 @@ mod tests {
     }
 
     #[test]
+    fn get_room_data_round_trip() {
+        let request = GetRoomDataReq {
+            id_start: 1000,
+            id_end: 1002,
+        };
+        let request_body = encode_body(&request);
+        let request_packet = encode_packet(MessageType::GetRoomDataReq, 11, &request_body);
+        let request_header = parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let request_packet = Packet::new(request_header, request_packet[HEADER_LEN..].to_vec());
+        let decoded = request_packet
+            .decode_body::<GetRoomDataReq>("INVALID_GET_ROOM_DATA_BODY")
+            .unwrap();
+        assert_eq!(decoded, request);
+
+        let response = GetRoomDataRes {
+            ok: true,
+            field_0_list: vec!["alpha".to_string(), "beta".to_string()],
+            error_code: String::new(),
+        };
+        let response_body = encode_body(&response);
+        let response_packet = encode_packet(MessageType::GetRoomDataRes, 11, &response_body);
+        let response_header = parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let response_packet = Packet::new(response_header, response_packet[HEADER_LEN..].to_vec());
+        let decoded = response_packet
+            .decode_body::<GetRoomDataRes>("INVALID_GET_ROOM_DATA_RES_BODY")
+            .unwrap();
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
     fn admin_server_status_round_trip() {
         let request = ServerStatusReq {};
         let request_body = encode_body(&request);
@@ -245,3 +278,7 @@ mod tests {
         assert_eq!(result, Err("INVALID_AUTH_BODY"));
     }
 }
+
+
+
+
