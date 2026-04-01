@@ -1,14 +1,9 @@
 mod admin_server;
 mod config;
 mod config_table;
-#[allow(dead_code)]
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
-}
-#[allow(dead_code)]
-mod admin_pb {
-    include!(concat!(env!("OUT_DIR"), "/myserver.admin.rs"));
-}
+mod proto;
+pub use proto::admin as admin_pb;
+pub use proto::game as pb;
 #[allow(dead_code)]
 mod csv_code;
 mod mysql_store;
@@ -124,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = mysql_store.close().await;
     result
 }
+
 
 
 
