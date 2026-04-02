@@ -52,6 +52,10 @@ namespace MyServer.SimpleClient
         RoomEndRes = 1114,
         RoomStatePush = 1201,
         GameMessagePush = 1202,
+        FrameBundlePush = 1203,
+        RoomFrameRatePush = 1204,
+        GetRoomDataReq = 1301,
+        GetRoomDataRes = 1302,
         ErrorRes = 9000
     }
 
@@ -119,6 +123,14 @@ namespace MyServer.SimpleClient
     }
 
     [Serializable]
+    public sealed class GetRoomDataResponse
+    {
+        public bool ok;
+        public List<string> field0List = new List<string>();
+        public string errorCode = string.Empty;
+    }
+
+    [Serializable]
     public sealed class ErrorResponse
     {
         public string errorCode = string.Empty;
@@ -157,6 +169,32 @@ namespace MyServer.SimpleClient
         public string playerId = string.Empty;
         public string action = string.Empty;
         public string payloadJson = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class FrameInput
+    {
+        public string playerId = string.Empty;
+        public string action = string.Empty;
+        public string payloadJson = string.Empty;
+    }
+
+    [Serializable]
+    public sealed class FrameBundlePush
+    {
+        public string roomId = string.Empty;
+        public uint frameId;
+        public uint fps;
+        public List<FrameInput> inputs = new List<FrameInput>();
+        public bool isSilentFrame;
+    }
+
+    [Serializable]
+    public sealed class RoomFrameRatePush
+    {
+        public string roomId = string.Empty;
+        public uint fps;
+        public string reason = string.Empty;
     }
 
     public sealed class MyServerHttpException : Exception

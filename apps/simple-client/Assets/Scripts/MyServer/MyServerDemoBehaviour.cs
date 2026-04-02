@@ -16,9 +16,12 @@ namespace MyServer.SimpleClient
         [Header("Session")]
         [SerializeField] private string guestId = "demo-user";
         [SerializeField] private string roomId = "room-demo";
+        [SerializeField] private uint inputFrameId = 0;
         [SerializeField] private string inputAction = "move";
         [SerializeField] private string inputPayloadJson = "{\"x\":1,\"y\":0}";
         [SerializeField] private string endReason = "manual_end";
+        [SerializeField] private int dataIdStart = 1000;
+        [SerializeField] private int dataIdEnd = 1002;
 
         private readonly StringBuilder _logBuilder = new StringBuilder(2048);
         private Vector2 _scrollPosition;
@@ -38,7 +41,7 @@ namespace MyServer.SimpleClient
 
         private void OnGUI()
         {
-            const float width = 480f;
+            const float width = 520f;
             var area = new Rect(16f, 16f, width, Screen.height - 32f);
             GUILayout.BeginArea(area, GUI.skin.box);
 
@@ -59,12 +62,18 @@ namespace MyServer.SimpleClient
             guestId = GUILayout.TextField(guestId);
             GUILayout.Label("Room ID");
             roomId = GUILayout.TextField(roomId);
+            GUILayout.Label("Input Frame ID");
+            inputFrameId = ParseUIntField(inputFrameId);
             GUILayout.Label("Input Action");
             inputAction = GUILayout.TextField(inputAction);
             GUILayout.Label("Input Payload JSON");
             inputPayloadJson = GUILayout.TextField(inputPayloadJson);
             GUILayout.Label("End Reason");
             endReason = GUILayout.TextField(endReason);
+            GUILayout.Label("Config ID Start");
+            dataIdStart = ParseIntField(dataIdStart);
+            GUILayout.Label("Config ID End");
+            dataIdEnd = ParseIntField(dataIdEnd);
 
             GUILayout.Space(10f);
 
@@ -129,8 +138,8 @@ namespace MyServer.SimpleClient
                 {
                     Run(async () =>
                     {
-                        var response = await _client.SendPlayerInputAsync(inputAction, inputPayloadJson);
-                        Log("input", $"ok={response.ok} roomId={response.roomId} error={response.errorCode}");
+                        var response = await _client.SendPlayerInputAsync(inputFrameId, inputAction, inputPayloadJson);
+                        Log("input", $"frameId={inputFrameId} ok={response.ok} roomId={response.roomId} error={response.errorCode}");
                     });
                 }
 
@@ -158,6 +167,15 @@ namespace MyServer.SimpleClient
                     {
                         var response = await _client.PingAsync();
                         Log("ping", $"serverTime={response.serverTime}");
+                    });
+                }
+
+                if (GUILayout.Button("11. Get Room Data"))
+                {
+                    Run(async () =>
+                    {
+                        var response = await _client.GetRoomDataAsync(dataIdStart, dataIdEnd);
+                        Log("room-data", $"ok={response.ok} count={response.field0List.Count} error={response.errorCode} values=[{string.Join(",", response.field0List.ToArray())}]");
                     });
                 }
             }
@@ -190,6 +208,8 @@ namespace MyServer.SimpleClient
             _client = new MyServerSessionClient(config);
             _client.roomStatePushed += OnRoomStatePushed;
             _client.gameMessagePushed += OnGameMessagePushed;
+            _client.frameBundlePushed += OnFrameBundlePushed;
+            _client.roomFrameRatePushed += OnRoomFrameRatePushed;
             _client.errorReceived += OnErrorReceived;
             _client.disconnected += OnDisconnected;
         }
@@ -235,6 +255,16 @@ namespace MyServer.SimpleClient
             Log("game-push", $"event={push?.eventName} roomId={push?.roomId} playerId={push?.playerId} action={push?.action} payload={push?.payloadJson}");
         }
 
+        private void OnFrameBundlePushed(FrameBundlePush push)
+        {
+            Log("frame-bundle", $"roomId={push?.roomId} frameId={push?.frameId} fps={push?.fps} silent={push?.isSilentFrame} inputs={push?.inputs?.Count ?? 0}");
+        }
+
+        private void OnRoomFrameRatePushed(RoomFrameRatePush push)
+        {
+            Log("frame-rate", $"roomId={push?.roomId} fps={push?.fps} reason={push?.reason}");
+        }
+
         private void OnErrorReceived(ErrorResponse error)
         {
             Log("game-error", $"code={error?.errorCode} message={error?.message}");
@@ -269,6 +299,12 @@ namespace MyServer.SimpleClient
         {
             var raw = GUILayout.TextField(currentValue.ToString());
             return int.TryParse(raw, out var parsed) ? parsed : currentValue;
+        }
+
+        private static uint ParseUIntField(uint currentValue)
+        {
+            var raw = GUILayout.TextField(currentValue.ToString());
+            return uint.TryParse(raw, out var parsed) ? parsed : currentValue;
         }
 
         private readonly struct GUIEnabledScope : IDisposable

@@ -33,6 +33,8 @@ namespace MyServer.SimpleClient
 
         public event Action<RoomStatePush> roomStatePushed;
         public event Action<GamePushMessage> gameMessagePushed;
+        public event Action<FrameBundlePush> frameBundlePushed;
+        public event Action<RoomFrameRatePush> roomFrameRatePushed;
         public event Action<ErrorResponse> errorReceived;
         public event Action<string> disconnected;
 
@@ -132,6 +134,7 @@ namespace MyServer.SimpleClient
         }
 
         public Task<PlayerInputResponse> SendPlayerInputAsync(
+            uint frameId,
             string action,
             string payloadJson,
             CancellationToken cancellationToken = default)
@@ -139,9 +142,17 @@ namespace MyServer.SimpleClient
             return SendRequestAsync(
                 GameMessageType.PlayerInputReq,
                 GameMessageType.PlayerInputRes,
-                MyServerGameProtocol.EncodePlayerInputRequest(action, payloadJson),
+                MyServerGameProtocol.EncodePlayerInputRequest(frameId, action, payloadJson),
                 MyServerGameProtocol.DecodePlayerInputResponse,
                 cancellationToken);
+        }
+
+        public Task<PlayerInputResponse> SendPlayerInputAsync(
+            string action,
+            string payloadJson,
+            CancellationToken cancellationToken = default)
+        {
+            return SendPlayerInputAsync(0, action, payloadJson, cancellationToken);
         }
 
         public Task<RoomEndResponse> EndGameAsync(string reason, CancellationToken cancellationToken = default)
@@ -151,6 +162,16 @@ namespace MyServer.SimpleClient
                 GameMessageType.RoomEndRes,
                 MyServerGameProtocol.EncodeRoomEndRequest(reason),
                 MyServerGameProtocol.DecodeRoomEndResponse,
+                cancellationToken);
+        }
+
+        public Task<GetRoomDataResponse> GetRoomDataAsync(int idStart, int idEnd, CancellationToken cancellationToken = default)
+        {
+            return SendRequestAsync(
+                GameMessageType.GetRoomDataReq,
+                GameMessageType.GetRoomDataRes,
+                MyServerGameProtocol.EncodeGetRoomDataRequest(idStart, idEnd),
+                MyServerGameProtocol.DecodeGetRoomDataResponse,
                 cancellationToken);
         }
 
@@ -306,6 +327,20 @@ namespace MyServer.SimpleClient
             {
                 var push = MyServerGameProtocol.DecodeGamePushMessage(body);
                 Dispatch(() => gameMessagePushed?.Invoke(push));
+                return;
+            }
+
+            if (messageType == GameMessageType.FrameBundlePush)
+            {
+                var push = MyServerGameProtocol.DecodeFrameBundlePush(body);
+                Dispatch(() => frameBundlePushed?.Invoke(push));
+                return;
+            }
+
+            if (messageType == GameMessageType.RoomFrameRatePush)
+            {
+                var push = MyServerGameProtocol.DecodeRoomFrameRatePush(body);
+                Dispatch(() => roomFrameRatePushed?.Invoke(push));
                 return;
             }
 

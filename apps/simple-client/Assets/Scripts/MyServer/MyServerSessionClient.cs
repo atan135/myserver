@@ -20,6 +20,8 @@ namespace MyServer.SimpleClient
                 roomStatePushed?.Invoke(push);
             };
             game.gameMessagePushed += push => gameMessagePushed?.Invoke(push);
+            game.frameBundlePushed += push => frameBundlePushed?.Invoke(push);
+            game.roomFrameRatePushed += push => roomFrameRatePushed?.Invoke(push);
             game.errorReceived += error => errorReceived?.Invoke(error);
             game.disconnected += reason => disconnected?.Invoke(reason);
         }
@@ -32,6 +34,8 @@ namespace MyServer.SimpleClient
 
         public event Action<RoomStatePush> roomStatePushed;
         public event Action<GamePushMessage> gameMessagePushed;
+        public event Action<FrameBundlePush> frameBundlePushed;
+        public event Action<RoomFrameRatePush> roomFrameRatePushed;
         public event Action<ErrorResponse> errorReceived;
         public event Action<string> disconnected;
 
@@ -108,6 +112,15 @@ namespace MyServer.SimpleClient
         }
 
         public Task<PlayerInputResponse> SendPlayerInputAsync(
+            uint frameId,
+            string action,
+            string payloadJson,
+            CancellationToken cancellationToken = default)
+        {
+            return game.SendPlayerInputAsync(frameId, action, payloadJson, cancellationToken);
+        }
+
+        public Task<PlayerInputResponse> SendPlayerInputAsync(
             string action,
             string payloadJson,
             CancellationToken cancellationToken = default)
@@ -118,6 +131,11 @@ namespace MyServer.SimpleClient
         public Task<RoomEndResponse> EndGameAsync(string reason, CancellationToken cancellationToken = default)
         {
             return game.EndGameAsync(reason, cancellationToken);
+        }
+
+        public Task<GetRoomDataResponse> GetRoomDataAsync(int idStart, int idEnd, CancellationToken cancellationToken = default)
+        {
+            return game.GetRoomDataAsync(idStart, idEnd, cancellationToken);
         }
 
         public void Dispose()
@@ -134,5 +152,3 @@ namespace MyServer.SimpleClient
         }
     }
 }
-
-

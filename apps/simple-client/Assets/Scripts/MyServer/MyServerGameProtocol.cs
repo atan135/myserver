@@ -92,11 +92,12 @@ namespace MyServer.SimpleClient
             return Array.Empty<byte>();
         }
 
-        public static byte[] EncodePlayerInputRequest(string action, string payloadJson)
+        public static byte[] EncodePlayerInputRequest(uint frameId, string action, string payloadJson)
         {
             var writer = new ProtoWriter();
-            writer.WriteString(1, action);
-            writer.WriteString(2, payloadJson);
+            writer.WriteUInt32(1, frameId);
+            writer.WriteString(2, action);
+            writer.WriteString(3, payloadJson);
             return writer.ToArray();
         }
 
@@ -104,6 +105,14 @@ namespace MyServer.SimpleClient
         {
             var writer = new ProtoWriter();
             writer.WriteString(1, reason);
+            return writer.ToArray();
+        }
+
+        public static byte[] EncodeGetRoomDataRequest(int idStart, int idEnd)
+        {
+            var writer = new ProtoWriter();
+            writer.WriteInt32(1, idStart);
+            writer.WriteInt32(2, idEnd);
             return writer.ToArray();
         }
 
@@ -296,6 +305,30 @@ namespace MyServer.SimpleClient
             return response;
         }
 
+        public static GetRoomDataResponse DecodeGetRoomDataResponse(byte[] body)
+        {
+            var response = new GetRoomDataResponse();
+            ReadFields(body, (fieldNumber, reader) =>
+            {
+                switch (fieldNumber)
+                {
+                    case 1:
+                        response.ok = reader.ReadBool();
+                        return true;
+                    case 2:
+                        response.field0List.Add(reader.ReadString());
+                        return true;
+                    case 3:
+                        response.errorCode = reader.ReadString();
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+
+            return response;
+        }
+
         public static ErrorResponse DecodeErrorResponse(byte[] body)
         {
             var response = new ErrorResponse();
@@ -368,6 +401,60 @@ namespace MyServer.SimpleClient
             return push;
         }
 
+        public static FrameBundlePush DecodeFrameBundlePush(byte[] body)
+        {
+            var push = new FrameBundlePush();
+            ReadFields(body, (fieldNumber, reader) =>
+            {
+                switch (fieldNumber)
+                {
+                    case 1:
+                        push.roomId = reader.ReadString();
+                        return true;
+                    case 2:
+                        push.frameId = reader.ReadUInt32();
+                        return true;
+                    case 3:
+                        push.fps = reader.ReadUInt32();
+                        return true;
+                    case 4:
+                        push.inputs.Add(DecodeFrameInput(reader.ReadBytes()));
+                        return true;
+                    case 5:
+                        push.isSilentFrame = reader.ReadBool();
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+
+            return push;
+        }
+
+        public static RoomFrameRatePush DecodeRoomFrameRatePush(byte[] body)
+        {
+            var push = new RoomFrameRatePush();
+            ReadFields(body, (fieldNumber, reader) =>
+            {
+                switch (fieldNumber)
+                {
+                    case 1:
+                        push.roomId = reader.ReadString();
+                        return true;
+                    case 2:
+                        push.fps = reader.ReadUInt32();
+                        return true;
+                    case 3:
+                        push.reason = reader.ReadString();
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+
+            return push;
+        }
+
         private static RoomSnapshot DecodeRoomSnapshot(byte[] body)
         {
             var snapshot = new RoomSnapshot();
@@ -417,6 +504,30 @@ namespace MyServer.SimpleClient
             });
 
             return member;
+        }
+
+        private static FrameInput DecodeFrameInput(byte[] body)
+        {
+            var input = new FrameInput();
+            ReadFields(body, (fieldNumber, reader) =>
+            {
+                switch (fieldNumber)
+                {
+                    case 1:
+                        input.playerId = reader.ReadString();
+                        return true;
+                    case 2:
+                        input.action = reader.ReadString();
+                        return true;
+                    case 3:
+                        input.payloadJson = reader.ReadString();
+                        return true;
+                    default:
+                        return false;
+                }
+            });
+
+            return input;
         }
 
         private static void ReadFields(byte[] body, Func<int, ProtoFieldReader, bool> readField)
@@ -497,6 +608,18 @@ namespace MyServer.SimpleClient
                 WriteVarint(value ? 1UL : 0UL);
             }
 
+            public void WriteInt32(int fieldNumber, int value)
+            {
+                WriteTag(fieldNumber, 0);
+                WriteVarint(unchecked((ulong)value));
+            }
+
+            public void WriteUInt32(int fieldNumber, uint value)
+            {
+                WriteTag(fieldNumber, 0);
+                WriteVarint(value);
+            }
+
             public void WriteInt64(int fieldNumber, long value)
             {
                 WriteTag(fieldNumber, 0);
@@ -555,6 +678,18 @@ namespace MyServer.SimpleClient
             {
                 EnsureWireType(wireType, 0);
                 return ReadVarint() != 0;
+            }
+
+            public int ReadInt32(int wireType)
+            {
+                EnsureWireType(wireType, 0);
+                return unchecked((int)ReadVarint());
+            }
+
+            public uint ReadUInt32(int wireType)
+            {
+                EnsureWireType(wireType, 0);
+                return checked((uint)ReadVarint());
             }
 
             public long ReadInt64(int wireType)
@@ -650,6 +785,16 @@ namespace MyServer.SimpleClient
             public bool ReadBool()
             {
                 return _reader.ReadBool(_wireType);
+            }
+
+            public int ReadInt32()
+            {
+                return _reader.ReadInt32(_wireType);
+            }
+
+            public uint ReadUInt32()
+            {
+                return _reader.ReadUInt32(_wireType);
             }
 
             public long ReadInt64()
