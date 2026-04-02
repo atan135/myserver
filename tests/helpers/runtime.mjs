@@ -224,6 +224,7 @@ export async function startGameServer({
   host = "127.0.0.1",
   port,
   adminPort,
+  localSocketName = "myserver-game-server.sock",
   ticketSecret,
   redisUrl,
   redisKeyPrefix
@@ -239,6 +240,7 @@ export async function startGameServer({
     GAME_PORT: String(port),
     ADMIN_HOST: host,
     ADMIN_PORT: String(adminPort),
+    GAME_LOCAL_SOCKET_NAME: localSocketName,
     LOG_LEVEL: "error",
     LOG_ENABLE_CONSOLE: "false",
     LOG_ENABLE_FILE: "false",
@@ -405,3 +407,96 @@ export async function runMockClientScenario({
 
   return { stdout, stderr };
 }
+
+export async function startGameProxy({
+  host = "127.0.0.1",
+  port,
+  adminPort,
+  upstreamLocalSocketName = "myserver-game-server.sock"
+}) {
+  const stdout = [];
+  const stderr = [];
+  const cargoBin = resolveCargoBin();
+  const cargoTargetDir = path.join(projectRoot, ".tmp", "cargo-target", "integration-proxy");
+  let spawnError = null;
+  const cargoEnv = {
+    ...process.env,
+    PROXY_HOST: host,
+    PROXY_PORT: String(port),
+    PROXY_ADMIN_HOST: host,
+    PROXY_ADMIN_PORT: String(adminPort),
+    LOG_LEVEL: "error",
+    LOG_ENABLE_CONSOLE: "false",
+    LOG_ENABLE_FILE: "false",
+    LOG_DIR: "logs/test-game-proxy",
+    UPSTREAM_SERVER_ID: "game-server-1",
+    UPSTREAM_LOCAL_SOCKET_NAME: upstreamLocalSocketName,
+    CARGO_TARGET_DIR: cargoTargetDir
+  };
+
+  await runProcess({
+    command: cargoBin,
+    args: ["build", "--quiet"],
+    cwd: path.join(projectRoot, "apps", "game-proxy"),
+    env: cargoEnv
+  });
+
+  const binaryPath = path.join(
+    cargoTargetDir,
+    "debug",
+    process.platform === "win32" ? "game-proxy.exe" : "game-proxy"
+  );
+
+  const child = spawn(binaryPath, [], {
+    cwd: path.join(projectRoot, "apps", "game-proxy"),
+    env: cargoEnv,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout.push(chunk.toString());
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(chunk.toString());
+  });
+
+  try {
+    await waitForTcpPort({
+      host,
+      port: adminPort,
+      onTick: () => {
+        if (spawnError) {
+          throw spawnError;
+        }
+        if (child.exitCode !== null) {
+          throw new Error("game-proxy exited early with code " + child.exitCode);
+        }
+      }
+    });
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      await once(child, "exit").catch(() => {});
+    }
+    throw new Error(error.message + "\n[game-proxy stdout]\n" + stdout.join("") + "\n[game-proxy stderr]\n" + stderr.join(""));
+  }
+
+  return {
+    host,
+    port,
+    adminPort,
+    stdout,
+    stderr,
+    async close() {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+        await once(child, "exit").catch(() => {});
+      }
+    }
+  };
+}
+
+

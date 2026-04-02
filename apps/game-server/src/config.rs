@@ -9,6 +9,7 @@ pub struct Config {
     pub csv_reload_interval_secs: u64,
     pub admin_host: String,
     pub admin_port: u16,
+    pub local_socket_name: String,
     pub log_level: String,
     pub log_enable_console: bool,
     pub log_enable_file: bool,
@@ -49,6 +50,8 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7001);
+        let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
+            .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let log_enable_console = parse_bool("LOG_ENABLE_CONSOLE", true);
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
@@ -81,6 +84,7 @@ impl Config {
             csv_reload_interval_secs,
             admin_host,
             admin_port,
+            local_socket_name,
             log_level,
             log_enable_console,
             log_enable_file,

@@ -250,6 +250,31 @@
 4. 再完成 P3，让控制、观测和排障能力成型
 5. 最后进入 P4 和 P5，扩展玩法装配和多节点能力
 
+## 5.1 当前阶段调整
+
+当前项目已完成 P0 与 P1 的主体收敛。
+
+从 P2 往后的路线暂时不继续推进，当前优先级切换为一条新的接入层支线：
+
+- 新增 `apps/game-proxy`
+- 在客户端与 `game-server` 之间增加一层 proxy
+- 把 `game-server` 的热切换、摘流和连接代理能力前置到 proxy
+- 客户端与 proxy 使用 `KCP`
+- proxy 与 `game-server` 使用 `UDS`
+
+当前设计文档见：
+
+- `docs/game-proxy-hot-update-design.md`
+
+这条支线的目标不是替代 `game-server`，而是补一层独立的连接代理与热切换层。
+
+后续建议开发顺序调整为：
+
+1. 先确认 `game-proxy` 文档细节
+2. 再实现 `apps/game-proxy` 最小骨架
+3. 再让 `mock-client` 和 `simple-client` 改为优先连接 `game-proxy`
+4. 最后再决定是否恢复 P2-P5 的继续开发
+
 ## 6. 当前不建议优先做的事
 
 这些方向有价值，但不建议现在优先：

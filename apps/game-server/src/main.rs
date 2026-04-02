@@ -3,6 +3,7 @@ mod config;
 mod config_table;
 mod core;
 mod gameservice;
+mod local_socket;
 mod proto;
 pub use proto::admin as admin_pb;
 pub use proto::game as pb;
@@ -87,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mysql_enabled = config.mysql_enabled,
         game_addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
+        local_socket_name = %config.local_socket_name,
         "game-server logging initialized"
     );
 

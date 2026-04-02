@@ -3,7 +3,8 @@
 通用游戏后端框架第一版最小闭环，当前包含：
 
 - `apps/auth-http`：Node.js + Express 登录服
-- `apps/game-server`：Rust + Tokio TCP 游戏服
+- `apps/game-server`：Rust + Tokio 游戏服
+- `apps/game-proxy`：Rust + Tokio KCP 接入代理与热切换层
 - `packages/proto`：玩家协议与内部控制协议
 - `docs`：架构与协议文档
 - `scripts`：环境检查与本地启动辅助脚本
@@ -13,6 +14,7 @@
 
 - [底层框架路线图](./docs/game-server-framework-roadmap.md)
 - [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
+- [game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
 - [CSV 配置表设计](./docs/game-server-csv-config-design.md)
 - [协议设计](./docs/protocol.md)
 

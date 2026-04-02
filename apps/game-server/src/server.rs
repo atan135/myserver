@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
@@ -41,8 +42,9 @@ pub async fn run(
     mysql_store: MySqlAuditStore,
     config_tables: ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(config.bind_addr()).await?;
+    let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
+    let local_socket_listener = crate::local_socket::create_listener(&config.local_socket_name)?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let shared_state = ServerSharedState {
         room_manager: Arc::new(RoomManager::new()),
@@ -61,6 +63,7 @@ pub async fn run(
     info!(
         addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
+        local_socket_name = %config.local_socket_name,
         redis = %config.redis_url,
         mysql_enabled = mysql_store.enabled(),
         "game server listening"
@@ -73,11 +76,19 @@ pub async fn run(
         shared_state.connection_count.clone(),
     ));
 
+    let local_socket_task = tokio::spawn(run_local_socket_listener(
+        local_socket_listener,
+        redis_client.clone(),
+        services.clone(),
+        shared_state.runtime_config.clone(),
+        shared_state.connection_count.clone(),
+    ));
+
     let mut next_session_id: u64 = 1;
 
     loop {
         let accept_result = tokio::select! {
-            result = listener.accept() => Some(result),
+            result = tcp_listener.accept() => Some(result),
             _ = tokio::signal::ctrl_c() => None,
         };
 
@@ -89,56 +100,102 @@ pub async fn run(
         let session_id = next_session_id;
         next_session_id += 1;
 
-        shared_state.connection_count.fetch_add(1, Ordering::Relaxed);
-        info!(session_id = session_id, peer = %peer_addr, "accepted tcp connection");
-        mysql_store
-            .append_connection_event(
-                session_id,
-                None,
-                Some(&peer_addr.to_string()),
-                "tcp_connected",
-                None,
-            )
-            .await;
-
-        let redis_client = redis_client.clone();
-        let services = services.clone();
-        let runtime_config = shared_state.runtime_config.clone();
-        let connection_count = shared_state.connection_count.clone();
-        tokio::spawn(async move {
-            let _connection_guard = ConnectionCountGuard { connection_count };
-            if let Err(error) = handle_connection(
-                socket,
-                peer_addr.to_string(),
-                session_id,
-                redis_client,
-                services,
-                runtime_config,
-            )
-            .await
-            {
-                warn!(session_id = session_id, error = %error, "connection task failed");
-            }
-        });
+        spawn_connection_task(
+            socket,
+            peer_addr.to_string(),
+            session_id,
+            redis_client.clone(),
+            services.clone(),
+            shared_state.runtime_config.clone(),
+            shared_state.connection_count.clone(),
+            mysql_store.clone(),
+        )
+        .await;
     }
 
     admin_task.abort();
     let _ = admin_task.await;
+    local_socket_task.abort();
+    let _ = local_socket_task.await;
 
     info!("game server shutdown completed");
     Ok(())
 }
 
-async fn handle_connection(
-    socket: TcpStream,
+async fn run_local_socket_listener(
+    mut listener: interprocess::local_socket::tokio::Listener,
+    redis_client: redis::Client,
+    services: ServiceContext,
+    runtime_config: Arc<RwLock<RuntimeConfig>>,
+    connection_count: Arc<AtomicU64>,
+) -> Result<(), std::io::Error> {
+    let mut next_session_id = 1_000_000u64;
+    loop {
+        let socket = listener.accept().await?;
+        let session_id = next_session_id;
+        next_session_id = next_session_id.saturating_add(1);
+        spawn_connection_task(
+            socket,
+            format!("local:{}", session_id),
+            session_id,
+            redis_client.clone(),
+            services.clone(),
+            runtime_config.clone(),
+            connection_count.clone(),
+            services.mysql_store.clone(),
+        )
+        .await;
+    }
+}
+
+async fn spawn_connection_task<S>(
+    socket: S,
     peer_addr: String,
     session_id: u64,
     redis_client: redis::Client,
     services: ServiceContext,
     runtime_config: Arc<RwLock<RuntimeConfig>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    connection_count: Arc<AtomicU64>,
+    mysql_store: MySqlAuditStore,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    connection_count.fetch_add(1, Ordering::Relaxed);
+    info!(session_id = session_id, peer = %peer_addr, "accepted game connection");
+    mysql_store
+        .append_connection_event(session_id, None, Some(&peer_addr), "connected", None)
+        .await;
+
+    tokio::spawn(async move {
+        let _connection_guard = ConnectionCountGuard { connection_count };
+        if let Err(error) = handle_connection(
+            socket,
+            peer_addr,
+            session_id,
+            redis_client,
+            services,
+            runtime_config,
+        )
+        .await
+        {
+            warn!(session_id = session_id, error = %error, "connection task failed");
+        }
+    });
+}
+
+async fn handle_connection<S>(
+    socket: S,
+    peer_addr: String,
+    session_id: u64,
+    redis_client: redis::Client,
+    services: ServiceContext,
+    runtime_config: Arc<RwLock<RuntimeConfig>>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let redis = redis_client.get_multiplexed_async_connection().await?;
-    let (mut reader, mut writer) = socket.into_split();
+    let (mut reader, mut writer) = tokio::io::split(socket);
     let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
     let mut connection = ConnectionContext {
         peer_addr,
@@ -155,6 +212,7 @@ async fn handle_connection(
             }
         }
 
+        writer.shutdown().await?;
         Ok::<(), std::io::Error>(())
     });
 
@@ -177,7 +235,7 @@ async fn handle_connection(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
                         Some(&connection.peer_addr),
-                        "tcp_closed",
+                        "closed",
                         None,
                     )
                     .await;
@@ -220,6 +278,7 @@ async fn handle_connection(
 
         if header.body_len as usize > runtime.max_body_len {
             connection.queue_error(header.seq, "BODY_TOO_LARGE", "body too large")?;
+            discard_body(&mut reader, header.body_len as usize).await?;
             services
                 .mysql_store
                 .append_connection_event(
@@ -251,6 +310,19 @@ async fn handle_connection(
     Ok(())
 }
 
+async fn discard_body<R>(reader: &mut R, body_len: usize) -> Result<(), std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut remaining = body_len;
+    let mut buffer = [0u8; 4096];
+    while remaining > 0 {
+        let chunk_len = remaining.min(buffer.len());
+        reader.read_exact(&mut buffer[..chunk_len]).await?;
+        remaining -= chunk_len;
+    }
+    Ok(())
+}
 async fn dispatch_packet(
     services: &ServiceContext,
     connection: &mut ConnectionContext,
@@ -305,5 +377,6 @@ pub fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
+
 
 

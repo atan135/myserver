@@ -7,6 +7,7 @@ import {
   randomId,
   runMockClientScenario,
   startAuthHttpServer,
+  startGameProxy,
   startGameServer
 } from "./helpers/runtime.mjs";
 
@@ -16,19 +17,33 @@ const redisKeyPrefix = `test:integration:${randomId("redis")}:`;
 
 let authServer;
 let gameServer;
+let gameProxy;
 
 before(async () => {
   const authPort = await findFreePort();
   const gamePort = await findFreePort();
   const adminPort = await findFreePort();
+  const proxyPort = await findFreePort();
+  const proxyAdminPort = await findFreePort();
+  const localSocketName = process.platform === "win32"
+    ? randomId("game-server")
+    : randomId("game-server") + ".sock";
 
   gameServer = await startGameServer({
     host: "127.0.0.1",
     port: gamePort,
     adminPort,
+    localSocketName,
     ticketSecret,
     redisUrl,
     redisKeyPrefix
+  });
+
+  gameProxy = await startGameProxy({
+    host: "127.0.0.1",
+    port: proxyPort,
+    adminPort: proxyAdminPort,
+    upstreamLocalSocketName: localSocketName
   });
 
   authServer = await startAuthHttpServer({
@@ -43,6 +58,9 @@ before(async () => {
 });
 
 after(async () => {
+  if (gameProxy) {
+    await gameProxy.close();
+  }
   if (gameServer) {
     await gameServer.close();
   }
@@ -77,6 +95,14 @@ test("auth-http proxies protobuf admin calls to game-server", async () => {
   const updatedStatusPayload = await updatedStatusResponse.json();
   assert.equal(updatedStatusPayload.ok, true);
   assert.equal(updatedStatusPayload.maxBodyLen, 8192);
+});
+
+test("game-proxy exposes active upstream status", async () => {
+  const response = await fetch(`http://127.0.0.1:${gameProxy.adminPort}/status`);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.active_upstream, "game-server-1");
 });
 
 test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t) => {
