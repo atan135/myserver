@@ -7,13 +7,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::info;
 
-use crate::pb::{
-    FrameBundlePush, FrameInput, GameMessagePush, RoomSnapshot, RoomStatePush,
-};
+use crate::core::room::{OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
+use crate::core::room_logic::RoomLogicFactory;
+use crate::core::room_policy::RoomPolicyRegistry;
+use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
 use crate::protocol::{MessageType, encode_body};
-use crate::room::{OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
-use crate::room_logic::RoomLogicFactory;
-use crate::room_policy::RoomPolicyRegistry;
 
 #[derive(Debug)]
 pub struct RoomRuntime {
@@ -274,25 +272,6 @@ impl RoomManager {
             snapshot: Some(snapshot),
         });
         self.broadcast_to_room(room_id, MessageType::RoomStatePush, body)
-            .await
-    }
-
-    pub async fn broadcast_game_message(
-        &self,
-        room_id: &str,
-        event: &str,
-        player_id: &str,
-        action: &str,
-        payload_json: &str,
-    ) -> Result<(), std::io::Error> {
-        let body = encode_body(&GameMessagePush {
-            event: event.to_string(),
-            room_id: room_id.to_string(),
-            player_id: player_id.to_string(),
-            action: action.to_string(),
-            payload_json: payload_json.to_string(),
-        });
-        self.broadcast_to_room(room_id, MessageType::GameMessagePush, body)
             .await
     }
 

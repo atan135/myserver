@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+use crate::core::room_logic::RoomLogic;
 use crate::pb::{RoomMember, RoomSnapshot};
-use crate::room_logic::RoomLogic;
 
 #[derive(Clone)]
 pub struct OutboundMessage {

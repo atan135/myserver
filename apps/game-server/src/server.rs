@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redis::AsyncCommands;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -12,20 +11,14 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::config_table::ConfigTableRuntime;
+use crate::core::context::{ConnectionContext, ServerSharedState, ServiceContext};
+use crate::core::room::OutboundMessage;
+use crate::core::room_manager::RoomManager;
+use crate::core::service::{core_service, room_service};
+use crate::gameservice::test_service;
 use crate::mysql_store::MySqlAuditStore;
-use crate::pb::{
-    AuthReq, AuthRes, ErrorRes, GetRoomDataReq, GetRoomDataRes, PingRes, PlayerInputReq,
-    PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes,
-    RoomReadyReq, RoomReadyRes, RoomStartRes,
-};
-use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
-use crate::room::OutboundMessage;
-use crate::room_manager::RoomManager;
-use crate::session::{Session, SessionState};
-use crate::ticket::verify_ticket;
-
-pub type SharedRoomManager = Arc<RoomManager>;
-pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
+use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
+use crate::session::Session;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
@@ -51,12 +44,20 @@ pub async fn run(
     let listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let room_manager: SharedRoomManager = Arc::new(RoomManager::new());
-    let runtime_config: SharedRuntimeConfig = Arc::new(RwLock::new(RuntimeConfig {
-        heartbeat_timeout_secs: config.heartbeat_timeout_secs,
-        max_body_len: config.max_body_len,
-    }));
-    let connection_count = Arc::new(AtomicU64::new(0));
+    let shared_state = ServerSharedState {
+        room_manager: Arc::new(RoomManager::new()),
+        runtime_config: Arc::new(RwLock::new(RuntimeConfig {
+            heartbeat_timeout_secs: config.heartbeat_timeout_secs,
+            max_body_len: config.max_body_len,
+        })),
+        connection_count: Arc::new(AtomicU64::new(0)),
+    };
+    let services = ServiceContext {
+        config: config.clone(),
+        mysql_store: mysql_store.clone(),
+        room_manager: shared_state.room_manager.clone(),
+        config_tables,
+    };
     info!(
         addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
@@ -67,9 +68,9 @@ pub async fn run(
 
     let admin_task = tokio::spawn(crate::admin_server::run_listener(
         admin_listener,
-        room_manager.clone(),
-        runtime_config.clone(),
-        connection_count.clone(),
+        shared_state.room_manager.clone(),
+        shared_state.runtime_config.clone(),
+        shared_state.connection_count.clone(),
     ));
 
     let mut next_session_id: u64 = 1;
@@ -88,7 +89,7 @@ pub async fn run(
         let session_id = next_session_id;
         next_session_id += 1;
 
-        connection_count.fetch_add(1, Ordering::Relaxed);
+        shared_state.connection_count.fetch_add(1, Ordering::Relaxed);
         info!(session_id = session_id, peer = %peer_addr, "accepted tcp connection");
         mysql_store
             .append_connection_event(
@@ -100,25 +101,19 @@ pub async fn run(
             )
             .await;
 
-        let connection_config = config.clone();
         let redis_client = redis_client.clone();
-        let room_manager = room_manager.clone();
-        let mysql_store = mysql_store.clone();
-        let runtime_config = runtime_config.clone();
-        let config_tables = config_tables.clone();
-        let connection_count = connection_count.clone();
+        let services = services.clone();
+        let runtime_config = shared_state.runtime_config.clone();
+        let connection_count = shared_state.connection_count.clone();
         tokio::spawn(async move {
             let _connection_guard = ConnectionCountGuard { connection_count };
             if let Err(error) = handle_connection(
                 socket,
                 peer_addr.to_string(),
                 session_id,
-                &connection_config,
                 redis_client,
-                mysql_store,
-                room_manager,
+                services,
                 runtime_config,
-                config_tables,
             )
             .await
             {
@@ -138,17 +133,19 @@ async fn handle_connection(
     socket: TcpStream,
     peer_addr: String,
     session_id: u64,
-    config: &Config,
     redis_client: redis::Client,
-    mysql_store: MySqlAuditStore,
-    room_manager: SharedRoomManager,
-    runtime_config: SharedRuntimeConfig,
-    config_tables: ConfigTableRuntime,
+    services: ServiceContext,
+    runtime_config: Arc<RwLock<RuntimeConfig>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = Session::new(session_id);
-    let mut redis = redis_client.get_multiplexed_async_connection().await?;
+    let redis = redis_client.get_multiplexed_async_connection().await?;
     let (mut reader, mut writer) = socket.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
+    let mut connection = ConnectionContext {
+        peer_addr,
+        redis,
+        session: Session::new(session_id),
+        tx,
+    };
 
     let writer_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -173,12 +170,13 @@ async fn handle_connection(
         match read_header {
             Ok(Ok(_)) => {}
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                info!(session_id = session.id, "peer closed connection");
-                mysql_store
+                info!(session_id = connection.session.id, "peer closed connection");
+                services
+                    .mysql_store
                     .append_connection_event(
-                        session.id,
-                        session.player_id.as_deref(),
-                        Some(&peer_addr),
+                        connection.session.id,
+                        connection.session.player_id.as_deref(),
+                        Some(&connection.peer_addr),
                         "tcp_closed",
                         None,
                     )
@@ -187,12 +185,13 @@ async fn handle_connection(
             }
             Ok(Err(error)) => return Err(Box::new(error)),
             Err(_) => {
-                queue_error(&tx, 0, "HEARTBEAT_TIMEOUT", "connection timed out")?;
-                mysql_store
+                connection.queue_error(0, "HEARTBEAT_TIMEOUT", "connection timed out")?;
+                services
+                    .mysql_store
                     .append_connection_event(
-                        session.id,
-                        session.player_id.as_deref(),
-                        Some(&peer_addr),
+                        connection.session.id,
+                        connection.session.player_id.as_deref(),
+                        Some(&connection.peer_addr),
                         "heartbeat_timeout",
                         None,
                     )
@@ -204,12 +203,13 @@ async fn handle_connection(
         let header = match parse_header(header_buf) {
             Ok(value) => value,
             Err(error_code) => {
-                queue_error(&tx, 0, error_code, "invalid header")?;
-                mysql_store
+                connection.queue_error(0, error_code, "invalid header")?;
+                services
+                    .mysql_store
                     .append_connection_event(
-                        session.id,
-                        session.player_id.as_deref(),
-                        Some(&peer_addr),
+                        connection.session.id,
+                        connection.session.player_id.as_deref(),
+                        Some(&connection.peer_addr),
                         "invalid_header",
                         Some(json!({ "errorCode": error_code })),
                     )
@@ -219,12 +219,13 @@ async fn handle_connection(
         };
 
         if header.body_len as usize > runtime.max_body_len {
-            queue_error(&tx, header.seq, "BODY_TOO_LARGE", "body too large")?;
-            mysql_store
+            connection.queue_error(header.seq, "BODY_TOO_LARGE", "body too large")?;
+            services
+                .mysql_store
                 .append_connection_event(
-                    session.id,
-                    session.player_id.as_deref(),
-                    Some(&peer_addr),
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
                     "body_too_large",
                     Some(json!({
                         "seq": header.seq,
@@ -240,728 +241,65 @@ async fn handle_connection(
         reader.read_exact(&mut body).await?;
         let packet = Packet::new(header, body);
 
-        let Some(message_type) = packet.message_type() else {
-            queue_error(&tx, header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type")?;
-            mysql_store
-                .append_connection_event(
-                    session.id,
-                    session.player_id.as_deref(),
-                    Some(&peer_addr),
-                    "unknown_message_type",
-                    Some(json!({ "msgType": packet.header.msg_type, "seq": packet.header.seq })),
-                )
-                .await;
-            continue;
-        };
-
-        match message_type {
-            MessageType::AuthReq => {
-                let request = match packet.decode_body::<AuthReq>("INVALID_AUTH_BODY") {
-                    Ok(value) => value,
-                    Err(error_code) => {
-                        queue_error(&tx, header.seq, error_code, "invalid auth body")?;
-                        mysql_store
-                            .append_connection_event(
-                                session.id,
-                                session.player_id.as_deref(),
-                                Some(&peer_addr),
-                                "invalid_auth_body",
-                                Some(json!({ "seq": header.seq })),
-                            )
-                            .await;
-                        continue;
-                    }
-                };
-
-                match verify_ticket(&config.ticket_secret, &request.ticket) {
-                    Ok(player_id) => {
-                        let ticket_key = format!(
-                            "{}ticket:{}",
-                            config.redis_key_prefix,
-                            crate::ticket::hash_ticket(&request.ticket)
-                        );
-                        let ticket_owner: Option<String> = redis.get(ticket_key).await?;
-
-                        if ticket_owner.as_deref() != Some(player_id.as_str()) {
-                            queue_message(
-                                &tx,
-                                MessageType::AuthRes,
-                                header.seq,
-                                AuthRes {
-                                    ok: false,
-                                    player_id: String::new(),
-                                    error_code: "TICKET_NOT_FOUND".to_string(),
-                                },
-                            )?;
-                            mysql_store
-                                .append_connection_event(
-                                    session.id,
-                                    Some(&player_id),
-                                    Some(&peer_addr),
-                                    "auth_ticket_not_found",
-                                    Some(json!({ "seq": header.seq })),
-                                )
-                                .await;
-                            continue;
-                        }
-
-                        session.state = SessionState::Authenticated;
-                        session.player_id = Some(player_id.clone());
-
-                        queue_message(
-                            &tx,
-                            MessageType::AuthRes,
-                            header.seq,
-                            AuthRes {
-                                ok: true,
-                                player_id: player_id.clone(),
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_connection_event(
-                                session.id,
-                                Some(&player_id),
-                                Some(&peer_addr),
-                                "auth_success",
-                                Some(json!({ "seq": header.seq })),
-                            )
-                            .await;
-                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::AuthRes,
-                            header.seq,
-                            AuthRes {
-                                ok: false,
-                                player_id: String::new(),
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_connection_event(
-                                session.id,
-                                None,
-                                Some(&peer_addr),
-                                "auth_failed",
-                                Some(json!({
-                                    "seq": header.seq,
-                                    "errorCode": error_code
-                                })),
-                            )
-                            .await;
-                    }
-                }
-            }
-            MessageType::PingReq => {
-                queue_message(
-                    &tx,
-                    MessageType::PingRes,
-                    header.seq,
-                    PingRes {
-                        server_time: current_unix_ms(),
-                    },
-                )?;
-            }
-            MessageType::GetRoomDataReq => {
-                let Some(_player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-
-                let request =
-                    match packet.decode_body::<GetRoomDataReq>("INVALID_GET_ROOM_DATA_BODY") {
-                        Ok(value) => value,
-                        Err(error_code) => {
-                            queue_error(
-                                &tx,
-                                header.seq,
-                                error_code,
-                                "invalid get room data body",
-                            )?;
-                            continue;
-                        }
-                    };
-
-                if request.id_start > request.id_end {
-                    queue_message(
-                        &tx,
-                        MessageType::GetRoomDataRes,
-                        header.seq,
-                        GetRoomDataRes {
-                            ok: false,
-                            field_0_list: Vec::new(),
-                            error_code: "INVALID_ID_RANGE".to_string(),
-                        },
-                    )?;
-                    continue;
-                }
-
-                let tables = config_tables.snapshot().await;
-                let table = &tables.testtable_100;
-                let mut field_0_list = Vec::new();
-
-                for id in request.id_start..=request.id_end {
-                    if let Some(row) = table.get(id) {
-                        for key in &row.field_0 {
-                            field_0_list
-                                .push(table.resolve_string(*key).unwrap_or_default().to_string());
-                        }
-                    }
-                }
-
-                if field_0_list.is_empty() {
-                    queue_message(
-                        &tx,
-                        MessageType::GetRoomDataRes,
-                        header.seq,
-                        GetRoomDataRes {
-                            ok: false,
-                            field_0_list,
-                            error_code: "CONFIG_NOT_FOUND".to_string(),
-                        },
-                    )?;
-                } else {
-                    queue_message(
-                        &tx,
-                        MessageType::GetRoomDataRes,
-                        header.seq,
-                        GetRoomDataRes {
-                            ok: true,
-                            field_0_list,
-                            error_code: String::new(),
-                        },
-                    )?;
-                }
-            }
-            MessageType::RoomJoinReq => {
-                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-
-                let request = match packet.decode_body::<RoomJoinReq>("INVALID_ROOM_JOIN_BODY") {
-                    Ok(value) => value,
-                    Err(error_code) => {
-                        queue_error(&tx, header.seq, error_code, "invalid room join body")?;
-                        continue;
-                    }
-                };
-
-                let room_id = if request.room_id.is_empty() {
-                    "room-default".to_string()
-                } else {
-                    request.room_id
-                };
-
-                if let Some(current_room_id) = &session.room_id {
-                    if current_room_id != &room_id {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomJoinRes,
-                            header.seq,
-                            RoomJoinRes {
-                                ok: false,
-                                room_id: current_room_id.clone(),
-                                error_code: "ALREADY_IN_OTHER_ROOM".to_string(),
-                            },
-                        )?;
-                        continue;
-                    }
-
-                    queue_message(
-                        &tx,
-                        MessageType::RoomJoinRes,
-                        header.seq,
-                        RoomJoinRes {
-                            ok: true,
-                            room_id: room_id.clone(),
-                            error_code: String::new(),
-                        },
-                    )?;
-                    continue;
-                }
-
-                let join_result = room_manager.join_room(&room_id, &player_id, tx.clone()).await;
-
-                match join_result {
-                    Ok(snapshot) => {
-                        session.room_id = Some(room_id.clone());
-                        queue_message(
-                            &tx,
-                            MessageType::RoomJoinRes,
-                            header.seq,
-                            RoomJoinRes {
-                                ok: true,
-                                room_id: room_id.clone(),
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                Some(&snapshot.owner_player_id),
-                                "room_joined",
-                                Some(&snapshot.state),
-                                snapshot.members.len(),
-                                Some(json!({
-                                    "seq": header.seq,
-                                    "members": snapshot.members.iter().map(|member| json!({
-                                        "playerId": member.player_id,
-                                        "ready": member.ready,
-                                        "isOwner": member.is_owner
-                                    })).collect::<Vec<_>>()
-                                })),
-                            )
-                            .await;
-                        room_manager
-                            .broadcast_snapshot(&room_id, "member_joined", snapshot)
-                            .await?;
-                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomJoinRes,
-                            header.seq,
-                            RoomJoinRes {
-                                ok: false,
-                                room_id: room_id.clone(),
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                None,
-                                "room_join_failed",
-                                None,
-                                0,
-                                Some(json!({ "errorCode": error_code, "seq": header.seq })),
-                            )
-                            .await;
-                    }
-                }
-            }
-            MessageType::RoomLeaveReq => {
-                let Some(room_id) = session.room_id.clone() else {
-                    queue_message(
-                        &tx,
-                        MessageType::RoomLeaveRes,
-                        header.seq,
-                        RoomLeaveRes {
-                            ok: false,
-                            room_id: String::new(),
-                            error_code: "ROOM_NOT_JOINED".to_string(),
-                        },
-                    )?;
-                    continue;
-                };
-
-                let Some(player_id) = session.player_id.clone() else {
-                    queue_error(&tx, header.seq, "NOT_AUTHENTICATED", "authenticate before leaving a room")?;
-                    continue;
-                };
-
-                let leave_result = room_manager.leave_room(&room_id, &player_id).await;
-                session.room_id = None;
-
-                queue_message(
-                    &tx,
-                    MessageType::RoomLeaveRes,
-                    header.seq,
-                    RoomLeaveRes {
-                        ok: true,
-                        room_id: room_id.clone(),
-                        error_code: String::new(),
-                    },
-                )?;
-
-                if let Some(snapshot) = leave_result.snapshot {
-                    mysql_store
-                        .append_room_event(
-                            &room_id,
-                            Some(&player_id),
-                            Some(&snapshot.owner_player_id),
-                            "room_left",
-                            Some(&snapshot.state),
-                            snapshot.members.len(),
-                            None,
-                        )
-                        .await;
-                    room_manager
-                        .broadcast_snapshot(&room_id, "member_left", snapshot)
-                        .await?;
-                } else if leave_result.room_removed {
-                    mysql_store
-                        .append_room_event(
-                            &room_id,
-                            Some(&player_id),
-                            None,
-                            "room_disbanded",
-                            None,
-                            0,
-                            None,
-                        )
-                        .await;
-                }
-            }
-            MessageType::RoomReadyReq => {
-                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-                let Some(room_id) = session.room_id.clone() else {
-                    queue_message(
-                        &tx,
-                        MessageType::RoomReadyRes,
-                        header.seq,
-                        RoomReadyRes {
-                            ok: false,
-                            room_id: String::new(),
-                            ready: false,
-                            error_code: "ROOM_NOT_JOINED".to_string(),
-                        },
-                    )?;
-                    continue;
-                };
-
-                let request = match packet.decode_body::<RoomReadyReq>("INVALID_ROOM_READY_BODY") {
-                    Ok(value) => value,
-                    Err(error_code) => {
-                        queue_error(&tx, header.seq, error_code, "invalid room ready body")?;
-                        continue;
-                    }
-                };
-
-                let ready_result = room_manager
-                    .set_ready_state(&room_id, &player_id, request.ready)
-                    .await;
-
-                match ready_result {
-                    Ok(snapshot) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomReadyRes,
-                            header.seq,
-                            RoomReadyRes {
-                                ok: true,
-                                room_id: room_id.clone(),
-                                ready: request.ready,
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                Some(&snapshot.owner_player_id),
-                                "room_ready_changed",
-                                Some(&snapshot.state),
-                                snapshot.members.len(),
-                                Some(json!({ "ready": request.ready, "seq": header.seq })),
-                            )
-                            .await;
-                        room_manager
-                            .broadcast_snapshot(&room_id, "ready_changed", snapshot)
-                            .await?;
-                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomReadyRes,
-                            header.seq,
-                            RoomReadyRes {
-                                ok: false,
-                                room_id,
-                                ready: request.ready,
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                    }
-                }
-            }
-            MessageType::RoomStartReq => {
-                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-                let Some(room_id) = session.room_id.clone() else {
-                    queue_message(
-                        &tx,
-                        MessageType::RoomStartRes,
-                        header.seq,
-                        RoomStartRes {
-                            ok: false,
-                            room_id: String::new(),
-                            error_code: "ROOM_NOT_JOINED".to_string(),
-                        },
-                    )?;
-                    continue;
-                };
-
-                let start_result = room_manager.start_game(&room_id, &player_id).await;
-
-                match start_result {
-                    Ok(snapshot) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomStartRes,
-                            header.seq,
-                            RoomStartRes {
-                                ok: true,
-                                room_id: room_id.clone(),
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                Some(&snapshot.owner_player_id),
-                                "game_started",
-                                Some(&snapshot.state),
-                                snapshot.members.len(),
-                                Some(json!({ "seq": header.seq })),
-                            )
-                            .await;
-                        room_manager
-                            .broadcast_snapshot(&room_id, "game_started", snapshot)
-                            .await?;
-                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomStartRes,
-                            header.seq,
-                            RoomStartRes {
-                                ok: false,
-                                room_id,
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                    }
-                }
-            }
-            MessageType::PlayerInputReq => {
-                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-                let Some(room_id) = session.room_id.clone() else {
-                    queue_message(
-                        &tx,
-                        MessageType::PlayerInputRes,
-                        header.seq,
-                        PlayerInputRes {
-                            ok: false,
-                            room_id: String::new(),
-                            error_code: "ROOM_NOT_JOINED".to_string(),
-                        },
-                    )?;
-                    continue;
-                };
-
-                let request = match packet.decode_body::<PlayerInputReq>("INVALID_PLAYER_INPUT_BODY") {
-                    Ok(value) => value,
-                    Err(error_code) => {
-                        queue_error(&tx, header.seq, error_code, "invalid player input body")?;
-                        continue;
-                    }
-                };
-
-                let input_result = room_manager
-                    .accept_player_input(&room_id, &player_id, request.frame_id, &request.action, &request.payload_json)
-                    .await;
-
-                match input_result {
-                    Ok(_) => {
-                        queue_message(
-                            &tx,
-                            MessageType::PlayerInputRes,
-                            header.seq,
-                            PlayerInputRes {
-                                ok: true,
-                                room_id: room_id.clone(),
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                None,
-                                "player_input",
-                                Some("in_game"),
-                                0,
-                                Some(json!({
-                                    "seq": header.seq,
-                                    "action": request.action,
-                                    "payloadJson": request.payload_json
-                                })),
-                            )
-                            .await;                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::PlayerInputRes,
-                            header.seq,
-                            PlayerInputRes {
-                                ok: false,
-                                room_id,
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                    }
-                }
-            }
-            MessageType::RoomEndReq => {
-                let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
-                    continue;
-                };
-                let Some(room_id) = session.room_id.clone() else {
-                    queue_message(
-                        &tx,
-                        MessageType::RoomEndRes,
-                        header.seq,
-                        RoomEndRes {
-                            ok: false,
-                            room_id: String::new(),
-                            error_code: "ROOM_NOT_JOINED".to_string(),
-                        },
-                    )?;
-                    continue;
-                };
-
-                let request = match packet.decode_body::<RoomEndReq>("INVALID_ROOM_END_BODY") {
-                    Ok(value) => value,
-                    Err(error_code) => {
-                        queue_error(&tx, header.seq, error_code, "invalid room end body")?;
-                        continue;
-                    }
-                };
-
-                let end_result = room_manager.end_game(&room_id, &player_id).await;
-
-                match end_result {
-                    Ok(snapshot) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomEndRes,
-                            header.seq,
-                            RoomEndRes {
-                                ok: true,
-                                room_id: room_id.clone(),
-                                error_code: String::new(),
-                            },
-                        )?;
-                        mysql_store
-                            .append_room_event(
-                                &room_id,
-                                Some(&player_id),
-                                Some(&snapshot.owner_player_id),
-                                "game_ended",
-                                Some(&snapshot.state),
-                                snapshot.members.len(),
-                                Some(json!({
-                                    "seq": header.seq,
-                                    "reason": request.reason
-                                })),
-                            )
-                            .await;
-                        room_manager
-                            .broadcast_snapshot(&room_id, "game_ended", snapshot)
-                            .await?;
-                    }
-                    Err(error_code) => {
-                        queue_message(
-                            &tx,
-                            MessageType::RoomEndRes,
-                            header.seq,
-                            RoomEndRes {
-                                ok: false,
-                                room_id,
-                                error_code: error_code.to_string(),
-                            },
-                        )?;
-                    }
-                }
-            }
-            _ => {
-                queue_error(&tx, header.seq, "MESSAGE_NOT_SUPPORTED", "message not supported in this phase")?;
-            }
-        }
+        dispatch_packet(&services, &mut connection, &packet).await?;
     }
 
-    if let (Some(room_id), Some(player_id)) = (session.room_id.clone(), session.player_id.clone()) {
-        let leave_result = room_manager.leave_room(&room_id, &player_id).await;
+    room_service::handle_disconnect_cleanup(&services, &connection).await;
 
-        if let Some(snapshot) = leave_result.snapshot {
-            mysql_store
-                .append_room_event(
-                    &room_id,
-                    Some(&player_id),
-                    Some(&snapshot.owner_player_id),
-                    "member_disconnected",
-                    Some(&snapshot.state),
-                    snapshot.members.len(),
-                    None,
-                )
-                .await;
-            let _ = room_manager
-                .broadcast_snapshot(&room_id, "member_disconnected", snapshot)
-                .await;
-        }
-    }
-
-    drop(tx);
+    drop(connection.tx);
     writer_task.await??;
     Ok(())
 }
 
-fn ensure_authenticated(
-    session: &Session,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
-    seq: u32,
-) -> Result<Option<String>, std::io::Error> {
-    if session.state != SessionState::Authenticated {
-        queue_error(tx, seq, "NOT_AUTHENTICATED", "authenticate first")?;
-        return Ok(None);
+async fn dispatch_packet(
+    services: &ServiceContext,
+    connection: &mut ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match packet.message_type() {
+        Some(MessageType::AuthReq) => core_service::handle_auth(services, connection, packet).await,
+        Some(MessageType::PingReq) => core_service::handle_ping(connection, packet)
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+        Some(MessageType::GetRoomDataReq) => {
+            test_service::handle_get_room_data(services, connection, packet).await
+        }
+        Some(MessageType::RoomJoinReq) => room_service::handle_room_join(services, connection, packet).await,
+        Some(MessageType::RoomLeaveReq) => room_service::handle_room_leave(services, connection, packet).await,
+        Some(MessageType::RoomReadyReq) => room_service::handle_room_ready(services, connection, packet).await,
+        Some(MessageType::RoomStartReq) => room_service::handle_room_start(services, connection, packet).await,
+        Some(MessageType::PlayerInputReq) => {
+            room_service::handle_player_input(services, connection, packet).await
+        }
+        Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
+        Some(_) => {
+            connection.queue_error(
+                packet.header.seq,
+                "MESSAGE_NOT_SUPPORTED",
+                "message not supported in this phase",
+            )?;
+            Ok(())
+        }
+        None => {
+            connection.queue_error(packet.header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type")?;
+            services
+                .mysql_store
+                .append_connection_event(
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
+                    "unknown_message_type",
+                    Some(json!({
+                        "msgType": packet.header.msg_type,
+                        "seq": packet.header.seq
+                    })),
+                )
+                .await;
+            Ok(())
+        }
     }
-
-    Ok(session.player_id.clone())
 }
 
-fn queue_error(
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
-    seq: u32,
-    error_code: &str,
-    message: &str,
-) -> Result<(), std::io::Error> {
-    queue_message(
-        tx,
-        MessageType::ErrorRes,
-        seq,
-        ErrorRes {
-            error_code: error_code.to_string(),
-            message: message.to_string(),
-        },
-    )
-}
-
-fn queue_message<M: prost::Message>(
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
-    message_type: MessageType,
-    seq: u32,
-    message: M,
-) -> Result<(), std::io::Error> {
-    let body = encode_body(&message);
-    tx.send(OutboundMessage {
-        message_type,
-        seq,
-        body,
-    })
-    .map_err(|_| std::io::Error::other("failed to queue outbound"))
-}
-
-fn current_unix_ms() -> i64 {
+pub fn current_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)

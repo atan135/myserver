@@ -1,6 +1,8 @@
 mod admin_server;
 mod config;
 mod config_table;
+mod core;
+mod gameservice;
 mod proto;
 pub use proto::admin as admin_pb;
 pub use proto::game as pb;
@@ -8,10 +10,6 @@ pub use proto::game as pb;
 mod csv_code;
 mod mysql_store;
 mod protocol;
-mod room;
-mod room_logic;
-mod room_manager;
-mod room_policy;
 mod server;
 mod session;
 mod ticket;
@@ -122,3 +120,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = mysql_store.close().await;
     result
 }
+
+

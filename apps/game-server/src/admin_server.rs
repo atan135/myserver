@@ -7,9 +7,10 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::admin_pb::{ServerStatusReq, ServerStatusRes, UpdateConfigReq, UpdateConfigRes};
+use crate::core::context::{SharedRoomManager, SharedRuntimeConfig};
 use crate::pb::ErrorRes;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
-use crate::server::{RuntimeConfig, SharedRoomManager, SharedRuntimeConfig};
+use crate::server::RuntimeConfig;
 
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
 
