@@ -9,6 +9,9 @@ mod csv_code;
 mod mysql_store;
 mod protocol;
 mod room;
+mod room_logic;
+mod room_manager;
+mod room_policy;
 mod server;
 mod session;
 mod ticket;
@@ -119,7 +122,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = mysql_store.close().await;
     result
 }
-
-
-
-

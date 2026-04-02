@@ -35,10 +35,12 @@ pub enum MessageType {
     PlayerInputRes = 1112,
     RoomEndReq = 1113,
     RoomEndRes = 1114,
-    GetRoomDataReq = 1301,
-    GetRoomDataRes = 1302,
     RoomStatePush = 1201,
     GameMessagePush = 1202,
+    FrameBundlePush = 1203,
+    RoomFrameRatePush = 1204,
+    GetRoomDataReq = 1301,
+    GetRoomDataRes = 1302,
     AdminServerStatusReq = 2001,
     AdminServerStatusRes = 2002,
     AdminUpdateConfigReq = 2003,
@@ -67,6 +69,8 @@ impl MessageType {
             1114 => Some(Self::RoomEndRes),
             1201 => Some(Self::RoomStatePush),
             1202 => Some(Self::GameMessagePush),
+            1203 => Some(Self::FrameBundlePush),
+            1204 => Some(Self::RoomFrameRatePush),
             1301 => Some(Self::GetRoomDataReq),
             1302 => Some(Self::GetRoomDataRes),
             2001 => Some(Self::AdminServerStatusReq),
@@ -143,7 +147,10 @@ pub fn encode_packet(msg_type: MessageType, seq: u32, body: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::admin_pb::{ServerStatusReq, ServerStatusRes};
-    use crate::pb::{AuthReq, GetRoomDataReq, GetRoomDataRes, RoomMember, RoomSnapshot, RoomStatePush};
+    use crate::pb::{
+        AuthReq, FrameBundlePush, FrameInput, GetRoomDataReq, GetRoomDataRes, RoomMember,
+        RoomSnapshot, RoomStatePush,
+    };
 
     #[test]
     fn auth_req_round_trip_through_packet() {
@@ -200,6 +207,36 @@ mod tests {
 
         let decoded = packet
             .decode_body::<RoomStatePush>("INVALID_ROOM_STATE_PUSH_BODY")
+            .unwrap();
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_bundle_push_round_trip() {
+        let message = FrameBundlePush {
+            room_id: "room-1".to_string(),
+            frame_id: 12,
+            fps: 10,
+            inputs: vec![FrameInput {
+                player_id: "player-a".to_string(),
+                action: "move".to_string(),
+                payload_json: "{\"x\":1}".to_string(),
+            }],
+            is_silent_frame: false,
+        };
+
+        let body = encode_body(&message);
+        let packet = Packet::new(
+            PacketHeader {
+                msg_type: MessageType::FrameBundlePush as u16,
+                seq: 0,
+                body_len: body.len() as u32,
+            },
+            body,
+        );
+
+        let decoded = packet
+            .decode_body::<FrameBundlePush>("INVALID_FRAME_BUNDLE_PUSH_BODY")
             .unwrap();
         assert_eq!(decoded, message);
     }
@@ -278,7 +315,3 @@ mod tests {
         assert_eq!(result, Err("INVALID_AUTH_BODY"));
     }
 }
-
-
-
-

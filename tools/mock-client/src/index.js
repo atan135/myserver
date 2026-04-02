@@ -26,6 +26,8 @@ const MESSAGE_TYPE = {
   GET_ROOM_DATA_REQ: 1301,
   GET_ROOM_DATA_RES: 1302,
   GAME_MESSAGE_PUSH: 1202,
+  FRAME_BUNDLE_PUSH: 1203,
+  ROOM_FRAME_RATE_PUSH: 1204,
   ERROR_RES: 9000
 };
 
@@ -39,7 +41,8 @@ const SCENARIO = {
   START_GAME_SINGLE_CLIENT: "start-game-single-client",
   START_GAME_READY_ROOM: "start-game-ready-room",
   GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip",
-  GET_ROOM_DATA: "get-room-data"
+  GET_ROOM_DATA: "get-room-data",
+  GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room"
 };
 
 function parseArgs(argv) {
@@ -193,10 +196,16 @@ function encodeRoomStartReq() {
   return Buffer.alloc(0);
 }
 
-function encodePlayerInputReq(action, payloadJson) {
+function encodeUInt32Field(fieldNumber, value) {
+  const fieldKey = fieldNumber << 3;
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value)]);
+}
+
+function encodePlayerInputReq(frameId, action, payloadJson) {
   return Buffer.concat([
-    encodeStringField(1, action),
-    encodeStringField(2, payloadJson)
+    encodeUInt32Field(1, frameId),
+    encodeStringField(2, action),
+    encodeStringField(3, payloadJson)
   ]);
 }
 
@@ -282,6 +291,19 @@ function readBool(fields, fieldNumber) {
 
 function readInt64(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n);
+}
+
+function readUInt32(fields, fieldNumber) {
+  return Number(fields.get(fieldNumber) || 0n);
+}
+
+function decodeFrameInput(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    playerId: readString(fields, 1),
+    action: readString(fields, 2),
+    payloadJson: readString(fields, 3)
+  };
 }
 
 function decodeRoomMember(buffer) {
@@ -383,6 +405,30 @@ function decodeByMessageType(messageType, body) {
         playerId: readString(fields, 3),
         action: readString(fields, 4),
         payloadJson: readString(fields, 5)
+      };
+    case MESSAGE_TYPE.FRAME_BUNDLE_PUSH: {
+      const inputsRaw = fields.get(4);
+      let inputs = [];
+      if (inputsRaw) {
+        if (Array.isArray(inputsRaw)) {
+          inputs = inputsRaw.map(decodeFrameInput);
+        } else {
+          inputs = [decodeFrameInput(inputsRaw)];
+        }
+      }
+      return {
+        roomId: readString(fields, 1),
+        frameId: readUInt32(fields, 2),
+        fps: readUInt32(fields, 3),
+        inputs,
+        isSilentFrame: readBool(fields, 5)
+      };
+    }
+    case MESSAGE_TYPE.ROOM_FRAME_RATE_PUSH:
+      return {
+        roomId: readString(fields, 1),
+        fps: readUInt32(fields, 2),
+        reason: readString(fields, 3)
       };
     case MESSAGE_TYPE.ERROR_RES:
       return {
@@ -505,6 +551,17 @@ class TcpProtocolClient {
 
       this.waiters.push(waiter);
     });
+  }
+
+  async readUntil(timeoutMs, predicate, label = "packet") {
+    while (true) {
+      const packet = await this.readNextPacket(timeoutMs);
+      const decoded = decodeByMessageType(packet.messageType, packet.body);
+      console.log(`${this.label}.${label}:`, JSON.stringify({ messageType: packet.messageType, seq: packet.seq, decoded }, null, 2));
+      if (predicate(packet, decoded)) {
+        return decoded;
+      }
+    }
   }
 
   close() {
@@ -643,6 +700,50 @@ async function authenticateClient(client, options, login, seq = 1) {
   }
 }
 
+async function waitForFrameBundle(client, timeoutMs, expectedAction = null) {
+  return client.readUntil(
+    timeoutMs,
+    (packet, decoded) => {
+      if (packet.messageType !== MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
+        return false;
+      }
+      if (decoded.isSilentFrame) {
+        return false;
+      }
+      if (!expectedAction) {
+        return true;
+      }
+      return decoded.inputs.some((input) => input.action === expectedAction);
+    },
+    "frameBundle"
+  );
+}
+
+async function delayBeforeFinalLeave(client, timeoutMs, delayMs = 10000) {
+  console.log(`${client.label}.delayBeforeFinalLeave: waiting ${delayMs}ms before final leave`);
+  const startedAt = Date.now();
+  let pingSeq = 900000;
+
+  while (Date.now() - startedAt < delayMs) {
+    const remainingMs = delayMs - (Date.now() - startedAt);
+    const sleepMs = Math.min(3000, Math.max(0, remainingMs));
+    if (sleepMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    }
+    if (Date.now() - startedAt >= delayMs) {
+      break;
+    }
+
+    await client.send(MESSAGE_TYPE.PING_REQ, pingSeq, encodePingReq(Date.now()));
+    await client.readUntil(
+      timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.PING_RES && packet.seq === pingSeq,
+      "delayPing"
+    );
+    pingSeq += 1;
+  }
+}
+
 async function runHappyPath(client, options, login) {
   await authenticateClient(client, options, login, 1);
 
@@ -668,6 +769,7 @@ async function runHappyPath(client, options, login) {
     throw new Error("expected room state to become ready");
   }
 
+  await delayBeforeFinalLeave(client, options.timeoutMs);
   await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
   const leaveRes = printResponse(`${client.label}.roomLeave`, await client.readNextPacket(options.timeoutMs));
   if (!leaveRes.ok) {
@@ -720,9 +822,44 @@ async function runGetRoomData(client, options, login) {
 
   console.log(`${client.label}.getRoomData.field0List:`, JSON.stringify(response.field0List, null, 2));
 }
+
+async function runGetRoomDataInRoom(client, options, login) {
+  await authenticateClient(client, options, login, 1);
+
+  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+  const joinRes = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  if (!joinRes.ok) {
+    throw new Error(`room join failed: ${joinRes.errorCode}`);
+  }
+
+  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(
+    MESSAGE_TYPE.GET_ROOM_DATA_REQ,
+    3,
+    encodeGetRoomDataReq(options.idStart, options.idEnd)
+  );
+  const response = printResponse(`${client.label}.getRoomData`, await client.readNextPacket(options.timeoutMs));
+  if (!response.ok) {
+    throw new Error(`get room data failed: ${response.errorCode}`);
+  }
+  if (response.field0List.length === 0) {
+    throw new Error("expected field0List to contain at least one string");
+  }
+
+  console.log(`${client.label}.getRoomData.field0List:`, JSON.stringify(response.field0List, null, 2));
+
+  await delayBeforeFinalLeave(client, options.timeoutMs);
+  await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 4, encodeRoomLeaveReq());
+  const leaveRes = printResponse(`${client.label}.roomLeave`, await client.readNextPacket(options.timeoutMs));
+  if (!leaveRes.ok) {
+    throw new Error(`room leave failed: ${leaveRes.errorCode}`);
+  }
+}
+
 async function runGameplayRoundtrip(options) {
-  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
-  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
   console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
@@ -764,22 +901,25 @@ async function runGameplayRoundtrip(options) {
     printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
 
     const payloadJson = JSON.stringify({ x: 4, y: 7, frame: 1 });
-    await clientA.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 5, encodePlayerInputReq("move", payloadJson));
+    await clientA.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 5, encodePlayerInputReq(1, "move", payloadJson));
     const inputRes = printResponse("clientA.playerInput", await clientA.readNextPacket(options.timeoutMs));
     if (!inputRes.ok) {
       throw new Error(`clientA player input failed: ${inputRes.errorCode}`);
     }
 
-    const gamePushA = printResponse("clientA.gameMessagePush", await clientA.readNextPacket(options.timeoutMs));
-    const gamePushB = printResponse("clientB.gameMessagePush", await clientB.readNextPacket(options.timeoutMs));
-    if (gamePushA.action !== "move" || gamePushB.action !== "move") {
-      throw new Error("expected game message push action to be move");
+    const framePushA = await waitForFrameBundle(clientA, options.timeoutMs, "move");
+    const framePushB = await waitForFrameBundle(clientB, options.timeoutMs, "move");
+    if (framePushA.inputs.length !== 1 || framePushB.inputs.length !== 1) {
+      throw new Error("expected one frame input in the first non-silent frame");
     }
-    if (gamePushA.payloadJson !== payloadJson || gamePushB.payloadJson !== payloadJson) {
-      throw new Error("expected game message push payload to match input payload");
+    if (framePushA.inputs[0].action !== "move" || framePushB.inputs[0].action !== "move") {
+      throw new Error("expected frame bundle action to be move");
     }
-    if (gamePushA.playerId !== loginA.playerId || gamePushB.playerId !== loginA.playerId) {
-      throw new Error("expected game message push playerId to be the input sender");
+    if (framePushA.inputs[0].payloadJson !== payloadJson || framePushB.inputs[0].payloadJson !== payloadJson) {
+      throw new Error("expected frame bundle payload to match input payload");
+    }
+    if (framePushA.inputs[0].playerId !== loginA.playerId || framePushB.inputs[0].playerId !== loginA.playerId) {
+      throw new Error("expected frame bundle playerId to be the input sender");
     }
 
     await clientA.send(MESSAGE_TYPE.ROOM_END_REQ, 6, encodeRoomEndReq("round-complete"));
@@ -807,6 +947,7 @@ async function runGameplayRoundtrip(options) {
     }
     printResponse("clientB.roomStatePush(afterOwnerLeave)", await clientB.readNextPacket(options.timeoutMs));
 
+    await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 7, encodeRoomLeaveReq());
     const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
     if (!leaveB.ok) {
@@ -819,8 +960,8 @@ async function runGameplayRoundtrip(options) {
 }
 
 async function runStartGameReadyRoom(options) {
-  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
-  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
   console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
@@ -878,6 +1019,7 @@ async function runStartGameReadyRoom(options) {
     }
     printResponse("clientB.roomStatePush(afterOwnerLeave)", await clientB.readNextPacket(options.timeoutMs));
 
+    await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
     const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
     if (!leaveB.ok) {
@@ -889,8 +1031,8 @@ async function runStartGameReadyRoom(options) {
   }
 }
 async function runTwoClientRoom(options) {
-  const loginA = await fetchTicket(options, `${options.roomId}-owner`);
-  const loginB = await fetchTicket(options, `${options.roomId}-member`);
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
   console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
@@ -943,6 +1085,7 @@ async function runTwoClientRoom(options) {
       throw new Error("expected only one member after owner leave");
     }
 
+    await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 3, encodeRoomLeaveReq());
     const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
     if (!leaveB.ok) {
@@ -1005,7 +1148,8 @@ async function main() {
     SCENARIO.INVALID_TICKET,
     SCENARIO.OVERSIZED_ROOM_JOIN,
     SCENARIO.START_GAME_SINGLE_CLIENT,
-    SCENARIO.GET_ROOM_DATA
+    SCENARIO.GET_ROOM_DATA,
+    SCENARIO.GET_ROOM_DATA_IN_ROOM
   ].includes(options.scenario) || Boolean(options.ticket);
   const login = needsLogin ? await fetchTicket(options) : null;
 
@@ -1042,6 +1186,9 @@ async function main() {
         break;
       case SCENARIO.GET_ROOM_DATA:
         await runGetRoomData(client, options, login);
+        break;
+      case SCENARIO.GET_ROOM_DATA_IN_ROOM:
+        await runGetRoomDataInRoom(client, options, login);
         break;
       default:
         throw new Error(`unknown scenario: ${options.scenario}`);

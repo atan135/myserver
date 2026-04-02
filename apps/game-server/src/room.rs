@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 
 use crate::pb::{RoomMember, RoomSnapshot};
+use crate::room_logic::RoomLogic;
 
 #[derive(Clone)]
 pub struct OutboundMessage {
@@ -25,14 +27,44 @@ pub struct RoomMemberState {
 }
 
 #[derive(Clone)]
+pub struct PlayerInputRecord {
+    pub frame_id: u32,
+    pub player_id: String,
+    pub action: String,
+    pub payload_json: String,
+    pub received_at: Instant,
+}
+
 pub struct Room {
     pub room_id: String,
     pub owner_player_id: String,
     pub phase: RoomPhase,
+    pub policy_id: String,
+    pub current_frame: u32,
+    pub pending_inputs: Vec<PlayerInputRecord>,
     pub members: HashMap<String, RoomMemberState>,
+    pub logic: Box<dyn RoomLogic>,
 }
 
 impl Room {
+    pub fn new(
+        room_id: String,
+        owner_player_id: String,
+        policy_id: String,
+        logic: Box<dyn RoomLogic>,
+    ) -> Self {
+        Self {
+            room_id,
+            owner_player_id,
+            phase: RoomPhase::Waiting,
+            policy_id,
+            current_frame: 0,
+            pending_inputs: Vec::new(),
+            members: HashMap::new(),
+            logic,
+        }
+    }
+
     pub fn snapshot(&self) -> RoomSnapshot {
         let members = self
             .members
@@ -115,6 +147,7 @@ impl Room {
 
     pub fn reset_to_waiting(&mut self) {
         self.phase = RoomPhase::Waiting;
+        self.pending_inputs.clear();
         for member in self.members.values_mut() {
             member.ready = false;
         }

@@ -77,9 +77,11 @@ pub struct RoomStartRes {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlayerInputReq {
-    #[prost(string, tag = "1")]
-    pub action: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "1")]
+    pub frame_id: u32,
     #[prost(string, tag = "2")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
     pub payload_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -106,6 +108,37 @@ pub struct GetRoomDataRes {
     pub field_0_list: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "3")]
     pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FrameInput {
+    #[prost(string, tag = "1")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub payload_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FrameBundlePush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub frame_id: u32,
+    #[prost(uint32, tag = "3")]
+    pub fps: u32,
+    #[prost(message, repeated, tag = "4")]
+    pub inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(bool, tag = "5")]
+    pub is_silent_frame: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomFrameRatePush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub fps: u32,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GameMessagePush {

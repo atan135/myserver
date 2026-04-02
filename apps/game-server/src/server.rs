@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +6,7 @@ use redis::AsyncCommands;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
@@ -15,17 +14,18 @@ use crate::config::Config;
 use crate::config_table::ConfigTableRuntime;
 use crate::mysql_store::MySqlAuditStore;
 use crate::pb::{
-    AuthReq, AuthRes, ErrorRes, GameMessagePush, GetRoomDataReq, GetRoomDataRes, PingRes,
-    PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes,
-    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomSnapshot, RoomStartRes, RoomStatePush,
+    AuthReq, AuthRes, ErrorRes, GetRoomDataReq, GetRoomDataRes, PingRes, PlayerInputReq,
+    PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes,
+    RoomReadyReq, RoomReadyRes, RoomStartRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
-use crate::room::{OutboundMessage, Room, RoomMemberState, RoomPhase};
+use crate::room::OutboundMessage;
+use crate::room_manager::RoomManager;
 use crate::session::{Session, SessionState};
 use crate::ticket::verify_ticket;
-pub type SharedRooms = Arc<Mutex<HashMap<String, Room>>>;
+
+pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
-const MIN_START_PLAYERS: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
@@ -51,7 +51,7 @@ pub async fn run(
     let listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let rooms: SharedRooms = Arc::new(Mutex::new(HashMap::new()));
+    let room_manager: SharedRoomManager = Arc::new(RoomManager::new());
     let runtime_config: SharedRuntimeConfig = Arc::new(RwLock::new(RuntimeConfig {
         heartbeat_timeout_secs: config.heartbeat_timeout_secs,
         max_body_len: config.max_body_len,
@@ -67,7 +67,7 @@ pub async fn run(
 
     let admin_task = tokio::spawn(crate::admin_server::run_listener(
         admin_listener,
-        rooms.clone(),
+        room_manager.clone(),
         runtime_config.clone(),
         connection_count.clone(),
     ));
@@ -102,7 +102,7 @@ pub async fn run(
 
         let connection_config = config.clone();
         let redis_client = redis_client.clone();
-        let rooms = rooms.clone();
+        let room_manager = room_manager.clone();
         let mysql_store = mysql_store.clone();
         let runtime_config = runtime_config.clone();
         let config_tables = config_tables.clone();
@@ -116,7 +116,7 @@ pub async fn run(
                 &connection_config,
                 redis_client,
                 mysql_store,
-                rooms,
+                room_manager,
                 runtime_config,
                 config_tables,
             )
@@ -141,7 +141,7 @@ async fn handle_connection(
     config: &Config,
     redis_client: redis::Client,
     mysql_store: MySqlAuditStore,
-    rooms: SharedRooms,
+    room_manager: SharedRoomManager,
     runtime_config: SharedRuntimeConfig,
     config_tables: ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -404,9 +404,8 @@ async fn handle_connection(
                 for id in request.id_start..=request.id_end {
                     if let Some(row) = table.get(id) {
                         for key in &row.field_0 {
-                            field_0_list.push(
-                                table.resolve_string(*key).unwrap_or_default().to_string(),
-                            );
+                            field_0_list
+                                .push(table.resolve_string(*key).unwrap_or_default().to_string());
                         }
                     }
                 }
@@ -434,7 +433,8 @@ async fn handle_connection(
                         },
                     )?;
                 }
-            }            MessageType::RoomJoinReq => {
+            }
+            MessageType::RoomJoinReq => {
                 let Some(player_id) = ensure_authenticated(&session, &tx, header.seq)? else {
                     continue;
                 };
@@ -481,10 +481,7 @@ async fn handle_connection(
                     continue;
                 }
 
-                let join_result = {
-                    let mut rooms_guard = rooms.lock().await;
-                    join_room(&mut rooms_guard, &room_id, &player_id, tx.clone())
-                };
+                let join_result = room_manager.join_room(&room_id, &player_id, tx.clone()).await;
 
                 match join_result {
                     Ok(snapshot) => {
@@ -517,7 +514,9 @@ async fn handle_connection(
                                 })),
                             )
                             .await;
-                        broadcast_snapshot(&rooms, &room_id, "member_joined", snapshot).await?;
+                        room_manager
+                            .broadcast_snapshot(&room_id, "member_joined", snapshot)
+                            .await?;
                     }
                     Err(error_code) => {
                         queue_message(
@@ -564,11 +563,7 @@ async fn handle_connection(
                     continue;
                 };
 
-                let snapshot = {
-                    let mut rooms_guard = rooms.lock().await;
-                    leave_room(&mut rooms_guard, &room_id, &player_id)
-                };
-
+                let leave_result = room_manager.leave_room(&room_id, &player_id).await;
                 session.room_id = None;
 
                 queue_message(
@@ -582,7 +577,7 @@ async fn handle_connection(
                     },
                 )?;
 
-                if let Some(snapshot) = snapshot {
+                if let Some(snapshot) = leave_result.snapshot {
                     mysql_store
                         .append_room_event(
                             &room_id,
@@ -594,8 +589,10 @@ async fn handle_connection(
                             None,
                         )
                         .await;
-                    broadcast_snapshot(&rooms, &room_id, "member_left", snapshot).await?;
-                } else {
+                    room_manager
+                        .broadcast_snapshot(&room_id, "member_left", snapshot)
+                        .await?;
+                } else if leave_result.room_removed {
                     mysql_store
                         .append_room_event(
                             &room_id,
@@ -636,10 +633,9 @@ async fn handle_connection(
                     }
                 };
 
-                let ready_result = {
-                    let mut rooms_guard = rooms.lock().await;
-                    set_ready_state(&mut rooms_guard, &room_id, &player_id, request.ready)
-                };
+                let ready_result = room_manager
+                    .set_ready_state(&room_id, &player_id, request.ready)
+                    .await;
 
                 match ready_result {
                     Ok(snapshot) => {
@@ -665,7 +661,9 @@ async fn handle_connection(
                                 Some(json!({ "ready": request.ready, "seq": header.seq })),
                             )
                             .await;
-                        broadcast_snapshot(&rooms, &room_id, "ready_changed", snapshot).await?;
+                        room_manager
+                            .broadcast_snapshot(&room_id, "ready_changed", snapshot)
+                            .await?;
                     }
                     Err(error_code) => {
                         queue_message(
@@ -700,10 +698,7 @@ async fn handle_connection(
                     continue;
                 };
 
-                let start_result = {
-                    let mut rooms_guard = rooms.lock().await;
-                    start_game(&mut rooms_guard, &room_id, &player_id)
-                };
+                let start_result = room_manager.start_game(&room_id, &player_id).await;
 
                 match start_result {
                     Ok(snapshot) => {
@@ -728,7 +723,9 @@ async fn handle_connection(
                                 Some(json!({ "seq": header.seq })),
                             )
                             .await;
-                        broadcast_snapshot(&rooms, &room_id, "game_started", snapshot).await?;
+                        room_manager
+                            .broadcast_snapshot(&room_id, "game_started", snapshot)
+                            .await?;
                     }
                     Err(error_code) => {
                         queue_message(
@@ -770,10 +767,9 @@ async fn handle_connection(
                     }
                 };
 
-                let input_result = {
-                    let rooms_guard = rooms.lock().await;
-                    apply_player_input(&rooms_guard, &room_id, &player_id)
-                };
+                let input_result = room_manager
+                    .accept_player_input(&room_id, &player_id, request.frame_id, &request.action, &request.payload_json)
+                    .await;
 
                 match input_result {
                     Ok(_) => {
@@ -801,17 +797,7 @@ async fn handle_connection(
                                     "payloadJson": request.payload_json
                                 })),
                             )
-                            .await;
-                        broadcast_game_message(
-                            &rooms,
-                            &room_id,
-                            "player_input",
-                            &player_id,
-                            &request.action,
-                            &request.payload_json,
-                        )
-                        .await?;
-                    }
+                            .await;                    }
                     Err(error_code) => {
                         queue_message(
                             &tx,
@@ -852,10 +838,7 @@ async fn handle_connection(
                     }
                 };
 
-                let end_result = {
-                    let mut rooms_guard = rooms.lock().await;
-                    end_game(&mut rooms_guard, &room_id, &player_id)
-                };
+                let end_result = room_manager.end_game(&room_id, &player_id).await;
 
                 match end_result {
                     Ok(snapshot) => {
@@ -883,7 +866,9 @@ async fn handle_connection(
                                 })),
                             )
                             .await;
-                        broadcast_snapshot(&rooms, &room_id, "game_ended", snapshot).await?;
+                        room_manager
+                            .broadcast_snapshot(&room_id, "game_ended", snapshot)
+                            .await?;
                     }
                     Err(error_code) => {
                         queue_message(
@@ -906,12 +891,9 @@ async fn handle_connection(
     }
 
     if let (Some(room_id), Some(player_id)) = (session.room_id.clone(), session.player_id.clone()) {
-        let snapshot = {
-            let mut rooms_guard = rooms.lock().await;
-            leave_room(&mut rooms_guard, &room_id, &player_id)
-        };
+        let leave_result = room_manager.leave_room(&room_id, &player_id).await;
 
-        if let Some(snapshot) = snapshot {
+        if let Some(snapshot) = leave_result.snapshot {
             mysql_store
                 .append_room_event(
                     &room_id,
@@ -923,7 +905,9 @@ async fn handle_connection(
                     None,
                 )
                 .await;
-            let _ = broadcast_snapshot(&rooms, &room_id, "member_disconnected", snapshot).await;
+            let _ = room_manager
+                .broadcast_snapshot(&room_id, "member_disconnected", snapshot)
+                .await;
         }
     }
 
@@ -943,192 +927,6 @@ fn ensure_authenticated(
     }
 
     Ok(session.player_id.clone())
-}
-
-fn join_room(
-    rooms: &mut HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-    sender: mpsc::UnboundedSender<OutboundMessage>,
-) -> Result<RoomSnapshot, &'static str> {
-    let room = rooms.entry(room_id.to_string()).or_insert_with(|| Room {
-        room_id: room_id.to_string(),
-        owner_player_id: player_id.to_string(),
-        phase: RoomPhase::Waiting,
-        members: HashMap::new(),
-    });
-
-    if room.phase == RoomPhase::InGame && !room.members.contains_key(player_id) {
-        return Err("ROOM_ALREADY_IN_GAME");
-    }
-
-    if room.members.len() >= 10 && !room.members.contains_key(player_id) {
-        return Err("ROOM_FULL");
-    }
-
-    room.members.insert(
-        player_id.to_string(),
-        RoomMemberState {
-            player_id: player_id.to_string(),
-            ready: false,
-            sender,
-        },
-    );
-
-    Ok(room.snapshot())
-}
-
-fn leave_room(
-    rooms: &mut HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-) -> Option<RoomSnapshot> {
-    let room = rooms.get_mut(room_id)?;
-    room.members.remove(player_id)?;
-
-    if room.members.is_empty() {
-        rooms.remove(room_id);
-        return None;
-    }
-
-    if room.owner_player_id == player_id {
-        if let Some(next_owner) = room.members.keys().next() {
-            room.owner_player_id = next_owner.clone();
-        }
-    }
-
-    // Once a member leaves mid-game, fall back to waiting so the room can be re-formed.
-    room.reset_to_waiting();
-
-    Some(room.snapshot())
-}
-
-fn set_ready_state(
-    rooms: &mut HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-    ready: bool,
-) -> Result<RoomSnapshot, &'static str> {
-    let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
-    if room.phase == RoomPhase::InGame {
-        return Err("ROOM_ALREADY_IN_GAME");
-    }
-
-    let member = room
-        .members
-        .get_mut(player_id)
-        .ok_or("ROOM_MEMBER_NOT_FOUND")?;
-    member.ready = ready;
-    Ok(room.snapshot())
-}
-
-fn start_game(
-    rooms: &mut HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-) -> Result<RoomSnapshot, &'static str> {
-    let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
-
-    // Keep start-game validation centralized so room state transitions stay consistent.
-    room.can_start_game(player_id, MIN_START_PLAYERS)?;
-    room.phase = RoomPhase::InGame;
-
-    Ok(room.snapshot())
-}
-
-fn apply_player_input(
-    rooms: &HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-) -> Result<(), &'static str> {
-    let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
-    room.can_send_input(player_id)
-}
-
-fn end_game(
-    rooms: &mut HashMap<String, Room>,
-    room_id: &str,
-    player_id: &str,
-) -> Result<RoomSnapshot, &'static str> {
-    let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
-
-    // Ending the game also resets member ready state for the next round.
-    room.can_end_game(player_id)?;
-    room.reset_to_waiting();
-    Ok(room.snapshot())
-}
-
-async fn broadcast_snapshot(
-    rooms: &SharedRooms,
-    room_id: &str,
-    event: &str,
-    snapshot: RoomSnapshot,
-) -> Result<(), std::io::Error> {
-    let body = encode_body(&RoomStatePush {
-        event: event.to_string(),
-        snapshot: Some(snapshot.clone()),
-    });
-
-    let senders = {
-        let rooms_guard = rooms.lock().await;
-        let Some(room) = rooms_guard.get(room_id) else {
-            return Ok(());
-        };
-
-        room.members
-            .values()
-            .map(|member| member.sender.clone())
-            .collect::<Vec<_>>()
-    };
-
-    for sender in senders {
-        let _ = sender.send(OutboundMessage {
-            message_type: MessageType::RoomStatePush,
-            seq: 0,
-            body: body.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-async fn broadcast_game_message(
-    rooms: &SharedRooms,
-    room_id: &str,
-    event: &str,
-    player_id: &str,
-    action: &str,
-    payload_json: &str,
-) -> Result<(), std::io::Error> {
-    let body = encode_body(&GameMessagePush {
-        event: event.to_string(),
-        room_id: room_id.to_string(),
-        player_id: player_id.to_string(),
-        action: action.to_string(),
-        payload_json: payload_json.to_string(),
-    });
-
-    let senders = {
-        let rooms_guard = rooms.lock().await;
-        let Some(room) = rooms_guard.get(room_id) else {
-            return Ok(());
-        };
-
-        room.members
-            .values()
-            .map(|member| member.sender.clone())
-            .collect::<Vec<_>>()
-    };
-
-    for sender in senders {
-        let _ = sender.send(OutboundMessage {
-            message_type: MessageType::GameMessagePush,
-            seq: 0,
-            body: body.clone(),
-        });
-    }
-
-    Ok(())
 }
 
 fn queue_error(
@@ -1169,16 +967,5 @@ fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
-
-
-
-
-
-
-
-
-
-
-
 
 

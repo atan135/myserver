@@ -58,8 +58,9 @@ message RoomStartRes {
 }
 
 message PlayerInputReq {
-  string action = 1;
-  string payload_json = 2;
+  uint32 frame_id = 1;
+  string action = 2;
+  string payload_json = 3;
 }
 
 message PlayerInputRes {
@@ -78,6 +79,27 @@ message GetRoomDataRes {
   repeated string field_0_list = 2;
   string error_code = 3;
 }
+
+message FrameInput {
+  string player_id = 1;
+  string action = 2;
+  string payload_json = 3;
+}
+
+message FrameBundlePush {
+  string room_id = 1;
+  uint32 frame_id = 2;
+  uint32 fps = 3;
+  repeated FrameInput inputs = 4;
+  bool is_silent_frame = 5;
+}
+
+message RoomFrameRatePush {
+  string room_id = 1;
+  uint32 fps = 2;
+  string reason = 3;
+}
+
 message GameMessagePush {
   string event = 1;
   string room_id = 2;
@@ -118,5 +140,3 @@ message ErrorRes {
   string error_code = 1;
   string message = 2;
 }
-
-

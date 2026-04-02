@@ -9,24 +9,26 @@ use tracing::warn;
 use crate::admin_pb::{ServerStatusReq, ServerStatusRes, UpdateConfigReq, UpdateConfigRes};
 use crate::pb::ErrorRes;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
-use crate::server::{RuntimeConfig, SharedRooms, SharedRuntimeConfig};
+use crate::server::{RuntimeConfig, SharedRoomManager, SharedRuntimeConfig};
 
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
 
 pub async fn run_listener(
     listener: TcpListener,
-    rooms: SharedRooms,
+    room_manager: SharedRoomManager,
     runtime_config: SharedRuntimeConfig,
     connection_count: Arc<AtomicU64>,
 ) -> Result<(), std::io::Error> {
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        let rooms = rooms.clone();
+        let room_manager = room_manager.clone();
         let runtime_config = runtime_config.clone();
         let connection_count = connection_count.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = handle_admin_connection(socket, rooms, runtime_config, connection_count).await {
+            if let Err(error) =
+                handle_admin_connection(socket, room_manager, runtime_config, connection_count).await
+            {
                 warn!(peer = %peer_addr, error = %error, "admin connection failed");
             }
         });
@@ -35,7 +37,7 @@ pub async fn run_listener(
 
 async fn handle_admin_connection(
     socket: TcpStream,
-    rooms: SharedRooms,
+    room_manager: SharedRoomManager,
     runtime_config: SharedRuntimeConfig,
     connection_count: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -52,10 +54,7 @@ async fn handle_admin_connection(
                     .decode_body::<ServerStatusReq>("INVALID_ADMIN_STATUS_BODY")
                     .map_err(std::io::Error::other)?;
 
-                let room_count = {
-                    let rooms = rooms.lock().await;
-                    rooms.len() as u64
-                };
+                let room_count = room_manager.room_count().await as u64;
                 let RuntimeConfig {
                     heartbeat_timeout_secs,
                     max_body_len,
@@ -140,12 +139,20 @@ async fn read_packet(
         Ok(Ok(Some(header_buf))) => header_buf,
         Ok(Ok(None)) => return Ok(None),
         Ok(Err(error)) => return Err(Box::new(error)),
-        Err(_) => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "read timeout"))),
+        Err(_) => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "read timeout",
+            )));
+        }
     };
 
     let header = parse_header(header_buf).map_err(std::io::Error::other)?;
     if header.body_len as usize > ADMIN_MAX_BODY_LEN {
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "body too large")));
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "body too large",
+        )));
     }
 
     let mut body = vec![0u8; header.body_len as usize];

@@ -169,4 +169,13 @@ test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t
       roomId: randomId("room-gameplay")
     });
   });
+  await t.test("get-room-data-in-room", async () => {
+    await runMockClientScenario({
+      scenario: "get-room-data-in-room",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-data")
+    });
+  });
 });

@@ -9,6 +9,13 @@
 - `scripts`：环境检查与本地启动辅助脚本
 - `tools/mock-client`：无真实客户端依赖的联调工具
 
+## 文档导航
+
+- [底层框架路线图](./docs/game-server-framework-roadmap.md)
+- [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
+- [CSV 配置表设计](./docs/game-server-csv-config-design.md)
+- [协议设计](./docs/protocol.md)
+
 ## 统一日志方案
 
 当前两边统一采用相同的日志配置思想：
