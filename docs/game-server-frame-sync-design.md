@@ -499,68 +499,63 @@ pub default_empty_ttl_secs: u64,
 
 第一版直接在代码里内置模板构造函数。
 
-## 14. 第一阶段开发范围建议
+## 14. 开发阶段范围
 
-建议不要一次把所有高级能力都做进去，第一阶段只做最小可运行版本。
+### Phase 1 ✅ 已完成
 
-### Phase 1
+- ✅ 为 `Room` 增加 `current_frame`、`policy_id`、`pending_inputs`
+- ✅ 引入 `RoomRuntimePolicy`
+- ✅ 引入 `RoomManager`
+- ✅ 直接引入 `RoomLogic trait`
+- ✅ 提供 `TestRoomLogic` 最简运行样例
+- ✅ 支持 `silent_room_fps`
+- ✅ 支持 `destroy_enabled`、`destroy_when_empty` 和 `empty_ttl_secs`
+- ✅ `PlayerInputReq` 增加 `frame_id`
+- ✅ 服务端按帧聚合输入并广播 `FrameBundlePush`
+- ✅ 无人房间与有人房间走同一套逻辑更新链路，只是每秒 tick 次数不同
 
-- 为 `Room` 增加 `current_frame`、`policy_id`、`pending_inputs`
-- 引入 `RoomRuntimePolicy`
-- 引入 `RoomManager`
-- 直接引入 `RoomLogic trait`
-- 提供 `TestRoomLogic` 最简运行样例
-- 支持 `silent_room_fps`
-- 支持 `destroy_enabled`、`destroy_when_empty` 和 `empty_ttl_secs`
-- `PlayerInputReq` 增加 `frame_id`
-- 服务端按帧聚合输入并广播 `FrameBundlePush`
-- 无人房间与有人房间走同一套逻辑更新链路，只是每秒 tick 次数不同
+### Phase 2 进行中
 
-### Phase 2
-
-- 客户端帧率变化通知
+- 客户端帧率变化通知 (`RoomFrameRatePush`)
 - 房间 tick task 平滑调速
 - 更细的活跃度判定
 - 空帧压缩 / 合并
 
-### Phase 3
+### Phase 3 待开始
 
 - 多种 `RoomLogic` 实现
 - 常驻房间预创建
 - 临时房间自动销毁策略完善
 - 更完整的监控与审计日志
+- 完整增量状态广播
 
-## 15. 当前代码需要特别修改的点
+## 15. 代码已完成的修改
 
-### 15.1 `leave_room()` 不能再直接删除空房
+### 15.1 `leave_room()` 不再直接删除空房
 
-当前实现里，空房会立刻从 `HashMap` 移除。这不适合常驻房间。
+已修改为：
 
-后续应改成：
+- 玩家离开时调用 `room.mark_empty()` 标记空房时间
+- 由 `room.should_destroy(&policy)` 判断是否应销毁
+- 支持 TTL 机制：空房后等待 `empty_ttl_secs` 再销毁
 
-- 标记 `empty_since_ms`
-- 由 `RoomManager` 决定是否销毁
+### 15.2 `PlayerInputReq` 改为帧聚合广播
 
-### 15.2 `PlayerInputReq` 不能再收到即广播
+已修改为：
 
-当前实现是收到输入后直接 `broadcast_game_message(...)`。
+- 收到输入后校验合法性
+- 放入 `room.pending_inputs`
+- 等房间 tick 时统一广播本帧输入集合 (`FrameBundlePush`)
+- 调用 `room.logic.on_tick()` 让业务逻辑处理输入
 
-后续应改成：
+### 15.3 `server.rs` 已分离房间调度逻辑
 
-- 校验输入合法性
-- 放入 `pending_inputs`
-- 等房间 tick 时统一广播本帧输入集合
+已分离为：
 
-### 15.3 `server.rs` 不应该继续承载全部房间控制逻辑
-
-随着帧同步和生命周期复杂度上升，`server.rs` 只应负责：
-
-- 连接读写
-- 鉴权
-- 消息分发
-- 调用 `RoomManager`
-
-房间运行时调度要迁走。
+- `server.rs`：连接读写、鉴权、消息分发
+- `RoomManager`：房间创建、销毁、调度、fps 计算、tick task 管理
+- `Room`：房间状态和业务数据
+- `RoomLogic`：业务逻辑扩展点
 
 ## 16. 关键设计结论
 
@@ -572,17 +567,24 @@ pub default_empty_ttl_secs: u64,
 
 如果这三点定下来，后面的代码演进路径会比较清晰。
 
-## 17. 本轮确认结果
+## 17. 当前实现状态
 
-本轮设计确认如下：
+以下功能已实现：
 
-1. 第一版直接引入 `RoomLogic trait`，并提供 `TestRoomLogic` 最简样例
-2. 房间策略模板第一版内置在代码中
-3. 第一版 `FrameBundlePush` 只广播输入集合，不广播完整增量状态
-4. 无人房间和有人房间走相同逻辑链路，只是 tick 次数不同
-5. 不按“是否 MOBA”区分房间，而是统一通过房间销毁配置控制：
-   - `destroy_enabled`
-   - `destroy_when_empty`
-   - `empty_ttl_secs`
+1. ✅ `RoomLogic trait` + `TestRoomLogic` 样例
+2. ✅ 房间策略模板内置在代码中 (`default_match`, `persistent_world`)
+3. ✅ `FrameBundlePush` 按帧广播输入集合
+4. ✅ 无人房间和有人房间走相同逻辑链路，只是 tick 次数不同
+5. ✅ 房间销毁配置化：`destroy_enabled`、`destroy_when_empty`、`empty_ttl_secs`
+6. ✅ 房间生命周期辅助方法：`update_activity`、`mark_empty`、`should_destroy`
+7. ✅ 玩家加入/离开时更新活跃度
 
-完整增量状态广播不进入第一版范围，已单独记录到待办清单。
+## 18. 待完成项
+
+以下功能尚未实现：
+
+- `RoomFrameRatePush` 客户端帧率变化通知（协议已定义，客户端未对接）
+- 多种 `RoomLogic` 实现（当前只有 `TestRoomLogic`）
+- 完整增量状态广播
+- 断线重连后的房间状态恢复
+- `retain_state_when_empty` 逻辑（字段已定义，保留供后续使用）
