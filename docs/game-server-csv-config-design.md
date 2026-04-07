@@ -256,10 +256,10 @@ apps/game-server/tools/csv_codegen
 输出：
 
 ```text
-apps/game-server/src/generated_tables/mod.rs
-apps/game-server/src/generated_tables/test_table_100.rs
-apps/game-server/src/generated_tables/test_table_110.rs
-apps/game-server/src/generated_tables/table_registry.rs
+apps/game-server/src/csv_code/mod.rs
+apps/game-server/src/csv_code/test_table_100.rs
+apps/game-server/src/csv_code/test_table_110.rs
+apps/game-server/src/csv_code/table_registry.rs
 ```
 
 ### 8.1 每张表生成内容
@@ -547,7 +547,7 @@ apps/game-server/src/config_table/
   reload.rs
   traits.rs
 
-apps/game-server/src/generated_tables/
+apps/game-server/src/csv_code/
   mod.rs
   ...
 ```

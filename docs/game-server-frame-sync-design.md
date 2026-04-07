@@ -22,32 +22,36 @@
 
 ## 2. 当前项目现状
 
-当前 `game-server` 的核心能力是：
+当前 `game-server` 已实现以下能力：
 
 - TCP 长连接接入
 - Protobuf 消息编解码
 - 基础房间管理
 - `InGame` 状态下允许玩家发送输入
-- 服务端把玩家输入直接广播给房间内其他玩家
+- 房间级 `current_frame` 和固定帧循环
+- 输入按帧聚合 (`pending_inputs`)
+- 房间级动态帧率 (`silent_room_fps`, `idle_room_fps`, `active_room_fps`, `busy_room_fps`)
+- 房间生命周期策略 (`RoomRuntimePolicy`)
+- 房间运行时调度器 (`RoomManager`)
+- `RoomLogic` trait 和 `TestRoomLogic` 实现
+- `FrameBundlePush` 按帧广播
+- 空房 TTL 销毁机制
 
-这意味着当前实现更接近：
+当前实现已具备：
 
 - 房间服
 - 输入广播服
+- 基础帧同步服
 
-而不是：
+## 2.1 仍需完善的能力
 
-- 真正的帧同步服
-- 服务端权威状态推进服
+以下能力尚未完全实现或需要优化：
 
-当前缺少的关键能力包括：
-
-- 房间级 `current_frame`
-- 固定帧循环
-- 输入按帧聚合
-- 房间级动态帧率
-- 房间生命周期策略
-- 房间运行时调度器
+- 多种 `RoomLogic` 实现（当前只有 `TestRoomLogic`）
+- 完整增量状态广播
+- 客户端帧率变化通知 (`RoomFrameRatePush`)
+- 断线重连后的房间状态恢复
+- 更细粒度的活跃度判定
 
 ## 3. 总体架构
 
@@ -244,7 +248,7 @@ fn compute_room_fps(room: &Room, policy: &RoomRuntimePolicy) -> u16 {
 
 ## 7. Room 运行时数据结构设计
 
-建议把 `Room` 从当前的轻量房间结构扩展为“统一运行时容器”。
+当前 `Room` 结构已实现为”统一运行时容器”。
 
 ```rust
 pub struct Room {
@@ -254,34 +258,48 @@ pub struct Room {
     pub members: HashMap<String, RoomMemberState>,
 
     pub current_frame: u32,
-    pub created_at_ms: i64,
-    pub last_active_at_ms: i64,
-    pub empty_since_ms: Option<i64>,
+    pub created_at: Instant,
+    pub last_active_at: Instant,
+    pub empty_since: Option<Instant>,
 
     pub policy_id: String,
-    pub pending_inputs: BTreeMap<u32, HashMap<String, PlayerFrameInput>>,
+    pub pending_inputs: Vec<PlayerInputRecord>,
 
-    pub logic_state: RoomLogicState,
+    pub logic: Box<dyn RoomLogic>,
 }
 ```
 
 其中：
 
 - `current_frame`：当前房间帧号
-- `last_active_at_ms`：用于后续做活跃度判定
-- `empty_since_ms`：用于空房 TTL 销毁
+- `created_at`：房间创建时间（用于活跃度判定）
+- `last_active_at`：最后活跃时间（每次玩家操作时更新）
+- `empty_since`：房间变空的时间点（用于 TTL 销毁计时）
 - `policy_id`：指向房间策略模板
-- `pending_inputs`：未来若干帧的输入缓存
-- `logic_state`：业务逻辑私有状态
+- `pending_inputs`：输入缓冲区，按接收顺序存储
+- `logic`：业务逻辑实例
 
 ### 7.1 输入结构
 
 ```rust
-pub struct PlayerFrameInput {
+pub struct PlayerInputRecord {
+    pub frame_id: u32,
     pub player_id: String,
     pub action: String,
     pub payload_json: String,
-    pub recv_at_ms: i64,
+    pub received_at: Instant,
+}
+```
+
+### 7.2 Room 辅助方法
+
+```rust
+impl Room {
+    pub fn update_activity(&mut self);        // 更新最后活跃时间
+    pub fn mark_empty(&mut self);           // 标记房间为空
+    pub fn clear_empty(&mut self);          // 清除空房标记
+    pub fn is_empty(&self) -> bool;         // 检查房间是否为空
+    pub fn should_destroy(&self, policy: &RoomRuntimePolicy) -> bool;  // 根据策略判断是否销毁
 }
 ```
 
@@ -330,9 +348,7 @@ type SharedRoomRuntimes = Arc<Mutex<HashMap<String, RoomRuntime>>>;
 
 ## 10. 协议演进建议
 
-当前 `PlayerInputReq` 只有 `action` 和 `payload_json`，无法表达帧同步。
-
-建议改成：
+当前 `PlayerInputReq` 已实现 `frame_id` 字段：
 
 ```proto
 message PlayerInputReq {
@@ -342,7 +358,7 @@ message PlayerInputReq {
 }
 ```
 
-同时新增按帧广播消息：
+已实现的按帧广播消息：
 
 ```proto
 message FrameInput {
@@ -370,25 +386,27 @@ message RoomFrameRatePush {
 
 - `FrameBundlePush` 是第一版真正的按帧广播载体
 - 第一版只广播输入集合，不广播完整增量状态
-- `RoomFrameRatePush` 用于通知客户端当前房间帧率变化
+- `RoomFrameRatePush` 用于通知客户端当前房间帧率变化（待客户端对接）
 - `is_silent_frame` 表示这是无人房间或无输入帧，便于客户端做差异化处理
 
 ## 11. RoomLogic 抽象建议
 
-为了让框架支持不同玩法，建议抽出房间业务逻辑接口。
+当前已实现房间业务逻辑接口 `RoomLogic trait`。
 
 ```rust
-pub trait RoomLogic {
-    fn on_player_join(&mut self, player_id: &str);
-    fn on_player_leave(&mut self, player_id: &str);
-    fn on_start_game(&mut self);
-    fn on_end_game(&mut self);
-    fn on_tick(&mut self, frame_id: u32, inputs: &[PlayerFrameInput]);
-    fn should_destroy(&self) -> bool;
+pub trait RoomLogic: Send {
+    fn on_room_created(&mut self, room_id: &str) {}
+    fn on_player_join(&mut self, player_id: &str) {}
+    fn on_player_leave(&mut self, player_id: &str) {}
+    fn on_game_started(&mut self) {}
+    fn on_game_ended(&mut self) {}
+    fn on_player_input(&mut self, player_id: &str, action: &str, payload_json: &str) {}
+    fn on_tick(&mut self, frame_id: u32, inputs: &[PlayerInputRecord]) {}
+    fn should_destroy(&self) -> bool { false }
 }
 ```
 
-第一版直接引入 `RoomLogic trait`，并提供一个最简样例实现 `TestRoomLogic`，用于验证：
+当前提供最简样例实现 `TestRoomLogic`，用于验证：
 
 - 房间 tick 流程可正常运行
 - 输入聚合可正常进入逻辑层
@@ -402,12 +420,14 @@ pub struct TestRoomLogic {
 }
 
 impl RoomLogic for TestRoomLogic {
+    fn on_room_created(&mut self, _room_id: &str) {}
     fn on_player_join(&mut self, _player_id: &str) {}
     fn on_player_leave(&mut self, _player_id: &str) {}
-    fn on_start_game(&mut self) {}
-    fn on_end_game(&mut self) {}
+    fn on_game_started(&mut self) {}
+    fn on_game_ended(&mut self) {}
+    fn on_player_input(&mut self, _player_id: &str, _action: &str, _payload_json: &str) {}
 
-    fn on_tick(&mut self, _frame_id: u32, _inputs: &[PlayerFrameInput]) {
+    fn on_tick(&mut self, _frame_id: u32, _inputs: &[PlayerInputRecord]) {
         self.tick_count += 1;
     }
 

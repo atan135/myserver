@@ -36,6 +36,8 @@
 - `1114 ROOM_END_RES`
 - `1201 ROOM_STATE_PUSH`
 - `1202 GAME_MESSAGE_PUSH`
+- `1211 FRAME_BUNDLE_PUSH`
+- `1212 ROOM_FRAME_RATE_PUSH`
 - `9000 ERROR_RES`
 
 ## 房间核心消息
@@ -83,6 +85,7 @@
 
 `PLAYER_INPUT_REQ`
 
+- `frame_id: uint32`
 - `action: string`
 - `payload_json: string`
 
@@ -91,6 +94,26 @@
 - `ok: bool`
 - `room_id: string`
 - `error_code: string`
+
+`FrameInput`
+
+- `player_id: string`
+- `action: string`
+- `payload_json: string`
+
+`FrameBundlePush`
+
+- `room_id: string`
+- `frame_id: uint32`
+- `fps: uint32`
+- `inputs: FrameInput[]`
+- `is_silent_frame: bool`
+
+`RoomFrameRatePush`
+
+- `room_id: string`
+- `fps: uint32`
+- `reason: string`
 
 `GAME_MESSAGE_PUSH`
 

@@ -44,6 +44,9 @@ pub struct Room {
     pub pending_inputs: Vec<PlayerInputRecord>,
     pub members: HashMap<String, RoomMemberState>,
     pub logic: Box<dyn RoomLogic>,
+    pub created_at: Instant,
+    pub last_active_at: Instant,
+    pub empty_since: Option<Instant>,
 }
 
 impl Room {
@@ -53,6 +56,7 @@ impl Room {
         policy_id: String,
         logic: Box<dyn RoomLogic>,
     ) -> Self {
+        let now = Instant::now();
         Self {
             room_id,
             owner_player_id,
@@ -62,6 +66,9 @@ impl Room {
             pending_inputs: Vec::new(),
             members: HashMap::new(),
             logic,
+            created_at: now,
+            last_active_at: now,
+            empty_since: None,
         }
     }
 
@@ -151,5 +158,46 @@ impl Room {
         for member in self.members.values_mut() {
             member.ready = false;
         }
+    }
+
+    pub fn update_activity(&mut self) {
+        self.last_active_at = Instant::now();
+    }
+
+    pub fn mark_empty(&mut self) {
+        if self.empty_since.is_none() {
+            self.empty_since = Some(Instant::now());
+        }
+    }
+
+    pub fn clear_empty(&mut self) {
+        self.empty_since = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub fn should_destroy(&self, policy: &crate::core::room_policy::RoomRuntimePolicy) -> bool {
+        if !policy.destroy_enabled {
+            return false;
+        }
+
+        if !policy.destroy_when_empty {
+            return false;
+        }
+
+        if !self.is_empty() {
+            return false;
+        }
+
+        if let Some(empty_since) = self.empty_since {
+            let empty_duration_secs = empty_since.elapsed().as_secs();
+            if empty_duration_secs >= policy.empty_ttl_secs {
+                return true;
+            }
+        }
+
+        false
     }
 }

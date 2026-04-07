@@ -99,6 +99,8 @@ impl RoomManager {
         );
 
         if is_new_member {
+            room.update_activity();
+            room.clear_empty();
             room.logic.on_player_join(player_id);
         }
 
@@ -129,11 +131,15 @@ impl RoomManager {
         room.logic.on_player_leave(player_id);
         let policy = self.policies.resolve(&room.policy_id);
 
-        if room.members.is_empty() && policy.destroy_when_empty {
+        if room.members.is_empty() {
+            room.mark_empty();
+        }
+
+        if room.should_destroy(&policy) {
             info!(
                 room_id = room_id,
                 policy_id = %room.policy_id,
-                "room removed because it became empty"
+                "room removed because it became empty and TTL expired"
             );
             rooms.remove(room_id);
             if let Some(runtime) = runtimes.remove(room_id) {
@@ -223,6 +229,7 @@ impl RoomManager {
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
         room.can_send_input(player_id)?;
+        room.update_activity();
         room.logic.on_player_input(player_id, action, payload_json);
         room.pending_inputs.push(PlayerInputRecord {
             frame_id,
@@ -371,6 +378,8 @@ impl RoomManager {
                     break;
                 };
 
+                room.update_activity();
+
                 if room.phase != RoomPhase::InGame {
                     continue;
                 }
@@ -378,15 +387,21 @@ impl RoomManager {
                 room.current_frame = room.current_frame.saturating_add(1);
                 let frame_id = room.current_frame;
                 let drained = std::mem::take(&mut room.pending_inputs);
-                let inputs = drained
+                let tick_inputs: Vec<PlayerInputRecord> = drained
                     .into_iter()
                     .filter(|input| input.frame_id <= frame_id)
+                    .collect();
+
+                let inputs = tick_inputs
+                    .iter()
                     .map(|input| FrameInput {
-                        player_id: input.player_id,
-                        action: input.action,
-                        payload_json: input.payload_json,
+                        player_id: input.player_id.clone(),
+                        action: input.action.clone(),
+                        payload_json: input.payload_json.clone(),
                     })
                     .collect::<Vec<_>>();
+
+                room.logic.on_tick(frame_id, &tick_inputs);
 
                 FrameBundlePush {
                     room_id: room.room_id.clone(),
