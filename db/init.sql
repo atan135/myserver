@@ -38,6 +38,22 @@ CREATE TABLE IF NOT EXISTS auth_audit_logs (
   KEY idx_auth_audit_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS security_audit_logs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  event_type VARCHAR(64) NOT NULL,
+  target_type VARCHAR(32) NULL COMMENT 'ip, account, ticket, etc.',
+  target_value VARCHAR(256) NULL COMMENT 'ip address, login_name, etc.',
+  client_ip VARCHAR(64) NULL,
+  severity VARCHAR(16) NOT NULL DEFAULT 'warning' COMMENT 'info, warning, critical',
+  details_json JSON NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_security_audit_logs_event_type (event_type),
+  KEY idx_security_audit_logs_target (target_type, target_value),
+  KEY idx_security_audit_logs_client_ip (client_ip),
+  KEY idx_security_audit_logs_severity (severity),
+  KEY idx_security_audit_logs_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 USE myserver_game;
 
 CREATE TABLE IF NOT EXISTS game_connection_audit_logs (

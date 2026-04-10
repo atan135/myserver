@@ -1,6 +1,6 @@
 import { Router } from "express";
 
-import { badRequest, unauthorized } from "./http-errors.js";
+import { badRequest, unauthorized, rateLimited, forbidden } from "./http-errors.js";
 
 function getBearerToken(req) {
   const authorization = req.headers.authorization;
@@ -42,8 +42,32 @@ function sendLoginSuccess(res, session, config) {
   });
 }
 
-export function createRoutes(config, authStore, gameAdminClient) {
+export function createRoutes(config, authStore, gameAdminClient, rateLimiter, accountLockout, mysqlStore) {
   const router = Router();
+
+  // Middleware: IP rate limiting for all routes
+  router.use(async (req, res, next) => {
+    const clientIp = getClientIp(req);
+
+    if (config.ratelimitEnabled && rateLimiter) {
+      const isLimited = await rateLimiter.isIpRateLimited(clientIp);
+      if (isLimited) {
+        // Log security event
+        mysqlStore?.appendSecurityAudit?.({
+          eventType: "ip_rate_limited",
+          targetType: "ip",
+          targetValue: clientIp,
+          clientIp,
+          severity: "warning",
+          details: { path: req.path }
+        });
+
+        return rateLimited(res, "IP_RATE_LIMITED", "Too many requests from this IP");
+      }
+    }
+
+    next();
+  });
 
   router.get("/healthz", async (_req, res) => {
     res.json({
@@ -73,6 +97,7 @@ export function createRoutes(config, authStore, gameAdminClient) {
   router.post("/api/v1/auth/login", async (req, res, next) => {
     const loginName = req.body?.loginName;
     const password = req.body?.password;
+    const clientIp = getClientIp(req);
 
     if (typeof loginName !== "string" || loginName.trim().length === 0) {
       return badRequest(
@@ -98,18 +123,70 @@ export function createRoutes(config, authStore, gameAdminClient) {
       );
     }
 
+    // Check account lockout
+    if (config.accountLockEnabled && accountLockout) {
+      const lockStatus = await accountLockout.getLockStatus(loginName);
+      if (lockStatus.locked) {
+        mysqlStore?.appendSecurityAudit?.({
+          eventType: "account_locked_login_attempt",
+          targetType: "account",
+          targetValue: loginName,
+          clientIp,
+          severity: "critical",
+          details: { remainingSeconds: lockStatus.remainingSeconds }
+        });
+
+        return forbidden(
+          res,
+          "ACCOUNT_LOCKED",
+          `Account is locked. Try again in ${lockStatus.remainingSeconds} seconds`
+        );
+      }
+    }
+
     try {
       const session = await authStore.createPasswordSession(
         loginName,
         password,
-        getClientIp(req)
+        clientIp
       );
+
+      // Clear failed attempts on successful login
+      if (config.accountLockEnabled && accountLockout) {
+        await accountLockout.clearFailedAttempts(loginName);
+      }
+
       return sendLoginSuccess(res, session, config);
     } catch (error) {
+      // Record failed attempt
+      if (config.accountLockEnabled && accountLockout) {
+        const { locked, attempts } = await accountLockout.recordFailedAttempt(loginName);
+
+        if (locked) {
+          mysqlStore?.appendSecurityAudit?.({
+            eventType: "account_locked",
+            targetType: "account",
+            targetValue: loginName,
+            clientIp,
+            severity: "critical",
+            details: { attempts }
+          });
+        }
+      }
+
       if (
         error.code === "INVALID_LOGIN_CREDENTIALS" ||
         error.code === "ACCOUNT_DISABLED"
       ) {
+        mysqlStore?.appendSecurityAudit?.({
+          eventType: "login_failed",
+          targetType: "account",
+          targetValue: loginName,
+          clientIp,
+          severity: "warning",
+          details: { reason: error.code }
+        });
+
         return unauthorized(res, error.code);
       }
 

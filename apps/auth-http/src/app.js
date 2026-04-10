@@ -6,6 +6,7 @@ import { GameAdminClient } from "./game-admin-client.js";
 import { configureLogger, log } from "./logger.js";
 import { createMySqlPool } from "./mysql-client.js";
 import { MySqlAuthStore } from "./mysql-store.js";
+import { RateLimiter, AccountLockout } from "./rate-limiter.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 
@@ -25,6 +26,8 @@ export async function createApp() {
   const mysqlStore = new MySqlAuthStore(mysqlPool);
   const authStore = new AuthStore(config, redis, mysqlStore);
   const gameAdminClient = new GameAdminClient(config);
+  const rateLimiter = new RateLimiter(redis, config);
+  const accountLockout = new AccountLockout(redis, config);
   const app = express();
 
   app.disable("x-powered-by");
@@ -38,7 +41,7 @@ export async function createApp() {
     next();
   });
 
-  app.use(createRoutes(config, authStore, gameAdminClient));
+  app.use(createRoutes(config, authStore, gameAdminClient, rateLimiter, accountLockout, mysqlStore));
 
   app.use((req, res) => {
     res.status(404).json({

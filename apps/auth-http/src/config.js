@@ -49,6 +49,23 @@ export function getConfig() {
       10
     ),
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
-    gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "7002", 10)
+    gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "7002", 10),
+
+    // Rate Limiting
+    ratelimitEnabled: parseBoolean(process.env.RATELIMIT_ENABLED, true),
+    ratelimitWindowMs: Number.parseInt(process.env.RATELIMIT_WINDOW_MS || "60000", 10),
+    ratelimitMax: Number.parseInt(process.env.RATELIMIT_MAX || "60", 10),
+
+    // Account Lockout
+    accountLockEnabled: parseBoolean(process.env.ACCOUNT_LOCK_ENABLED, true),
+    accountLockMaxAttempts: Number.parseInt(process.env.ACCOUNT_LOCK_MAX_ATTEMPTS || "5", 10),
+    accountLockWindowSeconds: Number.parseInt(process.env.ACCOUNT_LOCK_WINDOW_SECONDS || "900", 10),
+    accountLockTtlSeconds: Number.parseInt(process.env.ACCOUNT_LOCK_TTL_SECONDS || "900", 10),
+
+    // Ticket Validation
+    ticketValidateEnabled: parseBoolean(process.env.TICKET_VALIDATE_ENABLED, true),
+
+    // Security Audit
+    securityAuditEnabled: parseBoolean(process.env.SECURITY_AUDIT_ENABLED, true)
   };
 }

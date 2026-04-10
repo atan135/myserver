@@ -230,4 +230,37 @@ export class MySqlAuthStore {
       ]
     );
   }
+
+  async appendSecurityAudit({
+    eventType,
+    targetType = null,
+    targetValue = null,
+    clientIp = null,
+    severity = "warning",
+    details = null
+  }) {
+    if (!this.enabled) {
+      return;
+    }
+
+    await this.pool.execute(
+      `INSERT INTO security_audit_logs (
+         event_type,
+         target_type,
+         target_value,
+         client_ip,
+         severity,
+         details_json,
+         created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))`,
+      [
+        eventType,
+        targetType,
+        targetValue,
+        clientIp,
+        severity,
+        details ? JSON.stringify(details) : null
+      ]
+    );
+  }
 }
