@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo doc:*)",
+      "Bash(grep -r generate ~/.cargo/registry/src/*/snowflake-1.3.0/src/*.rs)",
+      "Bash(node --check src/index.js)",
+      "Bash(find C:/project/MyServer -name *.ps1)",
+      "Bash(find C:/project/MyServer/apps -name *.rs)",
+      "Bash(find C:/project/MyServer/apps -name *.rs -exec grep -l \"generate_ticket\\\\|make_ticket\\\\|create_ticket\" {})",
+      "Bash(2)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \"9001 7000 3000\")",
+      "Bash(tasklist)",
+      "Bash(findstr \"2896\")",
+      "Bash(findstr \":9001\")"
     ]
   }
 }

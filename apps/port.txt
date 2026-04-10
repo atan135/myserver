@@ -1,0 +1,4 @@
+auth-http: 3000
+game-server: 7000
+chat-server: 7001
+game-proxy: 7002

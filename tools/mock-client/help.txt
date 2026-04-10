@@ -3,3 +3,32 @@ node tools/mock-client/src/index.js --scenario get-room-data --http-base-url htt
 
 # 先入房、拉取房间数据、延迟10秒再离房
 node tools/mock-client/src/index.js --scenario get-room-data-in-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-debug-001 --id-start 1000 --id-end 1008
+
+# ========== 聊天系统测试 ==========
+
+# 发送私聊消息
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id target-player-id --content "Hello!"
+
+# 发送群聊消息
+node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id grp_xxx --content "Hello group!"
+
+# 创建群组
+node tools/mock-client/src/index.js --scenario group-create --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-name "My Group"
+
+# 获取群组列表
+node tools/mock-client/src/index.js --scenario group-list --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd!
+
+# 查询聊天历史
+node tools/mock-client/src/index.js --scenario chat-history --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id target-player-id --limit 20
+
+# 双客户端群聊测试（创建群、加入、发送消息、接收推送）
+node tools/mock-client/src/index.js --scenario chat-two-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room --content "Group message!"
+
+# 双客户端私聊测试（互发消息、接收推送）
+node tools/mock-client/src/index.js --scenario chat-private-two-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room --content "Hello!"
+
+# 交互式聊天（开启两个客户端，通过命令行互相发送消息）
+node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
+
+
+node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room

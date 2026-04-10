@@ -1,7 +1,9 @@
 import net from "node:net";
 import process from "node:process";
+import readline from "node:readline/promises";
+import { Readable, Writable } from "node:stream";
 
-const MAGIC = 0xcafe;
+const MAGIC = 0x4D53; // 'MS' for chat-server
 const VERSION = 1;
 const HEADER_LEN = 14;
 
@@ -28,6 +30,24 @@ const MESSAGE_TYPE = {
   GAME_MESSAGE_PUSH: 1202,
   FRAME_BUNDLE_PUSH: 1203,
   ROOM_FRAME_RATE_PUSH: 1204,
+  // Chat (1401-1422)
+  CHAT_PRIVATE_REQ: 1401,
+  CHAT_PRIVATE_RES: 1402,
+  CHAT_GROUP_REQ: 1403,
+  CHAT_GROUP_RES: 1404,
+  CHAT_PUSH: 1405,
+  GROUP_CREATE_REQ: 1411,
+  GROUP_CREATE_RES: 1412,
+  GROUP_JOIN_REQ: 1413,
+  GROUP_JOIN_RES: 1414,
+  GROUP_LEAVE_REQ: 1415,
+  GROUP_LEAVE_RES: 1416,
+  GROUP_DISMISS_REQ: 1417,
+  GROUP_DISMISS_RES: 1418,
+  GROUP_LIST_REQ: 1419,
+  GROUP_LIST_RES: 1420,
+  CHAT_HISTORY_REQ: 1421,
+  CHAT_HISTORY_RES: 1422,
   ERROR_RES: 9000
 };
 
@@ -42,13 +62,26 @@ const SCENARIO = {
   START_GAME_READY_ROOM: "start-game-ready-room",
   GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip",
   GET_ROOM_DATA: "get-room-data",
-  GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room"
+  GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
+  // Chat scenarios
+  CHAT_PRIVATE: "chat-private",
+  CHAT_GROUP: "chat-group",
+  GROUP_CREATE: "group-create",
+  GROUP_JOIN: "group-join",
+  GROUP_LEAVE: "group-leave",
+  GROUP_DISMISS: "group-dismiss",
+  GROUP_LIST: "group-list",
+  CHAT_HISTORY: "chat-history",
+  CHAT_TWO_CLIENT: "chat-two-client",
+  CHAT_PRIVATE_TWO_CLIENT: "chat-private-two-client",
+  CHAT_INTERACTIVE: "chat-interactive"
 };
 
 function parseArgs(argv) {
   const result = {
     host: "127.0.0.1",
     port: 7000,
+    chatPort: 9001,
     httpBaseUrl: "http://127.0.0.1:3000",
     roomId: "room-default",
     guestId: "",
@@ -63,7 +96,14 @@ function parseArgs(argv) {
     scenario: SCENARIO.HAPPY,
     maxBodyLen: 4096,
     idStart: 1000,
-    idEnd: 1000
+    idEnd: 1000,
+    // Chat args
+    targetId: "",
+    groupId: "",
+    content: "Hello from mock-client!",
+    groupName: "",
+    limit: 20,
+    beforeTime: 0
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -75,6 +115,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--port" && next) {
       result.port = Number.parseInt(next, 10);
+      index += 1;
+    } else if (arg === "--chat-port" && next) {
+      result.chatPort = Number.parseInt(next, 10);
       index += 1;
     } else if (arg === "--http-base-url" && next) {
       result.httpBaseUrl = next;
@@ -120,6 +163,24 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--id-end" && next) {
       result.idEnd = Number.parseInt(next, 10);
+      index += 1;
+    } else if (arg === "--target-id" && next) {
+      result.targetId = next;
+      index += 1;
+    } else if (arg === "--group-id" && next) {
+      result.groupId = next;
+      index += 1;
+    } else if (arg === "--content" && next) {
+      result.content = next;
+      index += 1;
+    } else if (arg === "--group-name" && next) {
+      result.groupName = next;
+      index += 1;
+    } else if (arg === "--limit" && next) {
+      result.limit = Number.parseInt(next, 10);
+      index += 1;
+    } else if (arg === "--before-time" && next) {
+      result.beforeTime = Number.parseInt(next, 10);
       index += 1;
     }
   }
@@ -176,6 +237,11 @@ function encodeAuthReq(ticket) {
   return encodeStringField(1, ticket);
 }
 
+// Chat server uses ChatAuthReq with ticket in field 2 (token)
+function encodeChatAuthReq(ticket) {
+  return encodeStringField(2, ticket);
+}
+
 function encodePingReq(clientTime) {
   return encodeInt64Field(1, clientTime);
 }
@@ -222,6 +288,50 @@ function encodeGetRoomDataReq(idStart, idEnd) {
   return Buffer.concat([
     encodeInt32Field(1, idStart),
     encodeInt32Field(2, idEnd)
+  ]);
+}
+
+// Chat encode functions
+function encodeChatPrivateReq(targetId, content) {
+  return Buffer.concat([
+    encodeStringField(1, targetId),
+    encodeStringField(2, content)
+  ]);
+}
+
+function encodeChatGroupReq(groupId, content) {
+  return Buffer.concat([
+    encodeStringField(1, groupId),
+    encodeStringField(2, content)
+  ]);
+}
+
+function encodeGroupCreateReq(name) {
+  return encodeStringField(1, name);
+}
+
+function encodeGroupJoinReq(groupId) {
+  return encodeStringField(1, groupId);
+}
+
+function encodeGroupLeaveReq(groupId) {
+  return encodeStringField(1, groupId);
+}
+
+function encodeGroupDismissReq(groupId) {
+  return encodeStringField(1, groupId);
+}
+
+function encodeGroupListReq() {
+  return Buffer.alloc(0);
+}
+
+function encodeChatHistoryReq(chatType, targetId, beforeTime, limit) {
+  return Buffer.concat([
+    encodeInt32Field(1, chatType),
+    encodeStringField(2, targetId),
+    encodeInt64Field(3, beforeTime),
+    encodeInt32Field(4, limit)
   ]);
 }
 
@@ -336,6 +446,15 @@ function decodeRoomSnapshot(buffer) {
   };
 }
 
+function decodeGroupInfo(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    groupId: readString(fields, 1),
+    name: readString(fields, 2),
+    memberCount: readUInt32(fields, 3)
+  };
+}
+
 function decodeByMessageType(messageType, body) {
   const fields = decodeFieldsWithRepeated(body);
 
@@ -430,6 +549,97 @@ function decodeByMessageType(messageType, body) {
         fps: readUInt32(fields, 2),
         reason: readString(fields, 3)
       };
+    // Chat responses
+    case MESSAGE_TYPE.CHAT_PRIVATE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        msgId: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.CHAT_GROUP_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        msgId: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.CHAT_PUSH:
+      return {
+        msgId: readString(fields, 1),
+        chatType: readUInt32(fields, 2),
+        senderId: readString(fields, 3),
+        senderName: readString(fields, 4),
+        content: readString(fields, 5),
+        timestamp: readInt64(fields, 6),
+        targetId: readString(fields, 7),
+        groupId: readString(fields, 8)
+      };
+    case MESSAGE_TYPE.GROUP_CREATE_RES:
+      return {
+        ok: readBool(fields, 1),
+        groupId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GROUP_JOIN_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GROUP_LEAVE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GROUP_DISMISS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GROUP_LIST_RES: {
+      const groupsRaw = fields.get(1);
+      let groups = [];
+      if (groupsRaw) {
+        if (Array.isArray(groupsRaw)) {
+          groups = groupsRaw.map(decodeGroupInfo);
+        } else {
+          groups = [decodeGroupInfo(groupsRaw)];
+        }
+      }
+      return { groups };
+    }
+    case MESSAGE_TYPE.CHAT_HISTORY_RES: {
+      const messagesRaw = fields.get(1);
+      let messages = [];
+      if (messagesRaw) {
+        if (Array.isArray(messagesRaw)) {
+          messages = messagesRaw.map((buf) => {
+            const f = decodeFieldsWithRepeated(buf);
+            return {
+              msgId: readString(f, 1),
+              chatType: readUInt32(f, 2),
+              senderId: readString(f, 3),
+              senderName: readString(f, 4),
+              content: readString(f, 5),
+              timestamp: readInt64(f, 6),
+              targetId: readString(f, 7),
+              groupId: readString(f, 8)
+            };
+          });
+        } else {
+          const f = decodeFieldsWithRepeated(messagesRaw);
+          messages = [{
+            msgId: readString(f, 1),
+            chatType: readUInt32(f, 2),
+            senderId: readString(f, 3),
+            senderName: readString(f, 4),
+            content: readString(f, 5),
+            timestamp: readInt64(f, 6),
+            targetId: readString(f, 7),
+            groupId: readString(f, 8)
+          }];
+        }
+      }
+      return { messages };
+    }
     case MESSAGE_TYPE.ERROR_RES:
       return {
         errorCode: readString(fields, 1),
@@ -489,12 +699,50 @@ class TcpProtocolClient {
     while (this.buffer.length >= HEADER_LEN) {
       const magic = this.buffer.readUInt16BE(0);
       if (magic !== MAGIC) {
-        throw new Error(`Invalid magic: ${magic}`);
+        // Scan forward to find next potential magic marker
+        let foundIdx = -1;
+        for (let i = 1; i <= this.buffer.length - HEADER_LEN; i++) {
+          if (this.buffer.readUInt16BE(i) === MAGIC) {
+            foundIdx = i;
+            break;
+          }
+        }
+
+        if (foundIdx > 0) {
+          // Found potential magic at foundIdx, skip bytes before it
+          const skipped = foundIdx;
+          if (skipped <= 16) {
+            // Only log if we skipped a small amount (likely just misalignment)
+            console.warn(`Invalid magic ${magic} at offset 0, skipping ${skipped} bytes to find magic`);
+          }
+          this.buffer = this.buffer.subarray(foundIdx);
+          continue;
+        }
+
+        // No magic found in entire buffer - discard everything and wait for more data
+        // This can happen if we received garbage or partial data
+        if (this.buffer.length > 64) {
+          // Show hex dump of first 64 bytes to help diagnose
+          const hexDump = this.buffer.subarray(0, 64).toString("hex");
+          console.warn(`No magic found in ${this.buffer.length} bytes, discarding. First 64 bytes: ${hexDump}`);
+        }
+        this.buffer = Buffer.alloc(0);
+        return;
       }
 
       const messageType = this.buffer.readUInt16BE(4);
       const seq = this.buffer.readUInt32BE(6);
       const bodyLen = this.buffer.readUInt32BE(10);
+
+      // Sanity check: if bodyLen is unreasonably large, we likely have garbage
+      // Maximum reasonable body size is 1MB
+      const MAX_BODY_LEN = 1024 * 1024;
+      if (bodyLen > MAX_BODY_LEN) {
+        console.warn(`Suspicious body_len ${bodyLen} at magic position, skipping byte`);
+        this.buffer = this.buffer.subarray(1);
+        continue;
+      }
+
       const packetLen = HEADER_LEN + bodyLen;
       if (this.buffer.length < packetLen) {
         return;
@@ -692,8 +940,8 @@ async function expectErrorPacket(client, timeoutMs, expectedErrorCode, label = "
   }
 }
 
-async function authenticateClient(client, options, login, seq = 1) {
-  await client.send(MESSAGE_TYPE.AUTH_REQ, seq, encodeAuthReq(login.ticket));
+async function authenticateClient(client, options, login, seq = 1, encodeAuthFn = encodeAuthReq) {
+  await client.send(MESSAGE_TYPE.AUTH_REQ, seq, encodeAuthFn(login.ticket));
   const auth = printResponse(`${client.label}.auth`, await client.readNextPacket(options.timeoutMs));
   if (!auth.ok) {
     throw new Error(`${client.label} auth failed: ${auth.errorCode}`);
@@ -1122,6 +1370,361 @@ async function runOversizedRoomJoin(client, options, login) {
   await expectErrorPacket(client, options.timeoutMs, "BODY_TOO_LARGE");
 }
 
+// Chat scenario helper
+async function connectToChatServer(options) {
+  const chatOptions = { ...options, port: options.chatPort };
+  const client = new TcpProtocolClient(chatOptions, "chat");
+  await client.connect();
+  return client;
+}
+
+async function runChatPrivate(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  const targetId = options.targetId || "target-player-id";
+  await client.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(targetId, options.content));
+  const res = printResponse("chat.privateRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`private chat failed: ${res.errorCode}`);
+  }
+  console.log("private chat sent successfully, msgId:", res.msgId);
+
+  client.close();
+}
+
+async function runChatGroup(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1);
+
+  const groupId = options.groupId || "grp_test";
+  await client.send(MESSAGE_TYPE.CHAT_GROUP_REQ, 2, encodeChatGroupReq(groupId, options.content));
+  const res = printResponse("chat.groupRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`group chat failed: ${res.errorCode}`);
+  }
+  console.log("group chat sent successfully, msgId:", res.msgId);
+
+  client.close();
+}
+
+async function runGroupCreate(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  const groupName = options.groupName || "Test Group";
+  await client.send(MESSAGE_TYPE.GROUP_CREATE_REQ, 2, encodeGroupCreateReq(groupName));
+  const res = printResponse("chat.groupCreateRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`group create failed: ${res.errorCode}`);
+  }
+  console.log("group created, groupId:", res.groupId);
+
+  client.close();
+  return res.groupId;
+}
+
+async function runGroupJoin(options, groupId) {
+  const login = await fetchTicket(options, { guestId: "joiner-" + options.roomId });
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  await client.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 2, encodeGroupJoinReq(groupId));
+  const res = printResponse("chat.groupJoinRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`group join failed: ${res.errorCode}`);
+  }
+  console.log("joined group successfully");
+
+  client.close();
+}
+
+async function runGroupLeave(options, groupId) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  await client.send(MESSAGE_TYPE.GROUP_LEAVE_REQ, 2, encodeGroupLeaveReq(groupId));
+  const res = printResponse("chat.groupLeaveRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`group leave failed: ${res.errorCode}`);
+  }
+  console.log("left group successfully");
+
+  client.close();
+}
+
+async function runGroupDismiss(options, groupId) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  await client.send(MESSAGE_TYPE.GROUP_DISMISS_REQ, 2, encodeGroupDismissReq(groupId));
+  const res = printResponse("chat.groupDismissRes", await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`group dismiss failed: ${res.errorCode}`);
+  }
+  console.log("group dismissed successfully");
+
+  client.close();
+}
+
+async function runGroupList(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  await client.send(MESSAGE_TYPE.GROUP_LIST_REQ, 2, encodeGroupListReq());
+  const res = printResponse("chat.groupListRes", await client.readNextPacket(options.timeoutMs));
+  console.log("group list:", JSON.stringify(res.groups, null, 2));
+
+  client.close();
+}
+
+async function runChatHistory(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = await connectToChatServer(options);
+  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+
+  const chatType = 1; // private
+  const targetId = options.targetId || "";
+  const beforeTime = options.beforeTime || 0;
+  const limit = options.limit || 20;
+
+  await client.send(MESSAGE_TYPE.CHAT_HISTORY_REQ, 2, encodeChatHistoryReq(chatType, targetId, beforeTime, limit));
+  const res = printResponse("chat.historyRes", await client.readNextPacket(options.timeoutMs));
+  console.log("chat history:", JSON.stringify(res.messages, null, 2));
+
+  client.close();
+}
+
+async function runChatTwoClient(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  // Create a group first
+  const clientA = await connectToChatServer(options);
+  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+
+  const groupName = options.groupName || "Test Group";
+  await clientA.send(MESSAGE_TYPE.GROUP_CREATE_REQ, 2, encodeGroupCreateReq(groupName));
+  const createRes = printResponse("clientA.groupCreate", await clientA.readNextPacket(options.timeoutMs));
+  if (!createRes.ok) {
+    throw new Error(`group create failed: ${createRes.errorCode}`);
+  }
+  const groupId = createRes.groupId;
+  console.log("group created:", groupId);
+
+  // Client B joins
+  const clientB = await connectToChatServer(options);
+  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+
+  await clientB.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 3, encodeGroupJoinReq(groupId));
+  const joinRes = printResponse("clientB.groupJoin", await clientB.readNextPacket(options.timeoutMs));
+  if (!joinRes.ok) {
+    throw new Error(`group join failed: ${joinRes.errorCode}`);
+  }
+  console.log("clientB joined group");
+
+  // Client A sends a group message
+  await clientA.send(MESSAGE_TYPE.CHAT_GROUP_REQ, 3, encodeChatGroupReq(groupId, options.content));
+  const chatRes = printResponse("clientA.groupChat", await clientA.readNextPacket(options.timeoutMs));
+  if (!chatRes.ok) {
+    throw new Error(`group chat failed: ${chatRes.errorCode}`);
+  }
+  console.log("clientA sent group message");
+
+  // Client B receives push
+  const push = await clientB.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.CHAT_PUSH,
+    "chatPush"
+  );
+  console.log("clientB received push:", JSON.stringify(push, null, 2));
+
+  clientA.close();
+  clientB.close();
+}
+
+async function runChatPrivateTwoClient(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  // Client A connects and waits for messages
+  const clientA = await connectToChatServer(options);
+  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+  console.log("clientA connected, waiting for private message...");
+
+  // Client B connects and sends private message to A
+  const clientB = await connectToChatServer(options);
+  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+
+  await clientB.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(loginA.playerId, options.content));
+  const chatRes = printResponse("clientB.privateChat", await clientB.readNextPacket(options.timeoutMs));
+  if (!chatRes.ok) {
+    throw new Error(`private chat failed: ${chatRes.errorCode}`);
+  }
+  console.log("clientB sent private message to clientA");
+
+  // Client A receives push
+  const push = await clientA.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.CHAT_PUSH,
+    "chatPush"
+  );
+  console.log("clientA received push:", JSON.stringify(push, null, 2));
+
+  // Now A replies to B
+  await clientA.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(loginB.playerId, "Reply: " + options.content));
+  const replyRes = printResponse("clientA.privateChat", await clientA.readNextPacket(options.timeoutMs));
+  if (!replyRes.ok) {
+    throw new Error(`reply chat failed: ${replyRes.errorCode}`);
+  }
+  console.log("clientA replied to clientB");
+
+  // Client B receives A's reply
+  const replyPush = await clientB.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.CHAT_PUSH,
+    "chatPush"
+  );
+  console.log("clientB received reply push:", JSON.stringify(replyPush, null, 2));
+
+  clientA.close();
+  clientB.close();
+}
+
+async function runChatInteractive(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
+
+  console.log("clientA.playerId:", loginA.playerId);
+  console.log("clientB.playerId:", loginB.playerId);
+  console.log("");
+  console.log("=== Interactive Chat ===");
+  console.log("clientA (you) <---> clientB");
+  console.log("Type messages and press Enter to send from clientA to clientB");
+  console.log("clientB will auto-reply with your message prefixed with 'B: '");
+  console.log("Press Ctrl+C to exit");
+  console.log("");
+
+  // Client A connects - this is "us"
+  const clientA = await connectToChatServer(options);
+  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+  console.log("[connected as clientA, waiting for messages...]");
+
+  // Client B connects - this is "other player"
+  const clientB = await connectToChatServer(options);
+  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+  console.log("[clientB connected]");
+
+  // Create readline interface for interactive input
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  let seq = 2;
+  const clientBPlayerId = loginB.playerId;
+  let replyingToSeq = 1;
+
+  // Helper to send message from clientA to clientB
+  async function sendMessage(content) {
+    await clientA.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, seq, encodeChatPrivateReq(clientBPlayerId, content));
+    seq++;
+  }
+
+  // Task to handle clientB receiving messages and auto-reply
+  const clientBTask = async () => {
+    while (true) {
+      try {
+        const packet = await clientB.readNextPacket(60000);
+        const decoded = decodeByMessageType(packet.messageType, packet.body);
+
+        if (packet.messageType === MESSAGE_TYPE.CHAT_PUSH) {
+          console.log(`\n[clientB received from ${decoded.senderId}]: ${decoded.content}`);
+
+          // Auto reply
+          const replyContent = `B: ${decoded.content}`;
+          await clientB.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, replyingToSeq, encodeChatPrivateReq(decoded.senderId, replyContent));
+          replyingToSeq++;
+        }
+      } catch (e) {
+        // Timeout is normal, just continue
+        if (!e.message.includes("Timed out")) {
+          console.error("clientB read error:", e.message);
+        }
+      }
+    }
+  };
+
+  // Task to handle clientA receiving messages
+  const clientATask = async () => {
+    while (true) {
+      try {
+        const packet = await clientA.readNextPacket(60000);
+        const decoded = decodeByMessageType(packet.messageType, packet.body);
+
+        if (packet.messageType === MESSAGE_TYPE.CHAT_PUSH) {
+          console.log(`\n[received from ${decoded.senderId}]: ${decoded.content}`);
+        }
+      } catch (e) {
+        // Timeout is normal, just continue
+        if (!e.message.includes("Timed out")) {
+          console.error("clientA read error:", e.message);
+        }
+      }
+    }
+  };
+
+  // Start both tasks in background
+  clientBTask();
+  clientATask();
+
+  // Main input loop
+  const askQuestion = async () => {
+    try {
+      const answer = await rl.question("> ");
+      if (answer.trim()) {
+        await sendMessage(answer.trim());
+      }
+      askQuestion();
+    } catch {
+      // Input closed, exit
+    }
+  };
+
+  askQuestion();
+
+  // Keep running until interrupted
+  await new Promise(() => {});
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
 
@@ -1189,6 +1792,31 @@ async function main() {
         break;
       case SCENARIO.GET_ROOM_DATA_IN_ROOM:
         await runGetRoomDataInRoom(client, options, login);
+        break;
+      // Chat scenarios
+      case SCENARIO.CHAT_PRIVATE:
+        await runChatPrivate(options);
+        break;
+      case SCENARIO.CHAT_GROUP:
+        await runChatGroup(options);
+        break;
+      case SCENARIO.GROUP_CREATE:
+        await runGroupCreate(options);
+        break;
+      case SCENARIO.GROUP_LIST:
+        await runGroupList(options);
+        break;
+      case SCENARIO.CHAT_HISTORY:
+        await runChatHistory(options);
+        break;
+      case SCENARIO.CHAT_TWO_CLIENT:
+        await runChatTwoClient(options);
+        break;
+      case SCENARIO.CHAT_PRIVATE_TWO_CLIENT:
+        await runChatPrivateTwoClient(options);
+        break;
+      case SCENARIO.CHAT_INTERACTIVE:
+        await runChatInteractive(options);
         break;
       default:
         throw new Error(`unknown scenario: ${options.scenario}`);
