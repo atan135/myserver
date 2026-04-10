@@ -198,4 +198,34 @@ export class AuthStore {
       expiresAt
     };
   }
+
+  async revokeTicket(ticket, clientIp = null) {
+    const key = this.prefixedKey(ticketKey(ticket));
+    const playerId = await this.redis.get(key);
+
+    await this.redis.del(key);
+
+    if (playerId && this.mysqlStore) {
+      await this.mysqlStore.appendAuthAudit({
+        playerId,
+        eventType: "revoke_ticket",
+        ticket,
+        clientIp,
+        details: {
+          action: "logout"
+        }
+      });
+
+      this.mysqlStore.appendSecurityAudit?.({
+        eventType: "ticket_revoked",
+        targetType: "ticket",
+        targetValue: hashTicket(ticket).slice(0, 16) + "...",
+        clientIp,
+        severity: "info",
+        details: { playerId }
+      });
+    }
+
+    return { revoked: true };
+  }
 }

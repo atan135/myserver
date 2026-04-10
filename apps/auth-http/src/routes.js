@@ -248,6 +248,30 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
     });
   });
 
+  router.post("/api/v1/game-ticket/revoke", async (req, res) => {
+    const accessToken = getBearerToken(req);
+    if (!accessToken) {
+      return unauthorized(res, "MISSING_BEARER_TOKEN");
+    }
+
+    const session = await authStore.getSessionByAccessToken(accessToken);
+    if (!session) {
+      return unauthorized(res, "INVALID_ACCESS_TOKEN");
+    }
+
+    const { ticket } = req.body || {};
+    if (!ticket || typeof ticket !== "string") {
+      return badRequest(res, "INVALID_TICKET", "ticket must be a non-empty string");
+    }
+
+    await authStore.revokeTicket(ticket, getClientIp(req));
+
+    return res.json({
+      ok: true,
+      message: "Ticket revoked"
+    });
+  });
+
   router.get("/api/v1/internal/game-server/status", async (_req, res) => {
     try {
       const status = await gameAdminClient.getServerStatus();

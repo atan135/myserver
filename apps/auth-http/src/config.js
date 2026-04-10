@@ -40,7 +40,7 @@ export function getConfig() {
     ticketSecret:
       process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     ticketTtlSeconds: Number.parseInt(
-      process.env.TICKET_TTL_SECONDS || "300",
+      process.env.TICKET_TTL_SECONDS || "86400",
       10
     ),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
