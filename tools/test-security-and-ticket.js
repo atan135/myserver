@@ -17,7 +17,19 @@ import https from "node:https";
 
 const BASE_URL = process.argv.find((a) => a.startsWith("--base-url="))?.split("=")[1] || "http://127.0.0.1:3000";
 
-function request(method, path, body = null, headers = {}) {
+async function request(method, path, body = null, headers = {}, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await doRequest(method, path, body, headers);
+      return result;
+    } catch (err) {
+      if (attempt === retries) throw err;
+      await delay(500 * attempt);
+    }
+  }
+}
+
+async function doRequest(method, path, body = null, headers = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, BASE_URL);
     const client = url.protocol === "https:" ? https : http;
@@ -235,10 +247,7 @@ async function main() {
   }
   console.log("  [OK] 服务正常");
 
-  // 执行测试
-  if (await testIPRateLimit()) passed++; else failed++;
-  await delay(500);
-
+  // 执行测试（IP限流放最后，避免阻塞其他测试）
   if (await testAccountLockout()) passed++; else failed++;
   await delay(500);
 
@@ -246,6 +255,9 @@ async function main() {
   await delay(500);
 
   if (await testTicketRevoke()) passed++; else failed++;
+  await delay(500);
+
+  if (await testIPRateLimit()) passed++; else failed++;
 
   // 汇总
   console.log("\n========================================");

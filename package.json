@@ -2,6 +2,7 @@
   "name": "myserver",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "workspaces": [
     "apps/auth-http",
     "tools/mock-client"
