@@ -5,12 +5,18 @@
   "type": "module",
   "workspaces": [
     "apps/auth-http",
+    "apps/admin-api",
+    "apps/admin-web",
     "tools/mock-client"
   ],
   "scripts": {
     "update:ports": "node apps/update-ports.js",
     "dev:auth": "npm run dev --workspace auth-http",
     "start:auth": "npm run start --workspace auth-http",
+    "dev:admin-api": "npm run dev --workspace admin-api",
+    "start:admin-api": "npm run start --workspace admin-api",
+    "dev:admin-web": "npm run dev --workspace admin-web",
+    "build:admin-web": "npm run build --workspace admin-web",
     "dev:mock-client": "npm run dev --workspace mock-client",
     "flow:mock-client": "npm run flow --workspace mock-client --",
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",

@@ -54,6 +54,38 @@ CREATE TABLE IF NOT EXISTS security_audit_logs (
   KEY idx_security_audit_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS admin_accounts (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  display_name VARCHAR(64) NULL,
+  password_algo VARCHAR(32) NOT NULL DEFAULT 'scrypt',
+  password_salt VARCHAR(128) NOT NULL,
+  password_hash VARCHAR(256) NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'viewer',
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_login_at DATETIME(3) NULL,
+  UNIQUE KEY uk_admin_accounts_username (username),
+  KEY idx_admin_accounts_role (role),
+  KEY idx_admin_accounts_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  admin_id BIGINT UNSIGNED NULL,
+  admin_username VARCHAR(64) NULL,
+  action VARCHAR(64) NOT NULL,
+  target_type VARCHAR(32) NULL,
+  target_value VARCHAR(256) NULL,
+  details_json JSON NULL,
+  ip VARCHAR(64) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_admin_audit_logs_admin_id (admin_id),
+  KEY idx_admin_audit_logs_action (action),
+  KEY idx_admin_audit_logs_target (target_type, target_value),
+  KEY idx_admin_audit_logs_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 USE myserver_game;
 
 CREATE TABLE IF NOT EXISTS game_connection_audit_logs (
