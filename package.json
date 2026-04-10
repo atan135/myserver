@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "myserver",
   "version": "0.1.0",
   "private": true,
@@ -7,6 +7,7 @@
     "tools/mock-client"
   ],
   "scripts": {
+    "update:ports": "node apps/update-ports.js",
     "dev:auth": "npm run dev --workspace auth-http",
     "start:auth": "npm run start --workspace auth-http",
     "dev:mock-client": "npm run dev --workspace mock-client",
@@ -14,5 +15,8 @@
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",
     "test:auth-http": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/auth-http.test.mjs",
     "test:integration": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/integration-flow.test.mjs"
+  },
+  "dependencies": {
+    "node-kcp-x": "^1.2.3"
   }
 }

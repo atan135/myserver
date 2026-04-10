@@ -399,6 +399,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "service-registry",
  "sha2",
  "tokio",
  "tracing",
@@ -1288,6 +1289,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "service-registry"
+version = "0.1.0"
+dependencies = [
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

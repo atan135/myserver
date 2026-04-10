@@ -22,6 +22,7 @@ use std::time::Duration;
 use config::Config;
 use config_table::{ConfigTableRuntime, spawn_hot_reload_task};
 use mysql_store::MySqlAuditStore;
+use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -101,6 +102,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "csv config tables loaded"
     );
 
+    // Service Registry
+    let registry_client: Option<RegistryClient> = if config.registry_enabled {
+        match RegistryClient::new(
+            &config.registry_url,
+            &config.service_name,
+            &config.service_instance_id,
+        )
+        .await
+        {
+            Ok(client) => {
+                let instance = ServiceInstance::new(
+                    config.service_instance_id.clone(),
+                    config.service_name.clone(),
+                    config.host.clone(),
+                    config.port,
+                )
+                .with_admin_port(config.admin_port)
+                .with_local_socket(config.local_socket_name.clone())
+                .with_tags(vec!["game".to_string(), "tcp".to_string()]);
+
+                if let Err(e) = client.register(&instance).await {
+                    tracing::error!(error = %e, "failed to register service");
+                } else {
+                    tracing::info!(
+                        service = %config.service_name,
+                        instance = %config.service_instance_id,
+                        "service registered to registry"
+                    );
+                }
+
+                Some(client)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create registry client");
+                None
+            }
+        }
+    } else {
+        tracing::info!("service registry disabled");
+        None
+    };
+
+    // 启动心跳任务
+    let heartbeat_handle = registry_client
+        .as_ref()
+        .map(|client| client.start_heartbeat_task());
+
     let csv_reload_task = if config.csv_reload_enabled {
         Some(spawn_hot_reload_task(
             config_table_runtime.clone(),
@@ -113,6 +161,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mysql_store = MySqlAuditStore::new(&config).await?;
     let result = server::run(&config, mysql_store.clone(), config_table_runtime.clone()).await;
+
+    // 关闭时注销服务
+    if let Some(client) = registry_client {
+        // 停止心跳任务
+        if let Some(handle) = heartbeat_handle {
+            handle.abort();
+        }
+        // 注销服务
+        if let Err(e) = client.deregister().await {
+            tracing::error!(error = %e, "failed to deregister service");
+        } else {
+            tracing::info!(
+                service = %config.service_name,
+                instance = %config.service_instance_id,
+                "service deregistered from registry"
+            );
+        }
+    }
 
     if let Some(task) = csv_reload_task {
         task.abort();

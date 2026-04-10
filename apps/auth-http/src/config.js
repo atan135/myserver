@@ -47,6 +47,8 @@ export function getConfig() {
     gameServerAdminPort: Number.parseInt(
       process.env.GAME_SERVER_ADMIN_PORT || "7001",
       10
-    )
+    ),
+    gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
+    gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "7002", 10)
   };
 }

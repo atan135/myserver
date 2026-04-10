@@ -28,7 +28,7 @@ function handleGameServerError(res, error) {
   });
 }
 
-function sendLoginSuccess(res, session) {
+function sendLoginSuccess(res, session, config) {
   return res.status(201).json({
     ok: true,
     playerId: session.playerId,
@@ -36,7 +36,9 @@ function sendLoginSuccess(res, session) {
     loginName: session.loginName || null,
     accessToken: session.accessToken,
     ticket: session.gameTicket.value,
-    ticketExpiresAt: session.gameTicket.expiresAt
+    ticketExpiresAt: session.gameTicket.expiresAt,
+    gameProxyHost: config.gameProxyHost,
+    gameProxyPort: config.gameProxyPort
   });
 }
 
@@ -102,7 +104,7 @@ export function createRoutes(config, authStore, gameAdminClient) {
         password,
         getClientIp(req)
       );
-      return sendLoginSuccess(res, session);
+      return sendLoginSuccess(res, session, config);
     } catch (error) {
       if (
         error.code === "INVALID_LOGIN_CREDENTIALS" ||
@@ -123,7 +125,7 @@ export function createRoutes(config, authStore, gameAdminClient) {
 
     const session = await authStore.createGuestSession(guestId, getClientIp(req));
 
-    return sendLoginSuccess(res, session);
+    return sendLoginSuccess(res, session, config);
   });
 
   router.get("/api/v1/auth/me", async (req, res) => {
@@ -163,7 +165,9 @@ export function createRoutes(config, authStore, gameAdminClient) {
       ok: true,
       playerId: session.playerId,
       ticket: ticket.value,
-      ticketExpiresAt: ticket.expiresAt
+      ticketExpiresAt: ticket.expiresAt,
+      gameProxyHost: config.gameProxyHost,
+      gameProxyPort: config.gameProxyPort
     });
   });
 

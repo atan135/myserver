@@ -16,6 +16,19 @@ struct StatusResponse {
     active_upstream: Option<String>,
 }
 
+#[derive(Serialize)]
+struct InstanceInfo {
+    server_id: String,
+    local_socket: String,
+    state: String,
+}
+
+#[derive(Serialize)]
+struct InstancesResponse {
+    ok: bool,
+    instances: Vec<InstanceInfo>,
+}
+
 pub async fn run(
     bind_addr: &str,
     route_store: ProxyRouteStore,
@@ -62,6 +75,20 @@ async fn handle_connection(
             connection_count: connection_count.load(Ordering::Relaxed),
             maintenance: *maintenance.read().await,
             active_upstream: active,
+        })
+    } else if first_line.starts_with("GET /instances") {
+        let routes = route_store.list_routes().await;
+        let instances: Vec<InstanceInfo> = routes
+            .into_iter()
+            .map(|route| InstanceInfo {
+                server_id: route.server_id,
+                local_socket: route.local_socket_name,
+                state: format!("{:?}", route.state),
+            })
+            .collect();
+        write_json(InstancesResponse {
+            ok: true,
+            instances,
         })
     } else if first_line.starts_with("POST /maintenance/on") {
         *maintenance.write().await = true;

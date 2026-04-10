@@ -22,12 +22,25 @@ pub struct Config {
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    // Service Registry
+    pub registry_enabled: bool,
+    pub registry_url: String,
+    pub registry_heartbeat_interval_secs: u64,
+    pub service_name: String,
+    pub service_instance_id: String,
 }
 
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
         .ok()
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(default)
+}
+
+fn parse_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
 }
 
@@ -76,6 +89,16 @@ impl Config {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(4096);
 
+        // Service Registry
+        let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
+        let registry_url = env::var("REGISRTY_URL")
+            .or_else(|_| env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let registry_heartbeat_interval_secs = parse_u64("REGISTRY_HEARTBEAT_INTERVAL", 10);
+        let service_name = env::var("SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
+        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
+            .unwrap_or_else(|_| format!("{}-{}", service_name, port));
+
         Self {
             host,
             port,
@@ -97,6 +120,11 @@ impl Config {
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,
+            registry_enabled,
+            registry_url,
+            registry_heartbeat_interval_secs,
+            service_name,
+            service_instance_id,
         }
     }
 
