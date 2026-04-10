@@ -14,7 +14,8 @@
     "flow:mock-client": "npm run flow --workspace mock-client --",
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",
     "test:auth-http": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/auth-http.test.mjs",
-    "test:integration": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/integration-flow.test.mjs"
+    "test:integration": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/integration-flow.test.mjs",
+    "test:security": "node tools/test-security-and-ticket.js"
   },
   "dependencies": {
     "node-kcp-x": "^1.2.3"
