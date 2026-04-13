@@ -3,6 +3,7 @@ dist/
 target/
 .env
 .env.local
+*.local.json
 *.log
 logs/
 coverage/
