@@ -10,7 +10,7 @@
 ## 多人游戏核心
 - [x] 帧同步实现（lockstep） ✅ 第二阶段已完成
 - [x] 状态同步实现（state sync） ✅ 框架就绪（game_state 字段已定义，业务层实现序列化逻辑）
-- [ ] 延迟补偿算法
+- [ ] 延迟补偿算法 ⚠️ 暂不处理，详见 `docs/network-lag-compensation-design.md`
 - [ ] 房间匹配系统（matchmaking）
 - [x] 观战/OB系统 ✅ 已集成到帧同步 Phase 2
 
