@@ -1,9 +1,10 @@
 use serde_json::json;
+use tracing::info;
 
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::pb::{
     PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes,
-    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomStartRes,
+    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq, RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -29,6 +30,13 @@ pub async fn handle_room_join(
     } else {
         request.room_id
     };
+
+    info!(
+        session_id = connection.session.id,
+        player_id = %player_id,
+        room_id = %room_id,
+        "handle_room_join"
+    );
 
     if let Some(current_room_id) = &connection.session.room_id {
         if current_room_id != &room_id {
@@ -506,10 +514,18 @@ pub async fn handle_disconnect_cleanup(
     services: &ServiceContext,
     connection: &ConnectionContext,
 ) {
-    if let (Some(room_id), Some(player_id)) = (
-        connection.session.room_id.clone(),
-        connection.session.player_id.clone(),
-    ) {
+    let session = &connection.session;
+    let room_id = session.room_id.clone();
+    let player_id = session.player_id.clone();
+
+    info!(
+        session_id = session.id,
+        room_id = ?room_id,
+        player_id = ?player_id,
+        "handle_disconnect_cleanup called"
+    );
+
+    if let (Some(room_id), Some(player_id)) = (room_id, player_id) {
         let leave_result = services.room_manager.leave_room(&room_id, &player_id).await;
 
         if let Some(snapshot) = leave_result.snapshot {
@@ -531,4 +547,117 @@ pub async fn handle_disconnect_cleanup(
                 .await;
         }
     }
+}
+
+pub async fn handle_room_reconnect(
+    services: &ServiceContext,
+    connection: &mut ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY") {
+        Ok(value) => value,
+        Err(error_code) => {
+            connection.queue_error(packet.header.seq, error_code, "invalid room reconnect body")?;
+            return Ok(());
+        }
+    };
+
+    // Use the player_id from reconnect request
+    let reconnect_player_id = if request.player_id.is_empty() {
+        player_id.clone()
+    } else {
+        request.player_id
+    };
+
+    // If already in a room, cannot reconnect
+    if connection.session.room_id.is_some() {
+        connection.queue_message(
+            MessageType::RoomReconnectRes,
+            packet.header.seq,
+            RoomReconnectRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: "ALREADY_IN_ROOM".to_string(),
+                snapshot: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    // Find the room the player is offline in (via MySQL audit log or cache)
+    // For now, client should provide room_id - we'll search for the player
+    // This is a simplified implementation - in production you'd track this in Redis
+    let room_id = services
+        .mysql_store
+        .find_room_by_offline_player(&reconnect_player_id)
+        .await;
+
+    let Some(room_id) = room_id else {
+        connection.queue_message(
+            MessageType::RoomReconnectRes,
+            packet.header.seq,
+            RoomReconnectRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: "PLAYER_NOT_OFFLINE".to_string(),
+                snapshot: None,
+            },
+        )?;
+        return Ok(());
+    };
+
+    let reconnect_result = services
+        .room_manager
+        .reconnect_room(&room_id, &reconnect_player_id, connection.tx.clone())
+        .await;
+
+    match reconnect_result {
+        Ok(snapshot) => {
+            connection.session.room_id = Some(room_id.clone());
+            connection.queue_message(
+                MessageType::RoomReconnectRes,
+                packet.header.seq,
+                RoomReconnectRes {
+                    ok: true,
+                    room_id: room_id.clone(),
+                    error_code: String::new(),
+                    snapshot: Some(snapshot.clone()),
+                },
+            )?;
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&reconnect_player_id),
+                    Some(&snapshot.owner_player_id),
+                    "player_reconnected",
+                    Some(&snapshot.state),
+                    snapshot.members.len(),
+                    None,
+                )
+                .await;
+            services
+                .room_manager
+                .broadcast_snapshot(&room_id, "member_reconnected", snapshot)
+                .await?;
+        }
+        Err(error_code) => {
+            connection.queue_message(
+                MessageType::RoomReconnectRes,
+                packet.header.seq,
+                RoomReconnectRes {
+                    ok: false,
+                    room_id,
+                    error_code: error_code.to_string(),
+                    snapshot: None,
+                },
+            )?;
+        }
+    }
+
+    Ok(())
 }

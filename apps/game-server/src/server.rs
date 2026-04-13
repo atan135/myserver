@@ -241,7 +241,11 @@ where
                     .await;
                 break;
             }
-            Ok(Err(error)) => return Err(Box::new(error)),
+            Ok(Err(error)) => {
+                // Connection error (e.g., reset, broken pipe) - break to run cleanup
+                warn!(session_id = connection.session.id, error = %error, "connection read error, will cleanup");
+                break;
+            }
             Err(_) => {
                 connection.queue_error(0, "HEARTBEAT_TIMEOUT", "connection timed out")?;
                 services
@@ -343,6 +347,7 @@ async fn dispatch_packet(
             room_service::handle_player_input(services, connection, packet).await
         }
         Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
+        Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,
         Some(_) => {
             connection.queue_error(
                 packet.header.seq,

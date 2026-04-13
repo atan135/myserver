@@ -175,6 +175,8 @@ pub struct RoomMember {
     pub ready: bool,
     #[prost(bool, tag = "3")]
     pub is_owner: bool,
+    #[prost(bool, tag = "4")]
+    pub offline: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomSnapshot {
@@ -193,6 +195,31 @@ pub struct RoomStatePush {
     pub event: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub snapshot: ::core::option::Option<RoomSnapshot>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomReconnectReq {
+    #[prost(string, tag = "1")]
+    pub player_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomReconnectRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub snapshot: ::core::option::Option<RoomSnapshot>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomMemberOfflinePush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub offline: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ErrorRes {

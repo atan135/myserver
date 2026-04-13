@@ -122,6 +122,7 @@ message RoomMember {
   string player_id = 1;
   bool ready = 2;
   bool is_owner = 3;
+  bool offline = 4;
 }
 
 message RoomSnapshot {
@@ -134,6 +135,23 @@ message RoomSnapshot {
 message RoomStatePush {
   string event = 1;
   RoomSnapshot snapshot = 2;
+}
+
+message RoomReconnectReq {
+  string player_id = 1;
+}
+
+message RoomReconnectRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  RoomSnapshot snapshot = 4;
+}
+
+message RoomMemberOfflinePush {
+  string room_id = 1;
+  string player_id = 2;
+  bool offline = 3;
 }
 
 message ErrorRes {

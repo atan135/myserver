@@ -95,6 +95,8 @@ impl RoomManager {
                 player_id: player_id.to_string(),
                 ready: false,
                 sender,
+                offline: false,
+                offline_since: None,
             },
         );
 
@@ -112,26 +114,57 @@ impl RoomManager {
     }
 
     pub async fn leave_room(&self, room_id: &str, player_id: &str) -> RoomLeaveResult {
+        info!(
+            room_id = room_id,
+            player_id = player_id,
+            "leave_room called"
+        );
+
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let Some(room) = rooms.get_mut(room_id) else {
+            info!(room_id = room_id, "leave_room: room not found");
             return RoomLeaveResult {
                 snapshot: None,
                 room_removed: false,
             };
         };
 
-        if room.members.remove(player_id).is_none() {
+        // Mark player as offline instead of removing, so they can reconnect later
+        if let Some(member) = room.members.get_mut(player_id) {
+            member.offline = true;
+            member.offline_since = Some(Instant::now());
+            room.logic.on_player_offline(room_id, player_id);
+            info!(
+                room_id = room_id,
+                player_id = player_id,
+                "player marked offline, members count: {}",
+                room.members.len()
+            );
+        } else {
+            info!(
+                room_id = room_id,
+                player_id = player_id,
+                "leave_room: player not found in room members, current members: {:?}",
+                room.members.keys().collect::<Vec<_>>()
+            );
             return RoomLeaveResult {
                 snapshot: None,
                 room_removed: false,
             };
         }
 
-        room.logic.on_player_leave(player_id);
         let policy = self.policies.resolve(&room.policy_id);
 
-        if room.members.is_empty() {
+        // Transfer ownership if owner goes offline
+        if room.owner_player_id == player_id {
+            if let Some(next_owner) = room.members.values().find(|m| !m.offline).map(|m| m.player_id.clone()) {
+                room.owner_player_id = next_owner;
+            }
+        }
+
+        // If all members are offline, mark room as empty
+        if !room.has_online_members() {
             room.mark_empty();
         }
 
@@ -153,17 +186,80 @@ impl RoomManager {
             };
         }
 
-        if room.owner_player_id == player_id {
-            if let Some(next_owner) = room.members.keys().next() {
-                room.owner_player_id = next_owner.clone();
-            }
-        }
-
         room.reset_to_waiting();
 
         RoomLeaveResult {
             snapshot: Some(room.snapshot()),
             room_removed: false,
+        }
+    }
+
+    pub async fn reconnect_room(
+        &self,
+        room_id: &str,
+        player_id: &str,
+        sender: mpsc::UnboundedSender<OutboundMessage>,
+    ) -> Result<RoomSnapshot, &'static str> {
+        let mut rooms = self.rooms.lock().await;
+        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+        // Check if player is offline in this room
+        if let Some(member) = room.members.get_mut(player_id) {
+            if !member.offline {
+                return Err("PLAYER_ALREADY_ONLINE");
+            }
+
+            // Reconnect the player
+            member.offline = false;
+            member.offline_since = None;
+            member.sender = sender;
+            room.logic.on_player_online(room_id, player_id);
+            room.clear_empty();
+            room.update_activity();
+
+            info!(
+                room_id = room_id,
+                player_id = player_id,
+                "player reconnected"
+            );
+
+            Ok(room.snapshot())
+        } else {
+            Err("PLAYER_NOT_IN_ROOM")
+        }
+    }
+
+    pub async fn cleanup_expired_offline_players(&self) {
+        let mut rooms = self.rooms.lock().await;
+
+        for (room_id, room) in rooms.iter_mut() {
+            let policy = self.policies.resolve(&room.policy_id);
+            let expired = room.collect_expired_offline_players(policy.offline_ttl_secs);
+
+            if !expired.is_empty() {
+                info!(
+                    room_id = room_id,
+                    expired_players = ?expired,
+                    ttl_secs = policy.offline_ttl_secs,
+                    "removing expired offline players"
+                );
+
+                for player_id in &expired {
+                    room.logic.on_player_leave(player_id);
+                }
+
+                room.remove_members(&expired);
+
+                if room.owner_player_id != *"" && !room.members.contains_key(&room.owner_player_id) {
+                    if let Some(next) = room.members.keys().next() {
+                        room.owner_player_id = next.clone();
+                    }
+                }
+
+                if !room.has_online_members() {
+                    room.mark_empty();
+                }
+            }
         }
     }
 
@@ -200,7 +296,7 @@ impl RoomManager {
         room.phase = RoomPhase::InGame;
         room.current_frame = 0;
         room.pending_inputs.clear();
-        room.logic.on_game_started();
+        room.logic.on_game_started(room_id);
         info!(
             room_id = room_id,
             owner_player_id = player_id,
@@ -251,7 +347,7 @@ impl RoomManager {
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
         room.can_end_game(player_id)?;
-        room.logic.on_game_ended();
+        room.logic.on_game_ended(room_id);
         room.reset_to_waiting();
         info!(
             room_id = room_id,
@@ -340,16 +436,16 @@ impl RoomManager {
 
     fn compute_room_fps(&self, room: &Room) -> u16 {
         let policy = self.policies.resolve(&room.policy_id);
-        let member_count = room.members.len();
+        let online_count = room.online_members().len();
 
-        if member_count == 0 {
+        if online_count == 0 {
             return policy.silent_room_fps.max(1);
         }
 
         match room.phase {
             RoomPhase::Waiting => policy.idle_room_fps.max(1),
             RoomPhase::InGame => {
-                if member_count >= policy.busy_room_player_threshold {
+                if online_count >= policy.busy_room_player_threshold {
                     policy.busy_room_fps.max(1)
                 } else {
                     policy.active_room_fps.max(1)
@@ -435,11 +531,21 @@ impl RoomManager {
         let senders = {
             let rooms = self.rooms.lock().await;
             let Some(room) = rooms.get(room_id) else {
+                info!(room_id = room_id, "broadcast_to_room: room not found");
                 return Ok(());
             };
 
-            room.members
-                .values()
+            let online = room.online_members();
+            info!(
+                room_id = room_id,
+                message_type = ?message_type,
+                online_count = online.len(),
+                "broadcast_to_room"
+            );
+
+            // Only broadcast to online members
+            online
+                .iter()
                 .map(|member| member.sender.clone())
                 .collect::<Vec<_>>()
         };

@@ -1,43 +1,143 @@
-# 典型的一次性房间数据请求
-node tools/mock-client/src/index.js --scenario get-room-data --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --id-start 1000 --id-end 1000
+# Mock Client 测试帮助文档
+# 用法: node tools/mock-client/src/index.js [选项]
 
-# 先入房、拉取房间数据、延迟10秒再离房
-node tools/mock-client/src/index.js --scenario get-room-data-in-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-debug-001 --id-start 1000 --id-end 1008
+# ========== 通用参数 ==========
+# --scenario <name>          测试场景 (见下方场景列表)
+# --http-base-url <url>      认证服务地址 (默认 http://127.0.0.1:3000)
+# --host <ip>                游戏服务器地址 (默认 127.0.0.1)
+# --port <port>              游戏服务器端口 (默认 7000)
+# --chat-port <port>         聊天服务器端口 (默认 9001)
+# --room-id <id>             房间ID (默认 room-default)
+# --login-name <name>        登录用户名
+# --password <pwd>           登录密码
+# --timeout-ms <ms>          超时毫秒 (默认 5000)
 
-# ========== 聊天系统测试 ==========
+# ========== 场景列表 ==========
 
-# 发送私聊消息
-node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id target-player-id --content "Hello!"
+# ---------- 基础流程 ----------
 
-# 发送群聊消息
-node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id grp_xxx --content "Hello group!"
+# 1. 正常流程测试 (HAPPY)
+# 登录 -> 入房 -> 离房
+node tools/mock-client/src/index.js --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
 
-# 创建群组
+# 2. 非法Ticket测试 (INVALID_TICKET)
+# 使用伪造的ticket进行认证，应返回失败
+node tools/mock-client/src/index.js --scenario invalid-ticket --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
+
+# 3. 未认证入房测试 (UNAUTH_ROOM_JOIN)
+# 未认证直接入房，应返回 NOT_AUTHENTICATED
+node tools/mock-client/src/index.js --scenario unauth-room-join --host 127.0.0.1 --port 7000 --room-id test-room
+
+# 4. 未知消息类型测试 (UNKNOWN_MESSAGE)
+# 发送未知的消息类型，应返回 UNKNOWN_MESSAGE_TYPE
+node tools/mock-client/src/index.js --scenario unknown-message --host 127.0.0.1 --port 7000
+
+# 5. 超大RoomId测试 (OVERSIZED_ROOM_JOIN)
+# RoomId超过最大长度，应返回 BODY_TOO_LARGE
+node tools/mock-client/src/index.js --scenario oversized-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
+
+# ---------- 房间功能 ----------
+
+# 6. 单客户端入房并获取房间数据 (GET_ROOM_DATA)
+node tools/mock-client/src/index.js --scenario get-room-data --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
+
+# 7. 在房间内获取房间数据 (GET_ROOM_DATA_IN_ROOM)
+# 入房 -> 延迟离房 -> 拉取房间数据
+node tools/mock-client/src/index.js --scenario get-room-data-in-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-debug-001
+
+# 8. 双客户端房间测试 (TWO_CLIENT_ROOM)
+# clientA 入房 -> clientB 入房 -> clientB离房 -> clientA离房
+node tools/mock-client/src/index.js --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-room
+
+# ---------- 游戏开始/结束 ----------
+
+# 9. 单客户端开始游戏测试 (START_GAME_SINGLE_CLIENT)
+# 入房 -> 开始游戏 (单客户端应失败)
+node tools/mock-client/src/index.js --scenario start-game-single-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id test-start
+
+# 10. 就绪状态开始游戏测试 (START_GAME_READY_ROOM)
+# clientA 入房并准备 -> clientB 入房 -> 房主开始游戏 -> clientB输入 -> 房主结束游戏
+node tools/mock-client/src/index.js --scenario start-game-ready-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-ready-room
+
+# 11. 游戏回合测试 (GAMEPLAY_ROUNDTRIP)
+# clientA入房 -> clientB入房 -> 开始游戏 -> 互相发送输入 -> 结束游戏
+node tools/mock-client/src/index.js --scenario gameplay-roundtrip --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-gameplay
+
+# ---------- 断线重连测试 ----------
+
+# 12. 断线重连测试 (RECONNECT)
+# clientA入房 -> clientB入房 -> 开始游戏 -> clientA断开(不发送ROOM_LEAVE) -> clientA重连
+node tools/mock-client/src/index.js --scenario reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-reconnect
+
+# ========== 聊天系统测试 (通过 --chat-port 9001) ==========
+
+# 13. 私聊消息 (CHAT_PRIVATE)
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <目标玩家ID> --content "Hello!"
+
+# 14. 群聊消息 (CHAT_GROUP)
+node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID> --content "Hello group!"
+
+# 15. 创建群组 (GROUP_CREATE)
 node tools/mock-client/src/index.js --scenario group-create --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-name "My Group"
 
-# 获取群组列表
+# 16. 加入群组 (GROUP_JOIN)
+node tools/mock-client/src/index.js --scenario group-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+
+# 17. 离开群组 (GROUP_LEAVE)
+node tools/mock-client/src/index.js --scenario group-leave --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+
+# 18. 解散群组 (GROUP_DISMISS)
+node tools/mock-client/src/index.js --scenario group-dismiss --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+
+# 19. 获取群组列表 (GROUP_LIST)
 node tools/mock-client/src/index.js --scenario group-list --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd!
 
-# 查询聊天历史
-node tools/mock-client/src/index.js --scenario chat-history --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id target-player-id --limit 20
+# 20. 查询聊天历史 (CHAT_HISTORY)
+node tools/mock-client/src/index.js --scenario chat-history --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <目标玩家ID> --limit 20
 
-# 双客户端群聊测试（创建群、加入、发送消息、接收推送）
+# 21. 双客户端群聊测试 (CHAT_TWO_CLIENT)
+# 创建群 -> 加入群 -> 发送消息 -> 接收推送
 node tools/mock-client/src/index.js --scenario chat-two-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room --content "Group message!"
 
-# 双客户端私聊测试（互发消息、接收推送）
+# 22. 双客户端私聊测试 (CHAT_PRIVATE_TWO_CLIENT)
+# 互发消息 -> 接收推送
 node tools/mock-client/src/index.js --scenario chat-private-two-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room --content "Hello!"
 
-# 交互式聊天（开启两个客户端，通过命令行互相发送消息）
+# 23. 交互式聊天 (CHAT_INTERACTIVE)
+# 开启两个客户端，通过命令行互相发送消息
 node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
 
 # ========== 通过 Proxy 测试 ==========
 
-# 通过 TCP fallback 连接 proxy（推荐测试方式）
-# proxy 会自动路由到活跃的 game-server 实例
-node tools/mock-client/src/index.js --scenario get-room-data --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 17002 --login-name test001 --password Passw0rd! --id-start 1000 --id-end 1000
+# 通过 TCP fallback 连接 proxy（proxy 会自动路由到活跃的 game-server 实例）
+node tools/mock-client/src/index.js --scenario get-room-data --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 17002 --login-name test001 --password Passw0rd!
 
-# 通过 proxy 进入房间
-node tools/mock-client/src/index.js --scenario get-room-data-in-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 17002 --login-name test001 --password Passw0rd! --room-id room-debug-001 --id-start 1000 --id-end 1008
-
-# 双客户端通过 proxy 测试（两个客户端都通过 proxy 连接）
+# 双客户端通过 proxy 测试
 node tools/mock-client/src/index.js --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 17002 --room-id test-room
+
+# ========== 场景速查表 ==========
+# 场景名                    | 说明
+# -------------------------|----------------------------------
+# happy                    | 正常流程：登录->入房->离房
+# invalid-ticket           | 非法Ticket认证
+# unauth-room-join         | 未认证入房
+# unknown-message          | 未知消息类型
+# oversized-room-join      | 超大RoomId
+# two-client-room          | 双客户端房间
+# start-game-single-client | 单客户端开始游戏
+# start-game-ready-room    | 就绪状态开始游戏
+# gameplay-roundtrip        | 游戏输入回合
+# get-room-data            | 获取房间数据
+# get-room-data-in-room    | 在房间内获取数据
+# reconnect                | 断线重连
+# chat-private             | 私聊
+# chat-group               | 群聊
+# group-create             | 创建群组
+# group-join               | 加入群组
+# group-leave              | 离开群组
+# group-dismiss            | 解散群组
+# group-list               | 群组列表
+# chat-history             | 聊天历史
+# chat-two-client          | 双客户端群聊
+# chat-private-two-client  | 双客户端私聊
+# chat-interactive         | 交互式聊天

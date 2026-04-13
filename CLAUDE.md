@@ -58,6 +58,14 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 - `myserver_auth` - 账号库
 - `myserver_game` - 游戏库
 
+## 协议常量
+
+- **MAGIC**: `0xCAFE` - 所有服务间通信的固定魔数，用于协议头校验
+  - game-server: `apps/game-server/src/protocol.rs`
+  - chat-server: `apps/chat-server/src/protocol.rs`
+  - mock-client: `tools/mock-client/src/index.js`
+  - 新增 server 必须使用相同值 `0xCAFE`
+
 ## 重要文档
 
 - `docs/protocol.md` - 协议设计

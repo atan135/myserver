@@ -1,4 +1,5 @@
 use redis::AsyncCommands;
+use tracing::info;
 
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::pb::{AuthReq, AuthRes, PingRes};
@@ -63,6 +64,12 @@ pub async fn handle_auth(
 
             connection.session.state = SessionState::Authenticated;
             connection.session.player_id = Some(player_id.clone());
+
+            info!(
+                session_id = connection.session.id,
+                player_id = %player_id,
+                "player authenticated"
+            );
 
             connection.queue_message(
                 MessageType::AuthRes,

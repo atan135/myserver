@@ -24,6 +24,8 @@ pub struct RoomMemberState {
     pub player_id: String,
     pub ready: bool,
     pub sender: mpsc::UnboundedSender<OutboundMessage>,
+    pub offline: bool,
+    pub offline_since: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -80,6 +82,7 @@ impl Room {
                 player_id: member.player_id.clone(),
                 ready: member.ready,
                 is_owner: member.player_id == self.owner_player_id,
+                offline: member.offline,
             })
             .collect();
 
@@ -187,7 +190,8 @@ impl Room {
             return false;
         }
 
-        if !self.is_empty() {
+        // Only consider destroying if no online members
+        if self.has_online_members() {
             return false;
         }
 
@@ -199,5 +203,64 @@ impl Room {
         }
 
         false
+    }
+
+    pub fn has_online_members(&self) -> bool {
+        self.members.values().any(|m| !m.offline)
+    }
+
+    pub fn mark_offline(&mut self, player_id: &str) {
+        if let Some(member) = self.members.get_mut(player_id) {
+            member.offline = true;
+            member.offline_since = Some(Instant::now());
+        }
+    }
+
+    pub fn mark_online(&mut self, player_id: &str, sender: mpsc::UnboundedSender<OutboundMessage>) -> bool {
+        if let Some(member) = self.members.get_mut(player_id) {
+            member.offline = false;
+            member.offline_since = None;
+            member.sender = sender;
+            return true;
+        }
+        false
+    }
+
+    pub fn update_sender(&mut self, player_id: &str, sender: mpsc::UnboundedSender<OutboundMessage>) {
+        if let Some(member) = self.members.get_mut(player_id) {
+            member.sender = sender;
+        }
+    }
+
+    pub fn collect_expired_offline_players(&self, ttl_secs: u64) -> Vec<String> {
+        self.members
+            .values()
+            .filter(|m| {
+                if !m.offline {
+                    return false;
+                }
+                if let Some(since) = m.offline_since {
+                    since.elapsed().as_secs() >= ttl_secs
+                } else {
+                    false
+                }
+            })
+            .map(|m| m.player_id.clone())
+            .collect()
+    }
+
+    pub fn remove_members(&mut self, player_ids: &[String]) {
+        for id in player_ids {
+            self.members.remove(id);
+        }
+        if self.owner_player_id != *"" && !self.members.contains_key(&self.owner_player_id) {
+            if let Some(next) = self.members.keys().next() {
+                self.owner_player_id = next.clone();
+            }
+        }
+    }
+
+    pub fn online_members(&self) -> Vec<&RoomMemberState> {
+        self.members.values().filter(|m| !m.offline).collect()
     }
 }

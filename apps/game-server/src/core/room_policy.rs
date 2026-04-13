@@ -14,6 +14,7 @@ pub struct RoomRuntimePolicy {
     pub destroy_when_empty: bool,
     pub empty_ttl_secs: u64,
     pub retain_state_when_empty: bool,
+    pub offline_ttl_secs: u64,
 }
 
 impl RoomRuntimePolicy {
@@ -31,6 +32,7 @@ impl RoomRuntimePolicy {
             destroy_when_empty: true,
             empty_ttl_secs: 60,
             retain_state_when_empty: false,
+            offline_ttl_secs: 60,
         }
     }
 
@@ -48,6 +50,7 @@ impl RoomRuntimePolicy {
             destroy_when_empty: false,
             empty_ttl_secs: 0,
             retain_state_when_empty: true,
+            offline_ttl_secs: 300,
         }
     }
 }

@@ -34,7 +34,7 @@ impl Packet {
 
 pub fn parse_header(data: [u8; HEADER_LEN]) -> Result<PacketHeader, String> {
     let magic = u16::from_be_bytes([data[0], data[1]]);
-    if magic != 0x4D53 {
+    if magic != 0xCAFE {
         return Err("INVALID_MAGIC".to_string());
     }
 
@@ -64,9 +64,9 @@ pub fn encode_packet(message_type: u16, seq: u32, body: &[u8]) -> Vec<u8> {
     let body_len = body.len() as u32;
     let mut packet = Vec::with_capacity(HEADER_LEN + body_len as usize);
 
-    // MAGIC: 0x4D53 ('MS')
-    packet.push(0x4D);
-    packet.push(0x53);
+    // MAGIC: 0xCAFE
+    packet.push(0xCA);
+    packet.push(0xFE);
     // Version
     packet.push(1);
     // Flags

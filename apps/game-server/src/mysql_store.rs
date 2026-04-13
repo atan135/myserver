@@ -154,4 +154,40 @@ impl MySqlAuditStore {
             )
             .await;
     }
+
+    /// Find the room_id where a player is currently offline.
+    /// Returns the most recent room_id where the player had a 'member_disconnected' event
+    /// but no subsequent 'player_reconnected' or 'room_left' event.
+    pub async fn find_room_by_offline_player(&self, player_id: &str) -> Option<String> {
+        let Some(pool) = &self.pool else {
+            return None;
+        };
+
+        let Ok(mut conn) = pool.get_conn().await else {
+            return None;
+        };
+
+        // Find the most recent member_disconnected without a subsequent reconnection
+        // This is a simplified implementation - in production you'd track this more reliably
+        let result: Option<String> = conn
+            .exec_first(
+                r#"SELECT room_id FROM room_event_logs
+                   WHERE player_id = :player_id AND event_type = 'member_disconnected'
+                   AND id > COALESCE(
+                       (SELECT MAX(id) FROM room_event_logs
+                        WHERE player_id = :player_id2 AND event_type IN ('player_reconnected', 'room_left', 'room_disbanded')),
+                       0
+                   )
+                   ORDER BY created_at DESC LIMIT 1"#,
+                params! {
+                    "player_id" => player_id,
+                    "player_id2" => player_id,
+                },
+            )
+            .await
+            .ok()
+            .flatten();
+
+        result
+    }
 }
