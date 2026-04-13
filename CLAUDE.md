@@ -71,3 +71,8 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 - `docs/protocol.md` - 协议设计
 - `docs/game-server-frame-sync-design.md` - 帧同步与房间生命周期
 - `docs/game-proxy-hot-update-design.md` - 热切换代理设计
+
+## Git 提交规则
+
+- **除非我（用户）主动要求提交 git，否则你不能将修改提交到 git**
+- 所有 git 操作（commit、push 等）都必须等待我明确指令
