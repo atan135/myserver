@@ -41,6 +41,12 @@
 ---
 
 ## 已完成
+- [x] game-server 帧同步第三阶段：支持观战者和断线重连
+  - 新增 `MemberRole` 枚举区分 Player/Observer
+  - 新增 `RoomJoinAsObserverReq/Res` 观战者加入协议
+  - 重连时返回 `snapshot + current_frame_id + recent_inputs`
+  - `FrameBundlePush` 每 N 帧携带完整快照
+  - `Room.input_history` 保存最近 300 帧输入
 - [x] game-server 帧同步第二阶段：为 `FrameBundlePush` 或后续新消息设计并实现"广播完整增量状态"能力。当前第一版仅广播输入集合。
 - [x] 场景/关卡管理：RoomLogic 模块化，新增 persistent_world/disposable_match/sandbox 三种场景模板，支持策略化房间生命周期管理
 - [x] retain_state_when_empty 逻辑：RoomManager 统一处理空房清理任务，根据策略（destroy_enabled/destroy_when_empty/retain_state_when_empty/empty_ttl_secs）决定销毁时机

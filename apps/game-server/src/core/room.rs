@@ -19,6 +19,12 @@ pub enum RoomPhase {
     InGame,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberRole {
+    Player,
+    Observer,
+}
+
 #[derive(Clone)]
 pub struct RoomMemberState {
     pub player_id: String,
@@ -26,6 +32,7 @@ pub struct RoomMemberState {
     pub sender: mpsc::UnboundedSender<OutboundMessage>,
     pub offline: bool,
     pub offline_since: Option<Instant>,
+    pub role: MemberRole,
 }
 
 #[derive(Clone)]
@@ -50,6 +57,8 @@ pub struct Room {
     pub last_active_at: Instant,
     pub empty_since: Option<Instant>,
     pub marked_for_destruction: bool,
+    pub input_history: Vec<PlayerInputRecord>,
+    pub last_snapshot_frame: u32,
 }
 
 impl Room {
@@ -73,18 +82,29 @@ impl Room {
             last_active_at: now,
             empty_since: None,
             marked_for_destruction: false,
+            input_history: Vec::new(),
+            last_snapshot_frame: 0,
         }
     }
 
     pub fn snapshot(&self) -> RoomSnapshot {
+        use crate::pb::MemberRole as PbMemberRole;
+
         let members = self
             .members
             .values()
-            .map(|member| RoomMember {
-                player_id: member.player_id.clone(),
-                ready: member.ready,
-                is_owner: member.player_id == self.owner_player_id,
-                offline: member.offline,
+            .map(|member| {
+                let role: i32 = match member.role {
+                    MemberRole::Player => PbMemberRole::Player as i32,
+                    MemberRole::Observer => PbMemberRole::Observer as i32,
+                };
+                RoomMember {
+                    player_id: member.player_id.clone(),
+                    ready: member.ready,
+                    is_owner: member.player_id == self.owner_player_id,
+                    offline: member.offline,
+                    role,
+                }
             })
             .collect();
 
@@ -93,6 +113,8 @@ impl Room {
             owner_player_id: self.owner_player_id.clone(),
             state: self.state_name(),
             members,
+            current_frame_id: self.current_frame,
+            game_state: self.logic.get_serialized_state(),
         }
     }
 
@@ -140,6 +162,12 @@ impl Room {
 
         if !self.members.contains_key(player_id) {
             return Err("ROOM_MEMBER_NOT_FOUND");
+        }
+
+        if let Some(member) = self.members.get(player_id) {
+            if member.role == MemberRole::Observer {
+                return Err("OBSERVER_CANNOT_SEND_INPUT");
+            }
         }
 
         Ok(())
@@ -244,6 +272,21 @@ impl Room {
                 self.owner_player_id = next.clone();
             }
         }
+    }
+
+    pub fn push_input_history(&mut self, input: PlayerInputRecord) {
+        const MAX_HISTORY: usize = 300;
+        self.input_history.push(input);
+        if self.input_history.len() > MAX_HISTORY {
+            self.input_history.remove(0);
+        }
+    }
+
+    pub fn get_inputs_in_range(&self, from_frame: u32, to_frame: u32) -> Vec<&PlayerInputRecord> {
+        self.input_history
+            .iter()
+            .filter(|i| i.frame_id >= from_frame && i.frame_id <= to_frame)
+            .collect()
     }
 
     pub fn online_members(&self) -> Vec<&RoomMemberState> {

@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::info;
 
-use crate::core::room::{OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
+use crate::core::room::{MemberRole, OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
 use crate::gameroom::RoomLogicFactory;
 use crate::core::room_policy::RoomPolicyRegistry;
 use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
@@ -142,6 +142,7 @@ impl RoomManager {
         room_id: &str,
         player_id: &str,
         sender: mpsc::UnboundedSender<OutboundMessage>,
+        role: MemberRole,
     ) -> Result<RoomSnapshot, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
@@ -181,6 +182,7 @@ impl RoomManager {
                 sender,
                 offline: false,
                 offline_since: None,
+                role,
             },
         );
 
@@ -268,7 +270,7 @@ impl RoomManager {
         room_id: &str,
         player_id: &str,
         sender: mpsc::UnboundedSender<OutboundMessage>,
-    ) -> Result<RoomSnapshot, &'static str> {
+    ) -> Result<(RoomSnapshot, u32, Vec<FrameInput>), &'static str> {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
@@ -292,10 +294,98 @@ impl RoomManager {
                 "player reconnected"
             );
 
-            Ok(room.snapshot())
+            let snapshot = room.snapshot();
+            let current_frame_id = room.current_frame;
+            let recent_inputs = room
+                .get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
+                .iter()
+                .map(|input| FrameInput {
+                    player_id: input.player_id.clone(),
+                    action: input.action.clone(),
+                    payload_json: input.payload_json.clone(),
+                })
+                .collect();
+
+            Ok((snapshot, current_frame_id, recent_inputs))
         } else {
             Err("PLAYER_NOT_IN_ROOM")
         }
+    }
+
+    pub async fn join_room_as_observer(
+        &self,
+        room_id: &str,
+        player_id: &str,
+        sender: mpsc::UnboundedSender<OutboundMessage>,
+    ) -> Result<(RoomSnapshot, u32, Vec<FrameInput>), &'static str> {
+        let mut rooms = self.rooms.lock().await;
+        let mut runtimes = self.runtimes.lock().await;
+        let default_policy = self.policies.default_policy().clone();
+        let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
+            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            logic.on_room_created(room_id);
+            info!(
+                room_id = room_id,
+                owner_player_id = player_id,
+                policy_id = %default_policy.policy_id,
+                "room created for observer"
+            );
+            Room::new(
+                room_id.to_string(),
+                player_id.to_string(),
+                default_policy.policy_id.clone(),
+                logic,
+            )
+        });
+
+        let policy = self.policies.resolve(&room.policy_id);
+        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+            return Err("ROOM_FULL");
+        }
+
+        let is_new_member = !room.members.contains_key(player_id);
+        room.members.insert(
+            player_id.to_string(),
+            RoomMemberState {
+                player_id: player_id.to_string(),
+                ready: false,
+                sender,
+                offline: false,
+                offline_since: None,
+                role: MemberRole::Observer,
+            },
+        );
+
+        if is_new_member {
+            room.update_activity();
+            room.clear_empty();
+            room.logic.on_player_join(player_id);
+        }
+
+        runtimes
+            .entry(room_id.to_string())
+            .or_insert_with(RoomRuntime::default);
+
+        let snapshot = room.snapshot();
+        let current_frame_id = room.current_frame;
+        let recent_inputs = room
+            .get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
+            .iter()
+            .map(|input| FrameInput {
+                player_id: input.player_id.clone(),
+                action: input.action.clone(),
+                payload_json: input.payload_json.clone(),
+            })
+            .collect();
+
+        info!(
+            room_id = room_id,
+            player_id = player_id,
+            current_frame_id = current_frame_id,
+            "observer joined"
+        );
+
+        Ok((snapshot, current_frame_id, recent_inputs))
     }
 
     pub async fn cleanup_expired_offline_players(&self) {
@@ -396,13 +486,15 @@ impl RoomManager {
         room.can_send_input(player_id)?;
         room.update_activity();
         room.logic.on_player_input(player_id, action, payload_json);
-        room.pending_inputs.push(PlayerInputRecord {
+        let input_record = PlayerInputRecord {
             frame_id,
             player_id: player_id.to_string(),
             action: action.to_string(),
             payload_json: payload_json.to_string(),
             received_at: Instant::now(),
-        });
+        };
+        room.pending_inputs.push(input_record.clone());
+        room.push_input_history(input_record);
 
         Ok(())
     }
@@ -549,13 +641,20 @@ impl RoomManager {
                     continue;
                 }
 
+                let policy = self.policies.resolve(&room.policy_id);
+                let snapshot_interval = policy.snapshot_interval_frames;
+
                 room.current_frame = room.current_frame.saturating_add(1);
                 let frame_id = room.current_frame;
                 let drained = std::mem::take(&mut room.pending_inputs);
-                let tick_inputs: Vec<PlayerInputRecord> = drained
+
+                // Split inputs: process now (frame_id <= current) vs defer to future (frame_id > current)
+                let (tick_inputs, future_inputs): (Vec<_>, Vec<_>) = drained
                     .into_iter()
-                    .filter(|input| input.frame_id <= frame_id)
-                    .collect();
+                    .partition(|input| input.frame_id <= frame_id);
+
+                // Put future inputs back into pending_inputs for next frame
+                room.pending_inputs = future_inputs;
 
                 let inputs = tick_inputs
                     .iter()
@@ -568,12 +667,65 @@ impl RoomManager {
 
                 room.logic.on_tick(frame_id, &tick_inputs);
 
+                // Generate snapshot at configured interval
+                let snapshot = if frame_id % snapshot_interval == 0 {
+                    room.last_snapshot_frame = frame_id;
+                    info!(
+                        room_id = %room_id,
+                        frame_id = frame_id,
+                        snapshot_interval = snapshot_interval,
+                        ">>> SNAPSHOT GENERATED at frame {} <<<",
+                        frame_id
+                    );
+                    Some(room.snapshot())
+                } else {
+                    None
+                };
+
+                // Log frame sync info
+                if !inputs.is_empty() {
+                    info!(
+                        room_id = %room_id,
+                        frame_id = frame_id,
+                        fps = fps,
+                        input_count = inputs.len(),
+                        has_snapshot = snapshot.is_some(),
+                        "FRAME Bundle: inputs={} frame={} fps={}",
+                        inputs.len(),
+                        frame_id,
+                        fps
+                    );
+                    for input in &inputs {
+                        info!(
+                            room_id = %room_id,
+                            frame_id = frame_id,
+                            player_id = %input.player_id,
+                            action = %input.action,
+                            "  └─ [{}] {}: {}",
+                            input.player_id,
+                            input.action,
+                            input.payload_json
+                        );
+                    }
+                } else {
+                    info!(
+                        room_id = %room_id,
+                        frame_id = frame_id,
+                        fps = fps,
+                        has_snapshot = snapshot.is_some(),
+                        "FRAME Bundle: SILENT frame={} fps={}",
+                        frame_id,
+                        fps
+                    );
+                }
+
                 FrameBundlePush {
                     room_id: room.room_id.clone(),
                     frame_id,
                     fps: u32::from(fps),
                     is_silent_frame: inputs.is_empty(),
                     inputs,
+                    snapshot,
                 }
             };
 

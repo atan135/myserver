@@ -38,6 +38,10 @@ export function encodeRoomReconnectReq(playerId) {
   return encodeStringField(1, playerId);
 }
 
+export function encodeRoomJoinAsObserverReq(roomId) {
+  return encodeStringField(1, roomId);
+}
+
 export function encodeRoomLeaveReq() {
   return Buffer.alloc(0);
 }
@@ -129,7 +133,9 @@ function decodeRoomMember(buffer) {
   return {
     playerId: readString(fields, 1),
     ready: readBool(fields, 2),
-    isOwner: readBool(fields, 3)
+    isOwner: readBool(fields, 3),
+    offline: readBool(fields, 4),
+    role: readUInt32(fields, 5) // 0=Player, 1=Observer
   };
 }
 
@@ -150,7 +156,9 @@ function decodeRoomSnapshot(buffer) {
     roomId: readString(fields, 1),
     ownerPlayerId: readString(fields, 2),
     state: readString(fields, 3),
-    members
+    members,
+    currentFrameId: readUInt32(fields, 5) || 0,
+    gameState: readString(fields, 6) || ""
   };
 }
 
@@ -221,12 +229,25 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 3)
       };
     case MESSAGE_TYPE.ROOM_RECONNECT_RES:
+    case MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_RES: {
+      const recentInputsRaw = fields.get(6);
+      let recentInputs = [];
+      if (recentInputsRaw) {
+        if (Array.isArray(recentInputsRaw)) {
+          recentInputs = recentInputsRaw.map(decodeFrameInput);
+        } else {
+          recentInputs = [decodeFrameInput(recentInputsRaw)];
+        }
+      }
       return {
         ok: readBool(fields, 1),
         roomId: readString(fields, 2),
         errorCode: readString(fields, 3),
-        snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null
+        snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null,
+        currentFrameId: readUInt32(fields, 5) || 0,
+        recentInputs
       };
+    }
     case MESSAGE_TYPE.GET_ROOM_DATA_RES:
       return {
         ok: readBool(fields, 1),
@@ -261,7 +282,8 @@ export function decodeByMessageType(messageType, body) {
         frameId: readUInt32(fields, 2),
         fps: readUInt32(fields, 3),
         inputs,
-        isSilentFrame: readBool(fields, 5)
+        isSilentFrame: readBool(fields, 5),
+        snapshot: fields.get(6) ? decodeRoomSnapshot(fields.get(6)) : null
       };
     }
     case MESSAGE_TYPE.ROOM_FRAME_RATE_PUSH:

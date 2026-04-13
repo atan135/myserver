@@ -2,9 +2,11 @@ use serde_json::json;
 use tracing::info;
 
 use crate::core::context::{ConnectionContext, ServiceContext};
+use crate::core::room::MemberRole;
 use crate::pb::{
-    PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinReq, RoomJoinRes,
-    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq, RoomReconnectRes, RoomStartRes,
+    PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq,
+    RoomJoinAsObserverRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes,
+    RoomReconnectReq, RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -66,7 +68,7 @@ pub async fn handle_room_join(
 
     let join_result = services
         .room_manager
-        .join_room(&room_id, &player_id, connection.tx.clone())
+        .join_room(&room_id, &player_id, connection.tx.clone(), MemberRole::Player)
         .await;
 
     match join_result {
@@ -583,6 +585,8 @@ pub async fn handle_room_reconnect(
                 room_id: String::new(),
                 error_code: "ALREADY_IN_ROOM".to_string(),
                 snapshot: None,
+                current_frame_id: 0,
+                recent_inputs: vec![],
             },
         )?;
         return Ok(());
@@ -605,6 +609,8 @@ pub async fn handle_room_reconnect(
                 room_id: String::new(),
                 error_code: "PLAYER_NOT_OFFLINE".to_string(),
                 snapshot: None,
+                current_frame_id: 0,
+                recent_inputs: vec![],
             },
         )?;
         return Ok(());
@@ -616,7 +622,7 @@ pub async fn handle_room_reconnect(
         .await;
 
     match reconnect_result {
-        Ok(snapshot) => {
+        Ok((snapshot, current_frame_id, recent_inputs)) => {
             connection.session.room_id = Some(room_id.clone());
             connection.queue_message(
                 MessageType::RoomReconnectRes,
@@ -626,6 +632,8 @@ pub async fn handle_room_reconnect(
                     room_id: room_id.clone(),
                     error_code: String::new(),
                     snapshot: Some(snapshot.clone()),
+                    current_frame_id,
+                    recent_inputs,
                 },
             )?;
             services
@@ -654,8 +662,123 @@ pub async fn handle_room_reconnect(
                     room_id,
                     error_code: error_code.to_string(),
                     snapshot: None,
+                    current_frame_id: 0,
+                    recent_inputs: vec![],
                 },
             )?;
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_join_as_observer(
+    services: &ServiceContext,
+    connection: &mut ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet.decode_body::<RoomJoinAsObserverReq>("INVALID_OBSERVER_JOIN_BODY") {
+        Ok(value) => value,
+        Err(error_code) => {
+            connection.queue_error(packet.header.seq, error_code, "invalid observer join body")?;
+            return Ok(());
+        }
+    };
+
+    let room_id = if request.room_id.is_empty() {
+        "room-default".to_string()
+    } else {
+        request.room_id
+    };
+
+    info!(
+        session_id = connection.session.id,
+        player_id = %player_id,
+        room_id = %room_id,
+        "handle_join_as_observer"
+    );
+
+    if let Some(current_room_id) = &connection.session.room_id {
+        connection.queue_message(
+            MessageType::RoomJoinAsObserverRes,
+            packet.header.seq,
+            RoomJoinAsObserverRes {
+                ok: false,
+                room_id: current_room_id.clone(),
+                error_code: "ALREADY_IN_OTHER_ROOM".to_string(),
+                snapshot: None,
+                current_frame_id: 0,
+                recent_inputs: vec![],
+            },
+        )?;
+        return Ok(());
+    }
+
+    let join_result = services
+        .room_manager
+        .join_room_as_observer(&room_id, &player_id, connection.tx.clone())
+        .await;
+
+    match join_result {
+        Ok((snapshot, current_frame_id, recent_inputs)) => {
+            connection.session.room_id = Some(room_id.clone());
+            connection.queue_message(
+                MessageType::RoomJoinAsObserverRes,
+                packet.header.seq,
+                RoomJoinAsObserverRes {
+                    ok: true,
+                    room_id: room_id.clone(),
+                    error_code: String::new(),
+                    snapshot: Some(snapshot.clone()),
+                    current_frame_id,
+                    recent_inputs,
+                },
+            )?;
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    Some(&snapshot.owner_player_id),
+                    "observer_joined",
+                    Some(&snapshot.state),
+                    snapshot.members.len(),
+                    Some(json!({
+                        "seq": packet.header.seq,
+                        "currentFrameId": current_frame_id
+                    })),
+                )
+                .await;
+        }
+        Err(error_code) => {
+            connection.queue_message(
+                MessageType::RoomJoinAsObserverRes,
+                packet.header.seq,
+                RoomJoinAsObserverRes {
+                    ok: false,
+                    room_id: room_id.clone(),
+                    error_code: error_code.to_string(),
+                    snapshot: None,
+                    current_frame_id: 0,
+                    recent_inputs: vec![],
+                },
+            )?;
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    None,
+                    "observer_join_failed",
+                    None,
+                    0,
+                    Some(json!({ "errorCode": error_code, "seq": packet.header.seq })),
+                )
+                .await;
         }
     }
 

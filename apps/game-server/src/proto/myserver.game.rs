@@ -130,6 +130,8 @@ pub struct FrameBundlePush {
     pub inputs: ::prost::alloc::vec::Vec<FrameInput>,
     #[prost(bool, tag = "5")]
     pub is_silent_frame: bool,
+    #[prost(message, optional, tag = "6")]
+    pub snapshot: ::core::option::Option<RoomSnapshot>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomFrameRatePush {
@@ -177,6 +179,8 @@ pub struct RoomMember {
     pub is_owner: bool,
     #[prost(bool, tag = "4")]
     pub offline: bool,
+    #[prost(enumeration = "MemberRole", tag = "5")]
+    pub role: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomSnapshot {
@@ -188,6 +192,10 @@ pub struct RoomSnapshot {
     pub state: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
     pub members: ::prost::alloc::vec::Vec<RoomMember>,
+    #[prost(uint32, tag = "5")]
+    pub current_frame_id: u32,
+    #[prost(string, tag = "6")]
+    pub game_state: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomStatePush {
@@ -195,6 +203,26 @@ pub struct RoomStatePush {
     pub event: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub snapshot: ::core::option::Option<RoomSnapshot>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomJoinAsObserverReq {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomJoinAsObserverRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub snapshot: ::core::option::Option<RoomSnapshot>,
+    #[prost(uint32, tag = "5")]
+    pub current_frame_id: u32,
+    #[prost(message, repeated, tag = "6")]
+    pub recent_inputs: ::prost::alloc::vec::Vec<FrameInput>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomReconnectReq {
@@ -211,6 +239,10 @@ pub struct RoomReconnectRes {
     pub error_code: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "4")]
     pub snapshot: ::core::option::Option<RoomSnapshot>,
+    #[prost(uint32, tag = "5")]
+    pub current_frame_id: u32,
+    #[prost(message, repeated, tag = "6")]
+    pub recent_inputs: ::prost::alloc::vec::Vec<FrameInput>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {
@@ -227,4 +259,30 @@ pub struct ErrorRes {
     pub error_code: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MemberRole {
+    Player = 0,
+    Observer = 1,
+}
+impl MemberRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Player => "MEMBER_ROLE_PLAYER",
+            Self::Observer => "MEMBER_ROLE_OBSERVER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MEMBER_ROLE_PLAYER" => Some(Self::Player),
+            "MEMBER_ROLE_OBSERVER" => Some(Self::Observer),
+            _ => None,
+        }
+    }
 }

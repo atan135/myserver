@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package myserver.game;
 
+enum MemberRole {
+  MEMBER_ROLE_PLAYER = 0;
+  MEMBER_ROLE_OBSERVER = 1;
+}
+
 message AuthReq {
   string ticket = 1;
 }
@@ -92,6 +97,7 @@ message FrameBundlePush {
   uint32 fps = 3;
   repeated FrameInput inputs = 4;
   bool is_silent_frame = 5;
+  RoomSnapshot snapshot = 6;
 }
 
 message RoomFrameRatePush {
@@ -123,6 +129,7 @@ message RoomMember {
   bool ready = 2;
   bool is_owner = 3;
   bool offline = 4;
+  MemberRole role = 5;
 }
 
 message RoomSnapshot {
@@ -130,11 +137,26 @@ message RoomSnapshot {
   string owner_player_id = 2;
   string state = 3;
   repeated RoomMember members = 4;
+  uint32 current_frame_id = 5;
+  string game_state = 6;
 }
 
 message RoomStatePush {
   string event = 1;
   RoomSnapshot snapshot = 2;
+}
+
+message RoomJoinAsObserverReq {
+  string room_id = 1;
+}
+
+message RoomJoinAsObserverRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  RoomSnapshot snapshot = 4;
+  uint32 current_frame_id = 5;
+  repeated FrameInput recent_inputs = 6;
 }
 
 message RoomReconnectReq {
@@ -146,6 +168,8 @@ message RoomReconnectRes {
   string room_id = 2;
   string error_code = 3;
   RoomSnapshot snapshot = 4;
+  uint32 current_frame_id = 5;
+  repeated FrameInput recent_inputs = 6;
 }
 
 message RoomMemberOfflinePush {

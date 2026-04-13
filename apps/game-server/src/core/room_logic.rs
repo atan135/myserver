@@ -25,4 +25,10 @@ pub trait RoomLogic: Send {
     fn should_destroy(&self) -> bool {
         false
     }
+
+    fn get_serialized_state(&self) -> String {
+        String::new()
+    }
+
+    fn restore_from_serialized_state(&mut self, _state: &str) {}
 }

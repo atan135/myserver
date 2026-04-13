@@ -348,6 +348,7 @@ async fn dispatch_packet(
         }
         Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
         Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,
+        Some(MessageType::RoomJoinAsObserverReq) => room_service::handle_join_as_observer(services, connection, packet).await,
         Some(_) => {
             connection.queue_error(
                 packet.header.seq,

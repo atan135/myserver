@@ -15,6 +15,7 @@ pub struct RoomRuntimePolicy {
     pub empty_ttl_secs: u64,
     pub retain_state_when_empty: bool,
     pub offline_ttl_secs: u64,
+    pub snapshot_interval_frames: u32,
 }
 
 impl RoomRuntimePolicy {
@@ -33,6 +34,7 @@ impl RoomRuntimePolicy {
             empty_ttl_secs: 60,
             retain_state_when_empty: false,
             offline_ttl_secs: 60,
+            snapshot_interval_frames: 30,
         }
     }
 
@@ -51,6 +53,7 @@ impl RoomRuntimePolicy {
             empty_ttl_secs: 0,
             retain_state_when_empty: true,
             offline_ttl_secs: 300,
+            snapshot_interval_frames: 30,
         }
     }
 
@@ -69,6 +72,7 @@ impl RoomRuntimePolicy {
             empty_ttl_secs: 60,
             retain_state_when_empty: false,
             offline_ttl_secs: 60,
+            snapshot_interval_frames: 30,
         }
     }
 
@@ -87,6 +91,7 @@ impl RoomRuntimePolicy {
             empty_ttl_secs: 300,
             retain_state_when_empty: true,
             offline_ttl_secs: 120,
+            snapshot_interval_frames: 30,
         }
     }
 }
