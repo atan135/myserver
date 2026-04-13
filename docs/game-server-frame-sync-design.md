@@ -514,20 +514,23 @@ pub default_empty_ttl_secs: u64,
 - ✅ 服务端按帧聚合输入并广播 `FrameBundlePush`
 - ✅ 无人房间与有人房间走同一套逻辑更新链路，只是每秒 tick 次数不同
 
-### Phase 2 进行中
+### Phase 2 ✅ 已完成
+
+- ✅ 观战者支持 (MemberRole + Observer 加入/接收帧)
+- ✅ 断线重连恢复 (snapshot + frame_id + recent_inputs)
+- ✅ 定时快照生成 (每 N 帧)
+- ✅ 输入历史记录 (最近 300 帧)
+- ✅ 未来帧输入正确处理
+
+### Phase 3 待开始
 
 - 客户端帧率变化通知 (`RoomFrameRatePush`)
 - 房间 tick task 平滑调速
 - 更细的活跃度判定
 - 空帧压缩 / 合并
-
-### Phase 3 待开始
-
-- 多种 `RoomLogic` 实现
-- 常驻房间预创建
-- 临时房间自动销毁策略完善
-- 更完整的监控与审计日志
-- 完整增量状态广播
+- game_state 序列化（业务层实现）
+- OB 功能（暂停/快进/回放）
+- 回放存储与播放
 
 ## 15. 代码已完成的修改
 
@@ -571,6 +574,8 @@ pub default_empty_ttl_secs: u64,
 
 以下功能已实现：
 
+### Phase 1 ✅ 已完成
+
 1. ✅ `RoomLogic trait` + `TestRoomLogic` 样例
 2. ✅ 房间策略模板内置在代码中 (`default_match`, `persistent_world`, `disposable_match`, `sandbox`)
 3. ✅ `FrameBundlePush` 按帧广播输入集合
@@ -580,14 +585,39 @@ pub default_empty_ttl_secs: u64,
 7. ✅ 玩家加入/离开时更新活跃度
 8. ✅ 多种 `RoomLogic` 实现 (`TestRoomLogic`, `PersistentWorldLogic`, `DisposableMatchLogic`, `SandboxLogic`)
 
+### Phase 2 ✅ 已完成
+
+9. ✅ `MemberRole` 枚举 (Player / Observer)
+10. ✅ 观战者加入 (`RoomJoinAsObserverReq/Res`)
+11. ✅ Observer 接收帧数据但不能发送输入
+12. ✅ 断线重连恢复 (snapshot + current_frame_id + recent_inputs)
+13. ✅ 定时快照生成 (每 N 帧，snapshot_interval_frames)
+14. ✅ 输入历史记录 (最近 300 帧)
+15. ✅ 未来帧输入处理 (frame_id > current_frame 时正确暂存)
+16. ✅ `retain_state_when_empty` 逻辑（RoomManager 统一处理空房清理）
+
 ## 18. 待完成项
 
-以下功能尚未实现：
+以下功能尚未实现或未完全实现：
 
-- `RoomFrameRatePush` 客户端帧率变化通知（协议已定义，客户端未对接）
-- 完整增量状态广播
-- 断线重连后的房间状态恢复
-- `retain_state_when_empty` 逻辑（字段已定义，保留供后续使用）
+### 18.1 已完成 ✅
+
+- ✅ 断线重连后的房间状态恢复（snapshot + current_frame_id + recent_inputs）
+- ✅ `retain_state_when_empty` 逻辑（RoomManager 统一处理空房清理）
+- ✅ Observer 观战者支持（MemberRole + RoomJoinAsObserverReq/Res）
+- ✅ 定时快照生成（每 N 帧，配置项 snapshot_interval_frames）
+- ✅ 输入历史记录（最近 300 帧）
+
+### 18.2 待完成 ⚠️
+
+- **game_state 序列化**: `RoomLogic::get_serialized_state()` 方法签名已定义，具体游戏状态序列化逻辑需由业务层实现
+- **RoomFrameRatePush 客户端通知**: 协议已定义，当运行时 fps 变化时未主动推送客户端
+- **OB 功能**: 暂停、快进、回放等观战控制功能未实现
+
+### 18.3 未来规划 🎯
+
+- **回放存储与播放**: 帧数据持久化，支持回放功能
+- **完整增量状态广播**: 与 game_state 序列化配合，实现状态同步模式
 
 ## 19. 新增 RoomLogic 类型开发流程
 
