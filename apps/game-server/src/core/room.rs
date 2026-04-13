@@ -49,6 +49,7 @@ pub struct Room {
     pub created_at: Instant,
     pub last_active_at: Instant,
     pub empty_since: Option<Instant>,
+    pub marked_for_destruction: bool,
 }
 
 impl Room {
@@ -71,6 +72,7 @@ impl Room {
             created_at: now,
             last_active_at: now,
             empty_since: None,
+            marked_for_destruction: false,
         }
     }
 
@@ -181,28 +183,12 @@ impl Room {
         self.members.is_empty()
     }
 
-    pub fn should_destroy(&self, policy: &crate::core::room_policy::RoomRuntimePolicy) -> bool {
-        if !policy.destroy_enabled {
-            return false;
-        }
+    pub fn should_destroy(&self) -> bool {
+        self.marked_for_destruction
+    }
 
-        if !policy.destroy_when_empty {
-            return false;
-        }
-
-        // Only consider destroying if no online members
-        if self.has_online_members() {
-            return false;
-        }
-
-        if let Some(empty_since) = self.empty_since {
-            let empty_duration_secs = empty_since.elapsed().as_secs();
-            if empty_duration_secs >= policy.empty_ttl_secs {
-                return true;
-            }
-        }
-
-        false
+    pub fn mark_for_destruction(&mut self) {
+        self.marked_for_destruction = true;
     }
 
     pub fn has_online_members(&self) -> bool {

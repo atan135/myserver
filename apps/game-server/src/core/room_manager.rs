@@ -46,7 +46,91 @@ pub struct RoomManager {
 
 impl RoomManager {
     pub fn new() -> Self {
-        Self::default()
+        let this = Self::default();
+        this.spawn_cleanup_task();
+        this
+    }
+
+    fn spawn_cleanup_task(&self) {
+        let rooms = Arc::clone(&self.rooms);
+        let runtimes = Arc::clone(&self.runtimes);
+        let policies = self.policies.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                let mut to_destroy = Vec::new();
+
+                {
+                    let mut rooms_guard = rooms.lock().await;
+
+                    for (room_id, room) in rooms_guard.iter_mut() {
+                        // Skip if already marked for destruction
+                        if room.marked_for_destruction {
+                            continue;
+                        }
+
+                        let policy = policies.resolve(&room.policy_id);
+
+                        // Check if destruction is enabled
+                        if !policy.destroy_enabled {
+                            continue;
+                        }
+
+                        // Check if we should destroy when empty
+                        if !policy.destroy_when_empty {
+                            continue;
+                        }
+
+                        // Only consider destroying if no online members
+                        if room.has_online_members() {
+                            continue;
+                        }
+
+                        // At this point: no online members, destruction enabled, destroy when empty
+                        if !policy.retain_state_when_empty {
+                            // No retain - mark for immediate destruction
+                            info!(
+                                room_id = room_id,
+                                policy_id = %policy.policy_id,
+                                "room marked for destruction (no retain)"
+                            );
+                            room.mark_for_destruction();
+                            to_destroy.push(room_id.clone());
+                            continue;
+                        }
+
+                        // Retain state - check TTL
+                        if let Some(empty_since) = room.empty_since {
+                            let elapsed = empty_since.elapsed().as_secs();
+                            if elapsed >= policy.empty_ttl_secs {
+                                info!(
+                                    room_id = room_id,
+                                    policy_id = %policy.policy_id,
+                                    elapsed_secs = elapsed,
+                                    "room TTL expired, marked for destruction"
+                                );
+                                room.mark_for_destruction();
+                                to_destroy.push(room_id.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Execute destruction outside of rooms lock
+                for room_id in to_destroy {
+                    if let Some(runtime) = runtimes.lock().await.get(&room_id) {
+                        if let Some(handle) = &runtime.tick_handle {
+                            handle.abort();
+                        }
+                    }
+                    rooms.lock().await.remove(&room_id);
+                    info!(room_id = room_id, "room destroyed by cleanup task");
+                }
+            }
+        });
     }
 
     pub async fn room_count(&self) -> usize {
@@ -168,23 +252,8 @@ impl RoomManager {
             room.mark_empty();
         }
 
-        if room.should_destroy(&policy) {
-            info!(
-                room_id = room_id,
-                policy_id = %room.policy_id,
-                "room removed because it became empty and TTL expired"
-            );
-            rooms.remove(room_id);
-            if let Some(runtime) = runtimes.remove(room_id) {
-                if let Some(handle) = runtime.tick_handle {
-                    handle.abort();
-                }
-            }
-            return RoomLeaveResult {
-                snapshot: None,
-                room_removed: true,
-            };
-        }
+        // Note: destruction is now handled by the cleanup task in RoomManager
+        // based on policy.destroy_enabled, destroy_when_empty, retain_state_when_empty, and empty_ttl_secs
 
         room.reset_to_waiting();
 
