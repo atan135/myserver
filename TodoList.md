@@ -5,7 +5,7 @@
 - [x] 内部控制面（管理后台、GM命令） ✅
 - [x] 开始游戏/结束游戏状态流转 ✅
 - [x] 断线重连与掉线托管 ✅
-- [ ] 场景/关卡管理
+- [x] 场景/关卡管理 ✅
 
 ## 多人游戏核心
 - [~] 帧同步实现（lockstep） ⚙️ 第二阶段已完成
@@ -42,3 +42,5 @@
 
 ## 已完成
 - [x] game-server 帧同步第二阶段：为 `FrameBundlePush` 或后续新消息设计并实现"广播完整增量状态"能力。当前第一版仅广播输入集合。
+- [x] 场景/关卡管理：RoomLogic 模块化，新增 persistent_world/disposable_match/sandbox 三种场景模板，支持策略化房间生命周期管理
+- [x] retain_state_when_empty 逻辑：RoomManager 统一处理空房清理任务，根据策略（destroy_enabled/destroy_when_empty/retain_state_when_empty/empty_ttl_secs）决定销毁时机
