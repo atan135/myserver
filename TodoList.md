@@ -8,11 +8,11 @@
 - [x] 场景/关卡管理 ✅
 
 ## 多人游戏核心
-- [~] 帧同步实现（lockstep） ⚙️ 第二阶段已完成
-- [ ] 状态同步实现（state sync）
+- [x] 帧同步实现（lockstep） ✅ 第二阶段已完成
+- [x] 状态同步实现（state sync） ✅ 框架就绪（game_state 字段已定义，业务层实现序列化逻辑）
 - [ ] 延迟补偿算法
 - [ ] 房间匹配系统（matchmaking）
-- [ ] 观战/OB系统
+- [x] 观战/OB系统 ✅ 已集成到帧同步 Phase 2
 
 ## 运维支撑
 - [ ] 服务健康检查与监控告警
@@ -36,7 +36,7 @@
 
 ---
 
-**建议优先级**：限流风控 → 断线重连 → 帧/状态同步 → 房间匹配 → 配置中心
+**建议优先级**：限流风控 → 断线重连 → 帧/状态同步(已完成) → 房间匹配 → 配置中心
 
 ---
 
@@ -48,5 +48,6 @@
   - `FrameBundlePush` 每 N 帧携带完整快照
   - `Room.input_history` 保存最近 300 帧输入
 - [x] game-server 帧同步第二阶段：为 `FrameBundlePush` 或后续新消息设计并实现"广播完整增量状态"能力。当前第一版仅广播输入集合。
+- [x] 状态同步框架：RoomLogic 新增 `get_serialized_state()` 和 `restore_from_serialized_state()` 方法，框架层已就绪，业务层实现具体序列化
 - [x] 场景/关卡管理：RoomLogic 模块化，新增 persistent_world/disposable_match/sandbox 三种场景模板，支持策略化房间生命周期管理
 - [x] retain_state_when_empty 逻辑：RoomManager 统一处理空房清理任务，根据策略（destroy_enabled/destroy_when_empty/retain_state_when_empty/empty_ttl_secs）决定销毁时机
