@@ -8,7 +8,7 @@ use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::info;
 
 use crate::core::room::{OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
-use crate::core::room_logic::RoomLogicFactory;
+use crate::gameroom::RoomLogicFactory;
 use crate::core::room_policy::RoomPolicyRegistry;
 use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
 use crate::protocol::{MessageType, encode_body};

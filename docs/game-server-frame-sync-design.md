@@ -572,19 +572,188 @@ pub default_empty_ttl_secs: u64,
 以下功能已实现：
 
 1. ✅ `RoomLogic trait` + `TestRoomLogic` 样例
-2. ✅ 房间策略模板内置在代码中 (`default_match`, `persistent_world`)
+2. ✅ 房间策略模板内置在代码中 (`default_match`, `persistent_world`, `disposable_match`, `sandbox`)
 3. ✅ `FrameBundlePush` 按帧广播输入集合
 4. ✅ 无人房间和有人房间走相同逻辑链路，只是 tick 次数不同
 5. ✅ 房间销毁配置化：`destroy_enabled`、`destroy_when_empty`、`empty_ttl_secs`
 6. ✅ 房间生命周期辅助方法：`update_activity`、`mark_empty`、`should_destroy`
 7. ✅ 玩家加入/离开时更新活跃度
+8. ✅ 多种 `RoomLogic` 实现 (`TestRoomLogic`, `PersistentWorldLogic`, `DisposableMatchLogic`, `SandboxLogic`)
 
 ## 18. 待完成项
 
 以下功能尚未实现：
 
 - `RoomFrameRatePush` 客户端帧率变化通知（协议已定义，客户端未对接）
-- 多种 `RoomLogic` 实现（当前只有 `TestRoomLogic`）
 - 完整增量状态广播
 - 断线重连后的房间状态恢复
 - `retain_state_when_empty` 逻辑（字段已定义，保留供后续使用）
+
+## 19. 新增 RoomLogic 类型开发流程
+
+当需要新增一种房间/场景类型时，需按以下步骤完成开发。
+
+### 19.1 目录结构
+
+```
+apps/game-server/src/
+├── gameroom/
+│   ├── mod.rs
+│   └── test_room/
+│       ├── mod.rs                      # 模块导出
+│       ├── test_room_logic.rs         # TestRoomLogic + RoomLogicFactory
+│       ├── persistent_world_logic.rs   # 示例：常驻大世界
+│       ├── disposable_match_logic.rs   # 示例：临时对局
+│       └── sandbox_logic.rs            # 示例：沙盒模式
+├── core/
+│   ├── room_logic.rs                  # RoomLogic trait 定义
+│   └── room_policy.rs                 # 策略模板定义
+```
+
+### 19.2 开发步骤
+
+#### Step 1：定义 RoomLogic 实现
+
+在 `apps/game-server/src/gameroom/test_room/` 下新建文件，如 `my_room_logic.rs`：
+
+```rust
+use tracing::info;
+use crate::core::room::PlayerInputRecord;
+use crate::core::room_logic::RoomLogic;
+
+#[derive(Default)]
+pub struct MyRoomLogic {
+    pub tick_count: u64,
+}
+
+impl RoomLogic for MyRoomLogic {
+    fn on_room_created(&mut self, _room_id: &str) {
+        info!(room_id = _room_id, "[RoomLogic/my_room] room created");
+    }
+
+    fn on_player_join(&mut self, _player_id: &str) {
+        info!(player_id = _player_id, "[RoomLogic/my_room] player joined");
+    }
+
+    fn on_player_leave(&mut self, _player_id: &str) {
+        info!(player_id = _player_id, "[RoomLogic/my_room] player left");
+    }
+
+    fn on_player_offline(&mut self, _room_id: &str, _player_id: &str) {
+        info!(room_id = _room_id, player_id = _player_id, "[RoomLogic/my_room] player offline");
+    }
+
+    fn on_player_online(&mut self, _room_id: &str, _player_id: &str) {
+        info!(room_id = _room_id, player_id = _player_id, "[RoomLogic/my_room] player online");
+    }
+
+    fn on_game_started(&mut self, _room_id: &str) {
+        info!(room_id = _room_id, "[RoomLogic/my_room] game started");
+    }
+
+    fn on_game_ended(&mut self, _room_id: &str) {
+        info!(room_id = _room_id, "[RoomLogic/my_room] game ended");
+    }
+
+    fn on_tick(&mut self, _frame_id: u32, _inputs: &[PlayerInputRecord]) {
+        self.tick_count += 1;
+    }
+
+    fn should_destroy(&self) -> bool {
+        false  // true 表示游戏结束后自动销毁房间
+    }
+}
+```
+
+#### Step 2：在 test_room/mod.rs 中注册模块和导出
+
+```rust
+pub mod test_room_logic;
+pub mod persistent_world_logic;
+pub mod disposable_match_logic;
+pub mod sandbox_logic;
+pub mod my_room_logic;  // 新增
+
+pub use test_room_logic::{RoomLogicFactory, TestRoomLogic};
+pub use persistent_world_logic::PersistentWorldLogic;
+pub use disposable_match_logic::DisposableMatchLogic;
+pub use sandbox_logic::SandboxLogic;
+pub use my_room_logic::MyRoomLogic;  // 新增
+```
+
+#### Step 3：在 RoomLogicFactory 中添加映射
+
+编辑 `test_room_logic.rs` 中的 `RoomLogicFactory::create` 方法：
+
+```rust
+impl RoomLogicFactory {
+    pub fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
+        match policy_id {
+            "persistent_world" => Box::new(PersistentWorldLogic { tick_count: 0 }),
+            "disposable_match" => Box::new(DisposableMatchLogic { tick_count: 0 }),
+            "sandbox" => Box::new(SandboxLogic { tick_count: 0 }),
+            "my_room" => Box::new(MyRoomLogic { tick_count: 0 }),  // 新增
+            _ => Box::new(TestRoomLogic { tick_count: 0 }),
+        }
+    }
+}
+```
+
+#### Step 4（如需新策略）：定义策略模板
+
+编辑 `core/room_policy.rs`，添加策略方法：
+
+```rust
+pub fn my_room() -> Self {
+    Self {
+        policy_id: "my_room".to_string(),
+        max_members: 10,
+        min_start_players: 2,
+        silent_room_fps: 1,
+        idle_room_fps: 5,
+        active_room_fps: 15,
+        busy_room_fps: 30,
+        busy_room_player_threshold: 4,
+        destroy_enabled: true,
+        destroy_when_empty: true,
+        empty_ttl_secs: 60,
+        retain_state_when_empty: false,
+        offline_ttl_secs: 60,
+    }
+}
+```
+
+并在 `RoomPolicyRegistry::default()` 中注册：
+
+```rust
+impl Default for RoomPolicyRegistry {
+    fn default() -> Self {
+        let default_policy = RoomRuntimePolicy::default_match();
+        let mut policies = std::collections::HashMap::new();
+        policies.insert(default_policy.policy_id.clone(), default_policy.clone());
+        policies.insert("persistent_world".to_string(), RoomRuntimePolicy::persistent_world());
+        policies.insert("disposable_match".to_string(), RoomRuntimePolicy::disposable_match());
+        policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
+        policies.insert("my_room".to_string(), RoomRuntimePolicy::my_room());  // 新增
+
+        Self {
+            default_policy,
+            policies,
+        }
+    }
+}
+```
+
+### 19.3 关键约束
+
+- `RoomLogic trait` 的方法签名不可随意增删参数，如需 `room_id` 信息，请使用已有带 `room_id` 参数的方法（如 `on_player_offline`、`on_game_started` 等）
+- `on_player_join` 和 `on_player_leave` 只有 `player_id`，不包含 `room_id`
+- 日志标记格式：`[RoomLogic/<room_type_name>]`，便于日志过滤
+
+### 19.4 策略模板选择机制
+
+当前房间使用哪种策略，由创建房间时的 `policy_id` 决定：
+- 通过 `RoomLogicFactory.create(policy_id)` 映射到对应 RoomLogic
+- 通过 `RoomPolicyRegistry.resolve(policy_id)` 获取运行时参数
+
+后续可扩展为：从请求参数、房间名称规则、配置中心等来源动态指定 policy_id。

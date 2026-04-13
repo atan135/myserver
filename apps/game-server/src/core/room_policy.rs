@@ -53,6 +53,42 @@ impl RoomRuntimePolicy {
             offline_ttl_secs: 300,
         }
     }
+
+    pub fn disposable_match() -> Self {
+        Self {
+            policy_id: "disposable_match".to_string(),
+            max_members: 10,
+            min_start_players: 2,
+            silent_room_fps: 1,
+            idle_room_fps: 5,
+            active_room_fps: 15,
+            busy_room_fps: 30,
+            busy_room_player_threshold: 2,
+            destroy_enabled: true,
+            destroy_when_empty: true,
+            empty_ttl_secs: 60,
+            retain_state_when_empty: false,
+            offline_ttl_secs: 60,
+        }
+    }
+
+    pub fn sandbox() -> Self {
+        Self {
+            policy_id: "sandbox".to_string(),
+            max_members: 50,
+            min_start_players: 1,
+            silent_room_fps: 1,
+            idle_room_fps: 5,
+            active_room_fps: 20,
+            busy_room_fps: 30,
+            busy_room_player_threshold: 10,
+            destroy_enabled: true,
+            destroy_when_empty: false,
+            empty_ttl_secs: 300,
+            retain_state_when_empty: true,
+            offline_ttl_secs: 120,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +103,8 @@ impl Default for RoomPolicyRegistry {
         let mut policies = std::collections::HashMap::new();
         policies.insert(default_policy.policy_id.clone(), default_policy.clone());
         policies.insert("persistent_world".to_string(), RoomRuntimePolicy::persistent_world());
+        policies.insert("disposable_match".to_string(), RoomRuntimePolicy::disposable_match());
+        policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
 
         Self {
             default_policy,

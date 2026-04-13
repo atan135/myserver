@@ -2,6 +2,7 @@ mod admin_server;
 mod config;
 mod config_table;
 mod core;
+mod gameroom;
 mod gameservice;
 mod local_socket;
 mod proto;
