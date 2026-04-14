@@ -31,7 +31,7 @@
 - [ ] 聊天系统增强（禁言、过滤）
 - [ ] 好友系统
 - [ ] 成就/排行榜
-- [ ] 邮件/公告系统
+- [x] 邮件/公告系统 ✅
 - [ ] SDK 对接（支付、统计）
 
 ---
@@ -55,3 +55,8 @@
 - [x] 状态同步框架：RoomLogic 新增 `get_serialized_state()` 和 `restore_from_serialized_state()` 方法，框架层已就绪，业务层实现具体序列化
 - [x] 场景/关卡管理：RoomLogic 模块化，新增 persistent_world/disposable_match/sandbox 三种场景模板，支持策略化房间生命周期管理
 - [x] retain_state_when_empty 逻辑：RoomManager 统一处理空房清理任务，根据策略（destroy_enabled/destroy_when_empty/retain_state_when_empty/empty_ttl_secs）决定销毁时机
+- [x] 邮件通知系统
+  - mail-service (Node.js): HTTP REST API 管理邮件，支持创建/读取/标记已读
+  - Redis Pub/Sub 实现跨服务通知
+  - chat-server 订阅 Redis 频道，收到通知后推送给在线玩家
+  - MailNotifyPush (1501) 协议及 mock-client 测试支持
