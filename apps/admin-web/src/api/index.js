@@ -5,6 +5,11 @@ const api = axios.create({
   timeout: 10000
 });
 
+const _monitoringApi = axios.create({
+  baseURL: "/api/admin/monitoring",
+  timeout: 10000
+});
+
 // Add auth token to requests
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("admin_token");
@@ -73,6 +78,15 @@ export const maintenanceApi = {
     api.get("/maintenance"),
   setStatus: (enabled, reason) =>
     api.post("/maintenance", { enabled, reason })
+};
+
+export const monitoringApi = {
+  getServices: () =>
+    _monitoringApi.get("/services"),
+  getServiceMetrics: (name, window) =>
+    _monitoringApi.get(`/services/${name}/metrics`, { params: { window } }),
+  triggerArchive: () =>
+    _monitoringApi.post("/archive")
 };
 
 export default api;

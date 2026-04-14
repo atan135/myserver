@@ -37,6 +37,18 @@ const routes = [
     name: "Players",
     component: () => import("../views/Players.vue"),
     meta: { requiresAuth: true, roles: ["admin", "operator", "viewer"] }
+  },
+  {
+    path: "/monitoring",
+    name: "Monitoring",
+    component: () => import("../views/admin/Monitoring.vue"),
+    meta: { requiresAuth: true, roles: ["admin", "operator", "viewer"] }
+  },
+  {
+    path: "/monitoring/:service",
+    name: "MonitoringDetail",
+    component: () => import("../views/admin/MonitoringDetail.vue"),
+    meta: { requiresAuth: true, roles: ["admin", "operator", "viewer"] }
   }
 ];
 

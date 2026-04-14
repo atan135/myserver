@@ -29,6 +29,9 @@
             <el-menu-item index="/gm" v-if="authStore.isOperator">
               <span>GM 命令</span>
             </el-menu-item>
+            <el-menu-item index="/monitoring">
+              <span>服务监控</span>
+            </el-menu-item>
           </el-menu>
         </el-aside>
 
