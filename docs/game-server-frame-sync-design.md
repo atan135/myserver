@@ -33,7 +33,8 @@
 - 房间级动态帧率 (`silent_room_fps`, `idle_room_fps`, `active_room_fps`, `busy_room_fps`)
 - 房间生命周期策略 (`RoomRuntimePolicy`)
 - 房间运行时调度器 (`RoomManager`)
-- `RoomLogic` trait 和 `TestRoomLogic` 实现
+- `core::logic::RoomLogic` trait
+- `gameroom::GameRoomLogicFactory` 和多种 `RoomLogic` 实现
 - `FrameBundlePush` 按帧广播
 - 空房 TTL 销毁机制
 
@@ -47,7 +48,6 @@
 
 以下能力尚未完全实现或需要优化：
 
-- 多种 `RoomLogic` 实现（当前只有 `TestRoomLogic`）
 - 完整增量状态广播
 - 客户端帧率变化通知 (`RoomFrameRatePush`)
 - 断线重连后的房间状态恢复
@@ -451,22 +451,34 @@ member_count == 0 => destroy
 
 ## 12. 模块划分建议
 
-建议新增或调整这些模块：
+当前代码已经按四层目录落地，后续扩展建议继续遵守这个边界：
 
-- `room.rs`
+- `core/room/mod.rs`
   - 保留房间结构和基础状态函数
-- `room_manager.rs`
+- `core/runtime/room_manager.rs`
   - 负责房间创建、销毁、调度、fps 计算、tick task 管理
-- `room_policy.rs`
+- `core/runtime/room_policy.rs`
   - 定义房间运行策略和内置策略模板
-- `room_logic.rs`
-  - 定义 `RoomLogic` trait、逻辑工厂和 `TestRoomLogic`
+- `core/logic/room_logic.rs`
+  - 定义 `RoomLogic` trait
+- `core/logic/factory.rs`
+  - 定义 `RoomLogicFactory` trait，作为框架层与游戏层的依赖边界
+- `core/system/`
+  - 预留移动、战斗、场景等通用系统抽象
+- `gameroom/factory.rs`
+  - 放游戏侧具体 `GameRoomLogicFactory`
+- `gameroom/*/mod.rs`
+  - 放各房间类型具体实现，如 `test_room`、`persistent_world`、`disposable_match`、`sandbox`
+- `gameservice/`
+  - 放业务消息入口，当前已拆出 `room_query`
+- `gameconfig/registry.rs`
+  - 放具体游戏 CSV 表装配
 - `protocol.rs`
-  - 扩展新的帧同步消息号和 packet 编解码支持
+  - 扩展帧同步消息号和 packet 编解码支持
 - `server.rs`
   - 继续承担连接接入和消息分发，但不再直接承载房间调度主逻辑
 
-为了后续框架化，允许在 `apps/game-server/src` 下新增目录和模块，不要求继续把所有逻辑堆在单层文件中。
+后续如新增模块，应优先判断它属于“框架通用能力”还是“具体游戏接入逻辑”，避免再回到所有逻辑堆在单层文件里的状态。
 
 ## 13. 配置设计建议
 
@@ -619,171 +631,165 @@ pub default_empty_ttl_secs: u64,
 - **回放存储与播放**: 帧数据持久化，支持回放功能
 - **完整增量状态广播**: 与 game_state 序列化配合，实现状态同步模式
 
-## 19. 新增 RoomLogic 类型开发流程
+## 19. 新增房间类型开发流程
 
-当需要新增一种房间/场景类型时，需按以下步骤完成开发。
+当需要新增一种房间 / 场景类型时，建议按当前分层后的目录结构开发。
 
-### 19.1 目录结构
+### 19.1 当前目录结构
 
-```
+```text
 apps/game-server/src/
-├── gameroom/
-│   ├── mod.rs
-│   └── test_room/
-│       ├── mod.rs                      # 模块导出
-│       ├── test_room_logic.rs         # TestRoomLogic + RoomLogicFactory
-│       ├── persistent_world_logic.rs   # 示例：常驻大世界
-│       ├── disposable_match_logic.rs   # 示例：临时对局
-│       └── sandbox_logic.rs            # 示例：沙盒模式
 ├── core/
-│   ├── room_logic.rs                  # RoomLogic trait 定义
-│   └── room_policy.rs                 # 策略模板定义
+│   ├── logic/
+│   │   ├── factory.rs
+│   │   └── room_logic.rs
+│   ├── room/
+│   │   └── mod.rs
+│   ├── runtime/
+│   │   ├── room_manager.rs
+│   │   └── room_policy.rs
+│   └── system/
+├── gameroom/
+│   ├── factory.rs
+│   ├── mod.rs
+│   ├── test_room/
+│   │   └── mod.rs
+│   ├── persistent_world/
+│   │   └── mod.rs
+│   ├── disposable_match/
+│   │   └── mod.rs
+│   └── sandbox/
+│       └── mod.rs
+├── gameservice/
+│   ├── room_query/
+│   │   └── mod.rs
+│   ├── config/
+│   └── debug/
+└── gameconfig/
+    ├── mod.rs
+    └── registry.rs
 ```
 
 ### 19.2 开发步骤
 
-#### Step 1：定义 RoomLogic 实现
+#### Step 1：新增一个房间目录
 
-在 `apps/game-server/src/gameroom/test_room/` 下新建文件，如 `my_room_logic.rs`：
+例如新增 `movement_room`：
+
+```text
+apps/game-server/src/gameroom/
+└── movement_room/
+    └── mod.rs
+```
+
+在 `mod.rs` 中实现具体 `RoomLogic`：
 
 ```rust
 use tracing::info;
+
+use crate::core::logic::RoomLogic;
 use crate::core::room::PlayerInputRecord;
-use crate::core::room_logic::RoomLogic;
 
 #[derive(Default)]
-pub struct MyRoomLogic {
+pub struct MovementRoomLogic {
     pub tick_count: u64,
 }
 
-impl RoomLogic for MyRoomLogic {
-    fn on_room_created(&mut self, _room_id: &str) {
-        info!(room_id = _room_id, "[RoomLogic/my_room] room created");
+impl RoomLogic for MovementRoomLogic {
+    fn on_room_created(&mut self, room_id: &str) {
+        info!(room_id = room_id, "[RoomLogic/movement_room] room created");
     }
 
-    fn on_player_join(&mut self, _player_id: &str) {
-        info!(player_id = _player_id, "[RoomLogic/my_room] player joined");
-    }
-
-    fn on_player_leave(&mut self, _player_id: &str) {
-        info!(player_id = _player_id, "[RoomLogic/my_room] player left");
-    }
-
-    fn on_player_offline(&mut self, _room_id: &str, _player_id: &str) {
-        info!(room_id = _room_id, player_id = _player_id, "[RoomLogic/my_room] player offline");
-    }
-
-    fn on_player_online(&mut self, _room_id: &str, _player_id: &str) {
-        info!(room_id = _room_id, player_id = _player_id, "[RoomLogic/my_room] player online");
-    }
-
-    fn on_game_started(&mut self, _room_id: &str) {
-        info!(room_id = _room_id, "[RoomLogic/my_room] game started");
-    }
-
-    fn on_game_ended(&mut self, _room_id: &str) {
-        info!(room_id = _room_id, "[RoomLogic/my_room] game ended");
+    fn on_player_join(&mut self, player_id: &str) {
+        info!(player_id = player_id, "[RoomLogic/movement_room] player joined");
     }
 
     fn on_tick(&mut self, _frame_id: u32, _inputs: &[PlayerInputRecord]) {
         self.tick_count += 1;
     }
-
-    fn should_destroy(&self) -> bool {
-        false  // true 表示游戏结束后自动销毁房间
-    }
 }
 ```
 
-#### Step 2：在 test_room/mod.rs 中注册模块和导出
+#### Step 2：在 `gameroom/mod.rs` 暴露模块
 
 ```rust
-pub mod test_room_logic;
-pub mod persistent_world_logic;
-pub mod disposable_match_logic;
-pub mod sandbox_logic;
-pub mod my_room_logic;  // 新增
+pub mod movement_room;
 
-pub use test_room_logic::{RoomLogicFactory, TestRoomLogic};
-pub use persistent_world_logic::PersistentWorldLogic;
-pub use disposable_match_logic::DisposableMatchLogic;
-pub use sandbox_logic::SandboxLogic;
-pub use my_room_logic::MyRoomLogic;  // 新增
+pub use movement_room::MovementRoomLogic;
 ```
 
-#### Step 3：在 RoomLogicFactory 中添加映射
+#### Step 3：在 `gameroom/factory.rs` 中注册映射
 
-编辑 `test_room_logic.rs` 中的 `RoomLogicFactory::create` 方法：
+`core` 只持有 `RoomLogicFactory` trait，真正的映射关系由游戏层维护：
 
 ```rust
-impl RoomLogicFactory {
-    pub fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
+impl RoomLogicFactory for GameRoomLogicFactory {
+    fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
         match policy_id {
-            "persistent_world" => Box::new(PersistentWorldLogic { tick_count: 0 }),
-            "disposable_match" => Box::new(DisposableMatchLogic { tick_count: 0 }),
-            "sandbox" => Box::new(SandboxLogic { tick_count: 0 }),
-            "my_room" => Box::new(MyRoomLogic { tick_count: 0 }),  // 新增
-            _ => Box::new(TestRoomLogic { tick_count: 0 }),
+            "movement_room" => Box::new(MovementRoomLogic::default()),
+            _ => Box::new(TestRoomLogic::default()),
         }
     }
 }
 ```
 
-#### Step 4（如需新策略）：定义策略模板
+#### Step 4：如需新运行策略，编辑 `core/runtime/room_policy.rs`
 
-编辑 `core/room_policy.rs`，添加策略方法：
+新增策略模板：
 
 ```rust
-pub fn my_room() -> Self {
+pub fn movement_room() -> Self {
     Self {
-        policy_id: "my_room".to_string(),
-        max_members: 10,
-        min_start_players: 2,
+        policy_id: "movement_room".to_string(),
+        max_members: 20,
+        min_start_players: 1,
         silent_room_fps: 1,
         idle_room_fps: 5,
         active_room_fps: 15,
         busy_room_fps: 30,
-        busy_room_player_threshold: 4,
+        busy_room_player_threshold: 8,
         destroy_enabled: true,
         destroy_when_empty: true,
         empty_ttl_secs: 60,
         retain_state_when_empty: false,
         offline_ttl_secs: 60,
+        snapshot_interval_frames: 30,
     }
 }
 ```
 
-并在 `RoomPolicyRegistry::default()` 中注册：
+并注册到 `RoomPolicyRegistry::default()`。
 
-```rust
-impl Default for RoomPolicyRegistry {
-    fn default() -> Self {
-        let default_policy = RoomRuntimePolicy::default_match();
-        let mut policies = std::collections::HashMap::new();
-        policies.insert(default_policy.policy_id.clone(), default_policy.clone());
-        policies.insert("persistent_world".to_string(), RoomRuntimePolicy::persistent_world());
-        policies.insert("disposable_match".to_string(), RoomRuntimePolicy::disposable_match());
-        policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
-        policies.insert("my_room".to_string(), RoomRuntimePolicy::my_room());  // 新增
+#### Step 5：如需业务消息入口，编辑 `gameservice/`
 
-        Self {
-            default_policy,
-            policies,
-        }
-    }
-}
-```
+如果该房间类型需要专属查询、调试命令或配置接口：
+
+- 配置查询放 `gameservice/config/`
+- 调试命令放 `gameservice/debug/`
+- 房间查询或玩法业务请求按域新增目录，比如 `gameservice/movement/`
+
+不要把这些 handler 再放回 `server.rs` 或 `core/service/`。
+
+#### Step 6：如需具体配置表，编辑 `gameconfig/`
+
+如果新增玩法需要新的 CSV 表装配：
+
+- 通用 CSV runtime 仍放在 `core/config_table/`
+- 具体表装配放在 `gameconfig/registry.rs`
+- 生成代码继续由 `csv_code/` 提供
 
 ### 19.3 关键约束
 
-- `RoomLogic trait` 的方法签名不可随意增删参数，如需 `room_id` 信息，请使用已有带 `room_id` 参数的方法（如 `on_player_offline`、`on_game_started` 等）
-- `on_player_join` 和 `on_player_leave` 只有 `player_id`，不包含 `room_id`
-- 日志标记格式：`[RoomLogic/<room_type_name>]`，便于日志过滤
+- `core` 不直接 import `gameroom`、`gameservice`、`gameconfig`
+- `RoomLogic trait` 的方法签名不可随意增删参数，如需更多上下文，应优先通过框架层抽象补充，而不是直接把游戏层类型透传到 `core`
+- 日志标记格式建议保持为 `[RoomLogic/<room_type_name>]`，便于日志过滤
+- 通用移动、战斗、场景能力优先沉淀到 `core/system/`，房间逻辑只做装配和规则编排
 
-### 19.4 策略模板选择机制
+### 19.4 策略与逻辑选择机制
 
-当前房间使用哪种策略，由创建房间时的 `policy_id` 决定：
-- 通过 `RoomLogicFactory.create(policy_id)` 映射到对应 RoomLogic
-- 通过 `RoomPolicyRegistry.resolve(policy_id)` 获取运行时参数
+当前房间运行时由同一个 `policy_id` 串起两层决策：
 
-后续可扩展为：从请求参数、房间名称规则、配置中心等来源动态指定 policy_id。
+- `GameRoomLogicFactory.create(policy_id)`：决定具体使用哪种 `RoomLogic`
+- `RoomPolicyRegistry.resolve(policy_id)`：决定该房间的 fps、销毁、保活等运行参数
+
+后续如果要扩展到“房间模板 + 地图模板 + 玩法规则模板”，建议继续沿用这个方向，把选择逻辑集中在 `gameroom` 和 `core/runtime`，而不是散落在连接层。

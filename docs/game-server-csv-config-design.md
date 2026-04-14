@@ -1,6 +1,6 @@
 # game-server CSV 配置系统设计（草案）
 
-这份文档描述 `apps/game-server/csv` 下配置表的加载、代码生成、索引和热更新方案。
+这份文档描述 `apps/game-server/csv` 下配置表的加载、代码生成、索引和热更新方案，并对齐当前 `core/config_table + gameconfig` 分层实现。
 
 目标不是做一个完全动态的通用 csv 解析器，而是做一个适合游戏服长期维护的“编译期结构生成 + 运行时数据热更”系统。
 
@@ -242,10 +242,10 @@ hello:world|foo:bar
 
 ## 8. 代码生成方案
 
-建议新增一个编译期生成器，例如：
+当前实现使用编译期生成器：
 
 ```text
-apps/game-server/tools/csv_codegen
+apps/game-server/tools/csv_codegen.rs
 ```
 
 输入：
@@ -257,9 +257,8 @@ apps/game-server/tools/csv_codegen
 
 ```text
 apps/game-server/src/csv_code/mod.rs
-apps/game-server/src/csv_code/test_table_100.rs
-apps/game-server/src/csv_code/test_table_110.rs
-apps/game-server/src/csv_code/table_registry.rs
+apps/game-server/src/csv_code/testtable_100.rs
+apps/game-server/src/csv_code/testtable_110.rs
 ```
 
 ### 8.1 每张表生成内容
@@ -418,14 +417,23 @@ impl SomeTableRow {
 
 ## 12. 运行时注册中心
 
-建议新增统一注册中心，例如：
+当前实现已经把“通用 CSV runtime”和“具体游戏表装配”拆开：
+
+- `core/config_table/`
+  - 放通用 CSV 解析、trait、runtime、reload
+- `gameconfig/registry.rs`
+  - 放具体游戏的 `ConfigTables` 装配
+
+建议统一注册中心保持为强类型结构，例如：
 
 ```rust
 pub struct ConfigTables {
-    pub test_table_100: Arc<TestTable100>,
-    pub test_table_110: Arc<TestTable110>,
+    pub testtable_100: Arc<TestTable100>,
+    pub testtable_110: Arc<TestTable110>,
 }
 ```
+
+当前代码中，`ConfigTables` 已位于 `apps/game-server/src/gameconfig/registry.rs`，而不是继续放在 `src/config_table/` 下。
 
 或者后续如果表数量很多，再包装成统一管理器。
 
@@ -538,11 +546,12 @@ pub const TEST_TABLE_100_SCHEMA_SIGNATURE: &str =
 
 ## 18. 模块划分建议
 
-建议新增以下目录和模块：
+当前推荐目录结构如下：
 
 ```text
-apps/game-server/src/config_table/
+apps/game-server/src/core/config_table/
   mod.rs
+  parser.rs
   runtime.rs
   reload.rs
   traits.rs
@@ -550,18 +559,29 @@ apps/game-server/src/config_table/
 apps/game-server/src/csv_code/
   mod.rs
   ...
+
+apps/game-server/src/gameconfig/
+  mod.rs
+  registry.rs
+  generated/
+    mod.rs
 ```
 
 职责建议：
 
-- `generated_tables/`
-  - 编译期生成代码
-- `config_table/runtime.rs`
-  - 注册中心和读取入口
-- `config_table/reload.rs`
-  - 文件监听和热更新
-- `config_table/traits.rs`
-  - 统一加载 trait
+- `core/config_table/`
+  - 通用 CSV runtime、reload、trait、parser
+- `gameconfig/registry.rs`
+  - 当前游戏的 `ConfigTables` 注册中心和表装配入口
+- `gameconfig/generated/`
+  - 预留给游戏侧生成装配代码或手工聚合导出
+- `csv_code/`
+  - 编译期生成的具体表实现
+
+补充说明：
+
+- `apps/game-server/src/config_table/mod.rs` 目前仅作为兼容层 re-export，方便旧代码平滑迁移
+- 后续新增文档、代码或扩展模块时，应优先引用 `core/config_table` 和 `gameconfig` 的新结构
 
 ## 19. 统一 trait 建议
 
@@ -610,7 +630,26 @@ pub trait CsvTableLoader: Sized {
 - 跨表引用校验
 - 自动从运行时动态推断结构
 
-## 21. 关键设计结论
+## 21. 当前落地说明
+
+当前代码中的职责划分如下：
+
+- `core::config_table::ConfigTableRuntime`
+  - 负责配置表目录加载、快照读取、按文件变更热更新
+- `core::config_table::CsvTableLoader`
+  - 约束每张生成表的统一加载接口
+- `gameconfig::ConfigTables`
+  - 负责把当前游戏实际使用的表聚合成强类型注册中心
+- `csv_code::*`
+  - 负责承载编译期生成出的具体表结构、字符串池、加载逻辑和查询函数
+
+因此后续扩展时的建议是：
+
+- 新增通用 CSV 能力时，优先改 `core/config_table/`
+- 新增某个游戏具体表时，优先改 `gameconfig/registry.rs`
+- 新增 codegen 产物或生成规则时，改 `tools/csv_codegen.rs` 和 `csv_code/`
+
+## 22. 关键设计结论
 
 这套 csv 配置系统的核心结论是：
 

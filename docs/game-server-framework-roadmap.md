@@ -47,6 +47,26 @@
 - 管理面、风控、监控和测试必须视为框架组成部分，而不是后补工具
 - 优先先完成单机内的抽象收敛，再做跨节点、多服和分布式扩展
 
+## 3.1 当前已落地的分层
+
+本轮重构后，`apps/game-server/src` 已按“框架层 / 游戏层”完成第一轮整理：
+
+- `core/`
+  - 放通用运行时与抽象：`logic`、`runtime`、`room`、`service`、`system`、`config_table`
+- `gameroom/`
+  - 放具体房间类型与 `GameRoomLogicFactory`
+- `gameservice/`
+  - 放游戏侧业务消息入口，当前已拆出 `room_query`
+- `gameconfig/`
+  - 放具体游戏 CSV 表装配，和 `core/config_table` 的通用 runtime 解耦
+
+当前依赖方向约束：
+
+- `core` 只定义抽象与通用运行时，不直接依赖 `gameroom`、`gameservice`、`gameconfig`
+- `gameroom` 实现 `core::logic::RoomLogic` 和 `core::logic::RoomLogicFactory`
+- `server.rs` 在启动阶段注入 `GameRoomLogicFactory` 给 `RoomManager`
+- `gameservice` 只处理业务消息分发，不承载房间调度主逻辑
+
 ## 4. 分阶段路线图
 
 ### P0：框架骨架收敛
@@ -69,10 +89,11 @@
 建议改动模块：
 
 - `apps/game-server/src/server.rs`
-- `apps/game-server/src/room.rs`
-- 新增 `apps/game-server/src/room_manager.rs`
-- 新增 `apps/game-server/src/room_policy.rs`
-- 新增 `apps/game-server/src/room_logic.rs`
+- `apps/game-server/src/core/room/mod.rs`
+- 新增 `apps/game-server/src/core/runtime/room_manager.rs`
+- 新增 `apps/game-server/src/core/runtime/room_policy.rs`
+- 新增 `apps/game-server/src/core/logic/room_logic.rs`
+- 新增 `apps/game-server/src/core/logic/factory.rs`
 - `apps/game-server/src/main.rs`
 
 验收标准：
@@ -109,9 +130,9 @@
 
 - `packages/proto/game.proto`
 - `apps/game-server/src/protocol.rs`
-- `apps/game-server/src/room.rs`
-- `apps/game-server/src/room_manager.rs`
-- `apps/game-server/src/room_logic.rs`
+- `apps/game-server/src/core/room/mod.rs`
+- `apps/game-server/src/core/runtime/room_manager.rs`
+- `apps/game-server/src/core/logic/room_logic.rs`
 - `apps/game-server/src/server.rs`
 - `tools/mock-client`
 - `apps/simple-client/Assets/Scripts/MyServer`
@@ -151,7 +172,7 @@
 
 - `apps/game-server/src/session.rs`
 - `apps/game-server/src/server.rs`
-- `apps/game-server/src/room_manager.rs`
+- `apps/game-server/src/core/runtime/room_manager.rs`
 - `apps/game-server/src/ticket.rs`
 - `apps/auth-http/src/routes.js`
 - `apps/auth-http/src/auth-store.js`
@@ -210,9 +231,12 @@
 
 建议改动模块：
 
-- `apps/game-server/src/room_logic.rs`
-- `apps/game-server/src/room_policy.rs`
-- `apps/game-server/src/room_manager.rs`
+- `apps/game-server/src/gameroom/factory.rs`
+- `apps/game-server/src/gameroom/*/mod.rs`
+- `apps/game-server/src/core/runtime/room_policy.rs`
+- `apps/game-server/src/core/runtime/room_manager.rs`
+- `apps/game-server/src/gameservice/`
+- `apps/game-server/src/gameconfig/`
 - `apps/auth-http`
 - `tools/mock-client`
 
