@@ -1,134 +1,97 @@
 <template>
-  <div class="dashboard">
-    <el-container>
-      <el-header class="header">
-        <h2>MyServer 管理后台</h2>
-        <div class="user-info">
-          <span>{{ authStore.displayName }} ({{ authStore.role }})</span>
-          <el-button type="danger" size="small" @click="handleLogout">
-            退出登录
-          </el-button>
-        </div>
-      </el-header>
+  <AdminLayout>
+    <h3>玩家管理</h3>
 
-      <el-container>
-        <el-aside width="200px" class="sidebar">
-          <el-menu :default-active="$route.name" router>
-            <el-menu-item index="/">
-              <span>概览</span>
-            </el-menu-item>
-            <el-menu-item index="/audit-logs">
-              <span>审计日志</span>
-            </el-menu-item>
-            <el-menu-item index="/security-logs">
-              <span>安全日志</span>
-            </el-menu-item>
-            <el-menu-item index="/players">
-              <span>玩家管理</span>
-            </el-menu-item>
-            <el-menu-item index="/gm" v-if="authStore.isOperator">
-              <span>GM 命令</span>
-            </el-menu-item>
-          </el-menu>
-        </el-aside>
+    <el-card style="margin-top: 20px">
+      <el-form :inline="true" @submit.prevent="handleSearch">
+        <el-form-item label="登录名">
+          <el-input v-model="filters.loginName" placeholder="模糊搜索" clearable />
+        </el-form-item>
+        <el-form-item label="Guest ID">
+          <el-input v-model="filters.guestId" placeholder="模糊搜索" clearable />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="filters.status" placeholder="全部" clearable>
+            <el-option label="正常" value="active" />
+            <el-option label="禁用" value="disabled" />
+            <el-option label="封禁" value="banned" />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="handleSearch">查询</el-button>
+        </el-form-item>
+      </el-form>
 
-        <el-main>
-          <h3>玩家管理</h3>
+      <el-table :data="players" v-loading="loading" stripe style="margin-top: 16px">
+        <el-table-column prop="player_id" label="Player ID" width="220" />
+        <el-table-column prop="login_name" label="登录名" width="120">
+          <template #default="{ row }">
+            {{ row.login_name || "-" }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="guest_id" label="Guest ID" width="180">
+          <template #default="{ row }">
+            {{ row.guest_id || "-" }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="account_type" label="账号类型" width="100" />
+        <el-table-column prop="status" label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="statusType(row.status)">
+              {{ statusLabel(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="last_login_at" label="最后登录" width="170">
+          <template #default="{ row }">
+            {{ formatTime(row.last_login_at) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" v-if="authStore.isOperator">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.status === 'active'"
+              type="warning"
+              size="small"
+              link
+              @click="handleDisable(row)"
+            >
+              禁用
+            </el-button>
+            <el-button
+              v-if="row.status === 'disabled' || row.status === 'banned'"
+              type="success"
+              size="small"
+              link
+              @click="handleEnable(row)"
+            >
+              解禁
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
 
-          <el-card style="margin-top: 20px">
-            <el-form :inline="true" @submit.prevent="handleSearch">
-              <el-form-item label="登录名">
-                <el-input v-model="filters.loginName" placeholder="模糊搜索" clearable />
-              </el-form-item>
-              <el-form-item label="Guest ID">
-                <el-input v-model="filters.guestId" placeholder="模糊搜索" clearable />
-              </el-form-item>
-              <el-form-item label="状态">
-                <el-select v-model="filters.status" placeholder="全部" clearable>
-                  <el-option label="正常" value="active" />
-                  <el-option label="禁用" value="disabled" />
-                  <el-option label="封禁" value="banned" />
-                </el-select>
-              </el-form-item>
-              <el-form-item>
-                <el-button type="primary" @click="handleSearch">查询</el-button>
-              </el-form-item>
-            </el-form>
-
-            <el-table :data="players" v-loading="loading" stripe style="margin-top: 16px">
-              <el-table-column prop="player_id" label="Player ID" width="220" />
-              <el-table-column prop="login_name" label="登录名" width="120">
-                <template #default="{ row }">
-                  {{ row.login_name || "-" }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="guest_id" label="Guest ID" width="180">
-                <template #default="{ row }">
-                  {{ row.guest_id || "-" }}
-                </template>
-              </el-table-column>
-              <el-table-column prop="account_type" label="账号类型" width="100" />
-              <el-table-column prop="status" label="状态" width="100">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="statusType(row.status)">
-                    {{ statusLabel(row.status) }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="last_login_at" label="最后登录" width="170">
-                <template #default="{ row }">
-                  {{ formatTime(row.last_login_at) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="150" v-if="authStore.isOperator">
-                <template #default="{ row }">
-                  <el-button
-                    v-if="row.status === 'active'"
-                    type="warning"
-                    size="small"
-                    link
-                    @click="handleDisable(row)"
-                  >
-                    禁用
-                  </el-button>
-                  <el-button
-                    v-if="row.status === 'disabled' || row.status === 'banned'"
-                    type="success"
-                    size="small"
-                    link
-                    @click="handleEnable(row)"
-                  >
-                    解禁
-                  </el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-
-            <el-pagination
-              v-model:current-page="pagination.page"
-              v-model:page-size="pagination.limit"
-              :total="pagination.total"
-              :page-sizes="[20, 50, 100]"
-              layout="total, sizes, prev, pager, next"
-              style="margin-top: 16px"
-              @size-change="fetchPlayers"
-              @current-change="fetchPlayers"
-            />
-          </el-card>
-        </el-main>
-      </el-container>
-    </el-container>
-  </div>
+      <el-pagination
+        v-model:current-page="pagination.page"
+        v-model:page-size="pagination.limit"
+        :total="pagination.total"
+        :page-sizes="[20, 50, 100]"
+        layout="total, sizes, prev, pager, next"
+        style="margin-top: 16px"
+        @size-change="fetchPlayers"
+        @current-change="fetchPlayers"
+      />
+    </el-card>
+  </AdminLayout>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from "vue";
-import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
 import { playerApi } from "../api";
 
-const router = useRouter();
 const authStore = useAuthStore();
 
 const players = ref([]);
@@ -237,48 +200,7 @@ async function handleEnable(row) {
   }
 }
 
-async function handleLogout() {
-  await authStore.logout();
-  ElMessage.success("已退出登录");
-  router.push("/login");
-}
-
 onMounted(() => {
   fetchPlayers();
 });
 </script>
-
-<style scoped>
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.header h2 {
-  margin: 0;
-  font-size: 18px;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.sidebar {
-  background: #f5f7fa;
-  border-right: 1px solid #e4e7ed;
-  min-height: calc(100vh - 60px);
-}
-
-.dashboard {
-  min-height: 100vh;
-}
-
-.el-main {
-  background: #f5f7fa;
-}
-</style>

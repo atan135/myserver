@@ -1,62 +1,64 @@
 <template>
-  <div class="monitoring">
-    <div class="header">
-      <div class="header-left">
-        <el-button @click="goHome" size="small">← 返回</el-button>
-        <h2>服务监控</h2>
-      </div>
-      <div class="window-selector">
-        <el-radio-group v-model="currentWindow" size="small">
-          <el-radio-button value="1m">1分钟</el-radio-button>
-          <el-radio-button value="5m">5分钟</el-radio-button>
-          <el-radio-button value="15m">15分钟</el-radio-button>
-          <el-radio-button value="1h">1小时</el-radio-button>
-        </el-radio-group>
-      </div>
-    </div>
-
-    <div class="services-grid">
-      <el-card
-        v-for="service in services"
-        :key="service.name"
-        class="service-card"
-        :class="{ offline: service.status === 'offline' }"
-        @click="goToDetail(service.name)"
-      >
-        <template #header>
-          <div class="card-header">
-            <span class="service-name">{{ service.name }}</span>
-            <el-tag :type="service.status === 'online' ? 'success' : 'danger'" size="small">
-              {{ service.status === 'online' ? '在线' : '离线' }}
-            </el-tag>
-          </div>
-        </template>
-        <div class="card-content">
-          <div class="metric">
-            <span class="label">QPS</span>
-            <span class="value">{{ service.status === 'online' ? service.qps : '--' }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">延迟</span>
-            <span class="value" :class="{ warning: service.latency_ms > 500 }">
-              {{ service.status === 'online' ? service.latency_ms + 'ms' : '--' }}
-            </span>
-          </div>
-          <div class="metric" v-if="service.online_value !== undefined">
-            <span class="label">{{ onlineLabel(service.name) }}</span>
-            <span class="value">
-              {{ service.status === 'online' ? service.online_value : '--' }}
-            </span>
-          </div>
+  <AdminLayout>
+    <div class="monitoring">
+      <div class="header">
+        <div class="header-left">
+          <h2>服务监控</h2>
         </div>
-      </el-card>
+        <div class="window-selector">
+          <el-radio-group v-model="currentWindow" size="small">
+            <el-radio-button value="1m">1分钟</el-radio-button>
+            <el-radio-button value="5m">5分钟</el-radio-button>
+            <el-radio-button value="15m">15分钟</el-radio-button>
+            <el-radio-button value="1h">1小时</el-radio-button>
+          </el-radio-group>
+        </div>
+      </div>
+
+      <div class="services-grid">
+        <el-card
+          v-for="service in services"
+          :key="service.name"
+          class="service-card"
+          :class="{ offline: service.status === 'offline' }"
+          @click="goToDetail(service.name)"
+        >
+          <template #header>
+            <div class="card-header">
+              <span class="service-name">{{ service.name }}</span>
+              <el-tag :type="service.status === 'online' ? 'success' : 'danger'" size="small">
+                {{ service.status === 'online' ? '在线' : '离线' }}
+              </el-tag>
+            </div>
+          </template>
+          <div class="card-content">
+            <div class="metric">
+              <span class="label">QPS</span>
+              <span class="value">{{ service.status === 'online' ? service.qps : '--' }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">延迟</span>
+              <span class="value" :class="{ warning: service.latency_ms > 500 }">
+                {{ service.status === 'online' ? service.latency_ms + 'ms' : '--' }}
+              </span>
+            </div>
+            <div class="metric" v-if="service.online_value !== undefined">
+              <span class="label">{{ onlineLabel(service.name) }}</span>
+              <span class="value">
+                {{ service.status === 'online' ? service.online_value : '--' }}
+              </span>
+            </div>
+          </div>
+        </el-card>
+      </div>
     </div>
-  </div>
+  </AdminLayout>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
+import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi } from "../../api";
 
 const router = useRouter();
@@ -91,10 +93,6 @@ async function fetchServices() {
 
 function goToDetail(serviceName) {
   router.push(`/monitoring/${serviceName}?window=${currentWindow.value}`);
-}
-
-function goHome() {
-  router.push("/");
 }
 
 onMounted(() => {

@@ -1,55 +1,57 @@
 <template>
-  <div class="monitoring-detail">
-    <div class="header">
-      <div class="back-btn">
-        <el-button @click="goBack" size="default">
-          <el-icon><Back /></el-icon>
-          返回
-        </el-button>
+  <AdminLayout>
+    <div class="monitoring-detail">
+      <div class="header">
+        <div class="back-btn">
+          <el-button @click="goBack" size="default">
+            <el-icon><Back /></el-icon>
+            返回
+          </el-button>
+        </div>
+        <h2>{{ serviceName }} 监控详情</h2>
+        <div class="window-selector">
+          <el-radio-group v-model="currentWindow" size="small">
+            <el-radio-button value="1m">1分钟</el-radio-button>
+            <el-radio-button value="5m">5分钟</el-radio-button>
+            <el-radio-button value="15m">15分钟</el-radio-button>
+            <el-radio-button value="1h">1小时</el-radio-button>
+          </el-radio-group>
+        </div>
       </div>
-      <h2>{{ serviceName }} 监控详情</h2>
-      <div class="window-selector">
-        <el-radio-group v-model="currentWindow" size="small">
-          <el-radio-button value="1m">1分钟</el-radio-button>
-          <el-radio-button value="5m">5分钟</el-radio-button>
-          <el-radio-button value="15m">15分钟</el-radio-button>
-          <el-radio-button value="1h">1小时</el-radio-button>
-        </el-radio-group>
-      </div>
+
+      <el-row :gutter="16" class="summary-cards">
+        <el-col :span="8">
+          <el-card>
+            <el-statistic title="当前 QPS" :value="currentQps" />
+          </el-card>
+        </el-col>
+        <el-col :span="8">
+          <el-card>
+            <el-statistic title="当前延迟" :value="currentLatency" suffix="ms" />
+          </el-card>
+        </el-col>
+        <el-col :span="8">
+          <el-card>
+            <el-statistic :title="onlineLabel" :value="currentOnline" />
+          </el-card>
+        </el-col>
+      </el-row>
+
+      <el-card class="chart-card">
+        <template #header>
+          <span>QPS 折线图</span>
+        </template>
+        <div ref="qpsChartRef" class="chart"></div>
+      </el-card>
+
+      <el-card class="chart-card">
+        <template #header>
+          <span>延迟折线图</span>
+        </template>
+        <div ref="latencyChartRef" class="chart"></div>
+      </el-card>
     </div>
-
-    <el-row :gutter="16" class="summary-cards">
-      <el-col :span="8">
-        <el-card>
-          <el-statistic title="当前 QPS" :value="currentQps" />
-        </el-card>
-      </el-col>
-      <el-col :span="8">
-        <el-card>
-          <el-statistic title="当前延迟" :value="currentLatency" suffix="ms" />
-        </el-card>
-      </el-col>
-      <el-col :span="8">
-        <el-card>
-          <el-statistic :title="onlineLabel" :value="currentOnline" />
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-card class="chart-card">
-      <template #header>
-        <span>QPS 折线图</span>
-      </template>
-      <div ref="qpsChartRef" class="chart"></div>
-    </el-card>
-
-    <el-card class="chart-card">
-      <template #header>
-        <span>延迟折线图</span>
-      </template>
-      <div ref="latencyChartRef" class="chart"></div>
-    </el-card>
-  </div>
+  </AdminLayout>
 </template>
 
 <script setup>
@@ -57,6 +59,7 @@ import { ref, onMounted, onUnmounted, watch, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Back } from "@element-plus/icons-vue";
 import * as echarts from "echarts";
+import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi } from "../../api";
 
 const route = useRoute();
