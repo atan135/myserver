@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { badRequest, unauthorized, rateLimited, forbidden } from "./http-errors.js";
+import { assertValidGuestId, normalizeGuestId } from "./password-utils.js";
 
 function getBearerToken(req) {
   const authorization = req.headers.authorization;
@@ -196,11 +197,20 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
 
   router.post("/api/v1/auth/guest-login", async (req, res) => {
     const guestId = req.body?.guestId;
-    if (guestId !== undefined && typeof guestId !== "string") {
-      return badRequest(res, "INVALID_GUEST_ID", "guestId must be a string");
+
+    let normalizedGuestId = null;
+    if (guestId !== undefined) {
+      if (typeof guestId !== "string") {
+        return badRequest(res, "INVALID_GUEST_ID", "guestId must be a string");
+      }
+      try {
+        normalizedGuestId = assertValidGuestId(guestId);
+      } catch (err) {
+        return badRequest(res, "INVALID_GUEST_ID", err.message);
+      }
     }
 
-    const session = await authStore.createGuestSession(guestId, getClientIp(req));
+    const session = await authStore.createGuestSession(normalizedGuestId, getClientIp(req));
 
     return sendLoginSuccess(res, session, config);
   });

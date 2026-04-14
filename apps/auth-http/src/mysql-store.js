@@ -42,17 +42,32 @@ export class MySqlAuthStore {
 
     const playerId = `player-${crypto.randomUUID()}`;
 
-    await this.pool.execute(
-      `INSERT INTO player_accounts (
-         player_id,
-         guest_id,
-         account_type,
-         status,
-         created_at,
-         last_login_at
-       ) VALUES (?, ?, 'guest', 'active', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
-      [playerId, guestId]
-    );
+    try {
+      await this.pool.execute(
+        `INSERT INTO player_accounts (
+           player_id,
+           guest_id,
+           account_type,
+           status,
+           created_at,
+           last_login_at
+         ) VALUES (?, ?, 'guest', 'active', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
+        [playerId, guestId]
+      );
+    } catch (err) {
+      if (err.code === "ER_DUP_ENTRY" || err.code === "ER_NO_REFERENCED_ROW_2") {
+        // Concurrent insert: another request already created this guest account
+        const [rows] = await this.pool.execute(
+          `SELECT player_id, guest_id FROM player_accounts WHERE guest_id = ? LIMIT 1`,
+          [guestId]
+        );
+        if (rows.length > 0) {
+          await this.touchPlayerLastLogin(rows[0].player_id);
+          return { playerId: rows[0].player_id, guestId: rows[0].guest_id };
+        }
+      }
+      throw err;
+    }
 
     return {
       playerId,

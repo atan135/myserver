@@ -1,11 +1,16 @@
 import crypto from "node:crypto";
 
 const LOGIN_NAME_PATTERN = /^[a-z0-9._-]{3,64}$/;
+const GUEST_ID_PATTERN = /^[a-z0-9._-]{3,128}$/;
 
 export function normalizeLoginName(value) {
   return String(value || "")
     .trim()
     .toLowerCase();
+}
+
+export function normalizeGuestId(value) {
+  return String(value || "").trim();
 }
 
 export function assertValidLoginName(value) {
@@ -16,6 +21,16 @@ export function assertValidLoginName(value) {
     );
   }
 
+  return normalized;
+}
+
+export function assertValidGuestId(value) {
+  const normalized = normalizeGuestId(value);
+  if (!GUEST_ID_PATTERN.test(normalized)) {
+    throw new Error(
+      "guestId must be 3-128 chars and only contain a-z, 0-9, dot, underscore or dash"
+    );
+  }
   return normalized;
 }
 
