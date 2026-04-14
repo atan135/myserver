@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "update:ports": "node apps/update-ports.js",
+    "build:all": "powershell -ExecutionPolicy Bypass -File scripts/build-all.ps1",
     "dev:auth": "npm run dev --workspace auth-http",
     "start:auth": "npm run start --workspace auth-http",
     "dev:admin-api": "npm run dev --workspace admin-api",
