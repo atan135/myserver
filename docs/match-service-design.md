@@ -422,27 +422,49 @@ thiserror = "2"
 
 ## 11. 开发阶段
 
-### Phase 1: 核心框架
-- [ ] 项目结构搭建
-- [ ] proto 定义与编译
-- [ ] gRPC server 基础框架
-- [ ] 玩家状态机
+### Phase 1: 核心框架 ✅ 已完成
+- [x] 项目结构搭建
+- [x] proto 定义与编译
+- [x] gRPC server 基础框架
+- [x] 玩家状态机
 
-### Phase 2: 匹配逻辑
-- [ ] 匹配池实现
-- [ ] 简单撮合器
-- [ ] 匹配超时处理
+### Phase 2: 匹配逻辑 ✅ 已完成
+- [x] 匹配池实现
+- [x] 简单撮合器
+- [x] 匹配超时处理
 
-### Phase 3: 房间联动
-- [ ] GameServer gRPC Client
-- [ ] CreateRoomAndJoin 流程
-- [ ] PlayerJoined / PlayerLeft 回调
+### Phase 3: 房间联动 ✅ 已完成
+- [x] MatchService 接口定义
+- [x] GameServer gRPC Client（`apps/game-server/src/match_client.rs`）
+- [x] CreateRoomAndJoin 流程
+- [x] PlayerJoined / PlayerLeft 回调
 
-### Phase 4: 完善
-- [ ] MatchEventStream 推送
-- [ ] MatchStatus 查询
-- [ ] MatchCancel 取消
-- [ ] 错误码与日志完善
+### Phase 4: 完善 ⚠️ 部分完成
+- [x] MatchEventStream 推送
+- [x] MatchStatus 查询
+- [x] MatchCancel 取消
+- [x] 错误码与日志完善
+
+---
+
+## 11.1 当前实现状态
+
+### 已完成
+- `apps/match-service/` 项目结构
+- `packages/proto/match.proto` - gRPC 接口定义
+- `MatchService` 对外接口（MatchStart/Cancel/Status/EventStream）
+- `MatchInternal` 对内接口（CreateRoomAndJoin/PlayerJoined/PlayerLeft/MatchEnd）
+- 玩家状态机（Idle/Matching/Matched/InRoom）
+- 匹配池（按模式分离，人齐即开）
+- 简单撮合器（SimpleMatcher）
+- GameServer MatchClient（`apps/game-server/src/match_client.rs`）
+- gRPC Server（tonic + reflection）
+
+### 待完成
+- GameServer 作为 client 调用 MatchService
+- 实际的房间创建回调（当前为 mock）
+- 撮合定时器（当前只在 MatchStart 时尝试撮合）
+- 匹配超时清理（cleanup_timeout 未被调用）
 
 ---
 
