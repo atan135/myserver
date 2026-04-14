@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::json;
@@ -18,6 +18,7 @@ use crate::core::room_manager::RoomManager;
 use crate::core::service::{core_service, room_service};
 use crate::gameservice::test_service;
 use crate::match_client::{init_match_client, MatchClientConfig};
+use crate::metrics::METRICS;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::Session;
@@ -62,12 +63,14 @@ pub async fn run(
             max_body_len: config.max_body_len,
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
+        online_player_count: Arc::new(AtomicU64::new(0)),
     };
     let services = ServiceContext {
         config: config.clone(),
         mysql_store: mysql_store.clone(),
         room_manager: shared_state.room_manager.clone(),
         config_tables,
+        online_player_count: shared_state.online_player_count.clone(),
     };
     info!(
         addr = %config.bind_addr(),
@@ -312,11 +315,20 @@ where
         let mut body = vec![0u8; header.body_len as usize];
         reader.read_exact(&mut body).await?;
         let packet = Packet::new(header, body);
-
-        dispatch_packet(&services, &mut connection, &packet).await?;
+        let started_at = Instant::now();
+        let result = dispatch_packet(&services, &mut connection, &packet).await;
+        METRICS.record_request();
+        METRICS.record_latency(started_at.elapsed().as_millis() as u64);
+        result?;
     }
 
     room_service::handle_disconnect_cleanup(&services, &connection).await;
+
+    if connection.session.state == crate::session::SessionState::Authenticated {
+        let previous = services.online_player_count.fetch_sub(1, Ordering::Relaxed);
+        let online_players = previous.saturating_sub(1);
+        METRICS.set_online_players(online_players);
+    }
 
     drop(connection.tx);
     writer_task.await??;

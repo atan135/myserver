@@ -1,7 +1,10 @@
+use std::sync::atomic::Ordering;
+
 use redis::AsyncCommands;
 use tracing::info;
 
 use crate::core::context::{ConnectionContext, ServiceContext};
+use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
 use crate::protocol::{MessageType, Packet};
 use crate::session::SessionState;
@@ -62,8 +65,14 @@ pub async fn handle_auth(
                 return Ok(());
             }
 
+            let was_authenticated = connection.session.state == SessionState::Authenticated;
             connection.session.state = SessionState::Authenticated;
             connection.session.player_id = Some(player_id.clone());
+            if !was_authenticated {
+                let online_players =
+                    services.online_player_count.fetch_add(1, Ordering::Relaxed) + 1;
+                METRICS.set_online_players(online_players);
+            }
 
             info!(
                 session_id = connection.session.id,

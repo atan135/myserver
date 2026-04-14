@@ -1,11 +1,13 @@
 //! MatchService gRPC 实现
 
 use std::pin::Pin;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
 use crate::matcher::SharedSimpleMatcher;
+use crate::metrics::METRICS;
 use crate::proto::myserver::matchservice::{
     match_service_server::MatchService,
     match_internal_server::MatchInternal,
@@ -27,6 +29,11 @@ impl MatchServiceImpl {
     }
 }
 
+fn record_rpc_metrics(started_at: Instant) {
+    METRICS.record_request();
+    METRICS.record_latency(started_at.elapsed().as_millis() as u64);
+}
+
 #[tonic::async_trait]
 impl MatchService for MatchServiceImpl {
     /// 客户端发起匹配
@@ -34,6 +41,7 @@ impl MatchService for MatchServiceImpl {
         &self,
         request: Request<MatchStartReq>,
     ) -> Result<Response<MatchStartRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -47,7 +55,7 @@ impl MatchService for MatchServiceImpl {
 
         let result = self.matcher.start_match(player_id, mode).await;
 
-        match result {
+        let response = match result {
             Ok(match_id) => {
                 Ok(Response::new(MatchStartRes {
                     ok: true,
@@ -63,7 +71,9 @@ impl MatchService for MatchServiceImpl {
                     error_code: e.error_code().to_string(),
                 }))
             }
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// 客户端取消匹配
@@ -71,6 +81,7 @@ impl MatchService for MatchServiceImpl {
         &self,
         request: Request<MatchCancelReq>,
     ) -> Result<Response<MatchCancelRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -81,7 +92,7 @@ impl MatchService for MatchServiceImpl {
 
         let result = self.matcher.cancel_match(&req.player_id, &req.match_id).await;
 
-        match result {
+        let response = match result {
             Ok(()) => {
                 Ok(Response::new(MatchCancelRes {
                     ok: true,
@@ -95,7 +106,9 @@ impl MatchService for MatchServiceImpl {
                     error_code: e.error_code().to_string(),
                 }))
             }
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// 客户端查询匹配状态
@@ -103,17 +116,20 @@ impl MatchService for MatchServiceImpl {
         &self,
         request: Request<MatchStatusReq>,
     ) -> Result<Response<MatchStatusRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         let result = self.matcher.get_status(&req.player_id).await;
 
-        match result {
+        let response = match result {
             Ok(res) => Ok(Response::new(res)),
             Err(e) => {
                 tracing::error!(error = %e, "MatchStatus failed");
                 Err(Status::internal(e.to_string()))
             }
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// 客户端订阅匹配事件推送
@@ -123,6 +139,7 @@ impl MatchService for MatchServiceImpl {
         &self,
         request: Request<MatchEventStreamReq>,
     ) -> Result<Response<Self::MatchEventStreamStream>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
         let player_id = req.player_id.clone();
 
@@ -135,12 +152,15 @@ impl MatchService for MatchServiceImpl {
         let player_state = self.matcher.player_state().clone();
         player_state.register_stream(&player_id, tx).await;
 
-        Ok(Response::new(Box::pin(async_stream::stream! {
+        let stream: Self::MatchEventStreamStream = Box::pin(async_stream::stream! {
             let mut stream = rx;
             while let Some(event) = stream.recv().await {
                 yield Ok(event);
             }
-        })))
+        });
+        let response = Ok(Response::new(stream));
+        record_rpc_metrics(started_at);
+        response
     }
 }
 
@@ -163,6 +183,7 @@ impl MatchInternal for MatchInternalImpl {
         &self,
         request: Request<CreateRoomAndJoinReq>,
     ) -> Result<Response<CreateRoomAndJoinRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -173,10 +194,12 @@ impl MatchInternal for MatchInternalImpl {
             "CreateRoomAndJoin request"
         );
 
-        Ok(Response::new(CreateRoomAndJoinRes {
+        let response = Ok(Response::new(CreateRoomAndJoinRes {
             ok: true,
             error_code: String::new(),
-        }))
+        }));
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// GameServer 通知玩家已进入房间
@@ -184,6 +207,7 @@ impl MatchInternal for MatchInternalImpl {
         &self,
         request: Request<PlayerJoinedReq>,
     ) -> Result<Response<PlayerJoinedRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -198,7 +222,7 @@ impl MatchInternal for MatchInternalImpl {
             .player_joined(&req.match_id, &req.player_id, &req.room_id)
             .await;
 
-        match result {
+        let response = match result {
             Ok(()) => Ok(Response::new(PlayerJoinedRes {
                 ok: true,
                 error_code: String::new(),
@@ -207,7 +231,9 @@ impl MatchInternal for MatchInternalImpl {
                 ok: false,
                 error_code: e.error_code().to_string(),
             })),
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// GameServer 通知玩家已离开房间
@@ -215,6 +241,7 @@ impl MatchInternal for MatchInternalImpl {
         &self,
         request: Request<PlayerLeftReq>,
     ) -> Result<Response<PlayerLeftRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -229,7 +256,7 @@ impl MatchInternal for MatchInternalImpl {
             .player_left(&req.match_id, &req.player_id, &req.reason)
             .await;
 
-        match result {
+        let response = match result {
             Ok(should_abort) => Ok(Response::new(PlayerLeftRes {
                 ok: true,
                 match_should_abort: should_abort,
@@ -240,7 +267,9 @@ impl MatchInternal for MatchInternalImpl {
                 match_should_abort: false,
                 error_code: e.error_code().to_string(),
             })),
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 
     /// GameServer 通知对局结束
@@ -248,6 +277,7 @@ impl MatchInternal for MatchInternalImpl {
         &self,
         request: Request<MatchEndReq>,
     ) -> Result<Response<MatchEndRes>, Status> {
+        let started_at = Instant::now();
         let req = request.into_inner();
 
         info!(
@@ -262,7 +292,7 @@ impl MatchInternal for MatchInternalImpl {
             .match_end(&req.match_id, &req.room_id, &req.reason)
             .await;
 
-        match result {
+        let response = match result {
             Ok(()) => Ok(Response::new(MatchEndRes {
                 ok: true,
                 error_code: String::new(),
@@ -271,6 +301,8 @@ impl MatchInternal for MatchInternalImpl {
                 ok: false,
                 error_code: e.error_code().to_string(),
             })),
-        }
+        };
+        record_rpc_metrics(started_at);
+        response
     }
 }

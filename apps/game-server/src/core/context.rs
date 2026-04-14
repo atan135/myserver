@@ -22,6 +22,7 @@ pub struct ServiceContext {
     pub mysql_store: MySqlAuditStore,
     pub room_manager: SharedRoomManager,
     pub config_tables: ConfigTableRuntime,
+    pub online_player_count: Arc<AtomicU64>,
 }
 
 pub struct ConnectionContext {
@@ -35,6 +36,7 @@ pub struct ServerSharedState {
     pub room_manager: SharedRoomManager,
     pub runtime_config: SharedRuntimeConfig,
     pub connection_count: Arc<AtomicU64>,
+    pub online_player_count: Arc<AtomicU64>,
 }
 
 impl ConnectionContext {

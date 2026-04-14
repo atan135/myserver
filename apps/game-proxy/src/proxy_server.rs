@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional, ReadBuf};
 use tokio::net::TcpStream as TokioTcpStream;
@@ -9,6 +10,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::metrics::METRICS;
 use crate::route_store::{ProxyRouteStore, UpstreamRoute, UpstreamState};
 use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
@@ -250,10 +252,14 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         return Err(Box::new(std::io::Error::other("selected upstream is not active")));
     }
 
+    let connect_started_at = Instant::now();
     let mut upstream = connect_upstream(&route).await?;
+    METRICS.record_request();
+    METRICS.record_latency(connect_started_at.elapsed().as_millis() as u64);
     session.upstream_server_id = Some(route.server_id.clone());
     session.state = ProxySessionState::Proxying;
-    connection_count.fetch_add(1, Ordering::Relaxed);
+    let connections = connection_count.fetch_add(1, Ordering::Relaxed) + 1;
+    METRICS.set_connections(connections);
 
     info!(
         session_id = session.id,
@@ -264,7 +270,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     );
 
     let result = copy_bidirectional(&mut client_stream, &mut upstream).await;
-    connection_count.fetch_sub(1, Ordering::Relaxed);
+    let previous = connection_count.fetch_sub(1, Ordering::Relaxed);
+    METRICS.set_connections(previous.saturating_sub(1));
     session.state = ProxySessionState::Closed;
 
     match result {

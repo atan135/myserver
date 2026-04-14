@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::chat_store::{ChatGroup, ChatMessage};
 use crate::chat_server::MessageType;
+use crate::metrics::METRICS;
 use crate::protocol::{encode_body, OutboundMessage, Packet};
 use crate::proto::chat::{
     ChatGroupReq, ChatGroupRes, ChatHistoryReq, ChatHistoryRes, ChatPrivateReq, ChatPrivateRes,
@@ -522,11 +523,21 @@ pub async fn register_session(
     player_id: String,
     sender: mpsc::UnboundedSender<OutboundMessage>,
 ) {
-    sessions.write().await.insert(player_id, sender);
+    let online_players = {
+        let mut guard = sessions.write().await;
+        guard.insert(player_id, sender);
+        guard.len() as u64
+    };
+    METRICS.set_online_players(online_players);
 }
 
 pub async fn unregister_session(sessions: &ChatSessionMap, player_id: &str) {
-    sessions.write().await.remove(player_id);
+    let online_players = {
+        let mut guard = sessions.write().await;
+        guard.remove(player_id);
+        guard.len() as u64
+    };
+    METRICS.set_online_players(online_players);
 }
 
 // ============================================================

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::config::ModeConfig;
+use crate::metrics::METRICS;
 use crate::state::{new_player_state_store, SharedPlayerState};
 
 use super::candidate::MatchCandidate;
@@ -53,6 +54,12 @@ impl Default for MatchPool {
 }
 
 impl MatchPool {
+    fn total_candidates_from_pools(pools: &HashMap<String, ModePool>) -> u64 {
+        pools.values()
+            .map(|pool| pool.candidates.len() as u64)
+            .sum()
+    }
+
     pub fn new(player_state: SharedPlayerState) -> Self {
         Self {
             pools: RwLock::new(HashMap::new()),
@@ -94,22 +101,29 @@ impl MatchPool {
                 candidates: Vec::new(),
             },
         );
+        METRICS.set_pool_size(Self::total_candidates_from_pools(&pools));
     }
 
     /// 添加候选人到匹配池
     pub async fn add_candidate(&self, candidate: MatchCandidate) {
         let mut pools = self.pools.write().await;
+        let mut updated = None;
         if let Some(pool) = pools.get_mut(&candidate.mode) {
             let count_before = pool.candidates.len();
             pool.candidates.push(candidate.clone());
             let count_after = pool.candidates.len();
+            updated = Some((count_before, count_after, pool.config.total_size));
+        }
+
+        if let Some((count_before, count_after, required)) = updated {
+            METRICS.set_pool_size(Self::total_candidates_from_pools(&pools));
             tracing::info!(
                 mode = %candidate.mode,
                 player_id = %candidate.player_id,
                 match_id = %candidate.match_id,
                 count_before = count_before,
                 count_after = count_after,
-                required = pool.config.total_size,
+                required = required,
                 "candidate added to pool"
             );
         }
@@ -118,18 +132,23 @@ impl MatchPool {
     /// 从匹配池移除候选人
     pub async fn remove_candidate(&self, player_id: &str, mode: &str) -> Option<MatchCandidate> {
         let mut pools = self.pools.write().await;
+        let mut removed = None;
         if let Some(pool) = pools.get_mut(mode) {
             if let Some(pos) = pool.candidates.iter().position(|c| c.player_id == *player_id) {
-                return Some(pool.candidates.remove(pos));
+                removed = Some(pool.candidates.remove(pos));
             }
         }
-        None
+        if removed.is_some() {
+            METRICS.set_pool_size(Self::total_candidates_from_pools(&pools));
+        }
+        removed
     }
 
     /// 尝试撮合
     /// 返回匹配的候选人列表，如果人数不够返回 None
     pub async fn try_match(&self, mode: &str) -> Option<Vec<MatchCandidate>> {
         let mut pools = self.pools.write().await;
+        let mut matched = None;
         if let Some(pool) = pools.get_mut(mode) {
             let total_size = pool.config.total_size;
 
@@ -139,11 +158,13 @@ impl MatchPool {
             // 检查是否有足够的候选人
             if pool.candidates.len() >= total_size {
                 // 取出足够的候选人
-                let matched: Vec<MatchCandidate> = pool.candidates.drain(..total_size).collect();
-                return Some(matched);
+                matched = Some(pool.candidates.drain(..total_size).collect());
             }
         }
-        None
+        if matched.is_some() {
+            METRICS.set_pool_size(Self::total_candidates_from_pools(&pools));
+        }
+        matched
     }
 
     /// 创建匹配任务
@@ -199,6 +220,7 @@ impl MatchPool {
             pool.candidates.retain(|c| !c.is_timeout());
             removed.extend(to_remove);
         }
+        METRICS.set_pool_size(Self::total_candidates_from_pools(&pools));
 
         removed
     }

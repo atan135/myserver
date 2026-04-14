@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -7,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
+use crate::metrics::METRICS;
 use crate::protocol::{encode_packet, parse_header, OutboundMessage, Packet, HEADER_LEN};
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
 use crate::ticket::verify_ticket;
@@ -120,13 +123,18 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
 
     // === 认证阶段 ===
+    let auth_started_at = Instant::now();
     let player_id = match read_auth_request(&mut reader, &mut writer, &config).await {
         Ok(id) => id,
         Err(e) => {
+            METRICS.record_request();
+            METRICS.record_latency(auth_started_at.elapsed().as_millis() as u64);
             warn!(peer = %peer_addr, error = %e, "auth failed");
             return Ok(());
         }
     };
+    METRICS.record_request();
+    METRICS.record_latency(auth_started_at.elapsed().as_millis() as u64);
 
     info!(peer = %peer_addr, player_id = %player_id, "player authenticated");
 
@@ -192,6 +200,7 @@ where
         };
 
         // 处理聊天消息
+        let started_at = Instant::now();
         match msg_type {
             MessageType::ChatPrivateReq => {
                 if let Err(e) = chat_service::handle_chat_private(
@@ -269,6 +278,8 @@ where
                 warn!(peer = %peer_addr, msg_type = ?msg_type, "unsupported message type");
             }
         }
+        METRICS.record_request();
+        METRICS.record_latency(started_at.elapsed().as_millis() as u64);
     }
 
     // 注销聊天会话

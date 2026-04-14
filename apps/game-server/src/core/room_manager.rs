@@ -11,6 +11,7 @@ use crate::core::room::{MemberRole, OutboundMessage, PlayerInputRecord, Room, Ro
 use crate::gameroom::RoomLogicFactory;
 use crate::core::room_policy::RoomPolicyRegistry;
 use crate::match_client::SharedMatchClient;
+use crate::metrics::METRICS;
 use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
 use crate::protocol::{MessageType, encode_body};
 
@@ -150,6 +151,8 @@ impl RoomManager {
                         }
                     }
                     rooms.lock().await.remove(&room_id);
+                    let room_count = rooms.lock().await.len() as u64;
+                    METRICS.set_room_count(room_count);
                     info!(room_id = room_id, "room destroyed by cleanup task");
                 }
             }
@@ -171,29 +174,33 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy().clone();
+        {
+            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
+                let mut logic = self.logic_factory.create(&default_policy.policy_id);
+                logic.on_room_created(room_id);
+                info!(
+                    room_id = room_id,
+                    match_id = match_id,
+                    mode = mode,
+                    "matched room created"
+                );
+                let mut room = Room::new(
+                    room_id.to_string(),
+                    player_ids.first().cloned().unwrap_or_default(),
+                    default_policy.policy_id.clone(),
+                    logic,
+                );
+                room.set_match_id(match_id.to_string());
+                room
+            });
 
-        let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-            let mut logic = self.logic_factory.create(&default_policy.policy_id);
-            logic.on_room_created(room_id);
-            info!(
-                room_id = room_id,
-                match_id = match_id,
-                mode = mode,
-                "matched room created"
-            );
-            let mut room = Room::new(
-                room_id.to_string(),
-                player_ids.first().cloned().unwrap_or_default(),
-                default_policy.policy_id.clone(),
-                logic,
-            );
-            room.set_match_id(match_id.to_string());
-            room
-        });
-
-        runtimes
-            .entry(room_id.to_string())
-            .or_insert_with(RoomRuntime::default);
+            let _ = room;
+            runtimes
+                .entry(room_id.to_string())
+                .or_insert_with(RoomRuntime::default);
+        }
+        let room_count = rooms.len() as u64;
+        METRICS.set_room_count(room_count);
 
         let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
         let snapshot = room.snapshot();
@@ -280,57 +287,60 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy().clone();
-        let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-            let mut logic = self.logic_factory.create(&default_policy.policy_id);
-            logic.on_room_created(room_id);
-            info!(
-                room_id = room_id,
-                owner_player_id = player_id,
-                policy_id = %default_policy.policy_id,
-                "room created"
-            );
-            Room::new(
-                room_id.to_string(),
+        let (snapshot, match_id) = {
+            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
+                let mut logic = self.logic_factory.create(&default_policy.policy_id);
+                logic.on_room_created(room_id);
+                info!(
+                    room_id = room_id,
+                    owner_player_id = player_id,
+                    policy_id = %default_policy.policy_id,
+                    "room created"
+                );
+                Room::new(
+                    room_id.to_string(),
+                    player_id.to_string(),
+                    default_policy.policy_id.clone(),
+                    logic,
+                )
+            });
+
+            let policy = self.policies.resolve(&room.policy_id);
+            if room.phase == RoomPhase::InGame && !room.members.contains_key(player_id) {
+                return Err("ROOM_ALREADY_IN_GAME");
+            }
+
+            if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+                return Err("ROOM_FULL");
+            }
+
+            let is_new_member = !room.members.contains_key(player_id);
+            room.members.insert(
                 player_id.to_string(),
-                default_policy.policy_id.clone(),
-                logic,
-            )
-        });
+                RoomMemberState {
+                    player_id: player_id.to_string(),
+                    ready: false,
+                    sender,
+                    offline: false,
+                    offline_since: None,
+                    role,
+                },
+            );
 
-        let policy = self.policies.resolve(&room.policy_id);
-        if room.phase == RoomPhase::InGame && !room.members.contains_key(player_id) {
-            return Err("ROOM_ALREADY_IN_GAME");
-        }
+            if is_new_member {
+                room.update_activity();
+                room.clear_empty();
+                room.logic.on_player_join(player_id);
+            }
 
-        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
-            return Err("ROOM_FULL");
-        }
+            runtimes
+                .entry(room_id.to_string())
+                .or_insert_with(RoomRuntime::default);
 
-        let is_new_member = !room.members.contains_key(player_id);
-        room.members.insert(
-            player_id.to_string(),
-            RoomMemberState {
-                player_id: player_id.to_string(),
-                ready: false,
-                sender,
-                offline: false,
-                offline_since: None,
-                role,
-            },
-        );
-
-        if is_new_member {
-            room.update_activity();
-            room.clear_empty();
-            room.logic.on_player_join(player_id);
-        }
-
-        runtimes
-            .entry(room_id.to_string())
-            .or_insert_with(RoomRuntime::default);
-
-        let snapshot = room.snapshot();
-        let match_id = room.match_id.clone();
+            (room.snapshot(), room.match_id.clone())
+        };
+        let room_count = rooms.len() as u64;
+        METRICS.set_room_count(room_count);
         drop(rooms);
         drop(runtimes);
 
@@ -478,62 +488,68 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy().clone();
-        let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-            let mut logic = self.logic_factory.create(&default_policy.policy_id);
-            logic.on_room_created(room_id);
-            info!(
-                room_id = room_id,
-                owner_player_id = player_id,
-                policy_id = %default_policy.policy_id,
-                "room created for observer"
-            );
-            Room::new(
-                room_id.to_string(),
+        let (snapshot, current_frame_id, recent_inputs) = {
+            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
+                let mut logic = self.logic_factory.create(&default_policy.policy_id);
+                logic.on_room_created(room_id);
+                info!(
+                    room_id = room_id,
+                    owner_player_id = player_id,
+                    policy_id = %default_policy.policy_id,
+                    "room created for observer"
+                );
+                Room::new(
+                    room_id.to_string(),
+                    player_id.to_string(),
+                    default_policy.policy_id.clone(),
+                    logic,
+                )
+            });
+
+            let policy = self.policies.resolve(&room.policy_id);
+            if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+                return Err("ROOM_FULL");
+            }
+
+            let is_new_member = !room.members.contains_key(player_id);
+            room.members.insert(
                 player_id.to_string(),
-                default_policy.policy_id.clone(),
-                logic,
-            )
-        });
+                RoomMemberState {
+                    player_id: player_id.to_string(),
+                    ready: false,
+                    sender,
+                    offline: false,
+                    offline_since: None,
+                    role: MemberRole::Observer,
+                },
+            );
 
-        let policy = self.policies.resolve(&room.policy_id);
-        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
-            return Err("ROOM_FULL");
-        }
+            if is_new_member {
+                room.update_activity();
+                room.clear_empty();
+                room.logic.on_player_join(player_id);
+            }
 
-        let is_new_member = !room.members.contains_key(player_id);
-        room.members.insert(
-            player_id.to_string(),
-            RoomMemberState {
-                player_id: player_id.to_string(),
-                ready: false,
-                sender,
-                offline: false,
-                offline_since: None,
-                role: MemberRole::Observer,
-            },
-        );
+            runtimes
+                .entry(room_id.to_string())
+                .or_insert_with(RoomRuntime::default);
 
-        if is_new_member {
-            room.update_activity();
-            room.clear_empty();
-            room.logic.on_player_join(player_id);
-        }
+            let snapshot = room.snapshot();
+            let current_frame_id = room.current_frame;
+            let recent_inputs = room
+                .get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
+                .iter()
+                .map(|input| FrameInput {
+                    player_id: input.player_id.clone(),
+                    action: input.action.clone(),
+                    payload_json: input.payload_json.clone(),
+                })
+                .collect();
 
-        runtimes
-            .entry(room_id.to_string())
-            .or_insert_with(RoomRuntime::default);
-
-        let snapshot = room.snapshot();
-        let current_frame_id = room.current_frame;
-        let recent_inputs = room
-            .get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
-            .iter()
-            .map(|input| FrameInput {
-                player_id: input.player_id.clone(),
-                action: input.action.clone(),
-                payload_json: input.payload_json.clone(),
-            })
-            .collect();
+            (snapshot, current_frame_id, recent_inputs)
+        };
+        let room_count = rooms.len() as u64;
+        METRICS.set_room_count(room_count);
 
         info!(
             room_id = room_id,
