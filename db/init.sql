@@ -116,3 +116,15 @@ CREATE TABLE IF NOT EXISTS room_event_logs (
   KEY idx_room_event_logs_event_type (event_type),
   KEY idx_room_event_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS metrics_archive (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  service_name VARCHAR(64) NOT NULL,
+  bucket_time INT UNSIGNED NOT NULL COMMENT '5秒桶时间戳（秒级）',
+  qps INT UNSIGNED NOT NULL DEFAULT 0,
+  latency_ms INT UNSIGNED NOT NULL DEFAULT 0,
+  online_value INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'online_sessions / online_players / connections 等',
+  extra JSON NULL COMMENT '服务特有字段',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_metrics_archive_service_time (service_name, bucket_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
