@@ -11,7 +11,7 @@
 - [x] 帧同步实现（lockstep） ✅ 第二阶段已完成
 - [x] 状态同步实现（state sync） ✅ 框架就绪（game_state 字段已定义，业务层实现序列化逻辑）
 - [ ] 延迟补偿算法 ⚠️ 暂不处理，详见 `docs/network-lag-compensation-design.md`
-- [ ] 房间匹配系统（matchmaking）
+- [x] 房间匹配系统（matchmaking） ✅
 - [x] 观战/OB系统 ✅ 已集成到帧同步 Phase 2
 
 ## 运维支撑
@@ -41,6 +41,10 @@
 ---
 
 ## 已完成
+- [x] 房间匹配系统（matchmaking）
+  - MatchService 与 GameServer 的 gRPC 通信
+  - 支持创建房间并加入、加入已有房间等匹配场景
+  - mock-client 集成测试场景
 - [x] game-server 帧同步第三阶段：支持观战者和断线重连
   - 新增 `MemberRole` 枚举区分 Player/Observer
   - 新增 `RoomJoinAsObserverReq/Res` 观战者加入协议
