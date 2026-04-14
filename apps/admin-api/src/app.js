@@ -5,18 +5,24 @@ import { configureLogger, log } from "./logger.js";
 import { createMySqlPool } from "./mysql-client.js";
 import { AdminStore } from "./admin-store.js";
 import { GameAdminClient } from "./game-admin-client.js";
+import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
+import { createMetricsCollector } from "./metrics.js";
 
 export async function createApp() {
   const config = getConfig();
   configureLogger(config);
 
+  const redis = await createRedisClient(config);
   const pool = await createMySqlPool(config);
   const adminStore = new AdminStore(pool);
   const gameAdminClient = new GameAdminClient(config);
 
   // Ensure initial admin exists
   await adminStore.ensureInitialAdmin(config);
+
+  // Create and start metrics collector
+  const metrics = createMetricsCollector(redis, "admin-api", config.redisKeyPrefix || "");
 
   const app = express();
   app.disable("x-powered-by");
@@ -30,7 +36,10 @@ export async function createApp() {
     next();
   });
 
-  app.use(createRoutes(config, adminStore, gameAdminClient));
+  // Metrics middleware - track QPS and latency
+  app.use(metrics.middleware());
+
+  app.use(createRoutes(config, adminStore, gameAdminClient, redis, pool));
 
   app.use((req, res) => {
     res.status(404).json({ ok: false, error: "NOT_FOUND" });
@@ -41,5 +50,5 @@ export async function createApp() {
     res.status(500).json({ ok: false, error: "INTERNAL_ERROR" });
   });
 
-  return { app, config, pool };
+  return { app, config, pool, redis, metrics };
 }

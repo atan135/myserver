@@ -23,6 +23,8 @@ export function getConfig() {
     logEnableConsole: parseBoolean(process.env.LOG_ENABLE_CONSOLE, true),
     logEnableFile: parseBoolean(process.env.LOG_ENABLE_FILE, true),
     logDir: process.env.LOG_DIR || "logs/admin-api",
+    redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
+    redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
     mysqlUrl: process.env.MYSQL_URL || "mysql://root:password@127.0.0.1:3306/myserver_auth",
     mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",

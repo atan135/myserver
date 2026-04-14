@@ -11,7 +11,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { app, config, redis, mysqlPool, registryClient } = appContext;
+  const { app, config, redis, mysqlPool, registryClient, metrics } = appContext;
 
   // Register service to Redis
   try {
@@ -24,6 +24,13 @@ async function main() {
   // Register shutdown handlers
   const shutdown = async (signal) => {
     log("info", "shutdown.start", { signal });
+
+    // Stop metrics reporting
+    try {
+      await metrics.stop();
+    } catch (error) {
+      log("error", "shutdown.metrics_stop_failed", { error: error.message });
+    }
 
     registryClient.stopHeartbeat();
 

@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import crypto from "node:crypto";
 
 import { badRequest, unauthorized, forbidden, notFound } from "./http-errors.js";
+import { createMonitoringRoutes } from "./routes/monitoring.js";
 
 function getClientIp(req) {
   const forwardedFor = req.headers["x-forwarded-for"];
@@ -18,8 +19,11 @@ function getTokenFromHeader(req) {
   return auth.slice("Bearer ".length).trim();
 }
 
-export function createRoutes(config, adminStore, gameAdminClient) {
+export function createRoutes(config, adminStore, gameAdminClient, redis, mysqlPool) {
   const router = Router();
+
+  // Mount monitoring routes (no auth required for now)
+  router.use("/api/admin/monitoring", createMonitoringRoutes(redis, mysqlPool));
 
   // ============================================================
   // Public Routes

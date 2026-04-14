@@ -8,6 +8,7 @@ import { RegistryClient } from "./registry-client.js";
 import { PubSubClient } from "./pubsub-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
+import { createMetricsCollector } from "./metrics.js";
 
 export async function createApp() {
   const config = getConfig();
@@ -26,6 +27,9 @@ export async function createApp() {
   const pubsubClient = new PubSubClient(redis);
   const registryClient = new RegistryClient(redis, config);
 
+  // Create and start metrics collector
+  const metrics = createMetricsCollector(redis, "mail-service", "");
+
   const app = express();
 
   app.disable("x-powered-by");
@@ -38,6 +42,9 @@ export async function createApp() {
     });
     next();
   });
+
+  // Metrics middleware - track QPS and latency
+  app.use(metrics.middleware());
 
   app.use(createRoutes(config, mailStore, pubsubClient));
 
@@ -59,5 +66,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis, mysqlPool, registryClient };
+  return { app, config, redis, mysqlPool, registryClient, metrics };
 }

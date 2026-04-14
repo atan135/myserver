@@ -9,6 +9,7 @@ import { MySqlAuthStore } from "./mysql-store.js";
 import { RateLimiter, AccountLockout } from "./rate-limiter.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
+import { createMetricsCollector } from "./metrics.js";
 
 export async function createApp() {
   const config = getConfig();
@@ -30,6 +31,9 @@ export async function createApp() {
   const accountLockout = new AccountLockout(redis, config);
   const app = express();
 
+  // Create and start metrics collector
+  const metrics = createMetricsCollector(redis, "auth-http", config.redisKeyPrefix || "");
+
   app.disable("x-powered-by");
   app.use(express.json({ limit: "64kb" }));
 
@@ -40,6 +44,9 @@ export async function createApp() {
     });
     next();
   });
+
+  // Metrics middleware - track QPS and latency
+  app.use(metrics.middleware());
 
   app.use(createRoutes(config, authStore, gameAdminClient, rateLimiter, accountLockout, mysqlStore));
 
@@ -61,5 +68,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis, mysqlPool };
+  return { app, config, redis, mysqlPool, metrics };
 }
