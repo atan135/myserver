@@ -4,9 +4,9 @@ use tracing::info;
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
 use crate::pb::{
-    PlayerInputReq, PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq,
-    RoomJoinAsObserverRes, RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes,
-    RoomReconnectReq, RoomReconnectRes, RoomStartRes,
+    CreateMatchedRoomReq, CreateMatchedRoomRes, PlayerInputReq, PlayerInputRes, RoomEndReq,
+    RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes, RoomJoinReq, RoomJoinRes,
+    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq, RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -774,6 +774,131 @@ pub async fn handle_join_as_observer(
                     Some(&player_id),
                     None,
                     "observer_join_failed",
+                    None,
+                    0,
+                    Some(json!({ "errorCode": error_code, "seq": packet.header.seq })),
+                )
+                .await;
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_create_matched_room(
+    services: &ServiceContext,
+    connection: &mut ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet.decode_body::<CreateMatchedRoomReq>("INVALID_CREATE_MATCHED_ROOM_BODY") {
+        Ok(value) => value,
+        Err(error_code) => {
+            connection.queue_error(packet.header.seq, error_code, "invalid create matched room body")?;
+            return Ok(());
+        }
+    };
+
+    let CreateMatchedRoomReq {
+        match_id,
+        room_id,
+        player_ids,
+        mode,
+    } = request;
+
+    info!(
+        session_id = connection.session.id,
+        player_id = %player_id,
+        match_id = %match_id,
+        room_id = %room_id,
+        player_ids = ?player_ids,
+        mode = %mode,
+        "handle_create_matched_room"
+    );
+
+    // Verify the player is in the player_ids list
+    if !player_ids.contains(&player_id) {
+        connection.queue_message(
+            MessageType::CreateMatchedRoomRes,
+            packet.header.seq,
+            CreateMatchedRoomRes {
+                ok: false,
+                room_id: room_id.clone(),
+                error_code: "PLAYER_NOT_IN_MATCH".to_string(),
+                snapshot: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    // Use the first player as the owner
+    let owner_player_id = player_ids.first().cloned().unwrap_or_default();
+
+    // Create the matched room via RoomManager
+    match services
+        .room_manager
+        .create_matched_room(&match_id, &room_id, &player_ids, &mode)
+        .await
+    {
+        Ok(snapshot) => {
+            // Set the connection's room_id to the matched room
+            connection.session.room_id = Some(room_id.clone());
+
+            connection.queue_message(
+                MessageType::CreateMatchedRoomRes,
+                packet.header.seq,
+                CreateMatchedRoomRes {
+                    ok: true,
+                    room_id: room_id.clone(),
+                    error_code: String::new(),
+                    snapshot: Some(snapshot.clone()),
+                },
+            )?;
+
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    Some(&owner_player_id),
+                    "matched_room_created",
+                    Some(&snapshot.state),
+                    snapshot.members.len(),
+                    Some(json!({
+                        "seq": packet.header.seq,
+                        "matchId": match_id,
+                        "mode": mode,
+                        "playerCount": player_ids.len()
+                    })),
+                )
+                .await;
+
+            services
+                .room_manager
+                .broadcast_snapshot(&room_id, "matched_room_created", snapshot)
+                .await?;
+        }
+        Err(error_code) => {
+            connection.queue_message(
+                MessageType::CreateMatchedRoomRes,
+                packet.header.seq,
+                CreateMatchedRoomRes {
+                    ok: false,
+                    room_id: room_id.clone(),
+                    error_code: error_code.to_string(),
+                    snapshot: None,
+                },
+            )?;
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    None,
+                    "matched_room_create_failed",
                     None,
                     0,
                     Some(json!({ "errorCode": error_code, "seq": packet.header.seq })),

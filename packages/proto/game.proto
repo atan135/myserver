@@ -178,6 +178,20 @@ message RoomMemberOfflinePush {
   bool offline = 3;
 }
 
+message CreateMatchedRoomReq {
+  string match_id = 1;
+  string room_id = 2;
+  repeated string player_ids = 3;
+  string mode = 4;
+}
+
+message CreateMatchedRoomRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  RoomSnapshot snapshot = 4;
+}
+
 message ErrorRes {
   string error_code = 1;
   string message = 2;

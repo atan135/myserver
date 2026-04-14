@@ -17,6 +17,7 @@ use crate::core::room::OutboundMessage;
 use crate::core::room_manager::RoomManager;
 use crate::core::service::{core_service, room_service};
 use crate::gameservice::test_service;
+use crate::match_client::{init_match_client, MatchClientConfig};
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::Session;
@@ -46,8 +47,16 @@ pub async fn run(
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
     let local_socket_listener = crate::local_socket::create_listener(&config.local_socket_name)?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
+
+    // Initialize MatchClient for communicating with MatchService
+    let match_client = crate::match_client::create_match_client_shared();
+    let match_client_config = MatchClientConfig::default();
+    if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
+        tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
+    }
+
     let shared_state = ServerSharedState {
-        room_manager: Arc::new(RoomManager::new()),
+        room_manager: Arc::new(RoomManager::with_match_client(match_client)),
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             max_body_len: config.max_body_len,
@@ -349,6 +358,7 @@ async fn dispatch_packet(
         Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
         Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,
         Some(MessageType::RoomJoinAsObserverReq) => room_service::handle_join_as_observer(services, connection, packet).await,
+        Some(MessageType::CreateMatchedRoomReq) => room_service::handle_create_matched_room(services, connection, packet).await,
         Some(_) => {
             connection.queue_error(
                 packet.header.seq,

@@ -5,9 +5,10 @@ mod core;
 mod gameroom;
 mod gameservice;
 mod local_socket;
+mod match_client;
 mod proto;
-pub use proto::admin as admin_pb;
-pub use proto::game as pb;
+pub use proto::myserver::admin as admin_pb;
+pub use proto::myserver::game as pb;
 #[allow(dead_code)]
 mod csv_code;
 mod mysql_store;

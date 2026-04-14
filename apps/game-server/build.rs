@@ -2,7 +2,6 @@
 mod csv_codegen;
 
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 
 fn main() {
@@ -16,16 +15,20 @@ fn main() {
     println!("cargo:rerun-if-changed=csv");
     println!("cargo:rerun-if-changed=../../packages/proto/game.proto");
     println!("cargo:rerun-if-changed=../../packages/proto/admin.proto");
+    println!("cargo:rerun-if-changed=../../packages/proto/match.proto");
 
     csv_codegen::generate(&csv_dir, &csv_out_dir).expect("failed to generate csv table code");
 
-    fs::create_dir_all(&proto_out_dir).expect("failed to create proto output dir");
-
-    let mut config = prost_build::Config::new();
-    config.out_dir(&proto_out_dir);
-    config
-        .compile_protos(
-            &["../../packages/proto/game.proto", "../../packages/proto/admin.proto"],
+    // Use tonic_build for generating gRPC client code
+    tonic_build::configure()
+        .build_client(true)
+        .out_dir(&proto_out_dir)
+        .compile(
+            &[
+                "../../packages/proto/game.proto",
+                "../../packages/proto/admin.proto",
+                "../../packages/proto/match.proto",
+            ],
             &["../../packages/proto"],
         )
         .expect("failed to compile protobuf files");

@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package myserver.matchservice;
+
+// ============================================================
+// MatchService 对外接口（客户端调用）
+// ============================================================
+service MatchService {
+  // 客户端发起匹配
+  rpc MatchStart(MatchStartReq) returns (MatchStartRes);
+
+  // 客户端取消匹配
+  rpc MatchCancel(MatchCancelReq) returns (MatchCancelRes);
+
+  // 客户端查询匹配状态
+  rpc MatchStatus(MatchStatusReq) returns (MatchStatusRes);
+
+  // 客户端订阅匹配事件推送
+  rpc MatchEventStream(MatchEventStreamReq) returns (stream MatchEvent);
+}
+
+// ============================================================
+// MatchInternal 对内接口（GameServer 调用）
+// ============================================================
+service MatchInternal {
+  // GameServer 创建房间成功后回调
+  rpc CreateRoomAndJoin(CreateRoomAndJoinReq) returns (CreateRoomAndJoinRes);
+
+  // GameServer 通知玩家已进入房间
+  rpc PlayerJoined(PlayerJoinedReq) returns (PlayerJoinedRes);
+
+  // GameServer 通知玩家已离开房间
+  rpc PlayerLeft(PlayerLeftReq) returns (PlayerLeftRes);
+
+  // GameServer 通知对局结束
+  rpc MatchEnd(MatchEndReq) returns (MatchEndRes);
+}
+
+// ============================================================
+// MatchStart
+// ============================================================
+message MatchStartReq {
+  string player_id = 1;
+  string mode = 2;           // "1v1", "3v3", "5v5"
+  int32 rank_tier = 3;       // 预留：段位（暂不使用）
+}
+
+message MatchStartRes {
+  bool ok = 1;
+  string match_id = 2;
+  string error_code = 3;
+}
+
+// ============================================================
+// MatchCancel
+// ============================================================
+message MatchCancelReq {
+  string player_id = 1;
+  string match_id = 2;
+}
+
+message MatchCancelRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+// ============================================================
+// MatchStatus
+// ============================================================
+message MatchStatusReq {
+  string player_id = 1;
+}
+
+message MatchStatusRes {
+  string status = 1;              // "idle", "matching", "matched", "in_room"
+  string match_id = 2;
+  string room_id = 3;             // matched/in_room 时有效
+  string token = 4;               // 进入房间的临时凭证
+  int64 estimated_wait_secs = 5;  // 预计等待时间
+}
+
+// ============================================================
+// MatchEventStream
+// ============================================================
+message MatchEventStreamReq {
+  string player_id = 1;
+}
+
+message MatchEvent {
+  string event = 1;              // "matched", "match_failed", "match_cancelled"
+  string match_id = 2;
+  string room_id = 3;
+  string token = 4;
+  string error_code = 5;
+}
+
+// ============================================================
+// CreateRoomAndJoin (GameServer -> MatchService)
+// ============================================================
+message CreateRoomAndJoinReq {
+  string match_id = 1;
+  string room_id = 2;
+  repeated string player_ids = 3;
+  string mode = 4;
+}
+
+message CreateRoomAndJoinRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+// ============================================================
+// PlayerJoined (GameServer -> MatchService)
+// ============================================================
+message PlayerJoinedReq {
+  string match_id = 1;
+  string player_id = 2;
+  string room_id = 3;
+}
+
+message PlayerJoinedRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+// ============================================================
+// PlayerLeft (GameServer -> MatchService)
+// ============================================================
+message PlayerLeftReq {
+  string match_id = 1;
+  string player_id = 2;
+  string reason = 3;  // "normal", "disconnect", "kicked"
+}
+
+message PlayerLeftRes {
+  bool ok = 1;
+  bool match_should_abort = 2;  // 所有人都离开，是否 abort 匹配
+  string error_code = 3;
+}
+
+// ============================================================
+// MatchEnd (GameServer -> MatchService)
+// ============================================================
+message MatchEndReq {
+  string match_id = 1;
+  string room_id = 2;
+  string reason = 3;  // "game_over", "aborted", "timeout"
+}
+
+message MatchEndRes {
+  bool ok = 1;
+  string error_code = 2;
+}

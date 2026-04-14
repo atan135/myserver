@@ -10,6 +10,7 @@ use tracing::info;
 use crate::core::room::{MemberRole, OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
 use crate::gameroom::RoomLogicFactory;
 use crate::core::room_policy::RoomPolicyRegistry;
+use crate::match_client::SharedMatchClient;
 use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
 use crate::protocol::{MessageType, encode_body};
 
@@ -36,17 +37,39 @@ pub struct RoomLeaveResult {
     pub room_removed: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RoomManager {
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     runtimes: Arc<Mutex<HashMap<String, RoomRuntime>>>,
     policies: RoomPolicyRegistry,
     logic_factory: RoomLogicFactory,
+    match_client: SharedMatchClient,
+}
+
+impl Default for RoomManager {
+    fn default() -> Self {
+        Self {
+            rooms: Arc::new(Mutex::new(HashMap::new())),
+            runtimes: Arc::new(Mutex::new(HashMap::new())),
+            policies: RoomPolicyRegistry::default(),
+            logic_factory: RoomLogicFactory::default(),
+            match_client: crate::match_client::create_match_client_shared(),
+        }
+    }
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         let this = Self::default();
+        this.spawn_cleanup_task();
+        this
+    }
+
+    pub fn with_match_client(match_client: SharedMatchClient) -> Self {
+        let this = Self {
+            match_client,
+            ..Default::default()
+        };
         this.spawn_cleanup_task();
         this
     }
@@ -137,6 +160,116 @@ impl RoomManager {
         self.rooms.lock().await.len()
     }
 
+    /// Create a room for a matched session, notifying MatchService
+    pub async fn create_matched_room(
+        &self,
+        match_id: &str,
+        room_id: &str,
+        player_ids: &[String],
+        mode: &str,
+    ) -> Result<RoomSnapshot, &'static str> {
+        let mut rooms = self.rooms.lock().await;
+        let mut runtimes = self.runtimes.lock().await;
+        let default_policy = self.policies.default_policy().clone();
+
+        let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
+            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            logic.on_room_created(room_id);
+            info!(
+                room_id = room_id,
+                match_id = match_id,
+                mode = mode,
+                "matched room created"
+            );
+            let mut room = Room::new(
+                room_id.to_string(),
+                player_ids.first().cloned().unwrap_or_default(),
+                default_policy.policy_id.clone(),
+                logic,
+            );
+            room.set_match_id(match_id.to_string());
+            room
+        });
+
+        runtimes
+            .entry(room_id.to_string())
+            .or_insert_with(RoomRuntime::default);
+
+        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let snapshot = room.snapshot();
+        drop(rooms);
+        drop(runtimes);
+
+        // Notify MatchService that room was created
+        self.notify_room_created(match_id, room_id, player_ids, mode).await;
+
+        Ok(snapshot)
+    }
+
+    async fn notify_room_created(
+        &self,
+        match_id: &str,
+        room_id: &str,
+        player_ids: &[String],
+        mode: &str,
+    ) {
+        let mut guard = self.match_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            match client.create_room_and_join(match_id, room_id, player_ids, mode).await {
+                Ok(()) => {
+                    info!(match_id = match_id, room_id = room_id, "Notified MatchService: room created");
+                }
+                Err(e) => {
+                    tracing::error!(match_id = match_id, error = %e, "Failed to notify MatchService: room created");
+                }
+            }
+        }
+    }
+
+    async fn notify_player_joined(&self, match_id: &str, player_id: &str, room_id: &str) {
+        let mut guard = self.match_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            match client.player_joined(match_id, player_id, room_id).await {
+                Ok(()) => {
+                    info!(match_id = match_id, player_id = player_id, room_id = room_id, "Notified MatchService: player joined");
+                }
+                Err(e) => {
+                    tracing::error!(match_id = match_id, player_id = player_id, error = %e, "Failed to notify MatchService: player joined");
+                }
+            }
+        }
+    }
+
+    async fn notify_player_left(&self, match_id: &str, player_id: &str, reason: &str) -> bool {
+        let mut guard = self.match_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            match client.player_left(match_id, player_id, reason).await {
+                Ok(should_abort) => {
+                    info!(match_id = match_id, player_id = player_id, reason = reason, should_abort = should_abort, "Notified MatchService: player left");
+                    return should_abort;
+                }
+                Err(e) => {
+                    tracing::error!(match_id = match_id, player_id = player_id, error = %e, "Failed to notify MatchService: player left");
+                }
+            }
+        }
+        false
+    }
+
+    async fn notify_match_end(&self, match_id: &str, room_id: &str, reason: &str) {
+        let mut guard = self.match_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            match client.match_end(match_id, room_id, reason).await {
+                Ok(()) => {
+                    info!(match_id = match_id, room_id = room_id, reason = reason, "Notified MatchService: match ended");
+                }
+                Err(e) => {
+                    tracing::error!(match_id = match_id, room_id = room_id, error = %e, "Failed to notify MatchService: match ended");
+                }
+            }
+        }
+    }
+
     pub async fn join_room(
         &self,
         room_id: &str,
@@ -196,7 +329,17 @@ impl RoomManager {
             .entry(room_id.to_string())
             .or_insert_with(RoomRuntime::default);
 
-        Ok(room.snapshot())
+        let snapshot = room.snapshot();
+        let match_id = room.match_id.clone();
+        drop(rooms);
+        drop(runtimes);
+
+        // Notify MatchService if this is a matched room
+        if let Some(ref mid) = match_id {
+            self.notify_player_joined(mid, player_id, room_id).await;
+        }
+
+        Ok(snapshot)
     }
 
     pub async fn leave_room(&self, room_id: &str, player_id: &str) -> RoomLeaveResult {
@@ -259,8 +402,22 @@ impl RoomManager {
 
         room.reset_to_waiting();
 
+        let snapshot = room.snapshot();
+        let match_id = room.match_id.clone();
+        drop(rooms);
+        drop(runtimes);
+
+        // Notify MatchService if this is a matched room
+        if let Some(ref mid) = match_id {
+            let should_abort = self.notify_player_left(mid, player_id, "normal").await;
+            if should_abort {
+                info!(room_id = room_id, match_id = mid, "MatchService requested abort due to player leaving");
+                // For now, just log - actual abort handling would be implemented later
+            }
+        }
+
         RoomLeaveResult {
-            snapshot: Some(room.snapshot()),
+            snapshot: Some(snapshot),
             room_removed: false,
         }
     }
@@ -516,9 +673,17 @@ impl RoomManager {
             member_count = room.members.len(),
             "room returned to waiting phase"
         );
+
+        let snapshot = room.snapshot();
+        let match_id = room.match_id.clone();
         drop(rooms);
 
         self.update_room_fps(room_id).await;
+
+        // Notify MatchService if this is a matched room
+        if let Some(ref mid) = match_id {
+            self.notify_match_end(mid, room_id, "game_over").await;
+        }
 
         let rooms = self.rooms.lock().await;
         let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;

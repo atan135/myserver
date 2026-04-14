@@ -46,6 +46,7 @@ pub struct PlayerInputRecord {
 
 pub struct Room {
     pub room_id: String,
+    pub match_id: Option<String>,
     pub owner_player_id: String,
     pub phase: RoomPhase,
     pub policy_id: String,
@@ -71,6 +72,7 @@ impl Room {
         let now = Instant::now();
         Self {
             room_id,
+            match_id: None,
             owner_player_id,
             phase: RoomPhase::Waiting,
             policy_id,
@@ -291,5 +293,13 @@ impl Room {
 
     pub fn online_members(&self) -> Vec<&RoomMemberState> {
         self.members.values().filter(|m| !m.offline).collect()
+    }
+
+    pub fn set_match_id(&mut self, match_id: String) {
+        self.match_id = Some(match_id);
+    }
+
+    pub fn is_matched_room(&self) -> bool {
+        self.match_id.is_some()
     }
 }
