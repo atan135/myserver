@@ -7,6 +7,7 @@
     "apps/auth-http",
     "apps/admin-api",
     "apps/admin-web",
+    "apps/mail-service",
     "tools/mock-client"
   ],
   "scripts": {
@@ -17,6 +18,8 @@
     "start:admin-api": "npm run start --workspace admin-api",
     "dev:admin-web": "npm run dev --workspace admin-web",
     "build:admin-web": "npm run build --workspace admin-web",
+    "dev:mail": "npm run dev --workspace mail-service",
+    "start:mail": "npm run start --workspace mail-service",
     "dev:mock-client": "npm run dev --workspace mock-client",
     "flow:mock-client": "npm run flow --workspace mock-client --",
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",

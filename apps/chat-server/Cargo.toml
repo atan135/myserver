@@ -11,6 +11,7 @@ prost-build = "0.13"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dotenvy = "0.15"
+futures-util = "0.3"
 hmac = "0.12"
 mysql_async = "0.36"
 prost = "0.13"

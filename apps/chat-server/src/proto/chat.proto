@@ -120,3 +120,12 @@ message ChatHistoryReq {
 message ChatHistoryRes {
   repeated ChatPush messages = 1;
 }
+
+// --- 邮件通知推送 ---
+message MailNotifyPush {
+  string mail_id = 1;
+  string title = 2;
+  string from_player_id = 3;
+  string mail_type = 4;      // system, player, etc.
+  int64 created_at = 5;
+}

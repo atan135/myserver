@@ -406,6 +406,14 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 1),
         message: readString(fields, 2)
       };
+    case MESSAGE_TYPE.MAIL_NOTIFY_PUSH:
+      return {
+        mailId: readString(fields, 1),
+        title: readString(fields, 2),
+        fromPlayerId: readString(fields, 3),
+        mailType: readString(fields, 4),
+        createdAt: readInt64(fields, 5)
+      };
     default:
       return { rawHex: body.toString("hex") };
   }

@@ -65,6 +65,8 @@ export async function runChatInteractive(options) {
           const replyContent = `B: ${decoded.content}`;
           await clientB.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, replyingToSeq, encodeChatPrivateReq(decoded.senderId, replyContent));
           replyingToSeq++;
+        } else if (packet.messageType === MESSAGE_TYPE.MAIL_NOTIFY_PUSH) {
+          console.log(`\n[clientB mail notification]: mailId=${decoded.mailId}, title="${decoded.title}", from=${decoded.fromPlayerId}`);
         }
       } catch (e) {
         // Timeout is normal, just continue
@@ -84,6 +86,8 @@ export async function runChatInteractive(options) {
 
         if (packet.messageType === MESSAGE_TYPE.CHAT_PUSH) {
           console.log(`\n[received from ${decoded.senderId}]: ${decoded.content}`);
+        } else if (packet.messageType === MESSAGE_TYPE.MAIL_NOTIFY_PUSH) {
+          console.log(`\n[mail notification]: mailId=${decoded.mailId}, title="${decoded.title}", from=${decoded.fromPlayerId}`);
         }
       } catch (e) {
         // Timeout is normal, just continue

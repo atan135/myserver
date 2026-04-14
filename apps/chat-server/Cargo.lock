@@ -115,6 +115,7 @@ dependencies = [
  "base64",
  "chrono",
  "dotenvy",
+ "futures-util",
  "hmac",
  "mysql_async",
  "prost",

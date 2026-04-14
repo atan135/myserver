@@ -54,6 +54,8 @@ export const MESSAGE_TYPE = {
   GROUP_LIST_RES: 1420,
   CHAT_HISTORY_REQ: 1421,
   CHAT_HISTORY_RES: 1422,
+  // Mail notification (1501)
+  MAIL_NOTIFY_PUSH: 1501,
   // Error
   ERROR_RES: 9000
 };

@@ -189,3 +189,19 @@ pub struct ChatHistoryRes {
     #[prost(message, repeated, tag = "1")]
     pub messages: ::prost::alloc::vec::Vec<ChatPush>,
 }
+/// --- 邮件通知推送 ---
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MailNotifyPush {
+    #[prost(string, tag = "1")]
+    pub mail_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub from_player_id: ::prost::alloc::string::String,
+    /// system, player, etc.
+    #[prost(string, tag = "4")]
+    pub mail_type: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub created_at: i64,
+}

@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::chat_service::{self, ChatSessionMap, new_chat_session_map};
+use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
 use crate::protocol::{encode_packet, parse_header, OutboundMessage, Packet, HEADER_LEN};
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
@@ -30,6 +30,7 @@ pub enum MessageType {
     GroupListRes = 1420,
     ChatHistoryReq = 1421,
     ChatHistoryRes = 1422,
+    MailNotifyPush = 1501,
     ErrorRes = 9000,
 }
 
@@ -53,6 +54,7 @@ impl MessageType {
             1420 => Some(Self::GroupListRes),
             1421 => Some(Self::ChatHistoryReq),
             1422 => Some(Self::ChatHistoryRes),
+            1501 => Some(Self::MailNotifyPush),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }
@@ -70,9 +72,9 @@ pub struct Config {
 pub async fn run(
     config: Config,
     chat_store: ChatStore,
+    chat_sessions: ChatSessionMap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
-    let chat_sessions: ChatSessionMap = new_chat_session_map();
 
     info!(
         addr = %config.bind_addr,
