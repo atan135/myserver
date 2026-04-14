@@ -73,6 +73,17 @@ export function encodeGetRoomDataReq(idStart, idEnd) {
   ]);
 }
 
+// Match
+export function encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode) {
+  const playerIdsBuffers = playerIds.map((id) => encodeStringField(3, id));
+  return Buffer.concat([
+    encodeStringField(1, matchId),
+    encodeStringField(2, roomId),
+    ...playerIdsBuffers,
+    encodeStringField(4, mode)
+  ]);
+}
+
 // Chat
 export function encodeChatPrivateReq(targetId, content) {
   return Buffer.concat([
@@ -291,6 +302,13 @@ export function decodeByMessageType(messageType, body) {
         roomId: readString(fields, 1),
         fps: readUInt32(fields, 2),
         reason: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.CREATE_MATCHED_ROOM_RES:
+      return {
+        ok: readBool(fields, 1),
+        roomId: readString(fields, 2),
+        errorCode: readString(fields, 3),
+        snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null
       };
     // Chat responses
     case MESSAGE_TYPE.CHAT_PRIVATE_RES:

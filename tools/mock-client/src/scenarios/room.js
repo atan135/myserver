@@ -10,7 +10,8 @@ import {
   encodePlayerInputReq,
   encodeRoomEndReq,
   encodeRoomReconnectReq,
-  encodeGetRoomDataReq
+  encodeGetRoomDataReq,
+  encodeCreateMatchedRoomReq
 } from "../messages.js";
 import { decodeByMessageType } from "../messages.js";
 import { fetchTicket, formatLoginSummary } from "../auth.js";
@@ -542,4 +543,140 @@ export async function runReconnect(options) {
   clientA2.close();
   clientB.close();
   console.log("Reconnect scenario completed successfully!");
+}
+
+/**
+ * Create matched room scenario: login -> create matched room
+ */
+export async function runCreateMatchedRoom(client, options, login) {
+  await authenticateClient(client, options, login, 1);
+
+  const matchId = options.matchId || `match-${Date.now()}`;
+  const roomId = options.roomId || "room-matched-001";
+  // Ensure authenticated player is always in player_ids
+  const playerIds = (options.playerIds && options.playerIds.length > 0)
+    ? [...new Set([login.playerId, ...options.playerIds])]  // Merge and dedupe
+    : [login.playerId];
+  const mode = options.mode || "1v1";
+
+  console.log(`${client.label}.createMatchedRoom:`, JSON.stringify({ matchId, roomId, playerIds, mode }, null, 2));
+
+  await client.send(
+    MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
+    2,
+    encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode)
+  );
+
+  const res = printResponse(`${client.label}.createMatchedRoomRes`, await client.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`create matched room failed: ${res.errorCode}`);
+  }
+
+  console.log(`${client.label}.matchedRoom:`, JSON.stringify({
+    roomId: res.roomId,
+    snapshot: res.snapshot ? {
+      state: res.snapshot.state,
+      memberCount: res.snapshot.members?.length,
+      owner: res.snapshot.ownerPlayerId
+    } : null
+  }, null, 2));
+
+  console.log(`${client.label}.create matched room success!`);
+  console.log(`  Note: In real flow, players receive MatchEventStream and join via RoomJoinReq`);
+}
+
+/**
+ * Create matched room and have all players join it - tests full flow including player_joined callbacks
+ */
+export async function runCreateMatchedRoomAndJoin(options) {
+  // Create guest IDs for each player
+  const hostGuestId = `host-${Date.now()}`;
+  const guest1Id = `guest1-${Date.now()}`;
+  const guest2Id = `guest2-${Date.now()}`;
+
+  const matchId = options.matchId || `match-${Date.now()}`;
+  const roomId = options.roomId || "room-matched-001";
+  const mode = options.mode || "1v1";
+
+  console.log("=== Create Matched Room And Join ===");
+  console.log("Room:", JSON.stringify({ matchId, roomId, mode }, null, 2));
+
+  // Step 1: All players get tickets (with delay to ensure unique guestIds)
+  console.log("\n--- Getting tickets for all players ---");
+  const loginHost = await fetchTicket(options, { guestId: hostGuestId });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const login1 = await fetchTicket(options, { guestId: guest1Id });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const login2 = await fetchTicket(options, { guestId: guest2Id });
+
+  console.log("Host:", JSON.stringify({ playerId: loginHost.playerId }, null, 2));
+  console.log("Player1:", JSON.stringify({ playerId: login1.playerId }, null, 2));
+  console.log("Player2:", JSON.stringify({ playerId: login2.playerId }, null, 2));
+
+  // Build player_ids from actual authenticated player IDs
+  const playerIds = [loginHost.playerId, login1.playerId, login2.playerId];
+  console.log("Player IDs for match:", playerIds);
+
+  // Step 2: Host creates matched room
+  const clientHost = new TcpProtocolClient(options, "clientHost");
+  await clientHost.connect();
+  await authenticateClient(clientHost, options, loginHost, 1);
+
+  console.log("\n--- Host creating matched room ---");
+  await clientHost.send(
+    MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
+    2,
+    encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode)
+  );
+
+  const res = printResponse("clientHost.createMatchedRoomRes", await clientHost.readNextPacket(options.timeoutMs));
+  if (!res.ok) {
+    throw new Error(`create matched room failed: ${res.errorCode}`);
+  }
+
+  console.log("Matched room created:", JSON.stringify({
+    roomId: res.roomId,
+    snapshot: res.snapshot ? {
+      state: res.snapshot.state,
+      memberCount: res.snapshot.members?.length,
+      owner: res.snapshot.ownerPlayerId
+    } : null
+  }, null, 2));
+
+  // Step 3: All players join the room
+  console.log("\n--- All players joining room ---");
+
+  const players = [
+    { login: login1, label: "Player1" },
+    { login: login2, label: "Player2" },
+  ];
+
+  for (const { login, label } of players) {
+    console.log(`[${label}] ${login.playerId} joining...`);
+
+    const client = new TcpProtocolClient(options, `client_${label}`);
+    await client.connect();
+    await authenticateClient(client, options, login, 3);
+
+    await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 4, encodeRoomJoinReq(roomId));
+    const joinRes = printResponse(`client_${label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+
+    if (!joinRes.ok) {
+      throw new Error(`player ${label} room join failed: ${joinRes.errorCode}`);
+    }
+
+    // Wait for room state push
+    const pushRes = printResponse(`client_${label}.roomStatePush`, await client.readNextPacket(options.timeoutMs));
+    console.log(`[${label}] ${login.playerId} joined room, members:`, pushRes.snapshot?.members?.length);
+  }
+
+  console.log("\n--- All players joined successfully ---");
+  console.log("Match flow complete!");
+  console.log("  match_id:", matchId);
+  console.log("  room_id:", roomId);
+  console.log("  player_count:", playerIds.length);
+
+  // Keep host connection open briefly to see the room state
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  clientHost.close();
 }

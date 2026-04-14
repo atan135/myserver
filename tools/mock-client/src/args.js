@@ -24,7 +24,10 @@ const DEFAULT_OPTIONS = {
   content: "Hello from mock-client!",
   groupName: "",
   limit: 20,
-  beforeTime: 0
+  beforeTime: 0,
+  matchId: "",
+  playerIds: [],
+  mode: "1v1"
 };
 
 /**
@@ -136,6 +139,18 @@ export function parseArgs(argv) {
         break;
       case "--before-time":
         result.beforeTime = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--match-id":
+        result.matchId = next;
+        index += 1;
+        break;
+      case "--player-ids":
+        result.playerIds = next.split(",");
+        index += 1;
+        break;
+      case "--mode":
+        result.mode = next;
         index += 1;
         break;
     }

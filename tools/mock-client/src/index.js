@@ -16,6 +16,8 @@ import {
   runUnknownMessage,
   runOversizedRoomJoin,
   runReconnect,
+  runCreateMatchedRoom,
+  runCreateMatchedRoomAndJoin,
   // Game scenarios
   runGameplayRoundtrip,
   // Chat scenarios
@@ -64,7 +66,8 @@ async function main() {
     SCENARIO.OVERSIZED_ROOM_JOIN,
     SCENARIO.START_GAME_SINGLE_CLIENT,
     SCENARIO.GET_ROOM_DATA,
-    SCENARIO.GET_ROOM_DATA_IN_ROOM
+    SCENARIO.GET_ROOM_DATA_IN_ROOM,
+    SCENARIO.CREATE_MATCHED_ROOM
   ].includes(options.scenario) || Boolean(options.ticket);
   const login = needsLogin ? await fetchTicket(options) : null;
 
@@ -100,6 +103,12 @@ async function main() {
         break;
       case SCENARIO.GET_ROOM_DATA_IN_ROOM:
         await runGetRoomDataInRoom(client, options, login);
+        break;
+      case SCENARIO.CREATE_MATCHED_ROOM:
+        await runCreateMatchedRoom(client, options, login);
+        break;
+      case SCENARIO.CREATE_MATCHED_ROOM_AND_JOIN:
+        await runCreateMatchedRoomAndJoin(options);
         break;
       // Chat scenarios
       case SCENARIO.CHAT_PRIVATE:

@@ -88,6 +88,27 @@ export async function fetchTicket(options, overrides = {}) {
     return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket };
   }
 
+  // If guestId is explicitly provided in overrides, use guest login directly
+  // This ensures that guest login works even when options has loginName/password
+  if (overrides.guestId) {
+    const response = await fetch(`${options.httpBaseUrl}/api/v1/auth/guest-login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ guestId: overrides.guestId })
+    });
+
+    if (!response.ok) {
+      throw new Error(`guest-login failed with status ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (!payload.ok) {
+      throw new Error(`guest-login failed: ${JSON.stringify(payload)}`);
+    }
+
+    return payload;
+  }
+
   // Try account login first
   const accountCredentials = resolveAccountCredentials(options, overrides);
   if (accountCredentials) {

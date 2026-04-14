@@ -27,6 +27,8 @@ export const MESSAGE_TYPE = {
   ROOM_RECONNECT_RES: 1116,
   ROOM_JOIN_AS_OBSERVER_REQ: 1117,
   ROOM_JOIN_AS_OBSERVER_RES: 1118,
+  CREATE_MATCHED_ROOM_REQ: 1119,
+  CREATE_MATCHED_ROOM_RES: 1120,
   ROOM_STATE_PUSH: 1201,
   GET_ROOM_DATA_REQ: 1301,
   GET_ROOM_DATA_RES: 1302,
@@ -70,6 +72,9 @@ export const SCENARIO = {
   GET_ROOM_DATA: "get-room-data",
   GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
   RECONNECT: "reconnect",
+  // Match scenarios
+  CREATE_MATCHED_ROOM: "create-matched-room",
+  CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",
   // Chat scenarios
   CHAT_PRIVATE: "chat-private",
   CHAT_GROUP: "chat-group",
