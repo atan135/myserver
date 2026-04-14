@@ -9,7 +9,7 @@
 ### 1.2 数据流
 
 ```
-各服务内部计算 metrics → 每 5 秒批量写 Redis → admin-api 读 Redis → admin-web 展示
+各服务内部计算 metrics → 每 5 秒批量写 Redis Hash → admin-api 读 Redis / MySQL 归档 → admin-web 展示
 ```
 
 ### 1.3 界面设计
@@ -25,7 +25,7 @@
 
 ```
 Key:    metrics:{service_name}:{timestamp_5s_bucket}
-Value:  JSON
+Value:  Redis Hash
 TTL:    604800 秒（7 天）
 ```
 
@@ -43,7 +43,7 @@ TTL:    30 秒（30 秒内无心跳视为离线）
 
 | 服务 | 字段 |
 |------|------|
-| auth-http | `{"qps": N, "latency_ms": N, "online_sessions": N}` |
+| auth-http | `{"qps": N, "latency_ms": N, "online_sessions": N, "unique_players": N, "active_sessions_5m": N, "active_window_seconds": 300}` |
 | game-server | `{"qps": N, "latency_ms": N, "online_players": N, "room_count": N}` |
 | game-proxy | `{"qps": N, "latency_ms": N, "connections": N}` |
 | chat-server | `{"qps": N, "latency_ms": N, "online_players": N}` |
@@ -74,12 +74,12 @@ TTL:    60 秒（需要续期）
 | 服务 | 延迟定义 |
 |------|---------|
 | auth-http | HTTP 请求处理耗时（ms） |
-| game-server | TCP 消息处理耗时 + 心跳响应耗时 |
+| game-server | 单个已解析 TCP 包从分发到 handler 返回的处理耗时 |
 | chat-server | TCP 消息处理耗时 |
 | match-service | gRPC 调用处理耗时 |
 | mail-service | HTTP 请求处理耗时 |
 | admin-api | HTTP 请求处理耗时 |
-| game-proxy | KCP 包转发耗时 |
+| game-proxy | 代理连接建立到上游 local socket 的耗时 |
 
 ### 3.3 Node.js 服务（auth-http / mail-service / admin-api）
 
@@ -107,7 +107,7 @@ setInterval(async () => {
   metricsBuffer = [];
   await redis.pipeline()
     .hset(`metrics:${SERVICE_NAME}:${currentBucket}`, aggregated)
-    .expire(`metrics:${SERVICE_NAME}:${currentBucket}`, 300)
+    .expire(`metrics:${SERVICE_NAME}:${currentBucket}`, 604800)
     .set(`heartbeat:${SERVICE_NAME}`, Date.now(), 'EX', 30)
     .exec();
 }, 5000);
@@ -149,6 +149,19 @@ tokio::spawn(async move {
 });
 ```
 
+### 3.5 当前真实埋点来源
+
+当前 Rust 服务已不再是仅启动上报线程，核心指标已接入真实运行时路径：
+
+| 服务 | QPS / 延迟来源 | 在线类指标来源 |
+|------|----------------|----------------|
+| game-server | `server.rs` 统一消息分发主路径 | 已认证连接数、`RoomManager` 的 `room_count` |
+| chat-server | `chat_server.rs` 消息主循环 | `ChatSessionMap` 当前长度 |
+| game-proxy | 成功建立 relay 的代理会话 | `connection_count` 实时值 |
+| match-service | `match_service.rs` 的 gRPC handler | `MatchPool` 实时汇总的 `pool_size` |
+
+已通过编译与联调验证，监控历史窗口中可以观察到上述指标随真实业务流量变化。
+
 ---
 
 ## 4. admin-api 接口
@@ -166,7 +179,11 @@ tokio::spawn(async move {
       "status": "online",   // "online" | "offline"
       "qps": 120,
       "latency_ms": 5,
+      "online_value": 320,
       "online_sessions": 350,
+      "unique_players": 320,
+      "active_sessions_5m": 128,
+      "active_window_seconds": 300,
       "last_heartbeat": 1713000000000
     },
     {
@@ -174,6 +191,7 @@ tokio::spawn(async move {
       "status": "online",
       "qps": 450,
       "latency_ms": 2,
+      "online_value": 128,
       "online_players": 128,
       "room_count": 24,
       "last_heartbeat": 1713000000000
@@ -200,8 +218,8 @@ Query: window=1m|5m|15m|1h
   "service": "auth-http",
   "window": "5m",
   "points": [
-    { "timestamp": 1713000000, "qps": 118, "latency_ms": 5, "online_sessions": 348 },
-    { "timestamp": 1713000005, "qps": 122, "latency_ms": 4, "online_sessions": 350 },
+    { "timestamp": 1713000000, "qps": 118, "latency_ms": 5, "online_value": 320, "online_sessions": 348, "unique_players": 320, "active_sessions_5m": 126 },
+    { "timestamp": 1713000005, "qps": 122, "latency_ms": 4, "online_value": 322, "online_sessions": 350, "unique_players": 322, "active_sessions_5m": 128 },
     // ...
   ]
 }
