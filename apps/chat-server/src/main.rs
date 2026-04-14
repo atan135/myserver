@@ -2,6 +2,7 @@ mod chat_server;
 mod chat_service;
 mod chat_store;
 mod mail_subscriber;
+mod metrics;
 mod proto;
 mod protocol;
 mod ticket;
@@ -127,6 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create Redis client for mail notification subscriber
     let redis_client = redis::Client::open(config.redis_url.clone())?;
     let _redis_conn = redis_client.get_multiplexed_async_connection().await?;
+
+    // 启动 metrics 上报任务
+    let metrics_redis_url = config.redis_url.clone();
+    tokio::spawn(async move {
+        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+    });
 
     let server_config = chat_server::Config {
         bind_addr: config.bind_addr.clone(),

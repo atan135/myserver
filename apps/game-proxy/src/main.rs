@@ -1,6 +1,7 @@
 mod admin_server;
 mod config;
 mod local_socket;
+mod metrics;
 mod proxy_server;
 mod route_store;
 mod session;
@@ -68,6 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let config = Config::from_env();
     init_logging(&config);
+
+    // 启动 metrics 上报任务
+    let metrics_redis_url = config.registry_url.clone();
+    tokio::spawn(async move {
+        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+    });
 
     let route_store = ProxyRouteStore::default();
     route_store

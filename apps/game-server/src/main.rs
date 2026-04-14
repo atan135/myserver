@@ -6,6 +6,7 @@ mod gameroom;
 mod gameservice;
 mod local_socket;
 mod match_client;
+mod metrics;
 mod proto;
 pub use proto::myserver::admin as admin_pb;
 pub use proto::myserver::game as pb;
@@ -162,6 +163,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mysql_store = MySqlAuditStore::new(&config).await?;
+
+    // 启动 metrics 上报任务
+    let metrics_redis_url = config.redis_url.clone();
+    tokio::spawn(async move {
+        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+    });
+
     let result = server::run(&config, mysql_store.clone(), config_table_runtime.clone()).await;
 
     // 关闭时注销服务

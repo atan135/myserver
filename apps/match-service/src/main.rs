@@ -3,6 +3,7 @@
 mod config;
 mod error;
 mod matcher;
+mod metrics;
 mod pool;
 mod proto;
 mod server;
@@ -73,6 +74,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_addr = %config.bind_addr,
         "match-service starting"
     );
+
+    // 启动 metrics 上报任务
+    let metrics_redis_url = config.redis_url.clone();
+    tokio::spawn(async move {
+        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+    });
 
     server::run(config).await
 }

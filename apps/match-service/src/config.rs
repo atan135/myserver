@@ -12,6 +12,7 @@ pub struct Config {
     pub log_enable_console: bool,
     pub log_enable_file: bool,
     pub log_dir: String,
+    pub redis_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,8 @@ impl Config {
                 .parse()
                 .unwrap_or(false),
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
         }
     }
 
