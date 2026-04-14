@@ -28,35 +28,134 @@
 
 ## 2. 服务角色划分
 
-### 2.1 单实例服务（固定地址）
+### 2.1 服务类型分类
 
-| 服务 | 地址 | 说明 |
+| 类型 | 说明 | 示例 |
 |------|------|------|
-| auth-http | 127.0.0.1:3000 | 登录认证服务，单实例足够 |
-| proxy-server | 127.0.0.1:7002 | 网关代理，单实例足够 |
+| 入口服务 | 客户端直连，固定端口 | auth-http, game-proxy, admin-api |
+| 内部服务 | 通过注册中心发现，支持多实例 | game-server, chat-server, match-service, mail-service |
+| 前端资源 | 静态托管，不监听端口 | admin-web |
 
-**这些服务地址硬编码在客户端配置中，保持不变。**
+### 2.2 端口分配表
 
-### 2.2 多实例服务（动态发现）
+#### 入口服务（固定端口，客户端硬编码）
 
-| 服务 | 地址 | 说明 |
-|------|------|------|
-| game-server | 127.0.0.1:7000+n | 支持多实例，端口动态分配 |
+| 服务 | 端口 | 协议 | 说明 |
+|------|------|------|------|
+| auth-http | 3000 | HTTP | 玩家登录，签发 ticket，下发服务地址 |
+| admin-api | 3001 | HTTP | 运营后台 API |
+| game-proxy | 7002 | KCP | 客户端游戏入口 |
 
-**game-server 通过服务注册中心实现动态发现。**
+#### 内部服务（动态端口，通过 Redis 注册）
 
-### 2.3 简化后的数据流
+| 服务 | 端口 | 协议 | 发现方式 |
+|------|------|------|----------|
+| game-server | 7000-7499 | TCP | Redis 注册中心 |
+| game-server (admin) | **7500** | TCP | 固定端口，admin-api 调用 |
+| chat-server | 9001 | TCP | Redis 注册中心 |
+| match-service | 9002 | gRPC | Redis 注册中心 |
+| mail-service | 9003 | HTTP | Redis 注册中心 |
+
+#### 前端资源
+
+| 服务 | 部署方式 | 说明 |
+|------|----------|------|
+| admin-web | Nginx 静态托管 | 不监听端口 |
+
+### 2.3 服务独立架构
+
+各服务独立运行，不相互依赖，**故障隔离**：
 
 ```
-1. Client -> auth-http (登录)
-2. auth-http 返回: { ticket, proxyHost, proxyPort }
-   - proxyHost: 固定配置 (127.0.0.1)
-   - proxyPort: 固定配置 (7002)
-
-3. Client -> proxy-server (proxyHost:proxyPort)
-   - proxy-server 通过 Redis 查询活跃的 game-server
-   - proxy-server 路由到选中的 game-server 实例
+┌─────────────────────────────────────────────────────────────┐
+│                         客户端                              │
+│                                                             │
+│   直连: auth-http (3000)  →  登录、获取服务地址             │
+│   直连: game-proxy (7002) →  游戏流量                       │
+│   直连: chat-server (9001)→  聊天                          │
+│   直连: mail-service (9003)→ 邮件（HTTP CRUD）             │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  Redis 注册中心   │
+                    │                  │
+                    │ service:game-server:instances:* │
+                    │ service:chat-server:instances:*  │
+                    │ service:mail-service:instances:* │
+                    └─────────────────┘
 ```
+
+### 2.4 登录流程
+
+```http
+POST /api/login
+Content-Type: application/json
+
+{
+  "username": "test001",
+  "password": "Passw0rd!"
+}
+```
+
+```json
+{
+  "ok": true,
+  "player_id": "player_001",
+  "ticket": "xxx",
+  "expires_at": 1713000000,
+  "services": {
+    "game": {
+      "host": "127.0.0.1",
+      "port": 7002,
+      "protocol": "kcp"
+    },
+    "chat": {
+      "host": "127.0.0.1",
+      "port": 9001,
+      "protocol": "tcp"
+    },
+    "mail": {
+      "host": "127.0.0.1",
+      "port": 9003,
+      "protocol": "http"
+    }
+  }
+}
+```
+
+客户端根据返回的 `services` 直连各服务，无需硬编码。
+
+### 2.5 服务职责边界
+
+| 服务 | 职责 | 独立扩缩容 |
+|------|------|-----------|
+| auth-http | 登录、ticket 签发、服务地址下发 | ✅ |
+| game-proxy | 玩家游戏流量入口、路由到 game-server | ✅ |
+| game-server | 游戏逻辑、房间、帧同步 | ✅ |
+| chat-server | 私聊、群聊、聊天历史 | ✅ |
+| match-service | 匹配逻辑（MOBA/天梯等） | ✅ |
+| mail-service | 邮件 CRUD、附件领取 | ✅ |
+| admin-api | 运营管理（玩家、房间、审计） | ✅ |
+
+### 2.6 服务间通信
+
+服务间通信通过 **Redis Pub/Sub** 解耦，不直接调用：
+
+```
+mail-service 收到新邮件
+       ↓
+   Redis Pub/Sub: mail:notify:{player_id}
+       ↓
+   chat-server / game-server 订阅该频道
+       ↓
+   在已有 TCP 连接上推送通知给客户端
+```
+
+**好处**：
+- 服务间无直接依赖
+- game-server 负载高不影响邮件通知
+- 新增通知渠道只需修改订阅方
 
 ---
 
@@ -99,53 +198,70 @@
 ### 3.1 整体架构
 
 ```
-                                    +------------------+
-                                    |  Service         |
-                                    |  Registry        |
-                                    |  (Redis)         |
-                                    |                  |
-                                    |  只注册          |
-                                    |  game-server     |
-                                    +--------+---------+
-                                             ^
-                                             |
-                    +------------------------+------------------------+
-                    |                        |                        |
-                    |                        |                        |
-           +----------------+       +----------------+       +----------------+
-           |   auth-http    |       |  game-server   |       |  game-proxy    |
-           |   (Node.js)   |       |   (Rust) x N   |       |    (Rust)     |
-           |  单实例固定地址 |       |  多实例动态注册 |       |  单实例固定地址 |
-           +----------------+       +----------------+       +----------------+
-                    |                        ^                        |
-                    |                        |                        |
-                    +------------------------+------------------------+
-                                             |
-                                             v
-                                    +----------------+
-                                    |  simple-client |
-                                    |  (Unity C#)    |
-                                    +----------------+
+                         +---------------------+
+                         |      Redis          |
+                         |   注册中心 + 心跳    |
+                         +-----------+---------+
+                                     ^
+                                     │
+        +----------------------------+----------------------------+
+        │                            │                            │
+        ▼                            ▼                            ▼
++------------------+         +------------------+         +------------------+
+|   auth-http      |         |  game-server x N  |         |  game-proxy      |
+|   :3000          |         |  :7000 (游戏端口) |         |  :7002           |
+|   (Node.js)      |         |  :7001 (管理端口)  |         |  (Rust)          |
++------------------+         +------------------+         +------------------+
+        ▲                            ▲                            ▲
+        │                            │                            │
+        │   /login 返回 services     │   Redis 注册               │   Redis 发现
+        │───────────────────────────│───────────────────────────│
+                                     │
+                                     ▼
+                         +------------------+
+                         | chat-server      |
+                         | :9001 (TCP)      |
+                         +------------------+
+                                     │
+                                     ▼
+                         +------------------+
+                         | mail-service     |
+                         | :9003 (HTTP)     |
+                         +------------------+
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                          客户端                                  │
+│                                                                  │
+│  auth-http:3000 (登录)                                           │
+│  game-proxy:7002 (游戏)                                          │
+│  chat-server:9001 (聊天)                                         │
+│  mail-service:9003 (邮件)                                        │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 服务注册中心位置
+### 3.2 服务注册中心职责
+
+所有**内部服务**启动时注册到 Redis，关闭时注销：
 
 ```
 apps/
-├── auth-http/          # 注册 auth-http 服务
 ├── game-server/        # 注册 game-server 服务
 ├── chat-server/        # 注册 chat-server 服务
-├── game-proxy/         # 注册 game-proxy 服务，查询 game-server
+├── match-service/      # 注册 match-service 服务
+├── mail-service/      # 注册 mail-service 服务
+├── game-proxy/         # 查询 game-server（消费者）
+├── auth-http/          # 查询服务列表用于登录响应
 packages/
-└── service-registry/   # [新增] Redis 注册中心封装库
+└── service-registry/   # Redis 注册中心封装库
 ```
 
 ### 3.3 数据流
 
-1. **服务启动**：服务从环境变量读取基础配置，连接 Redis，注册自身
-2. **心跳维持**：服务定期向 Redis 发送心跳，更新 TTL
-3. **服务发现**：客户端/服务向 Redis 查询目标服务地址列表
-4. **服务下线**：服务正常关闭时主动注销；心跳超时则自动移除
+1. **服务启动**：从环境变量读取配置，连接 Redis，注册自身（含端口、实例ID）
+2. **心跳维持**：服务定期向 Redis 发送心跳，更新 TTL（30s）
+3. **服务发现**：auth-http 登录时查询可用服务地址，下发给客户端
+4. **服务下线**：正常关闭主动注销；心跳超时（30s 未更新）则自动移除
 
 ---
 
@@ -163,7 +279,7 @@ service:game-server:instances:game-server-001 = {
     "host": "127.0.0.1",
     "port": 7000,
     "admin_port": 7001,
-    "local_socket": "myserver-game-server.sock",
+    "local_socket": "myserver-game-server-001.sock",
     "tags": ["game", "tcp"],
     "weight": 100,
     "metadata": {},
@@ -171,13 +287,40 @@ service:game-server:instances:game-server-001 = {
     "healthy": true
 }
 
-# game-proxy 实例
-service:game-proxy:instances:game-proxy-001 = {
-    "id": "game-proxy-001",
-    "name": "game-proxy",
+# chat-server 实例
+service:chat-server:instances:chat-server-001 = {
+    "id": "chat-server-001",
+    "name": "chat-server",
     "host": "127.0.0.1",
-    "port": 7002,
-    "tags": ["game", "kcp", "proxy"],
+    "port": 9001,
+    "tags": ["chat", "tcp"],
+    "weight": 100,
+    "metadata": {},
+    "registered_at": 1712736000000,
+    "healthy": true
+}
+
+# mail-service 实例
+service:mail-service:instances:mail-001 = {
+    "id": "mail-001",
+    "name": "mail-service",
+    "host": "127.0.0.1",
+    "port": 9003,
+    "tags": ["mail", "http"],
+    "weight": 100,
+    "metadata": {},
+    "registered_at": 1712736000000,
+    "healthy": true
+}
+
+# match-service 实例
+service:match-service:instances:match-001 = {
+    "id": "match-001",
+    "name": "match-service",
+    "host": "127.0.0.1",
+    "port": 9002,
+    "protocol": "grpc",
+    "tags": ["match", "grpc"],
     "weight": 100,
     "metadata": {},
     "registered_at": 1712736000000,
@@ -316,21 +459,102 @@ impl UpstreamDiscovery {
 }
 ```
 
-### 5.3 客户端流程（无需改造）
+### 5.3 其他服务注册（chat-server / match-service / mail-service）
 
-simple-client 不需要服务发现，保持原有流程：
+所有内部服务遵循相同的注册模式：
 
-```csharp
-// MyServerClientConfig.cs - 固定配置
-public sealed class MyServerClientConfig
-{
-    public string httpBaseUrl = "http://127.0.0.1:3000";  // auth-http
-    public string gameHost = "127.0.0.1";                  // proxy-server
-    public int gamePort = 7002;                            // proxy-server
+#### chat-server 注册
+
+```rust
+// 启动参数
+SERVICE_NAME=chat-server
+SERVICE_INSTANCE_ID=chat-server-001
+CHAT_PORT=9001
+```
+
+#### match-service 注册
+
+```rust
+// 启动参数
+SERVICE_NAME=match-service
+SERVICE_INSTANCE_ID=match-001
+MATCH_PORT=9002
+MATCH_PROTOCOL=grpc
+```
+
+#### mail-service 注册
+
+```rust
+// 启动参数
+SERVICE_NAME=mail-service
+SERVICE_INSTANCE_ID=mail-001
+MAIL_PORT=9003
+```
+
+**统一注册流程**：
+1. 服务启动时调用 `RegistryClient::register()`
+2. 启动心跳任务 `RegistryClient::start_heartbeat(10)`
+3. 服务关闭时调用 `RegistryClient::deregister()`
+
+### 5.4 auth-http 服务发现（登录响应）
+
+auth-http 登录时需要查询各服务地址，组装到登录响应中：
+
+```rust
+async fn handle_login(&self, username: &str, password: &str) -> Result<LoginResponse, Error> {
+    // 1. 验证账号
+    let player = self.verify_player(username, password)?;
+
+    // 2. 查询可用服务
+    let services = self.discover_services().await?;
+
+    // 3. 签发 ticket
+    let ticket = self.sign_ticket(&player.id)?;
+
+    Ok(LoginResponse {
+        ok: true,
+        player_id: player.id,
+        ticket,
+        expires_at: now() + 86400,
+        services,
+    })
+}
+
+async fn discover_services(&self) -> Result<Services, Error> {
+    let mut conn = self.redis.get_multiplexed_async_connection().await?;
+
+    Ok(Services {
+        game: self.find_one_service("game-proxy").await?,
+        chat: self.find_one_service("chat-server").await?,
+        mail: self.find_one_service("mail-service").await?,
+    })
 }
 ```
 
-登录后直接使用 proxy-server 地址连接。```
+### 5.5 客户端流程（改造）
+
+客户端从 auth-http 获取所有服务地址后直连各服务：
+
+```csharp
+// 1. 登录获取服务地址
+var loginResponse = await authClient.LoginAsync(username, password);
+// loginResponse.services 包含所有服务地址
+
+// 2. 直连各服务
+var gameClient = new GameClient(loginResponse.services.game);
+// gameClient.Connect();
+
+var chatClient = new ChatClient(loginResponse.services.chat);
+// chatClient.Connect();
+
+var mailClient = new MailClient(loginResponse.services.mail);
+// 邮件查询直接 HTTP 请求即可
+```
+
+**优势**：
+- 客户端无需硬编码服务地址
+- 新增服务只需修改 auth-http 登录响应
+- 各服务独立扩缩容，不影响客户端
 
 ---
 
@@ -419,12 +643,41 @@ packages/
 
 **里程碑**：game-proxy 可动态路由到任意活跃的 game-server
 
-### 阶段四：测试验证（0.5天）
+### 阶段四：chat-server 集成（1天）
 
-1. 启动多个 game-server 实例
-2. 验证 proxy-server 正确路由
-3. 验证心跳超时移除
-4. 验证优雅关闭注销
+1. 引入 `service-registry` 包
+2. 启动时注册到 Redis，关闭时注销
+3. 启动心跳续期任务
+4. auth-http 登录响应添加 chat-server 地址
+
+**里程碑**：客户端可从登录响应获取 chat-server 地址并连接
+
+### 阶段五：mail-service 集成（1天）
+
+1. 新建 mail-service（Node.js/Go）
+2. 引入 `service-registry` 包，注册到 Redis
+3. 实现邮件 CRUD API
+4. 通过 Redis Pub/Sub 接收新邮件通知
+5. auth-http 登录响应添加 mail-service 地址
+
+**里程碑**：客户端可从登录响应获取 mail-service 地址，邮件通知通过 chat-server 推送
+
+### 阶段六：match-service 集成（1天）
+
+1. 完善 match-service gRPC 接口
+2. 引入 `service-registry` 包
+3. 实现匹配逻辑（房间、队列、规则）
+4. 匹配完成后通知 game-server 创建房间
+
+**里程碑**：客户端可通过 match-service 加入匹配队列
+
+### 阶段七：测试验证（0.5天）
+
+1. 启动所有服务实例
+2. 验证登录响应包含所有服务地址
+3. 验证各服务独立运行
+4. 验证心跳超时移除
+5. 验证优雅关闭注销
 
 ---
 
@@ -546,7 +799,15 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 | `/maintenance/off` | POST | 关闭维护模式 |
 | `/switch/:server_id` | POST | 切换到指定服务器 |
 
-### 12.2 启动脚本
+### 12.2 待集成服务
+
+| 服务 | 端口 | 状态 | 说明 |
+|------|------|------|------|
+| chat-server | 9001 | 待集成 | 需引入 service-registry 包 |
+| mail-service | 9003 | 待实现 | 新建服务，实现邮件 CRUD + Redis Pub/Sub 通知 |
+| match-service | 9002 | 开发中 | gRPC 接口已定义，需完善业务逻辑 |
+
+### 12.3 启动脚本
 
 - `scripts/dev-game.ps1` - 启动 game-server 实例
   ```powershell
@@ -558,9 +819,27 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
   .\dev-proxy.ps1
   ```
 
-### 12.3 测试验证
+### 12.4 服务地址统一返回
 
-1. 启动多个 game-server 实例
-2. 访问 `GET /instances` 确认所有实例已注册
-3. 关闭其中一个实例
-4. 验证 proxy 自动路由到剩余实例
+auth-http 登录接口已规划返回所有服务地址：
+
+```json
+{
+  "ok": true,
+  "player_id": "player_001",
+  "ticket": "xxx",
+  "services": {
+    "game": { "host": "127.0.0.1", "port": 7002, "protocol": "kcp" },
+    "chat": { "host": "127.0.0.1", "port": 9001, "protocol": "tcp" },
+    "mail": { "host": "127.0.0.1", "port": 9003, "protocol": "http" }
+  }
+}
+```
+
+### 12.5 测试验证
+
+1. 启动所有服务实例
+2. 调用登录接口验证返回的服务地址
+3. 验证客户端可直连各服务
+4. 验证心跳超时移除
+5. 验证优雅关闭注销

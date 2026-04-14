@@ -1,4 +1,22 @@
-auth-http: 3000
-game-server: 7000
-chat-server: 7001
-game-proxy: 7002
+# ============================================================
+# 服务端口配置
+# 格式: 服务名: 端口号 [: 固定|动态]
+# - 固定端口: 入口服务，客户端直连，update-ports.js 会自动更新对应 .env
+# - 动态端口: 内部服务，通过 Redis 注册中心发现，启动时传入
+# ============================================================
+
+# --- 入口服务（固定端口）---
+auth-http: 3000:fixed
+admin-api: 3001:fixed
+game-proxy: 7002:fixed
+
+# --- game-server ---
+# 主端口范围: 7000-7499（玩家游戏通信，每个实例独立）
+# 管理端口: 7500（admin-api 调用，固定）
+game-server: 7000:fixed
+game-server-admin: 7500:fixed
+
+# --- 内部服务（动态端口，通过 Redis 注册）---
+# chat-server: 9001:dynamic
+# match-service: 9002:dynamic
+# mail-service: 9003:dynamic
