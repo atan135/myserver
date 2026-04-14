@@ -21,6 +21,10 @@ function sessionKey(accessToken) {
   return `session:${accessToken}`;
 }
 
+function sessionActivityKey(accessToken) {
+  return `session-activity:${accessToken}`;
+}
+
 function ticketKey(ticket) {
   return `ticket:${hashTicket(ticket)}`;
 }
@@ -40,6 +44,20 @@ export class AuthStore {
 
   prefixedKey(key) {
     return `${this.config.redisKeyPrefix || ""}${key}`;
+  }
+
+  async markSessionActive(accessToken) {
+    try {
+      await this.redis.set(
+        this.prefixedKey(sessionActivityKey(accessToken)),
+        Date.now(),
+        "EX",
+        300
+      );
+    } catch (error) {
+      // Session activity should improve observability, not break auth.
+      console.error("[auth-store] markSessionActive error:", error);
+    }
   }
 
   async createGuestSession(guestId, clientIp = null) {
@@ -134,6 +152,7 @@ export class AuthStore {
       "EX",
       this.config.sessionTtlSeconds
     );
+    await this.markSessionActive(accessToken);
 
     await this.mysqlStore?.appendAuthAudit({
       playerId: account.playerId,
@@ -160,6 +179,7 @@ export class AuthStore {
       return null;
     }
 
+    await this.markSessionActive(accessToken);
     return JSON.parse(raw);
   }
 

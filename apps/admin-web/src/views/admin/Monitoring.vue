@@ -48,6 +48,12 @@
                 {{ service.status === 'online' ? service.online_value : '--' }}
               </span>
             </div>
+            <div class="metric metric-secondary" v-if="secondaryMetric(service)">
+              <span class="label">{{ secondaryMetric(service).label }}</span>
+              <span class="value value-secondary">
+                {{ service.status === 'online' ? secondaryMetric(service).value : '--' }}
+              </span>
+            </div>
           </div>
         </el-card>
       </div>
@@ -67,7 +73,7 @@ const currentWindow = ref("5m");
 let pollTimer = null;
 
 const SERVICE_ONLINE_LABELS = {
-  "auth-http": "在线会话",
+  "auth-http": "唯一玩家",
   "game-server": "在线玩家",
   "game-proxy": "连接数",
   "chat-server": "在线玩家",
@@ -78,6 +84,17 @@ const SERVICE_ONLINE_LABELS = {
 
 function onlineLabel(serviceName) {
   return SERVICE_ONLINE_LABELS[serviceName] || "在线";
+}
+
+function secondaryMetric(service) {
+  if (service.name === "auth-http") {
+    return {
+      label: "5 分钟活跃会话",
+      value: service.active_sessions_5m ?? 0
+    };
+  }
+
+  return null;
 }
 
 async function fetchServices() {
@@ -191,5 +208,14 @@ onUnmounted(() => {
 
 .metric .value.warning {
   color: #f56c6c;
+}
+
+.metric-secondary {
+  padding-top: 4px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.metric .value.value-secondary {
+  font-size: 16px;
 }
 </style>

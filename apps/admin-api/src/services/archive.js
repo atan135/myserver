@@ -21,6 +21,18 @@ const SERVICE_NAMES = [
   "admin-api"
 ];
 
+function parseMetricInt(value) {
+  return parseInt(value || "0", 10);
+}
+
+function getArchiveOnlineValue(serviceName, data) {
+  if (serviceName === "auth-http") {
+    return parseMetricInt(data.unique_players);
+  }
+
+  return parseMetricInt(data.online_players || data.connections || data.pool_size || data.online_sessions);
+}
+
 /**
  * 执行归档任务
  * 将 7 天前 ~ 8 天前的 Redis metrics 数据迁移到 MySQL
@@ -90,14 +102,14 @@ async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, 
  * 插入归档记录到 MySQL
  */
 async function insertArchiveRecord(mysqlPool, serviceName, bucketTime, data) {
-  const qps = parseInt(data.qps || "0", 10);
-  const latencyMs = parseInt(data.latency_ms || "0", 10);
-  const onlineValue = parseInt(data.online_sessions || data.online_players || data.connections || "0", 10);
+  const qps = parseMetricInt(data.qps);
+  const latencyMs = parseMetricInt(data.latency_ms);
+  const onlineValue = getArchiveOnlineValue(serviceName, data);
 
   // 收集扩展字段
   const extra = {};
   for (const [k, v] of Object.entries(data)) {
-    if (!["qps", "latency_ms", "online_sessions", "online_players", "connections", "room_count", "pool_size"].includes(k)) {
+    if (!["qps", "latency_ms", "online_sessions", "unique_players", "active_sessions_5m", "active_window_seconds", "online_players", "connections", "room_count", "pool_size"].includes(k)) {
       extra[k] = v;
     }
   }

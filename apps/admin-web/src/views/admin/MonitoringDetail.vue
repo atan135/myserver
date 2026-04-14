@@ -20,19 +20,24 @@
       </div>
 
       <el-row :gutter="16" class="summary-cards">
-        <el-col :span="8">
+        <el-col :span="summarySpan">
           <el-card>
             <el-statistic title="当前 QPS" :value="currentQps" />
           </el-card>
         </el-col>
-        <el-col :span="8">
+        <el-col :span="summarySpan">
           <el-card>
             <el-statistic title="当前延迟" :value="currentLatency" suffix="ms" />
           </el-card>
         </el-col>
-        <el-col :span="8">
+        <el-col :span="summarySpan">
           <el-card>
             <el-statistic :title="onlineLabel" :value="currentOnline" />
+          </el-card>
+        </el-col>
+        <el-col v-if="secondaryMetricLabel" :span="summarySpan">
+          <el-card>
+            <el-statistic :title="secondaryMetricLabel" :value="currentSecondaryMetric" />
           </el-card>
         </el-col>
       </el-row>
@@ -72,6 +77,7 @@ const metricsPoints = ref([]);
 const currentQps = ref(0);
 const currentLatency = ref(0);
 const currentOnline = ref(0);
+const currentSecondaryMetric = ref(0);
 
 const qpsChartRef = ref(null);
 const latencyChartRef = ref(null);
@@ -80,7 +86,7 @@ let latencyChart = null;
 let pollTimer = null;
 
 const SERVICE_ONLINE_LABELS = {
-  "auth-http": "在线会话",
+  "auth-http": "唯一玩家",
   "game-server": "在线玩家",
   "game-proxy": "连接数",
   "chat-server": "在线玩家",
@@ -90,6 +96,14 @@ const SERVICE_ONLINE_LABELS = {
 };
 
 const onlineLabel = computed(() => SERVICE_ONLINE_LABELS[serviceName.value] || "在线");
+const secondaryMetricLabel = computed(() => {
+  if (serviceName.value === "auth-http") {
+    return "5 分钟活跃会话";
+  }
+
+  return "";
+});
+const summarySpan = computed(() => secondaryMetricLabel.value ? 6 : 8);
 
 async function fetchServiceInfo() {
   try {
@@ -100,6 +114,7 @@ async function fetchServiceInfo() {
         currentQps.value = serviceInfo.value.qps || 0;
         currentLatency.value = serviceInfo.value.latency_ms || 0;
         currentOnline.value = serviceInfo.value.online_value || 0;
+        currentSecondaryMetric.value = serviceInfo.value.active_sessions_5m || 0;
       }
     }
   } catch (error) {

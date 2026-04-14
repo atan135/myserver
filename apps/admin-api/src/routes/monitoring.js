@@ -12,7 +12,7 @@ import { runArchiveTask } from "../services/archive.js";
  * 服务列表及字段配置
  */
 const SERVICE_CONFIGS = {
-  "auth-http": { onlineField: "online_sessions" },
+  "auth-http": { onlineField: "unique_players" },
   "game-server": { onlineField: "online_players" },
   "game-proxy": { onlineField: "connections" },
   "chat-server": { onlineField: "online_players" },
@@ -33,6 +33,19 @@ const WINDOW_SECONDS = {
   "15m": 900,
   "1h": 3600
 };
+
+function parseMetricInt(value) {
+  return parseInt(value || "0", 10);
+}
+
+function getOnlineValue(serviceName, data) {
+  const onlineField = SERVICE_CONFIGS[serviceName]?.onlineField;
+  if (!onlineField) {
+    return 0;
+  }
+
+  return parseMetricInt(data[onlineField]);
+}
 
 /**
  * 创建监控路由
@@ -72,12 +85,9 @@ export function createMonitoringRoutes(redis, mysqlPool) {
       if (status === "online") {
         const latestMetrics = await getLatestMetrics(redis, serviceName);
         if (latestMetrics) {
-          qps = parseInt(latestMetrics.qps || "0", 10);
-          latencyMs = parseInt(latestMetrics.latency_ms || "0", 10);
-          const onlineField = SERVICE_CONFIGS[serviceName].onlineField;
-          if (onlineField && latestMetrics[onlineField]) {
-            onlineValue = parseInt(latestMetrics[onlineField], 10);
-          }
+          qps = parseMetricInt(latestMetrics.qps);
+          latencyMs = parseMetricInt(latestMetrics.latency_ms);
+          onlineValue = getOnlineValue(serviceName, latestMetrics);
           metricsData = latestMetrics;
         }
       }
@@ -200,9 +210,12 @@ async function getHistoricalMetrics(redis, serviceName, fromBucket, toBucket) {
         if (data && Object.keys(data).length > 0) {
           points.push({
             timestamp: bucket,
-            qps: parseInt(data.qps || "0", 10),
-            latency_ms: parseInt(data.latency_ms || "0", 10),
-            online_value: parseInt(data.online_sessions || data.online_players || data.connections || "0", 10)
+            qps: parseMetricInt(data.qps),
+            latency_ms: parseMetricInt(data.latency_ms),
+            online_value: getOnlineValue(serviceName, data),
+            online_sessions: parseMetricInt(data.online_sessions),
+            unique_players: parseMetricInt(data.unique_players),
+            active_sessions_5m: parseMetricInt(data.active_sessions_5m)
           });
         }
       }
