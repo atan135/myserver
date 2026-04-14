@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config_table::traits::{CsvLoadError, CsvTableLoader};
+use crate::core::config_table::{CsvLoadError, CsvTableLoader};
 use crate::csv_code::testtable_100::TestTable100;
 use crate::csv_code::testtable_110::TestTable110;
 

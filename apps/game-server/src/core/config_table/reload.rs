@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
-use crate::config_table::ConfigTableRuntime;
+use crate::core::config_table::ConfigTableRuntime;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CsvFileState {

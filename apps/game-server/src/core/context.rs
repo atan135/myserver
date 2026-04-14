@@ -5,9 +5,9 @@ use redis::aio::MultiplexedConnection;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::config::Config;
-use crate::config_table::ConfigTableRuntime;
+use crate::core::config_table::ConfigTableRuntime;
 use crate::core::room::OutboundMessage;
-use crate::core::room_manager::RoomManager;
+use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::RuntimeConfig;

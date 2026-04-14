@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::config_table::{ConfigTables, CsvLoadError};
+use crate::core::config_table::CsvLoadError;
+use crate::gameconfig::ConfigTables;
 
 #[derive(Clone)]
 pub struct ConfigTableRuntime {

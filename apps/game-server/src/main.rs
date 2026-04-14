@@ -3,6 +3,7 @@ mod config;
 mod config_table;
 mod core;
 mod gameroom;
+mod gameconfig;
 mod gameservice;
 mod local_socket;
 mod match_client;
@@ -23,7 +24,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use config::Config;
-use config_table::{ConfigTableRuntime, spawn_hot_reload_task};
+use core::config_table::{ConfigTableRuntime, spawn_hot_reload_task};
 use mysql_store::MySqlAuditStore;
 use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;

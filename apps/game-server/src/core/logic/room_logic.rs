@@ -7,11 +7,9 @@ pub trait RoomLogic: Send {
 
     fn on_player_leave(&mut self, _player_id: &str) {}
 
-    /// Called when a player goes offline (disconnect). Game logic can use this
-    /// to spawn an AI to take over the player's actions.
+    // Disconnection hook for AI takeover or offline state handling.
     fn on_player_offline(&mut self, _room_id: &str, _player_id: &str) {}
 
-    /// Called when a player comes back online (reconnect).
     fn on_player_online(&mut self, _room_id: &str, _player_id: &str) {}
 
     fn on_game_started(&mut self, _room_id: &str) {}

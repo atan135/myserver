@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, mpsc};
@@ -7,9 +6,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::info;
 
+use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::room::{MemberRole, OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
-use crate::gameroom::RoomLogicFactory;
-use crate::core::room_policy::RoomPolicyRegistry;
+use crate::core::runtime::room_policy::RoomPolicyRegistry;
 use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
 use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
@@ -40,44 +39,39 @@ pub struct RoomLeaveResult {
 
 #[derive(Clone)]
 pub struct RoomManager {
-    rooms: Arc<Mutex<HashMap<String, Room>>>,
-    runtimes: Arc<Mutex<HashMap<String, RoomRuntime>>>,
+    rooms: std::sync::Arc<Mutex<HashMap<String, Room>>>,
+    runtimes: std::sync::Arc<Mutex<HashMap<String, RoomRuntime>>>,
     policies: RoomPolicyRegistry,
-    logic_factory: RoomLogicFactory,
+    logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
 }
 
-impl Default for RoomManager {
-    fn default() -> Self {
-        Self {
-            rooms: Arc::new(Mutex::new(HashMap::new())),
-            runtimes: Arc::new(Mutex::new(HashMap::new())),
-            policies: RoomPolicyRegistry::default(),
-            logic_factory: RoomLogicFactory::default(),
-            match_client: crate::match_client::create_match_client_shared(),
-        }
-    }
-}
-
 impl RoomManager {
-    pub fn new() -> Self {
-        let this = Self::default();
-        this.spawn_cleanup_task();
-        this
+    pub fn new(logic_factory: SharedRoomLogicFactory) -> Self {
+        Self::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            logic_factory,
+        )
     }
 
-    pub fn with_match_client(match_client: SharedMatchClient) -> Self {
+    pub fn with_match_client(
+        match_client: SharedMatchClient,
+        logic_factory: SharedRoomLogicFactory,
+    ) -> Self {
         let this = Self {
+            rooms: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            runtimes: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            policies: RoomPolicyRegistry::default(),
+            logic_factory,
             match_client,
-            ..Default::default()
         };
         this.spawn_cleanup_task();
         this
     }
 
     fn spawn_cleanup_task(&self) {
-        let rooms = Arc::clone(&self.rooms);
-        let runtimes = Arc::clone(&self.runtimes);
+        let rooms = std::sync::Arc::clone(&self.rooms);
+        let runtimes = std::sync::Arc::clone(&self.runtimes);
         let policies = self.policies.clone();
 
         tokio::spawn(async move {
@@ -91,31 +85,16 @@ impl RoomManager {
                     let mut rooms_guard = rooms.lock().await;
 
                     for (room_id, room) in rooms_guard.iter_mut() {
-                        // Skip if already marked for destruction
                         if room.marked_for_destruction {
                             continue;
                         }
 
                         let policy = policies.resolve(&room.policy_id);
-
-                        // Check if destruction is enabled
-                        if !policy.destroy_enabled {
+                        if !policy.destroy_enabled || !policy.destroy_when_empty || room.has_online_members() {
                             continue;
                         }
 
-                        // Check if we should destroy when empty
-                        if !policy.destroy_when_empty {
-                            continue;
-                        }
-
-                        // Only consider destroying if no online members
-                        if room.has_online_members() {
-                            continue;
-                        }
-
-                        // At this point: no online members, destruction enabled, destroy when empty
                         if !policy.retain_state_when_empty {
-                            // No retain - mark for immediate destruction
                             info!(
                                 room_id = room_id,
                                 policy_id = %policy.policy_id,
@@ -126,7 +105,6 @@ impl RoomManager {
                             continue;
                         }
 
-                        // Retain state - check TTL
                         if let Some(empty_since) = room.empty_since {
                             let elapsed = empty_since.elapsed().as_secs();
                             if elapsed >= policy.empty_ttl_secs {
@@ -143,7 +121,6 @@ impl RoomManager {
                     }
                 }
 
-                // Execute destruction outside of rooms lock
                 for room_id in to_destroy {
                     if let Some(runtime) = runtimes.lock().await.get(&room_id) {
                         if let Some(handle) = &runtime.tick_handle {
@@ -163,7 +140,6 @@ impl RoomManager {
         self.rooms.lock().await.len()
     }
 
-    /// Create a room for a matched session, notifying MatchService
     pub async fn create_matched_room(
         &self,
         match_id: &str,
@@ -207,7 +183,6 @@ impl RoomManager {
         drop(rooms);
         drop(runtimes);
 
-        // Notify MatchService that room was created
         self.notify_room_created(match_id, room_id, player_ids, mode).await;
 
         Ok(snapshot)
@@ -344,7 +319,6 @@ impl RoomManager {
         drop(rooms);
         drop(runtimes);
 
-        // Notify MatchService if this is a matched room
         if let Some(ref mid) = match_id {
             self.notify_player_joined(mid, player_id, room_id).await;
         }
@@ -360,7 +334,7 @@ impl RoomManager {
         );
 
         let mut rooms = self.rooms.lock().await;
-        let mut runtimes = self.runtimes.lock().await;
+        let runtimes = self.runtimes.lock().await;
         let Some(room) = rooms.get_mut(room_id) else {
             info!(room_id = room_id, "leave_room: room not found");
             return RoomLeaveResult {
@@ -369,7 +343,6 @@ impl RoomManager {
             };
         };
 
-        // Mark player as offline instead of removing, so they can reconnect later
         if let Some(member) = room.members.get_mut(player_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
@@ -395,21 +368,17 @@ impl RoomManager {
 
         let policy = self.policies.resolve(&room.policy_id);
 
-        // Transfer ownership if owner goes offline
         if room.owner_player_id == player_id {
             if let Some(next_owner) = room.members.values().find(|m| !m.offline).map(|m| m.player_id.clone()) {
                 room.owner_player_id = next_owner;
             }
         }
 
-        // If all members are offline, mark room as empty
         if !room.has_online_members() {
             room.mark_empty();
         }
 
-        // Note: destruction is now handled by the cleanup task in RoomManager
-        // based on policy.destroy_enabled, destroy_when_empty, retain_state_when_empty, and empty_ttl_secs
-
+        let _ = policy;
         room.reset_to_waiting();
 
         let snapshot = room.snapshot();
@@ -417,12 +386,10 @@ impl RoomManager {
         drop(rooms);
         drop(runtimes);
 
-        // Notify MatchService if this is a matched room
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "normal").await;
             if should_abort {
                 info!(room_id = room_id, match_id = mid, "MatchService requested abort due to player leaving");
-                // For now, just log - actual abort handling would be implemented later
             }
         }
 
@@ -441,13 +408,11 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
-        // Check if player is offline in this room
         if let Some(member) = room.members.get_mut(player_id) {
             if !member.offline {
                 return Err("PLAYER_ALREADY_ONLINE");
             }
 
-            // Reconnect the player
             member.offline = false;
             member.offline_since = None;
             member.sender = sender;
@@ -690,13 +655,11 @@ impl RoomManager {
             "room returned to waiting phase"
         );
 
-        let snapshot = room.snapshot();
         let match_id = room.match_id.clone();
         drop(rooms);
 
         self.update_room_fps(room_id).await;
 
-        // Notify MatchService if this is a matched room
         if let Some(ref mid) = match_id {
             self.notify_match_end(mid, room_id, "game_over").await;
         }
@@ -829,12 +792,10 @@ impl RoomManager {
                 let frame_id = room.current_frame;
                 let drained = std::mem::take(&mut room.pending_inputs);
 
-                // Split inputs: process now (frame_id <= current) vs defer to future (frame_id > current)
                 let (tick_inputs, future_inputs): (Vec<_>, Vec<_>) = drained
                     .into_iter()
                     .partition(|input| input.frame_id <= frame_id);
 
-                // Put future inputs back into pending_inputs for next frame
                 room.pending_inputs = future_inputs;
 
                 let inputs = tick_inputs
@@ -848,7 +809,6 @@ impl RoomManager {
 
                 room.logic.on_tick(frame_id, &tick_inputs);
 
-                // Generate snapshot at configured interval
                 let snapshot = if frame_id % snapshot_interval == 0 {
                     room.last_snapshot_frame = frame_id;
                     info!(
@@ -863,7 +823,6 @@ impl RoomManager {
                     None
                 };
 
-                // Log frame sync info
                 if !inputs.is_empty() {
                     info!(
                         room_id = %room_id,
@@ -945,7 +904,6 @@ impl RoomManager {
                 "broadcast_to_room"
             );
 
-            // Only broadcast to online members
             online
                 .iter()
                 .map(|member| member.sender.clone())

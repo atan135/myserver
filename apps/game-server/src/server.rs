@@ -11,12 +11,14 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::config_table::ConfigTableRuntime;
+use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, ServerSharedState, ServiceContext};
+use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::room::OutboundMessage;
-use crate::core::room_manager::RoomManager;
+use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, room_service};
-use crate::gameservice::test_service;
+use crate::gameroom::GameRoomLogicFactory;
+use crate::gameservice::room_query;
 use crate::match_client::{init_match_client, MatchClientConfig};
 use crate::metrics::METRICS;
 use crate::mysql_store::MySqlAuditStore;
@@ -56,8 +58,9 @@ pub async fn run(
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }
 
+    let room_logic_factory: SharedRoomLogicFactory = Arc::new(GameRoomLogicFactory::default());
     let shared_state = ServerSharedState {
-        room_manager: Arc::new(RoomManager::with_match_client(match_client)),
+        room_manager: Arc::new(RoomManager::with_match_client(match_client, room_logic_factory)),
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             max_body_len: config.max_body_len,
@@ -135,7 +138,7 @@ pub async fn run(
 }
 
 async fn run_local_socket_listener(
-    mut listener: interprocess::local_socket::tokio::Listener,
+    listener: interprocess::local_socket::tokio::Listener,
     redis_client: redis::Client,
     services: ServiceContext,
     runtime_config: Arc<RwLock<RuntimeConfig>>,
@@ -358,7 +361,7 @@ async fn dispatch_packet(
         Some(MessageType::PingReq) => core_service::handle_ping(connection, packet)
             .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
         Some(MessageType::GetRoomDataReq) => {
-            test_service::handle_get_room_data(services, connection, packet).await
+            room_query::handle_get_room_data(services, connection, packet).await
         }
         Some(MessageType::RoomJoinReq) => room_service::handle_room_join(services, connection, packet).await,
         Some(MessageType::RoomLeaveReq) => room_service::handle_room_leave(services, connection, packet).await,

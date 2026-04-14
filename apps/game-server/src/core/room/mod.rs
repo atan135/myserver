@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::core::room_logic::RoomLogic;
+use crate::core::logic::RoomLogic;
 use crate::pb::{RoomMember, RoomSnapshot};
 
 #[derive(Clone)]

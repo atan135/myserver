@@ -1,7 +1,7 @@
 use tracing::info;
 
 use crate::core::room::PlayerInputRecord;
-use crate::core::room_logic::RoomLogic;
+use crate::core::logic::RoomLogic;
 
 #[derive(Default)]
 pub struct PersistentWorldLogic {
