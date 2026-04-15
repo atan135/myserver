@@ -28,9 +28,9 @@
 - [ ] 防火墙/黑白名单
 
 ## 玩法底层开发
-- [ ] 移动同步
+- [x] 移动同步 ✅
 - [ ] 战斗基础
-- [ ] 背包系统
+- [x] 背包系统 ✅
 
 ## 可选项
 - [ ] 聊天系统增强（禁言、过滤）
@@ -75,3 +75,15 @@
   - Redis Pub/Sub 实现跨服务通知
   - chat-server 订阅 Redis 频道，收到通知后推送给在线玩家
   - MailNotifyPush (1501) 协议及 mock-client 测试支持
+- [x] 移动同步
+  - MovementSystem 支持 Entity 移动状态管理
+  - MoveInputReq 支持 MOVE_DIR/MOVE_STOP/FACE_TO
+  - MovementSnapshotPush 广播位置/朝向快照
+  - MovementRejectPush 处理非法移动拒绝
+  - mock-client 双客户端移动同步测试
+- [x] 背包系统
+  - inventory 模块：Item、ItemContainer、EquipmentSlots、AttrPanel、Buff、PlayerData
+  - player 模块：PlayerManager、MySqlPlayerStore
+  - 协议：ItemEquipReq/Res、ItemUseReq/Res、ItemDiscardReq/Res、WarehouseAccessReq/Res、ItemAddReq/Res、GetInventoryReq/Res
+  - 推送：InventoryUpdatePush、AttrChangePush、VisualChangePush
+  - mock-client 完整背包测试流程支持
