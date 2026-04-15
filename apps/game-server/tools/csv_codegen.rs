@@ -457,10 +457,11 @@ fn render_table(table: &CsvTable, out: &mut String) {
     }
     out.push_str("\n");
     out.push_str("        for (row_offset, line) in lines.enumerate() {\n");
-    out.push_str("            if line.trim().is_empty() {\n");
+    out.push_str("            let trimmed = line.trim();\n");
+    out.push_str("            if trimmed.is_empty() || trimmed.starts_with('#') {\n");
     out.push_str("                continue;\n");
     out.push_str("            }\n");
-    out.push_str("            let columns = crate::config_table::parse_csv_columns(line);\n");
+    out.push_str("            let columns = crate::config_table::parse_csv_columns(trimmed);\n");
     out.push_str("            if columns.len() != header_columns.len() {\n");
     out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\"table {} row {} column count mismatch: expected {}, got {}\", Self::TABLE_NAME, row_offset + 3, header_columns.len(), columns.len())));\n");
     out.push_str("            }\n");
@@ -562,11 +563,28 @@ fn to_pascal_case(value: &str) -> String {
 }
 
 fn to_snake_case(value: &str) -> String {
-    split_identifier(value)
+    let result = split_identifier(value)
         .into_iter()
         .map(|part| part.to_ascii_lowercase())
         .collect::<Vec<_>>()
-        .join("_")
+        .join("_");
+    // Escape Rust keywords
+    if is_rust_keyword(&result) {
+        format!("{}_", result)
+    } else {
+        result
+    }
+}
+
+fn is_rust_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn"
+            | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
+            | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
+            | "self" | "Self" | "static" | "struct" | "super" | "trait" | "true" | "type"
+            | "unsafe" | "use" | "where" | "while"
+    )
 }
 
 fn to_upper_snake_case(value: &str) -> String {
