@@ -108,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         scenemonsterspawn_rows = row_counts.scenemonsterspawn,
         testtable_100_rows = row_counts.testtable_100,
         testtable_110_rows = row_counts.testtable_110,
+        itemtable_rows = row_counts.itemtable,
         "csv config tables loaded"
     );
 

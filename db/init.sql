@@ -128,3 +128,21 @@ CREATE TABLE IF NOT EXISTS metrics_archive (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   INDEX idx_metrics_archive_service_time (service_name, bucket_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 玩家背包数据表
+CREATE TABLE IF NOT EXISTS player_inventory (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  player_id VARCHAR(64) NOT NULL,
+  level INT NOT NULL DEFAULT 1,
+  hp BIGINT NOT NULL DEFAULT 0,
+  inventory_data JSON NOT NULL COMMENT '背包物品 JSON',
+  warehouse_data JSON NOT NULL COMMENT '仓库物品 JSON',
+  equipment_data JSON NOT NULL COMMENT '装备栏 JSON',
+  attr_base_data JSON NOT NULL COMMENT '基础属性 JSON',
+  visual_data JSON NOT NULL COMMENT '外观 JSON',
+  buffs_data JSON NOT NULL COMMENT 'Buff列表 JSON',
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_player_inventory_player_id (player_id),
+  KEY idx_player_inventory_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
