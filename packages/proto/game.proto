@@ -245,3 +245,118 @@ message ErrorRes {
   string error_code = 1;
   string message = 2;
 }
+
+// ========== 物品基础结构 ==========
+
+message Item {
+  uint64 uid = 1;
+  int32 item_id = 2;
+  uint32 count = 3;
+  bool binded = 4;
+}
+
+message AttrPanel {
+  int64 hp = 1;
+  int64 max_hp = 2;
+  int64 attack = 3;
+  int64 defense = 4;
+  int32 speed = 5;
+  float crit_rate = 6;
+  float crit_dmg = 7;
+}
+
+message AttrRecord {
+  string source = 1;
+  string attr_type = 2;
+  int32 value = 3;
+}
+
+// ========== 物品操作 ==========
+
+message ItemEquipReq {
+  uint64 item_uid = 1;
+  string equip_slot = 2;
+}
+
+message ItemEquipRes {
+  bool ok = 1;
+  string error_code = 2;
+  Item unequipped_item = 3;
+}
+
+message ItemUseReq {
+  uint64 item_uid = 1;
+}
+
+message ItemUseRes {
+  bool ok = 1;
+  string error_code = 2;
+  int64 hp_change = 3;
+  repeated int32 new_buff_ids = 4;
+}
+
+message ItemDiscardReq {
+  uint64 item_uid = 1;
+  uint32 count = 2;
+}
+
+message ItemDiscardRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+message ItemAddReq {
+  int32 item_id = 1;
+  uint32 count = 2;
+  bool binded = 3;
+}
+
+message ItemAddRes {
+  bool ok = 1;
+  string error_code = 2;
+  Item item = 3;
+}
+
+message WarehouseAccessReq {
+  string action = 1;
+  uint64 item_uid = 2;
+  uint32 count = 3;
+}
+
+message WarehouseAccessRes {
+  bool ok = 1;
+  string error_code = 2;
+}
+
+message GetInventoryReq {
+}
+
+message GetInventoryRes {
+  bool ok = 1;
+  string error_code = 2;
+  repeated Item inventory_items = 3;
+  repeated Item warehouse_items = 4;
+}
+
+// ========== 推送消息 ==========
+
+message InventoryUpdatePush {
+  repeated Item inventory_items = 1;
+  repeated Item warehouse_items = 2;
+}
+
+message AttrChangePush {
+  AttrPanel base = 1;
+  repeated AttrRecord bonus = 2;
+  AttrPanel final_ = 3;
+}
+
+message VisualChangePush {
+  uint32 appearance = 1;
+  repeated int32 active_buff_ids = 2;
+}
+
+message ItemObtainPush {
+  repeated Item items = 1;
+  string source = 2;
+}

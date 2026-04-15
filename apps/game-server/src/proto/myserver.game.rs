@@ -351,6 +351,166 @@ pub struct ErrorRes {
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct Item {
+    #[prost(uint64, tag = "1")]
+    pub uid: u64,
+    #[prost(int32, tag = "2")]
+    pub item_id: i32,
+    #[prost(uint32, tag = "3")]
+    pub count: u32,
+    #[prost(bool, tag = "4")]
+    pub binded: bool,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct AttrPanel {
+    #[prost(int64, tag = "1")]
+    pub hp: i64,
+    #[prost(int64, tag = "2")]
+    pub max_hp: i64,
+    #[prost(int64, tag = "3")]
+    pub attack: i64,
+    #[prost(int64, tag = "4")]
+    pub defense: i64,
+    #[prost(int32, tag = "5")]
+    pub speed: i32,
+    #[prost(float, tag = "6")]
+    pub crit_rate: f32,
+    #[prost(float, tag = "7")]
+    pub crit_dmg: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttrRecord {
+    #[prost(string, tag = "1")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub attr_type: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub value: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemEquipReq {
+    #[prost(uint64, tag = "1")]
+    pub item_uid: u64,
+    #[prost(string, tag = "2")]
+    pub equip_slot: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemEquipRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub unequipped_item: ::core::option::Option<Item>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ItemUseReq {
+    #[prost(uint64, tag = "1")]
+    pub item_uid: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemUseRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(int64, tag = "3")]
+    pub hp_change: i64,
+    #[prost(int32, repeated, tag = "4")]
+    pub new_buff_ids: ::prost::alloc::vec::Vec<i32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ItemDiscardReq {
+    #[prost(uint64, tag = "1")]
+    pub item_uid: u64,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemDiscardRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ItemAddReq {
+    #[prost(int32, tag = "1")]
+    pub item_id: i32,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+    #[prost(bool, tag = "3")]
+    pub binded: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemAddRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub item: ::core::option::Option<Item>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WarehouseAccessReq {
+    #[prost(string, tag = "1")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub item_uid: u64,
+    #[prost(uint32, tag = "3")]
+    pub count: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WarehouseAccessRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetInventoryReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetInventoryRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub inventory_items: ::prost::alloc::vec::Vec<Item>,
+    #[prost(message, repeated, tag = "4")]
+    pub warehouse_items: ::prost::alloc::vec::Vec<Item>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InventoryUpdatePush {
+    #[prost(message, repeated, tag = "1")]
+    pub inventory_items: ::prost::alloc::vec::Vec<Item>,
+    #[prost(message, repeated, tag = "2")]
+    pub warehouse_items: ::prost::alloc::vec::Vec<Item>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttrChangePush {
+    #[prost(message, optional, tag = "1")]
+    pub base: ::core::option::Option<AttrPanel>,
+    #[prost(message, repeated, tag = "2")]
+    pub bonus: ::prost::alloc::vec::Vec<AttrRecord>,
+    #[prost(message, optional, tag = "3")]
+    pub r#final: ::core::option::Option<AttrPanel>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VisualChangePush {
+    #[prost(uint32, tag = "1")]
+    pub appearance: u32,
+    #[prost(int32, repeated, tag = "2")]
+    pub active_buff_ids: ::prost::alloc::vec::Vec<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ItemObtainPush {
+    #[prost(message, repeated, tag = "1")]
+    pub items: ::prost::alloc::vec::Vec<Item>,
+    #[prost(string, tag = "2")]
+    pub source: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MemberRole {
