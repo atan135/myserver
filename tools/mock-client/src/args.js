@@ -29,7 +29,19 @@ const DEFAULT_OPTIONS = {
   playerIds: [],
   mode: "1v1",
   policyId: "",
-  moveFrames: [1, 2, 3, 4, 5]
+  moveFrames: [1, 2, 3, 4, 5],
+  // Inventory parameters
+  itemUid: 0,
+  equipSlot: "",
+  useItemUid: 0,
+  discardUid: 0,
+  discardCount: 0,
+  depositUid: 0,
+  depositCount: 0,
+  warehouseAction: "deposit",
+  addItemId: 0,
+  addCount: 1,
+  addBinded: false
 };
 
 /**
@@ -164,6 +176,51 @@ export function parseArgs(argv) {
           .split(",")
           .map((value) => Number.parseInt(value, 10))
           .filter((value) => Number.isFinite(value) && value > 0);
+        index += 1;
+        break;
+      // Inventory arguments
+      case "--item-uid":
+        result.itemUid = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--equip-slot":
+        result.equipSlot = next;
+        index += 1;
+        break;
+      case "--use-item-uid":
+        result.useItemUid = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--discard-uid":
+        result.discardUid = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--discard-count":
+        result.discardCount = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--deposit-uid":
+        result.depositUid = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--deposit-count":
+        result.depositCount = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--warehouse-action":
+        result.warehouseAction = next;
+        index += 1;
+        break;
+      case "--add-item-id":
+        result.addItemId = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--add-count":
+        result.addCount = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case "--add-binded":
+        result.addBinded = next === "true" || next === "1";
         index += 1;
         break;
     }

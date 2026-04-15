@@ -143,6 +143,46 @@ export function encodeChatHistoryReq(chatType, targetId, beforeTime, limit) {
   ]);
 }
 
+// ============ Inventory Encoders ============
+
+export function encodeItemEquipReq(itemUid, equipSlot) {
+  return Buffer.concat([
+    encodeInt64Field(1, itemUid),
+    encodeStringField(2, equipSlot)
+  ]);
+}
+
+export function encodeItemUseReq(itemUid) {
+  return encodeInt64Field(1, itemUid);
+}
+
+export function encodeItemDiscardReq(itemUid, count) {
+  return Buffer.concat([
+    encodeInt64Field(1, itemUid),
+    encodeUInt32Field(2, count)
+  ]);
+}
+
+export function encodeWarehouseAccessReq(action, itemUid, count) {
+  return Buffer.concat([
+    encodeStringField(1, action),
+    encodeInt64Field(2, itemUid),
+    encodeUInt32Field(3, count)
+  ]);
+}
+
+export function encodeItemAddReq(itemId, count, binded) {
+  return Buffer.concat([
+    encodeInt32Field(1, itemId),
+    encodeUInt32Field(2, count),
+    encodeBoolField(3, binded)
+  ]);
+}
+
+export function encodeGetInventoryReq() {
+  return Buffer.alloc(0);
+}
+
 // ============ Message Decoders ============
 
 function decodeFrameInput(buffer) {
@@ -209,6 +249,38 @@ function decodeGroupInfo(buffer) {
     groupId: readString(fields, 1),
     name: readString(fields, 2),
     memberCount: readUInt32(fields, 3)
+  };
+}
+
+function decodeItem(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    uid: readInt64(fields, 1),
+    itemId: readUInt32(fields, 2),
+    count: readUInt32(fields, 3),
+    binded: readBool(fields, 4)
+  };
+}
+
+function decodeAttrPanel(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    hp: readInt64(fields, 1),
+    maxHp: readInt64(fields, 2),
+    attack: readInt64(fields, 3),
+    defense: readInt64(fields, 4),
+    speed: readUInt32(fields, 5),
+    critRate: readFloat(fields, 6),
+    critDmg: readFloat(fields, 7)
+  };
+}
+
+function decodeAttrRecord(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    source: readString(fields, 1),
+    attrType: readString(fields, 2),
+    value: readUInt32(fields, 3)
   };
 }
 
@@ -368,6 +440,75 @@ export function decodeByMessageType(messageType, body) {
         snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null
       };
     // Chat responses
+    // Chat responses (for chat-server on port 9001)
+    // Note: These use same message IDs as inventory, so they're handled separately
+    // Inventory responses (for game-server on port 7000)
+    case MESSAGE_TYPE.ITEM_EQUIP_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        unequippedItem: fields.get(3) ? decodeItem(fields.get(3)) : null
+      };
+    case MESSAGE_TYPE.ITEM_USE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        hpChange: readInt64(fields, 3),
+        newBuffIds: fields.get(4) ? (Array.isArray(fields.get(4)) ? fields.get(4).map(f => readUInt32(decodeFieldsWithRepeated(f), 1)) : [readUInt32(decodeFieldsWithRepeated(fields.get(4)), 1)]) : []
+      };
+    case MESSAGE_TYPE.ITEM_DISCARD_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
+    case MESSAGE_TYPE.ITEM_ADD_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        item: fields.get(3) ? decodeItem(fields.get(3)) : null
+      };
+    case MESSAGE_TYPE.WAREHOUSE_ACCESS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
+    case MESSAGE_TYPE.GET_INVENTORY_RES: {
+      // Field layout: 1=ok(bool), 2=error_code(string), 3=inventory_items(repeated Item), 4=warehouse_items(repeated Item)
+      const invRaw = fields.get(3);
+      const whRaw = fields.get(4);
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        inventoryItems: invRaw ? (Array.isArray(invRaw) ? invRaw.map(decodeItem) : [decodeItem(invRaw)]) : [],
+        warehouseItems: whRaw ? (Array.isArray(whRaw) ? whRaw.map(decodeItem) : [decodeItem(whRaw)]) : []
+      };
+    }
+    // Inventory push messages
+    case MESSAGE_TYPE.INVENTORY_UPDATE_PUSH: {
+      const invRaw = fields.get(1);
+      const whRaw = fields.get(2);
+      return {
+        inventoryItems: invRaw ? (Array.isArray(invRaw) ? invRaw.map(decodeItem) : [decodeItem(invRaw)]) : [],
+        warehouseItems: whRaw ? (Array.isArray(whRaw) ? whRaw.map(decodeItem) : [decodeItem(whRaw)]) : []
+      };
+    }
+    case MESSAGE_TYPE.ATTR_CHANGE_PUSH:
+      return {
+        base: fields.get(1) ? decodeAttrPanel(fields.get(1)) : null,
+        bonus: fields.get(2) ? (Array.isArray(fields.get(2)) ? fields.get(2).map(decodeAttrRecord) : [decodeAttrRecord(fields.get(2))]) : [],
+        final: fields.get(3) ? decodeAttrPanel(fields.get(3)) : null
+      };
+    case MESSAGE_TYPE.VISUAL_CHANGE_PUSH: {
+      const buffsRaw = fields.get(2);
+      return {
+        appearance: readUInt32(fields, 1),
+        activeBuffIds: buffsRaw ? (Array.isArray(buffsRaw) ? buffsRaw.map(f => readUInt32(decodeFieldsWithRepeated(f), 1)) : [readUInt32(decodeFieldsWithRepeated(buffsRaw), 1)]) : []
+      };
+    }
+    // Chat responses (for chat-server on port 9001)
+    // NOTE: Chat uses same message IDs (1401-1405) as game inventory!
+    // When connected to chat-server, these will decode correctly because
+    // inventory cases above won't match (different field structures).
     case MESSAGE_TYPE.CHAT_PRIVATE_RES:
       return {
         ok: readBool(fields, 1),
@@ -391,39 +532,6 @@ export function decodeByMessageType(messageType, body) {
         targetId: readString(fields, 7),
         groupId: readString(fields, 8)
       };
-    case MESSAGE_TYPE.GROUP_CREATE_RES:
-      return {
-        ok: readBool(fields, 1),
-        groupId: readString(fields, 2),
-        errorCode: readString(fields, 3)
-      };
-    case MESSAGE_TYPE.GROUP_JOIN_RES:
-      return {
-        ok: readBool(fields, 1),
-        errorCode: readString(fields, 3)
-      };
-    case MESSAGE_TYPE.GROUP_LEAVE_RES:
-      return {
-        ok: readBool(fields, 1),
-        errorCode: readString(fields, 3)
-      };
-    case MESSAGE_TYPE.GROUP_DISMISS_RES:
-      return {
-        ok: readBool(fields, 1),
-        errorCode: readString(fields, 3)
-      };
-    case MESSAGE_TYPE.GROUP_LIST_RES: {
-      const groupsRaw = fields.get(1);
-      let groups = [];
-      if (groupsRaw) {
-        if (Array.isArray(groupsRaw)) {
-          groups = groupsRaw.map(decodeGroupInfo);
-        } else {
-          groups = [decodeGroupInfo(groupsRaw)];
-        }
-      }
-      return { groups };
-    }
     case MESSAGE_TYPE.CHAT_HISTORY_RES: {
       const messagesRaw = fields.get(1);
       let messages = [];
@@ -462,14 +570,6 @@ export function decodeByMessageType(messageType, body) {
       return {
         errorCode: readString(fields, 1),
         message: readString(fields, 2)
-      };
-    case MESSAGE_TYPE.MAIL_NOTIFY_PUSH:
-      return {
-        mailId: readString(fields, 1),
-        title: readString(fields, 2),
-        fromPlayerId: readString(fields, 3),
-        mailType: readString(fields, 4),
-        createdAt: readInt64(fields, 5)
       };
     default:
       return { rawHex: body.toString("hex") };

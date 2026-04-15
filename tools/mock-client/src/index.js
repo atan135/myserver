@@ -35,7 +35,15 @@ import {
   runChatHistory,
   runChatTwoClient,
   runChatPrivateTwoClient,
-  runChatInteractive
+  runChatInteractive,
+  // Inventory scenarios
+  runInventoryEquip,
+  runInventoryUse,
+  runInventoryDiscard,
+  runInventoryWarehouse,
+  runInventoryAdd,
+  runGetInventory,
+  runInventoryFull
 } from "./scenarios/index.js";
 
 async function main() {
@@ -186,6 +194,28 @@ async function main() {
         break;
       case SCENARIO.CHAT_INTERACTIVE:
         await runChatInteractive(options);
+        break;
+      // Inventory scenarios
+      case SCENARIO.INVENTORY_EQUIP:
+        await runInventoryEquip(options);
+        break;
+      case SCENARIO.INVENTORY_USE:
+        await runInventoryUse(options);
+        break;
+      case SCENARIO.INVENTORY_DISCARD:
+        await runInventoryDiscard(options);
+        break;
+      case SCENARIO.INVENTORY_WAREHOUSE:
+        await runInventoryWarehouse(options);
+        break;
+      case SCENARIO.INVENTORY_ADD:
+        await runInventoryAdd(options);
+        break;
+      case SCENARIO.INVENTORY_GET:
+        await runGetInventory(options);
+        break;
+      case SCENARIO.INVENTORY_FULL:
+        await runInventoryFull(options);
         break;
       default:
         throw new Error(`unknown scenario: ${options.scenario}`);

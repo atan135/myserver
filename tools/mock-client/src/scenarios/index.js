@@ -51,5 +51,16 @@ export { runChatInteractive } from "./interactive.js";
 // Interactive movement
 export { runMovementInteractive } from "./movement-interactive.js";
 
+// Inventory scenarios
+export {
+  runInventoryEquip,
+  runInventoryUse,
+  runInventoryDiscard,
+  runInventoryWarehouse,
+  runInventoryAdd,
+  runGetInventory,
+  runInventoryFull
+} from "./inventory.js";
+
 // Re-export MESSAGE_TYPE for convenience
 export { MESSAGE_TYPE } from "../constants.js";
