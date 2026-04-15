@@ -101,6 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_tables = config_table_runtime.snapshot().await;
     let row_counts = initial_tables.row_counts();
     tracing::info!(
+        scenetable_rows = row_counts.scenetable,
+        scenespawnpoint_rows = row_counts.scenespawnpoint,
+        sceneportal_rows = row_counts.sceneportal,
+        sceneregion_rows = row_counts.sceneregion,
+        scenemonsterspawn_rows = row_counts.scenemonsterspawn,
         testtable_100_rows = row_counts.testtable_100,
         testtable_110_rows = row_counts.testtable_110,
         "csv config tables loaded"

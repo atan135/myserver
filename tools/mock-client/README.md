@@ -104,6 +104,7 @@ Protobuf 风格的编解码工具：
 | 场景 | 说明 |
 |------|------|
 | `gameplay-roundtrip` | 完整游戏流程：入房→准备→开始→输入→结束 |
+| `movement-demo` | movement_demo 单客户端位移联调 |
 
 ### 聊天场景 (chat.js, interactive.js)
 | 场景 | 说明 |
@@ -134,6 +135,12 @@ node tools/mock-client/src/index.js --scenario happy \
 node tools/mock-client/src/index.js --scenario two-client-room \
   --http-base-url http://127.0.0.1:3000 --room-id test-room
 
+# movement_demo 位移联调
+node tools/mock-client/src/index.js --scenario movement-demo \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --room-id room-movement-demo --policy-id movement_demo
+
 # 聊天测试
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
@@ -154,6 +161,8 @@ node tools/mock-client/src/index.js --scenario chat-private \
 | `--password` | 登录密码 | - |
 | `--ticket` | 直接指定 ticket | - |
 | `--timeout-ms` | 超时毫秒 | `5000` |
+| `--policy-id` | 入房时指定房间策略 | 空 |
+| `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
 | `--target-id` | 私聊目标玩家ID | - |
 | `--group-id` | 群组ID | - |

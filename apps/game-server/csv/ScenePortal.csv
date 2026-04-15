@@ -1,0 +1,4 @@
+Id,SceneId,Code,RegionId,TargetSceneId,TargetSpawnId,PortalType,Enabled
+int,int,string,int,int,int,string,int
+5001,1,grassland_to_dungeon,3003,2,2001,scene_change,1
+5002,2,dungeon_to_grassland,4003,1,1001,return_point,1

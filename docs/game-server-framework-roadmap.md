@@ -314,12 +314,14 @@
 
 - `docs/game-server-frame-sync-design.md`
 - `docs/game-server-csv-config-design.md`
+- `docs/game-server-scene-map-format-design.md`
 - `docs/protocol.md`
 
 建议使用方式：
 
 - 本文负责说明“先做什么、后做什么”
 - `game-server-frame-sync-design.md` 负责说明 P1 的核心运行时设计
+- `game-server-scene-map-format-design.md` 负责说明场景地图、阻挡、出生点和 AOI 的数据格式
 - `protocol.md` 负责说明协议层的当前约束与演进点
 
 ## 8. 第一阶段建议拆单

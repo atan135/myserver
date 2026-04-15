@@ -27,7 +27,9 @@ const DEFAULT_OPTIONS = {
   beforeTime: 0,
   matchId: "",
   playerIds: [],
-  mode: "1v1"
+  mode: "1v1",
+  policyId: "",
+  moveFrames: [1, 2, 3, 4, 5]
 };
 
 /**
@@ -151,6 +153,17 @@ export function parseArgs(argv) {
         break;
       case "--mode":
         result.mode = next;
+        index += 1;
+        break;
+      case "--policy-id":
+        result.policyId = next;
+        index += 1;
+        break;
+      case "--move-frames":
+        result.moveFrames = next
+          .split(",")
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isFinite(value) && value > 0);
         index += 1;
         break;
     }

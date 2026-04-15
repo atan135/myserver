@@ -68,15 +68,22 @@ node tools/mock-client/src/index.js --scenario start-game-ready-room --http-base
 #   - SILENT 帧（无输入）标记
 node tools/mock-client/src/index.js --scenario gameplay-roundtrip --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-gameplay
 
+# 12. movement_demo 联调 (MOVEMENT_DEMO)
+# 单客户端登录 -> 以 movement_demo policy 入房 -> 开始游戏 -> 发送 MoveInputReq -> 观察 MovementSnapshotPush / MovementRejectPush
+# 可选参数：
+#   --policy-id movement_demo
+#   --move-frames 1,2,3,4,5
+node tools/mock-client/src/index.js --scenario movement-demo --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-movement-demo --policy-id movement_demo
+
 # ---------- 断线重连测试 ----------
 
-# 12. 断线重连测试 (RECONNECT)
+# 13. 断线重连测试 (RECONNECT)
 # clientA入房 -> clientB入房 -> 开始游戏 -> clientA断开(不发送ROOM_LEAVE) -> clientA重连
 node tools/mock-client/src/index.js --scenario reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-reconnect
 
 # ---------- 匹配系统测试 ----------
 
-# 13. 创建匹配房间 (CREATE_MATCHED_ROOM)
+# 14. 创建匹配房间 (CREATE_MATCHED_ROOM)
 # 登录 -> 创建匹配房间 (会通知 MatchService)
 # 参数说明：
 #   --match-id     匹配ID (可选，默认自动生成)
@@ -85,14 +92,14 @@ node tools/mock-client/src/index.js --scenario reconnect --http-base-url http://
 #   --mode         匹配模式 (可选，默认 1v1)
 node tools/mock-client/src/index.js --scenario create-matched-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
 
-# 14. 创建匹配房间(指定模式) (CREATE_MATCHED_ROOM_3V3)
+# 15. 创建匹配房间(指定模式) (CREATE_MATCHED_ROOM_3V3)
 node tools/mock-client/src/index.js --scenario create-matched-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --mode 3v3
 
-# 15. 创建匹配房间(指定多个玩家) (CREATE_MATCHED_ROOM_MULTI)
+# 16. 创建匹配房间(指定多个玩家) (CREATE_MATCHED_ROOM_MULTI)
 # --player-ids 会与当前登录玩家合并，确保请求者一定在列表中
 node tools/mock-client/src/index.js --scenario create-matched-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --player-ids test002,test003 --mode 3v3
 
-# 16. 创建匹配房间并让所有玩家加入 (CREATE_MATCHED_ROOM_AND_JOIN)
+# 17. 创建匹配房间并让所有玩家加入 (CREATE_MATCHED_ROOM_AND_JOIN)
 # 完整流程：创建匹配房间 -> 所有玩家 JOIN_ROOM -> 触发 player_joined 回调到 MatchService
 # 测试 MatchService 的 CreateRoomAndJoin、PlayerJoined、PlayerLeft 等完整回调日志
 # 注意：此场景会自动创建3个 guest 玩家（host + 2个 guest）
@@ -160,6 +167,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # start-game-single-client | 单客户端开始游戏
 # start-game-ready-room    | 就绪状态开始游戏
 # gameplay-roundtrip        | 帧同步测试：多输入帧、快照、状态同步
+# movement-demo            | movement_demo 单客户端位移联调
 # get-room-data            | 获取房间数据
 # get-room-data-in-room    | 在房间内获取数据
 # reconnect                | 断线重连

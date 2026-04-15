@@ -17,6 +17,7 @@ use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, room_service};
+use crate::core::system::scene::SceneCatalog;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
 use crate::match_client::{init_match_client, MatchClientConfig};
@@ -58,7 +59,20 @@ pub async fn run(
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }
 
-    let room_logic_factory: SharedRoomLogicFactory = Arc::new(GameRoomLogicFactory::default());
+    let tables_snapshot = config_tables.snapshot().await;
+    let scene_dir = std::path::Path::new(&config.csv_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("scene");
+    let scene_catalog = Arc::new(SceneCatalog::load_from_dir(&scene_dir, tables_snapshot.as_ref())?);
+    let movement_demo_scene_id = scene_catalog
+        .scene_id_by_code("grassland_01")
+        .or_else(|| scene_catalog.scenes.keys().min().copied())
+        .ok_or("scene catalog is empty")?;
+    let room_logic_factory: SharedRoomLogicFactory = Arc::new(GameRoomLogicFactory::new(
+        scene_catalog,
+        movement_demo_scene_id,
+    ));
     let shared_state = ServerSharedState {
         room_manager: Arc::new(RoomManager::with_match_client(match_client, room_logic_factory)),
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
@@ -369,6 +383,9 @@ async fn dispatch_packet(
         Some(MessageType::RoomStartReq) => room_service::handle_room_start(services, connection, packet).await,
         Some(MessageType::PlayerInputReq) => {
             room_service::handle_player_input(services, connection, packet).await
+        }
+        Some(MessageType::MoveInputReq) => {
+            room_service::handle_move_input(services, connection, packet).await
         }
         Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
         Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,

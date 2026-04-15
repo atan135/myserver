@@ -37,7 +37,7 @@ impl RoomLogic for PersistentWorldLogic {
         info!(room_id = _room_id, "[RoomLogic/persistent_world] world session ended");
     }
 
-    fn on_tick(&mut self, _frame_id: u32, _inputs: &[PlayerInputRecord]) {
+    fn on_tick(&mut self, _frame_id: u32, _fps: u16, _inputs: &[PlayerInputRecord]) {
         self.tick_count += 1;
     }
 

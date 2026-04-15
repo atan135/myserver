@@ -389,6 +389,87 @@ message RoomFrameRatePush {
 - `RoomFrameRatePush` 用于通知客户端当前房间帧率变化（待客户端对接）
 - `is_silent_frame` 表示这是无人房间或无输入帧，便于客户端做差异化处理
 
+### 10.1 位移同步建议
+
+当前框架下，位移同步建议采用：
+
+- **主链路**：输入帧同步
+- **辅链路**：低频权威位置校正
+
+也就是说：
+
+- 客户端每帧发送移动输入，而不是直接发送当前位置
+- 服务端在 `RoomLogic::on_tick()` 中按帧结算移动
+- 服务端继续通过 `FrameBundlePush` 广播输入集合
+- 服务端每隔 `N` 帧，或在误差超阈值时，下发权威位置校正
+
+第一版推荐的移动输入语义：
+
+```text
+action = "move_dir"   payload_json = {"x": 1.0, "y": 0.0}
+action = "move_stop"  payload_json = {}
+action = "dash"       payload_json = {"x": 1.0, "y": 0.0}
+action = "face_to"    payload_json = {"x": 120.0, "y": 40.0}
+```
+
+不建议直接发送：
+
+```text
+payload_json = {"pos_x": 100.0, "pos_y": 20.0}
+```
+
+原因：
+
+- 会削弱服务端权威校验能力
+- 难以结合场景阻挡、速度上限和碰撞做防作弊
+- 客户端可直接伪造位置，破坏同步一致性
+
+### 10.2 校正消息建议
+
+位移校正不建议每帧全量广播，而建议采用：
+
+- 每 `N` 帧发送一次权威快照
+- 误差超过阈值时立即发送强校正
+- 冲刺、击退、碰撞修正、传送、重连恢复时立即发送关键校正
+
+推荐增加一类轻量消息，例如：
+
+```proto
+message EntityTransform {
+  uint32 entity_id = 1;
+  float x = 2;
+  float y = 3;
+  float vx = 4;
+  float vy = 5;
+}
+
+message MovementSnapshotPush {
+  uint32 frame_id = 1;
+  repeated EntityTransform entities = 2;
+}
+```
+
+建议语义：
+
+- `FrameBundlePush`：告诉客户端这一帧有哪些输入
+- `MovementSnapshotPush`：告诉客户端到某一帧为止的权威位置结果
+
+### 10.3 100 人场景下的广播策略
+
+当房间规模提升到 `100` 玩家，且同时存在 NPC / 怪物 / 投射物时，不建议每帧广播所有实体位置。
+
+推荐顺序：
+
+1. 先实现输入帧同步 + 低频位移校正
+2. 再实现按实体变化量发送的增量快照
+3. 最后实现 AOI / 兴趣管理，只给玩家下发视野内实体
+
+推荐的第一版频率：
+
+- 玩家实体：每 `3-5` 帧校正一次
+- NPC / 怪物：每 `5-10` 帧校正一次
+- 投射物：尽量事件化，同步创建/销毁和关键命中结果
+
 ## 11. RoomLogic 抽象建议
 
 当前已实现房间业务逻辑接口 `RoomLogic trait`。

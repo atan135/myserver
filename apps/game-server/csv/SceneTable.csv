@@ -1,0 +1,4 @@
+Id,Code,Name,GridFile,Width,Height,CellSize,AoiBlockSize,DefaultSpawnId,Tags
+int,string,string,string,int,int,float,int,int,Array<string>
+1,grassland_01,初心草原,grassland_01.grid.json,16,16,1.0,4,1001,pve|outdoor|safe_zone
+2,dungeon_01,遗迹地牢,dungeon_01.grid.json,16,16,1.0,4,2001,pve|instance|danger_zone

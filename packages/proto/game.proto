@@ -27,6 +27,7 @@ message PingRes {
 
 message RoomJoinReq {
   string room_id = 1;
+  string policy_id = 2;
 }
 
 message RoomJoinRes {
@@ -69,6 +70,26 @@ message PlayerInputReq {
 }
 
 message PlayerInputRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+}
+
+enum MoveInputType {
+  MOVE_INPUT_TYPE_UNKNOWN = 0;
+  MOVE_INPUT_TYPE_MOVE_DIR = 1;
+  MOVE_INPUT_TYPE_MOVE_STOP = 2;
+  MOVE_INPUT_TYPE_FACE_TO = 3;
+}
+
+message MoveInputReq {
+  uint32 frame_id = 1;
+  MoveInputType input_type = 2;
+  float dir_x = 3;
+  float dir_y = 4;
+}
+
+message MoveInputRes {
   bool ok = 1;
   string room_id = 2;
   string error_code = 3;
@@ -141,9 +162,37 @@ message RoomSnapshot {
   string game_state = 6;
 }
 
+message EntityTransform {
+  uint64 entity_id = 1;
+  string player_id = 2;
+  int32 scene_id = 3;
+  float x = 4;
+  float y = 5;
+  float dir_x = 6;
+  float dir_y = 7;
+  bool moving = 8;
+  uint32 last_input_frame = 9;
+}
+
 message RoomStatePush {
   string event = 1;
   RoomSnapshot snapshot = 2;
+}
+
+message MovementSnapshotPush {
+  string room_id = 1;
+  uint32 frame_id = 2;
+  repeated EntityTransform entities = 3;
+  bool full_sync = 4;
+  string reason = 5;
+}
+
+message MovementRejectPush {
+  string room_id = 1;
+  uint32 frame_id = 2;
+  string player_id = 3;
+  string error_code = 4;
+  EntityTransform corrected = 5;
 }
 
 message RoomJoinAsObserverReq {

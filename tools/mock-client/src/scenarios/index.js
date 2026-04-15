@@ -21,7 +21,7 @@ export {
 } from "./room.js";
 
 // Game scenarios
-export { runGameplayRoundtrip } from "./game.js";
+export { runGameplayRoundtrip, runMovementDemo } from "./game.js";
 
 // Chat scenarios
 export {

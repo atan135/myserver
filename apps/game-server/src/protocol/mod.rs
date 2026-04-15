@@ -123,13 +123,19 @@ mod tests {
                         player_id: "player-a".to_string(),
                         ready: true,
                         is_owner: true,
+                        offline: false,
+                        role: 0,
                     },
                     RoomMember {
                         player_id: "player-b".to_string(),
                         ready: false,
                         is_owner: false,
+                        offline: false,
+                        role: 0,
                     },
                 ],
+                current_frame_id: 0,
+                game_state: String::new(),
             }),
         };
 
@@ -161,6 +167,7 @@ mod tests {
                 payload_json: "{\"x\":1}".to_string(),
             }],
             is_silent_frame: false,
+            snapshot: None,
         };
 
         let body = encode_body(&message);

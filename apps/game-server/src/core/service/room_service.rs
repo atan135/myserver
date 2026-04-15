@@ -3,10 +3,12 @@ use tracing::info;
 
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
+use crate::core::system::movement::player_input_from_move_req;
 use crate::pb::{
-    CreateMatchedRoomReq, CreateMatchedRoomRes, PlayerInputReq, PlayerInputRes, RoomEndReq,
-    RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes, RoomJoinReq, RoomJoinRes,
-    RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq, RoomReconnectRes, RoomStartRes,
+    CreateMatchedRoomReq, CreateMatchedRoomRes, MoveInputReq, MoveInputRes, PlayerInputReq,
+    PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes,
+    RoomJoinReq, RoomJoinRes, RoomLeaveRes, RoomReadyReq, RoomReadyRes, RoomReconnectReq,
+    RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -32,6 +34,7 @@ pub async fn handle_room_join(
     } else {
         request.room_id
     };
+    let requested_policy_id = (!request.policy_id.is_empty()).then_some(request.policy_id.as_str());
 
     info!(
         session_id = connection.session.id,
@@ -68,7 +71,13 @@ pub async fn handle_room_join(
 
     let join_result = services
         .room_manager
-        .join_room(&room_id, &player_id, connection.tx.clone(), MemberRole::Player)
+        .join_room(
+            &room_id,
+            &player_id,
+            connection.tx.clone(),
+            MemberRole::Player,
+            requested_policy_id,
+        )
         .await;
 
     match join_result {
@@ -423,6 +432,102 @@ pub async fn handle_player_input(
                 MessageType::PlayerInputRes,
                 packet.header.seq,
                 PlayerInputRes {
+                    ok: false,
+                    room_id,
+                    error_code: error_code.to_string(),
+                },
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_move_input(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+        return Ok(());
+    };
+    let Some(room_id) = connection.session.room_id.clone() else {
+        connection.queue_message(
+            MessageType::MoveInputRes,
+            packet.header.seq,
+            MoveInputRes {
+                ok: false,
+                room_id: String::new(),
+                error_code: "ROOM_NOT_JOINED".to_string(),
+            },
+        )?;
+        return Ok(());
+    };
+
+    let request = match packet.decode_body::<MoveInputReq>("INVALID_MOVE_INPUT_BODY") {
+        Ok(value) => value,
+        Err(error_code) => {
+            connection.queue_error(packet.header.seq, error_code, "invalid move input body")?;
+            return Ok(());
+        }
+    };
+
+    let (action, payload_json) = match player_input_from_move_req(&request) {
+        Ok(value) => value,
+        Err(error) => {
+            connection.queue_message(
+                MessageType::MoveInputRes,
+                packet.header.seq,
+                MoveInputRes {
+                    ok: false,
+                    room_id,
+                    error_code: error.error_code.to_string(),
+                },
+            )?;
+            return Ok(());
+        }
+    };
+
+    let input_result = services
+        .room_manager
+        .accept_player_input(&room_id, &player_id, request.frame_id, action, &payload_json)
+        .await;
+
+    match input_result {
+        Ok(_) => {
+            connection.queue_message(
+                MessageType::MoveInputRes,
+                packet.header.seq,
+                MoveInputRes {
+                    ok: true,
+                    room_id: room_id.clone(),
+                    error_code: String::new(),
+                },
+            )?;
+            services
+                .mysql_store
+                .append_room_event(
+                    &room_id,
+                    Some(&player_id),
+                    None,
+                    "move_input",
+                    Some("in_game"),
+                    0,
+                    Some(json!({
+                        "seq": packet.header.seq,
+                        "frameId": request.frame_id,
+                        "inputType": request.input_type,
+                        "dirX": request.dir_x,
+                        "dirY": request.dir_y
+                    })),
+                )
+                .await;
+        }
+        Err(error_code) => {
+            connection.queue_message(
+                MessageType::MoveInputRes,
+                packet.header.seq,
+                MoveInputRes {
                     ok: false,
                     room_id,
                     error_code: error_code.to_string(),

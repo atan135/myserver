@@ -1,0 +1,6 @@
+Id,SceneId,SpawnPointId,MonsterId,RespawnSeconds,MaxAlive,LeashRadius,Tags
+int,int,int,int,int,int,float,Array<string>
+6001,1,1101,10001,20,6,6.0,wolf|field
+6002,1,1102,10001,20,6,6.0,wolf|field
+6003,2,2101,20001,45,2,4.0,guard|elite
+6004,2,2102,20002,45,2,5.0,archer|elite

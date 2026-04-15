@@ -27,6 +27,8 @@ pub struct PingRes {
 pub struct RoomJoinReq {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub policy_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomJoinRes {
@@ -86,6 +88,26 @@ pub struct PlayerInputReq {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlayerInputRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct MoveInputReq {
+    #[prost(uint32, tag = "1")]
+    pub frame_id: u32,
+    #[prost(enumeration = "MoveInputType", tag = "2")]
+    pub input_type: i32,
+    #[prost(float, tag = "3")]
+    pub dir_x: f32,
+    #[prost(float, tag = "4")]
+    pub dir_y: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MoveInputRes {
     #[prost(bool, tag = "1")]
     pub ok: bool,
     #[prost(string, tag = "2")]
@@ -198,11 +220,58 @@ pub struct RoomSnapshot {
     pub game_state: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EntityTransform {
+    #[prost(uint64, tag = "1")]
+    pub entity_id: u64,
+    #[prost(string, tag = "2")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub scene_id: i32,
+    #[prost(float, tag = "4")]
+    pub x: f32,
+    #[prost(float, tag = "5")]
+    pub y: f32,
+    #[prost(float, tag = "6")]
+    pub dir_x: f32,
+    #[prost(float, tag = "7")]
+    pub dir_y: f32,
+    #[prost(bool, tag = "8")]
+    pub moving: bool,
+    #[prost(uint32, tag = "9")]
+    pub last_input_frame: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomStatePush {
     #[prost(string, tag = "1")]
     pub event: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub snapshot: ::core::option::Option<RoomSnapshot>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovementSnapshotPush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub frame_id: u32,
+    #[prost(message, repeated, tag = "3")]
+    pub entities: ::prost::alloc::vec::Vec<EntityTransform>,
+    #[prost(bool, tag = "4")]
+    pub full_sync: bool,
+    #[prost(string, tag = "5")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovementRejectPush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub frame_id: u32,
+    #[prost(string, tag = "3")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub corrected: ::core::option::Option<EntityTransform>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomJoinAsObserverReq {
@@ -304,6 +373,38 @@ impl MemberRole {
         match value {
             "MEMBER_ROLE_PLAYER" => Some(Self::Player),
             "MEMBER_ROLE_OBSERVER" => Some(Self::Observer),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MoveInputType {
+    Unknown = 0,
+    MoveDir = 1,
+    MoveStop = 2,
+    FaceTo = 3,
+}
+impl MoveInputType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "MOVE_INPUT_TYPE_UNKNOWN",
+            Self::MoveDir => "MOVE_INPUT_TYPE_MOVE_DIR",
+            Self::MoveStop => "MOVE_INPUT_TYPE_MOVE_STOP",
+            Self::FaceTo => "MOVE_INPUT_TYPE_FACE_TO",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MOVE_INPUT_TYPE_UNKNOWN" => Some(Self::Unknown),
+            "MOVE_INPUT_TYPE_MOVE_DIR" => Some(Self::MoveDir),
+            "MOVE_INPUT_TYPE_MOVE_STOP" => Some(Self::MoveStop),
+            "MOVE_INPUT_TYPE_FACE_TO" => Some(Self::FaceTo),
             _ => None,
         }
     }

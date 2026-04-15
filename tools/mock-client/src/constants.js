@@ -29,6 +29,8 @@ export const MESSAGE_TYPE = {
   ROOM_JOIN_AS_OBSERVER_RES: 1118,
   CREATE_MATCHED_ROOM_REQ: 1119,
   CREATE_MATCHED_ROOM_RES: 1120,
+  MOVE_INPUT_REQ: 1121,
+  MOVE_INPUT_RES: 1122,
   ROOM_STATE_PUSH: 1201,
   GET_ROOM_DATA_REQ: 1301,
   GET_ROOM_DATA_RES: 1302,
@@ -36,6 +38,8 @@ export const MESSAGE_TYPE = {
   FRAME_BUNDLE_PUSH: 1203,
   ROOM_FRAME_RATE_PUSH: 1204,
   ROOM_MEMBER_OFFLINE_PUSH: 1205,
+  MOVEMENT_SNAPSHOT_PUSH: 1206,
+  MOVEMENT_REJECT_PUSH: 1207,
   // Chat (1401-1422)
   CHAT_PRIVATE_REQ: 1401,
   CHAT_PRIVATE_RES: 1402,
@@ -60,6 +64,13 @@ export const MESSAGE_TYPE = {
   ERROR_RES: 9000
 };
 
+export const MOVE_INPUT_TYPE = {
+  UNKNOWN: 0,
+  MOVE_DIR: 1,
+  MOVE_STOP: 2,
+  FACE_TO: 3
+};
+
 // Test scenarios
 export const SCENARIO = {
   HAPPY: "happy",
@@ -71,6 +82,7 @@ export const SCENARIO = {
   START_GAME_SINGLE_CLIENT: "start-game-single-client",
   START_GAME_READY_ROOM: "start-game-ready-room",
   GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip",
+  MOVEMENT_DEMO: "movement-demo",
   GET_ROOM_DATA: "get-room-data",
   GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
   RECONNECT: "reconnect",

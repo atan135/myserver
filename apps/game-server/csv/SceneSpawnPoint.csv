@@ -1,0 +1,11 @@
+Id,SceneId,Code,SpawnType,X,Y,DirX,DirY,Radius,Tags
+int,int,string,string,float,float,float,float,float,Array<string>
+1001,1,grassland_player_main,player,2.0,2.0,1.0,0.0,2.0,default|safe
+1002,1,grassland_player_north,player,2.0,12.0,1.0,0.0,2.0,secondary|safe
+1101,1,grassland_wolf_spawn_a,monster,10.0,4.0,-1.0,0.0,3.0,wild|melee
+1102,1,grassland_wolf_spawn_b,monster,12.0,10.0,-1.0,0.0,3.0,wild|melee
+1201,1,grassland_portal_to_dungeon,portal_target,14.0,8.0,-1.0,0.0,0.5,portal
+2001,2,dungeon_player_entry,player,2.0,2.0,1.0,0.0,1.0,default|entry
+2101,2,dungeon_guard_spawn,monster,8.0,8.0,-1.0,0.0,1.5,elite|melee
+2102,2,dungeon_archer_spawn,monster,11.0,11.0,-1.0,0.0,1.5,elite|ranged
+2201,2,dungeon_return_portal,portal_target,13.0,13.0,-1.0,0.0,0.5,portal

@@ -15,8 +15,10 @@
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| MAX_ENTITIES | 16 | 每房间最大实体数（含玩家、NPC、投射物） |
-| MAX_PLAYERS | 8 | 每房间最大玩家数 |
+| MAX_ENTITIES | 2048 | 每房间最大实体数（含玩家、NPC、怪物、投射物、召唤物） |
+| MAX_PLAYERS | 100 | 每房间最大玩家数 |
+| MAX_NPCS | 500 | 每房间最大 NPC / 怪物规模建议值 |
+| MAX_PROJECTILES | 1000 | 投射物与短生命周期实体预算 |
 | MAX_SKILLS_PER_ENTITY | 8 | 每个实体最大技能槽数 |
 | MAX_BUFFS_PER_ENTITY | 6 | 每个实体最大 Buff 槽数 |
 | FPS | 30 | 帧率（帧同步基础） |
@@ -118,6 +120,64 @@ pub struct RoomCombatEcs {
     pending_skill_requests: Vec<SkillCastRequest>,
 }
 ```
+
+### 2.4 实体标识与索引映射
+
+当场景规模提升到 `100` 玩家，并同时存在 NPC / 怪物 / 投射物时，ECS 不建议直接使用 `player_id` 作为组件数组下标。
+
+推荐拆成三层身份：
+
+- `player_id`
+  - 业务层身份，仅玩家拥有
+- `entity_id`
+  - 统一实体身份，玩家 / NPC / 怪物 / 投射物都拥有
+- `dense_index`
+  - ECS 内部连续数组下标，专供 `Vec<Position>`、`Vec<MoveState>` 等组件访问
+
+推荐结构：
+
+```rust
+type EntityId = u32;
+type DenseIndex = usize;
+
+struct EntityMeta {
+    entity_id: EntityId,
+    entity_type: EntityType,
+    player_id: Option<String>,
+    alive: bool,
+}
+
+enum EntityType {
+    Player,
+    Npc,
+    Monster,
+    Projectile,
+    Summon,
+}
+
+pub struct RoomCombatEcs {
+    entities: Vec<EntityMeta>,
+    positions: Vec<Position>,
+    move_states: Vec<MoveState>,
+
+    player_entity_map: HashMap<String, EntityId>,
+    entity_index_map: HashMap<EntityId, DenseIndex>,
+    index_entity_map: Vec<EntityId>,
+}
+```
+
+访问路径应为：
+
+```text
+player_id -> entity_id -> dense_index -> move_states[dense_index]
+```
+
+这样可以同时满足：
+
+- 玩家输入入口仍使用 `player_id`
+- ECS tick 时仍可连续遍历 `Vec`
+- NPC / 怪物 / 投射物可共享同一套组件结构
+- 删除实体时可通过 `swap_remove` 维护紧凑数组
 
 ---
 
@@ -275,7 +335,7 @@ enum MoveState {
 
 ```rust
 fn tick_movements(&mut self) {
-    for i in 0..MAX_ENTITIES {
+    for i in 0..self.positions.len() {
         let state = &mut self.move_states[i];
         if !state.is_active() { continue; }
 
@@ -289,6 +349,50 @@ fn tick_movements(&mut self) {
     }
 }
 ```
+
+### 6.3 位移同步职责
+
+位移系统建议采用：
+
+- **输入帧同步** 作为主链路
+- **权威位置校正** 作为纠偏链路
+
+具体含义：
+
+- 客户端每帧发送移动输入，不直接发送当前位置
+- 服务端在 `on_tick()` 中处理输入并更新 `Position / MoveState`
+- 平时通过 `FrameBundlePush` 同步输入
+- 每 `N` 帧或超阈值时，通过单独快照消息校正权威位置
+
+不建议一开始就：
+
+- 每帧全量广播所有实体位置
+- 让客户端直接上传权威位置
+
+### 6.4 场景与阻挡校验
+
+服务端位移结算必须结合场景配置做校验，至少包括：
+
+- 可行走区域
+- 障碍 / 阻挡
+- 出生点
+- 越界约束
+- 冲刺 / 击退的特殊碰撞规则
+
+也就是说，位移同步的核心不是“同步坐标”，而是：
+
+```text
+同步输入 + 服务端按场景规则结算位置 + 低频校正
+```
+
+### 6.5 广播建议
+
+在 `100` 玩家 + NPC / 怪物场景下：
+
+- 玩家位置校正建议每 `3-5` 帧发送一次
+- NPC / 怪物位置校正建议每 `5-10` 帧发送一次
+- 投射物优先事件化广播
+- 后续必须接入 AOI / 兴趣管理，只同步视野内实体
 
 ---
 

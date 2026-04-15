@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::info;
 
-use crate::core::logic::SharedRoomLogicFactory;
+use crate::core::logic::{RoomLogicBroadcast, SharedRoomLogicFactory};
 use crate::core::room::{MemberRole, OutboundMessage, PlayerInputRecord, Room, RoomMemberState, RoomPhase};
 use crate::core::runtime::room_policy::RoomPolicyRegistry;
 use crate::match_client::SharedMatchClient;
@@ -258,24 +258,28 @@ impl RoomManager {
         player_id: &str,
         sender: mpsc::UnboundedSender<OutboundMessage>,
         role: MemberRole,
+        requested_policy_id: Option<&str>,
     ) -> Result<RoomSnapshot, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
-        let default_policy = self.policies.default_policy().clone();
+        let requested_policy_id = requested_policy_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.policies.default_policy().policy_id.as_str());
+        let selected_policy = self.policies.resolve(requested_policy_id);
         let (snapshot, match_id) = {
             let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-                let mut logic = self.logic_factory.create(&default_policy.policy_id);
+                let mut logic = self.logic_factory.create(&selected_policy.policy_id);
                 logic.on_room_created(room_id);
                 info!(
                     room_id = room_id,
                     owner_player_id = player_id,
-                    policy_id = %default_policy.policy_id,
+                    policy_id = %selected_policy.policy_id,
                     "room created"
                 );
                 Room::new(
                     room_id.to_string(),
                     player_id.to_string(),
-                    default_policy.policy_id.clone(),
+                    selected_policy.policy_id.clone(),
                     logic,
                 )
             });
@@ -773,7 +777,7 @@ impl RoomManager {
             let deadline = TokioInstant::now() + interval;
             sleep_until(deadline).await;
 
-            let frame_bundle = {
+            let (frame_bundle, pending_broadcasts) = {
                 let mut rooms = self.rooms.lock().await;
                 let Some(room) = rooms.get_mut(&room_id) else {
                     break;
@@ -807,7 +811,8 @@ impl RoomManager {
                     })
                     .collect::<Vec<_>>();
 
-                room.logic.on_tick(frame_id, &tick_inputs);
+                room.logic.on_tick(frame_id, fps, &tick_inputs);
+                let pending_broadcasts = room.logic.take_pending_broadcasts();
 
                 let snapshot = if frame_id % snapshot_interval == 0 {
                     room.last_snapshot_frame = frame_id;
@@ -859,15 +864,22 @@ impl RoomManager {
                     );
                 }
 
-                FrameBundlePush {
-                    room_id: room.room_id.clone(),
-                    frame_id,
-                    fps: u32::from(fps),
-                    is_silent_frame: inputs.is_empty(),
-                    inputs,
-                    snapshot,
-                }
+                (
+                    FrameBundlePush {
+                        room_id: room.room_id.clone(),
+                        frame_id,
+                        fps: u32::from(fps),
+                        is_silent_frame: inputs.is_empty(),
+                        inputs,
+                        snapshot,
+                    },
+                    pending_broadcasts,
+                )
             };
+
+            for RoomLogicBroadcast { message_type, body } in pending_broadcasts {
+                let _ = self.broadcast_to_room(&room_id, message_type, body).await;
+            }
 
             let body = encode_body(&frame_bundle);
             let _ = self

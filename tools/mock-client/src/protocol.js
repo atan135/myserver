@@ -67,6 +67,13 @@ export function encodeInt32Field(fieldNumber, value) {
   return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value)]);
 }
 
+export function encodeFloatField(fieldNumber, value) {
+  const fieldKey = (fieldNumber << 3) | 5;
+  const data = Buffer.allocUnsafe(4);
+  data.writeFloatLE(value, 0);
+  return Buffer.concat([encodeVarint(fieldKey), data]);
+}
+
 // Field decoding helpers
 function appendField(fields, fieldNumber, value) {
   const current = fields.get(fieldNumber);
@@ -112,6 +119,13 @@ export function decodeFieldsWithRepeated(buffer) {
       continue;
     }
 
+    if (wireType === 5) {
+      const end = offset + 4;
+      appendField(fields, fieldNumber, buffer.subarray(offset, end));
+      offset = end;
+      continue;
+    }
+
     throw new Error(`Unsupported wire type: ${wireType}`);
   }
 
@@ -145,4 +159,13 @@ export function readInt64(fields, fieldNumber) {
 
 export function readUInt32(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n);
+}
+
+export function readFloat(fields, fieldNumber) {
+  const value = fields.get(fieldNumber);
+  if (!value) {
+    return 0;
+  }
+  const buffer = Buffer.from(value);
+  return buffer.readFloatLE(0);
 }

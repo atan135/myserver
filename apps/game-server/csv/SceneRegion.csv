@@ -1,0 +1,8 @@
+Id,SceneId,Code,RegionType,MinX,MinY,MaxX,MaxY,Tags
+int,int,string,string,float,float,float,float,Array<string>
+3001,1,grassland_safe_zone,safe_zone,0.0,0.0,4.0,4.0,safe|newbie
+3002,1,grassland_wolf_field,combat_zone,7.0,2.0,14.0,12.0,combat|monster
+3003,1,grassland_to_dungeon,portal_zone,13.0,7.0,15.0,9.0,portal|scene_change
+4001,2,dungeon_entry_safe,safe_zone,0.0,0.0,4.0,4.0,safe|entry
+4002,2,dungeon_boss_hall,combat_zone,6.0,6.0,14.0,14.0,combat|elite
+4003,2,dungeon_return_portal,portal_zone,12.0,12.0,14.0,14.0,portal|scene_change

@@ -1,0 +1,25 @@
+Id,Code,Name,Type,Quality,MaxStack,Price,EquipSlot,LevelRequired,BindType,Attack,Defense,MaxHp,CritRate,MoveSpeed,UseEffect,UseTarget,UseValue,CoolDownMs,Description
+int,string,string,string,string,int,int,string,int,string,int,int,int,float,float,string,string,int,int,string
+# 武器
+1001,sword_001,精钢剑,Equipment,White,1,100,Weapon,1,Never,50,0,0,0.0,0.0,None,None,0,0,基础的直剑，适合新手
+1002,sword_002,秘银剑,Equipment,Blue,1,500,Weapon,10,Equip,120,0,0,0.05,0.0,None,None,0,0,秘银打造的锋利长剑
+1003,staff_001,新手法杖,Equipment,White,1,80,Weapon,1,Never,30,0,50,0.0,0.0,None,None,0,0,魔法师的基础装备
+# 防具
+2001,armor_001,皮甲,Equipment,White,1,80,Armor,1,Never,0,30,100,0.0,0.0,None,None,0,0,基础的防御装备
+2002,armor_002,锁甲,Equipment,Blue,1,300,Armor,10,Equip,0,80,200,0.0,0.0,None,None,0,0,铁锁编织的护甲
+# 头盔
+3001,helmet_001,布帽,Equipment,White,1,50,Helmet,1,Never,0,10,30,0.0,0.0,None,None,0,0,简单的布制帽子
+# 消耗品
+4001,potion_hp_small,小血瓶,Food,White,99,10,None,1,Pickup,0,0,0,0.0,0.0,Heal,Self,200,30000,恢复200点生命值
+4002,potion_hp_medium,中血瓶,Food,White,99,30,None,5,Pickup,0,0,0,0.0,0.0,Heal,Self,500,60000,恢复500点生命值
+4003,potion_hp_large,大血瓶,Food,Blue,99,80,None,15,Pickup,0,0,0,0.0,0.0,Heal,Self,1500,120000,恢复1500点生命值
+4004,potion_mp_small,小蓝瓶,Food,White,99,10,None,1,Pickup,0,0,0,0.0,0.0,RecoverMp,Self,100,30000,恢复100点法力值
+4005,potion_mp_medium,中蓝瓶,Food,White,99,30,None,5,Pickup,0,0,0,0.0,0.0,RecoverMp,Self,300,60000,恢复300点法力值
+# 材料
+5001,iron_ore,铁矿石,Material,White,99,5,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,锻造用的基础矿石
+5002,silver_ore,秘银矿,Material,Blue,99,20,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,稀有的秘银矿石
+5003,herb_001,蓝草药,Material,White,99,3,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,炼金用的基础草药
+5004,herb_002,月光草,Material,Blue,99,15,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,在月光下生长的稀有草药
+# 任务物品
+6001,quest_key_01,古铜钥匙,QuestItem,White,1,0,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,打开古老宝箱的钥匙
+6002,quest_crystal,纯净水晶,QuestItem,White,99,0,None,0,Never,0,0,0,0.0,0.0,None,None,0,0,蕴含纯净能量的水晶

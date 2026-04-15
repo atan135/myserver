@@ -20,6 +20,7 @@ import {
   runCreateMatchedRoomAndJoin,
   // Game scenarios
   runGameplayRoundtrip,
+  runMovementDemo,
   // Chat scenarios
   runChatPrivate,
   runChatGroup,
@@ -50,6 +51,21 @@ async function main() {
   if (options.scenario === SCENARIO.GAMEPLAY_ROUNDTRIP) {
     await runGameplayRoundtrip(options);
     console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_DEMO) {
+    const login = await fetchTicket(options);
+    console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+
+    const client = new TcpProtocolClient(options, "client");
+    await client.connect();
+    try {
+      await runMovementDemo(client, options, login);
+      console.log(`scenario completed: ${options.scenario}`);
+    } finally {
+      client.close();
+    }
     return;
   }
 
