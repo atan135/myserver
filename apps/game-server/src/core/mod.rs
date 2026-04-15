@@ -1,6 +1,8 @@
 pub mod config_table;
 pub mod context;
+pub mod inventory;
 pub mod logic;
+pub mod player;
 pub mod room;
 pub mod runtime;
 pub mod service;

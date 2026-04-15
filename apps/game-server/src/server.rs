@@ -14,9 +14,10 @@ use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
+use crate::core::player::{PlayerManager, MySqlPlayerStore};
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
-use crate::core::service::{core_service, room_service};
+use crate::core::service::{core_service, inventory_service, room_service};
 use crate::core::system::scene::SceneCatalog;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
@@ -82,11 +83,16 @@ pub async fn run(
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
     };
+
+    // Initialize MySqlPlayerStore for inventory persistence
+    let mysql_player_store = MySqlPlayerStore::new(config).await?;
+
     let services = ServiceContext {
         config: config.clone(),
         mysql_store: mysql_store.clone(),
         room_manager: shared_state.room_manager.clone(),
         config_tables,
+        player_manager: PlayerManager::new(mysql_player_store),
         online_player_count: shared_state.online_player_count.clone(),
     };
     info!(
@@ -391,6 +397,13 @@ async fn dispatch_packet(
         Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,
         Some(MessageType::RoomJoinAsObserverReq) => room_service::handle_join_as_observer(services, connection, packet).await,
         Some(MessageType::CreateMatchedRoomReq) => room_service::handle_create_matched_room(services, connection, packet).await,
+        // Inventory handlers
+        Some(MessageType::ItemEquipReq) => inventory_service::handle_item_equip(services, connection, packet).await,
+        Some(MessageType::ItemUseReq) => inventory_service::handle_item_use(services, connection, packet).await,
+        Some(MessageType::ItemDiscardReq) => inventory_service::handle_item_discard(services, connection, packet).await,
+        Some(MessageType::ItemAddReq) => inventory_service::handle_item_add(services, connection, packet).await,
+        Some(MessageType::WarehouseAccessReq) => inventory_service::handle_warehouse_access(services, connection, packet).await,
+        Some(MessageType::GetInventoryReq) => inventory_service::handle_get_inventory(services, connection, packet).await,
         Some(_) => {
             connection.queue_error(
                 packet.header.seq,

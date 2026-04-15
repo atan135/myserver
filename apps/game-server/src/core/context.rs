@@ -6,6 +6,7 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
+use crate::core::player::PlayerManager;
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
@@ -22,6 +23,7 @@ pub struct ServiceContext {
     pub mysql_store: MySqlAuditStore,
     pub room_manager: SharedRoomManager,
     pub config_tables: ConfigTableRuntime,
+    pub player_manager: PlayerManager,
     pub online_player_count: Arc<AtomicU64>,
 }
 
