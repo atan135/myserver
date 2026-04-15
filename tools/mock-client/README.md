@@ -22,6 +22,8 @@ tools/mock-client/
 │       ├── room.js      # 房间相关场景
 │       ├── chat.js      # 聊天相关场景
 │       ├── game.js      # 游戏相关场景
+│       ├── movement.js      # 移动相关场景
+│       ├── movement-interactive.js # 交互式双客户端移动
 │       └── interactive.js # 交互式聊天
 ├── package.json
 └── help.txt             # 命令行帮助
@@ -121,6 +123,16 @@ Protobuf 风格的编解码工具：
 | `chat-private-two-client` | 双客户端私聊 |
 | `chat-interactive` | 交互式聊天 (终端输入) |
 
+### 移动同步场景 (movement.js, movement-interactive.js)
+| 场景 | 说明 |
+|------|------|
+| `movement-demo` | movement_demo 单客户端位移联调 |
+| `movement-sync-validation` | 移动同步验证：MoveDir/MoveStop/FaceTo |
+| `movement-dual-client-sync` | 双客户端移动同步验证 |
+| `movement-snapshot-throttle` | 快照节流验证（每3帧） |
+| `movement-face-to` | FaceTo 转向与 last input wins |
+| `movement-interactive` | 交互式双客户端移动同步（键盘控制） |
+
 ## 使用方法
 
 ### 基础用法
@@ -159,6 +171,10 @@ node tools/mock-client/src/index.js --scenario chat-private \
 | `--room-id` | 房间ID | `room-default` |
 | `--login-name` | 登录用户名 | - |
 | `--password` | 登录密码 | - |
+| `--login-name-a` | 客户端A登录用户名 | - |
+| `--password-a` | 客户端A登录密码 | - |
+| `--login-name-b` | 客户端B登录用户名 | - |
+| `--password-b` | 客户端B登录密码 | - |
 | `--ticket` | 直接指定 ticket | - |
 | `--timeout-ms` | 超时毫秒 | `5000` |
 | `--policy-id` | 入房时指定房间策略 | 空 |

@@ -48,5 +48,8 @@ export {
 // Interactive chat
 export { runChatInteractive } from "./interactive.js";
 
+// Interactive movement
+export { runMovementInteractive } from "./movement-interactive.js";
+
 // Re-export MESSAGE_TYPE for convenience
 export { MESSAGE_TYPE } from "../constants.js";

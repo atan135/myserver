@@ -26,6 +26,7 @@ import {
   runMovementDualClientSync,
   runMovementSnapshotThrottle,
   runMovementFaceTo,
+  runMovementInteractive,
   // Chat scenarios
   runChatPrivate,
   runChatGroup,
@@ -94,6 +95,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.MOVEMENT_FACE_TO) {
     await runMovementFaceTo(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_INTERACTIVE) {
+    await runMovementInteractive(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

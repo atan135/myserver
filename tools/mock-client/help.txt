@@ -166,6 +166,17 @@ node tools/mock-client/src/index.js --scenario chat-private-two-client --http-ba
 # 开启两个客户端，通过命令行互相发送消息
 node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
 
+# ========== 移动同步交互测试 ==========
+
+# 24. 交互式双客户端移动同步 (MOVEMENT_INTERACTIVE)
+# 同时启动两个客户端连接到同一房间，一个通过键盘控制移动，另一个自动移动演示
+# 双方都能实时看到对方的位移更新
+# 使用真实账号登录:
+node tools/mock-client/src/index.js --scenario movement-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name-a test001 --password-a Passw0rd! --login-name-b test002 --password-b Passw0rd!
+# 使用 guest 登录 (自动生成两个匿名账号):
+node tools/mock-client/src/index.js --scenario movement-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000
+# 控制指令: w/a/s/d 或方向键移动, space 停止, q 退出
+
 # ========== 通过 Proxy 测试 ==========
 
 # 通过 TCP fallback 连接 proxy（proxy 会自动路由到活跃的 game-server 实例）
@@ -207,6 +218,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # chat-two-client          | 双客户端群聊
 # chat-private-two-client  | 双客户端私聊
 # chat-interactive         | 交互式聊天
+# movement-interactive     | 交互式双客户端移动同步
 
 # ========== 帧同步测试说明 ==========
 # gameplay-roundtrip 场景输出示例：

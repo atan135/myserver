@@ -104,5 +104,6 @@ export const SCENARIO = {
   CHAT_HISTORY: "chat-history",
   CHAT_TWO_CLIENT: "chat-two-client",
   CHAT_PRIVATE_TWO_CLIENT: "chat-private-two-client",
-  CHAT_INTERACTIVE: "chat-interactive"
+  CHAT_INTERACTIVE: "chat-interactive",
+  MOVEMENT_INTERACTIVE: "movement-interactive"
 };
