@@ -47,10 +47,11 @@ impl CsvTableLoader for SceneRegion {
         let mut string_pool = StringPoolBuilder::default();
 
         for (row_offset, line) in lines.enumerate() {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let columns = crate::config_table::parse_csv_columns(line);
+            let columns = crate::config_table::parse_csv_columns(trimmed);
             if columns.len() != header_columns.len() {
                 return Err(CsvLoadError::InvalidRow(format!("table {} row {} column count mismatch: expected {}, got {}", Self::TABLE_NAME, row_offset + 3, header_columns.len(), columns.len())));
             }

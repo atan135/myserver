@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::core::config_table::{CsvLoadError, CsvTableLoader};
+use crate::csv_code::itemtable::ItemTable;
 use crate::csv_code::scenemonsterspawn::SceneMonsterSpawn;
 use crate::csv_code::sceneportal::ScenePortal;
 use crate::csv_code::sceneregion::SceneRegion;
@@ -18,6 +19,7 @@ const SCENEREGION_FILE: &str = "SceneRegion.csv";
 const SCENEMONSTERSPAWN_FILE: &str = "SceneMonsterSpawn.csv";
 const TESTTABLE_100_FILE: &str = "TestTable_100.csv";
 const TESTTABLE_110_FILE: &str = "TestTable_110.csv";
+const ITEMTABLE_FILE: &str = "ItemTable.csv";
 
 #[derive(Clone)]
 pub struct ConfigTables {
@@ -28,6 +30,7 @@ pub struct ConfigTables {
     pub scenemonsterspawn: Arc<SceneMonsterSpawn>,
     pub testtable_100: Arc<TestTable100>,
     pub testtable_110: Arc<TestTable110>,
+    pub item_table: Arc<ItemTable>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +42,7 @@ pub struct ConfigTableRowCounts {
     pub scenemonsterspawn: usize,
     pub testtable_100: usize,
     pub testtable_110: usize,
+    pub itemtable: usize,
 }
 
 impl ConfigTables {
@@ -52,6 +56,7 @@ impl ConfigTables {
             SceneMonsterSpawn::load_from_csv(&csv_dir.join(SCENEMONSTERSPAWN_FILE))?;
         let testtable_100 = TestTable100::load_from_csv(&csv_dir.join(TESTTABLE_100_FILE))?;
         let testtable_110 = TestTable110::load_from_csv(&csv_dir.join(TESTTABLE_110_FILE))?;
+        let itemtable = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
 
         Ok(Self {
             scenetable: Arc::new(scenetable),
@@ -61,6 +66,7 @@ impl ConfigTables {
             scenemonsterspawn: Arc::new(scenemonsterspawn),
             testtable_100: Arc::new(testtable_100),
             testtable_110: Arc::new(testtable_110),
+            item_table: Arc::new(itemtable),
         })
     }
 
@@ -115,6 +121,12 @@ impl ConfigTables {
             self.testtable_110.clone()
         };
 
+        let itemtable = if changed_files.contains(ITEMTABLE_FILE) {
+            Arc::new(ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?)
+        } else {
+            self.item_table.clone()
+        };
+
         Ok(Self {
             scenetable,
             scenespawnpoint,
@@ -123,6 +135,7 @@ impl ConfigTables {
             scenemonsterspawn,
             testtable_100,
             testtable_110,
+            item_table: itemtable,
         })
     }
 
@@ -135,6 +148,7 @@ impl ConfigTables {
             csv_dir.join(SCENEMONSTERSPAWN_FILE),
             csv_dir.join(TESTTABLE_100_FILE),
             csv_dir.join(TESTTABLE_110_FILE),
+            csv_dir.join(ITEMTABLE_FILE),
         ]
     }
 
@@ -147,6 +161,7 @@ impl ConfigTables {
             scenemonsterspawn: self.scenemonsterspawn.rows.len(),
             testtable_100: self.testtable_100.rows.len(),
             testtable_110: self.testtable_110.rows.len(),
+            itemtable: self.item_table.rows.len(),
         }
     }
 }
