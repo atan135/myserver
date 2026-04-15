@@ -20,7 +20,12 @@ import {
   runCreateMatchedRoomAndJoin,
   // Game scenarios
   runGameplayRoundtrip,
+  // Movement scenarios
   runMovementDemo,
+  runMovementSyncValidation,
+  runMovementDualClientSync,
+  runMovementSnapshotThrottle,
+  runMovementFaceTo,
   // Chat scenarios
   runChatPrivate,
   runChatGroup,
@@ -66,6 +71,30 @@ async function main() {
     } finally {
       client.close();
     }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_SYNC_VALIDATION) {
+    await runMovementSyncValidation(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_DUAL_CLIENT_SYNC) {
+    await runMovementDualClientSync(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_SNAPSHOT_THROTTLE) {
+    await runMovementSnapshotThrottle(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_FACE_TO) {
+    await runMovementFaceTo(options);
+    console.log(`scenario completed: ${options.scenario}`);
     return;
   }
 

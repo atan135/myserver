@@ -1,4 +1,4 @@
-import { MESSAGE_TYPE, MOVE_INPUT_TYPE } from "../constants.js";
+import { MESSAGE_TYPE } from "../constants.js";
 import {
   encodePingReq,
   encodeRoomJoinReq,
@@ -6,7 +6,6 @@ import {
   encodeRoomReadyReq,
   encodeRoomStartReq,
   encodePlayerInputReq,
-  encodeMoveInputReq,
   encodeRoomEndReq
 } from "../messages.js";
 import { fetchTicket } from "../auth.js";
@@ -213,139 +212,5 @@ export async function runGameplayRoundtrip(options) {
   } finally {
     clientA.close();
     clientB.close();
-  }
-}
-
-function formatMovementSnapshot(label, push) {
-  console.log(
-    `${label}: frameId=${push.frameId}, entities=${push.entities.length}, fullSync=${push.fullSync}, reason=${push.reason}`
-  );
-  for (const entity of push.entities) {
-    console.log(
-      `  └─ [${entity.playerId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
-    );
-  }
-}
-
-export async function runMovementDemo(client, options, login) {
-  await authenticateClient(client, options, login, 1);
-
-  const policyId = options.policyId || "movement_demo";
-  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
-  const roomJoin = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
-  if (!roomJoin.ok) {
-    throw new Error(`movement demo room join failed: ${roomJoin.errorCode}`);
-  }
-
-  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
-
-  await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
-  if (!readyRes.ok) {
-    throw new Error(`movement demo room ready failed: ${readyRes.errorCode}`);
-  }
-  printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
-
-  await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-  const startRes = printResponse(`${client.label}.roomStart`, await client.readNextPacket(options.timeoutMs));
-  if (!startRes.ok) {
-    throw new Error(`movement demo room start failed: ${startRes.errorCode}`);
-  }
-  printResponse(`${client.label}.roomStatePush(gameStarted)`, await client.readNextPacket(options.timeoutMs));
-
-  let sawSnapshot = false;
-  let sawReject = false;
-  const frames = options.moveFrames?.length ? options.moveFrames : [1, 2, 3, 4, 5];
-
-  for (const frameId of frames) {
-    const reqSeq = 100 + frameId;
-    await client.send(
-      MESSAGE_TYPE.MOVE_INPUT_REQ,
-      reqSeq,
-      encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0)
-    );
-    const moveRes = await client.readUntil(
-      options.timeoutMs,
-      (packet) => packet.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && packet.seq === reqSeq,
-      `moveInputRes(${frameId})`
-    );
-    if (!moveRes.ok) {
-      throw new Error(`movement demo move input failed at frame ${frameId}: ${moveRes.errorCode}`);
-    }
-  }
-
-  await client.send(
-    MESSAGE_TYPE.MOVE_INPUT_REQ,
-    200,
-    encodeMoveInputReq(frames.at(-1) + 1, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
-  );
-  const stopRes = await client.readUntil(
-    options.timeoutMs,
-    (packet) => packet.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && packet.seq === 200,
-    "moveStopRes"
-  );
-  if (!stopRes.ok) {
-    throw new Error(`movement demo move stop failed: ${stopRes.errorCode}`);
-  }
-
-  await client.send(
-    MESSAGE_TYPE.MOVE_INPUT_REQ,
-    201,
-    encodeMoveInputReq(frames.at(-1) + 2, MOVE_INPUT_TYPE.MOVE_DIR, -1, 0)
-  );
-  const reverseRes = await client.readUntil(
-    options.timeoutMs,
-    (packet) => packet.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && packet.seq === 201,
-    "moveReverseRes"
-  );
-  if (!reverseRes.ok) {
-    throw new Error(`movement demo reverse move failed: ${reverseRes.errorCode}`);
-  }
-
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < options.timeoutMs * 4) {
-    const packet = await client.readNextPacket(options.timeoutMs);
-    const decoded = decodeByMessageType(packet.messageType, packet.body);
-
-    if (packet.messageType === MESSAGE_TYPE.MOVEMENT_SNAPSHOT_PUSH) {
-      formatMovementSnapshot(`[${client.label}.movementSnapshot]`, decoded);
-      sawSnapshot = true;
-      if (decoded.entities.length > 0 && decoded.entities.some((entity) => entity.moving === false)) {
-        break;
-      }
-      continue;
-    }
-
-    if (packet.messageType === MESSAGE_TYPE.MOVEMENT_REJECT_PUSH) {
-      printResponse(`${client.label}.movementReject`, packet);
-      sawReject = true;
-      break;
-    }
-
-    if (packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
-      console.log(`${client.label}.frameBundle:`, JSON.stringify(decoded, null, 2));
-      continue;
-    }
-
-    printResponse(`${client.label}.misc`, packet);
-  }
-
-  if (!sawSnapshot && !sawReject) {
-    throw new Error(
-      "movement demo did not receive MovementSnapshotPush or MovementRejectPush (may have been consumed while waiting for MoveInputRes)"
-    );
-  }
-
-  console.log(`${client.label}.movementDemo.summary:`, JSON.stringify({ sawSnapshot, sawReject }, null, 2));
-
-  await delayBeforeFinalLeave(client, options.timeoutMs, 1000);
-  await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 300, encodeRoomLeaveReq());
-  const leaveRes = await client.readUntil(
-    options.timeoutMs,
-    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES,
-    "roomLeave"
-  );
-  if (!leaveRes.ok) {
-    throw new Error(`movement demo room leave failed: ${leaveRes.errorCode}`);
   }
 }

@@ -21,7 +21,14 @@ export {
 } from "./room.js";
 
 // Game scenarios
-export { runGameplayRoundtrip, runMovementDemo } from "./game.js";
+export { runGameplayRoundtrip } from "./game.js";
+export {
+  runMovementDemo,
+  runMovementSyncValidation,
+  runMovementDualClientSync,
+  runMovementSnapshotThrottle,
+  runMovementFaceTo
+} from "./movement.js";
 
 // Chat scenarios
 export {

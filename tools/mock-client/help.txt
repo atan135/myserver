@@ -75,6 +75,25 @@ node tools/mock-client/src/index.js --scenario gameplay-roundtrip --http-base-ur
 #   --move-frames 1,2,3,4,5
 node tools/mock-client/src/index.js --scenario movement-demo --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-movement-demo --policy-id movement_demo
 
+# 13. 移动同步验证 (MOVEMENT_SYNC_VALIDATION)
+# 测试 MoveDir(1,0) -> MoveStop -> MoveDir(0,1) 触发快照的完整流程
+# 验证：方向变化、moving状态、位置推进、快照触发条件
+node tools/mock-client/src/index.js --scenario movement-sync-validation --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-sync-new1 --policy-id movement_demo
+
+# 14. 双客户端移动同步 (MOVEMENT_DUAL_CLIENT_SYNC)
+# 两个客户端加入同一房间 -> 各自移动 -> 验证位置 EPS=0.05
+node tools/mock-client/src/index.js --scenario movement-dual-client-sync --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-sync-multi1 --policy-id movement_demo
+
+# 15. 快照节流测试 (MOVEMENT_SNAPSHOT_THROTTLE)
+# 验证每3帧发送一次快照（SNAPSHOT_INTERVAL_FRAMES=3）
+# 首帧 fullSync=true，后续 changed_count=0 && reject_count=0 时跳过
+node tools/mock-client/src/index.js --scenario movement-snapshot-throttle --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-throttle1 --policy-id movement_demo
+
+# 16. FaceTo 转向测试 (MOVEMENT_FACE_TO)
+# 测试 FaceTo 输入在 FrameBundlePush 中正确携带
+# 验证 MoveDir 和 FaceTo 混用时 last input wins 行为
+node tools/mock-client/src/index.js --scenario movement-face-to --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-face-new2 --policy-id movement_demo
+
 # ---------- 断线重连测试 ----------
 
 # 13. 断线重连测试 (RECONNECT)
@@ -168,6 +187,10 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # start-game-ready-room    | 就绪状态开始游戏
 # gameplay-roundtrip        | 帧同步测试：多输入帧、快照、状态同步
 # movement-demo            | movement_demo 单客户端位移联调
+# movement-sync-validation | 移动同步验证：MoveDir/MoveStop/FaceTo
+# movement-dual-client-sync | 双客户端移动同步验证
+# movement-snapshot-throttle | 快照节流验证（每3帧）
+# movement-face-to         | FaceTo 转向与 last input wins
 # get-room-data            | 获取房间数据
 # get-room-data-in-room    | 在房间内获取数据
 # reconnect                | 断线重连
