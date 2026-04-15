@@ -24,6 +24,7 @@ tools/mock-client/
 │       ├── game.js      # 游戏相关场景
 │       ├── movement.js      # 移动相关场景
 │       ├── movement-interactive.js # 交互式双客户端移动
+│       ├── inventory.js # 背包系统测试
 │       └── interactive.js # 交互式聊天
 ├── package.json
 └── help.txt             # 命令行帮助
@@ -133,6 +134,16 @@ Protobuf 风格的编解码工具：
 | `movement-face-to` | FaceTo 转向与 last input wins |
 | `movement-interactive` | 交互式双客户端移动同步（键盘控制） |
 
+### 背包系统场景 (inventory.js)
+| 场景 | 说明 |
+|------|------|
+| `inventory-equip` | 装备穿戴到指定槽位 |
+| `inventory-use` | 使用背包中的消耗品 |
+| `inventory-discard` | 丢弃背包中的物品 |
+| `inventory-warehouse` | 仓库存取操作 |
+| `inventory-add` | 添加物品到背包（测试用） |
+| `inventory-full` | 完整背包流程测试 |
+
 ## 使用方法
 
 ### 基础用法
@@ -180,6 +191,14 @@ node tools/mock-client/src/index.js --scenario chat-private \
 | `--policy-id` | 入房时指定房间策略 | 空 |
 | `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
+| `--item-uid` | 物品UID (背包测试) | - |
+| `--equip-slot` | 装备槽位: Weapon/Armor/Helmet/Pants/Shoes/Accessory | - |
+| `--use-item-uid` | 使用物品UID | - |
+| `--discard-uid` | 丢弃物品UID | - |
+| `--discard-count` | 丢弃物品数量 | - |
+| `--warehouse-action` | 仓库操作: deposit/withdraw | `deposit` |
+| `--deposit-uid` | 存入仓库物品UID | - |
+| `--deposit-count` | 存入仓库物品数量 | - |
 | `--target-id` | 私聊目标玩家ID | - |
 | `--group-id` | 群组ID | - |
 | `--group-name` | 群组名称 | - |

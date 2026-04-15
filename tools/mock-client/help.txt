@@ -177,6 +177,83 @@ node tools/mock-client/src/index.js --scenario movement-interactive --http-base-
 node tools/mock-client/src/index.js --scenario movement-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000
 # 控制指令: w/a/s/d 或方向键移动, space 停止, q 退出
 
+# ========== 背包系统测试 ==========
+
+# 25. 装备穿戴测试 (INVENTORY_EQUIP)
+# 测试将物品装备到指定槽位
+# 注意：需要先通过INVENTORY_ADD获取物品UID
+# 参数说明：
+#   --item-uid     物品UID (必填，通过inventory-add获得)
+#   --equip-slot   装备槽位: Weapon, Armor, Helmet, Pants, Shoes, Accessory (必填)
+# 示例流程：先添加武器获得UID，再装备
+#   1. 添加武器: inventory-add --add-item-id 1001 --add-count 1
+#   2. 装备: inventory-equip --item-uid <上一步返回的uid> --equip-slot Weapon
+
+# 26. 物品使用测试 (INVENTORY_USE)
+# 测试使用背包中的消耗品
+# 注意：需要先通过INVENTORY_ADD获取物品UID
+# 参数说明：
+#   --item-uid     物品UID (必填，通过inventory-add获得)
+# 示例流程：先添加消耗品获得UID，再使用
+#   1. 添加消耗品: inventory-add --add-item-id 4001 --add-count 1
+#   2. 使用: inventory-use --item-uid <上一步返回的uid>
+
+# 27. 物品丢弃测试 (INVENTORY_DISCARD)
+# 测试丢弃背包中的物品
+# 注意：需要先通过INVENTORY_ADD获取物品UID
+# 参数说明：
+#   --item-uid     物品UID (必填，通过inventory-add获得)
+#   --count        丢弃数量 (必填)
+# 示例流程：先添加物品获得UID，再丢弃
+#   1. 添加物品: inventory-add --add-item-id 5001 --add-count 10
+#   2. 丢弃: inventory-discard --item-uid <上一步返回的uid> --count 5
+
+# 28. 仓库存取测试 (INVENTORY_WAREHOUSE)
+# 测试将物品存入仓库或从仓库取出
+# 注意：需要先通过INVENTORY_ADD获取物品UID
+# 参数说明：
+#   --warehouse-action  操作类型: deposit(存) 或 withdraw(取) (必填)
+#   --item-uid          物品UID (必填，通过inventory-add获得)
+#   --count             数量 (必填)
+# 示例流程：先添加物品获得UID，再存入仓库
+#   1. 添加物品: inventory-add --add-item-id 5001 --add-count 10
+#   2. 存仓: inventory-warehouse --warehouse-action deposit --item-uid <上一步返回的uid> --count 5
+
+# 29. 添加物品测试 (INVENTORY_ADD)
+# 测试添加物品到背包（用于测试）
+# 参数说明：
+#   --add-item-id    物品配置ID (必填，见下方ItemTable)
+#   --add-count      数量 (必填，默认1)
+#   --add-binded     是否绑定 (可选，默认false)
+# ItemTable物品ID参考：
+#   武器: 1001(精钢剑), 1002(秘银剑), 1003(新手法杖)
+#   防具: 2001(皮甲), 2002(锁甲)
+#   头盔: 3001(布帽)
+#   消耗品: 4001(小血瓶), 4002(中血瓶), 4003(大血瓶)
+#   材料: 5001(铁矿石), 5002(秘银矿)
+# 示例：添加5个小血瓶
+node tools/mock-client/src/index.js --scenario inventory-add --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --add-item-id 4001 --add-count 5
+
+# 30. 获取背包信息测试 (INVENTORY_GET)
+# 查询当前背包和仓库中的物品
+node tools/mock-client/src/index.js --scenario inventory-get --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd!
+
+# 31. 完整背包流程测试 (INVENTORY_FULL)
+# 测试完整的背包操作流程：入房 -> 添加物品 -> 装备 -> 使用 -> 丢弃 -> 仓库
+# 注意：物品UID需要通过inventory-add获得，此处仅为占位说明
+# 可选参数：
+#   --add-item-id    添加物品配置ID
+#   --add-count      添加数量
+#   --item-uid        装备物品UID (需先add获得)
+#   --equip-slot      装备槽位
+#   --use-item-uid    使用物品UID (需先add获得)
+#   --discard-uid     丢弃物品UID (需先add获得)
+#   --discard-count   丢弃数量
+#   --deposit-uid     存入仓库物品UID (需先add获得)
+#   --deposit-count   存入数量
+# 示例：添加武器和消耗品，然后装备武器
+# node tools/mock-client/src/index.js --scenario inventory-full --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --add-item-id 1001 --add-count 1 --item-uid <uid> --equip-slot Weapon
+
 # ========== 通过 Proxy 测试 ==========
 
 # 通过 TCP fallback 连接 proxy（proxy 会自动路由到活跃的 game-server 实例）
@@ -219,6 +296,13 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # chat-private-two-client  | 双客户端私聊
 # chat-interactive         | 交互式聊天
 # movement-interactive     | 交互式双客户端移动同步
+# inventory-equip          | 装备穿戴
+# inventory-use           | 物品使用
+# inventory-discard       | 物品丢弃
+# inventory-warehouse     | 仓库存取
+# inventory-add          | 添加物品（测试用）
+# inventory-get          | 获取背包信息
+# inventory-full          | 完整背包流程
 
 # ========== 帧同步测试说明 ==========
 # gameplay-roundtrip 场景输出示例：
