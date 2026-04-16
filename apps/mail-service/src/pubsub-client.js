@@ -7,10 +7,14 @@ export class PubSubClient {
 
   async publishMailNotification(playerId, mail) {
     const channel = `mail:notify:${playerId}`;
+    const senderId = typeof mail.sender_id === "string" && mail.sender_id.toLowerCase() === "system"
+      ? "system"
+      : (mail.sender_id || mail.from_player_id);
     const payload = {
       mail_id: mail.mail_id,
       title: mail.title,
-      from: mail.from_player_id,
+      from: senderId,
+      from_name: mail.sender_name || (senderId === "system" ? "系统" : senderId),
       type: mail.mail_type,
       created_at: mail.created_at
     };

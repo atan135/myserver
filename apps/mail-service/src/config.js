@@ -31,6 +31,8 @@ export function getConfig() {
       process.env.MYSQL_URL ||
       "mysql://root:password@127.0.0.1:3306/myserver_mail",
     mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
+    gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
+    gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "mail-001"

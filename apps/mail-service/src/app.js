@@ -1,6 +1,7 @@
 import express from "express";
 
 import { getConfig } from "./config.js";
+import { GameAdminClient } from "./game-admin-client.js";
 import { configureLogger, log } from "./logger.js";
 import { createMySqlPool } from "./mysql-client.js";
 import { MySqlMailStore } from "./mysql-store.js";
@@ -25,6 +26,7 @@ export async function createApp() {
 
   const mailStore = new MySqlMailStore(mysqlPool);
   const pubsubClient = new PubSubClient(redis);
+  const gameAdminClient = new GameAdminClient(config);
   const registryClient = new RegistryClient(redis, config);
 
   // Create and start metrics collector
@@ -46,7 +48,7 @@ export async function createApp() {
   // Metrics middleware - track QPS and latency
   app.use(metrics.middleware());
 
-  app.use(createRoutes(config, mailStore, pubsubClient));
+  app.use(createRoutes(config, mailStore, pubsubClient, gameAdminClient));
 
   app.use((req, res) => {
     res.status(404).json({

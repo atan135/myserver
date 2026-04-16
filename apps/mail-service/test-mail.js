@@ -49,14 +49,31 @@ async function markAsRead(mailId, playerId) {
   return data;
 }
 
+async function claimAttachments(mailId, playerId) {
+  const response = await fetch(`${MAIL_SERVICE_URL}/api/v1/mails/${mailId}/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ player_id: playerId })
+  });
+  const data = await response.json();
+  console.log(`[POST /api/v1/mails/${mailId}/claim] ${response.status}:`, JSON.stringify(data, null, 2));
+  return data;
+}
+
 async function testSendSystemMail() {
   console.log("\n=== 测试: 发送系统邮件 ===");
   const result = await sendMail({
     to_player_id: "player_001",
-    from_player_id: "system",
+    sender_type: "system",
+    sender_id: "system",
+    sender_name: "系统",
     title: "欢迎来到 MyServer",
     content: "欢迎使用游戏服务，祝您游戏愉快！",
-    mail_type: "system"
+    attachments: [{ type: "item", id: 1001, count: 1 }],
+    mail_type: "system",
+    created_by_type: "admin",
+    created_by_id: "gm001",
+    created_by_name: "GM 001"
   });
   return result;
 }
@@ -65,7 +82,9 @@ async function testSendPlayerMail() {
   console.log("\n=== 测试: 玩家之间发送邮件 ===");
   const result = await sendMail({
     to_player_id: "player_002",
-    from_player_id: "player_001",
+    sender_type: "player",
+    sender_id: "player_001",
+    sender_name: "player_001",
     title: "好友邀请",
     content: "一起来打副本吧！",
     mail_type: "player"
@@ -107,6 +126,22 @@ async function testMarkAsRead() {
   }
 }
 
+async function testClaimAttachments() {
+  const mails = await getMails("player_001");
+  if (mails.ok && mails.mails && mails.mails.length > 0) {
+    const mailWithAttachments = mails.mails.find((mail) => Array.isArray(mail.attachments) && mail.attachments.length > 0);
+    if (!mailWithAttachments) {
+      console.log("\n[SKIP] 没有带附件的邮件可测试");
+      return;
+    }
+
+    console.log("\n=== 测试: 领取邮件附件 ===");
+    await claimAttachments(mailWithAttachments.mail_id, "player_001");
+  } else {
+    console.log("\n[SKIP] 没有邮件可测试附件领取");
+  }
+}
+
 async function runAllTests() {
   console.log("========================================");
   console.log("  Mail Service 测试");
@@ -126,6 +161,9 @@ async function runAllTests() {
 
   // 5. 标记已读
   await testMarkAsRead();
+
+  // 6. 领取附件
+  await testClaimAttachments();
 
   console.log("\n========================================");
   console.log("  测试完成!");
