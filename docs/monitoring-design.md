@@ -24,7 +24,7 @@
 
 ```text
 服务运行时采集指标
-  -> 每 5 秒写入 Redis metrics / heartbeat
+  -> 每 5 秒写入 Redis metrics / metrics heartbeat
   -> admin-api 读取 Redis 生成监控接口响应
   -> admin-web 通过监控页面轮询展示
 ```
@@ -80,7 +80,7 @@ TTL:    604800 秒（7 天）
 ### 3.2 心跳数据
 
 ```text
-Key:    heartbeat:{service_name}
+Key:    metrics:heartbeat:{service_name}
 Value:  最近一次上报时间戳字符串
 TTL:    30 秒
 ```
@@ -89,7 +89,7 @@ TTL:    30 秒
 
 说明：
 
-- 当前监控接口依赖的是 `heartbeat:{service_name}`
+- 当前监控接口依赖的是 `metrics:heartbeat:{service_name}`
 - 不依赖 `service-registry` 的 `services:{service_name}` 注册信息
 - `service-registry` 仍是另一套服务发现机制，不是当前监控页面的数据源
 
@@ -180,7 +180,7 @@ TTL:    30 秒
 
 当前逻辑：
 
-- 从固定服务列表逐个读取 `heartbeat:{service_name}`
+- 从固定服务列表逐个读取 `metrics:heartbeat:{service_name}`
 - 30 秒内有心跳则视为 `online`
 - 在线状态下再扫描 `metrics:{service_name}:*` 找到最新桶
 - 返回 `qps`、`latency_ms`、`online_value` 以及原始指标字段

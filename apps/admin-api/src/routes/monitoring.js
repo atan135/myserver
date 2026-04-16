@@ -64,7 +64,7 @@ export function createMonitoringRoutes(redis, mysqlPool) {
     const services = [];
 
     for (const serviceName of SERVICE_NAMES) {
-      const heartbeatKey = `heartbeat:${serviceName}`;
+      const heartbeatKey = `metrics:heartbeat:${serviceName}`;
       const lastHeartbeat = await redis.get(heartbeatKey);
 
       let status = "offline";

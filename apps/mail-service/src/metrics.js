@@ -48,7 +48,7 @@ export class MetricsCollector {
   async flush() {
     const bucket = currentBucket();
     const metricsKey = `metrics:${this.serviceName}:${bucket}`;
-    const heartbeatKey = `heartbeat:${this.serviceName}`;
+    const heartbeatKey = `metrics:heartbeat:${this.serviceName}`;
 
     const qps = this.qps;
     const latencyMs = this.latencyCount > 0 ? Math.round(this.latencySum / this.latencyCount) : 0;

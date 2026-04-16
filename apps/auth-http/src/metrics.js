@@ -117,7 +117,7 @@ export class MetricsCollector {
   async flush() {
     const bucket = currentBucket();
     const metricsKey = `metrics:${this.serviceName}:${bucket}`;
-    const heartbeatKey = `heartbeat:${this.serviceName}`;
+    const heartbeatKey = `metrics:heartbeat:${this.serviceName}`;
 
     await Promise.all([
       this.countSessionStats(),

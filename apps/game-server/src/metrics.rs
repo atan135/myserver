@@ -118,7 +118,7 @@ impl MetricsCollector {
 
                 let bucket = current_bucket();
                 let metrics_key = format!("metrics:{}:{}", service_name, bucket);
-                let heartbeat_key = format!("heartbeat:{}", service_name);
+                let heartbeat_key = format!("metrics:heartbeat:{}", service_name);
 
                 // 收集扩展字段
                 let extra = {

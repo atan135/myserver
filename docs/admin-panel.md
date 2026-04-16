@@ -416,7 +416,7 @@ npm run dev:admin-web
 
 状态判定规则：
 
-- 通过 Redis `heartbeat:<service>` 判断服务是否在线
+- 通过 Redis `metrics:heartbeat:<service>` 判断服务是否在线
 - 30 秒内有心跳视为在线
 - 在线时再读取 `metrics:<service>:*` 中最新桶数据
 
