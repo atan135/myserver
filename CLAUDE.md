@@ -275,6 +275,27 @@ npm run flow:mock-client -- --scenario two-client-room --http-base-url http://12
 | `scripts/seed-auth-test-accounts.ps1` | 录入测试账号 |
 | `scripts/test-auth-http-login.ps1` | 测试登录接口 |
 
+## Git 提交规范
+
+- 提交按**功能模块**拆分：一个 commit 只解决一类问题，避免把协议、服务实现、测试工具、文档更新混在同一个提交里。
+- 提交标题格式统一为：`<type>: <简短主题>`
+- `type` 推荐使用：`feat`、`fix`、`docs`、`refactor`、`test`、`chore`
+- 提交标题中的“主题”统一使用中文，不使用英文短语或中英混写主题。
+- 标题要直接说明“改了什么”，优先写具体模块或能力，不写空泛描述。
+- 提交正文与标题之间保留一个空行。
+- 提交正文至少说明两点：
+- 这次一起改了哪些关键项
+- 为什么要这样改，解决了什么问题，或避免了什么联调/维护风险
+- 如果改动涉及端口、配置、协议、脚本或跨服务联动，正文里要明确写出受影响的服务名、关键配置项或关键文件。
+
+示例：
+
+```text
+chore: 统一 game-proxy 默认端口配置
+
+将 game-proxy 默认监听端口和 auth-http 默认下发的 GAME_PROXY_PORT 一并调整为 4000，并同步更新 port.txt 与示例环境变量，避免与 game-server 端口段混用，减少联调时连错入口的问题。
+```
+
 ## 下一步建议
 
 1. 完成 P2：连接恢复、背压治理与安全边界
