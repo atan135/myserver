@@ -44,7 +44,7 @@
 |------|------|------|------|
 | auth-http | 3000 | HTTP | 玩家登录，签发 ticket，下发服务地址 |
 | admin-api | 3001 | HTTP | 运营后台 API |
-| game-proxy | 7002 | KCP | 客户端游戏入口 |
+| game-proxy | 4000 | KCP | 客户端游戏入口 |
 
 #### 内部服务（动态端口，通过 Redis 注册）
 
@@ -71,7 +71,7 @@
 │                         客户端                              │
 │                                                             │
 │   直连: auth-http (3000)  →  登录、获取服务地址             │
-│   直连: game-proxy (7002) →  游戏流量                       │
+│   直连: game-proxy (4000) →  游戏流量                       │
 │   直连: chat-server (9001)→  聊天                          │
 │   直连: mail-service (9003)→ 邮件（HTTP CRUD）             │
 └─────────────────────────────────────────────────────────────┘
@@ -107,7 +107,7 @@ Content-Type: application/json
   "services": {
     "game": {
       "host": "127.0.0.1",
-      "port": 7002,
+      "port": 4000,
       "protocol": "kcp"
     },
     "chat": {
@@ -209,8 +209,8 @@ mail-service 收到新邮件
         ▼                            ▼                            ▼
 +------------------+         +------------------+         +------------------+
 |   auth-http      |         |  game-server x N  |         |  game-proxy      |
-|   :3000          |         |  :7000 (游戏端口) |         |  :7002           |
-|   (Node.js)      |         |  :7001 (管理端口)  |         |  (Rust)          |
+|   :3000          |         |  :7000 (游戏端口) |         |  :4000           |
+|   (Node.js)      |         |  :7500 (管理端口)  |         |  (Rust)          |
 +------------------+         +------------------+         +------------------+
         ▲                            ▲                            ▲
         │                            │                            │
@@ -234,7 +234,7 @@ mail-service 收到新邮件
 │                          客户端                                  │
 │                                                                  │
 │  auth-http:3000 (登录)                                           │
-│  game-proxy:7002 (游戏)                                          │
+│  game-proxy:4000 (游戏)                                          │
 │  chat-server:9001 (聊天)                                         │
 │  mail-service:9003 (邮件)                                        │
 └─────────────────────────────────────────────────────────────────┘
@@ -278,7 +278,7 @@ service:game-server:instances:game-server-001 = {
     "name": "game-server",
     "host": "127.0.0.1",
     "port": 7000,
-    "admin_port": 7001,
+    "admin_port": 7500,
     "local_socket": "myserver-game-server-001.sock",
     "tags": ["game", "tcp"],
     "weight": 100,
@@ -570,7 +570,7 @@ Content-Type: application/json
     "name": "game-server",
     "host": "127.0.0.1",
     "port": 7000,
-    "admin_port": 7001,
+    "admin_port": 7500,
     "local_socket": "myserver-game-server.sock",
     "tags": ["game", "tcp"],
     "weight": 100
@@ -774,22 +774,41 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 
 ### 12.1 已完成的实现
 
-1. **service-registry 包** (`packages/service-registry/`)
-   - `RegistryClient` 实现服务注册、注销、心跳、发现
-   - 使用 Redis Hash 存储服务实例信息
-   - 心跳 TTL 30秒，每10秒续期
+1. **`service-registry` 包已存在** (`packages/service-registry/`)
+   - `RegistryClient` 已实现注册、注销、心跳、发现
+   - 注册信息存储在 `service:{service_name}:instances:{instance_id}`
+   - 心跳信息存储在 `heartbeat:{service_name}:{instance_id}`
+   - 发现逻辑会过滤掉无心跳实例
 
-2. **game-server 集成**
-   - 启动时注册到 Redis，关闭时注销
-   - 通过环境变量 `SERVICE_INSTANCE_ID` 区分不同实例
-   - UDS socket 文件名包含实例ID，避免冲突
+2. **`game-server` 已接入 `service-registry` 包**
+   - `REGISTRY_ENABLED=true` 时启动即注册，关闭时注销
+   - 注册信息会带 `admin_port`、`local_socket`、`tags`
+   - `SERVICE_INSTANCE_ID` 与 UDS 文件名一起用于多实例隔离
+   - 代码位置：
+     - `apps/game-server/src/main.rs`
+     - `apps/game-server/src/config.rs`
 
-3. **game-proxy 动态发现**
-   - 支持静态配置（向后兼容）
-   - 启用 Registry 时自动从 Redis 发现活跃实例
-   - 支持 KCP 和 TCP 两种前端协议
+3. **`game-proxy` 已接入基于注册中心的动态发现**
+   - `REGISTRY_ENABLED=true` 时定期从 Redis 发现 `game-server`
+   - 发现结果会同步到内部路由表
+   - `REGISTRY_ENABLED=false` 时仍保留静态 `UPSTREAM_LOCAL_SOCKET_NAME` 兼容路径
+   - 当前是 `game-proxy` 消费注册中心，不向注册中心注册自身
+   - 代码位置：
+     - `apps/game-proxy/src/config.rs`
+     - `apps/game-proxy/src/proxy_server.rs`
 
-4. **管理接口** (`game-proxy`)
+4. **`mail-service` 已实现独立的 Redis 注册客户端**
+   - 启动时注册到 `service:mail-service:instances:{instance_id}`
+   - 定时写入 `heartbeat:mail-service:{instance_id}`
+   - 关闭时注销
+   - 当前不是复用 Rust 的 `packages/service-registry`，而是 Node.js 侧单独实现
+   - 代码位置：
+     - `apps/mail-service/src/registry-client.js`
+     - `apps/mail-service/src/server.js`
+
+5. **`game-proxy` 管理接口仍然存在**
+   - 当前实现为内置 TCP/HTTP 风格的简易管理面
+   - 仍支持查看上游、维护模式和手动切换路由
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
@@ -799,13 +818,24 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 | `/maintenance/off` | POST | 关闭维护模式 |
 | `/switch/:server_id` | POST | 切换到指定服务器 |
 
-### 12.2 待集成服务
+### 12.2 当前各服务接入状态
 
 | 服务 | 端口 | 状态 | 说明 |
 |------|------|------|------|
-| chat-server | 9001 | 待集成 | 需引入 service-registry 包 |
-| mail-service | 9003 | 待实现 | 新建服务，实现邮件 CRUD + Redis Pub/Sub 通知 |
-| match-service | 9002 | 开发中 | gRPC 接口已定义，需完善业务逻辑 |
+| game-server | 7000-7499 | 已接入 | 通过 `packages/service-registry` 注册自身 |
+| game-server(admin) | 7500 | 固定端口 | 不走注册中心，供 `admin-api` 直连 |
+| game-proxy | 4000 | 已接入发现 | 消费注册中心发现 `game-server`，自身不注册 |
+| chat-server | 9001 | 未接入 | 当前只实现聊天服务与 metrics，上报 `heartbeat:chat-server` 仅用于监控，不是服务注册 |
+| match-service | 9002 | 未接入 | 当前只有 gRPC 服务与 metrics，上报 `heartbeat:match-service` 仅用于监控，不是服务注册 |
+| mail-service | 9003 | 已部分接入 | 已实现独立 Redis 注册/心跳，但未统一到 `packages/service-registry` |
+| auth-http | 3000 | 未接入发现 | 当前登录响应仍只下发 `gameProxyHost/gameProxyPort`，未从注册中心聚合 `chat` / `mail` 地址 |
+
+需要特别区分两类“heartbeat”：
+
+- `heartbeat:{service}:{instance}`：服务注册中心使用的实例级心跳
+- `heartbeat:{service}`：监控系统使用的服务级心跳
+
+它们是两套独立用途的数据结构，不能混为一谈。
 
 ### 12.3 启动脚本
 
@@ -813,33 +843,76 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
   ```powershell
   .\dev-game.ps1 -InstanceId "game-server-001" -Port 7000
   ```
+  说明：
+  - 会自动设置 `REGISTRY_ENABLED=true`
+  - 会自动设置 `SERVICE_INSTANCE_ID`
+  - 会按实例名生成 UDS 文件名
 
 - `scripts/dev-proxy.ps1` - 启动 game-proxy（启用服务发现）
   ```powershell
   .\dev-proxy.ps1
   ```
+  说明：
+  - 会自动设置 `REGISTRY_ENABLED=true`
+  - 默认从注册中心发现 `game-server`
+
+- `scripts/dev-chat.ps1` - 启动 chat-server
+  ```powershell
+  .\dev-chat.ps1
+  ```
+  说明：
+  - 当前不会向服务注册中心注册
+
+- `scripts/dev-match.ps1` - 启动 match-service
+  ```powershell
+  .\dev-match.ps1
+  ```
+  说明：
+  - 当前不会向服务注册中心注册
 
 ### 12.4 服务地址统一返回
 
-auth-http 登录接口已规划返回所有服务地址：
+设计目标仍然是由 `auth-http` 登录接口统一返回所有服务地址，但**当前代码尚未落地**。
+
+当前 `auth-http` 登录 / 签票相关接口实际返回的是：
 
 ```json
 {
   "ok": true,
-  "player_id": "player_001",
+  "playerId": "player_001",
   "ticket": "xxx",
-  "services": {
-    "game": { "host": "127.0.0.1", "port": 7002, "protocol": "kcp" },
-    "chat": { "host": "127.0.0.1", "port": 9001, "protocol": "tcp" },
-    "mail": { "host": "127.0.0.1", "port": 9003, "protocol": "http" }
-  }
+  "ticketExpiresAt": 1713000000,
+  "gameProxyHost": "127.0.0.1",
+  "gameProxyPort": 4000
 }
 ```
 
+也就是说当前现状是：
+
+- `auth-http` 仍通过静态配置下发 `game-proxy` 地址
+- 没有返回统一的 `services` 对象
+- 没有从注册中心动态发现 `chat-server` / `mail-service` / `match-service`
+
+对应代码位置：
+
+- `apps/auth-http/src/routes.js`
+- `apps/auth-http/src/config.js`
+
 ### 12.5 测试验证
 
-1. 启动所有服务实例
-2. 调用登录接口验证返回的服务地址
-3. 验证客户端可直连各服务
-4. 验证心跳超时移除
-5. 验证优雅关闭注销
+当前更准确的验证建议是：
+
+1. 使用 `scripts/dev-game.ps1` 启动一个或多个 `game-server` 实例。
+2. 使用 `scripts/dev-proxy.ps1` 启动 `game-proxy`，验证 `/instances` 能看到注册到 Redis 的 `game-server`。
+3. 关闭某个 `game-server`，验证其实例心跳消失后不再被 `game-proxy` 发现。
+4. 启动 `mail-service`，验证 Redis 中出现 `service:mail-service:instances:*` 和对应实例级心跳。
+5. 调用 `auth-http` 登录接口，确认当前只会返回 `gameProxyHost/gameProxyPort`，而不是统一 `services` 对象。
+
+### 12.6 当前与原设计的主要偏差
+
+当前实现和前文原始设计相比，至少存在以下差异：
+
+1. `game-server` 与 `game-proxy` 已接入 Redis 注册中心，但 `chat-server`、`match-service` 仍未接入。
+2. `mail-service` 已实现独立注册逻辑，不再属于“待实现”状态。
+3. `auth-http` 尚未接入注册中心发现，登录响应也未统一返回全部服务地址。
+4. 监控系统中的 `heartbeat:{service}` 与注册中心中的 `heartbeat:{service}:{instance}` 已并存，文档阅读时必须区分用途。

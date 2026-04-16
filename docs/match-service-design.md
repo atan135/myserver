@@ -62,8 +62,8 @@ apps/match-service/
     ├── main.rs               # 入口、日志初始化
     ├── config.rs             # 配置读取
     ├── proto/
-    │   ├── mod.rs            # myserver.match 模块导出
-    │   └── myserver.match.rs # 自动生成
+    │   ├── mod.rs                   # myserver.matchservice 模块导出
+    │   └── myserver.matchservice.rs # 自动生成
     ├── server.rs             # gRPC 服务器
     ├── service/
     │   ├── mod.rs
@@ -95,7 +95,7 @@ packages/proto/
 // packages/proto/match.proto
 syntax = "proto3";
 
-package myserver.match;
+package myserver.matchservice;
 
 service MatchService {
   // 客户端发起匹配
@@ -285,7 +285,7 @@ pub struct MatchCandidate {
 2. 按等待时间排序（早来先配）
 3. 凑齐 total_size 人后，生成 match_id
 4. 发布 MatchMatched 事件
-5. 调用 game-server.CreateRoomAndJoin
+5. 调用 game-server.CreateRoomAndJoin（当前代码中的真实创建流程仍未接线）
 ```
 
 > **扩展预留**：后续可在 `Matcher` trait 中实现按段位/技能匹配等复杂算法
@@ -343,6 +343,8 @@ pub struct MatchCandidate {
 9. 所有玩家都 joined 后，MatchService 标记 match 为 InRoom
 ```
 
+> 当前实现备注：`SimpleMatcher::try_match_mode()` 已具备撮合成功后的状态推进与事件推送，但当前既没有在 `MatchStart` 后自动触发，也没有后台撮合任务；即便手动触发后，房间创建仍是在服务内部直接生成 mock `room_id` / `token`，尚未由 MatchService 主动调用 GameServer 创建房间。
+
 ### 7.2 取消匹配流程
 
 ```
@@ -361,6 +363,8 @@ pub struct MatchCandidate {
 4. 如果是，标记 match_should_abort = true
 5. GameServer 收到后 abort 房间创建或通知房间内其他人
 ```
+
+> 当前实现备注：`PlayerLeft` 回调链路已经存在，但 `player_left()` 目前固定返回 `match_should_abort = false`，尚未根据剩余玩家数量做真正的中止判断。
 
 ---
 
@@ -398,6 +402,7 @@ struct ModeConfig {
 | MATCH_TIMEOUT | 匹配超时 |
 | ROOM_CREATE_FAILED | 房间创建失败 |
 | PLAYER_NOT_FOUND | 玩家不存在 |
+| INTERNAL_ERROR | 服务内部错误 |
 
 ---
 
@@ -428,43 +433,49 @@ thiserror = "2"
 - [x] gRPC server 基础框架
 - [x] 玩家状态机
 
-### Phase 2: 匹配逻辑 ✅ 已完成
+### Phase 2: 匹配逻辑 ⚠️ 部分完成
 - [x] 匹配池实现
-- [x] 简单撮合器
-- [x] 匹配超时处理
+- [x] 简单撮合器核心逻辑
+- [ ] 自动触发撮合流程
+- [ ] 匹配超时清理调度（`cleanup_timeout()` 已实现，尚未接线）
 
-### Phase 3: 房间联动 ✅ 已完成
-- [x] MatchService 接口定义
+### Phase 3: 房间联动 ⚠️ 部分完成
+- [x] MatchService / MatchInternal 接口定义
 - [x] GameServer gRPC Client（`apps/game-server/src/match_client.rs`）
-- [x] CreateRoomAndJoin 流程
-- [x] PlayerJoined / PlayerLeft 回调
+- [x] GameServer → MatchService 回调链路（`CreateRoomAndJoin` / `PlayerJoined` / `PlayerLeft` / `MatchEnd`）
+- [ ] MatchService → GameServer 主动创建房间链路
+- [ ] `CreateRoomAndJoin` 服务端状态落地
 
 ### Phase 4: 完善 ⚠️ 部分完成
 - [x] MatchEventStream 推送
 - [x] MatchStatus 查询
 - [x] MatchCancel 取消
-- [x] 错误码与日志完善
+- [x] 错误码、日志与基础指标
+- [ ] 离房后的中止判定与失败补偿
 
 ---
 
 ## 11.1 当前实现状态
 
-### 已完成
-- `apps/match-service/` 项目结构
-- `packages/proto/match.proto` - gRPC 接口定义
-- `MatchService` 对外接口（MatchStart/Cancel/Status/EventStream）
-- `MatchInternal` 对内接口（CreateRoomAndJoin/PlayerJoined/PlayerLeft/MatchEnd）
-- 玩家状态机（Idle/Matching/Matched/InRoom）
-- 匹配池（按模式分离，人齐即开）
-- 简单撮合器（SimpleMatcher）
-- GameServer MatchClient（`apps/game-server/src/match_client.rs`）
-- gRPC Server（tonic + reflection）
+### 已实现
+- `apps/match-service/` 服务骨架已落地，`server.rs` 同时挂载了 `MatchService`、`MatchInternal` 和 tonic reflection
+- `packages/proto/match.proto` 已生成并接入当前服务，外部接口包含 `MatchStart` / `MatchCancel` / `MatchStatus` / `MatchEventStream`，内部接口包含 `CreateRoomAndJoin` / `PlayerJoined` / `PlayerLeft` / `MatchEnd`
+- 玩家状态机、玩家上下文、事件 stream 注册与推送链路已实现，状态包括 `Idle / Matching / Matched / InRoom`
+- 匹配池与匹配任务存储已实现，支持按模式分池、候选人增删、创建 match task、记录房间号
+- `SimpleMatcher` 已实现 `start_match`、`cancel_match`、`get_status`、`player_joined`、`player_left`、`match_end`、`try_match_mode`
+- GameServer 侧的 `MatchClient` 和房间回调链路已落地；`RoomManager` 会在建房、进房、离房、对局结束时调用 MatchService
+- 监控指标已接入，包含 QPS、延迟、池子大小和 `heartbeat:match-service`
 
-### 待完成
-- GameServer 作为 client 调用 MatchService
-- 实际的房间创建回调（当前为 mock）
-- 撮合定时器（当前只在 MatchStart 时尝试撮合）
-- 匹配超时清理（cleanup_timeout 未被调用）
+### 部分实现 / 当前限制
+- `try_match_mode()` 已能在人数满足时创建 match task、更新玩家状态并推送 `matched` 事件，但房间创建仍是服务内部 mock：直接生成 `room_id` 与 `token`
+- `CreateRoomAndJoin` RPC 当前仅记录日志并返回成功，没有继续更新匹配任务或玩家状态
+- `player_left()` 当前只重置离开玩家自己的状态，返回值固定为 `false`，尚未根据剩余玩家数给出 `match_should_abort`
+- 配置与错误码已经覆盖主流程，但 `match_timeout_secs` 的实际使用主要落在各 mode 配置，尚未形成统一的超时调度闭环
+
+### 未接线 / 待补齐
+- 自动触发撮合流程尚未接线：`MatchStart` 当前只负责入池和更新状态，不会主动调用 `try_match_mode()`；代码中也没有后台撮合任务
+- 匹配超时清理尚未接线：`MatchPool::cleanup_timeout()` 已实现，但当前没有定时任务调用它
+- MatchService 主动通知 GameServer 创建房间的真实链路尚未接线；现阶段只有 GameServer → MatchService 的回调链路是完整可用的
 
 ---
 

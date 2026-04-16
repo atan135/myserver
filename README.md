@@ -6,7 +6,7 @@
 apps/
 ├── auth-http/        # Node.js + Express 登录服 (端口 3000)
 ├── game-server/     # Rust + Tokio TCP 游戏服 (端口 7000)
-├── game-proxy/      # Rust + Tokio KCP 接入代理 (端口 7002)
+├── game-proxy/      # Rust + Tokio KCP 接入代理 (端口 4000)
 ├── chat-server/     # Rust + Tokio TCP 聊天服 (端口 9001)
 ├── match-service/   # Rust + gRPC 匹配服务 (端口 9002)
 ├── mail-service/    # Node.js HTTP 邮件服务 (端口 9003)

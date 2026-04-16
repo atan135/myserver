@@ -1,182 +1,170 @@
-# 服务健康检查与监控告警设计方案
+# 服务健康检查与监控实现说明
 
-## 1. 方案概述
+## 1. 概述
 
-### 1.1 目标
+当前仓库中的监控系统已经完成基础落地，目标是为管理后台提供：
 
-在 admin-web 新增监控界面，实时展示各服务的运行状态、QPS、延迟等核心指标，支持时间窗口切换和数据可视化。
+- 服务在线 / 离线状态
+- 最近 5 秒桶聚合的 QPS 与平均延迟
+- 服务专属在线类指标
+- 历史窗口图表查询
+- 超期 metrics 数据归档
 
-### 1.2 数据流
+这套能力由以下模块共同组成：
 
+- 各服务内部 metrics 模块，周期性写入 Redis
+- `admin-api` 监控接口，读取 Redis，并提供手动归档入口
+- `admin-web` 监控页面，展示总览卡片与详情图表
+
+当前实现已经落地，不再是纯设计稿。
+
+## 2. 当前实现架构
+
+### 2.1 数据流
+
+```text
+服务运行时采集指标
+  -> 每 5 秒写入 Redis metrics / heartbeat
+  -> admin-api 读取 Redis 生成监控接口响应
+  -> admin-web 通过监控页面轮询展示
 ```
-各服务内部计算 metrics → 每 5 秒批量写 Redis Hash → admin-api 读 Redis / MySQL 归档 → admin-web 展示
-```
 
-### 1.3 界面设计
+### 2.2 代码落点
 
-- **总览页**：7 个服务卡片，显示存活状态、QPS、延迟，异常标红
-- **详情页**：实时折线图，支持 1min / 5min / 15min / 1h 窗口切换，采样间隔 5 秒
+服务端 metrics 模块：
 
----
+- `apps/auth-http/src/metrics.js`
+- `apps/mail-service/src/metrics.js`
+- `apps/admin-api/src/metrics.js`
+- `apps/game-server/src/metrics.rs`
+- `apps/chat-server/src/metrics.rs`
+- `apps/match-service/src/metrics.rs`
+- `apps/game-proxy/src/metrics.rs`
 
-## 2. Redis 数据结构
+管理接口：
 
-### 2.1 Metrics 数据
+- `apps/admin-api/src/routes/monitoring.js`
+- `apps/admin-api/src/services/archive.js`
 
-```
+前端页面与接线：
+
+- `apps/admin-web/src/views/admin/Monitoring.vue`
+- `apps/admin-web/src/views/admin/MonitoringDetail.vue`
+- `apps/admin-web/src/router/index.js`
+- `apps/admin-web/src/api/index.js`
+
+### 2.3 固定服务列表
+
+当前监控接口并不是动态扫描注册中心，而是使用固定服务列表：
+
+- `auth-http`
+- `game-server`
+- `game-proxy`
+- `chat-server`
+- `match-service`
+- `mail-service`
+- `admin-api`
+
+## 3. Redis 数据结构
+
+### 3.1 Metrics 数据
+
+```text
 Key:    metrics:{service_name}:{timestamp_5s_bucket}
 Value:  Redis Hash
 TTL:    604800 秒（7 天）
 ```
 
-timestamp_5s_bucket = floor(unix_timestamp / 5) * 5
+5 秒桶时间戳为秒级 Unix 时间戳，按 5 秒对齐。
 
-### 2.2 服务心跳
+### 3.2 心跳数据
 
-```
+```text
 Key:    heartbeat:{service_name}
-Value:  unix_timestamp（上次心跳时间）
-TTL:    30 秒（30 秒内无心跳视为离线）
+Value:  最近一次上报时间戳字符串
+TTL:    30 秒
 ```
 
-### 2.3 Metrics Value 格式
+`admin-api` 通过该 key 判断在线状态。
 
-| 服务 | 字段 |
-|------|------|
-| auth-http | `{"qps": N, "latency_ms": N, "online_sessions": N, "unique_players": N, "active_sessions_5m": N, "active_window_seconds": 300}` |
-| game-server | `{"qps": N, "latency_ms": N, "online_players": N, "room_count": N}` |
-| game-proxy | `{"qps": N, "latency_ms": N, "connections": N}` |
-| chat-server | `{"qps": N, "latency_ms": N, "online_players": N}` |
-| match-service | `{"qps": N, "latency_ms": N, "pool_size": N}` |
-| mail-service | `{"qps": N, "latency_ms": N}` |
-| admin-api | `{"qps": N, "latency_ms": N}` |
+说明：
 
-### 2.4 服务注册信息（复用已有 service-registry）
+- 当前监控接口依赖的是 `heartbeat:{service_name}`
+- 不依赖 `service-registry` 的 `services:{service_name}` 注册信息
+- `service-registry` 仍是另一套服务发现机制，不是当前监控页面的数据源
 
-```
-Key:    services:{service_name}
-Value:  JSON { host, port, version }
-TTL:    60 秒（需要续期）
-```
+### 3.3 Metrics Hash 字段
 
----
+| 服务 | 当前写入字段 |
+|------|--------------|
+| `auth-http` | `qps` `latency_ms` `online_sessions` `unique_players` `active_sessions_5m` `active_window_seconds` |
+| `game-server` | `qps` `latency_ms` `online_players` `room_count` |
+| `game-proxy` | `qps` `latency_ms` `connections` |
+| `chat-server` | `qps` `latency_ms` `online_players` |
+| `match-service` | `qps` `latency_ms` `pool_size` |
+| `mail-service` | `qps` `latency_ms` |
+| `admin-api` | `qps` `latency_ms` |
 
-## 3. 各服务 Metrics 模块
+`admin-api` 会把各服务的在线类字段统一映射成 `online_value` 返回给前端：
 
-### 3.1 实现要求
+- `auth-http` -> `unique_players`
+- `game-server` -> `online_players`
+- `game-proxy` -> `connections`
+- `chat-server` -> `online_players`
+- `match-service` -> `pool_size`
+- `mail-service` / `admin-api` -> `0`
 
-- **延迟计算**：服务端内部计算，不依赖外部探测
-- **批量写入**：每 5 秒积累一次 metrics，批量写入 Redis
-- **原子操作**：使用 Redis pipeline 批量写入
+## 4. 指标来源
 
-### 3.2 延迟指标说明
+### 4.1 Node.js 服务
 
-| 服务 | 延迟定义 |
-|------|---------|
-| auth-http | HTTP 请求处理耗时（ms） |
-| game-server | 单个已解析 TCP 包从分发到 handler 返回的处理耗时 |
-| chat-server | TCP 消息处理耗时 |
-| match-service | gRPC 调用处理耗时 |
-| mail-service | HTTP 请求处理耗时 |
-| admin-api | HTTP 请求处理耗时 |
-| game-proxy | 代理连接建立到上游 local socket 的耗时 |
+`auth-http`、`mail-service`、`admin-api` 当前通过中间件统计：
 
-### 3.3 Node.js 服务（auth-http / mail-service / admin-api）
+- QPS：HTTP 请求完成数
+- 延迟：请求开始到响应结束的耗时
 
-使用 `setInterval` 每 5 秒执行一次上报：
+其中：
 
-```typescript
-// 伪代码
-let metricsBuffer = [];
+- `auth-http` 会额外扫描 session 与 session-activity key，统计 `online_sessions`、`unique_players`、`active_sessions_5m`
+- `mail-service` 与 `admin-api` 当前只上报基础 HTTP 指标
 
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    metricsBuffer.push({
-      qps: 1,
-      latency_ms: Date.now() - start,
-      timestamp: floor(Date.now() / 5000) * 5000
-    });
-  });
-  next();
-});
+### 4.2 Rust 服务
 
-setInterval(async () => {
-  if (metricsBuffer.length === 0) return;
-  const aggregated = aggregateMetrics(metricsBuffer); // 聚合
-  metricsBuffer = [];
-  await redis.pipeline()
-    .hset(`metrics:${SERVICE_NAME}:${currentBucket}`, aggregated)
-    .expire(`metrics:${SERVICE_NAME}:${currentBucket}`, 604800)
-    .set(`heartbeat:${SERVICE_NAME}`, Date.now(), 'EX', 30)
-    .exec();
-}, 5000);
-```
-
-### 3.4 Rust 服务（game-server / chat-server / match-service / game-proxy）
-
-使用 `tokio::time::interval` 每 5 秒执行一次上报：
-
-```rust
-// 伪代码
-use tokio::time::{interval, Duration};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-let qps_counter = AtomicU64::new(0);
-let latency_sum = AtomicU64::new(0);
-let latency_count = AtomicU64::new(0);
-
-tokio::spawn(async move {
-  let mut ticker = interval(Duration::from_secs(5));
-  loop {
-    ticker.tick().await;
-    let qps = qps_counter.swap(0, Ordering::Relaxed);
-    let latency = if latency_count.load(Ordering::Relaxed) > 0 {
-      latency_sum.swap(0, Ordering::Relaxed) / latency_count.swap(0, Ordering::Relaxed)
-    } else { 0 };
-
-    let bucket = floor_now() / 5000 * 5000;
-    let key = format!("metrics:{}:{}", SERVICE_NAME, bucket);
-
-    redis::pipe()
-      .hset(&key, "qps", qps)
-      .hset(&key, "latency_ms", latency)
-      .expire(&key, 300)
-      .set::<_>(format!("heartbeat:{}", SERVICE_NAME), now(), "EX", 30)
-      .query_async(&mut redis_conn)
-      .await;
-  }
-});
-```
-
-### 3.5 当前真实埋点来源
-
-当前 Rust 服务已不再是仅启动上报线程，核心指标已接入真实运行时路径：
+`game-server`、`chat-server`、`match-service`、`game-proxy` 当前已经接入真实运行时路径：
 
 | 服务 | QPS / 延迟来源 | 在线类指标来源 |
 |------|----------------|----------------|
-| game-server | `server.rs` 统一消息分发主路径 | 已认证连接数、`RoomManager` 的 `room_count` |
-| chat-server | `chat_server.rs` 消息主循环 | `ChatSessionMap` 当前长度 |
-| game-proxy | 成功建立 relay 的代理会话 | `connection_count` 实时值 |
-| match-service | `match_service.rs` 的 gRPC handler | `MatchPool` 实时汇总的 `pool_size` |
+| `game-server` | TCP 消息主分发路径 | 在线玩家数、房间数 |
+| `chat-server` | 聊天消息主循环 | 在线聊天会话数 |
+| `game-proxy` | 代理会话处理路径 | 连接数 |
+| `match-service` | gRPC handler | 匹配池大小 |
 
-已通过编译与联调验证，监控历史窗口中可以观察到上述指标随真实业务流量变化。
+## 5. admin-api 监控接口
 
----
+### 5.1 挂载位置
 
-## 4. admin-api 接口
+监控路由定义在：
 
-### 4.1 GET /api/admin/monitoring/services
+- `apps/admin-api/src/routes/monitoring.js`
 
-获取所有服务状态（总览页用）
+并由 `apps/admin-api/src/routes.js` 通过下面的前缀挂载：
+
+```text
+/api/admin/monitoring
+```
+
+### 5.2 `GET /api/admin/monitoring/services`
+
+用于监控总览页。
+
+返回示例：
 
 ```json
-// Response
 {
   "services": [
     {
       "name": "auth-http",
-      "status": "online",   // "online" | "offline"
+      "status": "online",
       "qps": 120,
       "latency_ms": 5,
       "online_value": 320,
@@ -185,225 +173,229 @@ tokio::spawn(async move {
       "active_sessions_5m": 128,
       "active_window_seconds": 300,
       "last_heartbeat": 1713000000000
-    },
-    {
-      "name": "game-server",
-      "status": "online",
-      "qps": 450,
-      "latency_ms": 2,
-      "online_value": 128,
-      "online_players": 128,
-      "room_count": 24,
-      "last_heartbeat": 1713000000000
     }
-    // ...
   ]
 }
 ```
 
-status 判断逻辑：
-- 读取 `heartbeat:{service_name}`，30 秒内无更新视为 offline
+当前逻辑：
 
-### 4.2 GET /api/admin/monitoring/services/:name/metrics
+- 从固定服务列表逐个读取 `heartbeat:{service_name}`
+- 30 秒内有心跳则视为 `online`
+- 在线状态下再扫描 `metrics:{service_name}:*` 找到最新桶
+- 返回 `qps`、`latency_ms`、`online_value` 以及原始指标字段
 
-获取指定服务历史 metrics（图表用）
+### 5.3 `GET /api/admin/monitoring/services/:name/metrics`
 
+用于监控详情页图表。
+
+请求参数：
+
+```text
+window=1m|5m|15m|1h
 ```
-Query: window=1m|5m|15m|1h
-```
+
+返回示例：
 
 ```json
-// Response
 {
   "service": "auth-http",
   "window": "5m",
   "points": [
-    { "timestamp": 1713000000, "qps": 118, "latency_ms": 5, "online_value": 320, "online_sessions": 348, "unique_players": 320, "active_sessions_5m": 126 },
-    { "timestamp": 1713000005, "qps": 122, "latency_ms": 4, "online_value": 322, "online_sessions": 350, "unique_players": 322, "active_sessions_5m": 128 },
-    // ...
+    {
+      "timestamp": 1713000000,
+      "qps": 118,
+      "latency_ms": 5,
+      "online_value": 320,
+      "online_sessions": 348,
+      "unique_players": 320,
+      "active_sessions_5m": 126
+    }
   ]
 }
 ```
 
-window 对应采样点数：
-- 1m: 12 个点
-- 5m: 60 个点
-- 15m: 180 个点
-- 1h: 720 个点
+当前逻辑：
 
----
+- 只接受固定窗口 `1m` / `5m` / `15m` / `1h`
+- 只从 Redis 扫描对应时间范围内的 key
+- 结果按时间戳升序返回
 
-## 5. admin-web 监控页面
+注意：
 
-### 5.1 路由
+- 当前详情接口没有从 MySQL `metrics_archive` 回查历史数据
+- 因此归档后的老数据目前不会通过该接口重新读出来
 
-```
-/admin/monitoring  (总览页)
-/admin/monitoring/:service  (详情页)
-```
+### 5.4 `POST /api/admin/monitoring/archive`
 
-### 5.2 总览页布局
+手动触发归档任务。
 
-```
-+------------------------------------------------------+
-|  服务监控                                    [1m][5m][15m][1h]  |
-+------------------------------------------------------+
-|  +--------+  +--------+  +--------+  +--------+      |
-|  |auth-   |  |game-   |  |game-   |  |chat-   |      |
-|  |http    |  |server  |  |proxy   |  |server  |      |
-|  |        |  |        |  |        |  |        |      |
-|  |QPS:120 |  |QPS:450 |  |QPS:890 |  |QPS:230 |      |
-|  |延迟:5ms|  |延迟:2ms|  |延迟:1ms|  |延迟:3ms|      |
-|  |在线:350|  |在线:128|  |连接:256|  |在线:89 |      |
-|  +--------+  +--------+  +--------+  +--------+      |
-|                                                       |
-|  +--------+  +--------+  +--------+                   |
-|  |match-  |  |mail-   |  |admin-  |                   |
-|  |service |  |service |  |api     |                   |
-|  |        |  |        |  |        |                   |
-|  |QPS:45  |  |QPS:30  |  |QPS:15  |                   |
-|  |延迟:8ms|  |延迟:12ms|  |延迟:3ms|                   |
-|  |匹配池: |  |        |  |        |                   |
-|  +--------+  +--------+  +--------+                   |
-+------------------------------------------------------+
-```
-
-服务卡片：
-- 顶部：服务名称
-- 中部：QPS + 延迟（延迟数字标红阈值可配置）
-- 底部：服务专属指标（在线人数/连接数/房间数等）
-- 离线状态：整个卡片边框变红，QPS/延迟 显示 "--"
-
-### 5.3 详情页布局
-
-```
-+------------------------------------------------------+
-|  < 返回  auth-http 监控详情              [1m][5m][15m][1h]  |
-+------------------------------------------------------+
-|  当前 QPS: 120        当前延迟: 5ms        在线: 350   |
-+------------------------------------------------------+
-|                    QPS 折线图                         |
-|  150 |                    ****                        |
-|      |               ****        ****                 |
-|  100 |          ****                              |
-|      |     ****                                        |
-|   50 |                                                   |
-|      +----------+----------+----------+----------+     |
-|            12:00    12:01    12:02    12:03              |
-+------------------------------------------------------+
-|                    延迟折线图                          |
-|   10 |      *                                    |
-|      |  *****                                         |
-|    5 |                                                   |
-|      +----------+----------+----------+----------+     |
-|            12:00    12:01    12:02    12:03              |
-+------------------------------------------------------+
-```
-
-图表要求：
-- 使用 ECharts
-- 折线图自动滚动最新数据
-- 悬停显示具体数值tooltip
-- Y 轴自适应，X 轴为时间轴
-
-### 5.4 告警规则
-
-- 服务离线：卡片边框标红 + 状态文字显示 "离线"
-- 延迟超标：延迟数值标红（阈值可配置，默认 > 500ms）
-- QPS 异常：暂不设置主动告警，仅展示
-
----
-
-## 6. 实现计划
-
-### 6.1 第一阶段：基础设施
-
-1. 各服务新增 metrics 模块（Rust 服务 + Node.js 服务）
-2. 验证 Redis 数据写入正确性
-3. admin-api 新增 /api/admin/monitoring 接口
-
-### 6.2 第二阶段：admin-web 页面
-
-1. 总览页开发（服务卡片网格）
-2. 详情页开发（实时折线图）
-3. 时间窗口切换功能
-
-### 6.3 文件变更
-
-| 文件 | 变更 |
-|------|------|
-| `apps/auth-http/src/metrics.ts` | 新增 |
-| `apps/mail-service/src/metrics.ts` | 新增 |
-| `apps/admin-api/src/metrics.ts` | 新增 |
-| `apps/game-server/src/metrics.rs` | 新增 |
-| `apps/chat-server/src/metrics.rs` | 新增 |
-| `apps/match-service/src/metrics.rs` | 新增 |
-| `apps/game-proxy/src/metrics.rs` | 新增 |
-| `apps/admin-api/src/routes/monitoring.ts` | 新增（含归档逻辑） |
-| `apps/admin-api/src/services/archive.ts` | 新增 |
-| `db/init.sql` | 新增 metrics_archive 表 |
-| `apps/admin-web/src/views/admin/Monitoring.vue` | 新增 |
-| `apps/admin-web/src/views/admin/MonitoringDetail.vue` | 新增 |
-| `apps/admin-web/src/router/index.ts` | 更新路由 |
-
----
-
-## 7. 数据归档
-
-### 7.1 策略概述
-
-Redis 中保留最近 7 天热数据，超期数据归档到 MySQL 永久保留。
-
-```
-Redis (热数据, 7天TTL)  →  定时任务迁移  →  MySQL (冷数据, 永久保留)
-```
-
-### 7.2 MySQL 归档表
-
-```sql
-CREATE TABLE metrics_archive (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  service_name VARCHAR(64) NOT NULL,
-  bucket_time INT NOT NULL,
-  qps INT DEFAULT 0,
-  latency_ms INT DEFAULT 0,
-  online_value INT DEFAULT 0,
-  extra JSON,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_service_time (service_name, bucket_time)
-);
-```
-
-### 7.3 归档 API
-
-**POST /api/admin/monitoring/archive**
-
-手动触发归档任务，将 7 天前~8 天前的 Redis 数据迁移到 MySQL。
+返回示例：
 
 ```json
-// Response
 {
+  "ok": true,
   "archived": 120960,
   "duration_ms": 3500
 }
 ```
 
-**触发时机**：部署时调用一次，后续可通过外部调度器（如 cron）定期触发。
+当前归档逻辑：
 
-### 7.4 归档查询逻辑
+- 扫描 8 天前到 7 天前之间的 Redis metrics 数据
+- 写入 MySQL `metrics_archive`
+- 写入后删除原 Redis key
 
+实现位置：
+
+- `apps/admin-api/src/services/archive.js`
+
+## 6. admin-web 监控页面
+
+### 6.1 实际前端路由
+
+当前前端监控页面路由定义在 `apps/admin-web/src/router/index.js`，真实路径是：
+
+```text
+/monitoring
+/monitoring/:service
 ```
-查询时间范围在最近 7 天内  →  读 Redis
-查询时间范围超过 7 天      →  读 MySQL
+
+不是 `/admin/monitoring`。
+
+说明：
+
+- `/api/admin/monitoring/*` 是后端接口前缀
+- `/monitoring*` 才是管理前端页面路由
+
+### 6.2 API 接线
+
+`apps/admin-web/src/api/index.js` 中监控请求使用单独的 axios 实例：
+
+```text
+baseURL = /api/admin/monitoring
 ```
 
----
+当前监控请求包括：
 
-## 8. 注意事项
+- `getServices()`
+- `getServiceMetrics(name, window)`
+- `triggerArchive()`
 
-1. **Redis 连接复用**：各服务复用已有的 Redis 连接，不新建连接池
-2. **指标聚合**：5 秒内的多次请求在服务端聚合后写入，而非逐请求写 Redis
-3. **优雅关闭**：服务停止时不再写入 metrics，但保留已有数据（TTL 自然过期）
-4. **多实例兼容**：metrics key 包含时间戳，支持多实例部署时数据叠加或取最大
-5. **时间一致性**：所有服务使用相同的 5 秒对齐时间戳桶，避免时区问题
-6. **归档时机**：选择低峰期执行，避免与正常监控查询竞争 Redis 资源
+与普通 `/api/v1/*` 接口不同，这个实例当前没有注入 JWT 头。
+
+### 6.3 总览页
+
+组件位置：
+
+- `apps/admin-web/src/views/admin/Monitoring.vue`
+
+当前行为：
+
+- 进入页面后立即请求 `/api/admin/monitoring/services`
+- 每 5 秒轮询一次
+- 使用卡片网格展示所有服务
+- 离线服务会加红色样式
+- 延迟大于 `500ms` 时延迟数值标红
+- 点击卡片跳转到 `/monitoring/:service?window=<currentWindow>`
+
+当前页面展示字段：
+
+- 服务名
+- 在线 / 离线状态
+- QPS
+- 延迟
+- 在线类指标
+- `auth-http` 额外展示 `5 分钟活跃会话`
+
+### 6.4 详情页
+
+组件位置：
+
+- `apps/admin-web/src/views/admin/MonitoringDetail.vue`
+
+当前行为：
+
+- 使用路由参数 `:service`
+- 使用查询参数 `window`，默认 `5m`
+- 每 5 秒轮询：
+  - `/api/admin/monitoring/services`
+  - `/api/admin/monitoring/services/:name/metrics`
+- 返回按钮跳回 `/monitoring`
+
+当前页面展示内容：
+
+- 当前 QPS 卡片
+- 当前延迟卡片
+- 当前在线类指标卡片
+- `auth-http` 额外展示 `5 分钟活跃会话`
+- QPS 折线图
+- 延迟折线图
+
+### 6.5 当前图表实现细节
+
+详情页当前使用 ECharts，但实现比原设计稿更简单：
+
+- X 轴是格式化后的时间字符串分类轴，不是 time 轴
+- Y 轴最小值固定为 `0`
+- 线图启用了 `smooth`
+- 启用了简单面积填充 `areaStyle`
+- 当前没有显式配置 tooltip、legend、dataZoom、自动滚动窗口
+
+因此如果后续要补强“更完整的监控图表交互”，需要继续迭代代码，而不是只改文档。
+
+## 7. 归档实现现状
+
+### 7.1 MySQL 表
+
+归档表定义在 `db/init.sql`：
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_archive (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  service_name VARCHAR(64) NOT NULL,
+  bucket_time INT UNSIGNED NOT NULL,
+  qps INT UNSIGNED NOT NULL DEFAULT 0,
+  latency_ms INT UNSIGNED NOT NULL DEFAULT 0,
+  online_value INT UNSIGNED NOT NULL DEFAULT 0,
+  extra JSON NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_metrics_archive_service_time (service_name, bucket_time)
+);
+```
+
+### 7.2 当前归档策略
+
+- Redis 保留最近 7 天热数据
+- 归档接口负责把更早的 1 天窗口迁移到 MySQL
+- 当前仓库中没有内置定时任务自动调用归档接口
+- 需要通过外部调度器或人工调用触发
+
+### 7.3 当前查询限制
+
+当前监控查询接口只读 Redis，不读 MySQL。
+
+因此“归档”当前的实际效果是：
+
+- 减少 Redis 中的历史 metrics 占用
+- 为后续补 MySQL 历史查询能力预留数据
+
+但它还不是“完整冷热分层查询”。
+
+## 8. 与旧设计稿的主要差异
+
+当前实现与旧版设计文档相比，已经有以下明确差异：
+
+1. 前端路由实际是 `/monitoring` 与 `/monitoring/:service`，不是 `/admin/monitoring/*`。
+2. 后端监控接口前缀是 `/api/admin/monitoring`，前后端路径不能混写。
+3. 实现文件当前以 `.js` 为主，不是文档里旧写法的 `.ts`。
+4. 监控接口使用固定服务列表，不依赖 `service-registry` 里的服务注册信息。
+5. 历史 metrics 查询当前只读 Redis，没有实现“超过 7 天自动查 MySQL”。
+6. 详情页图表实现比旧设计简化，没有完整 tooltip、自动滚动和 time 轴能力。
+
+## 9. 注意事项
+
+1. 监控接口当前未挂 JWT 鉴权，不应直接暴露到公网。
+2. `admin-web` 的监控页面虽然受前端路由守卫保护，但后端监控接口本身仍是匿名可访问的。
+3. 归档接口当前只是手动入口，没有内建调度。
+4. 如果后续补上 MySQL 历史查询、服务注册联动或接口鉴权，本文需要继续同步。
