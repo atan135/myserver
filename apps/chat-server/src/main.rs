@@ -8,7 +8,9 @@ mod protocol;
 mod ticket;
 
 use std::fs;
+use std::net::SocketAddr;
 
+use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -23,6 +25,12 @@ struct Config {
     max_body_len: usize,
     ticket_secret: String,
     redis_url: String,
+    registry_enabled: bool,
+    registry_url: String,
+    registry_heartbeat_interval_secs: u64,
+    service_name: String,
+    service_instance_id: String,
+    public_host: String,
     log_level: String,
     log_enable_console: bool,
     log_enable_file: bool,
@@ -52,6 +60,22 @@ impl Config {
                 .unwrap_or_else(|_| "default_secret_change_in_production".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            registry_enabled: std::env::var("REGISTRY_ENABLED")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            registry_url: std::env::var("REGISTRY_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            registry_heartbeat_interval_secs: std::env::var("REGISTRY_HEARTBEAT_INTERVAL")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            service_name: std::env::var("SERVICE_NAME")
+                .unwrap_or_else(|_| "chat-server".to_string()),
+            service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
+                .unwrap_or_else(|_| "chat-server-001".to_string()),
+            public_host: std::env::var("CHAT_PUBLIC_HOST")
+                .unwrap_or_else(|_| "127.0.0.1".to_string()),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             log_enable_console: std::env::var("LOG_ENABLE_CONSOLE")
                 .unwrap_or_else(|_| "true".to_string())
@@ -120,8 +144,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_addr = %config.bind_addr,
         mysql_url = %config.mysql_url,
         redis_url = %config.redis_url,
+        registry_enabled = config.registry_enabled,
         "chat-server starting"
     );
+
+    let registry_client: Option<RegistryClient> = if config.registry_enabled {
+        match RegistryClient::new(
+            &config.registry_url,
+            &config.service_name,
+            &config.service_instance_id,
+        )
+        .await
+        {
+            Ok(client) => {
+                let client = client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let port = extract_port(&config.bind_addr)?;
+                let instance = ServiceInstance::new(
+                    config.service_instance_id.clone(),
+                    config.service_name.clone(),
+                    config.public_host.clone(),
+                    port,
+                )
+                .with_tags(vec!["chat".to_string(), "tcp".to_string()]);
+
+                if let Err(e) = client.register(&instance).await {
+                    tracing::error!(error = %e, "failed to register service");
+                } else {
+                    tracing::info!(
+                        service = %config.service_name,
+                        instance = %config.service_instance_id,
+                        "service registered to registry"
+                    );
+                }
+
+                Some(client)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create registry client");
+                None
+            }
+        }
+    } else {
+        tracing::info!("service registry disabled");
+        None
+    };
+
+    let heartbeat_handle = registry_client
+        .as_ref()
+        .map(|client| client.start_heartbeat_task());
 
     let chat_store = chat_store::ChatStore::new(&config.mysql_url, config.mysql_pool_size).await?;
 
@@ -157,6 +227,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = chat_server::run(server_config, chat_store.clone(), chat_sessions).await;
 
+    if let Some(client) = registry_client {
+        if let Some(handle) = heartbeat_handle {
+            handle.abort();
+        }
+        if let Err(e) = client.deregister().await {
+            tracing::error!(error = %e, "failed to deregister service");
+        } else {
+            tracing::info!(
+                service = %config.service_name,
+                instance = %config.service_instance_id,
+                "service deregistered from registry"
+            );
+        }
+    }
+
     let _ = chat_store.close().await;
     result
+}
+
+fn extract_port(bind_addr: &str) -> Result<u16, Box<dyn std::error::Error>> {
+    let addr: SocketAddr = bind_addr.parse()?;
+    Ok(addr.port())
 }

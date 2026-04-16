@@ -25,3 +25,4 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 deadpool-redis = "0.17"
+service-registry = { path = "../../packages/service-registry" }

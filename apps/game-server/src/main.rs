@@ -122,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
+                let client = client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let instance = ServiceInstance::new(
                     config.service_instance_id.clone(),
                     config.service_name.clone(),

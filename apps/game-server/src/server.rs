@@ -55,7 +55,7 @@ pub async fn run(
 
     // Initialize MatchClient for communicating with MatchService
     let match_client = crate::match_client::create_match_client_shared();
-    let match_client_config = MatchClientConfig::default();
+    let match_client_config = MatchClientConfig::from_env().await;
     if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }

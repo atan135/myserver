@@ -1,5 +1,13 @@
 $ErrorActionPreference = "Stop"
 
+$env:REGISTRY_ENABLED="true"
+if (-not $env:SERVICE_INSTANCE_ID) {
+  $env:SERVICE_INSTANCE_ID="chat-server-001"
+}
+
+Write-Host "Starting chat-server with service discovery enabled" -ForegroundColor Cyan
+Write-Host "  InstanceId: $env:SERVICE_INSTANCE_ID" -ForegroundColor Gray
+
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
 Push-Location "$PSScriptRoot\..\apps\chat-server"
 try {

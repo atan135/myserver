@@ -50,6 +50,7 @@ export function getConfig() {
     ),
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
+    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
 
     // Rate Limiting
     ratelimitEnabled: parseBoolean(process.env.RATELIMIT_ENABLED, true),

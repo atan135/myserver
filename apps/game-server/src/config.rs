@@ -91,7 +91,7 @@ impl Config {
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
-        let registry_url = env::var("REGISRTY_URL")
+        let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let registry_heartbeat_interval_secs = parse_u64("REGISTRY_HEARTBEAT_INTERVAL", 10);

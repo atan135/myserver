@@ -29,7 +29,25 @@ function handleGameServerError(res, error) {
   });
 }
 
-function sendLoginSuccess(res, session, config) {
+async function buildServicePayload(config, serviceDiscovery) {
+  if (!serviceDiscovery) {
+    return {
+      game: {
+        host: config.gameProxyHost,
+        port: config.gameProxyPort,
+        protocol: "kcp"
+      },
+      chat: null,
+      mail: null
+    };
+  }
+
+  return serviceDiscovery.discoverClientServices();
+}
+
+async function sendLoginSuccess(res, session, config, serviceDiscovery) {
+  const services = await buildServicePayload(config, serviceDiscovery);
+
   return res.status(201).json({
     ok: true,
     playerId: session.playerId,
@@ -39,11 +57,20 @@ function sendLoginSuccess(res, session, config) {
     ticket: session.gameTicket.value,
     ticketExpiresAt: session.gameTicket.expiresAt,
     gameProxyHost: config.gameProxyHost,
-    gameProxyPort: config.gameProxyPort
+    gameProxyPort: config.gameProxyPort,
+    services
   });
 }
 
-export function createRoutes(config, authStore, gameAdminClient, rateLimiter, accountLockout, mysqlStore) {
+export function createRoutes(
+  config,
+  authStore,
+  gameAdminClient,
+  rateLimiter,
+  accountLockout,
+  mysqlStore,
+  serviceDiscovery
+) {
   const router = Router();
 
   // Middleware: IP rate limiting for all routes
@@ -145,19 +172,14 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
       }
     }
 
+    let session;
     try {
-      const session = await authStore.createPasswordSession(
-        loginName,
-        password,
-        clientIp
-      );
+      session = await authStore.createPasswordSession(loginName, password, clientIp);
 
       // Clear failed attempts on successful login
       if (config.accountLockEnabled && accountLockout) {
         await accountLockout.clearFailedAttempts(loginName);
       }
-
-      return sendLoginSuccess(res, session, config);
     } catch (error) {
       // Record failed attempt
       if (config.accountLockEnabled && accountLockout) {
@@ -193,6 +215,8 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
 
       return next(error);
     }
+
+    return sendLoginSuccess(res, session, config, serviceDiscovery);
   });
 
   router.post("/api/v1/auth/guest-login", async (req, res) => {
@@ -212,7 +236,7 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
 
     const session = await authStore.createGuestSession(normalizedGuestId, getClientIp(req));
 
-    return sendLoginSuccess(res, session, config);
+    return sendLoginSuccess(res, session, config, serviceDiscovery);
   });
 
   router.get("/api/v1/auth/me", async (req, res) => {
@@ -247,6 +271,7 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
     }
 
     const ticket = await authStore.issueGameTicket(session.playerId, getClientIp(req));
+    const services = await buildServicePayload(config, serviceDiscovery);
 
     return res.status(201).json({
       ok: true,
@@ -254,7 +279,8 @@ export function createRoutes(config, authStore, gameAdminClient, rateLimiter, ac
       ticket: ticket.value,
       ticketExpiresAt: ticket.expiresAt,
       gameProxyHost: config.gameProxyHost,
-      gameProxyPort: config.gameProxyPort
+      gameProxyPort: config.gameProxyPort,
+      services
     });
   });
 

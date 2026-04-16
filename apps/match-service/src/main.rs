@@ -12,6 +12,7 @@ mod state;
 
 use std::fs;
 
+use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -72,8 +73,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(
         bind_addr = %config.bind_addr,
+        registry_enabled = config.registry_enabled,
         "match-service starting"
     );
+
+    let registry_client: Option<RegistryClient> = if config.registry_enabled {
+        match RegistryClient::new(
+            &config.registry_url,
+            &config.service_name,
+            &config.service_instance_id,
+        )
+        .await
+        {
+            Ok(client) => {
+                let client = client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let instance = ServiceInstance::new(
+                    config.service_instance_id.clone(),
+                    config.service_name.clone(),
+                    config.public_host.clone(),
+                    config.port,
+                )
+                .with_tags(vec!["match".to_string(), "grpc".to_string()])
+                .with_metadata(serde_json::json!({
+                    "protocol": "grpc"
+                }));
+
+                if let Err(e) = client.register(&instance).await {
+                    tracing::error!(error = %e, "failed to register service");
+                } else {
+                    tracing::info!(
+                        service = %config.service_name,
+                        instance = %config.service_instance_id,
+                        "service registered to registry"
+                    );
+                }
+
+                Some(client)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create registry client");
+                None
+            }
+        }
+    } else {
+        tracing::info!("service registry disabled");
+        None
+    };
+
+    let heartbeat_handle = registry_client
+        .as_ref()
+        .map(|client| client.start_heartbeat_task());
 
     // 启动 metrics 上报任务
     let metrics_redis_url = config.redis_url.clone();
@@ -81,5 +130,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
     });
 
-    server::run(config).await
+    let result = server::run(config).await;
+
+    if let Some(client) = registry_client {
+        if let Some(handle) = heartbeat_handle {
+            handle.abort();
+        }
+        if let Err(e) = client.deregister().await {
+            tracing::error!(error = %e, "failed to deregister service");
+        } else {
+            tracing::info!("service deregistered from registry");
+        }
+    }
+
+    result
 }

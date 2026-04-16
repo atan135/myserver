@@ -464,7 +464,7 @@ thiserror = "2"
 - 匹配池与匹配任务存储已实现，支持按模式分池、候选人增删、创建 match task、记录房间号
 - `SimpleMatcher` 已实现 `start_match`、`cancel_match`、`get_status`、`player_joined`、`player_left`、`match_end`、`try_match_mode`
 - GameServer 侧的 `MatchClient` 和房间回调链路已落地；`RoomManager` 会在建房、进房、离房、对局结束时调用 MatchService
-- 监控指标已接入，包含 QPS、延迟、池子大小和 `heartbeat:match-service`
+- 监控指标已接入，包含 QPS、延迟、池子大小和 `metrics:heartbeat:match-service`
 
 ### 部分实现 / 当前限制
 - `try_match_mode()` 已能在人数满足时创建 match task、更新玩家状态并推送 `matched` 事件，但房间创建仍是服务内部 mock：直接生成 `room_id` 与 `token`

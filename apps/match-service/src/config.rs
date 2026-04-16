@@ -1,10 +1,13 @@
 //! 配置读取
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
+    pub public_host: String,
+    pub port: u16,
     pub match_timeout_secs: u64,
     pub max_concurrent_matches: usize,
     pub modes: HashMap<String, ModeConfig>,
@@ -13,6 +16,11 @@ pub struct Config {
     pub log_enable_file: bool,
     pub log_dir: String,
     pub redis_url: String,
+    pub registry_enabled: bool,
+    pub registry_url: String,
+    pub registry_heartbeat_interval_secs: u64,
+    pub service_name: String,
+    pub service_instance_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -24,6 +32,9 @@ pub struct ModeConfig {
 
 impl Config {
     pub fn from_env() -> Self {
+        let bind_addr = std::env::var("MATCH_BIND_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:9002".to_string());
+        let port = parse_port(&bind_addr).unwrap_or(9002);
         let mut modes = HashMap::new();
         modes.insert(
             "1v1".to_string(),
@@ -51,8 +62,10 @@ impl Config {
         );
 
         Self {
-            bind_addr: std::env::var("MATCH_BIND_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:9002".to_string()),
+            bind_addr,
+            public_host: std::env::var("MATCH_PUBLIC_HOST")
+                .unwrap_or_else(|_| "127.0.0.1".to_string()),
+            port,
             match_timeout_secs: std::env::var("MATCH_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
@@ -74,6 +87,20 @@ impl Config {
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            registry_enabled: std::env::var("REGISTRY_ENABLED")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
+            registry_url: std::env::var("REGISTRY_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            registry_heartbeat_interval_secs: std::env::var("REGISTRY_HEARTBEAT_INTERVAL")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            service_name: std::env::var("SERVICE_NAME")
+                .unwrap_or_else(|_| "match-service".to_string()),
+            service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
+                .unwrap_or_else(|_| format!("match-service-{}", port)),
         }
     }
 
@@ -96,4 +123,9 @@ impl Config {
     pub fn log_dir(&self) -> &str {
         &self.log_dir
     }
+}
+
+fn parse_port(bind_addr: &str) -> Option<u16> {
+    let addr: SocketAddr = bind_addr.parse().ok()?;
+    Some(addr.port())
 }

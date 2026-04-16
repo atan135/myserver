@@ -2,6 +2,7 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
+use service_registry::RegistryClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -19,11 +20,39 @@ pub struct MatchClientConfig {
     pub addr: String,
 }
 
-impl Default for MatchClientConfig {
-    fn default() -> Self {
-        Self {
-            addr: std::env::var("MATCH_SERVICE_ADDR")
-                .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string()),
+impl MatchClientConfig {
+    pub async fn from_env() -> Self {
+        let fallback_addr = std::env::var("MATCH_SERVICE_ADDR")
+            .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
+        let registry_enabled = std::env::var("REGISTRY_ENABLED")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
+
+        if !registry_enabled {
+            return Self { addr: fallback_addr };
+        }
+
+        let registry_url = std::env::var("REGISTRY_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let service_name = std::env::var("MATCH_SERVICE_NAME")
+            .unwrap_or_else(|_| "match-service".to_string());
+
+        match RegistryClient::new(&registry_url, "game-server", "match-discovery").await {
+            Ok(client) => match client.discover_one(&service_name).await {
+                Ok(Some(instance)) => Self {
+                    addr: format!("http://{}:{}", instance.host, instance.port),
+                },
+                Ok(None) => Self { addr: fallback_addr },
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to discover match-service, using fallback");
+                    Self { addr: fallback_addr }
+                }
+            },
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to create registry client for match discovery, using fallback");
+                Self { addr: fallback_addr }
+            }
         }
     }
 }

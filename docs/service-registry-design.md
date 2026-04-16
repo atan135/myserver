@@ -840,15 +840,15 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 | game-server | 7000-7499 | 已接入 | 通过 `packages/service-registry` 注册自身 |
 | game-server(admin) | 7500 | 固定端口 | 不走注册中心，供 `admin-api` 直连 |
 | game-proxy | 4000 | 已接入发现 | 消费注册中心发现 `game-server`，自身不注册 |
-| chat-server | 9001 | 未接入 | 当前只实现聊天服务与 metrics，上报 `heartbeat:chat-server` 仅用于监控，不是服务注册 |
-| match-service | 9002 | 未接入 | 当前只有 gRPC 服务与 metrics，上报 `heartbeat:match-service` 仅用于监控，不是服务注册 |
+| chat-server | 9001 | 已接入 | 已通过 `packages/service-registry` 注册自身并维持实例级心跳 |
+| match-service | 9002 | 已接入 | 已通过 `packages/service-registry` 注册自身并维持实例级心跳 |
 | mail-service | 9003 | 已部分接入 | 已实现独立 Redis 注册/心跳，但未统一到 `packages/service-registry` |
-| auth-http | 3000 | 未接入发现 | 当前登录响应仍只下发 `gameProxyHost/gameProxyPort`，未从注册中心聚合 `chat` / `mail` 地址 |
+| auth-http | 3000 | 已接入部分发现 | `REGISTRY_ENABLED=true` 时会返回统一 `services`，并从注册中心发现 `chat` / `mail`；`game` 仍来自静态 `gameProxyHost/gameProxyPort` 配置 |
 
 需要特别区分两类“heartbeat”：
 
 - `heartbeat:{service}:{instance}`：服务注册中心使用的实例级心跳
-- `heartbeat:{service}`：监控系统使用的服务级心跳
+- `metrics:heartbeat:{service}`：监控系统使用的服务级心跳
 
 它们是两套独立用途的数据结构，不能混为一谈。
 
@@ -876,18 +876,28 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
   .\dev-chat.ps1
   ```
   说明：
-  - 当前不会向服务注册中心注册
+  - 会自动设置 `REGISTRY_ENABLED=true`
+  - 默认设置 `SERVICE_INSTANCE_ID=chat-server-001`
 
 - `scripts/dev-match.ps1` - 启动 match-service
   ```powershell
   .\dev-match.ps1
   ```
   说明：
-  - 当前不会向服务注册中心注册
+  - 会自动设置 `REGISTRY_ENABLED=true`
+  - 默认按端口生成 `SERVICE_INSTANCE_ID`
+
+- `scripts/dev-auth.ps1` - 启动 auth-http
+  ```powershell
+  .\dev-auth.ps1
+  ```
+  说明：
+  - 会自动设置 `REGISTRY_ENABLED=true`
+  - 登录 / 签票响应会返回统一 `services` 对象，并保留旧的 `gameProxyHost/gameProxyPort` 字段
 
 ### 12.4 服务地址统一返回
 
-设计目标仍然是由 `auth-http` 登录接口统一返回所有服务地址，但**当前代码尚未落地**。
+设计目标已经开始落地，`auth-http` 登录 / 签票接口当前会返回统一 `services` 对象，同时保留旧字段兼容现有客户端。
 
 当前 `auth-http` 登录 / 签票相关接口实际返回的是：
 
@@ -898,15 +908,33 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
   "ticket": "xxx",
   "ticketExpiresAt": 1713000000,
   "gameProxyHost": "127.0.0.1",
-  "gameProxyPort": 4000
+  "gameProxyPort": 4000,
+  "services": {
+    "game": {
+      "host": "127.0.0.1",
+      "port": 4000,
+      "protocol": "kcp"
+    },
+    "chat": {
+      "host": "127.0.0.1",
+      "port": 9001,
+      "protocol": "tcp"
+    },
+    "mail": {
+      "host": "127.0.0.1",
+      "port": 9003,
+      "protocol": "http"
+    }
+  }
 }
 ```
 
 也就是说当前现状是：
 
 - `auth-http` 仍通过静态配置下发 `game-proxy` 地址
-- 没有返回统一的 `services` 对象
-- 没有从注册中心动态发现 `chat-server` / `mail-service` / `match-service`
+- 已返回统一的 `services` 对象
+- `REGISTRY_ENABLED=true` 时会从注册中心动态发现 `chat-server` / `mail-service`
+- `match-service` 不在客户端直连返回列表中，但 `game-server` 会优先尝试从注册中心发现
 
 对应代码位置：
 
@@ -921,13 +949,13 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 2. 使用 `scripts/dev-proxy.ps1` 启动 `game-proxy`，验证 `/instances` 能看到注册到 Redis 的 `game-server`。
 3. 关闭某个 `game-server`，验证其实例心跳消失后不再被 `game-proxy` 发现。
 4. 启动 `mail-service`，验证 Redis 中出现 `service:mail-service:instances:*` 和对应实例级心跳。
-5. 调用 `auth-http` 登录接口，确认当前只会返回 `gameProxyHost/gameProxyPort`，而不是统一 `services` 对象。
+5. 调用 `auth-http` 登录接口，确认当前会返回统一 `services` 对象，并保留 `gameProxyHost/gameProxyPort` 兼容字段。
 
 ### 12.6 当前与原设计的主要偏差
 
 当前实现和前文原始设计相比，至少存在以下差异：
 
-1. `game-server` 与 `game-proxy` 已接入 Redis 注册中心，但 `chat-server`、`match-service` 仍未接入。
+1. `game-server`、`game-proxy`、`chat-server`、`match-service` 已接入或消费 Redis 注册中心。
 2. `mail-service` 已实现独立注册逻辑，不再属于“待实现”状态。
-3. `auth-http` 尚未接入注册中心发现，登录响应也未统一返回全部服务地址。
-4. 监控系统中的 `heartbeat:{service}` 与注册中心中的 `heartbeat:{service}:{instance}` 已并存，文档阅读时必须区分用途。
+3. `auth-http` 已接入部分发现，当前会返回统一 `services`，但 `game` 仍来自静态配置。
+4. 监控系统中的 `metrics:heartbeat:{service}` 与注册中心中的 `heartbeat:{service}:{instance}` 已并存，文档阅读时必须区分用途。

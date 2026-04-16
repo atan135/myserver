@@ -10,10 +10,15 @@ $ErrorActionPreference = "Stop"
 
 $env:MATCH_BIND_ADDR="0.0.0.0:$Port"
 $env:LOG_LEVEL="$LogLevel"
+$env:REGISTRY_ENABLED="true"
+if (-not $env:SERVICE_INSTANCE_ID) {
+    $env:SERVICE_INSTANCE_ID="match-service-$Port"
+}
 
 Write-Host "Starting match-service" -ForegroundColor Cyan
 Write-Host "  BindAddr: $env:MATCH_BIND_ADDR" -ForegroundColor Gray
 Write-Host "  LogLevel: $LogLevel" -ForegroundColor Gray
+Write-Host "  InstanceId: $env:SERVICE_INSTANCE_ID" -ForegroundColor Gray
 
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
 Push-Location "$PSScriptRoot\..\apps\match-service"
