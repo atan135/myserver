@@ -28,3 +28,34 @@ pub struct UpdateConfigRes {
     #[prost(string, tag = "2")]
     pub error_code: ::prost::alloc::string::String,
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GrantItem {
+    #[prost(int32, tag = "1")]
+    pub item_id: i32,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+    #[prost(bool, tag = "3")]
+    pub binded: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantItemsReq {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub items: ::prost::alloc::vec::Vec<GrantItem>,
+    #[prost(string, tag = "4")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantItemsRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub applied: bool,
+}

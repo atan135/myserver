@@ -21,3 +21,23 @@ message UpdateConfigRes {
   bool ok = 1;
   string error_code = 2;
 }
+
+message GrantItem {
+  int32 item_id = 1;
+  uint32 count = 2;
+  bool binded = 3;
+}
+
+message GrantItemsReq {
+  string request_id = 1;
+  string player_id = 2;
+  repeated GrantItem items = 3;
+  string source = 4;
+  string reason = 5;
+}
+
+message GrantItemsRes {
+  bool ok = 1;
+  string error_code = 2;
+  bool applied = 3;
+}

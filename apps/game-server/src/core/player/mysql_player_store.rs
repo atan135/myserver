@@ -1,7 +1,8 @@
-use mysql_async::{Opts, OptsBuilder, Pool, params, prelude::Queryable, Row};
+use mysql_async::{Opts, OptsBuilder, Pool, TxOpts, params, prelude::Queryable, Row};
 use tracing::info;
 
 use crate::config::Config;
+use crate::core::inventory::Item;
 use crate::core::inventory::player_data::PlayerData;
 use crate::core::inventory::{
     AttrPanel, Buff, EquipmentSlots, ItemContainer, PlayerAttr, PlayerVisual,
@@ -51,6 +52,20 @@ impl MySqlPlayerStore {
                 created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
                 UNIQUE KEY uk_player_inventory_player_id (player_id),
                 KEY idx_player_inventory_updated_at (updated_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"#,
+        )
+        .await?;
+        conn.query_drop(
+            r#"CREATE TABLE IF NOT EXISTS player_inventory_grants (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                request_id VARCHAR(128) NOT NULL,
+                player_id VARCHAR(64) NOT NULL,
+                source VARCHAR(64) NOT NULL,
+                items_json JSON NOT NULL,
+                reason VARCHAR(255) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uk_player_inventory_grants_request_id (request_id),
+                KEY idx_player_inventory_grants_player_id (player_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"#,
         )
         .await?;
@@ -137,6 +152,125 @@ impl MySqlPlayerStore {
 
         info!(player_id = %player_id, "player inventory saved");
         Ok(())
+    }
+
+    pub async fn save_with_grant_record(
+        &self,
+        player_id: &str,
+        data: &PlayerData,
+        request_id: &str,
+        source: &str,
+        reason: &str,
+        items: &[Item],
+    ) -> Result<bool, String> {
+        let Some(pool) = &self.pool else {
+            return Err("MySQL not enabled".to_string());
+        };
+
+        if request_id.trim().is_empty() {
+            self.save(player_id, data).await?;
+            return Ok(true);
+        }
+
+        let inventory_json = serde_json::to_string(&data.inventory).map_err(|e| e.to_string())?;
+        let warehouse_json = serde_json::to_string(&data.warehouse).map_err(|e| e.to_string())?;
+        let equipment_json = serde_json::to_string(&data.equipment).map_err(|e| e.to_string())?;
+        let attr_base_json = serde_json::to_string(&data.attr.base).map_err(|e| e.to_string())?;
+        let visual_json = serde_json::to_string(&data.visual).map_err(|e| e.to_string())?;
+        let buffs_json = serde_json::to_string(&data.buffs).map_err(|e| e.to_string())?;
+        let items_json = serde_json::to_string(items).map_err(|e| e.to_string())?;
+
+        let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+        let mut tx = conn
+            .start_transaction(TxOpts::default())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match tx
+            .exec_drop(
+                r#"INSERT INTO player_inventory_grants (
+                    request_id,
+                    player_id,
+                    source,
+                    items_json,
+                    reason
+                ) VALUES (
+                    :request_id,
+                    :player_id,
+                    :source,
+                    :items_json,
+                    :reason
+                )"#,
+                params! {
+                    "request_id" => request_id,
+                    "player_id" => player_id,
+                    "source" => source,
+                    "items_json" => &items_json,
+                    "reason" => reason,
+                },
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if is_duplicate_request_error(&error) => {
+                tx.rollback().await.map_err(|rollback_error| rollback_error.to_string())?;
+                return Ok(false);
+            }
+            Err(error) => {
+                tx.rollback().await.map_err(|rollback_error| rollback_error.to_string())?;
+                return Err(error.to_string());
+            }
+        }
+
+        tx.exec_drop(
+            r#"INSERT INTO player_inventory (
+                player_id,
+                level,
+                hp,
+                inventory_data,
+                warehouse_data,
+                equipment_data,
+                attr_base_data,
+                visual_data,
+                buffs_data
+            ) VALUES (
+                :player_id,
+                :level,
+                :hp,
+                :inventory_data,
+                :warehouse_data,
+                :equipment_data,
+                :attr_base_data,
+                :visual_data,
+                :buffs_data
+            ) ON DUPLICATE KEY UPDATE
+                level = VALUES(level),
+                hp = VALUES(hp),
+                inventory_data = VALUES(inventory_data),
+                warehouse_data = VALUES(warehouse_data),
+                equipment_data = VALUES(equipment_data),
+                attr_base_data = VALUES(attr_base_data),
+                visual_data = VALUES(visual_data),
+                buffs_data = VALUES(buffs_data),
+                updated_at = CURRENT_TIMESTAMP(3)"#,
+            params! {
+                "player_id" => player_id,
+                "level" => data.level,
+                "hp" => data.get_hp(),
+                "inventory_data" => &inventory_json,
+                "warehouse_data" => &warehouse_json,
+                "equipment_data" => &equipment_json,
+                "attr_base_data" => &attr_base_json,
+                "visual_data" => &visual_json,
+                "buffs_data" => &buffs_json,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        info!(player_id = %player_id, request_id = %request_id, "player inventory grant saved");
+        Ok(true)
     }
 
     /// 从数据库加载玩家数据
@@ -239,5 +373,12 @@ impl MySqlPlayerStore {
 
         info!(player_id = %player_id, "player inventory deleted");
         Ok(())
+    }
+}
+
+fn is_duplicate_request_error(error: &mysql_async::Error) -> bool {
+    match error {
+        mysql_async::Error::Server(server_error) => server_error.code == 1062,
+        _ => false,
     }
 }

@@ -5,7 +5,13 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::mysql_player_store::MySqlPlayerStore;
-use crate::core::inventory::PlayerData;
+use crate::core::inventory::{Item, ItemError, PlayerData};
+
+#[derive(Debug, Clone)]
+pub struct GrantItemsOutcome {
+    pub applied: bool,
+    pub player_data: PlayerData,
+}
 
 /// 玩家数据管理器
 /// 负责管理所有在线玩家的背包/属性数据
@@ -74,6 +80,54 @@ impl PlayerManager {
         if let Err(e) = self.store.save(player_id, &data).await {
             warn!(player_id = %player_id, error = %e, "failed to persist player data");
         }
+    }
+
+    pub async fn grant_items(
+        &self,
+        player_id: &str,
+        items: &[Item],
+    ) -> Result<PlayerData, ItemError> {
+        let mut player_data = self.get_or_create_player(player_id).await;
+
+        for item in items {
+            player_data.add_item(item.clone())?;
+        }
+
+        self.save_player(player_id, player_data.clone()).await;
+        Ok(player_data)
+    }
+
+    pub async fn grant_items_with_request(
+        &self,
+        player_id: &str,
+        items: &[Item],
+        request_id: &str,
+        source: &str,
+        reason: &str,
+    ) -> Result<GrantItemsOutcome, String> {
+        let mut player_data = self.get_or_create_player(player_id).await;
+
+        for item in items {
+            player_data.add_item(item.clone()).map_err(|error| error.as_str().to_string())?;
+        }
+
+        let applied = if self.store.enabled() {
+            self.store
+                .save_with_grant_record(player_id, &player_data, request_id, source, reason, items)
+                .await?
+        } else {
+            true
+        };
+
+        if applied {
+            let mut players = self.players.write().await;
+            players.insert(player_id.to_string(), player_data.clone());
+        }
+
+        Ok(GrantItemsOutcome {
+            applied,
+            player_data,
+        })
     }
 
     /// 移除玩家数据（离线）

@@ -932,4 +932,36 @@ impl RoomManager {
 
         Ok(())
     }
+
+    pub async fn send_to_player(
+        &self,
+        player_id: &str,
+        message_type: MessageType,
+        body: Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        let sender = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .values()
+                .find_map(|room| {
+                    room.members.get(player_id).and_then(|member| {
+                        if member.offline {
+                            None
+                        } else {
+                            Some(member.sender.clone())
+                        }
+                    })
+                })
+        };
+
+        if let Some(sender) = sender {
+            let _ = sender.send(OutboundMessage {
+                message_type,
+                seq: 0,
+                body,
+            });
+        }
+
+        Ok(())
+    }
 }

@@ -21,6 +21,7 @@ const MESSAGE_TYPE = {
   GM_BAN_PLAYER_RES: 3008,
   ERROR_RES: 9000
 };
+let nextSeqValue = 1;
 
 function encodePacket(messageType, seq, body) {
   const header = Buffer.alloc(HEADER_LEN);
@@ -72,6 +73,15 @@ function decodeError(body) {
   return { errorCode, message };
 }
 
+function nextSeq() {
+  const seq = nextSeqValue >>> 0;
+  nextSeqValue = (nextSeqValue + 1) >>> 0;
+  if (nextSeqValue === 0) {
+    nextSeqValue = 1;
+  }
+  return seq;
+}
+
 async function sendRequest(config, messageType, payload, expectedType) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({
@@ -86,7 +96,7 @@ async function sendRequest(config, messageType, payload, expectedType) {
     };
 
     socket.on("connect", () => {
-      const packet = encodePacket(messageType, Date.now(), payload);
+      const packet = encodePacket(messageType, nextSeq(), payload);
       socket.write(packet, (err) => {
         if (err) {
           cleanup();

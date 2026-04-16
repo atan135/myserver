@@ -109,6 +109,8 @@ pub async fn run(
         shared_state.room_manager.clone(),
         shared_state.runtime_config.clone(),
         shared_state.connection_count.clone(),
+        services.player_manager.clone(),
+        services.config_tables.clone(),
     ));
 
     let local_socket_task = tokio::spawn(run_local_socket_listener(
