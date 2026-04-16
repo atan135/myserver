@@ -181,18 +181,28 @@ CREATE TABLE chat_group_members (
 - 用户收件箱查询逻辑
 - 离线未读推送机制
 
+当前仓库实现说明：
+- `mail-service` 已独立落地为 Node.js HTTP 服务
+- 新邮件通知通过 Redis Pub/Sub 下发到 `mail:notify:{player_id}`
+- 附件领取由 `mail-service` 调用 `game-server admin` 完成真实发奖
+- 当前未与 `chat-service` 共用同一套存储表
+
 ### 4.2 邮件特有字段
 
 ```sql
 CREATE TABLE mail_messages (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     mail_id VARCHAR(64) UNIQUE NOT NULL,
-    sender_id VARCHAR(64) NOT NULL,         -- 发件人 (系统为 "SYSTEM")
-    sender_name VARCHAR(128),               -- 发件人名称
+    sender_type VARCHAR(32) NOT NULL,       -- system / player
+    sender_id VARCHAR(64) NOT NULL,         -- 玩家侧看到的发件人ID；系统固定为 "system"
+    sender_name VARCHAR(128),               -- 玩家侧看到的发件人名称
     receiver_id VARCHAR(64) NOT NULL,       -- 收件人
     subject VARCHAR(256),                  -- 邮件主题
     content TEXT,                           -- 邮件正文
     attachments JSON,                       -- 附件 (物品/货币奖励)
+    created_by_type VARCHAR(32) NOT NULL,   -- system / admin / player / service
+    created_by_id VARCHAR(64),              -- 实际触发方，用于审计
+    created_by_name VARCHAR(128),           -- 实际触发方展示名
     is_read TINYINT DEFAULT 0,              -- 是否已读
     created_at BIGINT NOT NULL,
     expires_at BIGINT,                      -- 过期时间 (可选)
@@ -201,38 +211,41 @@ CREATE TABLE mail_messages (
 );
 ```
 
-### 4.3 邮件协议
+建议约定：
+- 面向玩家展示的发件人，固定使用 `sender_type / sender_id / sender_name`
+- 面向后台审计的操作者，固定使用 `created_by_type / created_by_id / created_by_name`
+- 系统奖励邮件不需要真实可登录账号，系统发件人统一保留值 `sender_id = "system"`
 
-```proto
-message MailSendReq {
-  string receiver_id = 1;
-  string subject = 2;
-  string content = 3;
-  string attachments_json = 4;   // JSON: [{"type": "item", "id": 1001, "count": 1}]
-}
+### 4.3 当前实现协议
 
-message MailListReq {
-  int32 page = 1;
-  int32 page_size = 2;
-}
+当前邮件能力对外通过 HTTP 暴露，核心接口如下：
 
-message MailListRes {
-  repeated MailItem mails = 1;
-}
+```http
+POST /api/v1/mails
+GET  /api/v1/mails?player_id=<player_id>&status=<status>&limit=<n>&offset=<n>
+GET  /api/v1/mails/:mailId
+PUT  /api/v1/mails/:mailId/read
+POST /api/v1/mails/:mailId/claim
+```
 
-message MailItem {
-  string mail_id = 1;
-  string sender_name = 2;
-  string subject = 3;
-  string preview = 4;           -- 内容预览
-  bool is_read = 5;
-  int64 created_at = 6;
-  bool has_attachments = 7;
-}
+其中附件领取接口的当前行为为：
+- 请求体需要带 `player_id`
+- 只能领取属于自己的邮件
+- 已过期邮件不可领取
+- 当前真实发奖只支持 `attachments[].type = "item"`
+- `mail-service` 会先调用 `game-server admin` 发奖，成功后才把邮件状态更新为 `claimed`
+- 返回体包含 `claimed`、`already_claimed`、`status`、`read_at`、`claimed_at`
+- 重复领取是幂等的，不会重复发放道具
 
-message MailReadReq { string mail_id = 1; }
-message MailDeleteReq { string mail_id = 1; }
-message MailAttachmentClaimReq { string mail_id = 1; }  -- 领取附件
+当前附件领取链路：
+
+```text
+client
+  -> POST /api/v1/mails/:mailId/claim
+  -> mail-service
+  -> game-server admin (GrantItemsReq / GrantItemsRes)
+  -> player inventory updated
+  -> mail status = claimed
 ```
 
 ### 4.4 邮件类型

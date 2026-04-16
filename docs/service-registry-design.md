@@ -140,22 +140,36 @@ Content-Type: application/json
 
 ### 2.6 服务间通信
 
-服务间通信通过 **Redis Pub/Sub** 解耦，不直接调用：
+当前实现同时存在两类链路：
 
 ```
+1. 新邮件通知：Redis Pub/Sub
+
 mail-service 收到新邮件
        ↓
-   Redis Pub/Sub: mail:notify:{player_id}
+Redis Pub/Sub: mail:notify:{player_id}
        ↓
-   chat-server / game-server 订阅该频道
+chat-server / game-server 订阅该频道
        ↓
-   在已有 TCP 连接上推送通知给客户端
+在已有 TCP 连接上推送通知给客户端
+
+2. 附件领取：mail-service 直连 game-server admin
+
+客户端调用 POST /api/v1/mails/:mailId/claim
+       ↓
+mail-service 校验归属、过期时间、附件格式
+       ↓
+mail-service -> game-server admin (:7500)
+       ↓
+game-server 发放道具并落库
+       ↓
+mail-service 将邮件标记为 claimed
 ```
 
-**好处**：
-- 服务间无直接依赖
-- game-server 负载高不影响邮件通知
-- 新增通知渠道只需修改订阅方
+**当前特点**：
+- 新邮件通知仍然保持 Pub/Sub 解耦
+- 附件发奖由 game-server 统一负责真实背包变更、在线推送与持久化
+- `mail-service` 在附件领取链路上对 `game-server admin` 存在直接依赖
 
 ---
 
@@ -656,11 +670,12 @@ packages/
 
 1. 新建 mail-service（Node.js/Go）
 2. 引入 `service-registry` 包，注册到 Redis
-3. 实现邮件 CRUD API
-4. 通过 Redis Pub/Sub 接收新邮件通知
-5. auth-http 登录响应添加 mail-service 地址
+3. 实现邮件 CRUD 与附件领取 API
+4. 通过 Redis Pub/Sub 发送新邮件通知
+5. 通过 game-server admin 发放附件奖励
+6. auth-http 登录响应添加 mail-service 地址
 
-**里程碑**：客户端可从登录响应获取 mail-service 地址，邮件通知通过 chat-server 推送
+**里程碑**：客户端可从登录响应获取 mail-service 地址，邮件通知可推送，邮件附件可领取并进入真实背包
 
 ### 阶段六：match-service 集成（1天）
 
