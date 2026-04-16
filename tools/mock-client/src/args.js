@@ -1,10 +1,35 @@
 import { SCENARIO } from "./constants.js";
 
+function collectOptionValue(argv, startIndex) {
+  const valueIndex = startIndex + 1;
+  return {
+    nextIndex: valueIndex,
+    value: argv[valueIndex] || ""
+  };
+}
+
+function collectJsonLikeOptionValue(argv, startIndex) {
+  const valueIndex = startIndex + 1;
+  let nextIndex = valueIndex;
+  let value = argv[valueIndex] || "";
+
+  while (nextIndex + 1 < argv.length && !argv[nextIndex + 1].startsWith("--")) {
+    value += argv[nextIndex + 1];
+    nextIndex += 1;
+  }
+
+  return {
+    nextIndex,
+    value
+  };
+}
+
 const DEFAULT_OPTIONS = {
   host: "127.0.0.1",
   port: 7000,
   chatPort: 9001,
   httpBaseUrl: "http://127.0.0.1:3000",
+  mailBaseUrl: "http://127.0.0.1:9003",
   roomId: "room-default",
   guestId: "",
   loginName: "",
@@ -30,6 +55,23 @@ const DEFAULT_OPTIONS = {
   mode: "1v1",
   policyId: "",
   moveFrames: [1, 2, 3, 4, 5],
+  // Mail parameters
+  mailId: "",
+  mailPlayerId: "",
+  mailToPlayerId: "",
+  mailStatus: "",
+  mailOffset: 0,
+  mailTitle: "Mock mail from mock-client",
+  mailContent: "Hello from mock-client mail!",
+  mailType: "system",
+  senderType: "system",
+  senderId: "system",
+  senderName: "系统",
+  createdByType: "script",
+  createdById: "mock-client",
+  createdByName: "mock-client",
+  attachmentsJson: "",
+  mailWatchSeconds: 15,
   // Inventory parameters
   itemUid: 0,
   equipSlot: "",
@@ -54,174 +96,206 @@ export function parseArgs(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    const next = argv[index + 1];
-
-    if (!next) continue;
 
     switch (arg) {
       case "--host":
-        result.host = next;
-        index += 1;
+        ({ value: result.host, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--port":
-        result.port = Number.parseInt(next, 10);
-        index += 1;
+        result.port = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--chat-port":
-        result.chatPort = Number.parseInt(next, 10);
-        index += 1;
+        result.chatPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--http-base-url":
-        result.httpBaseUrl = next;
-        index += 1;
+        ({ value: result.httpBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-base-url":
+        ({ value: result.mailBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--room-id":
-        result.roomId = next;
-        index += 1;
+        ({ value: result.roomId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--guest-id":
-        result.guestId = next;
-        index += 1;
+        ({ value: result.guestId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--login-name":
-        result.loginName = next;
-        index += 1;
+        ({ value: result.loginName, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--password":
-        result.password = next;
-        index += 1;
+        ({ value: result.password, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--login-name-a":
-        result.loginNameA = next;
-        index += 1;
+        ({ value: result.loginNameA, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--password-a":
-        result.passwordA = next;
-        index += 1;
+        ({ value: result.passwordA, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--login-name-b":
-        result.loginNameB = next;
-        index += 1;
+        ({ value: result.loginNameB, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--password-b":
-        result.passwordB = next;
-        index += 1;
+        ({ value: result.passwordB, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--ticket":
-        result.ticket = next;
-        index += 1;
+        ({ value: result.ticket, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--timeout-ms":
-        result.timeoutMs = Number.parseInt(next, 10);
-        index += 1;
+        result.timeoutMs = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--scenario":
-        result.scenario = next;
-        index += 1;
+        ({ value: result.scenario, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--max-body-len":
-        result.maxBodyLen = Number.parseInt(next, 10);
-        index += 1;
+        result.maxBodyLen = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--id-start":
-        result.idStart = Number.parseInt(next, 10);
-        index += 1;
+        result.idStart = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--id-end":
-        result.idEnd = Number.parseInt(next, 10);
-        index += 1;
+        result.idEnd = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--target-id":
-        result.targetId = next;
-        index += 1;
+        ({ value: result.targetId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--group-id":
-        result.groupId = next;
-        index += 1;
+        ({ value: result.groupId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--content":
-        result.content = next;
-        index += 1;
+        ({ value: result.content, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--group-name":
-        result.groupName = next;
-        index += 1;
+        ({ value: result.groupName, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--limit":
-        result.limit = Number.parseInt(next, 10);
-        index += 1;
+        result.limit = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--before-time":
-        result.beforeTime = Number.parseInt(next, 10);
-        index += 1;
+        result.beforeTime = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--match-id":
-        result.matchId = next;
-        index += 1;
+        ({ value: result.matchId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--player-ids":
-        result.playerIds = next.split(",");
-        index += 1;
+        result.playerIds = collectOptionValue(argv, index).value.split(",");
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--mode":
-        result.mode = next;
-        index += 1;
+        ({ value: result.mode, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--policy-id":
-        result.policyId = next;
-        index += 1;
+        ({ value: result.policyId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--move-frames":
-        result.moveFrames = next
+        result.moveFrames = collectOptionValue(argv, index).value
           .split(",")
           .map((value) => Number.parseInt(value, 10))
           .filter((value) => Number.isFinite(value) && value > 0);
-        index += 1;
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      // Mail arguments
+      case "--mail-id":
+        ({ value: result.mailId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-player-id":
+        ({ value: result.mailPlayerId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-to-player-id":
+        ({ value: result.mailToPlayerId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-status":
+        ({ value: result.mailStatus, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-offset":
+        result.mailOffset = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--mail-title":
+        ({ value: result.mailTitle, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-content":
+        ({ value: result.mailContent, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--mail-type":
+        ({ value: result.mailType, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--sender-type":
+        ({ value: result.senderType, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--sender-id":
+        ({ value: result.senderId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--sender-name":
+        ({ value: result.senderName, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--created-by-type":
+        ({ value: result.createdByType, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--created-by-id":
+        ({ value: result.createdById, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--created-by-name":
+        ({ value: result.createdByName, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--attachments-json":
+        ({ value: result.attachmentsJson, nextIndex: index } = collectJsonLikeOptionValue(argv, index));
+        break;
+      case "--mail-watch-seconds":
+        result.mailWatchSeconds = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       // Inventory arguments
       case "--item-uid":
-        result.itemUid = Number.parseInt(next, 10);
-        index += 1;
+        result.itemUid = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--equip-slot":
-        result.equipSlot = next;
-        index += 1;
+        ({ value: result.equipSlot, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--use-item-uid":
-        result.useItemUid = Number.parseInt(next, 10);
-        index += 1;
+        result.useItemUid = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--discard-uid":
-        result.discardUid = Number.parseInt(next, 10);
-        index += 1;
+        result.discardUid = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--discard-count":
-        result.discardCount = Number.parseInt(next, 10);
-        index += 1;
+        result.discardCount = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--deposit-uid":
-        result.depositUid = Number.parseInt(next, 10);
-        index += 1;
+        result.depositUid = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--deposit-count":
-        result.depositCount = Number.parseInt(next, 10);
-        index += 1;
+        result.depositCount = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--warehouse-action":
-        result.warehouseAction = next;
-        index += 1;
+        ({ value: result.warehouseAction, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--add-item-id":
-        result.addItemId = Number.parseInt(next, 10);
-        index += 1;
+        result.addItemId = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--add-count":
-        result.addCount = Number.parseInt(next, 10);
-        index += 1;
+        result.addCount = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--add-binded":
-        result.addBinded = next === "true" || next === "1";
-        index += 1;
+        result.addBinded =
+          collectOptionValue(argv, index).value === "true" ||
+          collectOptionValue(argv, index).value === "1";
+        index = collectOptionValue(argv, index).nextIndex;
         break;
     }
   }

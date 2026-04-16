@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的测试工具。它模拟游戏客户端，通过 TCP 协议与 game-server 和 chat-server 通信，验证服务器功能的正确性。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的测试工具。它模拟游戏客户端，通过 TCP 协议与 `game-server`、`chat-server` 通信，并通过 HTTP 调用 `auth-http` 与 `mail-service`，验证服务器功能的正确性。
 
 ## 项目结构
 
@@ -21,8 +21,9 @@ tools/mock-client/
 │       ├── index.js     # 场景统一导出
 │       ├── room.js      # 房间相关场景
 │       ├── chat.js      # 聊天相关场景
+│       ├── mail.js      # 邮件相关场景 (HTTP + 通知联调)
 │       ├── game.js      # 游戏相关场景
-│       ├── movement.js      # 移动相关场景
+│       ├── movement.js  # 移动相关场景
 │       ├── movement-interactive.js # 交互式双客户端移动
 │       ├── inventory.js # 背包系统测试
 │       └── interactive.js # 交互式聊天
@@ -68,6 +69,12 @@ Protobuf 风格的编解码工具：
 - `resolveAccountCredentials()` - 解析账号密码
 - `formatLoginSummary()` - 格式化登录信息
 
+### scenarios/mail.js
+邮件辅助场景：
+- 通过 HTTP 调用 `mail-service` 的邮件 CRUD / claim 接口
+- 支持带附件的系统邮件发送
+- 支持联调 `chat-server` 的 `MAIL_NOTIFY_PUSH`
+
 ## 协议格式
 
 ### 数据包结构 (14字节头 + body)
@@ -103,6 +110,12 @@ Protobuf 风格的编解码工具：
 | `oversized-room-join` | 超大 RoomId |
 | `reconnect` | 断线重连 |
 
+### 匹配场景 (room.js)
+| 场景 | 说明 |
+|------|------|
+| `create-matched-room` | 创建匹配房间并通知 MatchService |
+| `create-matched-room-and-join` | 创建匹配房间并让所有玩家加入，验证完整回调 |
+
 ### 游戏场景 (game.js)
 | 场景 | 说明 |
 |------|------|
@@ -124,6 +137,16 @@ Protobuf 风格的编解码工具：
 | `chat-private-two-client` | 双客户端私聊 |
 | `chat-interactive` | 交互式聊天 (终端输入) |
 
+### 邮件场景 (mail.js)
+| 场景 | 说明 |
+|------|------|
+| `mail-send` | 发送邮件到指定玩家或当前登录玩家 |
+| `mail-list` | 获取指定玩家的邮件列表 |
+| `mail-get` | 获取邮件详情 |
+| `mail-read` | 标记邮件已读 |
+| `mail-claim` | 领取邮件附件（重复领取会返回幂等结果） |
+| `mail-send-and-notify` | 发邮件并等待聊天服 `MAIL_NOTIFY_PUSH` |
+
 ### 移动同步场景 (movement.js, movement-interactive.js)
 | 场景 | 说明 |
 |------|------|
@@ -142,6 +165,7 @@ Protobuf 风格的编解码工具：
 | `inventory-discard` | 丢弃背包中的物品 |
 | `inventory-warehouse` | 仓库存取操作 |
 | `inventory-add` | 添加物品到背包（测试用） |
+| `inventory-get` | 获取当前背包和仓库状态 |
 | `inventory-full` | 完整背包流程测试 |
 
 ## 使用方法
@@ -168,6 +192,21 @@ node tools/mock-client/src/index.js --scenario movement-demo \
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
   --chat-port 9001 --target-id <目标ID> --content "Hello!"
+
+# 邮件测试
+node tools/mock-client/src/index.js --scenario mail-send \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --login-name test001 --password Passw0rd! \
+  --mail-title "系统奖励" --mail-content "请查收附件"
+
+# 邮件通知联调
+node tools/mock-client/src/index.js --scenario mail-send-and-notify \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --host 127.0.0.1 --chat-port 9001 \
+  --login-name test001 --password Passw0rd! \
+  --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
 ```
 
 ### 命令行参数
@@ -176,6 +215,7 @@ node tools/mock-client/src/index.js --scenario chat-private \
 |------|------|--------|
 | `--scenario` | 测试场景名称 | `happy` |
 | `--http-base-url` | 认证服务地址 | `http://127.0.0.1:3000` |
+| `--mail-base-url` | 邮件服务地址 | `http://127.0.0.1:9003` |
 | `--host` | 游戏服务器地址 | `127.0.0.1` |
 | `--port` | 游戏服务器端口 | `7000` |
 | `--chat-port` | 聊天服务器端口 | `9001` |
@@ -191,6 +231,22 @@ node tools/mock-client/src/index.js --scenario chat-private \
 | `--policy-id` | 入房时指定房间策略 | 空 |
 | `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
+| `--mail-id` | 邮件 ID（mail-get / mail-read / mail-claim） | 空 |
+| `--mail-player-id` | 邮件所属玩家 ID（mail-list / mail-read / mail-claim） | 空 |
+| `--mail-to-player-id` | 邮件接收方玩家 ID（mail-send） | 空 |
+| `--mail-status` | 邮件状态筛选，如 `unread` / `read` | 空 |
+| `--mail-offset` | 邮件列表偏移量 | `0` |
+| `--mail-title` | 邮件标题 | `Mock mail from mock-client` |
+| `--mail-content` | 邮件正文 | `Hello from mock-client mail!` |
+| `--mail-type` | 邮件类型 | `system` |
+| `--sender-type` | 发件人类型 | `system` |
+| `--sender-id` | 发件人 ID | `system` |
+| `--sender-name` | 发件人展示名 | `系统` |
+| `--created-by-type` | 实际触发者类型 | `script` |
+| `--created-by-id` | 实际触发者 ID | `mock-client` |
+| `--created-by-name` | 实际触发者展示名 | `mock-client` |
+| `--attachments-json` | 邮件附件 JSON；PowerShell 建议用单引号包裹 | 空 |
+| `--mail-watch-seconds` | `mail-send-and-notify` 等待通知秒数 | `15` |
 | `--item-uid` | 物品UID (背包测试) | - |
 | `--equip-slot` | 装备槽位: Weapon/Armor/Helmet/Pants/Shoes/Accessory | - |
 | `--use-item-uid` | 使用物品UID | - |
@@ -202,6 +258,38 @@ node tools/mock-client/src/index.js --scenario chat-private \
 | `--target-id` | 私聊目标玩家ID | - |
 | `--group-id` | 群组ID | - |
 | `--group-name` | 群组名称 | - |
+
+### 邮件测试示例
+
+```bash
+# 发给当前登录玩家
+node tools/mock-client/src/index.js --scenario mail-send \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --login-name test001 --password Passw0rd! \
+  --mail-title "欢迎礼包" --mail-content "请查收测试奖励"
+
+# 发带附件邮件
+node tools/mock-client/src/index.js --scenario mail-send \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --login-name test001 --password Passw0rd! \
+  --attachments-json '[{"type":"item","id":1001,"count":1}]'
+
+# 查看未读邮件
+node tools/mock-client/src/index.js --scenario mail-list \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --login-name test001 --password Passw0rd! \
+  --mail-status unread --limit 10
+
+# 标记已读
+node tools/mock-client/src/index.js --scenario mail-read \
+  --http-base-url http://127.0.0.1:3000 \
+  --mail-base-url http://127.0.0.1:9003 \
+  --login-name test001 --password Passw0rd! \
+  --mail-id <mail_id>
+```
 
 ### 双客户端测试
 
@@ -259,6 +347,7 @@ case MESSAGE_TYPE.MY_MESSAGE_RES:
 
 - Node.js 18+ (ES Module 支持)
 - TCP 网络连接
-- HTTP 认证服务 (auth-http)
+- HTTP 认证服务 (`auth-http`)
+- HTTP 邮件服务 (`mail-service`, 邮件场景需要)
 - 游戏服务器 (game-server)
-- 聊天服务器 (chat-server, 可选)
+- 聊天服务器 (`chat-server`, 聊天与邮件通知场景需要)

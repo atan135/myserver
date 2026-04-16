@@ -48,6 +48,16 @@ export {
 // Interactive chat
 export { runChatInteractive } from "./interactive.js";
 
+// Mail scenarios
+export {
+  runMailSend,
+  runMailList,
+  runMailGet,
+  runMailRead,
+  runMailClaim,
+  runMailSendAndNotify
+} from "./mail.js";
+
 // Interactive movement
 export { runMovementInteractive } from "./movement-interactive.js";
 

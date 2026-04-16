@@ -124,6 +124,13 @@ export const SCENARIO = {
   CHAT_TWO_CLIENT: "chat-two-client",
   CHAT_PRIVATE_TWO_CLIENT: "chat-private-two-client",
   CHAT_INTERACTIVE: "chat-interactive",
+  // Mail scenarios
+  MAIL_SEND: "mail-send",
+  MAIL_LIST: "mail-list",
+  MAIL_GET: "mail-get",
+  MAIL_READ: "mail-read",
+  MAIL_CLAIM: "mail-claim",
+  MAIL_SEND_AND_NOTIFY: "mail-send-and-notify",
   MOVEMENT_INTERACTIVE: "movement-interactive",
   // Inventory scenarios
   INVENTORY_EQUIP: "inventory-equip",

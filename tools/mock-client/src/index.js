@@ -36,6 +36,13 @@ import {
   runChatTwoClient,
   runChatPrivateTwoClient,
   runChatInteractive,
+  // Mail scenarios
+  runMailSend,
+  runMailList,
+  runMailGet,
+  runMailRead,
+  runMailClaim,
+  runMailSendAndNotify,
   // Inventory scenarios
   runInventoryEquip,
   runInventoryUse,
@@ -115,6 +122,42 @@ async function main() {
 
   if (options.scenario === SCENARIO.RECONNECT) {
     await runReconnect(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_SEND) {
+    await runMailSend(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_LIST) {
+    await runMailList(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_GET) {
+    await runMailGet(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_READ) {
+    await runMailRead(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_CLAIM) {
+    await runMailClaim(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MAIL_SEND_AND_NOTIFY) {
+    await runMailSendAndNotify(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

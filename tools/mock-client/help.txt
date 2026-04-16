@@ -4,6 +4,7 @@
 # ========== 通用参数 ==========
 # --scenario <name>          测试场景 (见下方场景列表)
 # --http-base-url <url>      认证服务地址 (默认 http://127.0.0.1:3000)
+# --mail-base-url <url>      邮件服务地址 (默认 http://127.0.0.1:9003)
 # --host <ip>                游戏服务器地址 (默认 127.0.0.1)
 # --port <port>              游戏服务器端口 (默认 7000)
 # --chat-port <port>         聊天服务器端口 (默认 9001)
@@ -11,6 +12,27 @@
 # --login-name <name>        登录用户名
 # --password <pwd>           登录密码
 # --timeout-ms <ms>          超时毫秒 (默认 5000)
+
+# ========== 邮件参数 ==========
+
+# --mail-id <id>                 邮件ID（mail-get / mail-read / mail-claim 必填）
+# --mail-player-id <player_id>   收件人玩家ID（mail-list / mail-read / mail-claim）
+# --mail-to-player-id <player_id> 邮件接收方玩家ID（mail-send）
+# --mail-status <status>         邮件状态筛选，例如 unread / read
+# --mail-offset <n>              邮件列表偏移量（默认 0）
+# --mail-title <text>            邮件标题
+# --mail-content <text>          邮件正文
+# --mail-type <type>             邮件类型（默认 system）
+# --sender-type <type>           发件人类型（默认 system）
+# --sender-id <id>               发件人ID（默认 system）
+# --sender-name <name>           发件人展示名（默认 系统）
+# --created-by-type <type>       实际触发者类型（默认 script）
+# --created-by-id <id>           实际触发者ID（默认 mock-client）
+# --created-by-name <name>       实际触发者展示名（默认 mock-client）
+# --attachments-json <json>      邮件附件 JSON，例如 [{"type":"item","id":1001,"count":1}]
+#                               PowerShell 建议使用单引号：--attachments-json '[{"type":"item","id":1001,"count":1}]'
+# --mail-watch-seconds <sec>     等待邮件通知秒数（默认 15）
+# --limit <n>                    列表条数（mail-list 复用该参数，默认 20）
 
 # ========== 场景列表 ==========
 
@@ -166,6 +188,31 @@ node tools/mock-client/src/index.js --scenario chat-private-two-client --http-ba
 # 开启两个客户端，通过命令行互相发送消息
 node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
 
+# ========== 邮件系统测试 (通过 --mail-base-url 9003) ==========
+
+# 发送系统邮件 (MAIL_SEND)
+# 默认会发给当前登录玩家；也可以通过 --mail-to-player-id 指定其他玩家
+node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-title "系统奖励" --mail-content "请查收附件"
+
+# 发送带附件的系统邮件
+node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-title "附件测试" --mail-content "包含一个物品奖励" --attachments-json '[{"type":"item","id":1001,"count":1}]'
+
+# 获取当前登录玩家的邮件列表 (MAIL_LIST)
+node tools/mock-client/src/index.js --scenario mail-list --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-status unread --limit 10
+
+# 查询邮件详情 (MAIL_GET)
+node tools/mock-client/src/index.js --scenario mail-get --mail-base-url http://127.0.0.1:9003 --mail-id <mail_id>
+
+# 标记邮件已读 (MAIL_READ)
+node tools/mock-client/src/index.js --scenario mail-read --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_id>
+
+# 领取邮件附件 (MAIL_CLAIM)
+# 若同一封邮件重复领取，服务端会返回幂等结果
+node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_id>
+
+# 发送邮件并等待聊天服推送 MAIL_NOTIFY_PUSH (MAIL_SEND_AND_NOTIFY)
+node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
+
 # ========== 移动同步交互测试 ==========
 
 # 24. 交互式双客户端移动同步 (MOVEMENT_INTERACTIVE)
@@ -295,6 +342,12 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # chat-two-client          | 双客户端群聊
 # chat-private-two-client  | 双客户端私聊
 # chat-interactive         | 交互式聊天
+# mail-send                | 发送邮件（HTTP）
+# mail-list                | 获取邮件列表（HTTP）
+# mail-get                 | 获取邮件详情（HTTP）
+# mail-read                | 标记邮件已读（HTTP）
+# mail-claim               | 领取邮件附件（HTTP）
+# mail-send-and-notify     | 发邮件并等待 MAIL_NOTIFY_PUSH
 # movement-interactive     | 交互式双客户端移动同步
 # inventory-equip          | 装备穿戴
 # inventory-use           | 物品使用
