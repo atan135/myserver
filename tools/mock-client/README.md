@@ -218,7 +218,7 @@ node tools/mock-client/src/index.js --scenario two-client-room \
 # 通过 TCP fallback 连接 proxy
 node tools/mock-client/src/index.js --scenario get-room-data \
   --http-base-url http://127.0.0.1:3000 \
-  --host 127.0.0.1 --port 17002 \
+  --host 127.0.0.1 --port 14000 \
   --login-name test001 --password Passw0rd!
 ```
 
