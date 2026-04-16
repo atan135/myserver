@@ -1,12 +1,12 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$InstanceId,
-
-    [Parameter(Mandatory=$true)]
-    [int]$Port,
+    [Parameter(Mandatory=$false)]
+    [string]$InstanceId = "game-server-001",
 
     [Parameter(Mandatory=$false)]
-    [int]$AdminPort = 0
+    [int]$Port = 7000,
+
+    [Parameter(Mandatory=$false)]
+    [Nullable[int]]$AdminPort = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,11 +19,16 @@ $env:GAME_PORT=$Port
 $udsName = "myserver-$InstanceId.sock"
 $env:GAME_LOCAL_SOCKET_NAME=$udsName
 
-# Admin 端口，如果没有指定则使用 Port+1
-if ($AdminPort -eq 0) {
-    $env:ADMIN_PORT=[string]($Port + 1)
+# Admin 端口默认与 apps/port.txt 保持一致：game-server-admin=7500
+# 若指定了非默认 Port 且未显式传入 AdminPort，则回退到 Port+1 便于多实例本地调试
+if ($null -eq $AdminPort) {
+    if ($Port -eq 7000) {
+        $env:ADMIN_PORT = "7500"
+    } else {
+        $env:ADMIN_PORT = [string]($Port + 1)
+    }
 } else {
-    $env:ADMIN_PORT=[string]$AdminPort
+    $env:ADMIN_PORT = [string]$AdminPort
 }
 
 # 清理可能残留的 UDS socket 文件（在项目根目录）
