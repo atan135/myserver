@@ -57,16 +57,23 @@ export async function delayBeforeFinalLeave(client, timeoutMs, delayMs = 10000) 
 /**
  * Authenticate a client
  */
-export async function authenticateClient(client, options, login, seq = 1, encodeAuthFn) {
-  const authFn = encodeAuthFn || (() => {
-    const { encodeAuthReq } = require("../messages.js");
-    return encodeAuthReq(login.ticket);
-  });
-  // Dynamic import to avoid circular deps
+export async function authenticateClient(
+  client,
+  options,
+  login,
+  seq = 1,
+  encodeAuthFn,
+  authReqType = MESSAGE_TYPE.AUTH_REQ,
+  authResType = MESSAGE_TYPE.AUTH_RES
+) {
   const { encodeAuthReq } = await import("../messages.js");
   const fn = encodeAuthFn || encodeAuthReq;
-  await client.send(MESSAGE_TYPE.AUTH_REQ, seq, fn(login.ticket));
-  const auth = printResponse(`${client.label}.auth`, await client.readNextPacket(options.timeoutMs));
+  await client.send(authReqType, seq, fn(login.ticket));
+  const packet = await client.readNextPacket(options.timeoutMs);
+  const auth = printResponse(`${client.label}.auth`, packet);
+  if (packet.messageType !== authResType) {
+    throw new Error(`${client.label} auth expected messageType ${authResType}, got ${packet.messageType}`);
+  }
   if (!auth.ok) {
     throw new Error(`${client.label} auth failed: ${auth.errorCode}`);
   }

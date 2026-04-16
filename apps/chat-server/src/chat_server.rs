@@ -16,48 +16,52 @@ use crate::ticket::verify_ticket;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MessageType {
-    ChatPrivateReq = 1401,
-    ChatPrivateRes = 1402,
-    ChatGroupReq = 1403,
-    ChatGroupRes = 1404,
-    ChatPush = 1405,
-    GroupCreateReq = 1411,
-    GroupCreateRes = 1412,
-    GroupJoinReq = 1413,
-    GroupJoinRes = 1414,
-    GroupLeaveReq = 1415,
-    GroupLeaveRes = 1416,
-    GroupDismissReq = 1417,
-    GroupDismissRes = 1418,
-    GroupListReq = 1419,
-    GroupListRes = 1420,
-    ChatHistoryReq = 1421,
-    ChatHistoryRes = 1422,
-    MailNotifyPush = 1501,
+    ChatAuthReq = 20001,
+    ChatAuthRes = 20002,
+    ChatPrivateReq = 20101,
+    ChatPrivateRes = 20102,
+    ChatGroupReq = 20103,
+    ChatGroupRes = 20104,
+    ChatPush = 20105,
+    GroupCreateReq = 20201,
+    GroupCreateRes = 20202,
+    GroupJoinReq = 20203,
+    GroupJoinRes = 20204,
+    GroupLeaveReq = 20205,
+    GroupLeaveRes = 20206,
+    GroupDismissReq = 20207,
+    GroupDismissRes = 20208,
+    GroupListReq = 20209,
+    GroupListRes = 20210,
+    ChatHistoryReq = 20211,
+    ChatHistoryRes = 20212,
+    MailNotifyPush = 20301,
     ErrorRes = 9000,
 }
 
 impl MessageType {
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
-            1401 => Some(Self::ChatPrivateReq),
-            1402 => Some(Self::ChatPrivateRes),
-            1403 => Some(Self::ChatGroupReq),
-            1404 => Some(Self::ChatGroupRes),
-            1405 => Some(Self::ChatPush),
-            1411 => Some(Self::GroupCreateReq),
-            1412 => Some(Self::GroupCreateRes),
-            1413 => Some(Self::GroupJoinReq),
-            1414 => Some(Self::GroupJoinRes),
-            1415 => Some(Self::GroupLeaveReq),
-            1416 => Some(Self::GroupLeaveRes),
-            1417 => Some(Self::GroupDismissReq),
-            1418 => Some(Self::GroupDismissRes),
-            1419 => Some(Self::GroupListReq),
-            1420 => Some(Self::GroupListRes),
-            1421 => Some(Self::ChatHistoryReq),
-            1422 => Some(Self::ChatHistoryRes),
-            1501 => Some(Self::MailNotifyPush),
+            20001 => Some(Self::ChatAuthReq),
+            20002 => Some(Self::ChatAuthRes),
+            20101 => Some(Self::ChatPrivateReq),
+            20102 => Some(Self::ChatPrivateRes),
+            20103 => Some(Self::ChatGroupReq),
+            20104 => Some(Self::ChatGroupRes),
+            20105 => Some(Self::ChatPush),
+            20201 => Some(Self::GroupCreateReq),
+            20202 => Some(Self::GroupCreateRes),
+            20203 => Some(Self::GroupJoinReq),
+            20204 => Some(Self::GroupJoinRes),
+            20205 => Some(Self::GroupLeaveReq),
+            20206 => Some(Self::GroupLeaveRes),
+            20207 => Some(Self::GroupDismissReq),
+            20208 => Some(Self::GroupDismissRes),
+            20209 => Some(Self::GroupListReq),
+            20210 => Some(Self::GroupListRes),
+            20211 => Some(Self::ChatHistoryReq),
+            20212 => Some(Self::ChatHistoryRes),
+            20301 => Some(Self::MailNotifyPush),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }
@@ -308,6 +312,15 @@ where
     .await??;
 
     let header = parse_header(header_buf)?;
+    match MessageType::from_u16(header.msg_type) {
+        Some(MessageType::ChatAuthReq) => {}
+        Some(other) => {
+            return Err(format!("expected chat auth request, got {:?}", other).into());
+        }
+        None => {
+            return Err(format!("unknown auth msg_type: {}", header.msg_type).into());
+        }
+    }
 
     if header.body_len as usize > config.max_body_len {
         return Err("body too large".into());
@@ -325,7 +338,7 @@ where
             let res = ChatAuthRes { ok: true, error_code: String::new() };
             let mut buf = Vec::new();
             res.encode(&mut buf)?;
-            let packet = encode_packet(1402, header.seq, &buf);
+            let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
             writer.write_all(&packet).await?;
             Ok(player_id)
         }
@@ -333,7 +346,7 @@ where
             let res = ChatAuthRes { ok: false, error_code: e.to_string() };
             let mut buf = Vec::new();
             res.encode(&mut buf)?;
-            let packet = encode_packet(1402, header.seq, &buf);
+            let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
             writer.write_all(&packet).await?;
             Err(format!("auth failed: {}", e).into())
         }

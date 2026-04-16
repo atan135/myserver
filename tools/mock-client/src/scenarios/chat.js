@@ -13,6 +13,19 @@ import { fetchTicket } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
 import { authenticateClient, printResponse } from "./room.js";
 
+export async function authenticateChatClient(client, options, login, seq = 1) {
+  const { encodeChatAuthReq } = await import("../messages.js");
+  await authenticateClient(
+    client,
+    options,
+    login,
+    seq,
+    encodeChatAuthReq,
+    MESSAGE_TYPE.CHAT_AUTH_REQ,
+    MESSAGE_TYPE.CHAT_AUTH_RES
+  );
+}
+
 /**
  * Connect to chat server
  */
@@ -31,8 +44,7 @@ export async function runChatPrivate(options) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   const targetId = options.targetId || "target-player-id";
   await client.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(targetId, options.content));
@@ -53,7 +65,7 @@ export async function runChatGroup(options) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  await authenticateClient(client, options, login, 1);
+  await authenticateChatClient(client, options, login, 1);
 
   const groupId = options.groupId || "grp_test";
   await client.send(MESSAGE_TYPE.CHAT_GROUP_REQ, 2, encodeChatGroupReq(groupId, options.content));
@@ -74,8 +86,7 @@ export async function runGroupCreate(options) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   const groupName = options.groupName || "Test Group";
   await client.send(MESSAGE_TYPE.GROUP_CREATE_REQ, 2, encodeGroupCreateReq(groupName));
@@ -97,8 +108,7 @@ export async function runGroupJoin(options, groupId) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 2, encodeGroupJoinReq(groupId));
   const res = printResponse("chat.groupJoinRes", await client.readNextPacket(options.timeoutMs));
@@ -118,8 +128,7 @@ export async function runGroupLeave(options, groupId) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_LEAVE_REQ, 2, encodeGroupLeaveReq(groupId));
   const res = printResponse("chat.groupLeaveRes", await client.readNextPacket(options.timeoutMs));
@@ -139,8 +148,7 @@ export async function runGroupDismiss(options, groupId) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_DISMISS_REQ, 2, encodeGroupDismissReq(groupId));
   const res = printResponse("chat.groupDismissRes", await client.readNextPacket(options.timeoutMs));
@@ -160,8 +168,7 @@ export async function runGroupList(options) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   await client.send(MESSAGE_TYPE.GROUP_LIST_REQ, 2, encodeGroupListReq());
   const res = printResponse("chat.groupListRes", await client.readNextPacket(options.timeoutMs));
@@ -178,8 +185,7 @@ export async function runChatHistory(options) {
   console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
 
   const client = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(client, options, login, 1, encodeChatAuthReq);
+  await authenticateChatClient(client, options, login, 1);
 
   const chatType = 1; // private
   const targetId = options.targetId || "";
@@ -205,8 +211,7 @@ export async function runChatTwoClient(options) {
 
   // Create a group first
   const clientA = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientA, options, loginA, 1);
 
   const groupName = options.groupName || "Test Group";
   await clientA.send(MESSAGE_TYPE.GROUP_CREATE_REQ, 2, encodeGroupCreateReq(groupName));
@@ -219,7 +224,7 @@ export async function runChatTwoClient(options) {
 
   // Client B joins
   const clientB = await connectToChatServer(options);
-  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientB, options, loginB, 1);
 
   await clientB.send(MESSAGE_TYPE.GROUP_JOIN_REQ, 3, encodeGroupJoinReq(groupId));
   const joinRes = printResponse("clientB.groupJoin", await clientB.readNextPacket(options.timeoutMs));
@@ -260,13 +265,12 @@ export async function runChatPrivateTwoClient(options) {
 
   // Client A connects and waits for messages
   const clientA = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientA, options, loginA, 1);
   console.log("clientA connected, waiting for private message...");
 
   // Client B connects and sends private message to A
   const clientB = await connectToChatServer(options);
-  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientB, options, loginB, 1);
 
   await clientB.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(loginA.playerId, options.content));
   const chatRes = printResponse("clientB.privateChat", await clientB.readNextPacket(options.timeoutMs));

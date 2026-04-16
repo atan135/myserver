@@ -304,6 +304,11 @@ export function decodeByMessageType(messageType, body) {
       return {
         serverTime: readInt64(fields, 1)
       };
+    case MESSAGE_TYPE.CHAT_AUTH_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
     case MESSAGE_TYPE.ROOM_JOIN_RES:
       return {
         ok: readBool(fields, 1),
@@ -439,10 +444,6 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 3),
         snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null
       };
-    // Chat responses
-    // Chat responses (for chat-server on port 9001)
-    // Note: These use same message IDs as inventory, so they're handled separately
-    // Inventory responses (for game-server on port 7000)
     case MESSAGE_TYPE.ITEM_EQUIP_RES:
       return {
         ok: readBool(fields, 1),
@@ -505,10 +506,27 @@ export function decodeByMessageType(messageType, body) {
         activeBuffIds: buffsRaw ? (Array.isArray(buffsRaw) ? buffsRaw.map(f => readUInt32(decodeFieldsWithRepeated(f), 1)) : [readUInt32(decodeFieldsWithRepeated(buffsRaw), 1)]) : []
       };
     }
-    // Chat responses (for chat-server on port 9001)
-    // NOTE: Chat uses same message IDs (1401-1405) as game inventory!
-    // When connected to chat-server, these will decode correctly because
-    // inventory cases above won't match (different field structures).
+    case MESSAGE_TYPE.GROUP_CREATE_RES:
+      return {
+        ok: readBool(fields, 1),
+        groupId: readString(fields, 2),
+        errorCode: readString(fields, 3)
+      };
+    case MESSAGE_TYPE.GROUP_JOIN_RES:
+    case MESSAGE_TYPE.GROUP_LEAVE_RES:
+    case MESSAGE_TYPE.GROUP_DISMISS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2)
+      };
+    case MESSAGE_TYPE.GROUP_LIST_RES: {
+      const groupsRaw = fields.get(1);
+      return {
+        groups: groupsRaw
+          ? (Array.isArray(groupsRaw) ? groupsRaw.map(decodeGroupInfo) : [decodeGroupInfo(groupsRaw)])
+          : []
+      };
+    }
     case MESSAGE_TYPE.CHAT_PRIVATE_RES:
       return {
         ok: readBool(fields, 1),
@@ -566,6 +584,14 @@ export function decodeByMessageType(messageType, body) {
       }
       return { messages };
     }
+    case MESSAGE_TYPE.MAIL_NOTIFY_PUSH:
+      return {
+        mailId: readString(fields, 1),
+        title: readString(fields, 2),
+        fromPlayerId: readString(fields, 3),
+        mailType: readString(fields, 4),
+        createdAt: readInt64(fields, 5)
+      };
     case MESSAGE_TYPE.ERROR_RES:
       return {
         errorCode: readString(fields, 1),

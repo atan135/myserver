@@ -3,8 +3,7 @@ import process from "node:process";
 import { MESSAGE_TYPE } from "../constants.js";
 import { encodeChatPrivateReq } from "../messages.js";
 import { fetchTicket } from "../auth.js";
-import { connectToChatServer } from "./chat.js";
-import { authenticateClient } from "./room.js";
+import { authenticateChatClient, connectToChatServer } from "./chat.js";
 import { decodeByMessageType } from "../messages.js";
 
 /**
@@ -26,13 +25,12 @@ export async function runChatInteractive(options) {
 
   // Client A connects - this is "us"
   const clientA = await connectToChatServer(options);
-  const { encodeChatAuthReq } = await import("../messages.js");
-  await authenticateClient(clientA, options, loginA, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientA, options, loginA, 1);
   console.log("[connected as clientA, waiting for messages...]");
 
   // Client B connects - this is "other player"
   const clientB = await connectToChatServer(options);
-  await authenticateClient(clientB, options, loginB, 1, encodeChatAuthReq);
+  await authenticateChatClient(clientB, options, loginB, 1);
   console.log("[clientB connected]");
 
   // Create readline interface for interactive input
