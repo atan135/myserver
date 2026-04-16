@@ -62,7 +62,7 @@ impl Config {
         let admin_port = env::var("ADMIN_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(7001);
+            .unwrap_or(7500);
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());

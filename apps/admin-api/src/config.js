@@ -30,7 +30,7 @@ export function getConfig() {
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || "8h",
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
-    gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7001", 10),
+    gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     initialAdminUsername: process.env.ADMIN_USERNAME || "admin",
     initialAdminPassword: process.env.ADMIN_PASSWORD || "AdminPass123!",
     initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator"

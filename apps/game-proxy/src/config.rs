@@ -36,7 +36,7 @@ impl Config {
         let port = env::var("PROXY_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(7100);
+            .unwrap_or(7002);
         let admin_host = env::var("PROXY_ADMIN_HOST").unwrap_or_else(|_| host.clone());
         let admin_port = env::var("PROXY_ADMIN_PORT")
             .ok()
