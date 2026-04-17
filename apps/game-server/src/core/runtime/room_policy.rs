@@ -33,6 +33,10 @@ pub struct RoomRuntimePolicy {
     pub wait_timeout_ms: u64,
     pub wait_strategy: InputWaitStrategy,
     pub missing_input_strategy: MissingInputStrategy,
+    pub movement_correction_interval_frames: u32,
+    pub movement_correction_threshold: f32,
+    pub movement_aoi_enabled: bool,
+    pub movement_aoi_radius: f32,
 }
 
 impl RoomRuntimePolicy {
@@ -56,6 +60,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 150,
             wait_strategy: InputWaitStrategy::Strict,
             missing_input_strategy: MissingInputStrategy::RepeatLast,
+            movement_correction_interval_frames: 5,
+            movement_correction_threshold: 0.5,
+            movement_aoi_enabled: false,
+            movement_aoi_radius: 0.0,
         }
     }
 
@@ -79,6 +87,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 150,
             wait_strategy: InputWaitStrategy::Strict,
             missing_input_strategy: MissingInputStrategy::RepeatLast,
+            movement_correction_interval_frames: 5,
+            movement_correction_threshold: 0.5,
+            movement_aoi_enabled: true,
+            movement_aoi_radius: 18.0,
         }
     }
 
@@ -102,6 +114,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 150,
             wait_strategy: InputWaitStrategy::Strict,
             missing_input_strategy: MissingInputStrategy::RepeatLast,
+            movement_correction_interval_frames: 4,
+            movement_correction_threshold: 0.4,
+            movement_aoi_enabled: true,
+            movement_aoi_radius: 12.0,
         }
     }
 
@@ -125,6 +141,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 120,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 4,
+            movement_correction_threshold: 0.35,
+            movement_aoi_enabled: true,
+            movement_aoi_radius: 20.0,
         }
     }
 
@@ -148,6 +168,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 100,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 3,
+            movement_correction_threshold: 0.35,
+            movement_aoi_enabled: true,
+            movement_aoi_radius: 16.0,
         }
     }
 
@@ -171,6 +195,10 @@ impl RoomRuntimePolicy {
             wait_timeout_ms: 100,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 3,
+            movement_correction_threshold: 0.4,
+            movement_aoi_enabled: true,
+            movement_aoi_radius: 18.0,
         }
     }
 }

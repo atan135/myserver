@@ -16,7 +16,10 @@ use crate::core::runtime::room_policy::{
 };
 use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
-use crate::pb::{FrameBundlePush, FrameInput, RoomSnapshot, RoomStatePush};
+use crate::pb::{
+    FrameBundlePush, FrameInput, MovementCorrectionReason, MovementRecoveryState as PbMovementRecoveryState,
+    RoomSnapshot, RoomStatePush,
+};
 use crate::protocol::{MessageType, encode_body};
 
 const MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE: u32 = 3;
@@ -53,6 +56,7 @@ pub struct RoomRecoveryState {
     pub waiting_frame_id: u32,
     pub waiting_inputs: Vec<FrameInput>,
     pub input_delay_frames: u32,
+    pub movement_recovery: Option<PbMovementRecoveryState>,
 }
 
 #[derive(Clone)]
@@ -590,6 +594,10 @@ impl RoomManager {
             let waiting_frame_id = room.current_waiting_frame_id();
             let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
             let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
+            let movement_recovery = room.logic.movement_recovery_state(
+                Some(player_id),
+                MovementCorrectionReason::ReconnectRecovery,
+            );
             let match_id = room.match_id.clone();
             drop(rooms);
 
@@ -604,6 +612,7 @@ impl RoomManager {
                 waiting_frame_id,
                 waiting_inputs,
                 input_delay_frames,
+                movement_recovery,
             })
         } else {
             Err("PLAYER_NOT_IN_ROOM")
@@ -671,6 +680,10 @@ impl RoomManager {
             let waiting_frame_id = room.current_waiting_frame_id();
             let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
             let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
+            let movement_recovery = room.logic.movement_recovery_state(
+                None,
+                MovementCorrectionReason::ObserverRecovery,
+            );
 
             RoomRecoveryState {
                 snapshot,
@@ -679,6 +692,7 @@ impl RoomManager {
                 waiting_frame_id,
                 waiting_inputs,
                 input_delay_frames,
+                movement_recovery,
             }
         };
         let room_count = rooms.len() as u64;
@@ -1089,8 +1103,15 @@ impl RoomManager {
                 continue;
             };
 
-            for RoomLogicBroadcast { message_type, body } in pending_broadcasts {
-                let _ = self.broadcast_to_room(&room_id, message_type, body).await;
+            for RoomLogicBroadcast {
+                message_type,
+                body,
+                target_player_ids,
+            } in pending_broadcasts
+            {
+                let _ = self
+                    .broadcast_message(&room_id, &target_player_ids, message_type, body)
+                    .await;
             }
 
             let body = encode_body(&frame_bundle);
@@ -1143,6 +1164,63 @@ impl RoomManager {
         }
 
         Ok(())
+    }
+
+    async fn broadcast_to_players(
+        &self,
+        room_id: &str,
+        target_player_ids: &[String],
+        message_type: MessageType,
+        body: Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        let senders = {
+            let rooms = self.rooms.lock().await;
+            let Some(room) = rooms.get(room_id) else {
+                info!(room_id = room_id, "broadcast_to_players: room not found");
+                return Ok(());
+            };
+
+            let targets = target_player_ids
+                .iter()
+                .filter_map(|player_id| room.members.get(player_id))
+                .filter(|member| !member.offline)
+                .map(|member| member.sender.clone())
+                .collect::<Vec<_>>();
+
+            info!(
+                room_id = room_id,
+                message_type = ?message_type,
+                target_count = targets.len(),
+                "broadcast_to_players"
+            );
+
+            targets
+        };
+
+        for sender in senders {
+            let _ = sender.send(OutboundMessage {
+                message_type,
+                seq: 0,
+                body: body.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn broadcast_message(
+        &self,
+        room_id: &str,
+        target_player_ids: &[String],
+        message_type: MessageType,
+        body: Vec<u8>,
+    ) -> Result<(), std::io::Error> {
+        if target_player_ids.is_empty() {
+            self.broadcast_to_room(room_id, message_type, body).await
+        } else {
+            self.broadcast_to_players(room_id, target_player_ids, message_type, body)
+                .await
+        }
     }
 
     pub async fn send_to_player(

@@ -99,10 +99,10 @@ impl CombatDemoLogic {
             action: action.to_string(),
             payload_json,
         };
-        self.pending_broadcasts.push(RoomLogicBroadcast {
-            message_type: MessageType::GameMessagePush,
-            body: encode_body(&message),
-        });
+        self.pending_broadcasts.push(RoomLogicBroadcast::broadcast_to_room(
+            MessageType::GameMessagePush,
+            encode_body(&message),
+        ));
     }
 
     fn queue_snapshot_push(&mut self, frame_id: u32, reason: &str, full_sync: bool) {

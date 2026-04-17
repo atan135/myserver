@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
-use crate::core::system::movement::input::MovementCommand;
+use crate::core::system::movement::input::{ClientMovementState, MovementCommand};
 use crate::core::system::scene::query::SceneSpawnPointDefinition;
-use crate::pb::EntityTransform;
+use crate::pb::{
+    EntityTransform, MovementCorrectionKind, MovementCorrectionReason, MovementRecoveryState,
+};
 
 pub type EntityId = u64;
 pub type DenseIndex = usize;
@@ -48,12 +50,34 @@ pub struct MovementEntityState {
     pub last_input_frame: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClientStateSample {
+    pub frame_id: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct MovementCorrectionEnvelope {
+    pub frame_id: u32,
+    pub entities: Vec<EntityTransform>,
+    pub correction_kind: i32,
+    pub reason_code: i32,
+    pub reference_frame_id: u32,
+    pub target_player_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomMovementState {
     pub scene_id: i32,
     pub next_entity_id: EntityId,
     pub snapshot_interval_frames: u32,
     pub last_snapshot_frame: u32,
+    pub last_full_sync_frame: u32,
+    pub correction_distance_threshold: f32,
+    pub correction_interval_frames: u32,
+    pub aoi_radius: f32,
+    pub aoi_enabled: bool,
     entities: Vec<EntityMeta>,
     positions_x: Vec<f32>,
     positions_y: Vec<f32>,
@@ -65,6 +89,8 @@ pub struct RoomMovementState {
     player_entity_map: HashMap<String, EntityId>,
     entity_index_map: HashMap<EntityId, DenseIndex>,
     index_entity_map: Vec<EntityId>,
+    latest_client_state_by_player: HashMap<String, ClientStateSample>,
+    last_sent_frame_by_player: HashMap<String, u32>,
 }
 
 impl RoomMovementState {
@@ -74,6 +100,11 @@ impl RoomMovementState {
             next_entity_id: 1,
             snapshot_interval_frames,
             last_snapshot_frame: 0,
+            last_full_sync_frame: 0,
+            correction_distance_threshold: 0.5,
+            correction_interval_frames: snapshot_interval_frames.max(1),
+            aoi_radius: 0.0,
+            aoi_enabled: false,
             entities: Vec::new(),
             positions_x: Vec::new(),
             positions_y: Vec::new(),
@@ -85,6 +116,8 @@ impl RoomMovementState {
             player_entity_map: HashMap::new(),
             entity_index_map: HashMap::new(),
             index_entity_map: Vec::new(),
+            latest_client_state_by_player: HashMap::new(),
+            last_sent_frame_by_player: HashMap::new(),
         }
     }
 
@@ -142,6 +175,9 @@ impl RoomMovementState {
             let swapped_entity_id = self.index_entity_map[dense_index];
             self.entity_index_map.insert(swapped_entity_id, dense_index);
         }
+
+        self.latest_client_state_by_player.remove(player_id);
+        self.last_sent_frame_by_player.remove(player_id);
     }
 
     pub fn entity(&self, player_id: &str) -> Option<MovementEntityState> {
@@ -292,6 +328,160 @@ impl RoomMovementState {
             .filter_map(|dense_index| self.entity_proto_at(dense_index))
             .collect()
     }
+
+    pub fn set_client_state_for_player(
+        &mut self,
+        player_id: &str,
+        client_state: ClientMovementState,
+    ) {
+        self.latest_client_state_by_player.insert(
+            player_id.to_string(),
+            ClientStateSample {
+                frame_id: client_state.frame_id,
+                x: client_state.position.x,
+                y: client_state.position.y,
+            },
+        );
+    }
+
+    pub fn client_state_for_player(&self, player_id: &str) -> Option<ClientStateSample> {
+        self.latest_client_state_by_player.get(player_id).copied()
+    }
+
+    pub fn drift_distance_for_player(&self, player_id: &str) -> Option<f32> {
+        let client = self.client_state_for_player(player_id)?;
+        let entity = self.entity(player_id)?;
+        Some(distance(entity.position, Vec2 { x: client.x, y: client.y }))
+    }
+
+    pub fn should_force_correction_for_player(&self, player_id: &str) -> bool {
+        self.drift_distance_for_player(player_id)
+            .map(|drift| drift >= self.correction_distance_threshold)
+            .unwrap_or(false)
+    }
+
+    pub fn note_sent_to_player(&mut self, player_id: &str, frame_id: u32) {
+        self.last_sent_frame_by_player
+            .insert(player_id.to_string(), frame_id);
+    }
+
+    pub fn should_periodic_sync(&self, frame_id: u32) -> bool {
+        self.last_snapshot_frame == 0
+            || frame_id.saturating_sub(self.last_snapshot_frame) >= self.correction_interval_frames
+    }
+
+    pub fn set_correction_config(
+        &mut self,
+        correction_interval_frames: u32,
+        correction_distance_threshold: f32,
+        aoi_radius: f32,
+        aoi_enabled: bool,
+    ) {
+        self.correction_interval_frames = correction_interval_frames.max(1);
+        self.correction_distance_threshold = correction_distance_threshold.max(0.0);
+        self.aoi_radius = aoi_radius.max(0.0);
+        self.aoi_enabled = aoi_enabled && self.aoi_radius > 0.0;
+    }
+
+    pub fn targets_for_player(&self, requester_player_id: &str) -> Vec<EntityTransform> {
+        if !self.aoi_enabled {
+            return self.all_transforms();
+        }
+
+        let Some(origin) = self.entity(requester_player_id).map(|entity| entity.position) else {
+            return self.all_transforms();
+        };
+
+        self.dense_indices()
+            .filter_map(|dense_index| self.entity_proto_at(dense_index))
+            .filter(|entity| {
+                entity.player_id == requester_player_id
+                    || distance(
+                        origin,
+                        Vec2 {
+                            x: entity.x,
+                            y: entity.y,
+                        },
+                    ) <= self.aoi_radius
+            })
+            .collect()
+    }
+
+    pub fn full_correction(
+        &mut self,
+        frame_id: u32,
+        reason_code: MovementCorrectionReason,
+        target_player_ids: Vec<String>,
+        entities: Vec<EntityTransform>,
+    ) -> MovementCorrectionEnvelope {
+        self.last_snapshot_frame = frame_id;
+        self.last_full_sync_frame = frame_id;
+        MovementCorrectionEnvelope {
+            frame_id,
+            entities,
+            correction_kind: MovementCorrectionKind::FullSync as i32,
+            reason_code: reason_code as i32,
+            reference_frame_id: frame_id,
+            target_player_ids,
+        }
+    }
+
+    pub fn strong_correction(
+        &mut self,
+        frame_id: u32,
+        reason_code: MovementCorrectionReason,
+        target_player_ids: Vec<String>,
+        entities: Vec<EntityTransform>,
+    ) -> MovementCorrectionEnvelope {
+        self.last_snapshot_frame = frame_id;
+        MovementCorrectionEnvelope {
+            frame_id,
+            entities,
+            correction_kind: MovementCorrectionKind::Strong as i32,
+            reason_code: reason_code as i32,
+            reference_frame_id: frame_id,
+            target_player_ids,
+        }
+    }
+
+    pub fn incremental_correction(
+        &mut self,
+        frame_id: u32,
+        reason_code: MovementCorrectionReason,
+        target_player_ids: Vec<String>,
+        entities: Vec<EntityTransform>,
+    ) -> MovementCorrectionEnvelope {
+        self.last_snapshot_frame = frame_id;
+        MovementCorrectionEnvelope {
+            frame_id,
+            entities,
+            correction_kind: MovementCorrectionKind::Incremental as i32,
+            reason_code: reason_code as i32,
+            reference_frame_id: frame_id,
+            target_player_ids,
+        }
+    }
+
+    pub fn recovery_state_for_player(
+        &self,
+        requester_player_id: Option<&str>,
+        frame_id: u32,
+        reason_code: MovementCorrectionReason,
+    ) -> MovementRecoveryState {
+        let entities = requester_player_id
+            .map(|player_id| self.targets_for_player(player_id))
+            .unwrap_or_else(|| self.all_transforms());
+
+        MovementRecoveryState {
+            frame_id,
+            entities,
+            correction_kind: MovementCorrectionKind::Recovery as i32,
+            reason_code: reason_code as i32,
+            reference_frame_id: frame_id,
+            aoi_enabled: self.aoi_enabled,
+            aoi_radius: self.aoi_radius,
+        }
+    }
 }
 
 impl MovementEntityState {
@@ -308,4 +498,10 @@ impl MovementEntityState {
             last_input_frame: self.last_input_frame,
         }
     }
+}
+
+fn distance(lhs: Vec2, rhs: Vec2) -> f32 {
+    let dx = lhs.x - rhs.x;
+    let dy = lhs.y - rhs.y;
+    (dx * dx + dy * dy).sqrt()
 }

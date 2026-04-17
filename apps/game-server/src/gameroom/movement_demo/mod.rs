@@ -5,13 +5,14 @@ use tracing::{info, warn};
 
 use crate::core::logic::{RoomLogic, RoomLogicBroadcast};
 use crate::core::room::PlayerInputRecord;
-use crate::core::system::movement::{RoomMovementState, decide_snapshot, tick_movement};
+use crate::core::system::movement::{
+    RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
+    snapshot_broadcasts, tick_movement,
+};
 use crate::core::system::scene::{SceneCatalog, SceneQuery};
-use crate::pb::{MovementRejectPush, MovementSnapshotPush};
-use crate::protocol::{MessageType, encode_body};
+use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
 const DEFAULT_MOVE_SPEED: f32 = 4.0;
-const SNAPSHOT_INTERVAL_FRAMES: u32 = 3;
 
 #[derive(Default)]
 pub struct MovementDemoLogic {
@@ -21,20 +22,33 @@ pub struct MovementDemoLogic {
     pub scene_catalog: Option<Arc<SceneCatalog>>,
     pub movement_state: Option<RoomMovementState>,
     pub pending_broadcasts: Vec<RoomLogicBroadcast>,
+    pub recipients: Vec<String>,
 }
 
 impl MovementDemoLogic {
-    pub fn new(scene_catalog: Arc<SceneCatalog>, default_scene_id: i32) -> Self {
+    pub fn new(
+        scene_catalog: Arc<SceneCatalog>,
+        default_scene_id: i32,
+        correction_interval_frames: u32,
+        correction_threshold: f32,
+        aoi_radius: f32,
+        aoi_enabled: bool,
+    ) -> Self {
+        let mut movement_state = RoomMovementState::new(default_scene_id, correction_interval_frames);
+        movement_state.set_correction_config(
+            correction_interval_frames,
+            correction_threshold,
+            aoi_radius,
+            aoi_enabled,
+        );
         Self {
             room_id: String::new(),
             tick_count: 0,
             default_scene_id,
             scene_catalog: Some(scene_catalog),
-            movement_state: Some(RoomMovementState::new(
-                default_scene_id,
-                SNAPSHOT_INTERVAL_FRAMES,
-            )),
+            movement_state: Some(movement_state),
             pending_broadcasts: Vec::new(),
+            recipients: Vec::new(),
         }
     }
 
@@ -71,28 +85,6 @@ impl MovementDemoLogic {
             "movement demo player spawned"
         );
     }
-
-    fn queue_snapshot_push(
-        &mut self,
-        frame_id: u32,
-        full_sync: bool,
-        reason: &str,
-    ) {
-        let Some(movement_state) = self.movement_state.as_ref() else {
-            return;
-        };
-        let message = MovementSnapshotPush {
-            room_id: self.room_id.clone(),
-            frame_id,
-            entities: movement_state.all_transforms(),
-            full_sync,
-            reason: reason.to_string(),
-        };
-        self.pending_broadcasts.push(RoomLogicBroadcast {
-            message_type: MessageType::MovementSnapshotPush,
-            body: encode_body(&message),
-        });
-    }
 }
 
 impl RoomLogic for MovementDemoLogic {
@@ -102,6 +94,9 @@ impl RoomLogic for MovementDemoLogic {
     }
 
     fn on_player_join(&mut self, player_id: &str) {
+        if !self.recipients.iter().any(|existing| existing == player_id) {
+            self.recipients.push(player_id.to_string());
+        }
         self.spawn_player_if_needed(player_id);
     }
 
@@ -109,10 +104,19 @@ impl RoomLogic for MovementDemoLogic {
         if let Some(movement_state) = self.movement_state.as_mut() {
             movement_state.remove_player(player_id);
         }
+        self.recipients.retain(|existing| existing != player_id);
     }
 
     fn on_game_started(&mut self, _room_id: &str) {
-        self.queue_snapshot_push(0, true, "game_started");
+        let Some(movement_state) = self.movement_state.as_mut() else {
+            return;
+        };
+        self.pending_broadcasts.push(full_sync_broadcast(
+            &self.room_id,
+            movement_state,
+            0,
+            MovementCorrectionReason::GameStarted,
+        ));
     }
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
@@ -132,35 +136,26 @@ impl RoomLogic for MovementDemoLogic {
                 error_code = reject.error_code,
                 "movement input rejected"
             );
-            let message = MovementRejectPush {
-                room_id: self.room_id.clone(),
-                frame_id,
-                player_id: reject.player_id.clone(),
-                error_code: reject.error_code.clone(),
-                corrected: Some(reject.corrected.clone()),
-            };
-            self.pending_broadcasts.push(RoomLogicBroadcast {
-                message_type: MessageType::MovementRejectPush,
-                body: encode_body(&message),
-            });
+            self.pending_broadcasts
+                .push(reject_broadcast(&self.room_id, frame_id, reject));
         }
 
-        let decision = decide_snapshot(
+        let corrections = decide_corrections(
             movement_state,
             frame_id,
-            result.changed_entities.len(),
-            result.rejects.len(),
+            &self.recipients,
+            &result,
         );
-        if decision.should_emit_snapshot {
+        if !corrections.is_empty() {
             info!(
                 room_id = self.room_id,
                 frame_id,
-                full_sync = decision.full_sync,
-                reason = decision.reason,
+                correction_count = corrections.len(),
                 entity_count = movement_state.entity_count(),
-                "movement snapshot queued"
+                "movement corrections queued"
             );
-            self.queue_snapshot_push(frame_id, decision.full_sync, decision.reason);
+            self.pending_broadcasts
+                .extend(snapshot_broadcasts(&self.room_id, corrections));
         }
     }
 
@@ -213,6 +208,19 @@ impl RoomLogic for MovementDemoLogic {
                 .collect(),
         })
         .unwrap_or_default()
+    }
+
+    fn movement_recovery_state(
+        &self,
+        requester_player_id: Option<&str>,
+        reason: MovementCorrectionReason,
+    ) -> Option<MovementRecoveryState> {
+        let movement_state = self.movement_state.as_ref()?;
+        Some(movement_state.recovery_state_for_player(
+            requester_player_id,
+            movement_state.last_snapshot_frame.max(self.tick_count as u32),
+            reason,
+        ))
     }
 
     fn take_pending_broadcasts(&mut self) -> Vec<RoomLogicBroadcast> {

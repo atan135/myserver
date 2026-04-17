@@ -518,7 +518,11 @@ pub async fn handle_move_input(
                         "frameId": request.frame_id,
                         "inputType": request.input_type,
                         "dirX": request.dir_x,
-                        "dirY": request.dir_y
+                        "dirY": request.dir_y,
+                        "hasClientState": request.has_client_state,
+                        "clientX": request.client_x,
+                        "clientY": request.client_y,
+                        "clientFrameId": request.client_frame_id
                     })),
                 )
                 .await;
@@ -698,6 +702,7 @@ pub async fn handle_room_reconnect(
                 waiting_frame_id: 0,
                 waiting_inputs: vec![],
                 input_delay_frames: 0,
+                movement_recovery: None,
             },
         )?;
         return Ok(());
@@ -725,6 +730,7 @@ pub async fn handle_room_reconnect(
                 waiting_frame_id: 0,
                 waiting_inputs: vec![],
                 input_delay_frames: 0,
+                movement_recovery: None,
             },
         )?;
         return Ok(());
@@ -752,6 +758,7 @@ pub async fn handle_room_reconnect(
                     waiting_frame_id: recovery.waiting_frame_id,
                     waiting_inputs: recovery.waiting_inputs,
                     input_delay_frames: recovery.input_delay_frames,
+                    movement_recovery: recovery.movement_recovery,
                 },
             )?;
             services
@@ -785,6 +792,7 @@ pub async fn handle_room_reconnect(
                     waiting_frame_id: 0,
                     waiting_inputs: vec![],
                     input_delay_frames: 0,
+                    movement_recovery: None,
                 },
             )?;
         }
@@ -837,6 +845,7 @@ pub async fn handle_join_as_observer(
                 waiting_frame_id: 0,
                 waiting_inputs: vec![],
                 input_delay_frames: 0,
+                movement_recovery: None,
             },
         )?;
         return Ok(());
@@ -864,6 +873,7 @@ pub async fn handle_join_as_observer(
                     waiting_frame_id: recovery.waiting_frame_id,
                     waiting_inputs: recovery.waiting_inputs,
                     input_delay_frames: recovery.input_delay_frames,
+                    movement_recovery: recovery.movement_recovery,
                 },
             )?;
             services
@@ -897,6 +907,7 @@ pub async fn handle_join_as_observer(
                     waiting_frame_id: 0,
                     waiting_inputs: vec![],
                     input_delay_frames: 0,
+                    movement_recovery: None,
                 },
             )?;
             services

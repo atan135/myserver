@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::core::logic::{RoomLogic, RoomLogicFactory};
+use crate::core::runtime::room_policy::RoomRuntimePolicy;
 use crate::core::system::{combat::SharedCombatCatalog, scene::SceneCatalog};
 
 use super::{
@@ -33,10 +34,17 @@ impl RoomLogicFactory for GameRoomLogicFactory {
     fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
         match policy_id {
             "combat_demo" => Box::new(CombatDemoLogic::new(self.combat_catalog.clone())),
-            "movement_demo" => Box::new(MovementDemoLogic::new(
-                self.scene_catalog.clone(),
-                self.movement_demo_scene_id,
-            )),
+            "movement_demo" => {
+                let policy = RoomRuntimePolicy::movement_demo();
+                Box::new(MovementDemoLogic::new(
+                    self.scene_catalog.clone(),
+                    self.movement_demo_scene_id,
+                    policy.movement_correction_interval_frames,
+                    policy.movement_correction_threshold,
+                    policy.movement_aoi_radius,
+                    policy.movement_aoi_enabled,
+                ))
+            }
             "persistent_world" => Box::new(PersistentWorldLogic { tick_count: 0 }),
             "disposable_match" => Box::new(DisposableMatchLogic { tick_count: 0 }),
             "sandbox" => Box::new(SandboxLogic { tick_count: 0 }),
