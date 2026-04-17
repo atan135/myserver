@@ -53,7 +53,10 @@ Protobuf 风格的编解码工具：
 ### messages.js
 消息编解码函数：
 - **编码器**: `encodeAuthReq`, `encodeRoomJoinReq`, `encodeRoomLeaveReq`, `encodeChatPrivateReq` 等
+- `encodeMoveInputReq()` 支持附带客户端预测状态：`{ x, y, frameId }`
 - **解码器**: `decodeByMessageType()` - 根据消息类型自动解码响应
+  - 已支持解码 `MovementSnapshotPush` / `MovementRejectPush` 的校正字段
+  - 已支持解码 `RoomReconnectRes` / `RoomJoinAsObserverRes` 的 `movementRecovery`
 
 ### client.js
 `TcpProtocolClient` 类：
@@ -157,6 +160,8 @@ Protobuf 风格的编解码工具：
 | `movement-dual-client-sync` | 双客户端移动同步验证 |
 | `movement-snapshot-throttle` | 快照节流验证（每3帧） |
 | `movement-face-to` | FaceTo 转向与 last input wins |
+| `movement-authoritative-correction` | 客户端预测漂移后，验证服务端下发强校正 |
+| `movement-reconnect-recovery` | movement_demo 断线重连，验证 `movement_recovery` 恢复数据 |
 | `movement-interactive` | 交互式双客户端移动同步（键盘控制） |
 
 ### 背包系统场景 (inventory.js)
@@ -189,6 +194,16 @@ node tools/mock-client/src/index.js --scenario movement-demo \
   --http-base-url http://127.0.0.1:3000 \
   --login-name test001 --password Passw0rd! \
   --room-id room-movement-demo --policy-id movement_demo
+
+# 客户端预测漂移 -> 权威强校正
+node tools/mock-client/src/index.js --scenario movement-authoritative-correction \
+  --http-base-url http://127.0.0.1:3000 \
+  --room-id room-movement-correction --policy-id movement_demo
+
+# movement_demo 断线重连恢复
+node tools/mock-client/src/index.js --scenario movement-reconnect-recovery \
+  --http-base-url http://127.0.0.1:3000 \
+  --room-id room-movement-reconnect --policy-id movement_demo
 
 # 全员掉线后 TTL 内双重连
 node tools/mock-client/src/index.js --scenario reconnect-all-disconnected \

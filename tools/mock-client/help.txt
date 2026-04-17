@@ -123,6 +123,16 @@ node tools/mock-client/src/index.js --scenario movement-snapshot-throttle --http
 # 验证 MoveDir 和 FaceTo 混用时 last input wins 行为
 node tools/mock-client/src/index.js --scenario movement-face-to --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-face-new2 --policy-id movement_demo
 
+# 18. 位移权威校正测试 (MOVEMENT_AUTHORITATIVE_CORRECTION)
+# 客户端故意上报一个与服务端权威位置偏差很大的预测位置
+# 期望收到 MovementSnapshotPush: correctionKind=STRONG, reasonCode=CLIENT_DRIFT
+node tools/mock-client/src/index.js --scenario movement-authoritative-correction --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-movement-correction --policy-id movement_demo
+
+# 19. 位移重连恢复测试 (MOVEMENT_RECONNECT_RECOVERY)
+# movement_demo 开始后断开连接，再用 ROOM_RECONNECT_REQ 重连
+# 期望 RoomReconnectRes 带 movementRecovery，且 reasonCode=RECONNECT_RECOVERY
+node tools/mock-client/src/index.js --scenario movement-reconnect-recovery --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-movement-reconnect --policy-id movement_demo
+
 # ---------- 断线重连测试 ----------
 
 # 13. 断线重连测试 (RECONNECT)
@@ -338,6 +348,8 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # movement-dual-client-sync | 双客户端移动同步验证
 # movement-snapshot-throttle | 快照节流验证（每3帧）
 # movement-face-to         | FaceTo 转向与 last input wins
+# movement-authoritative-correction | 客户端预测漂移后的权威强校正
+# movement-reconnect-recovery | movement_demo 断线重连恢复
 # combat-dual-client      | 双客户端 combat_demo 伤害联调
 # get-room-data            | 获取房间数据
 # get-room-data-in-room    | 在房间内获取数据
