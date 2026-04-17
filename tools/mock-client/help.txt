@@ -12,6 +12,8 @@
 # --login-name <name>        登录用户名
 # --password <pwd>           登录密码
 # --timeout-ms <ms>          超时毫秒 (默认 5000)
+# --policy-id <id>           房间策略，例如 movement_demo / combat_demo
+# --combat-skill-id <id>     combat-dual-client 使用的技能ID (默认 2)
 
 # ========== 邮件参数 ==========
 
@@ -90,28 +92,33 @@ node tools/mock-client/src/index.js --scenario start-game-ready-room --http-base
 #   - SILENT 帧（无输入）标记
 node tools/mock-client/src/index.js --scenario gameplay-roundtrip --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-gameplay
 
-# 12. movement_demo 联调 (MOVEMENT_DEMO)
+# 12. combat_demo 双客户端战斗联调 (COMBAT_DUAL_CLIENT)
+# clientA/clientB 入房并开始 combat_demo -> clientA 对 clientB 施法 -> 验证 damage 推送和快照掉血
+# 默认使用 skillId=2 (fireball)，因为开局射程足够覆盖对方
+node tools/mock-client/src/index.js --scenario combat-dual-client --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-combat-demo --policy-id combat_demo --combat-skill-id 2
+
+# 13. movement_demo 联调 (MOVEMENT_DEMO)
 # 单客户端登录 -> 以 movement_demo policy 入房 -> 开始游戏 -> 发送 MoveInputReq -> 观察 MovementSnapshotPush / MovementRejectPush
 # 可选参数：
 #   --policy-id movement_demo
 #   --move-frames 1,2,3,4,5
 node tools/mock-client/src/index.js --scenario movement-demo --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --room-id room-movement-demo --policy-id movement_demo
 
-# 13. 移动同步验证 (MOVEMENT_SYNC_VALIDATION)
+# 14. 移动同步验证 (MOVEMENT_SYNC_VALIDATION)
 # 测试 MoveDir(1,0) -> MoveStop -> MoveDir(0,1) 触发快照的完整流程
 # 验证：方向变化、moving状态、位置推进、快照触发条件
 node tools/mock-client/src/index.js --scenario movement-sync-validation --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-sync-new1 --policy-id movement_demo
 
-# 14. 双客户端移动同步 (MOVEMENT_DUAL_CLIENT_SYNC)
+# 15. 双客户端移动同步 (MOVEMENT_DUAL_CLIENT_SYNC)
 # 两个客户端加入同一房间 -> 各自移动 -> 验证位置 EPS=0.05
 node tools/mock-client/src/index.js --scenario movement-dual-client-sync --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-sync-multi1 --policy-id movement_demo
 
-# 15. 快照节流测试 (MOVEMENT_SNAPSHOT_THROTTLE)
+# 16. 快照节流测试 (MOVEMENT_SNAPSHOT_THROTTLE)
 # 验证每3帧发送一次快照（SNAPSHOT_INTERVAL_FRAMES=3）
 # 首帧 fullSync=true，后续 changed_count=0 && reject_count=0 时跳过
 node tools/mock-client/src/index.js --scenario movement-snapshot-throttle --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-throttle1 --policy-id movement_demo
 
-# 16. FaceTo 转向测试 (MOVEMENT_FACE_TO)
+# 17. FaceTo 转向测试 (MOVEMENT_FACE_TO)
 # 测试 FaceTo 输入在 FrameBundlePush 中正确携带
 # 验证 MoveDir 和 FaceTo 混用时 last input wins 行为
 node tools/mock-client/src/index.js --scenario movement-face-to --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-face-new2 --policy-id movement_demo
@@ -326,6 +333,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # movement-dual-client-sync | 双客户端移动同步验证
 # movement-snapshot-throttle | 快照节流验证（每3帧）
 # movement-face-to         | FaceTo 转向与 last input wins
+# combat-dual-client      | 双客户端 combat_demo 伤害联调
 # get-room-data            | 获取房间数据
 # get-room-data-in-room    | 在房间内获取数据
 # reconnect                | 断线重连

@@ -120,6 +120,7 @@ Protobuf 风格的编解码工具：
 | 场景 | 说明 |
 |------|------|
 | `gameplay-roundtrip` | 完整游戏流程：入房→准备→开始→输入→结束 |
+| `combat-dual-client` | 双客户端 `combat_demo` 联调：A 施法，B 掉血并验证快照 |
 | `movement-demo` | movement_demo 单客户端位移联调 |
 
 ### 聊天场景 (chat.js, interactive.js)
@@ -188,6 +189,12 @@ node tools/mock-client/src/index.js --scenario movement-demo \
   --login-name test001 --password Passw0rd! \
   --room-id room-movement-demo --policy-id movement_demo
 
+# combat_demo 双客户端联调
+node tools/mock-client/src/index.js --scenario combat-dual-client \
+  --http-base-url http://127.0.0.1:3000 \
+  --room-id room-combat-demo --policy-id combat_demo \
+  --combat-skill-id 2
+
 # 聊天测试
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
@@ -230,6 +237,7 @@ node tools/mock-client/src/index.js --scenario mail-send-and-notify \
 | `--timeout-ms` | 超时毫秒 | `5000` |
 | `--policy-id` | 入房时指定房间策略 | 空 |
 | `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |
+| `--combat-skill-id` | `combat-dual-client` 使用的技能 ID，默认 `2`(fireball) | `2` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
 | `--mail-id` | 邮件 ID（mail-get / mail-read / mail-claim） | 空 |
 | `--mail-player-id` | 邮件所属玩家 ID（mail-list / mail-read / mail-claim） | 空 |
