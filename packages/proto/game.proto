@@ -110,6 +110,7 @@ message FrameInput {
   string player_id = 1;
   string action = 2;
   string payload_json = 3;
+  uint32 frame_id = 4;
 }
 
 message FrameBundlePush {
@@ -206,6 +207,9 @@ message RoomJoinAsObserverRes {
   RoomSnapshot snapshot = 4;
   uint32 current_frame_id = 5;
   repeated FrameInput recent_inputs = 6;
+  uint32 waiting_frame_id = 7;
+  repeated FrameInput waiting_inputs = 8;
+  uint32 input_delay_frames = 9;
 }
 
 message RoomReconnectReq {
@@ -219,6 +223,9 @@ message RoomReconnectRes {
   RoomSnapshot snapshot = 4;
   uint32 current_frame_id = 5;
   repeated FrameInput recent_inputs = 6;
+  uint32 waiting_frame_id = 7;
+  repeated FrameInput waiting_inputs = 8;
+  uint32 input_delay_frames = 9;
 }
 
 message RoomMemberOfflinePush {

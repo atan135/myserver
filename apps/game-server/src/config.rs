@@ -7,6 +7,7 @@ pub struct Config {
     pub csv_dir: String,
     pub csv_reload_enabled: bool,
     pub csv_reload_interval_secs: u64,
+    pub room_cleanup_interval_secs: u64,
     pub admin_host: String,
     pub admin_port: u16,
     pub local_socket_name: String,
@@ -59,6 +60,11 @@ impl Config {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(3);
+        let room_cleanup_interval_secs = env::var("ROOM_CLEANUP_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(10);
         let admin_host = env::var("ADMIN_HOST").unwrap_or_else(|_| host.clone());
         let admin_port = env::var("ADMIN_PORT")
             .ok()
@@ -108,6 +114,7 @@ impl Config {
             csv_dir,
             csv_reload_enabled,
             csv_reload_interval_secs,
+            room_cleanup_interval_secs,
             admin_host,
             admin_port,
             local_socket_name,

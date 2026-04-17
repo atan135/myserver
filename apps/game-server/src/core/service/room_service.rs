@@ -633,7 +633,10 @@ pub async fn handle_disconnect_cleanup(
     );
 
     if let (Some(room_id), Some(player_id)) = (room_id, player_id) {
-        let leave_result = services.room_manager.leave_room(&room_id, &player_id).await;
+        let leave_result = services
+            .room_manager
+            .disconnect_room_member(&room_id, &player_id)
+            .await;
 
         if let Some(snapshot) = leave_result.snapshot {
             services
@@ -692,6 +695,9 @@ pub async fn handle_room_reconnect(
                 snapshot: None,
                 current_frame_id: 0,
                 recent_inputs: vec![],
+                waiting_frame_id: 0,
+                waiting_inputs: vec![],
+                input_delay_frames: 0,
             },
         )?;
         return Ok(());
@@ -716,6 +722,9 @@ pub async fn handle_room_reconnect(
                 snapshot: None,
                 current_frame_id: 0,
                 recent_inputs: vec![],
+                waiting_frame_id: 0,
+                waiting_inputs: vec![],
+                input_delay_frames: 0,
             },
         )?;
         return Ok(());
@@ -727,7 +736,8 @@ pub async fn handle_room_reconnect(
         .await;
 
     match reconnect_result {
-        Ok((snapshot, current_frame_id, recent_inputs)) => {
+        Ok(recovery) => {
+            let snapshot = recovery.snapshot.clone();
             connection.session.room_id = Some(room_id.clone());
             connection.queue_message(
                 MessageType::RoomReconnectRes,
@@ -737,8 +747,11 @@ pub async fn handle_room_reconnect(
                     room_id: room_id.clone(),
                     error_code: String::new(),
                     snapshot: Some(snapshot.clone()),
-                    current_frame_id,
-                    recent_inputs,
+                    current_frame_id: recovery.current_frame_id,
+                    recent_inputs: recovery.recent_inputs,
+                    waiting_frame_id: recovery.waiting_frame_id,
+                    waiting_inputs: recovery.waiting_inputs,
+                    input_delay_frames: recovery.input_delay_frames,
                 },
             )?;
             services
@@ -769,6 +782,9 @@ pub async fn handle_room_reconnect(
                     snapshot: None,
                     current_frame_id: 0,
                     recent_inputs: vec![],
+                    waiting_frame_id: 0,
+                    waiting_inputs: vec![],
+                    input_delay_frames: 0,
                 },
             )?;
         }
@@ -818,6 +834,9 @@ pub async fn handle_join_as_observer(
                 snapshot: None,
                 current_frame_id: 0,
                 recent_inputs: vec![],
+                waiting_frame_id: 0,
+                waiting_inputs: vec![],
+                input_delay_frames: 0,
             },
         )?;
         return Ok(());
@@ -829,7 +848,8 @@ pub async fn handle_join_as_observer(
         .await;
 
     match join_result {
-        Ok((snapshot, current_frame_id, recent_inputs)) => {
+        Ok(recovery) => {
+            let snapshot = recovery.snapshot.clone();
             connection.session.room_id = Some(room_id.clone());
             connection.queue_message(
                 MessageType::RoomJoinAsObserverRes,
@@ -839,8 +859,11 @@ pub async fn handle_join_as_observer(
                     room_id: room_id.clone(),
                     error_code: String::new(),
                     snapshot: Some(snapshot.clone()),
-                    current_frame_id,
-                    recent_inputs,
+                    current_frame_id: recovery.current_frame_id,
+                    recent_inputs: recovery.recent_inputs,
+                    waiting_frame_id: recovery.waiting_frame_id,
+                    waiting_inputs: recovery.waiting_inputs,
+                    input_delay_frames: recovery.input_delay_frames,
                 },
             )?;
             services
@@ -854,7 +877,8 @@ pub async fn handle_join_as_observer(
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "currentFrameId": current_frame_id
+                        "currentFrameId": recovery.current_frame_id,
+                        "waitingFrameId": recovery.waiting_frame_id
                     })),
                 )
                 .await;
@@ -870,6 +894,9 @@ pub async fn handle_join_as_observer(
                     snapshot: None,
                     current_frame_id: 0,
                     recent_inputs: vec![],
+                    waiting_frame_id: 0,
+                    waiting_inputs: vec![],
+                    input_delay_frames: 0,
                 },
             )?;
             services

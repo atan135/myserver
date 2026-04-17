@@ -1,5 +1,18 @@
 pub const DEFAULT_ROOM_POLICY_ID: &str = "default_match";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputWaitStrategy {
+    Strict,
+    Optimistic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingInputStrategy {
+    Empty,
+    RepeatLast,
+    DropAfterMisses,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomRuntimePolicy {
     pub policy_id: String,
@@ -16,6 +29,10 @@ pub struct RoomRuntimePolicy {
     pub retain_state_when_empty: bool,
     pub offline_ttl_secs: u64,
     pub snapshot_interval_frames: u32,
+    pub input_delay_frames: u32,
+    pub wait_timeout_ms: u64,
+    pub wait_strategy: InputWaitStrategy,
+    pub missing_input_strategy: MissingInputStrategy,
 }
 
 impl RoomRuntimePolicy {
@@ -35,6 +52,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: false,
             offline_ttl_secs: 60,
             snapshot_interval_frames: 30,
+            input_delay_frames: 2,
+            wait_timeout_ms: 150,
+            wait_strategy: InputWaitStrategy::Strict,
+            missing_input_strategy: MissingInputStrategy::RepeatLast,
         }
     }
 
@@ -54,6 +75,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: true,
             offline_ttl_secs: 300,
             snapshot_interval_frames: 30,
+            input_delay_frames: 2,
+            wait_timeout_ms: 150,
+            wait_strategy: InputWaitStrategy::Strict,
+            missing_input_strategy: MissingInputStrategy::RepeatLast,
         }
     }
 
@@ -73,6 +98,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: false,
             offline_ttl_secs: 60,
             snapshot_interval_frames: 30,
+            input_delay_frames: 2,
+            wait_timeout_ms: 150,
+            wait_strategy: InputWaitStrategy::Strict,
+            missing_input_strategy: MissingInputStrategy::RepeatLast,
         }
     }
 
@@ -92,6 +121,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: true,
             offline_ttl_secs: 120,
             snapshot_interval_frames: 30,
+            input_delay_frames: 2,
+            wait_timeout_ms: 120,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
         }
     }
 
@@ -111,6 +144,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: true,
             offline_ttl_secs: 120,
             snapshot_interval_frames: 15,
+            input_delay_frames: 2,
+            wait_timeout_ms: 100,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
         }
     }
 
@@ -130,6 +167,10 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: true,
             offline_ttl_secs: 120,
             snapshot_interval_frames: 10,
+            input_delay_frames: 2,
+            wait_timeout_ms: 100,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
         }
     }
 }

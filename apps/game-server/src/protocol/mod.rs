@@ -165,6 +165,7 @@ mod tests {
                 player_id: "player-a".to_string(),
                 action: "move".to_string(),
                 payload_json: "{\"x\":1}".to_string(),
+                frame_id: 12,
             }],
             is_silent_frame: false,
             snapshot: None,

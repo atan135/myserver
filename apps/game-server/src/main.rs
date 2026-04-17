@@ -91,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         csv_dir = %config.csv_dir,
         csv_reload_enabled = config.csv_reload_enabled,
         csv_reload_interval_secs = config.csv_reload_interval_secs,
+        room_cleanup_interval_secs = config.room_cleanup_interval_secs,
         mysql_enabled = config.mysql_enabled,
         game_addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),

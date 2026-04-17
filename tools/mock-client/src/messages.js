@@ -190,7 +190,8 @@ function decodeFrameInput(buffer) {
   return {
     playerId: readString(fields, 1),
     action: readString(fields, 2),
-    payloadJson: readString(fields, 3)
+    payloadJson: readString(fields, 3),
+    frameId: readUInt32(fields, 4) || 0
   };
 }
 
@@ -350,12 +351,21 @@ export function decodeByMessageType(messageType, body) {
     case MESSAGE_TYPE.ROOM_RECONNECT_RES:
     case MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_RES: {
       const recentInputsRaw = fields.get(6);
+      const waitingInputsRaw = fields.get(8);
       let recentInputs = [];
+      let waitingInputs = [];
       if (recentInputsRaw) {
         if (Array.isArray(recentInputsRaw)) {
           recentInputs = recentInputsRaw.map(decodeFrameInput);
         } else {
           recentInputs = [decodeFrameInput(recentInputsRaw)];
+        }
+      }
+      if (waitingInputsRaw) {
+        if (Array.isArray(waitingInputsRaw)) {
+          waitingInputs = waitingInputsRaw.map(decodeFrameInput);
+        } else {
+          waitingInputs = [decodeFrameInput(waitingInputsRaw)];
         }
       }
       return {
@@ -364,7 +374,10 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 3),
         snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null,
         currentFrameId: readUInt32(fields, 5) || 0,
-        recentInputs
+        recentInputs,
+        waitingFrameId: readUInt32(fields, 7) || 0,
+        waitingInputs,
+        inputDelayFrames: readUInt32(fields, 9) || 0
       };
     }
     case MESSAGE_TYPE.GET_ROOM_DATA_RES:

@@ -81,7 +81,11 @@ pub async fn run(
         combat_catalog,
     ));
     let shared_state = ServerSharedState {
-        room_manager: Arc::new(RoomManager::with_match_client(match_client, room_logic_factory)),
+        room_manager: Arc::new(RoomManager::with_match_client_and_cleanup_interval(
+            match_client,
+            room_logic_factory,
+            config.room_cleanup_interval_secs,
+        )),
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             max_body_len: config.max_body_len,

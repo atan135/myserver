@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -44,6 +44,14 @@ pub struct PlayerInputRecord {
     pub received_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingInputUpsert {
+    New,
+    Replaced,
+}
+
+pub type PendingFrameInputs = BTreeMap<u32, BTreeMap<String, PlayerInputRecord>>;
+
 pub struct Room {
     pub room_id: String,
     pub match_id: Option<String>,
@@ -51,7 +59,7 @@ pub struct Room {
     pub phase: RoomPhase,
     pub policy_id: String,
     pub current_frame: u32,
-    pub pending_inputs: Vec<PlayerInputRecord>,
+    pub pending_inputs: PendingFrameInputs,
     pub members: HashMap<String, RoomMemberState>,
     pub logic: Box<dyn RoomLogic>,
     pub created_at: Instant,
@@ -59,6 +67,9 @@ pub struct Room {
     pub empty_since: Option<Instant>,
     pub marked_for_destruction: bool,
     pub input_history: Vec<PlayerInputRecord>,
+    pub last_applied_inputs: HashMap<String, PlayerInputRecord>,
+    pub missing_input_streaks: HashMap<String, u32>,
+    pub wait_started_at: Option<Instant>,
     pub last_snapshot_frame: u32,
 }
 
@@ -77,7 +88,7 @@ impl Room {
             phase: RoomPhase::Waiting,
             policy_id,
             current_frame: 0,
-            pending_inputs: Vec::new(),
+            pending_inputs: BTreeMap::new(),
             members: HashMap::new(),
             logic,
             created_at: now,
@@ -85,6 +96,9 @@ impl Room {
             empty_since: None,
             marked_for_destruction: false,
             input_history: Vec::new(),
+            last_applied_inputs: HashMap::new(),
+            missing_input_streaks: HashMap::new(),
+            wait_started_at: None,
             last_snapshot_frame: 0,
         }
     }
@@ -170,6 +184,9 @@ impl Room {
             if member.role == MemberRole::Observer {
                 return Err("OBSERVER_CANNOT_SEND_INPUT");
             }
+            if member.offline {
+                return Err("ROOM_MEMBER_OFFLINE");
+            }
         }
 
         Ok(())
@@ -190,6 +207,7 @@ impl Room {
     pub fn reset_to_waiting(&mut self) {
         self.phase = RoomPhase::Waiting;
         self.pending_inputs.clear();
+        self.wait_started_at = None;
         for member in self.members.values_mut() {
             member.ready = false;
         }
@@ -289,6 +307,96 @@ impl Room {
             .iter()
             .filter(|i| i.frame_id >= from_frame && i.frame_id <= to_frame)
             .collect()
+    }
+
+    pub fn current_waiting_frame_id(&self) -> u32 {
+        self.current_frame.saturating_add(1)
+    }
+
+    pub fn ensure_wait_started(&mut self) {
+        if self.wait_started_at.is_none() {
+            self.wait_started_at = Some(Instant::now());
+        }
+    }
+
+    pub fn reset_wait_started(&mut self) {
+        self.wait_started_at = Some(Instant::now());
+    }
+
+    pub fn upsert_pending_input(&mut self, input: PlayerInputRecord) -> PendingInputUpsert {
+        let frame_inputs = self
+            .pending_inputs
+            .entry(input.frame_id)
+            .or_default();
+        let outcome = if frame_inputs.contains_key(&input.player_id) {
+            PendingInputUpsert::Replaced
+        } else {
+            PendingInputUpsert::New
+        };
+        frame_inputs.insert(input.player_id.clone(), input);
+        outcome
+    }
+
+    pub fn pending_input_count_for_frame(&self, frame_id: u32) -> usize {
+        self.pending_inputs
+            .get(&frame_id)
+            .map(|inputs| inputs.len())
+            .unwrap_or_default()
+    }
+
+    pub fn pending_inputs_for_frame(&self, frame_id: u32) -> Vec<&PlayerInputRecord> {
+        self.pending_inputs
+            .get(&frame_id)
+            .map(|inputs| inputs.values().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn take_pending_inputs_for_frame(&mut self, frame_id: u32) -> BTreeMap<String, PlayerInputRecord> {
+        self.pending_inputs.remove(&frame_id).unwrap_or_default()
+    }
+
+    pub fn clear_runtime_inputs(&mut self) {
+        self.current_frame = 0;
+        self.pending_inputs.clear();
+        self.input_history.clear();
+        self.last_applied_inputs.clear();
+        self.missing_input_streaks.clear();
+        self.wait_started_at = Some(Instant::now());
+    }
+
+    pub fn player_input_participants(&self) -> Vec<String> {
+        let mut players = self
+            .members
+            .values()
+            .filter(|member| !member.offline && member.role == MemberRole::Player)
+            .map(|member| member.player_id.clone())
+            .collect::<Vec<_>>();
+        players.sort();
+        players
+    }
+
+    pub fn last_applied_input_for_player(&self, player_id: &str) -> Option<&PlayerInputRecord> {
+        self.last_applied_inputs.get(player_id)
+    }
+
+    pub fn set_last_applied_input(&mut self, player_id: &str, input: PlayerInputRecord) {
+        self.last_applied_inputs.insert(player_id.to_string(), input);
+    }
+
+    pub fn reset_missing_input_streak(&mut self, player_id: &str) {
+        self.missing_input_streaks.insert(player_id.to_string(), 0);
+    }
+
+    pub fn increment_missing_input_streak(&mut self, player_id: &str) -> u32 {
+        let next = self
+            .missing_input_streaks
+            .get(player_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.missing_input_streaks
+            .insert(player_id.to_string(), next);
+        next
     }
 
     pub fn online_members(&self) -> Vec<&RoomMemberState> {

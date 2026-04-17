@@ -139,6 +139,8 @@ pub struct FrameInput {
     pub action: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub payload_json: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "4")]
+    pub frame_id: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FrameBundlePush {
@@ -292,6 +294,12 @@ pub struct RoomJoinAsObserverRes {
     pub current_frame_id: u32,
     #[prost(message, repeated, tag = "6")]
     pub recent_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(uint32, tag = "7")]
+    pub waiting_frame_id: u32,
+    #[prost(message, repeated, tag = "8")]
+    pub waiting_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(uint32, tag = "9")]
+    pub input_delay_frames: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomReconnectReq {
@@ -312,6 +320,12 @@ pub struct RoomReconnectRes {
     pub current_frame_id: u32,
     #[prost(message, repeated, tag = "6")]
     pub recent_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(uint32, tag = "7")]
+    pub waiting_frame_id: u32,
+    #[prost(message, repeated, tag = "8")]
+    pub waiting_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(uint32, tag = "9")]
+    pub input_delay_frames: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {

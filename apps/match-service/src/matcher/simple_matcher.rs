@@ -312,7 +312,7 @@ impl SimpleMatcher {
             .set_status(player_id, PlayerMatchStatus::Matched)
             .await;
 
-        let should_abort = task.active_players.is_empty();
+        let should_abort = task.active_players.is_empty() && reason != "disconnect";
 
         info!(
             player_id = %player_id,
@@ -603,4 +603,89 @@ pub type SharedSimpleMatcher = Arc<SimpleMatcher>;
 
 pub fn new_simple_matcher(config: Config) -> SharedSimpleMatcher {
     Arc::new(SimpleMatcher::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{PlayerMatchContext, PlayerMatchStatus};
+
+    async fn seed_in_room_match(
+        matcher: &SimpleMatcher,
+        match_id: &str,
+        room_id: &str,
+        players: &[&str],
+        mode: &str,
+    ) {
+        matcher
+            .pool()
+            .create_match_task(
+                match_id.to_string(),
+                mode.to_string(),
+                players.iter().map(|player| (*player).to_string()).collect(),
+            )
+            .await;
+
+        for player_id in players {
+            matcher
+                .player_state()
+                .set_context(
+                    player_id,
+                    PlayerMatchContext {
+                        match_id: match_id.to_string(),
+                        mode: mode.to_string(),
+                        room_id: Some(room_id.to_string()),
+                        token: Some(format!("token-{player_id}")),
+                    },
+                )
+                .await;
+            matcher
+                .player_state()
+                .set_status(player_id, PlayerMatchStatus::InRoom)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnecting_last_active_player_does_not_abort_match() {
+        let matcher = SimpleMatcher::new(Config::from_env());
+        seed_in_room_match(&matcher, "match-1", "room-1", &["player-a", "player-b"], "1v1").await;
+
+        let left_a = matcher
+            .player_left("match-1", "player-a", "disconnect")
+            .await
+            .unwrap();
+        let left_b = matcher
+            .player_left("match-1", "player-b", "disconnect")
+            .await
+            .unwrap();
+
+        assert!(!left_a);
+        assert!(!left_b);
+
+        let task = matcher
+            .pool()
+            .get_match_task("match-1")
+            .await
+            .expect("match task should still exist");
+        assert!(task.active_players.is_empty());
+    }
+
+    #[tokio::test]
+    async fn normal_leave_still_aborts_when_last_active_player_leaves() {
+        let matcher = SimpleMatcher::new(Config::from_env());
+        seed_in_room_match(&matcher, "match-2", "room-2", &["player-a", "player-b"], "1v1").await;
+
+        let left_a = matcher
+            .player_left("match-2", "player-a", "normal")
+            .await
+            .unwrap();
+        let left_b = matcher
+            .player_left("match-2", "player-b", "normal")
+            .await
+            .unwrap();
+
+        assert!(!left_a);
+        assert!(left_b);
+    }
 }
