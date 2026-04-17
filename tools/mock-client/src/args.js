@@ -55,6 +55,7 @@ const DEFAULT_OPTIONS = {
   mode: "1v1",
   policyId: "",
   moveFrames: [1, 2, 3, 4, 5],
+  combatSkillId: 2,
   // Mail parameters
   mailId: "",
   mailPlayerId: "",
@@ -199,6 +200,10 @@ export function parseArgs(argv) {
           .split(",")
           .map((value) => Number.parseInt(value, 10))
           .filter((value) => Number.isFinite(value) && value > 0);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--combat-skill-id":
+        result.combatSkillId = Number.parseInt(collectOptionValue(argv, index).value, 10);
         index = collectOptionValue(argv, index).nextIndex;
         break;
       // Mail arguments

@@ -100,6 +100,7 @@ export const SCENARIO = {
   TWO_CLIENT_ROOM: "two-client-room",
   START_GAME_SINGLE_CLIENT: "start-game-single-client",
   START_GAME_READY_ROOM: "start-game-ready-room",
+  COMBAT_DUAL_CLIENT: "combat-dual-client",
   GAMEPLAY_ROUNDTRIP: "gameplay-roundtrip",
   MOVEMENT_DEMO: "movement-demo",
   MOVEMENT_SYNC_VALIDATION: "movement-sync-validation",

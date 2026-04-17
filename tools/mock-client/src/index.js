@@ -20,6 +20,7 @@ import {
   runCreateMatchedRoomAndJoin,
   // Game scenarios
   runGameplayRoundtrip,
+  runCombatDualClient,
   // Movement scenarios
   runMovementDemo,
   runMovementSyncValidation,
@@ -71,6 +72,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.GAMEPLAY_ROUNDTRIP) {
     await runGameplayRoundtrip(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.COMBAT_DUAL_CLIENT) {
+    await runCombatDualClient(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

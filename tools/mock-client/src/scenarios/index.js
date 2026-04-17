@@ -22,6 +22,7 @@ export {
 
 // Game scenarios
 export { runGameplayRoundtrip } from "./game.js";
+export { runCombatDualClient } from "./combat.js";
 export {
   runMovementDemo,
   runMovementSyncValidation,
