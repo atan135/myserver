@@ -29,7 +29,9 @@ export {
   runMovementSyncValidation,
   runMovementDualClientSync,
   runMovementSnapshotThrottle,
-  runMovementFaceTo
+  runMovementFaceTo,
+  runMovementAuthoritativeCorrection,
+  runMovementReconnectRecovery
 } from "./movement.js";
 
 // Chat scenarios

@@ -68,13 +68,25 @@ export function encodePlayerInputReq(frameId, action, payloadJson) {
   ]);
 }
 
-export function encodeMoveInputReq(frameId, inputType, dirX = 0, dirY = 0) {
-  return Buffer.concat([
+export function encodeMoveInputReq(frameId, inputType, dirX = 0, dirY = 0, clientState = null) {
+  const fields = [
     encodeUInt32Field(1, frameId),
     encodeInt32Field(2, inputType),
     encodeFloatField(3, dirX),
     encodeFloatField(4, dirY)
-  ]);
+  ];
+
+  if (clientState) {
+    const hasClientState = clientState.hasClientState ?? true;
+    fields.push(encodeBoolField(5, hasClientState));
+    if (hasClientState) {
+      fields.push(encodeFloatField(6, clientState.x ?? 0));
+      fields.push(encodeFloatField(7, clientState.y ?? 0));
+      fields.push(encodeUInt32Field(8, clientState.frameId ?? frameId));
+    }
+  }
+
+  return Buffer.concat(fields);
 }
 
 export function encodeRoomEndReq(reason) {
@@ -195,6 +207,14 @@ function decodeFrameInput(buffer) {
   };
 }
 
+function decodeRepeatedMessage(fields, fieldNumber, decoder) {
+  const raw = fields.get(fieldNumber);
+  if (!raw) {
+    return [];
+  }
+  return Array.isArray(raw) ? raw.map(decoder) : [decoder(raw)];
+}
+
 function decodeEntityTransform(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
@@ -223,24 +243,26 @@ function decodeRoomMember(buffer) {
 
 function decodeRoomSnapshot(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
-  const membersRaw = fields.get(4);
-  let members = [];
-
-  if (membersRaw) {
-    if (Array.isArray(membersRaw)) {
-      members = membersRaw.map(decodeRoomMember);
-    } else {
-      members = [decodeRoomMember(membersRaw)];
-    }
-  }
-
   return {
     roomId: readString(fields, 1),
     ownerPlayerId: readString(fields, 2),
     state: readString(fields, 3),
-    members,
+    members: decodeRepeatedMessage(fields, 4, decodeRoomMember),
     currentFrameId: readUInt32(fields, 5) || 0,
     gameState: readString(fields, 6) || ""
+  };
+}
+
+function decodeMovementRecoveryState(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    frameId: readUInt32(fields, 1) || 0,
+    entities: decodeRepeatedMessage(fields, 2, decodeEntityTransform),
+    correctionKind: readUInt32(fields, 3) || 0,
+    reasonCode: readUInt32(fields, 4) || 0,
+    referenceFrameId: readUInt32(fields, 5) || 0,
+    aoiEnabled: readBool(fields, 6),
+    aoiRadius: readFloat(fields, 7)
   };
 }
 
@@ -350,34 +372,17 @@ export function decodeByMessageType(messageType, body) {
       };
     case MESSAGE_TYPE.ROOM_RECONNECT_RES:
     case MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_RES: {
-      const recentInputsRaw = fields.get(6);
-      const waitingInputsRaw = fields.get(8);
-      let recentInputs = [];
-      let waitingInputs = [];
-      if (recentInputsRaw) {
-        if (Array.isArray(recentInputsRaw)) {
-          recentInputs = recentInputsRaw.map(decodeFrameInput);
-        } else {
-          recentInputs = [decodeFrameInput(recentInputsRaw)];
-        }
-      }
-      if (waitingInputsRaw) {
-        if (Array.isArray(waitingInputsRaw)) {
-          waitingInputs = waitingInputsRaw.map(decodeFrameInput);
-        } else {
-          waitingInputs = [decodeFrameInput(waitingInputsRaw)];
-        }
-      }
       return {
         ok: readBool(fields, 1),
         roomId: readString(fields, 2),
         errorCode: readString(fields, 3),
         snapshot: fields.get(4) ? decodeRoomSnapshot(fields.get(4)) : null,
         currentFrameId: readUInt32(fields, 5) || 0,
-        recentInputs,
+        recentInputs: decodeRepeatedMessage(fields, 6, decodeFrameInput),
         waitingFrameId: readUInt32(fields, 7) || 0,
-        waitingInputs,
-        inputDelayFrames: readUInt32(fields, 9) || 0
+        waitingInputs: decodeRepeatedMessage(fields, 8, decodeFrameInput),
+        inputDelayFrames: readUInt32(fields, 9) || 0,
+        movementRecovery: fields.get(10) ? decodeMovementRecoveryState(fields.get(10)) : null
       };
     }
     case MESSAGE_TYPE.GET_ROOM_DATA_RES:
@@ -400,20 +405,11 @@ export function decodeByMessageType(messageType, body) {
         payloadJson: readString(fields, 5)
       };
     case MESSAGE_TYPE.FRAME_BUNDLE_PUSH: {
-      const inputsRaw = fields.get(4);
-      let inputs = [];
-      if (inputsRaw) {
-        if (Array.isArray(inputsRaw)) {
-          inputs = inputsRaw.map(decodeFrameInput);
-        } else {
-          inputs = [decodeFrameInput(inputsRaw)];
-        }
-      }
       return {
         roomId: readString(fields, 1),
         frameId: readUInt32(fields, 2),
         fps: readUInt32(fields, 3),
-        inputs,
+        inputs: decodeRepeatedMessage(fields, 4, decodeFrameInput),
         isSilentFrame: readBool(fields, 5),
         snapshot: fields.get(6) ? decodeRoomSnapshot(fields.get(6)) : null
       };
@@ -425,21 +421,16 @@ export function decodeByMessageType(messageType, body) {
         reason: readString(fields, 3)
       };
     case MESSAGE_TYPE.MOVEMENT_SNAPSHOT_PUSH: {
-      const entitiesRaw = fields.get(3);
-      let entities = [];
-      if (entitiesRaw) {
-        if (Array.isArray(entitiesRaw)) {
-          entities = entitiesRaw.map(decodeEntityTransform);
-        } else {
-          entities = [decodeEntityTransform(entitiesRaw)];
-        }
-      }
       return {
         roomId: readString(fields, 1),
         frameId: readUInt32(fields, 2),
-        entities,
+        entities: decodeRepeatedMessage(fields, 3, decodeEntityTransform),
         fullSync: readBool(fields, 4),
-        reason: readString(fields, 5)
+        reason: readString(fields, 5),
+        correctionKind: readUInt32(fields, 6) || 0,
+        reasonCode: readUInt32(fields, 7) || 0,
+        targetPlayerIds: readStringList(fields, 8),
+        referenceFrameId: readUInt32(fields, 9) || 0
       };
     }
     case MESSAGE_TYPE.MOVEMENT_REJECT_PUSH:
@@ -448,7 +439,15 @@ export function decodeByMessageType(messageType, body) {
         frameId: readUInt32(fields, 2),
         playerId: readString(fields, 3),
         errorCode: readString(fields, 4),
-        corrected: fields.get(5) ? decodeEntityTransform(fields.get(5)) : null
+        corrected: fields.get(5) ? decodeEntityTransform(fields.get(5)) : null,
+        correctionKind: readUInt32(fields, 6) || 0,
+        reasonCode: readUInt32(fields, 7) || 0,
+        referenceFrameId: readUInt32(fields, 8) || 0,
+        hasClientState: readBool(fields, 9),
+        clientX: readFloat(fields, 10),
+        clientY: readFloat(fields, 11),
+        serverX: readFloat(fields, 12),
+        serverY: readFloat(fields, 13)
       };
     case MESSAGE_TYPE.CREATE_MATCHED_ROOM_RES:
       return {

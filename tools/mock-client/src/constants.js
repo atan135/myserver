@@ -90,6 +90,24 @@ export const MOVE_INPUT_TYPE = {
   FACE_TO: 3
 };
 
+export const MOVEMENT_CORRECTION_KIND = {
+  INCREMENTAL: 0,
+  FULL_SYNC: 1,
+  STRONG: 2,
+  RECOVERY: 3
+};
+
+export const MOVEMENT_CORRECTION_REASON = {
+  UNKNOWN: 0,
+  PERIODIC: 1,
+  CLIENT_DRIFT: 2,
+  MOVEMENT_REJECTED: 3,
+  COLLISION_BLOCKED: 4,
+  GAME_STARTED: 5,
+  RECONNECT_RECOVERY: 6,
+  OBSERVER_RECOVERY: 7
+};
+
 // Test scenarios
 export const SCENARIO = {
   HAPPY: "happy",
@@ -107,6 +125,8 @@ export const SCENARIO = {
   MOVEMENT_DUAL_CLIENT_SYNC: "movement-dual-client-sync",
   MOVEMENT_SNAPSHOT_THROTTLE: "movement-snapshot-throttle",
   MOVEMENT_FACE_TO: "movement-face-to",
+  MOVEMENT_AUTHORITATIVE_CORRECTION: "movement-authoritative-correction",
+  MOVEMENT_RECONNECT_RECOVERY: "movement-reconnect-recovery",
   GET_ROOM_DATA: "get-room-data",
   GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
   RECONNECT: "reconnect",

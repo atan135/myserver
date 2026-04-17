@@ -36,6 +36,17 @@ function formatSnapshot(label, push) {
   return lines.join("\n");
 }
 
+async function reserveFutureInputFrame(client, timeoutMs, label) {
+  const bundle = await client.readUntil(
+    timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH,
+    `${label}.frameBundle`
+  );
+  const frameId = bundle.frameId + 2;
+  console.log(`[${client.label}.${label}] currentFrame=${bundle.frameId}, reservedInputFrame=${frameId}`);
+  return frameId;
+}
+
 export async function runMovementInteractive(options) {
   // Generate unique room ID if not provided, to avoid "ROOM_ALREADY_IN_GAME" from previous runs
   const roomId = options.roomId && options.roomId !== "room-default"
@@ -156,16 +167,15 @@ export async function runMovementInteractive(options) {
     if (snapA) console.log("\n" + formatSnapshot("[clientA.snapshot]", snapA));
     if (snapB) console.log("\n" + formatSnapshot("[clientB.snapshot]", snapB));
 
-    // Track frame ID for movement inputs
-    let nextFrameId = 1;
     let inputSeq = 100;
 
     // Helper: send movement from clientA
     async function sendMoveFromA(dirX, dirY) {
+      const frameId = await reserveFutureInputFrame(clientA, options.timeoutMs, "interactiveMoveA");
       await clientA.send(
         MESSAGE_TYPE.MOVE_INPUT_REQ,
         inputSeq++,
-        encodeMoveInputReq(nextFrameId++, MOVE_INPUT_TYPE.MOVE_DIR, dirX, dirY)
+        encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_DIR, dirX, dirY)
       );
       try {
         await clientA.readUntil(options.timeoutMs,
@@ -177,10 +187,11 @@ export async function runMovementInteractive(options) {
 
     // Helper: send stop from clientA
     async function sendStopFromA() {
+      const frameId = await reserveFutureInputFrame(clientA, options.timeoutMs, "interactiveStopA");
       await clientA.send(
         MESSAGE_TYPE.MOVE_INPUT_REQ,
         inputSeq++,
-        encodeMoveInputReq(nextFrameId++, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
+        encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
       );
       try {
         await clientA.readUntil(options.timeoutMs,
@@ -242,10 +253,11 @@ export async function runMovementInteractive(options) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
         if (autoMoveCount < 3) {
           // ClientB does a simple move right
+          const frameId = await reserveFutureInputFrame(clientB, options.timeoutMs, `interactiveAutoMoveB${autoMoveCount + 1}`);
           await clientB.send(
             MESSAGE_TYPE.MOVE_INPUT_REQ,
             200 + autoMoveCount,
-            encodeMoveInputReq(autoMoveCount + 1, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0)
+            encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0)
           );
           try {
             await clientB.readUntil(options.timeoutMs,
@@ -256,10 +268,11 @@ export async function runMovementInteractive(options) {
           autoMoveCount++;
         } else if (autoMoveCount === 3) {
           // Stop clientB
+          const frameId = await reserveFutureInputFrame(clientB, options.timeoutMs, "interactiveAutoStopB");
           await clientB.send(
             MESSAGE_TYPE.MOVE_INPUT_REQ,
             210,
-            encodeMoveInputReq(10, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
+            encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
           );
           autoMoveCount++;
         }

@@ -1,6 +1,12 @@
-import { MESSAGE_TYPE, MOVE_INPUT_TYPE } from "../constants.js";
+import {
+  MESSAGE_TYPE,
+  MOVE_INPUT_TYPE,
+  MOVEMENT_CORRECTION_KIND,
+  MOVEMENT_CORRECTION_REASON
+} from "../constants.js";
 import {
   encodeMoveInputReq,
+  encodeRoomReconnectReq,
   encodeRoomJoinReq,
   encodeRoomLeaveReq,
   encodeRoomReadyReq,
@@ -26,9 +32,20 @@ export const SERVER_FPS = 20;
 
 export function formatMovementSnapshot(label, push) {
   console.log(
-    `${label}: frameId=${push.frameId}, entities=${push.entities.length}, fullSync=${push.fullSync}, reason=${push.reason}`
+    `${label}: frameId=${push.frameId}, entities=${push.entities.length}, fullSync=${push.fullSync}, reason=${push.reason}, correctionKind=${push.correctionKind}, reasonCode=${push.reasonCode}, referenceFrameId=${push.referenceFrameId}, targets=${push.targetPlayerIds.join(",")}`
   );
   for (const entity of push.entities) {
+    console.log(
+      `  └─ [${entity.playerId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
+    );
+  }
+}
+
+export function formatMovementRecovery(label, recovery) {
+  console.log(
+    `${label}: frameId=${recovery.frameId}, entities=${recovery.entities.length}, correctionKind=${recovery.correctionKind}, reasonCode=${recovery.reasonCode}, referenceFrameId=${recovery.referenceFrameId}, aoiEnabled=${recovery.aoiEnabled}, aoiRadius=${recovery.aoiRadius}`
+  );
+  for (const entity of recovery.entities) {
     console.log(
       `  └─ [${entity.playerId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
     );
@@ -106,6 +123,113 @@ export async function drainUntilSnapshot(client, timeoutMs) {
   throw new Error("Timeout draining until next snapshot");
 }
 
+export async function waitForMovementSnapshotWhere(client, timeoutMs, predicate, label = "movementSnapshot") {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(100, deadline - Date.now());
+    let packet;
+    try {
+      packet = await client.readNextPacket(remaining);
+    } catch {
+      continue;
+    }
+    if (!packet) {
+      continue;
+    }
+
+    if (packet.messageType === MESSAGE_TYPE.MOVEMENT_SNAPSHOT_PUSH) {
+      const decoded = decodeByMessageType(packet.messageType, packet.body);
+      formatMovementSnapshot(`[${client.label}.${label}]`, decoded);
+      if (predicate(decoded)) {
+        return decoded;
+      }
+      continue;
+    }
+
+    if (packet.messageType === MESSAGE_TYPE.MOVEMENT_REJECT_PUSH) {
+      printResponse(`${client.label}.${label}.reject`, packet);
+      continue;
+    }
+
+    if (packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
+      const decoded = decodeByMessageType(packet.messageType, packet.body);
+      console.log(`${client.label}.${label}.frameBundle:`, JSON.stringify(decoded, null, 2));
+      continue;
+    }
+
+    if (packet.messageType === MESSAGE_TYPE.ERROR_RES) {
+      const decoded = decodeByMessageType(packet.messageType, packet.body);
+      console.log(`${client.label}.${label}.error:`, JSON.stringify(decoded, null, 2));
+      throw new Error(`Server returned ${decoded.errorCode} while waiting for movement snapshot`);
+    }
+
+    printResponse(`${client.label}.${label}.misc`, packet);
+  }
+
+  throw new Error(`Timeout waiting for matching MovementSnapshotPush after ${timeoutMs}ms`);
+}
+
+async function waitForAnyFrameBundle(client, timeoutMs, label = "frameBundle") {
+  return client.readUntil(
+    timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH,
+    label
+  );
+}
+
+async function reserveFutureInputFrame(client, timeoutMs, label = "reserveInputFrame") {
+  const bundle = await waitForAnyFrameBundle(client, timeoutMs, `${label}.bundle`);
+  const frameId = bundle.frameId + 2;
+  console.log(`[${client.label}.${label}] currentFrame=${bundle.frameId}, reservedInputFrame=${frameId}`);
+  return frameId;
+}
+
+async function setupMovementRoom(client, options, login, roomLabel = client.label) {
+  await authenticateClient(client, options, login, 1);
+
+  const policyId = options.policyId || "movement_demo";
+  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, policyId));
+  const joinRes = printResponse(`${roomLabel}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  if (!joinRes.ok) {
+    throw new Error(`${roomLabel} room join failed: ${joinRes.errorCode}`);
+  }
+
+  printResponse(`${roomLabel}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+  const readyRes = printResponse(`${roomLabel}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  if (!readyRes.ok) {
+    throw new Error(`${roomLabel} room ready failed: ${readyRes.errorCode}`);
+  }
+
+  printResponse(`${roomLabel}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+
+  await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
+  const startRes = printResponse(`${roomLabel}.roomStart`, await client.readNextPacket(options.timeoutMs));
+  if (!startRes.ok) {
+    throw new Error(`${roomLabel} room start failed: ${startRes.errorCode}`);
+  }
+
+  printResponse(`${roomLabel}.roomStatePush(gameStarted)`, await client.readNextPacket(options.timeoutMs));
+
+  const initialSnapshot = await waitForMovementSnapshot(client, options.timeoutMs * 3);
+  formatMovementSnapshot(`[${roomLabel}.initialSnapshot]`, initialSnapshot);
+  return initialSnapshot;
+}
+
+async function leaveMovementRoom(client, options, seq = 300) {
+  await delayBeforeFinalLeave(client, options.timeoutMs, 1000);
+  await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, seq, encodeRoomLeaveReq());
+  const leaveRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === seq,
+    "roomLeave"
+  );
+  if (!leaveRes.ok) {
+    throw new Error(`room leave failed: ${leaveRes.errorCode}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Scenario: MOVEMENT_DEMO
 // Single client joins movement_demo room, sends MoveDir/MoveStop/Reverse,
@@ -142,8 +266,9 @@ export async function runMovementDemo(client, options, login) {
   let sawReject = false;
   const frames = options.moveFrames?.length ? options.moveFrames : [1, 2, 3, 4, 5];
 
-  for (const frameId of frames) {
-    const reqSeq = 100 + frameId;
+  for (const [index] of frames.entries()) {
+    const frameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, `movementDemo.move${index + 1}`);
+    const reqSeq = 100 + index + 1;
     await client.send(
       MESSAGE_TYPE.MOVE_INPUT_REQ,
       reqSeq,
@@ -159,10 +284,11 @@ export async function runMovementDemo(client, options, login) {
     }
   }
 
+  const stopFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "movementDemo.stop");
   await client.send(
     MESSAGE_TYPE.MOVE_INPUT_REQ,
     200,
-    encodeMoveInputReq(frames.at(-1) + 1, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
+    encodeMoveInputReq(stopFrameId, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0)
   );
   const stopRes = await client.readUntil(
     options.timeoutMs,
@@ -173,10 +299,11 @@ export async function runMovementDemo(client, options, login) {
     throw new Error(`movement demo move stop failed: ${stopRes.errorCode}`);
   }
 
+  const reverseFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "movementDemo.reverse");
   await client.send(
     MESSAGE_TYPE.MOVE_INPUT_REQ,
     201,
-    encodeMoveInputReq(frames.at(-1) + 2, MOVE_INPUT_TYPE.MOVE_DIR, -1, 0)
+    encodeMoveInputReq(reverseFrameId, MOVE_INPUT_TYPE.MOVE_DIR, -1, 0)
   );
   const reverseRes = await client.readUntil(
     options.timeoutMs,
@@ -281,7 +408,8 @@ export async function runMovementSyncValidation(options) {
     // -------------------------------------------------------------------
     // 1. MoveDir(1,0) — direction becomes (1,0), moving=true, position advances
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(1, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
+    const moveFrame1 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "syncValidation.move1");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(moveFrame1, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
     const moveRes1 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100,
@@ -307,7 +435,8 @@ export async function runMovementSyncValidation(options) {
     // 2. MoveStop — does NOT emit MovementSnapshotPush (position unchanged).
     //    Confirm via FrameBundlePush carry-check.
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 101, encodeMoveInputReq(2, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0));
+    const stopFrame = await reserveFutureInputFrame(client, options.timeoutMs * 2, "syncValidation.stop");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 101, encodeMoveInputReq(stopFrame, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0));
     const stopRes = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 101,
@@ -346,7 +475,8 @@ export async function runMovementSyncValidation(options) {
     // 3. MoveDir(0,1) — changes y position, triggers MovementSnapshotPush.
     //    Also confirms previous moving=false state was held.
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 102, encodeMoveInputReq(3, MOVE_INPUT_TYPE.MOVE_DIR, 0, 1));
+    const moveFrame2 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "syncValidation.move2");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 102, encodeMoveInputReq(moveFrame2, MOVE_INPUT_TYPE.MOVE_DIR, 0, 1));
     const moveRes2 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 102,
@@ -456,14 +586,15 @@ export async function runMovementDualClientSync(options) {
     console.log(`[ASSERT] clientB spawn: (${entityB0.x.toFixed(3)}, ${entityB0.y.toFixed(3)})`);
 
     // ClientA moves right (1,0) for 3 frames
-    for (let frame = 1; frame <= 3; frame++) {
-      await clientA.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100 + frame, encodeMoveInputReq(frame, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
+    for (let step = 1; step <= 3; step++) {
+      const frameId = await reserveFutureInputFrame(clientA, options.timeoutMs * 2, `dualSync.move${step}`);
+      await clientA.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100 + step, encodeMoveInputReq(frameId, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
       const res = await clientA.readUntil(
         options.timeoutMs,
-        (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100 + frame,
-        `moveDirRes(${frame})`
+        (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100 + step,
+        `moveDirRes(${step})`
       );
-      if (!res.ok) throw new Error(`clientA MoveDir frame ${frame} failed: ${res.errorCode}`);
+      if (!res.ok) throw new Error(`clientA MoveDir step ${step} failed: ${res.errorCode}`);
     }
 
     // Wait for snapshots on both clients and compare entity positions
@@ -562,7 +693,8 @@ export async function runMovementSnapshotThrottle(options) {
     }
 
     // Send MoveDir, collect several snapshots, verify throttle interval
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(1, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
+    const throttleFrame = await reserveFutureInputFrame(client, options.timeoutMs * 2, "snapshotThrottle.move");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(throttleFrame, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
     const res0 = await client.readUntil(options.timeoutMs, (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100, "moveRes0");
     if (!res0.ok) throw new Error(`MoveDir failed: ${res0.errorCode}`);
 
@@ -659,7 +791,8 @@ export async function runMovementFaceTo(options) {
     // -------------------------------------------------------------------
     // 1. FaceTo(0,1) — face up (confirmed via bundle)
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(1, MOVE_INPUT_TYPE.FACE_TO, 0, 1));
+    const faceFrame1 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "faceTo.face1");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(faceFrame1, MOVE_INPUT_TYPE.FACE_TO, 0, 1));
     const res1 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100,
@@ -672,7 +805,8 @@ export async function runMovementFaceTo(options) {
     // 2. MoveDir(1,0) — triggers snapshot; direction becomes (1,0)
     //    because MoveDir OVERWRITES the direction set by prior FaceTo.
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 101, encodeMoveInputReq(2, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
+    const faceMoveFrame1 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "faceTo.move1");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 101, encodeMoveInputReq(faceMoveFrame1, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
     const res2 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 101,
@@ -695,7 +829,8 @@ export async function runMovementFaceTo(options) {
     // -------------------------------------------------------------------
     // 3. MoveStop, then FaceTo(-1,0)
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 102, encodeMoveInputReq(3, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0));
+    const stopFrame = await reserveFutureInputFrame(client, options.timeoutMs * 2, "faceTo.stop");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 102, encodeMoveInputReq(stopFrame, MOVE_INPUT_TYPE.MOVE_STOP, 0, 0));
     const resStop = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 102,
@@ -723,7 +858,8 @@ export async function runMovementFaceTo(options) {
       }
     }
 
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 103, encodeMoveInputReq(4, MOVE_INPUT_TYPE.FACE_TO, -1, 0));
+    const faceFrame2 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "faceTo.face2");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 103, encodeMoveInputReq(faceFrame2, MOVE_INPUT_TYPE.FACE_TO, -1, 0));
     const res3 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 103,
@@ -736,7 +872,8 @@ export async function runMovementFaceTo(options) {
     // 4. MoveDir(0,1) — triggers snapshot; direction becomes (0,1)
     //    because MoveDir OVERWRITES the direction set by prior FaceTo.
     // -------------------------------------------------------------------
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 104, encodeMoveInputReq(5, MOVE_INPUT_TYPE.MOVE_DIR, 0, 1));
+    const faceMoveFrame2 = await reserveFutureInputFrame(client, options.timeoutMs * 2, "faceTo.move2");
+    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 104, encodeMoveInputReq(faceMoveFrame2, MOVE_INPUT_TYPE.MOVE_DIR, 0, 1));
     const res4 = await client.readUntil(
       options.timeoutMs,
       (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 104,
@@ -766,5 +903,210 @@ export async function runMovementFaceTo(options) {
     if (!leaveRes.ok) throw new Error(`room leave failed: ${leaveRes.errorCode}`);
   } finally {
     client.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: MOVEMENT_AUTHORITATIVE_CORRECTION
+// Client sends predicted position far from server authority and expects
+// a strong correction targeted back to itself.
+// ---------------------------------------------------------------------------
+
+export async function runMovementAuthoritativeCorrection(options) {
+  const login = await fetchTicket(options, { guestId: `movement-correction-${Date.now()}` });
+  console.log("=".repeat(60));
+  console.log("MOVEMENT_AUTHORITATIVE_CORRECTION - START");
+  console.log("=".repeat(60));
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = new TcpProtocolClient(options, "client");
+  await client.connect();
+  try {
+    const initialSnapshot = await setupMovementRoom(client, options, login, "client");
+    const selfEntity = initialSnapshot.entities.find((entity) => entity.playerId === login.playerId);
+    if (!selfEntity) {
+      throw new Error(`initial entity not found for player ${login.playerId}`);
+    }
+    const inputFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "authoritativeCorrection");
+
+    const reqSeq = 100;
+    await client.send(
+      MESSAGE_TYPE.MOVE_INPUT_REQ,
+      reqSeq,
+      encodeMoveInputReq(inputFrameId, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0, {
+        x: selfEntity.x + 99,
+        y: selfEntity.y + 77,
+        frameId: inputFrameId
+      })
+    );
+    const moveRes = await client.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && packet.seq === reqSeq,
+      "moveAuthoritativeCorrectionRes"
+    );
+    if (!moveRes.ok) {
+      throw new Error(`movement authoritative correction input failed: ${moveRes.errorCode}`);
+    }
+
+    const correction = await waitForMovementSnapshotWhere(
+      client,
+      options.timeoutMs * 2,
+      (snapshot) =>
+        snapshot.correctionKind === MOVEMENT_CORRECTION_KIND.STRONG &&
+        snapshot.reasonCode === MOVEMENT_CORRECTION_REASON.CLIENT_DRIFT &&
+        snapshot.targetPlayerIds.includes(login.playerId),
+      "authoritativeCorrection"
+    );
+
+    const correctedSelf = correction.entities.find((entity) => entity.playerId === login.playerId);
+    if (!correctedSelf) {
+      throw new Error("strong correction snapshot missing self entity");
+    }
+    if (correction.referenceFrameId !== correction.frameId) {
+      throw new Error(
+        `expected strong correction referenceFrameId == frameId, got ${correction.referenceFrameId} vs ${correction.frameId}`
+      );
+    }
+
+    console.log("[ASSERT] strong authoritative correction received:", JSON.stringify({
+      frameId: correction.frameId,
+      correctionKind: correction.correctionKind,
+      reasonCode: correction.reasonCode,
+      targetPlayerIds: correction.targetPlayerIds,
+      correctedPosition: {
+        x: correctedSelf.x,
+        y: correctedSelf.y
+      }
+    }, null, 2));
+
+    await leaveMovementRoom(client, options);
+    console.log("\n" + "=".repeat(60));
+    console.log("MOVEMENT_AUTHORITATIVE_CORRECTION - ALL ASSERTIONS PASSED");
+    console.log("=".repeat(60));
+  } finally {
+    client.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: MOVEMENT_RECONNECT_RECOVERY
+// Client disconnects in movement_demo and reconnects, expecting structured
+// movement_recovery data in RoomReconnectRes.
+// ---------------------------------------------------------------------------
+
+export async function runMovementReconnectRecovery(options) {
+  const login = await fetchTicket(options, { guestId: `movement-reconnect-${Date.now()}` });
+  console.log("=".repeat(60));
+  console.log("MOVEMENT_RECONNECT_RECOVERY - START");
+  console.log("=".repeat(60));
+  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+
+  const client = new TcpProtocolClient(options, "client");
+  let reconnectClient = null;
+  await client.connect();
+  try {
+    const initialSnapshot = await setupMovementRoom(client, options, login, "client");
+    const selfEntity = initialSnapshot.entities.find((entity) => entity.playerId === login.playerId);
+    if (!selfEntity) {
+      throw new Error(`initial entity not found for player ${login.playerId}`);
+    }
+    const inputFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "reconnectRecovery");
+
+    const moveSeq = 100;
+    await client.send(
+      MESSAGE_TYPE.MOVE_INPUT_REQ,
+      moveSeq,
+      encodeMoveInputReq(inputFrameId, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0, {
+        x: selfEntity.x,
+        y: selfEntity.y,
+        frameId: inputFrameId
+      })
+    );
+    const moveRes = await client.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && packet.seq === moveSeq,
+      "moveBeforeReconnect"
+    );
+    if (!moveRes.ok) {
+      throw new Error(`movement reconnect pre-move failed: ${moveRes.errorCode}`);
+    }
+
+    await waitForMovementSnapshotWhere(
+      client,
+      options.timeoutMs * 4,
+      (snapshot) =>
+        snapshot.entities.some((entity) => entity.playerId === login.playerId && entity.x > selfEntity.x),
+      "preReconnectSnapshot"
+    );
+
+    console.log("Simulating disconnect before reconnect recovery validation...");
+    client.close();
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    reconnectClient = new TcpProtocolClient(options, "clientReconnect");
+    await reconnectClient.connect();
+    await authenticateClient(reconnectClient, options, login, 200);
+    await reconnectClient.send(
+      MESSAGE_TYPE.ROOM_RECONNECT_REQ,
+      201,
+      encodeRoomReconnectReq(login.playerId)
+    );
+    const reconnectRes = await reconnectClient.readUntil(
+      options.timeoutMs * 2,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_RECONNECT_RES && packet.seq === 201,
+      "roomReconnect"
+    );
+
+    if (!reconnectRes.ok) {
+      throw new Error(`movement reconnect failed: ${reconnectRes.errorCode}`);
+    }
+    if (!reconnectRes.movementRecovery) {
+      throw new Error("expected movementRecovery in reconnect response");
+    }
+
+    const recovery = reconnectRes.movementRecovery;
+    formatMovementRecovery("[clientReconnect.movementRecovery]", recovery);
+
+    if (recovery.correctionKind !== MOVEMENT_CORRECTION_KIND.RECOVERY) {
+      throw new Error(`expected recovery correctionKind, got ${recovery.correctionKind}`);
+    }
+    if (recovery.reasonCode !== MOVEMENT_CORRECTION_REASON.RECONNECT_RECOVERY) {
+      throw new Error(`expected reconnect recovery reasonCode, got ${recovery.reasonCode}`);
+    }
+    if (recovery.entities.length === 0) {
+      throw new Error("expected movement recovery entities");
+    }
+
+    const recoveredSelf = recovery.entities.find((entity) => entity.playerId === login.playerId);
+    if (!recoveredSelf) {
+      throw new Error(`movement recovery missing self entity ${login.playerId}`);
+    }
+
+    console.log("[ASSERT] reconnect movement recovery received:", JSON.stringify({
+      roomId: reconnectRes.roomId,
+      currentFrameId: reconnectRes.currentFrameId,
+      waitingFrameId: reconnectRes.waitingFrameId,
+      inputDelayFrames: reconnectRes.inputDelayFrames,
+      recovery: {
+        frameId: recovery.frameId,
+        correctionKind: recovery.correctionKind,
+        reasonCode: recovery.reasonCode,
+        referenceFrameId: recovery.referenceFrameId,
+        aoiEnabled: recovery.aoiEnabled,
+        aoiRadius: recovery.aoiRadius,
+        selfPosition: {
+          x: recoveredSelf.x,
+          y: recoveredSelf.y
+        }
+      }
+    }, null, 2));
+
+    await leaveMovementRoom(reconnectClient, options, 301);
+    console.log("\n" + "=".repeat(60));
+    console.log("MOVEMENT_RECONNECT_RECOVERY - ALL ASSERTIONS PASSED");
+    console.log("=".repeat(60));
+  } finally {
+    client.close();
+    reconnectClient?.close();
   }
 }

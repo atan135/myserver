@@ -28,6 +28,8 @@ import {
   runMovementDualClientSync,
   runMovementSnapshotThrottle,
   runMovementFaceTo,
+  runMovementAuthoritativeCorrection,
+  runMovementReconnectRecovery,
   runMovementInteractive,
   // Chat scenarios
   runChatPrivate,
@@ -118,6 +120,18 @@ async function main() {
 
   if (options.scenario === SCENARIO.MOVEMENT_FACE_TO) {
     await runMovementFaceTo(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_AUTHORITATIVE_CORRECTION) {
+    await runMovementAuthoritativeCorrection(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.MOVEMENT_RECONNECT_RECOVERY) {
+    await runMovementReconnectRecovery(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }
