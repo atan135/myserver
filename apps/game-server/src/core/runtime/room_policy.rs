@@ -113,6 +113,25 @@ impl RoomRuntimePolicy {
             snapshot_interval_frames: 15,
         }
     }
+
+    pub fn combat_demo() -> Self {
+        Self {
+            policy_id: "combat_demo".to_string(),
+            max_members: 32,
+            min_start_players: 1,
+            silent_room_fps: 1,
+            idle_room_fps: 10,
+            active_room_fps: 20,
+            busy_room_fps: 30,
+            busy_room_player_threshold: 4,
+            destroy_enabled: true,
+            destroy_when_empty: false,
+            empty_ttl_secs: 300,
+            retain_state_when_empty: true,
+            offline_ttl_secs: 120,
+            snapshot_interval_frames: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +149,7 @@ impl Default for RoomPolicyRegistry {
         policies.insert("disposable_match".to_string(), RoomRuntimePolicy::disposable_match());
         policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
         policies.insert("movement_demo".to_string(), RoomRuntimePolicy::movement_demo());
+        policies.insert("combat_demo".to_string(), RoomRuntimePolicy::combat_demo());
 
         Self {
             default_policy,

@@ -1,3 +1,4 @@
+pub mod combat_demo;
 pub mod disposable_match;
 pub mod factory;
 pub mod movement_demo;
@@ -5,6 +6,7 @@ pub mod persistent_world;
 pub mod sandbox;
 pub mod test_room;
 
+pub use combat_demo::CombatDemoLogic;
 pub use disposable_match::DisposableMatchLogic;
 pub use factory::GameRoomLogicFactory;
 pub use movement_demo::MovementDemoLogic;

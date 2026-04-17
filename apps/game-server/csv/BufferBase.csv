@@ -1,0 +1,7 @@
+Id,Code,Name,BuffType,MaxStacks,DurationFrames,IntervalFrames,EffectScript,CanDispel,Description
+int,string,string,string,int,int,int,string,int,string
+1,burn,灼烧,Dot,1,180,30,"DamagePeriodic,Fixed,5,0",1,每秒造成持续伤害
+2,shield,护盾,Buff,1,300,0,"ModifyDefense,Fixed,0,5",1,提升防御能力
+3,slow,减速,Debuff,3,120,0,"ModifySpeed,Fixed,0,-20",1,降低移动速度
+4,attack_up,攻击强化,Buff,5,180,0,"ModifyAttack,Fixed,0,10",1,提高攻击属性
+5,regen,回复,Hot,1,180,30,"HealPeriodic,Fixed,0,5",1,持续恢复生命

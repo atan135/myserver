@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::core::config_table::{CsvLoadError, CsvTableLoader};
+use crate::csv_code::bufferbase::BufferBase;
 use crate::csv_code::itemtable::ItemTable;
 use crate::csv_code::scenemonsterspawn::SceneMonsterSpawn;
 use crate::csv_code::sceneportal::ScenePortal;
 use crate::csv_code::sceneregion::SceneRegion;
 use crate::csv_code::scenespawnpoint::SceneSpawnPoint;
 use crate::csv_code::scenetable::SceneTable;
+use crate::csv_code::skillbase::SkillBase;
 use crate::csv_code::testtable_100::TestTable100;
 use crate::csv_code::testtable_110::TestTable110;
 
@@ -20,6 +22,8 @@ const SCENEMONSTERSPAWN_FILE: &str = "SceneMonsterSpawn.csv";
 const TESTTABLE_100_FILE: &str = "TestTable_100.csv";
 const TESTTABLE_110_FILE: &str = "TestTable_110.csv";
 const ITEMTABLE_FILE: &str = "ItemTable.csv";
+const SKILLBASE_FILE: &str = "SkillBase.csv";
+const BUFFERBASE_FILE: &str = "BufferBase.csv";
 
 #[derive(Clone)]
 pub struct ConfigTables {
@@ -31,6 +35,8 @@ pub struct ConfigTables {
     pub testtable_100: Arc<TestTable100>,
     pub testtable_110: Arc<TestTable110>,
     pub item_table: Arc<ItemTable>,
+    pub skillbase: Arc<SkillBase>,
+    pub bufferbase: Arc<BufferBase>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -43,6 +49,8 @@ pub struct ConfigTableRowCounts {
     pub testtable_100: usize,
     pub testtable_110: usize,
     pub itemtable: usize,
+    pub skillbase: usize,
+    pub bufferbase: usize,
 }
 
 impl ConfigTables {
@@ -57,6 +65,8 @@ impl ConfigTables {
         let testtable_100 = TestTable100::load_from_csv(&csv_dir.join(TESTTABLE_100_FILE))?;
         let testtable_110 = TestTable110::load_from_csv(&csv_dir.join(TESTTABLE_110_FILE))?;
         let itemtable = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
+        let skillbase = SkillBase::load_from_csv(&csv_dir.join(SKILLBASE_FILE))?;
+        let bufferbase = BufferBase::load_from_csv(&csv_dir.join(BUFFERBASE_FILE))?;
 
         Ok(Self {
             scenetable: Arc::new(scenetable),
@@ -67,6 +77,8 @@ impl ConfigTables {
             testtable_100: Arc::new(testtable_100),
             testtable_110: Arc::new(testtable_110),
             item_table: Arc::new(itemtable),
+            skillbase: Arc::new(skillbase),
+            bufferbase: Arc::new(bufferbase),
         })
     }
 
@@ -127,6 +139,18 @@ impl ConfigTables {
             self.item_table.clone()
         };
 
+        let skillbase = if changed_files.contains(SKILLBASE_FILE) {
+            Arc::new(SkillBase::load_from_csv(&csv_dir.join(SKILLBASE_FILE))?)
+        } else {
+            self.skillbase.clone()
+        };
+
+        let bufferbase = if changed_files.contains(BUFFERBASE_FILE) {
+            Arc::new(BufferBase::load_from_csv(&csv_dir.join(BUFFERBASE_FILE))?)
+        } else {
+            self.bufferbase.clone()
+        };
+
         Ok(Self {
             scenetable,
             scenespawnpoint,
@@ -136,6 +160,8 @@ impl ConfigTables {
             testtable_100,
             testtable_110,
             item_table: itemtable,
+            skillbase,
+            bufferbase,
         })
     }
 
@@ -149,6 +175,8 @@ impl ConfigTables {
             csv_dir.join(TESTTABLE_100_FILE),
             csv_dir.join(TESTTABLE_110_FILE),
             csv_dir.join(ITEMTABLE_FILE),
+            csv_dir.join(SKILLBASE_FILE),
+            csv_dir.join(BUFFERBASE_FILE),
         ]
     }
 
@@ -162,6 +190,8 @@ impl ConfigTables {
             testtable_100: self.testtable_100.rows.len(),
             testtable_110: self.testtable_110.rows.len(),
             itemtable: self.item_table.rows.len(),
+            skillbase: self.skillbase.rows.len(),
+            bufferbase: self.bufferbase.rows.len(),
         }
     }
 }

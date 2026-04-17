@@ -18,6 +18,7 @@ use crate::core::player::{PlayerManager, MySqlPlayerStore};
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, inventory_service, room_service};
+use crate::core::system::combat::{CsvCombatCatalog, SharedCombatCatalog};
 use crate::core::system::scene::SceneCatalog;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
@@ -68,6 +69,8 @@ pub async fn run(
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("scene");
     let scene_catalog = Arc::new(SceneCatalog::load_from_dir(&scene_dir, tables_snapshot.as_ref())?);
+    let combat_catalog: SharedCombatCatalog =
+        Arc::new(CsvCombatCatalog::from_tables(tables_snapshot.as_ref())?);
     let movement_demo_scene_id = scene_catalog
         .scene_id_by_code("grassland_01")
         .or_else(|| scene_catalog.scenes.keys().min().copied())
@@ -75,6 +78,7 @@ pub async fn run(
     let room_logic_factory: SharedRoomLogicFactory = Arc::new(GameRoomLogicFactory::new(
         scene_catalog,
         movement_demo_scene_id,
+        combat_catalog,
     ));
     let shared_state = ServerSharedState {
         room_manager: Arc::new(RoomManager::with_match_client(match_client, room_logic_factory)),

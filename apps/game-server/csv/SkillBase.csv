@@ -1,0 +1,7 @@
+Id,Code,Name,CooldownFrames,CastFrames,Range,TargetType,EffectScript,Description
+int,string,string,int,int,float,string,string,string
+1,basic_attack,普通攻击,30,0,50,Enemy,"Damage,Fixed,10,0,0,0,0,0",基础近战攻击
+2,fireball,火球术,90,0,300,Enemy,"Damage,Fixed,50,0,0,0,30,0",远程范围伤害
+3,heal,治疗术,120,0,200,Ally,"Heal,Fixed,0,80,0,0,0,0",单体恢复生命
+4,charge,冲锋,60,0,150,Enemy,"Damage,Fixed,20,0,0,0,0,0|Knockback,Fixed,0,0,0,0,0,100",造成伤害并击退
+5,burn,灼烧,0,0,50,Enemy,"Damage,Fixed,5,0,0,0,0,0|ApplyBuff,Fixed,0,0,1,180,0,0",命中后附加灼烧

@@ -111,6 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         testtable_100_rows = row_counts.testtable_100,
         testtable_110_rows = row_counts.testtable_110,
         itemtable_rows = row_counts.itemtable,
+        skillbase_rows = row_counts.skillbase,
+        bufferbase_rows = row_counts.bufferbase,
         "csv config tables loaded"
     );
 

@@ -61,6 +61,8 @@ pub fn spawn_hot_reload_task(runtime: ConfigTableRuntime, interval: Duration) ->
                         changed_files = changed_labels.join(","),
                         testtable_100_rows = counts.testtable_100,
                         testtable_110_rows = counts.testtable_110,
+                        skillbase_rows = counts.skillbase,
+                        bufferbase_rows = counts.bufferbase,
                         "csv config hot reload succeeded"
                     );
                 }
