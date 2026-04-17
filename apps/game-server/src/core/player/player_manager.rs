@@ -182,9 +182,7 @@ mod tests {
     use super::*;
 
     fn create_disabled_store() -> MySqlPlayerStore {
-        MySqlPlayerStore {
-            pool: None,
-        }
+        MySqlPlayerStore::new_disabled()
     }
 
     #[tokio::test]

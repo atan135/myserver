@@ -258,6 +258,7 @@ impl Default for PlayerAttr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::inventory::{EquipSlot, Item};
 
     #[test]
     fn test_attr_panel_add() {
