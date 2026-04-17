@@ -82,11 +82,33 @@ enum MoveInputType {
   MOVE_INPUT_TYPE_FACE_TO = 3;
 }
 
+enum MovementCorrectionKind {
+  MOVEMENT_CORRECTION_KIND_INCREMENTAL = 0;
+  MOVEMENT_CORRECTION_KIND_FULL_SYNC = 1;
+  MOVEMENT_CORRECTION_KIND_STRONG = 2;
+  MOVEMENT_CORRECTION_KIND_RECOVERY = 3;
+}
+
+enum MovementCorrectionReason {
+  MOVEMENT_CORRECTION_REASON_UNKNOWN = 0;
+  MOVEMENT_CORRECTION_REASON_PERIODIC = 1;
+  MOVEMENT_CORRECTION_REASON_CLIENT_DRIFT = 2;
+  MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED = 3;
+  MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED = 4;
+  MOVEMENT_CORRECTION_REASON_GAME_STARTED = 5;
+  MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY = 6;
+  MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY = 7;
+}
+
 message MoveInputReq {
   uint32 frame_id = 1;
   MoveInputType input_type = 2;
   float dir_x = 3;
   float dir_y = 4;
+  bool has_client_state = 5;
+  float client_x = 6;
+  float client_y = 7;
+  uint32 client_frame_id = 8;
 }
 
 message MoveInputRes {
@@ -186,6 +208,10 @@ message MovementSnapshotPush {
   repeated EntityTransform entities = 3;
   bool full_sync = 4;
   string reason = 5;
+  MovementCorrectionKind correction_kind = 6;
+  MovementCorrectionReason reason_code = 7;
+  repeated string target_player_ids = 8;
+  uint32 reference_frame_id = 9;
 }
 
 message MovementRejectPush {
@@ -194,6 +220,24 @@ message MovementRejectPush {
   string player_id = 3;
   string error_code = 4;
   EntityTransform corrected = 5;
+  MovementCorrectionKind correction_kind = 6;
+  MovementCorrectionReason reason_code = 7;
+  uint32 reference_frame_id = 8;
+  bool has_client_state = 9;
+  float client_x = 10;
+  float client_y = 11;
+  float server_x = 12;
+  float server_y = 13;
+}
+
+message MovementRecoveryState {
+  uint32 frame_id = 1;
+  repeated EntityTransform entities = 2;
+  MovementCorrectionKind correction_kind = 3;
+  MovementCorrectionReason reason_code = 4;
+  uint32 reference_frame_id = 5;
+  bool aoi_enabled = 6;
+  float aoi_radius = 7;
 }
 
 message RoomJoinAsObserverReq {
@@ -210,6 +254,7 @@ message RoomJoinAsObserverRes {
   uint32 waiting_frame_id = 7;
   repeated FrameInput waiting_inputs = 8;
   uint32 input_delay_frames = 9;
+  MovementRecoveryState movement_recovery = 10;
 }
 
 message RoomReconnectReq {
@@ -226,6 +271,7 @@ message RoomReconnectRes {
   uint32 waiting_frame_id = 7;
   repeated FrameInput waiting_inputs = 8;
   uint32 input_delay_frames = 9;
+  MovementRecoveryState movement_recovery = 10;
 }
 
 message RoomMemberOfflinePush {

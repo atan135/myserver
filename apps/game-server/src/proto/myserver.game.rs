@@ -105,6 +105,14 @@ pub struct MoveInputReq {
     pub dir_x: f32,
     #[prost(float, tag = "4")]
     pub dir_y: f32,
+    #[prost(bool, tag = "5")]
+    pub has_client_state: bool,
+    #[prost(float, tag = "6")]
+    pub client_x: f32,
+    #[prost(float, tag = "7")]
+    pub client_y: f32,
+    #[prost(uint32, tag = "8")]
+    pub client_frame_id: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MoveInputRes {
@@ -261,6 +269,14 @@ pub struct MovementSnapshotPush {
     pub full_sync: bool,
     #[prost(string, tag = "5")]
     pub reason: ::prost::alloc::string::String,
+    #[prost(enumeration = "MovementCorrectionKind", tag = "6")]
+    pub correction_kind: i32,
+    #[prost(enumeration = "MovementCorrectionReason", tag = "7")]
+    pub reason_code: i32,
+    #[prost(string, repeated, tag = "8")]
+    pub target_player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "9")]
+    pub reference_frame_id: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MovementRejectPush {
@@ -274,6 +290,39 @@ pub struct MovementRejectPush {
     pub error_code: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
     pub corrected: ::core::option::Option<EntityTransform>,
+    #[prost(enumeration = "MovementCorrectionKind", tag = "6")]
+    pub correction_kind: i32,
+    #[prost(enumeration = "MovementCorrectionReason", tag = "7")]
+    pub reason_code: i32,
+    #[prost(uint32, tag = "8")]
+    pub reference_frame_id: u32,
+    #[prost(bool, tag = "9")]
+    pub has_client_state: bool,
+    #[prost(float, tag = "10")]
+    pub client_x: f32,
+    #[prost(float, tag = "11")]
+    pub client_y: f32,
+    #[prost(float, tag = "12")]
+    pub server_x: f32,
+    #[prost(float, tag = "13")]
+    pub server_y: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MovementRecoveryState {
+    #[prost(uint32, tag = "1")]
+    pub frame_id: u32,
+    #[prost(message, repeated, tag = "2")]
+    pub entities: ::prost::alloc::vec::Vec<EntityTransform>,
+    #[prost(enumeration = "MovementCorrectionKind", tag = "3")]
+    pub correction_kind: i32,
+    #[prost(enumeration = "MovementCorrectionReason", tag = "4")]
+    pub reason_code: i32,
+    #[prost(uint32, tag = "5")]
+    pub reference_frame_id: u32,
+    #[prost(bool, tag = "6")]
+    pub aoi_enabled: bool,
+    #[prost(float, tag = "7")]
+    pub aoi_radius: f32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomJoinAsObserverReq {
@@ -300,6 +349,8 @@ pub struct RoomJoinAsObserverRes {
     pub waiting_inputs: ::prost::alloc::vec::Vec<FrameInput>,
     #[prost(uint32, tag = "9")]
     pub input_delay_frames: u32,
+    #[prost(message, optional, tag = "10")]
+    pub movement_recovery: ::core::option::Option<MovementRecoveryState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomReconnectReq {
@@ -326,6 +377,8 @@ pub struct RoomReconnectRes {
     pub waiting_inputs: ::prost::alloc::vec::Vec<FrameInput>,
     #[prost(uint32, tag = "9")]
     pub input_delay_frames: u32,
+    #[prost(message, optional, tag = "10")]
+    pub movement_recovery: ::core::option::Option<MovementRecoveryState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {
@@ -579,6 +632,90 @@ impl MoveInputType {
             "MOVE_INPUT_TYPE_MOVE_DIR" => Some(Self::MoveDir),
             "MOVE_INPUT_TYPE_MOVE_STOP" => Some(Self::MoveStop),
             "MOVE_INPUT_TYPE_FACE_TO" => Some(Self::FaceTo),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MovementCorrectionKind {
+    Incremental = 0,
+    FullSync = 1,
+    Strong = 2,
+    Recovery = 3,
+}
+impl MovementCorrectionKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Incremental => "MOVEMENT_CORRECTION_KIND_INCREMENTAL",
+            Self::FullSync => "MOVEMENT_CORRECTION_KIND_FULL_SYNC",
+            Self::Strong => "MOVEMENT_CORRECTION_KIND_STRONG",
+            Self::Recovery => "MOVEMENT_CORRECTION_KIND_RECOVERY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MOVEMENT_CORRECTION_KIND_INCREMENTAL" => Some(Self::Incremental),
+            "MOVEMENT_CORRECTION_KIND_FULL_SYNC" => Some(Self::FullSync),
+            "MOVEMENT_CORRECTION_KIND_STRONG" => Some(Self::Strong),
+            "MOVEMENT_CORRECTION_KIND_RECOVERY" => Some(Self::Recovery),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MovementCorrectionReason {
+    Unknown = 0,
+    Periodic = 1,
+    ClientDrift = 2,
+    MovementRejected = 3,
+    CollisionBlocked = 4,
+    GameStarted = 5,
+    ReconnectRecovery = 6,
+    ObserverRecovery = 7,
+}
+impl MovementCorrectionReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "MOVEMENT_CORRECTION_REASON_UNKNOWN",
+            Self::Periodic => "MOVEMENT_CORRECTION_REASON_PERIODIC",
+            Self::ClientDrift => "MOVEMENT_CORRECTION_REASON_CLIENT_DRIFT",
+            Self::MovementRejected => "MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED",
+            Self::CollisionBlocked => "MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED",
+            Self::GameStarted => "MOVEMENT_CORRECTION_REASON_GAME_STARTED",
+            Self::ReconnectRecovery => "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY",
+            Self::ObserverRecovery => "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MOVEMENT_CORRECTION_REASON_UNKNOWN" => Some(Self::Unknown),
+            "MOVEMENT_CORRECTION_REASON_PERIODIC" => Some(Self::Periodic),
+            "MOVEMENT_CORRECTION_REASON_CLIENT_DRIFT" => Some(Self::ClientDrift),
+            "MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED" => {
+                Some(Self::MovementRejected)
+            }
+            "MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED" => {
+                Some(Self::CollisionBlocked)
+            }
+            "MOVEMENT_CORRECTION_REASON_GAME_STARTED" => Some(Self::GameStarted),
+            "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY" => {
+                Some(Self::ReconnectRecovery)
+            }
+            "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY" => {
+                Some(Self::ObserverRecovery)
+            }
             _ => None,
         }
     }
