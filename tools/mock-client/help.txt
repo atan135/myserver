@@ -127,7 +127,12 @@ node tools/mock-client/src/index.js --scenario movement-face-to --http-base-url 
 
 # 13. 断线重连测试 (RECONNECT)
 # clientA入房 -> clientB入房 -> 开始游戏 -> clientA断开(不发送ROOM_LEAVE) -> clientA重连
+# 注意：如果断线期间房主已转移，场景会接受新的房主，而不再要求 clientA 必须继续是房主
 node tools/mock-client/src/index.js --scenario reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-reconnect
+
+# 14. 全员掉线后 TTL 内双重连 (RECONNECT_ALL_DISCONNECTED)
+# clientA入房 -> clientB入房 -> 开始游戏 -> 两端都直接断开(不发送ROOM_LEAVE) -> TTL 内先后重连
+node tools/mock-client/src/index.js --scenario reconnect-all-disconnected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id test-reconnect-all
 
 # ---------- 匹配系统测试 ----------
 
@@ -337,6 +342,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # get-room-data            | 获取房间数据
 # get-room-data-in-room    | 在房间内获取数据
 # reconnect                | 断线重连
+# reconnect-all-disconnected | 全员掉线后 TTL 内双重连
 # create-matched-room      | 创建匹配房间 (通知MatchService)
 # create-matched-room-and-join | 创建匹配房间并让所有玩家加入 (完整回调测试)
 # chat-private             | 私聊

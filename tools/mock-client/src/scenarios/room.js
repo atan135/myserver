@@ -101,6 +101,26 @@ export async function waitForFrameBundle(client, timeoutMs, expectedAction = nul
   );
 }
 
+async function waitForMessageType(client, timeoutMs, expectedMessageType, label) {
+  return client.readUntil(
+    timeoutMs,
+    (packet) => packet.messageType === expectedMessageType,
+    label
+  );
+}
+
+async function waitForRoomStartRes(client, timeoutMs, label = "roomStart") {
+  return waitForMessageType(client, timeoutMs, MESSAGE_TYPE.ROOM_START_RES, label);
+}
+
+async function waitForRoomStatePush(client, timeoutMs, expectedEvent, label = "roomStatePush") {
+  return client.readUntil(
+    timeoutMs,
+    (packet, decoded) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH && decoded.event === expectedEvent,
+    label
+  );
+}
+
 /**
  * Happy path: login -> join room -> ready -> leave
  */
@@ -434,122 +454,260 @@ export async function expectErrorPacket(client, timeoutMs, expectedErrorCode, la
 export async function runReconnect(options) {
   const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner-reconnect` });
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member-reconnect` });
+  let clientA2 = null;
 
   console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
   console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
 
   // ClientA connects and joins room
   const clientA = new TcpProtocolClient(options, "clientA");
-  await clientA.connect();
-  await authenticateClient(clientA, options, loginA, 1);
-
-  await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-  const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
-  if (!joinA.ok) {
-    throw new Error(`clientA room join failed: ${joinA.errorCode}`);
-  }
-  const pushA1 = printResponse("clientA.roomStatePush(join)", await clientA.readNextPacket(options.timeoutMs));
-  console.log("clientA joined room, owner:", pushA1.snapshot?.ownerPlayerId);
-
-  // ClientB connects and joins same room
   const clientB = new TcpProtocolClient(options, "clientB");
+  await clientA.connect();
   await clientB.connect();
-  await authenticateClient(clientB, options, loginB, 1);
 
-  await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-  const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
-  if (!joinB.ok) {
-    throw new Error(`clientB room join failed: ${joinB.errorCode}`);
-  }
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
 
-  // Both should receive state push
-  const pushB1 = printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
-  const pushA2 = printResponse("clientA.roomStatePush(member joined)", await clientA.readNextPacket(options.timeoutMs));
-  console.log("Both clients in room, member count:", pushA2.snapshot?.members?.length);
-
-  // Both ready up
-  await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-  const readyA = printResponse("clientA.ready", await clientA.readNextPacket(options.timeoutMs));
-  if (!readyA.ok) {
-    throw new Error(`clientA ready failed: ${readyA.errorCode}`);
-  }
-
-  await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
-  const readyB = printResponse("clientB.ready", await clientB.readNextPacket(options.timeoutMs));
-  if (!readyB.ok) {
-    throw new Error(`clientB ready failed: ${readyB.errorCode}`);
-  }
-
-  // Owner starts game
-  await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 5, encodeRoomStartReq());
-
-  // Wait for RoomStartRes (skip any RoomStatePush that arrive first)
-  let startA;
-  while (true) {
-    const response = await clientA.readNextPacket(options.timeoutMs);
-    if (response.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH) {
-      printResponse("clientA.roomStatePush", response);
-      continue; // Skip state pushes, wait for RoomStartRes
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    if (!joinA.ok) {
+      throw new Error(`clientA room join failed: ${joinA.errorCode}`);
     }
-    startA = printResponse("clientA.roomStart", response);
-    break;
+    const pushA1 = printResponse("clientA.roomStatePush(join)", await clientA.readNextPacket(options.timeoutMs));
+    console.log("clientA joined room, owner:", pushA1.snapshot?.ownerPlayerId);
+
+    // ClientB connects and joins same room
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    if (!joinB.ok) {
+      throw new Error(`clientB room join failed: ${joinB.errorCode}`);
+    }
+
+    // Both should receive state push
+    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    const pushA2 = printResponse("clientA.roomStatePush(member joined)", await clientA.readNextPacket(options.timeoutMs));
+    console.log("Both clients in room, member count:", pushA2.snapshot?.members?.length);
+
+    // Both ready up
+    await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    const readyA = printResponse("clientA.ready", await clientA.readNextPacket(options.timeoutMs));
+    if (!readyA.ok) {
+      throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
+    await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
+
+    await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
+    const readyB = printResponse("clientB.ready", await clientB.readNextPacket(options.timeoutMs));
+    if (!readyB.ok) {
+      throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    }
+    await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
+    await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
+
+    // Owner starts game
+    await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 5, encodeRoomStartReq());
+
+    const startA = await waitForRoomStartRes(clientA, options.timeoutMs, "roomStart");
+    if (!startA.ok) {
+      throw new Error(`clientA start failed: ${startA.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
+    await waitForRoomStatePush(clientB, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
+    console.log("Game started!");
+
+    // Simulate player input from clientB
+    await clientB.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 5, encodePlayerInputReq(1, "move", '{"direction":"right"}'));
+    const inputRes = await waitForMessageType(clientB, options.timeoutMs, MESSAGE_TYPE.PLAYER_INPUT_RES, "playerInput");
+    if (!inputRes.ok) {
+      throw new Error(`clientB player input failed: ${inputRes.errorCode}`);
+    }
+
+    // Simulate disconnect: close clientA connection without sending ROOM_LEAVE
+    console.log("Simulating disconnect for clientA (close without ROOM_LEAVE)...");
+    clientA.close();
+
+    // Wait a bit for disconnect to be detected
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // ClientB should see member disconnected
+    const pushDisconnected = await waitForRoomStatePush(
+      clientB,
+      options.timeoutMs * 2,
+      "member_disconnected",
+      "roomStatePush(disconnected)"
+    );
+    console.log("ClientB saw member disconnected, offline members:", pushDisconnected.snapshot?.members?.filter(m => m.offline)?.length);
+
+    // ClientA reconnects with new connection
+    console.log("ClientA reconnecting...");
+    clientA2 = new TcpProtocolClient(options, "clientA2");
+    await clientA2.connect();
+    await authenticateClient(clientA2, options, loginA, 6);
+
+    // Send reconnect request
+    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq(loginA.playerId));
+    const reconnectRes = printResponse("clientA2.roomReconnect", await clientA2.readNextPacket(options.timeoutMs));
+
+    if (!reconnectRes.ok) {
+      throw new Error(`clientA reconnect failed: ${reconnectRes.errorCode}`);
+    }
+
+    console.log("ClientA reconnected successfully!");
+    console.log("Reconnected room_id:", reconnectRes.roomId);
+    console.log("Snapshot state:", reconnectRes.snapshot?.state);
+    console.log("Snapshot member count:", reconnectRes.snapshot?.members?.length);
+    console.log("Offline members:", reconnectRes.snapshot?.members?.filter(m => m.offline)?.length);
+
+    // Reconnect should succeed even if ownership was transferred while clientA was offline.
+    if (reconnectRes.roomId !== options.roomId) {
+      throw new Error(`clientA reconnect returned unexpected room: ${reconnectRes.roomId}`);
+    }
+    if (reconnectRes.snapshot?.state !== "in_game") {
+      throw new Error(`clientA reconnect expected in_game snapshot, got ${reconnectRes.snapshot?.state}`);
+    }
+    if (![loginA.playerId, loginB.playerId].includes(reconnectRes.snapshot?.ownerPlayerId)) {
+      throw new Error(`unexpected owner after reconnect: ${reconnectRes.snapshot?.ownerPlayerId}`);
+    }
+    if (reconnectRes.snapshot?.ownerPlayerId !== loginA.playerId) {
+      console.log("Owner transferred while clientA was offline:", reconnectRes.snapshot?.ownerPlayerId);
+    }
+
+    // Cleanup
+    await delayBeforeFinalLeave(clientB, options.timeoutMs);
+    await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 8, encodeRoomLeaveReq());
+    const leaveB = await waitForMessageType(clientB, options.timeoutMs, MESSAGE_TYPE.ROOM_LEAVE_RES, "roomLeave");
+    if (!leaveB.ok) {
+      throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
+    }
+
+    console.log("Reconnect scenario completed successfully!");
+  } finally {
+    clientA.close();
+    clientB.close();
+    clientA2?.close();
   }
-  if (!startA.ok) {
-    throw new Error(`clientA start failed: ${startA.errorCode}`);
+}
+
+/**
+ * Reconnect-all-disconnected scenario:
+ * clientA/clientB join -> start game -> both disconnect without ROOM_LEAVE ->
+ * both reconnect within offline TTL and verify room stays in_game.
+ */
+export async function runReconnectAllDisconnected(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-all-offline-a` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-all-offline-b` });
+  let clientA2 = null;
+  let clientB2 = null;
+
+  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
+    if (!joinA.ok) {
+      throw new Error(`clientA room join failed: ${joinA.errorCode}`);
+    }
+    printResponse("clientA.roomStatePush(join)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
+    if (!joinB.ok) {
+      throw new Error(`clientB room join failed: ${joinB.errorCode}`);
+    }
+    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    const readyA = printResponse("clientA.ready", await clientA.readNextPacket(options.timeoutMs));
+    if (!readyA.ok) {
+      throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    }
+
+    await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
+    const readyB = printResponse("clientB.ready", await clientB.readNextPacket(options.timeoutMs));
+    if (!readyB.ok) {
+      throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    }
+
+    await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 5, encodeRoomStartReq());
+    const startRes = await waitForRoomStartRes(clientA, options.timeoutMs, "roomStart");
+    if (!startRes.ok) {
+      throw new Error(`clientA start failed: ${startRes.errorCode}`);
+    }
+    console.log("Game started!");
+
+    console.log("Simulating disconnect for clientA and clientB (close without ROOM_LEAVE)...");
+    clientA.close();
+    clientB.close();
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    console.log("ClientA reconnecting after global disconnect...");
+    clientA2 = new TcpProtocolClient(options, "clientA2");
+    await clientA2.connect();
+    await authenticateClient(clientA2, options, loginA, 6);
+    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq(loginA.playerId));
+    const reconnectA = printResponse("clientA2.roomReconnect", await clientA2.readNextPacket(options.timeoutMs));
+    if (!reconnectA.ok) {
+      throw new Error(`clientA reconnect failed: ${reconnectA.errorCode}`);
+    }
+    if (reconnectA.snapshot?.state !== "in_game") {
+      throw new Error(`clientA reconnect expected in_game snapshot, got ${reconnectA.snapshot?.state}`);
+    }
+
+    console.log("ClientB reconnecting after global disconnect...");
+    clientB2 = new TcpProtocolClient(options, "clientB2");
+    await clientB2.connect();
+    await authenticateClient(clientB2, options, loginB, 8);
+    await clientB2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 9, encodeRoomReconnectReq(loginB.playerId));
+    const reconnectB = printResponse("clientB2.roomReconnect", await clientB2.readNextPacket(options.timeoutMs));
+    if (!reconnectB.ok) {
+      throw new Error(`clientB reconnect failed: ${reconnectB.errorCode}`);
+    }
+    if (reconnectB.snapshot?.state !== "in_game") {
+      throw new Error(`clientB reconnect expected in_game snapshot, got ${reconnectB.snapshot?.state}`);
+    }
+
+    console.log("Reconnect-all-disconnected summary:", JSON.stringify({
+      roomId: options.roomId,
+      reconnectA: {
+        currentFrameId: reconnectA.currentFrameId,
+        waitingFrameId: reconnectA.waitingFrameId,
+        inputDelayFrames: reconnectA.inputDelayFrames,
+        memberCount: reconnectA.snapshot?.members?.length,
+        offlineMembers: reconnectA.snapshot?.members?.filter((member) => member.offline)?.length ?? 0
+      },
+      reconnectB: {
+        currentFrameId: reconnectB.currentFrameId,
+        waitingFrameId: reconnectB.waitingFrameId,
+        inputDelayFrames: reconnectB.inputDelayFrames,
+        memberCount: reconnectB.snapshot?.members?.length,
+        offlineMembers: reconnectB.snapshot?.members?.filter((member) => member.offline)?.length ?? 0
+      }
+    }, null, 2));
+
+    clientA2.close();
+    clientB2.close();
+    console.log("Reconnect-all-disconnected scenario completed successfully!");
+  } catch (error) {
+    clientA.close();
+    clientB.close();
+    clientA2?.close();
+    clientB2?.close();
+    throw error;
   }
-  console.log("Game started!");
-
-  // Simulate player input from clientB
-  await clientB.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 5, encodePlayerInputReq(1, "move", '{"direction":"right"}'));
-  printResponse("clientB.playerInput", await clientB.readNextPacket(options.timeoutMs));
-
-  // Simulate disconnect: close clientA connection without sending ROOM_LEAVE
-  console.log("Simulating disconnect for clientA (close without ROOM_LEAVE)...");
-  clientA.close();
-
-  // Wait a bit for disconnect to be detected
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-
-  // ClientB should see member disconnected
-  const pushDisconnected = printResponse("clientB.roomStatePush(disconnected)", await clientB.readNextPacket(options.timeoutMs * 2));
-  console.log("ClientB saw member disconnected, offline members:", pushDisconnected.snapshot?.members?.filter(m => m.offline)?.length);
-
-  // ClientA reconnects with new connection
-  console.log("ClientA reconnecting...");
-  const clientA2 = new TcpProtocolClient(options, "clientA2");
-  await clientA2.connect();
-  await authenticateClient(clientA2, options, loginA, 6);
-
-  // Send reconnect request
-  await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq(loginA.playerId));
-  const reconnectRes = printResponse("clientA2.roomReconnect", await clientA2.readNextPacket(options.timeoutMs));
-
-  if (!reconnectRes.ok) {
-    throw new Error(`clientA reconnect failed: ${reconnectRes.errorCode}`);
-  }
-
-  console.log("ClientA reconnected successfully!");
-  console.log("Reconnected room_id:", reconnectRes.roomId);
-  console.log("Snapshot state:", reconnectRes.snapshot?.state);
-  console.log("Snapshot member count:", reconnectRes.snapshot?.members?.length);
-  console.log("Offline members:", reconnectRes.snapshot?.members?.filter(m => m.offline)?.length);
-
-  // Verify the reconnect found the right room
-  if (reconnectRes.snapshot?.ownerPlayerId !== loginA.playerId) {
-    throw new Error("Reconnected clientA should still be owner");
-  }
-
-  // Cleanup
-  await delayBeforeFinalLeave(clientB, options.timeoutMs);
-  await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 8, encodeRoomLeaveReq());
-  const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
-  if (!leaveB.ok) {
-    throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
-  }
-
-  clientA2.close();
-  clientB.close();
-  console.log("Reconnect scenario completed successfully!");
 }
 
 /**

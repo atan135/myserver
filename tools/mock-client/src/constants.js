@@ -110,6 +110,7 @@ export const SCENARIO = {
   GET_ROOM_DATA: "get-room-data",
   GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
   RECONNECT: "reconnect",
+  RECONNECT_ALL_DISCONNECTED: "reconnect-all-disconnected",
   // Match scenarios
   CREATE_MATCHED_ROOM: "create-matched-room",
   CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",

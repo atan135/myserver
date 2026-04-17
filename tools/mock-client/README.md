@@ -109,6 +109,7 @@ Protobuf 风格的编解码工具：
 | `unknown-message` | 未知消息类型 |
 | `oversized-room-join` | 超大 RoomId |
 | `reconnect` | 断线重连 |
+| `reconnect-all-disconnected` | 全员掉线后 TTL 内双重连 |
 
 ### 匹配场景 (room.js)
 | 场景 | 说明 |
@@ -188,6 +189,12 @@ node tools/mock-client/src/index.js --scenario movement-demo \
   --http-base-url http://127.0.0.1:3000 \
   --login-name test001 --password Passw0rd! \
   --room-id room-movement-demo --policy-id movement_demo
+
+# 全员掉线后 TTL 内双重连
+node tools/mock-client/src/index.js --scenario reconnect-all-disconnected \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 7000 \
+  --room-id room-reconnect-all
 
 # combat_demo 双客户端联调
 node tools/mock-client/src/index.js --scenario combat-dual-client \

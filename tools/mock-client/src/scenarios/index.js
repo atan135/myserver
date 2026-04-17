@@ -11,6 +11,7 @@ export {
   runUnknownMessage,
   runOversizedRoomJoin,
   runReconnect,
+  runReconnectAllDisconnected,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   expectErrorPacket,

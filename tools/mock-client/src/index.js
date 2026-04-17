@@ -16,6 +16,7 @@ import {
   runUnknownMessage,
   runOversizedRoomJoin,
   runReconnect,
+  runReconnectAllDisconnected,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   // Game scenarios
@@ -129,6 +130,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.RECONNECT) {
     await runReconnect(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.RECONNECT_ALL_DISCONNECTED) {
+    await runReconnectAllDisconnected(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }
