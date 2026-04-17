@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-Match-Service 是独立的匹配服务，负责玩家匹配逻辑，与 game-server 通过 gRPC 通信。
+Match-Service 是独立的匹配服务，负责玩家匹配逻辑；对客户端暴露 gRPC，对 `game-server` 通过 gRPC 接收回调，并通过内部 local socket + Protobuf 请求 `game-server` 创建 matched room。
 
 ### 1.1 核心职责
 
@@ -27,8 +27,8 @@ Match-Service 是独立的匹配服务，负责玩家匹配逻辑，与 game-ser
 │                        Match-Service                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐    │
 │  │ MatchPool   │  │ Matcher     │  │ StateMachine    │    │
-│  │ (按mode/    │  │ (撮合逻辑)   │  │ (玩家状态管理)   │    │
-│  │  rank分离)  │  │             │  │                 │    │
+│  │ (按 mode    │  │ (撮合逻辑)   │  │ (玩家状态管理)   │    │
+│  │  分离)      │  │             │  │                 │    │
 │  └─────────────┘  └─────────────┘  └─────────────────┘    │
 │         │                │                  │              │
 │         └────────────────┼──────────────────┘              │
@@ -36,10 +36,16 @@ Match-Service 是独立的匹配服务，负责玩家匹配逻辑，与 game-ser
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │              GrpcServer ( tonic )                   │   │
 │  │  - MatchStart / MatchCancel / MatchStatus           │   │
-│  │  - CreateRoomAndJoin / PlayerJoined / PlayerLeft   │   │
+│  │  - MatchEventStream / CreateRoomAndJoin             │   │
+│  │  - PlayerJoined / PlayerLeft / MatchEnd             │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                          │                                  │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │           GameServerClient (local socket)           │   │
+│  │  - CreateMatchedRoomReq / CreateMatchedRoomRes      │   │
 │  └─────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
-                            │ gRPC
+                            │ gRPC / local socket
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Game-Server                             │
@@ -62,13 +68,14 @@ apps/match-service/
     ├── main.rs               # 入口、日志初始化
     ├── config.rs             # 配置读取
     ├── proto/
-    │   ├── mod.rs                   # myserver.matchservice 模块导出
-    │   └── myserver.matchservice.rs # 自动生成
+    │   ├── mod.rs                   # myserver.matchservice / myserver.game 模块导出
+    │   ├── myserver.matchservice.rs # 自动生成
+    │   └── myserver.game.rs         # 自动生成
     ├── server.rs             # gRPC 服务器
+    ├── game_server_client.rs # 通过内部 socket 请求 game-server 建房
     ├── service/
     │   ├── mod.rs
     │   ├── match_service.rs  # MatchService 实现（对外接口）
-    │   └── admin_service.rs  # 管理接口（可选）
     ├── pool/
     │   ├── mod.rs
     │   ├── match_pool.rs     # 匹配池
@@ -106,10 +113,8 @@ service MatchService {
 
   // 客户端查询匹配状态
   rpc MatchStatus(MatchStatusReq) returns (MatchStatusRes);
-}
 
-// 推送消息（服务端通过 gRPC stream 推送）
-service MatchPush {
+  // 客户端订阅匹配事件推送
   rpc MatchEventStream(MatchEventStreamReq) returns (stream MatchEvent);
 }
 ```
@@ -245,15 +250,23 @@ message MatchEndRes {
 
 ```
 MatchPool {
-  pools: HashMap<Mode, ModePool>
+  pools: HashMap<Mode, ModePool>,
+  matches: HashMap<MatchId, MatchTask>
 }
 
 ModePool {
   mode: String,                    // 模式标识
-  team_size: usize,               // 每队人数
-  total_size: usize,              // 总人数 = team_size * 2
+  config: ModeConfig,             // total_size / timeout 等模式配置
   candidates: Vec<MatchCandidate>, // 等待撮合的候选人
-  matcher: Box<dyn Matcher>,      // 撮合器
+}
+
+MatchTask {
+  match_id: String,
+  mode: String,
+  players: Vec<String>,
+  room_id: Option<String>,
+  joined_players: HashSet<String>,
+  active_players: HashSet<String>,
 }
 ```
 
@@ -266,7 +279,6 @@ pub struct MatchCandidate {
     pub mode: String,
     pub created_at: Instant,
     pub timeout_at: Instant,
-    pub stream_sender: ChannelSender<MatchEvent>,  // 推送通道
 }
 ```
 
@@ -284,8 +296,9 @@ pub struct MatchCandidate {
 1. 收集同一 mode 的候选人
 2. 按等待时间排序（早来先配）
 3. 凑齐 total_size 人后，生成 match_id
-4. 发布 MatchMatched 事件
-5. 调用 game-server.CreateRoomAndJoin（当前代码中的真实创建流程仍未接线）
+4. 创建 match task，并把候选玩家从 Matching 推进到 Matched 上下文
+5. 通过 `GameServerClient` 调用 `game-server` 内部 local socket，请求创建 matched room
+6. 收到 `CreateRoomAndJoin` 回调后，写入 room_id / token 并推送 `matched`
 ```
 
 > **扩展预留**：后续可在 `Matcher` trait 中实现按段位/技能匹配等复杂算法
@@ -335,15 +348,15 @@ pub struct MatchCandidate {
 1. 客户端 → MatchService.MatchStart
 2. MatchService → 匹配池添加候选人
 3. 撮合器检测到人数够，生成 match_id
-4. MatchService → GameServer.CreateRoomAndJoin
-5. GameServer 创建房间，返回 room_id
+4. MatchService → GameServer 内部 socket `CreateMatchedRoomReq`
+5. GameServer 创建房间，返回 room_id，并通过 `CreateRoomAndJoin` 回调 MatchService
 6. MatchService → 客户端 (stream) MatchEvent { matched, room_id, token }
-7. 客户端 → GameServer 携带 token 进入房间
+7. 客户端根据 room_id 进入房间；当前 token 已生成并回传，但尚未接入 `game-server` 的入房校验
 8. GameServer → MatchService.PlayerJoined
 9. 所有玩家都 joined 后，MatchService 标记 match 为 InRoom
 ```
 
-> 当前实现备注：`SimpleMatcher::try_match_mode()` 已具备撮合成功后的状态推进与事件推送，但当前既没有在 `MatchStart` 后自动触发，也没有后台撮合任务；即便手动触发后，房间创建仍是在服务内部直接生成 mock `room_id` / `token`，尚未由 MatchService 主动调用 GameServer 创建房间。
+> 当前实现备注：`MatchStart` 已会在入池后立即触发 `try_match_mode()`；`try_match_mode()` 会创建 match task、通过内部 socket 请求 `game-server` 建房，并在 `CreateRoomAndJoin` 回调落地后向玩家推送 `matched` 事件。
 
 ### 7.2 取消匹配流程
 
@@ -364,7 +377,7 @@ pub struct MatchCandidate {
 5. GameServer 收到后 abort 房间创建或通知房间内其他人
 ```
 
-> 当前实现备注：`PlayerLeft` 回调链路已经存在，但 `player_left()` 目前固定返回 `match_should_abort = false`，尚未根据剩余玩家数量做真正的中止判断。
+> 当前实现备注：`player_left()` 现在会维护 `active_players`，当最后一个活跃玩家离开时返回 `match_should_abort = true`；`game-server` 收到后会进一步上报 `MatchEnd { reason: "aborted" }` 清理匹配状态。
 
 ---
 
@@ -373,13 +386,16 @@ pub struct MatchCandidate {
 ```rust
 struct Config {
     bind_addr: String,           // gRPC 监听地址
+    public_host: String,         // 注册中心使用的对外地址
+    port: u16,                   // 从 bind_addr 推导出的端口
     match_timeout_secs: u64,     // 匹配超时（默认 30s）
     max_concurrent_matches: usize, // 最大并发匹配数
-
-    // 各模式配置
-    mode_1v1: ModeConfig,
-    mode_3v3: ModeConfig,
-    mode_5v5: ModeConfig,
+    modes: HashMap<String, ModeConfig>,
+    match_cleanup_interval_secs: u64,
+    game_server_service_name: String,
+    game_server_internal_socket_name: String,
+    registry_enabled: bool,
+    registry_url: String,
 }
 
 struct ModeConfig {
@@ -433,25 +449,25 @@ thiserror = "2"
 - [x] gRPC server 基础框架
 - [x] 玩家状态机
 
-### Phase 2: 匹配逻辑 ⚠️ 部分完成
+### Phase 2: 匹配逻辑 ✅ 已完成
 - [x] 匹配池实现
 - [x] 简单撮合器核心逻辑
-- [ ] 自动触发撮合流程
-- [ ] 匹配超时清理调度（`cleanup_timeout()` 已实现，尚未接线）
+- [x] 自动触发撮合流程
+- [x] 匹配超时清理调度
 
-### Phase 3: 房间联动 ⚠️ 部分完成
+### Phase 3: 房间联动 ✅ 已完成
 - [x] MatchService / MatchInternal 接口定义
 - [x] GameServer gRPC Client（`apps/game-server/src/match_client.rs`）
 - [x] GameServer → MatchService 回调链路（`CreateRoomAndJoin` / `PlayerJoined` / `PlayerLeft` / `MatchEnd`）
-- [ ] MatchService → GameServer 主动创建房间链路
-- [ ] `CreateRoomAndJoin` 服务端状态落地
+- [x] MatchService → GameServer 主动创建房间链路
+- [x] `CreateRoomAndJoin` 服务端状态落地
 
-### Phase 4: 完善 ⚠️ 部分完成
+### Phase 4: 完善 ✅ 基本完成
 - [x] MatchEventStream 推送
 - [x] MatchStatus 查询
 - [x] MatchCancel 取消
 - [x] 错误码、日志与基础指标
-- [ ] 离房后的中止判定与失败补偿
+- [x] 离房后的中止判定与失败补偿
 
 ---
 
@@ -459,23 +475,28 @@ thiserror = "2"
 
 ### 已实现
 - `apps/match-service/` 服务骨架已落地，`server.rs` 同时挂载了 `MatchService`、`MatchInternal` 和 tonic reflection
-- `packages/proto/match.proto` 已生成并接入当前服务，外部接口包含 `MatchStart` / `MatchCancel` / `MatchStatus` / `MatchEventStream`，内部接口包含 `CreateRoomAndJoin` / `PlayerJoined` / `PlayerLeft` / `MatchEnd`
+- `packages/proto/match.proto` 已生成并接入当前服务；同时引入 `packages/proto/game.proto` 的 `CreateMatchedRoomReq/CreateMatchedRoomRes`，用于 MatchService 主动请求 `game-server` 建立 matched room
+- 外部接口包含 `MatchStart` / `MatchCancel` / `MatchStatus` / `MatchEventStream`，内部接口包含 `CreateRoomAndJoin` / `PlayerJoined` / `PlayerLeft` / `MatchEnd`
 - 玩家状态机、玩家上下文、事件 stream 注册与推送链路已实现，状态包括 `Idle / Matching / Matched / InRoom`
-- 匹配池与匹配任务存储已实现，支持按模式分池、候选人增删、创建 match task、记录房间号
+- 匹配池与匹配任务存储已实现，支持按模式分池、候选人增删、创建 match task、记录房间号、joined 玩家集合和 active 玩家集合
 - `SimpleMatcher` 已实现 `start_match`、`cancel_match`、`get_status`、`player_joined`、`player_left`、`match_end`、`try_match_mode`
-- GameServer 侧的 `MatchClient` 和房间回调链路已落地；`RoomManager` 会在建房、进房、离房、对局结束时调用 MatchService
+- `MatchStart` 会在玩家入池后立即触发 `try_match_mode()`；`server.rs` 还会启动后台定时任务调用 `cleanup_timeout()`
+- `GameServerClient` 已实现，通过 `GAME_SERVER_INTERNAL_SOCKET_NAME` 或注册中心元数据中的 `internal_socket` 连接 `game-server` 内部通道发起 `CreateMatchedRoomReq`
+- GameServer 侧的 `MatchClient` 和房间回调链路已落地；`RoomManager` 会在建房、进房、离房、重连、对局结束时调用 MatchService
+- `CreateRoomAndJoin` 会把房间号、token 和玩家状态写回匹配上下文，并向玩家推送 `matched`
+- `player_left()` 会基于剩余 active 玩家数量返回 `match_should_abort`；最后一人离开时，`game-server` 会继续上报 `MatchEnd { reason: "aborted" }`
 - 监控指标已接入，包含 QPS、延迟、池子大小和 `metrics:heartbeat:match-service`
 
-### 部分实现 / 当前限制
-- `try_match_mode()` 已能在人数满足时创建 match task、更新玩家状态并推送 `matched` 事件，但房间创建仍是服务内部 mock：直接生成 `room_id` 与 `token`
-- `CreateRoomAndJoin` RPC 当前仅记录日志并返回成功，没有继续更新匹配任务或玩家状态
-- `player_left()` 当前只重置离开玩家自己的状态，返回值固定为 `false`，尚未根据剩余玩家数给出 `match_should_abort`
-- 配置与错误码已经覆盖主流程，但 `match_timeout_secs` 的实际使用主要落在各 mode 配置，尚未形成统一的超时调度闭环
+### 当前限制 / 后续补充点
+- `MatchEvent.token` 和 `MatchStatus.token` 已生成并回传，但当前 `game-server` 入房流程尚未消费这个 token，客户端仍主要依赖已有登录态 + `room_id` 入房
+- 文档中的“调用 game-server.CreateRoomAndJoin”在当前实现里落地为内部 local socket `CreateMatchedRoomReq`，与最初纯 gRPC 设想存在实现偏差
+- `match_timeout_secs` 仍主要由各 mode 的 `ModeConfig.match_timeout_secs` 决定；顶层 `MATCH_TIMEOUT_SECS` 更偏向默认配置入口
+- 当前仓库没有把“收到 matched 事件后继续自动 RoomJoin”做成单条现成脚本，验证时通常拆为 gRPC 探针和 mock-client 场景两段执行
 
-### 未接线 / 待补齐
-- 自动触发撮合流程尚未接线：`MatchStart` 当前只负责入池和更新状态，不会主动调用 `try_match_mode()`；代码中也没有后台撮合任务
-- 匹配超时清理尚未接线：`MatchPool::cleanup_timeout()` 已实现，但当前没有定时任务调用它
-- MatchService 主动通知 GameServer 创建房间的真实链路尚未接线；现阶段只有 GameServer → MatchService 的回调链路是完整可用的
+### 已验证的关键链路
+- `MatchStart -> try_match_mode -> GameServerClient.create_matched_room -> CreateRoomAndJoin -> MatchEventStream(matched)`
+- `MatchStart -> cleanup_timeout -> MatchEventStream(match_failed/MATCH_TIMEOUT) -> MatchStatus(idle)`
+- `PlayerJoined -> InRoom`、`PlayerLeft -> match_should_abort`、`MatchEnd -> Idle`
 
 ---
 

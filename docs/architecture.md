@@ -188,10 +188,9 @@
 ### 6.5 匹配服务
 
 - `match-service` 对外提供 gRPC 匹配接口
-- `game-server` 内置 `MatchClient`
-- 房间创建、玩家进入、玩家离开、对局结束等事件会回调到 `match-service`
-
-注意：匹配服务当前是“部分闭环”，接口和主流程已存在，但实际建房与超时清理仍未完全成熟。
+- `game-server` 内置 `MatchClient`，通过 gRPC 回调 `CreateRoomAndJoin`、`PlayerJoined`、`PlayerLeft`、`MatchEnd`
+- `match-service` 会通过 `game-server` 内部 socket 发送 `CreateMatchedRoomReq`，由 `game-server` 创建 matched room
+- 自动撮合、超时清理、离房中止判定已经形成可运行闭环
 
 ### 6.6 服务发现与监控
 
@@ -268,14 +267,16 @@ Redis 当前承担以下职责：
 
 ### 8.3 匹配内部协议
 
-匹配服务使用 gRPC：
+匹配服务相关协议当前分成两层：
 
 - `packages/proto/match.proto`
+  - 客户端 -> `match-service`
+  - `game-server` -> `match-service` 回调
+- `packages/proto/game.proto`
+  - `match-service` -> `game-server` 内部建房请求，当前复用 `CreateMatchedRoomReq/CreateMatchedRoomRes`
+  - 承载通道为 `game-server` 内部 local socket，而不是额外的 gRPC 服务
 
-主要包括两类接口：
-
-- 对外匹配接口
-- 对内房间协作接口
+当 `REGISTRY_ENABLED=true` 时，`match-service` 会优先从注册中心中读取 `game-server` 的 `metadata.internal_socket`；否则回退到本地 `GAME_SERVER_INTERNAL_SOCKET_NAME` 配置。
 
 ### 8.4 聊天协议
 

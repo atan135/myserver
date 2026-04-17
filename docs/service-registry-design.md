@@ -296,7 +296,9 @@ service:game-server:instances:game-server-001 = {
     "local_socket": "myserver-game-server-001.sock",
     "tags": ["game", "tcp"],
     "weight": 100,
-    "metadata": {},
+    "metadata": {
+        "internal_socket": "myserver-game-server-001-internal.sock"
+    },
     "registered_at": 1712736000000,
     "healthy": true
 }
@@ -797,7 +799,7 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 
 2. **`game-server` 已接入 `service-registry` 包**
    - `REGISTRY_ENABLED=true` 时启动即注册，关闭时注销
-   - 注册信息会带 `admin_port`、`local_socket`、`tags`
+   - 注册信息会带 `admin_port`、`local_socket`、`tags` 和 `metadata.internal_socket`
    - `SERVICE_INSTANCE_ID` 与 UDS 文件名一起用于多实例隔离
    - 代码位置：
      - `apps/game-server/src/main.rs`
@@ -812,7 +814,15 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
      - `apps/game-proxy/src/config.rs`
      - `apps/game-proxy/src/proxy_server.rs`
 
-4. **`mail-service` 已实现独立的 Redis 注册客户端**
+4. **`match-service` 已消费注册中心中的 `game-server` 内部地址**
+   - `REGISTRY_ENABLED=true` 时会优先发现 `game-server` 实例
+   - 若实例 `metadata.internal_socket` 存在，则优先使用该内部 socket 创建 matched room
+   - 若注册中心不可用或未返回 metadata，会回退到 `GAME_SERVER_INTERNAL_SOCKET_NAME`
+   - 代码位置：
+     - `apps/match-service/src/game_server_client.rs`
+     - `apps/match-service/src/config.rs`
+
+5. **`mail-service` 已实现独立的 Redis 注册客户端**
    - 启动时注册到 `service:mail-service:instances:{instance_id}`
    - 定时写入 `heartbeat:mail-service:{instance_id}`
    - 关闭时注销
@@ -821,7 +831,7 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
      - `apps/mail-service/src/registry-client.js`
      - `apps/mail-service/src/server.js`
 
-5. **`game-proxy` 管理接口仍然存在**
+6. **`game-proxy` 管理接口仍然存在**
    - 当前实现为内置 TCP/HTTP 风格的简易管理面
    - 仍支持查看上游、维护模式和手动切换路由
 

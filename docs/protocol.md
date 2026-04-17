@@ -10,7 +10,8 @@
 
 不在本文 `msgType` 命名空间中的协议：
 
-- `match-service` 使用 gRPC，定义在 `packages/proto/match.proto`
+- `match-service` 对外接口和 `game-server -> match-service` 回调使用 gRPC，定义在 `packages/proto/match.proto`
+- `match-service -> game-server` 的 matched room 创建复用 `packages/proto/game.proto` 中的 `CreateMatchedRoomReq/CreateMatchedRoomRes`，通过 `game-server` 内部 socket 承载
 - 管理控制消息结构定义在 `packages/proto/admin.proto`，但它们仍通过独立 TCP admin 通道承载
 
 代码基准：
@@ -201,6 +202,11 @@
 - `room_id: string`
 - `player_ids: repeated string`
 - `mode: string`
+
+说明：
+
+- 当前该消息既可由已鉴权玩家 TCP 请求触发，也可由 `match-service` 通过 `game-server` 内部 socket 发送
+- `CreateMatchedRoomRes` 会返回实际创建后的 `room_id` 与初始 `RoomSnapshot`
 
 #### `MoveInputReq`
 
