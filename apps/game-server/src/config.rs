@@ -10,6 +10,7 @@ pub struct Config {
     pub admin_host: String,
     pub admin_port: u16,
     pub local_socket_name: String,
+    pub internal_socket_name: String,
     pub log_level: String,
     pub log_enable_console: bool,
     pub log_enable_file: bool,
@@ -65,6 +66,8 @@ impl Config {
             .unwrap_or(7500);
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
+        let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
+            .unwrap_or_else(|_| derive_internal_socket_name(&local_socket_name));
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let log_enable_console = parse_bool("LOG_ENABLE_CONSOLE", true);
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
@@ -108,6 +111,7 @@ impl Config {
             admin_host,
             admin_port,
             local_socket_name,
+            internal_socket_name,
             log_level,
             log_enable_console,
             log_enable_file,
@@ -135,4 +139,12 @@ impl Config {
     pub fn admin_bind_addr(&self) -> String {
         format!("{}:{}", self.admin_host, self.admin_port)
     }
+}
+
+fn derive_internal_socket_name(local_socket_name: &str) -> String {
+    if let Some(prefix) = local_socket_name.strip_suffix(".sock") {
+        return format!("{prefix}-internal.sock");
+    }
+
+    format!("{local_socket_name}-internal")
 }

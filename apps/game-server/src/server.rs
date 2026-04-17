@@ -51,6 +51,8 @@ pub async fn run(
     let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
     let admin_listener = TcpListener::bind(config.admin_bind_addr()).await?;
     let local_socket_listener = crate::local_socket::create_listener(&config.local_socket_name)?;
+    let internal_socket_listener =
+        crate::local_socket::create_listener(&config.internal_socket_name)?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
 
     // Initialize MatchClient for communicating with MatchService
@@ -99,6 +101,7 @@ pub async fn run(
         addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
         local_socket_name = %config.local_socket_name,
+        internal_socket_name = %config.internal_socket_name,
         redis = %config.redis_url,
         mysql_enabled = mysql_store.enabled(),
         "game server listening"
@@ -119,6 +122,10 @@ pub async fn run(
         services.clone(),
         shared_state.runtime_config.clone(),
         shared_state.connection_count.clone(),
+    ));
+    let internal_socket_task = tokio::spawn(crate::internal_server::run_listener(
+        internal_socket_listener,
+        services.clone(),
     ));
 
     let mut next_session_id: u64 = 1;
@@ -154,6 +161,8 @@ pub async fn run(
     let _ = admin_task.await;
     local_socket_task.abort();
     let _ = local_socket_task.await;
+    internal_socket_task.abort();
+    let _ = internal_socket_task.await;
 
     info!("game server shutdown completed");
     Ok(())

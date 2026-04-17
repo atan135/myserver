@@ -5,6 +5,7 @@ mod core;
 mod gameroom;
 mod gameconfig;
 mod gameservice;
+mod internal_server;
 mod local_socket;
 mod match_client;
 mod metrics;
@@ -94,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         game_addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
         local_socket_name = %config.local_socket_name,
+        internal_socket_name = %config.internal_socket_name,
         "game-server logging initialized"
     );
 
@@ -131,7 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_admin_port(config.admin_port)
                 .with_local_socket(config.local_socket_name.clone())
-                .with_tags(vec!["game".to_string(), "tcp".to_string()]);
+                .with_tags(vec!["game".to_string(), "tcp".to_string()])
+                .with_metadata(serde_json::json!({
+                    "internal_socket": config.internal_socket_name.clone()
+                }));
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");

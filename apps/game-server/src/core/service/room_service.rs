@@ -939,78 +939,151 @@ pub async fn handle_create_matched_room(
         return Ok(());
     }
 
-    // Use the first player as the owner
+    let response = create_matched_room_impl(
+        services,
+        Some(&player_id),
+        &match_id,
+        &room_id,
+        &player_ids,
+        &mode,
+        "client",
+    )
+    .await;
+
+    if response.ok {
+        connection.session.room_id = Some(room_id);
+    }
+
+    connection.queue_message(
+        MessageType::CreateMatchedRoomRes,
+        packet.header.seq,
+        response,
+    )?;
+
+    Ok(())
+}
+
+pub async fn handle_create_matched_room_internal(
+    services: &ServiceContext,
+    request: CreateMatchedRoomReq,
+) -> CreateMatchedRoomRes {
+    let CreateMatchedRoomReq {
+        match_id,
+        room_id,
+        player_ids,
+        mode,
+    } = request;
+
+    info!(
+        match_id = %match_id,
+        room_id = %room_id,
+        player_ids = ?player_ids,
+        mode = %mode,
+        "handle_create_matched_room_internal"
+    );
+
+    create_matched_room_impl(
+        services,
+        None,
+        &match_id,
+        &room_id,
+        &player_ids,
+        &mode,
+        "internal",
+    )
+    .await
+}
+
+async fn create_matched_room_impl(
+    services: &ServiceContext,
+    actor_player_id: Option<&str>,
+    match_id: &str,
+    room_id: &str,
+    player_ids: &[String],
+    mode: &str,
+    source: &str,
+) -> CreateMatchedRoomRes {
+    if player_ids.is_empty() {
+        return CreateMatchedRoomRes {
+            ok: false,
+            room_id: room_id.to_string(),
+            error_code: "EMPTY_PLAYER_IDS".to_string(),
+            snapshot: None,
+        };
+    }
+
     let owner_player_id = player_ids.first().cloned().unwrap_or_default();
 
-    // Create the matched room via RoomManager
     match services
         .room_manager
-        .create_matched_room(&match_id, &room_id, &player_ids, &mode)
+        .create_matched_room(match_id, room_id, player_ids, mode)
         .await
     {
         Ok(snapshot) => {
-            // Set the connection's room_id to the matched room
-            connection.session.room_id = Some(room_id.clone());
-
-            connection.queue_message(
-                MessageType::CreateMatchedRoomRes,
-                packet.header.seq,
-                CreateMatchedRoomRes {
-                    ok: true,
-                    room_id: room_id.clone(),
-                    error_code: String::new(),
-                    snapshot: Some(snapshot.clone()),
-                },
-            )?;
-
             services
                 .mysql_store
                 .append_room_event(
-                    &room_id,
-                    Some(&player_id),
+                    room_id,
+                    actor_player_id,
                     Some(&owner_player_id),
                     "matched_room_created",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
-                        "seq": packet.header.seq,
                         "matchId": match_id,
                         "mode": mode,
-                        "playerCount": player_ids.len()
+                        "playerCount": player_ids.len(),
+                        "source": source
                     })),
                 )
                 .await;
 
-            services
+            if let Err(error) = services
                 .room_manager
-                .broadcast_snapshot(&room_id, "matched_room_created", snapshot)
-                .await?;
+                .broadcast_snapshot(room_id, "matched_room_created", snapshot.clone())
+                .await
+            {
+                tracing::error!(
+                    room_id = room_id,
+                    match_id = match_id,
+                    error = %error,
+                    "failed to broadcast matched room snapshot"
+                );
+            }
+
+            CreateMatchedRoomRes {
+                ok: true,
+                room_id: room_id.to_string(),
+                error_code: String::new(),
+                snapshot: Some(snapshot),
+            }
         }
         Err(error_code) => {
-            connection.queue_message(
-                MessageType::CreateMatchedRoomRes,
-                packet.header.seq,
-                CreateMatchedRoomRes {
-                    ok: false,
-                    room_id: room_id.clone(),
-                    error_code: error_code.to_string(),
-                    snapshot: None,
-                },
-            )?;
             services
                 .mysql_store
                 .append_room_event(
-                    &room_id,
-                    Some(&player_id),
+                    room_id,
+                    actor_player_id,
                     None,
                     "matched_room_create_failed",
                     None,
                     0,
-                    Some(json!({ "errorCode": error_code, "seq": packet.header.seq })),
+                    Some(json!({
+                        "errorCode": error_code,
+                        "matchId": match_id,
+                        "mode": mode,
+                        "playerCount": player_ids.len(),
+                        "source": source
+                    })),
                 )
                 .await;
+
+            CreateMatchedRoomRes {
+                ok: false,
+                room_id: room_id.to_string(),
+                error_code: error_code.to_string(),
+                snapshot: None,
+            }
         }
     }
-
-    Ok(())
 }

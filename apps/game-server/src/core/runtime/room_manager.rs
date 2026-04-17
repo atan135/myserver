@@ -394,6 +394,7 @@ impl RoomManager {
             let should_abort = self.notify_player_left(mid, player_id, "normal").await;
             if should_abort {
                 info!(room_id = room_id, match_id = mid, "MatchService requested abort due to player leaving");
+                self.notify_match_end(mid, room_id, "aborted").await;
             }
         }
 
@@ -441,6 +442,12 @@ impl RoomManager {
                     payload_json: input.payload_json.clone(),
                 })
                 .collect();
+            let match_id = room.match_id.clone();
+            drop(rooms);
+
+            if let Some(ref mid) = match_id {
+                self.notify_player_joined(mid, player_id, room_id).await;
+            }
 
             Ok((snapshot, current_frame_id, recent_inputs))
         } else {
