@@ -194,10 +194,21 @@ impl MatchInternal for MatchInternalImpl {
             "CreateRoomAndJoin request"
         );
 
-        let response = Ok(Response::new(CreateRoomAndJoinRes {
-            ok: true,
-            error_code: String::new(),
-        }));
+        let result = self
+            .matcher
+            .create_room_and_join(&req.match_id, &req.room_id, &req.player_ids, &req.mode)
+            .await;
+
+        let response = match result {
+            Ok(()) => Ok(Response::new(CreateRoomAndJoinRes {
+                ok: true,
+                error_code: String::new(),
+            })),
+            Err(e) => Ok(Response::new(CreateRoomAndJoinRes {
+                ok: false,
+                error_code: e.error_code().to_string(),
+            })),
+        };
         record_rpc_metrics(started_at);
         response
     }

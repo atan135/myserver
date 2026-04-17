@@ -2,6 +2,7 @@
 
 mod config;
 mod error;
+mod game_server_client;
 mod matcher;
 mod metrics;
 mod pool;

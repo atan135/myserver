@@ -11,6 +11,9 @@ pub struct Config {
     pub match_timeout_secs: u64,
     pub max_concurrent_matches: usize,
     pub modes: HashMap<String, ModeConfig>,
+    pub match_cleanup_interval_secs: u64,
+    pub game_server_service_name: String,
+    pub game_server_internal_socket_name: String,
     pub log_level: String,
     pub log_enable_console: bool,
     pub log_enable_file: bool,
@@ -60,6 +63,8 @@ impl Config {
                 match_timeout_secs: 90,
             },
         );
+        let game_server_local_socket_name = std::env::var("GAME_LOCAL_SOCKET_NAME")
+            .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
         Self {
             bind_addr,
@@ -75,6 +80,15 @@ impl Config {
                 .parse()
                 .unwrap_or(1000),
             modes,
+            match_cleanup_interval_secs: std::env::var("MATCH_CLEANUP_INTERVAL_SECS")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()
+                .unwrap_or(1),
+            game_server_service_name: std::env::var("GAME_SERVER_SERVICE_NAME")
+                .unwrap_or_else(|_| "game-server".to_string()),
+            game_server_internal_socket_name: std::env::var("GAME_SERVER_INTERNAL_SOCKET_NAME")
+                .or_else(|_| std::env::var("GAME_INTERNAL_SOCKET_NAME"))
+                .unwrap_or_else(|_| derive_internal_socket_name(&game_server_local_socket_name)),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             log_enable_console: std::env::var("LOG_ENABLE_CONSOLE")
                 .unwrap_or_else(|_| "true".to_string())
@@ -128,4 +142,12 @@ impl Config {
 fn parse_port(bind_addr: &str) -> Option<u16> {
     let addr: SocketAddr = bind_addr.parse().ok()?;
     Some(addr.port())
+}
+
+fn derive_internal_socket_name(local_socket_name: &str) -> String {
+    if let Some(prefix) = local_socket_name.strip_suffix(".sock") {
+        return format!("{prefix}-internal.sock");
+    }
+
+    format!("{local_socket_name}-internal")
 }

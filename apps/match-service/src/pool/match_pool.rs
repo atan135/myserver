@@ -1,6 +1,6 @@
 //! 匹配池实现
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,15 +17,20 @@ pub struct MatchTask {
     pub mode: String,
     pub players: Vec<String>,
     pub room_id: Option<String>,
+    pub joined_players: HashSet<String>,
+    pub active_players: HashSet<String>,
 }
 
 impl MatchTask {
     pub fn new(match_id: String, mode: String, players: Vec<String>) -> Self {
+        let active_players = players.iter().cloned().collect();
         Self {
             match_id,
             mode,
             players,
             room_id: None,
+            joined_players: HashSet::new(),
+            active_players,
         }
     }
 }
@@ -189,6 +194,25 @@ impl MatchPool {
         if let Some(task) = matches.get_mut(match_id) {
             task.room_id = Some(room_id);
         }
+    }
+
+    /// 标记玩家已进入房间
+    pub async fn mark_player_joined(&self, match_id: &str, player_id: &str) -> Option<MatchTask> {
+        let mut matches = self.matches.write().await;
+        let task = matches.get_mut(match_id)?;
+        if task.players.iter().any(|player| player == player_id) {
+            task.joined_players.insert(player_id.to_string());
+            task.active_players.insert(player_id.to_string());
+        }
+        Some(task.clone())
+    }
+
+    /// 标记玩家已离开房间
+    pub async fn mark_player_left(&self, match_id: &str, player_id: &str) -> Option<MatchTask> {
+        let mut matches = self.matches.write().await;
+        let task = matches.get_mut(match_id)?;
+        task.active_players.remove(player_id);
+        Some(task.clone())
     }
 
     /// 删除匹配任务

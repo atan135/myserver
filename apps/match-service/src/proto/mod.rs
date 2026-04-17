@@ -4,6 +4,10 @@
 
 // myserver.matchservice 是嵌套模块，需要分开声明
 pub mod myserver {
+    pub mod game {
+        include!("myserver.game.rs");
+    }
+
     pub mod matchservice {
         include!("myserver.matchservice.rs");
     }

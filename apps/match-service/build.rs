@@ -11,7 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = std::fs::read_dir(&proto_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
-        .filter(|e| e.file_name().to_string_lossy().starts_with("match"))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("match") || name == "game.proto"
+        })
         .map(|e| e.path())
         .collect::<Vec<_>>();
 
