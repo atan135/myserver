@@ -62,6 +62,15 @@ export {
   runMailSendAndNotify
 } from "./mail.js";
 
+// Announcement scenarios
+export {
+  runAnnounceList,
+  runAnnounceGet,
+  runAnnounceCreate,
+  runAnnounceUpdate,
+  runAnnounceDelete
+} from "./announce.js";
+
 // Interactive movement
 export { runMovementInteractive } from "./movement-interactive.js";
 

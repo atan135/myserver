@@ -4,6 +4,7 @@
 # ========== 通用参数 ==========
 # --scenario <name>          测试场景 (见下方场景列表)
 # --http-base-url <url>      认证服务地址 (默认 http://127.0.0.1:3000)
+# --announce-base-url <url>  公告服务地址 (默认 http://127.0.0.1:9004)
 # --mail-base-url <url>      邮件服务地址 (默认 http://127.0.0.1:9003)
 # --host <ip>                游戏服务器地址 (默认 127.0.0.1)
 # --port <port>              游戏服务器端口 (默认 7000)
@@ -35,6 +36,21 @@
 #                               PowerShell 建议使用单引号：--attachments-json '[{"type":"item","id":1001,"count":1}]'
 # --mail-watch-seconds <sec>     等待邮件通知秒数（默认 15）
 # --limit <n>                    列表条数（mail-list 复用该参数，默认 20）
+
+# ========== 公告参数 ==========
+
+# --announce-id <id>             公告ID（announce-get / announce-update / announce-delete）
+# --announce-locale <locale>     公告语言，例如 default / zh-CN
+# --announce-priority <n>        公告最小优先级筛选，或创建/更新时的优先级
+# --announce-type <type>         公告类型（默认由服务端回退为 banner）
+# --announce-target-group <group> 公告目标组（默认由服务端回退为 all）
+# --announce-offset <n>          公告列表偏移量（默认 0）
+# --announce-title <text>        公告标题
+# --announce-content <text>      公告正文
+# --announce-start-time <time>   公告开始时间，支持 ISO 字符串或 Unix 时间戳
+# --announce-end-time <time>     公告结束时间，支持 ISO 字符串或 Unix 时间戳
+# --announce-duration-seconds <sec> 从 start_time 开始的持续秒数；与 end_time 二选一
+# --announce-active-only <bool>  是否仅查询激活中的公告（默认 true；传 false 关闭）
 
 # ========== 场景列表 ==========
 
@@ -235,6 +251,26 @@ node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http:/
 # 发送邮件并等待聊天服推送 MAIL_NOTIFY_PUSH (MAIL_SEND_AND_NOTIFY)
 node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
 
+# ========== 公告系统测试 (通过 --announce-base-url 9004) ==========
+
+# 获取公告列表 (ANNOUNCE_LIST)
+# 默认仅返回当前激活中的公告；可用 --announce-active-only false 查看全部
+node tools/mock-client/src/index.js --scenario announce-list --announce-base-url http://127.0.0.1:9004 --announce-locale zh-CN --announce-target-group all
+
+# 创建公告 (ANNOUNCE_CREATE)
+# 创建时必须提供标题、正文，以及 end_time 或 duration_seconds
+node tools/mock-client/src/index.js --scenario announce-create --announce-base-url http://127.0.0.1:9004 --announce-title "系统公告" --announce-content "今晚 20:00 维护" --announce-type popup --announce-priority 20 --announce-duration-seconds 3600
+
+# 查询公告详情 (ANNOUNCE_GET)
+node tools/mock-client/src/index.js --scenario announce-get --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id>
+
+# 更新公告 (ANNOUNCE_UPDATE)
+# 至少传一个更新字段，例如标题、正文、优先级、时间窗口
+node tools/mock-client/src/index.js --scenario announce-update --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id> --announce-title "维护时间调整" --announce-end-time 2026-04-17T20:00:00+08:00
+
+# 删除公告 (ANNOUNCE_DELETE)
+node tools/mock-client/src/index.js --scenario announce-delete --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id>
+
 # ========== 移动同步交互测试 ==========
 
 # 24. 交互式双客户端移动同步 (MOVEMENT_INTERACTIVE)
@@ -374,6 +410,11 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # mail-read                | 标记邮件已读（HTTP）
 # mail-claim               | 领取邮件附件（HTTP）
 # mail-send-and-notify     | 发邮件并等待 MAIL_NOTIFY_PUSH
+# announce-list            | 获取公告列表（HTTP）
+# announce-get             | 获取公告详情（HTTP）
+# announce-create          | 创建公告（HTTP）
+# announce-update          | 更新公告（HTTP）
+# announce-delete          | 删除公告（HTTP）
 # movement-interactive     | 交互式双客户端移动同步
 # inventory-equip          | 装备穿戴
 # inventory-use           | 物品使用

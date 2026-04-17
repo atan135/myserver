@@ -34,6 +34,7 @@
 服务端 metrics 模块：
 
 - `apps/auth-http/src/metrics.js`
+- `apps/announce-service/src/metrics.js`
 - `apps/mail-service/src/metrics.js`
 - `apps/admin-api/src/metrics.js`
 - `apps/game-server/src/metrics.rs`
@@ -62,6 +63,7 @@
 - `game-proxy`
 - `chat-server`
 - `match-service`
+- `announce-service`
 - `mail-service`
 - `admin-api`
 
@@ -102,6 +104,7 @@ TTL:    30 秒
 | `game-proxy` | `qps` `latency_ms` `connections` |
 | `chat-server` | `qps` `latency_ms` `online_players` |
 | `match-service` | `qps` `latency_ms` `pool_size` |
+| `announce-service` | `qps` `latency_ms` |
 | `mail-service` | `qps` `latency_ms` |
 | `admin-api` | `qps` `latency_ms` |
 
@@ -112,13 +115,13 @@ TTL:    30 秒
 - `game-proxy` -> `connections`
 - `chat-server` -> `online_players`
 - `match-service` -> `pool_size`
-- `mail-service` / `admin-api` -> `0`
+- `announce-service` / `mail-service` / `admin-api` -> `0`
 
 ## 4. 指标来源
 
 ### 4.1 Node.js 服务
 
-`auth-http`、`mail-service`、`admin-api` 当前通过中间件统计：
+`auth-http`、`announce-service`、`mail-service`、`admin-api` 当前通过中间件统计：
 
 - QPS：HTTP 请求完成数
 - 延迟：请求开始到响应结束的耗时
@@ -126,7 +129,7 @@ TTL:    30 秒
 其中：
 
 - `auth-http` 会额外扫描 session 与 session-activity key，统计 `online_sessions`、`unique_players`、`active_sessions_5m`
-- `mail-service` 与 `admin-api` 当前只上报基础 HTTP 指标
+- `announce-service`、`mail-service` 与 `admin-api` 当前只上报基础 HTTP 指标
 
 ### 4.2 Rust 服务
 

@@ -20,3 +20,4 @@ game-server-admin: 7500:fixed
 # chat-server: 9001:dynamic
 # match-service: 9002:dynamic
 # mail-service: 9003:dynamic
+# announce-service: 9004:dynamic

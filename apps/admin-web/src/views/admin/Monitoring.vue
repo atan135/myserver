@@ -78,6 +78,7 @@ const SERVICE_ONLINE_LABELS = {
   "game-proxy": "连接数",
   "chat-server": "在线玩家",
   "match-service": "匹配池",
+  "announce-service": null,
   "mail-service": null,
   "admin-api": null
 };

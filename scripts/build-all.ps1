@@ -56,7 +56,7 @@ Write-Log "========================================" "Cyan"
 Write-Log "Installing Node.js dependencies" "Cyan"
 Write-Log "========================================" "Cyan"
 
-$NodeServices = @("auth-http", "admin-api", "admin-web", "mail-service")
+$NodeServices = @("auth-http", "admin-api", "admin-web", "announce-service", "mail-service")
 foreach ($svc in $NodeServices) {
     Write-Log "" "White"
     Write-Log "Installing: $svc" "Yellow"

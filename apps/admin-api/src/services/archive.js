@@ -17,6 +17,7 @@ const SERVICE_NAMES = [
   "game-proxy",
   "chat-server",
   "match-service",
+  "announce-service",
   "mail-service",
   "admin-api"
 ];

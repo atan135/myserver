@@ -47,6 +47,12 @@ import {
   runMailRead,
   runMailClaim,
   runMailSendAndNotify,
+  // Announcement scenarios
+  runAnnounceList,
+  runAnnounceGet,
+  runAnnounceCreate,
+  runAnnounceUpdate,
+  runAnnounceDelete,
   // Inventory scenarios
   runInventoryEquip,
   runInventoryUse,
@@ -186,6 +192,36 @@ async function main() {
 
   if (options.scenario === SCENARIO.MAIL_SEND_AND_NOTIFY) {
     await runMailSendAndNotify(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ANNOUNCE_LIST) {
+    await runAnnounceList(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ANNOUNCE_GET) {
+    await runAnnounceGet(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ANNOUNCE_CREATE) {
+    await runAnnounceCreate(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ANNOUNCE_UPDATE) {
+    await runAnnounceUpdate(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ANNOUNCE_DELETE) {
+    await runAnnounceDelete(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

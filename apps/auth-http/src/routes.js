@@ -38,7 +38,8 @@ async function buildServicePayload(config, serviceDiscovery) {
         protocol: "kcp"
       },
       chat: null,
-      mail: null
+      mail: null,
+      announce: null
     };
   }
 

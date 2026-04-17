@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的测试工具。它模拟游戏客户端，通过 TCP 协议与 `game-server`、`chat-server` 通信，并通过 HTTP 调用 `auth-http` 与 `mail-service`，验证服务器功能的正确性。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的测试工具。它模拟游戏客户端，通过 TCP 协议与 `game-server`、`chat-server` 通信，并通过 HTTP 调用 `auth-http`、`mail-service` 与 `announce-service`，验证服务器功能的正确性。
 
 ## 项目结构
 
@@ -22,6 +22,7 @@ tools/mock-client/
 │       ├── room.js      # 房间相关场景
 │       ├── chat.js      # 聊天相关场景
 │       ├── mail.js      # 邮件相关场景 (HTTP + 通知联调)
+│       ├── announce.js  # 公告相关场景 (HTTP CRUD 调试)
 │       ├── game.js      # 游戏相关场景
 │       ├── movement.js  # 移动相关场景
 │       ├── movement-interactive.js # 交互式双客户端移动
@@ -77,6 +78,12 @@ Protobuf 风格的编解码工具：
 - 通过 HTTP 调用 `mail-service` 的邮件 CRUD / claim 接口
 - 支持带附件的系统邮件发送
 - 支持联调 `chat-server` 的 `MAIL_NOTIFY_PUSH`
+
+### scenarios/announce.js
+公告辅助场景：
+- 通过 HTTP 调用 `announce-service` 的公告 CRUD 接口
+- 支持列表筛选：`locale`、`priority`、`target_group`、`active_only`
+- 支持时间窗口调试：`start_time`、`end_time`、`duration_seconds`
 
 ## 协议格式
 
@@ -151,6 +158,15 @@ Protobuf 风格的编解码工具：
 | `mail-read` | 标记邮件已读 |
 | `mail-claim` | 领取邮件附件（重复领取会返回幂等结果） |
 | `mail-send-and-notify` | 发邮件并等待聊天服 `MAIL_NOTIFY_PUSH` |
+
+### 公告场景 (announce.js)
+| 场景 | 说明 |
+|------|------|
+| `announce-list` | 获取公告列表，支持按语言、优先级、目标组、是否仅激活中筛选 |
+| `announce-get` | 获取单条公告详情 |
+| `announce-create` | 创建公告，需提供标题、内容和结束时间或持续时长 |
+| `announce-update` | 更新公告标题、正文、时间窗口、优先级等字段 |
+| `announce-delete` | 删除公告 |
 
 ### 移动同步场景 (movement.js, movement-interactive.js)
 | 场景 | 说明 |
@@ -236,6 +252,19 @@ node tools/mock-client/src/index.js --scenario mail-send-and-notify \
   --host 127.0.0.1 --chat-port 9001 \
   --login-name test001 --password Passw0rd! \
   --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
+
+# 公告列表
+node tools/mock-client/src/index.js --scenario announce-list \
+  --announce-base-url http://127.0.0.1:9004
+
+# 创建公告
+node tools/mock-client/src/index.js --scenario announce-create \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-title "系统公告" \
+  --announce-content "今晚 20:00 维护" \
+  --announce-type popup \
+  --announce-priority 20 \
+  --announce-duration-seconds 3600
 ```
 
 ### 命令行参数
@@ -244,6 +273,7 @@ node tools/mock-client/src/index.js --scenario mail-send-and-notify \
 |------|------|--------|
 | `--scenario` | 测试场景名称 | `happy` |
 | `--http-base-url` | 认证服务地址 | `http://127.0.0.1:3000` |
+| `--announce-base-url` | 公告服务地址 | `http://127.0.0.1:9004` |
 | `--mail-base-url` | 邮件服务地址 | `http://127.0.0.1:9003` |
 | `--host` | 游戏服务器地址 | `127.0.0.1` |
 | `--port` | 游戏服务器端口 | `7000` |
@@ -277,6 +307,18 @@ node tools/mock-client/src/index.js --scenario mail-send-and-notify \
 | `--created-by-name` | 实际触发者展示名 | `mock-client` |
 | `--attachments-json` | 邮件附件 JSON；PowerShell 建议用单引号包裹 | 空 |
 | `--mail-watch-seconds` | `mail-send-and-notify` 等待通知秒数 | `15` |
+| `--announce-id` | 公告 ID（`announce-get` / `announce-update` / `announce-delete`） | 空 |
+| `--announce-locale` | 公告语言，如 `default` / `zh-CN` | 空 |
+| `--announce-priority` | 公告最小优先级筛选，或创建/更新时的优先级 | 空 |
+| `--announce-type` | 公告类型，如 `banner` / `popup` | 空 |
+| `--announce-target-group` | 公告目标组，如 `all` / `beta` | 空 |
+| `--announce-offset` | 公告列表偏移量 | `0` |
+| `--announce-title` | 公告标题 | 空 |
+| `--announce-content` | 公告正文 | 空 |
+| `--announce-start-time` | 公告开始时间；支持 ISO 字符串或 Unix 时间戳 | 空 |
+| `--announce-end-time` | 公告结束时间；支持 ISO 字符串或 Unix 时间戳 | 空 |
+| `--announce-duration-seconds` | 创建/更新时间窗口持续秒数；与 `--announce-end-time` 二选一 | 空 |
+| `--announce-active-only` | 公告列表是否仅返回激活中的公告；传 `false` 可关闭 | `true` |
 | `--item-uid` | 物品UID (背包测试) | - |
 | `--equip-slot` | 装备槽位: Weapon/Armor/Helmet/Pants/Shoes/Accessory | - |
 | `--use-item-uid` | 使用物品UID | - |
@@ -319,6 +361,46 @@ node tools/mock-client/src/index.js --scenario mail-read \
   --mail-base-url http://127.0.0.1:9003 \
   --login-name test001 --password Passw0rd! \
   --mail-id <mail_id>
+```
+
+### 公告测试示例
+
+```bash
+# 查看当前生效的公告
+node tools/mock-client/src/index.js --scenario announce-list \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-active-only true
+
+# 按语言和目标组筛选
+node tools/mock-client/src/index.js --scenario announce-list \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-locale zh-CN --announce-target-group all
+
+# 创建一条 1 小时有效的公告
+node tools/mock-client/src/index.js --scenario announce-create \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-title "系统公告" \
+  --announce-content "今晚 20:00 维护" \
+  --announce-type popup \
+  --announce-priority 20 \
+  --announce-duration-seconds 3600
+
+# 查询单条公告
+node tools/mock-client/src/index.js --scenario announce-get \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-id <announce_id>
+
+# 更新公告标题或时间窗口
+node tools/mock-client/src/index.js --scenario announce-update \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-id <announce_id> \
+  --announce-title "维护时间调整" \
+  --announce-end-time 2026-04-17T20:00:00+08:00
+
+# 删除公告
+node tools/mock-client/src/index.js --scenario announce-delete \
+  --announce-base-url http://127.0.0.1:9004 \
+  --announce-id <announce_id>
 ```
 
 ### 双客户端测试
@@ -379,5 +461,6 @@ case MESSAGE_TYPE.MY_MESSAGE_RES:
 - TCP 网络连接
 - HTTP 认证服务 (`auth-http`)
 - HTTP 邮件服务 (`mail-service`, 邮件场景需要)
+- HTTP 公告服务 (`announce-service`, 公告场景需要)
 - 游戏服务器 (game-server)
 - 聊天服务器 (`chat-server`, 聊天与邮件通知场景需要)

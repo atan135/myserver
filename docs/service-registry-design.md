@@ -33,7 +33,7 @@
 | 类型 | 说明 | 示例 |
 |------|------|------|
 | 入口服务 | 客户端直连，固定端口 | auth-http, game-proxy, admin-api |
-| 内部服务 | 通过注册中心发现，支持多实例 | game-server, chat-server, match-service, mail-service |
+| 内部服务 | 通过注册中心发现，支持多实例 | game-server, chat-server, match-service, announce-service, mail-service |
 | 前端资源 | 静态托管，不监听端口 | admin-web |
 
 ### 2.2 端口分配表
@@ -54,6 +54,7 @@
 | game-server (admin) | **7500** | TCP | 固定端口，admin-api 调用 |
 | chat-server | 9001 | TCP | Redis 注册中心 |
 | match-service | 9002 | gRPC | Redis 注册中心 |
+| announce-service | 9004 | HTTP | Redis 注册中心 |
 | mail-service | 9003 | HTTP | Redis 注册中心 |
 
 #### 前端资源
@@ -73,6 +74,7 @@
 │   直连: auth-http (3000)  →  登录、获取服务地址             │
 │   直连: game-proxy (4000) →  游戏流量                       │
 │   直连: chat-server (9001)→  聊天                          │
+│   直连: announce-service (9004) → 公告（HTTP CRUD）        │
 │   直连: mail-service (9003)→ 邮件（HTTP CRUD）             │
 └─────────────────────────────────────────────────────────────┘
                               │
@@ -82,6 +84,7 @@
                     │                  │
                     │ service:game-server:instances:* │
                     │ service:chat-server:instances:*  │
+                    │ service:announce-service:instances:* │
                     │ service:mail-service:instances:* │
                     └─────────────────┘
 ```
@@ -119,6 +122,11 @@ Content-Type: application/json
       "host": "127.0.0.1",
       "port": 9003,
       "protocol": "http"
+    },
+    "announce": {
+      "host": "127.0.0.1",
+      "port": 9004,
+      "protocol": "http"
     }
   }
 }
@@ -135,6 +143,7 @@ Content-Type: application/json
 | game-server | 游戏逻辑、房间、帧同步 | ✅ |
 | chat-server | 私聊、群聊、聊天历史 | ✅ |
 | match-service | 匹配逻辑（MOBA/天梯等） | ✅ |
+| announce-service | 公告 CRUD、有效公告查询 | ✅ |
 | mail-service | 邮件 CRUD、附件领取 | ✅ |
 | admin-api | 运营管理（玩家、房间、审计） | ✅ |
 
@@ -853,7 +862,8 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 | chat-server | 9001 | 已接入 | 已通过 `packages/service-registry` 注册自身并维持实例级心跳 |
 | match-service | 9002 | 已接入 | 已通过 `packages/service-registry` 注册自身并维持实例级心跳 |
 | mail-service | 9003 | 已部分接入 | 已实现独立 Redis 注册/心跳，但未统一到 `packages/service-registry` |
-| auth-http | 3000 | 已接入部分发现 | `REGISTRY_ENABLED=true` 时会返回统一 `services`，并从注册中心发现 `chat` / `mail`；`game` 仍来自静态 `gameProxyHost/gameProxyPort` 配置 |
+| announce-service | 9004 | 已部分接入 | 已实现独立 Redis 注册/心跳与 HTTP metrics，上报方式与 `mail-service` 一致 |
+| auth-http | 3000 | 已接入部分发现 | `REGISTRY_ENABLED=true` 时会返回统一 `services`，并从注册中心发现 `chat` / `mail` / `announce`；`game` 仍来自静态 `gameProxyHost/gameProxyPort` 配置 |
 
 需要特别区分两类“heartbeat”：
 
@@ -897,6 +907,15 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
   - 会自动设置 `REGISTRY_ENABLED=true`
   - 默认按端口生成 `SERVICE_INSTANCE_ID`
 
+- `scripts/dev-announce.ps1` - 启动 announce-service
+  ```powershell
+  .\dev-announce.ps1
+  ```
+  说明：
+  - 会自动设置 `ANNOUNCE_PORT`、`HOST`、`LOG_LEVEL`
+  - 会默认设置 `MYSQL_ENABLED=false`，便于先以内存存储联调
+  - 默认按端口生成 `SERVICE_INSTANCE_ID`
+
 - `scripts/dev-auth.ps1` - 启动 auth-http
   ```powershell
   .\dev-auth.ps1
@@ -934,6 +953,11 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
       "host": "127.0.0.1",
       "port": 9003,
       "protocol": "http"
+    },
+    "announce": {
+      "host": "127.0.0.1",
+      "port": 9004,
+      "protocol": "http"
     }
   }
 }
@@ -943,7 +967,7 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 
 - `auth-http` 仍通过静态配置下发 `game-proxy` 地址
 - 已返回统一的 `services` 对象
-- `REGISTRY_ENABLED=true` 时会从注册中心动态发现 `chat-server` / `mail-service`
+- `REGISTRY_ENABLED=true` 时会从注册中心动态发现 `chat-server` / `mail-service` / `announce-service`
 - `match-service` 不在客户端直连返回列表中，但 `game-server` 会优先尝试从注册中心发现
 
 对应代码位置：
@@ -958,7 +982,7 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 1. 使用 `scripts/dev-game.ps1` 启动一个或多个 `game-server` 实例。
 2. 使用 `scripts/dev-proxy.ps1` 启动 `game-proxy`，验证 `/instances` 能看到注册到 Redis 的 `game-server`。
 3. 关闭某个 `game-server`，验证其实例心跳消失后不再被 `game-proxy` 发现。
-4. 启动 `mail-service`，验证 Redis 中出现 `service:mail-service:instances:*` 和对应实例级心跳。
+4. 启动 `mail-service` 与 `announce-service`，验证 Redis 中出现对应 `service:*:instances:*` 和实例级心跳。
 5. 调用 `auth-http` 登录接口，确认当前会返回统一 `services` 对象，并保留 `gameProxyHost/gameProxyPort` 兼容字段。
 
 ### 12.6 当前与原设计的主要偏差
@@ -966,6 +990,6 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 当前实现和前文原始设计相比，至少存在以下差异：
 
 1. `game-server`、`game-proxy`、`chat-server`、`match-service` 已接入或消费 Redis 注册中心。
-2. `mail-service` 已实现独立注册逻辑，不再属于“待实现”状态。
+2. `mail-service` 与 `announce-service` 已实现独立注册逻辑，不再属于“待实现”状态。
 3. `auth-http` 已接入部分发现，当前会返回统一 `services`，但 `game` 仍来自静态配置。
 4. 监控系统中的 `metrics:heartbeat:{service}` 与注册中心中的 `heartbeat:{service}:{instance}` 已并存，文档阅读时必须区分用途。

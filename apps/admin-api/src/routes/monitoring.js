@@ -17,6 +17,7 @@ const SERVICE_CONFIGS = {
   "game-proxy": { onlineField: "connections" },
   "chat-server": { onlineField: "online_players" },
   "match-service": { onlineField: "pool_size" },
+  "announce-service": { onlineField: null },
   "mail-service": { onlineField: null },
   "admin-api": { onlineField: null }
 };

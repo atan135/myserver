@@ -9,6 +9,7 @@ apps/
 ├── game-proxy/      # Rust + Tokio KCP 接入代理 (端口 4000)
 ├── chat-server/     # Rust + Tokio TCP 聊天服 (端口 9001)
 ├── match-service/   # Rust + gRPC 匹配服务 (端口 9002)
+├── announce-service/ # Node.js HTTP 公告服务 (端口 9004)
 ├── mail-service/    # Node.js HTTP 邮件服务 (端口 9003)
 ├── admin-api/       # Node.js + Express 管理后台 API (端口 3001)
 ├── admin-web/       # Vue 3 + Element Plus 管理前台 (端口 3002)
@@ -61,6 +62,9 @@ cd apps/chat-server && cargo run
 # 启动 match-service (Rust gRPC 匹配服务)
 cd apps/match-service && cargo run
 
+# 启动 announce-service (Node.js HTTP 公告服务)
+cd apps/announce-service && npm start
+
 # 启动 mail-service (Node.js HTTP 邮件服务)
 cd apps/mail-service && npm start
 
@@ -87,7 +91,7 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 
 - Redis (session/ticket/服务注册/限流)
 - MariaDB (账号、认证审计、房间事件)
-- Node.js 18+ (auth-http/admin-api/mail-service)
+- Node.js 18+ (auth-http/admin-api/announce-service/mail-service)
 - Rust 1.75+ (game-server/game-proxy/chat-server/match-service)
 
 ## 数据库

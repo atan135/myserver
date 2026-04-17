@@ -1,0 +1,19 @@
+{
+  "name": "announce-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:init": "node scripts/init-db.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "ioredis": "^5.7.0",
+    "log4js": "^6.9.1",
+    "mysql2": "^3.15.3",
+    "uuid": "^11.0.0"
+  }
+}

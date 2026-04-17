@@ -153,6 +153,12 @@ export const SCENARIO = {
   MAIL_READ: "mail-read",
   MAIL_CLAIM: "mail-claim",
   MAIL_SEND_AND_NOTIFY: "mail-send-and-notify",
+  // Announcement scenarios
+  ANNOUNCE_LIST: "announce-list",
+  ANNOUNCE_GET: "announce-get",
+  ANNOUNCE_CREATE: "announce-create",
+  ANNOUNCE_UPDATE: "announce-update",
+  ANNOUNCE_DELETE: "announce-delete",
   MOVEMENT_INTERACTIVE: "movement-interactive",
   // Inventory scenarios
   INVENTORY_EQUIP: "inventory-equip",

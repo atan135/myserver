@@ -15,6 +15,14 @@
 
 **结论**：两者可以共用一套消息存储层，但在业务逻辑上保持独立。
 
+当前仓库实现状态说明：
+
+- `chat-server` 已作为独立 Rust TCP 服务落地
+- `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
+- `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 metrics 上报
+- “聊天与邮件共用同一套存储层”目前仍未实现
+- 离线聊天当前更接近“历史可查询”，未实现“登录后自动补发离线消息”的完整闭环
+
 ## 2. 消息系统架构
 
 ```
@@ -259,6 +267,22 @@ client
 
 公告系统独立于 `auth-http`，因为 `auth-http` 只负责登录认证。
 
+当前仓库实现说明：
+
+- 已落地独立 `announce-service`
+- 当前对外使用 HTTP 接口，而不是独立 TCP / protobuf 公告协议
+- 当前支持：
+  - `GET /api/v1/announcements`
+  - `GET /api/v1/announcements/:announceId`
+  - `POST /api/v1/announcements`
+  - `PUT /api/v1/announcements/:announceId`
+  - `DELETE /api/v1/announcements/:announceId`
+- 当前存储支持：
+  - `MYSQL_ENABLED=true` 时使用 MySQL 持久化
+  - `MYSQL_ENABLED=false` 时回退到内存存储
+- 已验证 MySQL 模式下公告在服务重启后仍可查询
+- 已通过 `tools/mock-client` 完成 `announce-list/get/create/update/delete` 联调验证
+
 ### 5.2 建议放置位置
 
 **方案A**：独立 `announce-service`
@@ -312,14 +336,18 @@ message AnnouncementPushReq {     -- 管理员推送
 CREATE TABLE announcements (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     announce_id VARCHAR(64) UNIQUE NOT NULL,
+    locale VARCHAR(32) NOT NULL DEFAULT 'default',
     title VARCHAR(256) NOT NULL,
     content TEXT NOT NULL,
     priority INT DEFAULT 0,
-    type VARCHAR(32) DEFAULT 'banner',   -- popup / banner / scroll
-    target_group VARCHAR(128),             -- all / vip / new_user 等
-    start_time BIGINT NOT NULL,
-    end_time BIGINT NOT NULL,
-    created_at BIGINT NOT NULL,
+    announce_type VARCHAR(32) DEFAULT 'banner', -- popup / banner / scroll
+    target_group VARCHAR(128) DEFAULT 'all',    -- all / vip / new_user 等
+    start_time DATETIME(3) NOT NULL,
+    end_time DATETIME(3) NOT NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    INDEX idx_announcements_locale (locale),
+    INDEX idx_announcements_priority (priority),
     INDEX idx_time (start_time, end_time)
 );
 ```
@@ -340,9 +368,28 @@ CREATE TABLE announcements (
 ```
 1. 客户端启动
 2. 请求 auth-http 登录
-3. 登录成功后，HTTP 请求 announce-service 获取公告列表
-4. announce-service 返回当前有效公告
-5. 客户端展示公告
+3. 登录成功后，可从返回的 `services.announce` 获取公告服务地址
+4. HTTP 请求 announce-service 获取公告列表
+5. announce-service 返回当前有效公告
+6. 客户端展示公告
+```
+
+当前仓库实际情况补充：
+
+- `auth-http` 在 `REGISTRY_ENABLED=true` 时会把 `announce-service` 写入统一的 `services` 对象
+- 同时仍保留旧的 `gameProxyHost/gameProxyPort` 字段兼容现有客户端
+- 当前公告获取链路是“登录后主动 HTTP 拉取”，不是 `game-proxy` 自动推送
+
+```json
+{
+  "services": {
+    "announce": {
+      "host": "127.0.0.1",
+      "port": 9004,
+      "protocol": "http"
+    }
+  }
+}
 ```
 
 或者：
@@ -371,8 +418,8 @@ CREATE TABLE announcements (
 - [ ] 公告是否需要定时发布功能？
 - [ ] 公告是否需要区域/玩家群体筛选？
 - [ ] 公告推送方式？（弹窗、横幅、滚动）
-- [ ] 确认使用独立 `announce-service` 还是放在其他服务内？
+- [x] 当前实现已经采用独立 `announce-service`
 
 ### 8.4 部署架构
 - [ ] chat-service 和 mail-service 是否合并为一个服务？
-- [ ] announce-service 确认独立部署还是集成到其他服务？
+- [x] 当前实现已经独立部署 `announce-service`

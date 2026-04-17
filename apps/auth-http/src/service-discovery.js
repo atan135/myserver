@@ -28,20 +28,23 @@ export class ServiceDiscovery {
     const services = {
       game: createGameService(this.config),
       chat: null,
-      mail: null
+      mail: null,
+      announce: null
     };
 
     if (!this.config.registryDiscoveryEnabled) {
       return services;
     }
 
-    const [chatInstance, mailInstance] = await Promise.all([
+    const [chatInstance, mailInstance, announceInstance] = await Promise.all([
       this.discoverOne("chat-server"),
-      this.discoverOne("mail-service")
+      this.discoverOne("mail-service"),
+      this.discoverOne("announce-service")
     ]);
 
     services.chat = createServiceDescriptor(chatInstance, "tcp");
     services.mail = createServiceDescriptor(mailInstance, "http");
+    services.announce = createServiceDescriptor(announceInstance, "http");
     return services;
   }
 

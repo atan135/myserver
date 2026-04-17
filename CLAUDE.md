@@ -11,6 +11,7 @@ apps/
 ├── game-proxy/      # Rust + Tokio KCP 接入代理 (端口 4000)
 ├── chat-server/     # Rust + Tokio TCP 聊天服 (端口 9001)
 ├── match-service/   # Rust + gRPC 匹配服务 (端口 9002)
+├── announce-service/ # Node.js HTTP 公告服务 (端口 9004)
 ├── mail-service/    # Node.js HTTP 邮件服务 (端口 9003)
 ├── admin-api/       # Node.js + Express 管理后台 API (端口 3001)
 ├── admin-web/       # Vue 3 + Element Plus 管理前台 (端口 3002)
@@ -48,7 +49,7 @@ docs/                # 架构与协议文档
 - `LOG_ENABLE_FILE`
 - `LOG_DIR`
 
-### auth-http / mail-service / admin-api
+### auth-http / announce-service / mail-service / admin-api
 
 - 使用 `log4js`
 - 支持 console 输出
@@ -91,6 +92,7 @@ Rust 侧推荐继续用 `tracing`，原因是：
 ### 微服务
 - chat-server: 单聊、群聊、离线消息
 - match-service: 匹配池、撮合算法、gRPC 接口
+- announce-service: 公告 CRUD、有效公告查询、服务注册与监控上报
 - mail-service: 邮件 CRUD、附件领取、Redis Pub/Sub 通知
 - admin-api + admin-web: 运营后台 (账号管理、审计日志)
 - service-registry: 基于 Redis 的服务注册与发现
@@ -98,7 +100,7 @@ Rust 侧推荐继续用 `tracing`，原因是：
 ### 工具链
 - Node mock client 单客户端与双客户端联调场景
 - 协议与使用文档
-- 启动脚本 (dev-auth.ps1, dev-game.ps1, dev-proxy.ps1, dev-chat.ps1, dev-match.ps1)
+- 启动脚本 (dev-auth.ps1, dev-game.ps1, dev-proxy.ps1, dev-chat.ps1, dev-match.ps1, dev-announce.ps1)
 
 ## 日志配置
 
@@ -276,6 +278,7 @@ npm run flow:mock-client -- --scenario two-client-room --http-base-url http://12
 | `scripts/dev-proxy.ps1` | 启动 game-proxy |
 | `scripts/dev-chat.ps1` | 启动 chat-server |
 | `scripts/dev-match.ps1` | 启动 match-service |
+| `scripts/dev-announce.ps1` | 启动 announce-service |
 | `scripts/seed-auth-test-accounts.ps1` | 录入测试账号 |
 | `scripts/test-auth-http-login.ps1` | 测试登录接口 |
 

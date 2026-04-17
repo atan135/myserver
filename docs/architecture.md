@@ -26,6 +26,7 @@
 │  ├─ game-proxy/       # 游戏接入代理
 │  ├─ chat-server/      # 聊天服
 │  ├─ match-service/    # 匹配服务
+│  ├─ announce-service/ # 公告服务
 │  ├─ mail-service/     # 邮件服务
 │  └─ simple-client/    # Unity 测试客户端
 ├─ packages/
@@ -70,6 +71,7 @@
 | `game-proxy admin` | `7101` | Rust + Tokio | 查看上游、切换路由、维护模式 |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
+| `announce-service` | `9004` | Node.js + Express | 公告 CRUD、有效公告查询、服务注册与监控上报 |
 | `mail-service` | `9003` | Node.js + Express | 邮件 CRUD、邮件通知发布、部分服务注册接入 |
 
 ---
@@ -134,6 +136,7 @@
 - `accessToken`
 - `game ticket`
 - 当前配置下发的 `gameProxyHost/gameProxyPort`
+- 统一的 `services` 对象；其中 `chat` / `mail` / `announce` 可由注册中心动态发现
 3. 客户端使用 ticket 连接 `game-proxy`。
 4. `game-proxy` 将连接转发到 `game-server` 的本地 socket。
 5. `game-server` 校验 ticket 签名与 Redis 中的 ticket 记录，成功后建立会话。
@@ -181,6 +184,7 @@
 ### 6.4 聊天与邮件
 
 - `chat-server` 负责聊天会话、聊天历史和在线推送
+- `announce-service` 负责公告 CRUD 和当前有效公告查询
 - `mail-service` 负责邮件 CRUD
 - `mail-service` 通过 Redis Pub/Sub 通知 `chat-server`
 - `chat-server` 再把邮件通知推送给在线玩家
@@ -198,6 +202,7 @@
 - `game-server` 已支持按实例注册
 - `game-proxy` 已支持从注册中心发现上游 `game-server`
 - `mail-service` 已有自己的 registry 注册逻辑
+- `announce-service` 复用与 `mail-service` 一致的 Redis registry 与 HTTP metrics 模式
 - 各服务会把 metrics/heartbeat 写入 Redis
 - `admin-api` 提供监控聚合接口，`admin-web` 提供监控页面
 
@@ -226,6 +231,7 @@ Redis 当前承担以下职责：
 - 登录审计与安全审计
 - 游戏连接审计
 - 房间事件审计
+- 公告业务数据
 - 邮件业务数据
 
 仓库中已有统一初始化脚本：
@@ -317,6 +323,7 @@ Redis 当前承担以下职责：
 - `scripts/dev-proxy.ps1`
 - `scripts/dev-chat.ps1`
 - `scripts/dev-match.ps1`
+- `scripts/dev-announce.ps1`
 - `scripts/seed-auth-test-accounts.ps1`
 
 ---
@@ -335,7 +342,7 @@ Redis 当前承担以下职责：
 当前仍需注意的事实：
 
 - 服务发现尚未完全统一到一套实现上
-- `auth-http` 登录响应当前只下发 `gameProxyHost/gameProxyPort`，不是完整的服务地址表
+- `auth-http` 登录响应当前会返回统一的 `services` 对象，同时保留 `gameProxyHost/gameProxyPort` 兼容字段
 - 部分专题文档描述的是目标设计，不等于已经全部落地
 
 ---
@@ -352,7 +359,7 @@ Redis 当前承担以下职责：
 - `game-server admin` -> `7500`
 - `auth-http`、`admin-api`、`game-server`、`game-proxy` 的默认配置已同步到上述固定端口
 - `game-proxy admin` 当前仍使用代码默认值 `7101`，属于代理自身的内部管理口，不在 `apps/port.txt` 的固定入口清单里
-- `chat-server`、`match-service`、`mail-service` 属于内部服务；文档中的 `9001/9002/9003` 主要用于本地开发与默认示例，部署时仍应以实际配置和注册中心信息为准
+- `chat-server`、`match-service`、`announce-service`、`mail-service` 属于内部服务；文档中的 `9001/9002/9004/9003` 主要用于本地开发与默认示例，部署时仍应以实际配置和注册中心信息为准
 
 ---
 

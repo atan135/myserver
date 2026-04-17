@@ -29,6 +29,7 @@ const DEFAULT_OPTIONS = {
   port: 7000,
   chatPort: 9001,
   httpBaseUrl: "http://127.0.0.1:3000",
+  announceBaseUrl: "http://127.0.0.1:9004",
   mailBaseUrl: "http://127.0.0.1:9003",
   roomId: "room-default",
   guestId: "",
@@ -73,6 +74,19 @@ const DEFAULT_OPTIONS = {
   createdByName: "mock-client",
   attachmentsJson: "",
   mailWatchSeconds: 15,
+  // Announcement parameters
+  announceId: "",
+  announceLocale: "",
+  announcePriority: "",
+  announceType: "",
+  announceTargetGroup: "",
+  announceOffset: 0,
+  announceTitle: "",
+  announceContent: "",
+  announceStartTime: "",
+  announceEndTime: "",
+  announceDurationSeconds: "",
+  announceActiveOnly: true,
   // Inventory parameters
   itemUid: 0,
   equipSlot: "",
@@ -112,6 +126,9 @@ export function parseArgs(argv) {
         break;
       case "--http-base-url":
         ({ value: result.httpBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-base-url":
+        ({ value: result.announceBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--mail-base-url":
         ({ value: result.mailBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
@@ -255,6 +272,47 @@ export function parseArgs(argv) {
         break;
       case "--mail-watch-seconds":
         result.mailWatchSeconds = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      // Announcement arguments
+      case "--announce-id":
+        ({ value: result.announceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-locale":
+        ({ value: result.announceLocale, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-priority":
+        ({ value: result.announcePriority, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-type":
+        ({ value: result.announceType, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-target-group":
+        ({ value: result.announceTargetGroup, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-offset":
+        result.announceOffset = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--announce-title":
+        ({ value: result.announceTitle, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-content":
+        ({ value: result.announceContent, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-start-time":
+        ({ value: result.announceStartTime, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-end-time":
+        ({ value: result.announceEndTime, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-duration-seconds":
+        ({ value: result.announceDurationSeconds, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--announce-active-only":
+        result.announceActiveOnly =
+          collectOptionValue(argv, index).value !== "false" &&
+          collectOptionValue(argv, index).value !== "0";
         index = collectOptionValue(argv, index).nextIndex;
         break;
       // Inventory arguments
