@@ -381,6 +381,170 @@ pub struct RoomReconnectRes {
     pub movement_recovery: ::core::option::Option<MovementRecoveryState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ServerRedirectPush {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub reconnect_required: bool,
+    #[prost(uint32, tag = "5")]
+    pub retry_after_ms: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomTransferPayload {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub room_version: u64,
+    #[prost(string, tag = "4")]
+    pub policy_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub owner_player_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub room_phase: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "7")]
+    pub current_frame_id: u32,
+    #[prost(uint32, tag = "8")]
+    pub last_applied_frame_id: u32,
+    #[prost(message, optional, tag = "9")]
+    pub snapshot: ::core::option::Option<RoomSnapshot>,
+    #[prost(message, repeated, tag = "10")]
+    pub recent_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(uint32, tag = "11")]
+    pub waiting_frame_id: u32,
+    #[prost(message, repeated, tag = "12")]
+    pub waiting_inputs: ::prost::alloc::vec::Vec<FrameInput>,
+    #[prost(string, tag = "13")]
+    pub movement_state_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub logic_state_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "15")]
+    pub runtime_timers_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "16")]
+    pub match_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "17")]
+    pub checksum: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FreezeRoomForTransferReq {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FreezeRoomForTransferRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(enumeration = "RoomMigrationState", tag = "4")]
+    pub migration_state: i32,
+    #[prost(uint64, tag = "5")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExportRoomTransferReq {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExportRoomTransferRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub payload: ::core::option::Option<RoomTransferPayload>,
+    #[prost(string, tag = "5")]
+    pub checksum: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ImportRoomTransferReq {
+    #[prost(message, optional, tag = "1")]
+    pub payload: ::core::option::Option<RoomTransferPayload>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ImportRoomTransferRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub checksum: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RetireTransferredRoomReq {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub checksum: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RetireTransferredRoomRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetRolloutDrainStatusReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RoomRouteStatus {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub owner_server_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "RoomMigrationState", tag = "3")]
+    pub migration_state: i32,
+    #[prost(uint32, tag = "4")]
+    pub member_count: u32,
+    #[prost(uint32, tag = "5")]
+    pub online_member_count: u32,
+    #[prost(uint64, tag = "6")]
+    pub empty_since_ms: u64,
+    #[prost(uint64, tag = "7")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRolloutDrainStatusRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub owner_server_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub owned_room_count: u64,
+    #[prost(uint64, tag = "6")]
+    pub migrating_room_count: u64,
+    #[prost(uint64, tag = "7")]
+    pub connection_count: u64,
+    #[prost(message, repeated, tag = "8")]
+    pub routes: ::prost::alloc::vec::Vec<RoomRouteStatus>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,
@@ -716,6 +880,47 @@ impl MovementCorrectionReason {
             "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY" => {
                 Some(Self::ObserverRecovery)
             }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RoomMigrationState {
+    OwnedByOld = 0,
+    DrainingOnOld = 1,
+    FrozenForTransfer = 2,
+    ImportingToNew = 3,
+    OwnedByNew = 4,
+    TransferFailed = 5,
+    RetiredOnOld = 6,
+}
+impl RoomMigrationState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::OwnedByOld => "ROOM_MIGRATION_STATE_OWNED_BY_OLD",
+            Self::DrainingOnOld => "ROOM_MIGRATION_STATE_DRAINING_ON_OLD",
+            Self::FrozenForTransfer => "ROOM_MIGRATION_STATE_FROZEN_FOR_TRANSFER",
+            Self::ImportingToNew => "ROOM_MIGRATION_STATE_IMPORTING_TO_NEW",
+            Self::OwnedByNew => "ROOM_MIGRATION_STATE_OWNED_BY_NEW",
+            Self::TransferFailed => "ROOM_MIGRATION_STATE_TRANSFER_FAILED",
+            Self::RetiredOnOld => "ROOM_MIGRATION_STATE_RETIRED_ON_OLD",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ROOM_MIGRATION_STATE_OWNED_BY_OLD" => Some(Self::OwnedByOld),
+            "ROOM_MIGRATION_STATE_DRAINING_ON_OLD" => Some(Self::DrainingOnOld),
+            "ROOM_MIGRATION_STATE_FROZEN_FOR_TRANSFER" => Some(Self::FrozenForTransfer),
+            "ROOM_MIGRATION_STATE_IMPORTING_TO_NEW" => Some(Self::ImportingToNew),
+            "ROOM_MIGRATION_STATE_OWNED_BY_NEW" => Some(Self::OwnedByNew),
+            "ROOM_MIGRATION_STATE_TRANSFER_FAILED" => Some(Self::TransferFailed),
+            "ROOM_MIGRATION_STATE_RETIRED_ON_OLD" => Some(Self::RetiredOnOld),
             _ => None,
         }
     }

@@ -274,6 +274,117 @@ message RoomReconnectRes {
   MovementRecoveryState movement_recovery = 10;
 }
 
+enum RoomMigrationState {
+  ROOM_MIGRATION_STATE_OWNED_BY_OLD = 0;
+  ROOM_MIGRATION_STATE_DRAINING_ON_OLD = 1;
+  ROOM_MIGRATION_STATE_FROZEN_FOR_TRANSFER = 2;
+  ROOM_MIGRATION_STATE_IMPORTING_TO_NEW = 3;
+  ROOM_MIGRATION_STATE_OWNED_BY_NEW = 4;
+  ROOM_MIGRATION_STATE_TRANSFER_FAILED = 5;
+  ROOM_MIGRATION_STATE_RETIRED_ON_OLD = 6;
+}
+
+message ServerRedirectPush {
+  string reason = 1;
+  string room_id = 2;
+  string rollout_epoch = 3;
+  bool reconnect_required = 4;
+  uint32 retry_after_ms = 5;
+}
+
+message RoomTransferPayload {
+  string rollout_epoch = 1;
+  string room_id = 2;
+  uint64 room_version = 3;
+  string policy_id = 4;
+  string owner_player_id = 5;
+  string room_phase = 6;
+  uint32 current_frame_id = 7;
+  uint32 last_applied_frame_id = 8;
+  RoomSnapshot snapshot = 9;
+  repeated FrameInput recent_inputs = 10;
+  uint32 waiting_frame_id = 11;
+  repeated FrameInput waiting_inputs = 12;
+  string movement_state_json = 13;
+  string logic_state_json = 14;
+  string runtime_timers_json = 15;
+  string match_id = 16;
+  string checksum = 17;
+}
+
+message FreezeRoomForTransferReq {
+  string rollout_epoch = 1;
+  string room_id = 2;
+}
+
+message FreezeRoomForTransferRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  RoomMigrationState migration_state = 4;
+  uint64 room_version = 5;
+}
+
+message ExportRoomTransferReq {
+  string rollout_epoch = 1;
+  string room_id = 2;
+}
+
+message ExportRoomTransferRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  RoomTransferPayload payload = 4;
+  string checksum = 5;
+}
+
+message ImportRoomTransferReq {
+  RoomTransferPayload payload = 1;
+}
+
+message ImportRoomTransferRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  string checksum = 4;
+  uint64 room_version = 5;
+}
+
+message RetireTransferredRoomReq {
+  string rollout_epoch = 1;
+  string room_id = 2;
+  string checksum = 3;
+}
+
+message RetireTransferredRoomRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+}
+
+message GetRolloutDrainStatusReq {}
+
+message RoomRouteStatus {
+  string room_id = 1;
+  string owner_server_id = 2;
+  RoomMigrationState migration_state = 3;
+  uint32 member_count = 4;
+  uint32 online_member_count = 5;
+  uint64 empty_since_ms = 6;
+  uint64 room_version = 7;
+}
+
+message GetRolloutDrainStatusRes {
+  bool ok = 1;
+  string error_code = 2;
+  string rollout_epoch = 3;
+  string owner_server_id = 4;
+  uint64 owned_room_count = 5;
+  uint64 migrating_room_count = 6;
+  uint64 connection_count = 7;
+  repeated RoomRouteStatus routes = 8;
+}
+
 message RoomMemberOfflinePush {
   string room_id = 1;
   string player_id = 2;
