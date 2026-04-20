@@ -4,6 +4,7 @@ import {
 import {
   encodePingReq,
   encodeRoomJoinReq,
+  encodeRoomJoinAsObserverReq,
   encodeRoomLeaveReq,
   encodeRoomReadyReq,
   encodeRoomStartReq,
@@ -16,6 +17,8 @@ import {
 import { decodeByMessageType } from "../messages.js";
 import { fetchTicket, formatLoginSummary } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
+
+const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 
 /**
  * Print response and return decoded body
@@ -119,6 +122,87 @@ async function waitForRoomStatePush(client, timeoutMs, expectedEvent, label = "r
     (packet, decoded) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH && decoded.event === expectedEvent,
     label
   );
+}
+
+async function updateGameServerConfig(options, key, value) {
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/config`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key, value })
+  });
+
+  if (!response.ok) {
+    throw new Error(`update game-server config failed with status ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (!payload.ok) {
+    throw new Error(`update game-server config failed: ${payload.errorCode || JSON.stringify(payload)}`);
+  }
+
+  return payload;
+}
+
+async function fetchGameServerStatus(options) {
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/status`);
+  if (!response.ok) {
+    throw new Error(`fetch game-server status failed with status ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (!payload.ok) {
+    throw new Error(`fetch game-server status failed: ${payload.errorCode || JSON.stringify(payload)}`);
+  }
+
+  return payload;
+}
+
+async function setDrainMode(options, enabled) {
+  await updateGameServerConfig(options, "drain_mode", enabled ? "on" : "off");
+  const status = await fetchGameServerStatus(options);
+  const expectedStatus = enabled ? "draining" : "ok";
+  if (status.status !== expectedStatus) {
+    throw new Error(`expected game-server status ${expectedStatus}, got ${status.status}`);
+  }
+  console.log("drainMode.status:", JSON.stringify({
+    enabled,
+    status: status.status,
+    connectionCount: status.connectionCount,
+    roomCount: status.roomCount
+  }, null, 2));
+  return status;
+}
+
+async function joinRoomExpectSuccess(client, options, roomId, seq, label = "roomJoin") {
+  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, seq, encodeRoomJoinReq(roomId));
+  const joinPacket = await client.readNextPacket(options.timeoutMs);
+  const joinRes = printResponse(`${client.label}.${label}`, joinPacket);
+  if (joinPacket.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
+    throw new Error(`${client.label} expected ROOM_JOIN_RES, got ${joinPacket.messageType}`);
+  }
+  if (!joinRes.ok) {
+    throw new Error(`${client.label} room join failed: ${joinRes.errorCode}`);
+  }
+
+  const pushPacket = await client.readNextPacket(options.timeoutMs);
+  const push = printResponse(`${client.label}.roomStatePush(${label})`, pushPacket);
+  if (pushPacket.messageType !== MESSAGE_TYPE.ROOM_STATE_PUSH) {
+    throw new Error(`${client.label} expected ROOM_STATE_PUSH after join, got ${pushPacket.messageType}`);
+  }
+
+  return { joinRes, push };
+}
+
+async function safeLeaveRoom(client, options, seq, label = "roomLeave") {
+  try {
+    await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, seq, encodeRoomLeaveReq());
+    const leaveRes = await waitForMessageType(client, options.timeoutMs, MESSAGE_TYPE.ROOM_LEAVE_RES, label);
+    if (!leaveRes.ok) {
+      throw new Error(`${client.label} room leave failed: ${leaveRes.errorCode}`);
+    }
+  } catch (error) {
+    console.warn(`${client.label}.${label}: cleanup skipped: ${error.message}`);
+  }
 }
 
 /**
@@ -300,8 +384,9 @@ export async function runTwoClientRoom(options) {
     if (pushB2.snapshot?.ownerPlayerId !== loginB.playerId) {
       throw new Error("expected owner to transfer to clientB");
     }
-    if (pushB2.snapshot?.members?.length !== 1) {
-      throw new Error("expected only one member after owner leave");
+    const activeMembers = pushB2.snapshot?.members?.filter((member) => !member.offline) ?? [];
+    if (activeMembers.length !== 1 || activeMembers[0].playerId !== loginB.playerId) {
+      throw new Error("expected clientB to be the only active member after owner leave");
     }
 
     await delayBeforeFinalLeave(clientB, options.timeoutMs);
@@ -707,6 +792,326 @@ export async function runReconnectAllDisconnected(options) {
     clientA2?.close();
     clientB2?.close();
     throw error;
+  }
+}
+
+/**
+ * Drain scenario: new room creation through RoomJoinReq should be rejected.
+ */
+export async function runDrainNewRoomRejected(options) {
+  const login = await fetchTicket(options, { guestId: `${options.roomId}-drain-new-room` });
+  const client = new TcpProtocolClient(options, "client");
+  let drainEnabled = false;
+
+  await client.connect();
+
+  try {
+    await setDrainMode(options, true);
+    drainEnabled = true;
+
+    await authenticateClient(client, options, login, 1);
+    await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+
+    const packet = await client.readNextPacket(options.timeoutMs);
+    const joinRes = printResponse("client.roomJoin", packet);
+    if (packet.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
+      throw new Error(`expected ROOM_JOIN_RES, got ${packet.messageType}`);
+    }
+    if (joinRes.ok) {
+      throw new Error("expected drain mode to reject creating a new room");
+    }
+    if (joinRes.errorCode !== DRAIN_MODE_REJECT_NEW_ROOM_ERROR) {
+      throw new Error(`expected ${DRAIN_MODE_REJECT_NEW_ROOM_ERROR}, got ${joinRes.errorCode}`);
+    }
+
+    console.log("Drain new room rejection verified successfully.");
+  } finally {
+    client.close();
+    if (drainEnabled) {
+      await setDrainMode(options, false);
+    }
+  }
+}
+
+/**
+ * Drain scenario: joining an already existing room should still succeed.
+ */
+export async function runDrainExistingRoomJoin(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-drain-owner` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-drain-joiner` });
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  let drainEnabled = false;
+
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    const joinedA = await joinRoomExpectSuccess(clientA, options, options.roomId, 2);
+    if (joinedA.push.snapshot?.ownerPlayerId !== loginA.playerId) {
+      throw new Error(`expected ${loginA.playerId} to be room owner before drain`);
+    }
+
+    await setDrainMode(options, true);
+    drainEnabled = true;
+
+    await authenticateClient(clientB, options, loginB, 1);
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+
+    const joinPacketB = await clientB.readNextPacket(options.timeoutMs);
+    const joinResB = printResponse("clientB.roomJoin", joinPacketB);
+    if (joinPacketB.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
+      throw new Error(`clientB expected ROOM_JOIN_RES, got ${joinPacketB.messageType}`);
+    }
+    if (!joinResB.ok) {
+      throw new Error(`clientB room join failed during drain: ${joinResB.errorCode}`);
+    }
+
+    const pushB = printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    const pushA = printResponse("clientA.roomStatePush(memberJoined)", await clientA.readNextPacket(options.timeoutMs));
+    if (pushA.snapshot?.members?.length !== 2 || pushB.snapshot?.members?.length !== 2) {
+      throw new Error("expected both clients to observe two members in existing room during drain");
+    }
+
+    console.log("Drain existing room join verified successfully.");
+
+    await safeLeaveRoom(clientB, options, 3);
+    await safeLeaveRoom(clientA, options, 3);
+  } finally {
+    clientA.close();
+    clientB.close();
+    if (drainEnabled) {
+      await setDrainMode(options, false);
+    }
+  }
+}
+
+/**
+ * Drain scenario: reconnect into an existing room should still succeed.
+ */
+export async function runDrainExistingRoomReconnect(options) {
+  const loginA = await fetchTicket(options, { guestId: `${options.roomId}-drain-reconnect-a` });
+  const loginB = await fetchTicket(options, { guestId: `${options.roomId}-drain-reconnect-b` });
+  const clientA = new TcpProtocolClient(options, "clientA");
+  const clientB = new TcpProtocolClient(options, "clientB");
+  let clientA2 = null;
+  let drainEnabled = false;
+
+  await clientA.connect();
+  await clientB.connect();
+
+  try {
+    await authenticateClient(clientA, options, loginA, 1);
+    await authenticateClient(clientB, options, loginB, 1);
+
+    await joinRoomExpectSuccess(clientA, options, options.roomId, 2);
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
+    const joinPacketB = await clientB.readNextPacket(options.timeoutMs);
+    const joinResB = printResponse("clientB.roomJoin", joinPacketB);
+    if (joinPacketB.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
+      throw new Error(`clientB expected ROOM_JOIN_RES, got ${joinPacketB.messageType}`);
+    }
+    if (!joinResB.ok) {
+      throw new Error(`clientB room join failed: ${joinResB.errorCode}`);
+    }
+    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
+    printResponse("clientA.roomStatePush(memberJoined)", await clientA.readNextPacket(options.timeoutMs));
+
+    await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
+    const readyA = printResponse("clientA.roomReady", await clientA.readNextPacket(options.timeoutMs));
+    if (!readyA.ok) {
+      throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
+    await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
+
+    await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
+    const readyB = printResponse("clientB.roomReady", await clientB.readNextPacket(options.timeoutMs));
+    if (!readyB.ok) {
+      throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    }
+    await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
+    await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
+
+    await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 5, encodeRoomStartReq());
+    const startRes = await waitForRoomStartRes(clientA, options.timeoutMs, "roomStart");
+    if (!startRes.ok) {
+      throw new Error(`clientA room start failed: ${startRes.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
+    await waitForRoomStatePush(clientB, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
+
+    await clientB.send(MESSAGE_TYPE.PLAYER_INPUT_REQ, 6, encodePlayerInputReq(1, "move", '{"direction":"right"}'));
+    const inputRes = await waitForMessageType(clientB, options.timeoutMs, MESSAGE_TYPE.PLAYER_INPUT_RES, "playerInput");
+    if (!inputRes.ok) {
+      throw new Error(`clientB player input failed: ${inputRes.errorCode}`);
+    }
+
+    console.log("Simulating disconnect for clientA before enabling drain...");
+    clientA.close();
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    const disconnectedPush = await waitForRoomStatePush(
+      clientB,
+      options.timeoutMs * 2,
+      "member_disconnected",
+      "roomStatePush(disconnected)"
+    );
+    if (!disconnectedPush.snapshot?.members?.some((member) => member.playerId === loginA.playerId && member.offline)) {
+      throw new Error("expected clientA to appear offline before drain reconnect");
+    }
+
+    await setDrainMode(options, true);
+    drainEnabled = true;
+
+    clientA2 = new TcpProtocolClient(options, "clientA2");
+    await clientA2.connect();
+    await authenticateClient(clientA2, options, loginA, 3);
+
+    let reconnectRes = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const seq = 4 + attempt;
+      await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, seq, encodeRoomReconnectReq(loginA.playerId));
+
+      const reconnectPacket = await clientA2.readNextPacket(options.timeoutMs);
+      const currentRes = printResponse(`clientA2.roomReconnect(attempt-${attempt + 1})`, reconnectPacket);
+      if (reconnectPacket.messageType !== MESSAGE_TYPE.ROOM_RECONNECT_RES) {
+        throw new Error(`clientA2 expected ROOM_RECONNECT_RES, got ${reconnectPacket.messageType}`);
+      }
+      if (currentRes.ok) {
+        reconnectRes = currentRes;
+        break;
+      }
+      if (currentRes.errorCode !== "PLAYER_NOT_OFFLINE" || attempt === 4) {
+        throw new Error(`clientA reconnect failed during drain: ${currentRes.errorCode}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    if (!reconnectRes) {
+      throw new Error("clientA reconnect did not succeed within retry window");
+    }
+    if (reconnectRes.roomId !== options.roomId) {
+      throw new Error(`clientA reconnect returned unexpected room ${reconnectRes.roomId}`);
+    }
+    if (reconnectRes.snapshot?.state !== "in_game") {
+      throw new Error(`clientA reconnect expected in_game snapshot, got ${reconnectRes.snapshot?.state}`);
+    }
+
+    const reconnectedPush = await waitForRoomStatePush(
+      clientB,
+      options.timeoutMs,
+      "member_reconnected",
+      "roomStatePush(reconnected)"
+    );
+    if (!reconnectedPush.snapshot?.members?.some((member) => member.playerId === loginA.playerId && !member.offline)) {
+      throw new Error("expected clientA to be back online after drain reconnect");
+    }
+
+    console.log("Drain existing room reconnect verified successfully.");
+
+    await safeLeaveRoom(clientA2, options, 5);
+    await safeLeaveRoom(clientB, options, 5);
+  } finally {
+    clientA.close();
+    clientB.close();
+    clientA2?.close();
+    if (drainEnabled) {
+      await setDrainMode(options, false);
+    }
+  }
+}
+
+/**
+ * Drain scenario: observer can still join an already existing room.
+ */
+export async function runDrainExistingRoomObserver(options) {
+  const loginHost = await fetchTicket(options, { guestId: `${options.roomId}-drain-observer-host` });
+  const loginObserver = await fetchTicket(options, { guestId: `${options.roomId}-drain-observer-client` });
+  const host = new TcpProtocolClient(options, "host");
+  const observer = new TcpProtocolClient(options, "observer");
+  let drainEnabled = false;
+
+  await host.connect();
+  await observer.connect();
+
+  try {
+    await authenticateClient(host, options, loginHost, 1);
+    await joinRoomExpectSuccess(host, options, options.roomId, 2);
+
+    await setDrainMode(options, true);
+    drainEnabled = true;
+
+    await authenticateClient(observer, options, loginObserver, 1);
+    await observer.send(MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_REQ, 2, encodeRoomJoinAsObserverReq(options.roomId));
+
+    const observerPacket = await observer.readNextPacket(options.timeoutMs);
+    const observerRes = printResponse("observer.roomJoinAsObserver", observerPacket);
+    if (observerPacket.messageType !== MESSAGE_TYPE.ROOM_JOIN_AS_OBSERVER_RES) {
+      throw new Error(`observer expected ROOM_JOIN_AS_OBSERVER_RES, got ${observerPacket.messageType}`);
+    }
+    if (!observerRes.ok) {
+      throw new Error(`observer join failed during drain: ${observerRes.errorCode}`);
+    }
+    if (!observerRes.snapshot?.members?.some((member) => member.playerId === loginObserver.playerId && member.role === 1)) {
+      throw new Error("expected observer snapshot to contain observer role member");
+    }
+
+    console.log("Drain existing room observer verified successfully.");
+
+    await safeLeaveRoom(observer, options, 3);
+    await safeLeaveRoom(host, options, 3);
+  } finally {
+    host.close();
+    observer.close();
+    if (drainEnabled) {
+      await setDrainMode(options, false);
+    }
+  }
+}
+
+/**
+ * Drain scenario: new matched room creation should be rejected.
+ */
+export async function runDrainCreateMatchedRoomRejected(options) {
+  const login = await fetchTicket(options, { guestId: `${options.roomId}-drain-matched-owner` });
+  const client = new TcpProtocolClient(options, "client");
+  const matchId = options.matchId || `drain-match-${Date.now()}`;
+  let drainEnabled = false;
+
+  await client.connect();
+
+  try {
+    await setDrainMode(options, true);
+    drainEnabled = true;
+
+    await authenticateClient(client, options, login, 1);
+    await client.send(
+      MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
+      2,
+      encodeCreateMatchedRoomReq(matchId, options.roomId, [login.playerId], options.mode || "1v1")
+    );
+
+    const packet = await client.readNextPacket(options.timeoutMs);
+    const createRes = printResponse("client.createMatchedRoomRes", packet);
+    if (packet.messageType !== MESSAGE_TYPE.CREATE_MATCHED_ROOM_RES) {
+      throw new Error(`expected CREATE_MATCHED_ROOM_RES, got ${packet.messageType}`);
+    }
+    if (createRes.ok) {
+      throw new Error("expected drain mode to reject creating a new matched room");
+    }
+    if (createRes.errorCode !== DRAIN_MODE_REJECT_NEW_ROOM_ERROR) {
+      throw new Error(`expected ${DRAIN_MODE_REJECT_NEW_ROOM_ERROR}, got ${createRes.errorCode}`);
+    }
+
+    console.log("Drain create matched room rejection verified successfully.");
+  } finally {
+    client.close();
+    if (drainEnabled) {
+      await setDrainMode(options, false);
+    }
   }
 }
 

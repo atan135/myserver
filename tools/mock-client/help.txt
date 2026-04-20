@@ -16,6 +16,9 @@
 # --policy-id <id>           房间策略，例如 movement_demo / combat_demo
 # --combat-skill-id <id>     combat-dual-client 使用的技能ID (默认 2)
 
+# rollout / drain 相关测试说明、GM 开关命令与专用场景见:
+# tools/mock-client/help_rollout.txt
+
 # ========== 邮件参数 ==========
 
 # --mail-id <id>                 邮件ID（mail-get / mail-read / mail-claim 必填）

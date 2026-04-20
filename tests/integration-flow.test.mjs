@@ -25,6 +25,7 @@ before(async () => {
   const adminPort = await findFreePort();
   const proxyPort = await findFreePort();
   const proxyAdminPort = await findFreePort();
+  const proxyTcpFallbackPort = await findFreePort();
   const localSocketName = process.platform === "win32"
     ? randomId("game-server")
     : randomId("game-server") + ".sock";
@@ -43,6 +44,7 @@ before(async () => {
     host: "127.0.0.1",
     port: proxyPort,
     adminPort: proxyAdminPort,
+    tcpFallbackPort: proxyTcpFallbackPort,
     upstreamLocalSocketName: localSocketName
   });
 
@@ -202,6 +204,59 @@ test("mock-client scenarios cover core e2e flows", { timeout: 180000 }, async (t
       host: gameServer.host,
       port: gameServer.port,
       roomId: randomId("room-data")
+    });
+  });
+});
+
+test("mock-client scenarios cover drain guard flows", { timeout: 180000 }, async (t) => {
+  await t.test("drain-new-room-rejected", async () => {
+    await runMockClientScenario({
+      scenario: "drain-new-room-rejected",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-drain-new")
+    });
+  });
+
+  await t.test("drain-existing-room-join", async () => {
+    await runMockClientScenario({
+      scenario: "drain-existing-room-join",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-drain-join")
+    });
+  });
+
+  await t.test("drain-existing-room-reconnect", async () => {
+    await runMockClientScenario({
+      scenario: "drain-existing-room-reconnect",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-drain-reconnect"),
+      timeoutMs: 10000
+    });
+  });
+
+  await t.test("drain-existing-room-observer", async () => {
+    await runMockClientScenario({
+      scenario: "drain-existing-room-observer",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-drain-observer")
+    });
+  });
+
+  await t.test("drain-create-matched-room-rejected", async () => {
+    await runMockClientScenario({
+      scenario: "drain-create-matched-room-rejected",
+      httpBaseUrl: authServer.baseUrl,
+      host: gameServer.host,
+      port: gameServer.port,
+      roomId: randomId("room-drain-match")
     });
   });
 });

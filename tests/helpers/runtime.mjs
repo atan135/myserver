@@ -412,6 +412,7 @@ export async function startGameProxy({
   host = "127.0.0.1",
   port,
   adminPort,
+  tcpFallbackPort = port + 10000,
   upstreamLocalSocketName = "myserver-game-server.sock"
 }) {
   const stdout = [];
@@ -425,6 +426,8 @@ export async function startGameProxy({
     PROXY_PORT: String(port),
     PROXY_ADMIN_HOST: host,
     PROXY_ADMIN_PORT: String(adminPort),
+    PROXY_TCP_FALLBACK_HOST: host,
+    PROXY_TCP_FALLBACK_PORT: String(tcpFallbackPort),
     LOG_LEVEL: "error",
     LOG_ENABLE_CONSOLE: "false",
     LOG_ENABLE_FILE: "false",
@@ -488,6 +491,7 @@ export async function startGameProxy({
     host,
     port,
     adminPort,
+    tcpFallbackPort,
     stdout,
     stderr,
     async close() {

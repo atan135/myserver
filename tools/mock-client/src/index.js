@@ -17,6 +17,11 @@ import {
   runOversizedRoomJoin,
   runReconnect,
   runReconnectAllDisconnected,
+  runDrainNewRoomRejected,
+  runDrainExistingRoomJoin,
+  runDrainExistingRoomReconnect,
+  runDrainExistingRoomObserver,
+  runDrainCreateMatchedRoomRejected,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   // Game scenarios
@@ -156,6 +161,36 @@ async function main() {
 
   if (options.scenario === SCENARIO.RECONNECT_ALL_DISCONNECTED) {
     await runReconnectAllDisconnected(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.DRAIN_NEW_ROOM_REJECTED) {
+    await runDrainNewRoomRejected(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.DRAIN_EXISTING_ROOM_JOIN) {
+    await runDrainExistingRoomJoin(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.DRAIN_EXISTING_ROOM_RECONNECT) {
+    await runDrainExistingRoomReconnect(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.DRAIN_EXISTING_ROOM_OBSERVER) {
+    await runDrainExistingRoomObserver(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.DRAIN_CREATE_MATCHED_ROOM_REJECTED) {
+    await runDrainCreateMatchedRoomRejected(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

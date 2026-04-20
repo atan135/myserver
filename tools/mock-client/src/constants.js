@@ -131,6 +131,11 @@ export const SCENARIO = {
   GET_ROOM_DATA_IN_ROOM: "get-room-data-in-room",
   RECONNECT: "reconnect",
   RECONNECT_ALL_DISCONNECTED: "reconnect-all-disconnected",
+  DRAIN_NEW_ROOM_REJECTED: "drain-new-room-rejected",
+  DRAIN_EXISTING_ROOM_JOIN: "drain-existing-room-join",
+  DRAIN_EXISTING_ROOM_RECONNECT: "drain-existing-room-reconnect",
+  DRAIN_EXISTING_ROOM_OBSERVER: "drain-existing-room-observer",
+  DRAIN_CREATE_MATCHED_ROOM_REJECTED: "drain-create-matched-room-rejected",
   // Match scenarios
   CREATE_MATCHED_ROOM: "create-matched-room",
   CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",

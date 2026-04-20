@@ -1,0 +1,131 @@
+# Mock Client Rollout / Drain 测试帮助
+
+# 这份文档只覆盖当前已经落地、可直接执行的第一批 rollout/drain 验证。
+# 当前仓库尚未实现完整的 redirect 灰度重连链路，因此这里重点验证的是 old_server 的 drain guard。
+
+# ========== 前置说明 ==========
+
+# 当前可验证能力:
+# 1. drain 模式可通过 auth-http 内部接口开关
+# 2. drain 下拒绝创建新默认房
+# 3. drain 下允许进入已存在房间
+# 4. drain 下允许 RoomReconnectReq 重回已存在房间
+# 5. drain 下允许 observer 进入已存在房间
+# 6. drain 下拒绝 CreateMatchedRoomReq 创建新房
+
+# 当前还不能直接用 mock-client 验证的能力:
+# 1. old_server 主动下发 ServerRedirectPush
+# 2. 客户端收到 redirect 后显式断开并重连到 proxy/new_server
+# 3. old_server + new_server + proxy 的完整灰度接管闭环
+
+# ========== 测试 GM / 控制面 ==========
+
+# 这里的“测试 GM”采用现有 auth-http 内部接口模拟运维/控制面开关。
+# 默认 auth-http 地址: http://127.0.0.1:3000
+
+# 1. 查询 game-server 当前状态
+curl http://127.0.0.1:3000/api/v1/internal/game-server/status
+
+# 期望返回:
+# - status = ok        表示未开启 drain
+# - status = draining  表示 drain 已开启
+
+# 2. 开启 drain mode
+curl -X POST http://127.0.0.1:3000/api/v1/internal/game-server/config ^
+  -H "content-type: application/json" ^
+  -d "{\"key\":\"drain_mode\",\"value\":\"on\"}"
+
+# 3. 关闭 drain mode
+curl -X POST http://127.0.0.1:3000/api/v1/internal/game-server/config ^
+  -H "content-type: application/json" ^
+  -d "{\"key\":\"drain_mode\",\"value\":\"off\"}"
+
+# PowerShell 写法:
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3000/api/v1/internal/game-server/config" `
+  -ContentType "application/json" `
+  -Body '{"key":"drain_mode","value":"on"}'
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3000/api/v1/internal/game-server/config" `
+  -ContentType "application/json" `
+  -Body '{"key":"drain_mode","value":"off"}'
+
+# ========== mock-client 场景 ==========
+
+# 下面这些场景会在执行过程中自行开启/关闭 drain，不要求手工先切换 GM。
+# 如果场景失败，中间可能留下 draining 状态，建议再手工执行一次“关闭 drain mode”。
+
+# 1. drain-new-room-rejected
+# 说明:
+# - 开启 drain
+# - 登录一个新玩家
+# - 用 RoomJoinReq 请求一个本地不存在的新 room
+# 期望:
+# - ROOM_JOIN_RES.ok = false
+# - errorCode = SERVER_DRAINING_REJECT_NEW_ROOM
+node tools/mock-client/src/index.js --scenario drain-new-room-rejected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-new-room
+
+# 2. drain-existing-room-join
+# 说明:
+# - clientA 先创建并进入 room
+# - 开启 drain
+# - clientB 再通过 RoomJoinReq 进入同一个已存在 room
+# 期望:
+# - clientB 仍然 join 成功
+# - 双方都能看到 members=2
+node tools/mock-client/src/index.js --scenario drain-existing-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-existing-join
+
+# 3. drain-existing-room-reconnect
+# 说明:
+# - clientA/clientB 先进入同一 room
+# - clientA 断线，不发 ROOM_LEAVE
+# - 开启 drain
+# - clientA 重新发 RoomReconnectReq
+# 期望:
+# - reconnect 成功
+# - clientB 能收到 member_reconnected
+node tools/mock-client/src/index.js --scenario drain-existing-room-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-reconnect --timeout-ms 10000
+
+# 4. drain-existing-room-observer
+# 说明:
+# - host 先创建并进入 room
+# - 开启 drain
+# - observer 再通过 RoomJoinAsObserverReq 进入同一个已存在 room
+# 期望:
+# - observer join 成功
+# - snapshot 中 observer role = 1
+node tools/mock-client/src/index.js --scenario drain-existing-room-observer --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-observer
+
+# 5. drain-create-matched-room-rejected
+# 说明:
+# - 开启 drain
+# - 发 CreateMatchedRoomReq 创建一个本地不存在的新 matched room
+# 期望:
+# - CREATE_MATCHED_ROOM_RES.ok = false
+# - errorCode = SERVER_DRAINING_REJECT_NEW_ROOM
+node tools/mock-client/src/index.js --scenario drain-create-matched-room-rejected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-match
+
+# ========== 集成测试 ==========
+
+# Node 集成测试已经补充了 drain 场景组:
+# - drain-new-room-rejected
+# - drain-existing-room-join
+# - drain-existing-room-reconnect
+# - drain-existing-room-observer
+# - drain-create-matched-room-rejected
+
+# 直接执行:
+npm run test:integration
+
+# 如果只想看 mock-client 相关日志，建议本地单独跑上面的 node 命令。
+
+# ========== 当前结论 ==========
+
+# 现在 mock-client 能验证的是:
+# - drain 是 server 级开关
+# - new room create 会被挡住
+# - existing room join / reconnect / observer 不受影响
+
+# 还没有覆盖的 rollout 链路:
+# - redirect push
+# - reconnect 后通过 proxy 进入 new_server
+# - room route 切换与完整灰度收尾
