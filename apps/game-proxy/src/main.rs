@@ -1,8 +1,11 @@
+mod auth;
 mod admin_server;
 mod config;
 mod local_socket;
 mod metrics;
+mod proto;
 mod proxy_server;
+mod protocol;
 mod route_store;
 mod session;
 mod transport;
@@ -12,8 +15,12 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use auth::ProxyAuthService;
 use config::Config;
-use route_store::{ProxyRouteStore, UpstreamRoute, UpstreamState};
+pub use proto::myserver::game as pb;
+use route_store::{
+    ProxyRouteStore, UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
+};
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -71,19 +78,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging(&config);
 
     // 启动 metrics 上报任务
-    let metrics_redis_url = config.registry_url.clone();
+    let metrics_redis_url = config.redis_url.clone();
     tokio::spawn(async move {
         metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
     });
 
     let route_store = ProxyRouteStore::default();
     route_store
-        .set_routes(vec![UpstreamRoute {
+        .set_static_routes(vec![UpstreamRoute {
             server_id: config.upstream_server_id.clone(),
             local_socket_name: config.upstream_local_socket_name.clone(),
-            state: UpstreamState::Active,
+            operation_state: UpstreamOperationState::Active,
+            health_state: UpstreamHealthState::Healthy,
         }])
         .await;
+    let auth_service = Arc::new(ProxyAuthService::new(
+        &config.redis_url,
+        config.redis_key_prefix.clone(),
+        config.ticket_secret.clone(),
+    )?);
 
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
@@ -103,7 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let result = proxy_server::run(&config, route_store, connection_count, maintenance).await;
+    let result = proxy_server::run(
+        &config,
+        route_store,
+        auth_service,
+        connection_count,
+        maintenance,
+    )
+    .await;
 
     admin_task.abort();
     let _ = admin_task.await;

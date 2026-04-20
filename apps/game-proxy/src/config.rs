@@ -20,6 +20,9 @@ pub struct Config {
     pub log_enable_file: bool,
     pub log_dir: String,
     pub local_socket_name: String,
+    pub redis_url: String,
+    pub redis_key_prefix: String,
+    pub ticket_secret: String,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -53,6 +56,12 @@ impl Config {
         let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "logs/game-proxy".to_string());
         let local_socket_name = env::var("PROXY_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-proxy.sock".to_string());
+        let redis_url = env::var("REDIS_URL")
+            .or_else(|_| env::var("REGISTRY_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let ticket_secret = env::var("TICKET_SECRET")
+            .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -84,6 +93,9 @@ impl Config {
             log_enable_file,
             log_dir,
             local_socket_name,
+            redis_url,
+            redis_key_prefix,
+            ticket_secret,
             registry_enabled,
             registry_url,
             registry_discover_interval_secs,
