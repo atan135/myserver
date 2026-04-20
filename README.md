@@ -34,9 +34,11 @@ scripts/             # 环境检查与本地启动辅助脚本
 |------|------|
 | [架构设计](./docs/architecture.md) | 整体技术选型与服务边界 |
 | [协议设计](./docs/protocol.md) | 玩家 TCP 协议、消息号、房间规则 |
+| [更新策略拆分](./docs/game-server-update-strategy.md) | 运行时热更新与滚动重启/灰度发布的边界 |
 | [帧同步与房间生命周期](./docs/game-server-frame-sync-design.md) | 房间框架、帧推进、RoomLogic 抽象 |
-| [game-proxy 热切换代理](./docs/game-proxy-hot-update-design.md) | KCP 接入层、热更新、路由策略 |
+| [game-proxy 热切换代理](./docs/game-proxy-hot-update-design.md) | KCP 接入层、滚动重启/灰度发布、路由策略 |
 | [CSV 配置系统](./docs/game-server-csv-config-design.md) | 编译期代码生成、运行时热更新 |
+| [CSV 热更现状](./docs/game-server-csv-hot-reload-status.md) | 当前哪些表能在线生效，哪些仅 reload 不生效 |
 | [服务注册中心](./docs/service-registry-design.md) | Redis 服务发现与心跳 |
 | [聊天与邮件系统](./docs/game-server-chat-design.md) | 单聊/群聊、邮件、公告架构 |
 | [匹配服务](./docs/match-service-design.md) | 匹配池、撮合算法、gRPC 接口 |

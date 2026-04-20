@@ -29,9 +29,11 @@ docs/                # 架构与协议文档
 ## 文档导航
 
 - [底层框架路线图](./docs/game-server-framework-roadmap.md)
+- [更新策略拆分](./docs/game-server-update-strategy.md)
 - [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
 - [game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
 - [CSV 配置表设计](./docs/game-server-csv-config-design.md)
+- [CSV 热更现状清单](./docs/game-server-csv-hot-reload-status.md)
 - [协议设计](./docs/protocol.md)
 - [服务注册中心设计](./docs/service-registry-design.md)
 - [聊天与邮件系统设计](./docs/game-server-chat-design.md)

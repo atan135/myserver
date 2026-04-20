@@ -8,7 +8,7 @@
 - `game-server` 已支持 TCP 鉴权、心跳、房间加入/离开/准备/开始/结束
 - `game-server` 已支持基础房间快照广播和玩家输入广播
 - `auth-http` 已支持对 `game-server` 的内部状态查询与运行时配置代理
-- `game-server` 已支持 CSV 配置表加载与热更
+- `game-server` 已支持 CSV 配置表加载与运行时热更新
 - 仓库已具备基础的 HTTP 测试和跨服务集成测试
 
 但从“可联调最小闭环”到“可复用游戏底层框架”，还缺少一组更稳定的运行时抽象、治理能力和验收标准。
@@ -282,7 +282,7 @@
 
 - 新增 `apps/game-proxy`
 - 在客户端与 `game-server` 之间增加一层 proxy
-- 把 `game-server` 的热切换、摘流和连接代理能力前置到 proxy
+- 把 `game-server` 的滚动重启 / 灰度发布、摘流和连接代理能力前置到 proxy
 - 客户端与 proxy 使用 `KCP`
 - proxy 与 `game-server` 使用 `UDS`
 
