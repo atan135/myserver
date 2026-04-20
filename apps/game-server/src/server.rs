@@ -32,6 +32,18 @@ use crate::session::Session;
 pub struct RuntimeConfig {
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    pub drain_mode_enabled: bool,
+    pub drain_mode_entered_at_ms: Option<u64>,
+}
+
+impl RuntimeConfig {
+    pub fn status_label(&self) -> &'static str {
+        if self.drain_mode_enabled {
+            "draining"
+        } else {
+            "ok"
+        }
+    }
 }
 
 struct ConnectionCountGuard {
@@ -89,6 +101,8 @@ pub async fn run(
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             max_body_len: config.max_body_len,
+            drain_mode_enabled: false,
+            drain_mode_entered_at_ms: None,
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
@@ -101,6 +115,7 @@ pub async fn run(
         config: config.clone(),
         mysql_store: mysql_store.clone(),
         room_manager: shared_state.room_manager.clone(),
+        runtime_config: shared_state.runtime_config.clone(),
         config_tables,
         player_manager: PlayerManager::new(mysql_player_store),
         online_player_count: shared_state.online_player_count.clone(),

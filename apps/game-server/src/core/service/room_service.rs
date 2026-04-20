@@ -12,6 +12,8 @@ use crate::pb::{
 };
 use crate::protocol::{MessageType, Packet};
 
+const DRAIN_MODE_REJECT_NEW_ROOM_ERROR: &str = "SERVER_DRAINING_REJECT_NEW_ROOM";
+
 pub async fn handle_room_join(
     services: &ServiceContext,
     connection: &mut ConnectionContext,
@@ -64,6 +66,20 @@ pub async fn handle_room_join(
                 ok: true,
                 room_id: room_id.clone(),
                 error_code: String::new(),
+            },
+        )?;
+        return Ok(());
+    }
+
+    if drain_mode_blocks_new_room_creation(services, &room_id).await {
+        log_drain_mode_room_creation_rejected("room_join", Some(&player_id), &room_id, None);
+        connection.queue_message(
+            MessageType::RoomJoinRes,
+            packet.header.seq,
+            RoomJoinRes {
+                ok: false,
+                room_id: room_id.clone(),
+                error_code: DRAIN_MODE_REJECT_NEW_ROOM_ERROR.to_string(),
             },
         )?;
         return Ok(());
@@ -711,10 +727,19 @@ pub async fn handle_room_reconnect(
     // Find the room the player is offline in (via MySQL audit log or cache)
     // For now, client should provide room_id - we'll search for the player
     // This is a simplified implementation - in production you'd track this in Redis
-    let room_id = services
+    let room_id = match services
         .mysql_store
         .find_room_by_offline_player(&reconnect_player_id)
-        .await;
+        .await
+    {
+        Some(room_id) => Some(room_id),
+        None => {
+            services
+                .room_manager
+                .find_room_by_offline_player(&reconnect_player_id)
+                .await
+        }
+    };
 
     let Some(room_id) = room_id else {
         connection.queue_message(
@@ -839,6 +864,32 @@ pub async fn handle_join_as_observer(
                 ok: false,
                 room_id: current_room_id.clone(),
                 error_code: "ALREADY_IN_OTHER_ROOM".to_string(),
+                snapshot: None,
+                current_frame_id: 0,
+                recent_inputs: vec![],
+                waiting_frame_id: 0,
+                waiting_inputs: vec![],
+                input_delay_frames: 0,
+                movement_recovery: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    if drain_mode_blocks_new_room_creation(services, &room_id).await {
+        log_drain_mode_room_creation_rejected(
+            "observer_join",
+            Some(&player_id),
+            &room_id,
+            None,
+        );
+        connection.queue_message(
+            MessageType::RoomJoinAsObserverRes,
+            packet.header.seq,
+            RoomJoinAsObserverRes {
+                ok: false,
+                room_id: room_id.clone(),
+                error_code: DRAIN_MODE_REJECT_NEW_ROOM_ERROR.to_string(),
                 snapshot: None,
                 current_frame_id: 0,
                 recent_inputs: vec![],
@@ -1052,6 +1103,21 @@ async fn create_matched_room_impl(
 
     let owner_player_id = player_ids.first().cloned().unwrap_or_default();
 
+    if drain_mode_blocks_new_room_creation(services, room_id).await {
+        log_drain_mode_room_creation_rejected(
+            "create_matched_room",
+            actor_player_id,
+            room_id,
+            Some(match_id),
+        );
+        return CreateMatchedRoomRes {
+            ok: false,
+            room_id: room_id.to_string(),
+            error_code: DRAIN_MODE_REJECT_NEW_ROOM_ERROR.to_string(),
+            snapshot: None,
+        };
+    }
+
     match services
         .room_manager
         .create_matched_room(match_id, room_id, player_ids, mode)
@@ -1124,4 +1190,32 @@ async fn create_matched_room_impl(
             }
         }
     }
+}
+
+async fn drain_mode_blocks_new_room_creation(
+    services: &ServiceContext,
+    room_id: &str,
+) -> bool {
+    let drain_mode_enabled = services.runtime_config.read().await.drain_mode_enabled;
+    if !drain_mode_enabled {
+        return false;
+    }
+
+    !services.room_manager.room_exists(room_id).await
+}
+
+fn log_drain_mode_room_creation_rejected(
+    request_kind: &'static str,
+    player_id: Option<&str>,
+    room_id: &str,
+    match_id: Option<&str>,
+) {
+    info!(
+        request_kind,
+        player_id = %player_id.unwrap_or_default(),
+        room_id = %room_id,
+        match_id = %match_id.unwrap_or_default(),
+        error_code = DRAIN_MODE_REJECT_NEW_ROOM_ERROR,
+        "room creation rejected because server is in drain mode"
+    );
 }

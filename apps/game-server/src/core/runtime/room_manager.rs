@@ -229,6 +229,20 @@ impl RoomManager {
         self.rooms.lock().await.len()
     }
 
+    pub async fn room_exists(&self, room_id: &str) -> bool {
+        self.rooms.lock().await.contains_key(room_id)
+    }
+
+    pub async fn find_room_by_offline_player(&self, player_id: &str) -> Option<String> {
+        let rooms = self.rooms.lock().await;
+        rooms.iter().find_map(|(room_id, room)| {
+            room.members
+                .get(player_id)
+                .filter(|member| member.offline)
+                .map(|_| room_id.clone())
+        })
+    }
+
     pub async fn create_matched_room(
         &self,
         match_id: &str,
@@ -1427,6 +1441,25 @@ mod tests {
         }
 
         (manager, factory, receivers)
+    }
+
+    #[tokio::test]
+    async fn room_exists_reflects_room_creation() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        assert!(!manager.room_exists("room-test").await);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        manager
+            .join_room("room-test", "player-a", tx, MemberRole::Player, Some("default_match"))
+            .await
+            .unwrap();
+
+        assert!(manager.room_exists("room-test").await);
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::admin_pb::{
     GrantItem, GrantItemsReq, GrantItemsRes, ServerStatusReq, ServerStatusRes, UpdateConfigReq,
@@ -78,10 +78,12 @@ async fn handle_admin_connection(
                     .map_err(std::io::Error::other)?;
 
                 let room_count = room_manager.room_count().await as u64;
+                let runtime = *runtime_config.read().await;
                 let RuntimeConfig {
                     heartbeat_timeout_secs,
                     max_body_len,
-                } = *runtime_config.read().await;
+                    ..
+                } = runtime;
 
                 write_message(
                     &mut writer,
@@ -90,7 +92,7 @@ async fn handle_admin_connection(
                     &ServerStatusRes {
                         connection_count: connection_count.load(Ordering::Relaxed),
                         room_count,
-                        status: "ok".to_string(),
+                        status: runtime.status_label().to_string(),
                         max_body_len: max_body_len as u64,
                         heartbeat_timeout_secs,
                     },
@@ -404,8 +406,42 @@ async fn apply_runtime_config(
             runtime.heartbeat_timeout_secs = parsed;
             Ok(())
         }
+        "drain_mode" | "drain_mode_enabled" => {
+            let parsed = parse_bool_config_value(value)?;
+            let previous = runtime.drain_mode_enabled;
+            runtime.drain_mode_enabled = parsed;
+            runtime.drain_mode_entered_at_ms = if parsed {
+                runtime
+                    .drain_mode_entered_at_ms
+                    .or(Some(current_unix_ms_u64()))
+            } else {
+                None
+            };
+
+            if previous != parsed {
+                info!(
+                    drain_mode_enabled = parsed,
+                    drain_mode_entered_at_ms = ?runtime.drain_mode_entered_at_ms,
+                    "game-server drain mode updated"
+                );
+            }
+            Ok(())
+        }
         _ => Err("UNSUPPORTED_CONFIG_KEY"),
     }
+}
+
+fn parse_bool_config_value(value: &str) -> Result<bool, &'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "on" | "enabled" => Ok(true),
+        "0" | "false" | "off" | "disabled" => Ok(false),
+        _ => Err("INVALID_CONFIG_VALUE"),
+    }
+}
+
+fn current_unix_ms_u64() -> u64 {
+    current_unix_ms().max(0) as u64
 }
 
 async fn read_packet(
@@ -475,4 +511,52 @@ async fn write_error(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::RwLock;
+
+    use super::*;
+
+    fn runtime_config_fixture() -> SharedRuntimeConfig {
+        Arc::new(RwLock::new(RuntimeConfig {
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            drain_mode_enabled: false,
+            drain_mode_entered_at_ms: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_updates_drain_mode() {
+        let runtime_config = runtime_config_fixture();
+
+        apply_runtime_config(&runtime_config, "drain_mode", "on")
+            .await
+            .unwrap();
+
+        let enabled = *runtime_config.read().await;
+        assert!(enabled.drain_mode_enabled);
+        assert!(enabled.drain_mode_entered_at_ms.is_some());
+
+        apply_runtime_config(&runtime_config, "drain_mode_enabled", "off")
+            .await
+            .unwrap();
+
+        let disabled = *runtime_config.read().await;
+        assert!(!disabled.drain_mode_enabled);
+        assert_eq!(disabled.drain_mode_entered_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_rejects_invalid_drain_mode_value() {
+        let runtime_config = runtime_config_fixture();
+
+        let result = apply_runtime_config(&runtime_config, "drain_mode", "maybe").await;
+
+        assert_eq!(result, Err("INVALID_CONFIG_VALUE"));
+    }
 }
