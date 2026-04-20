@@ -16,8 +16,8 @@
 
 ## 运维支撑
 - [x] 服务健康检查与监控告警 ✅
-- [ ] 运行时热更新（配置项 / 可在线生效的 CSV）
-- [ ] 滚动重启/灰度发布（游戏逻辑 / 启动期固化 CSV）
+- [ ] 运行时热更新（配置项 / 可在线生效的 CSV）⚠️ 部分完成：`game-server` 运行时配置更新链路已具备，`TestTable_100` / `ItemTable` 已可在线生效；`SceneTable` / `SkillBase` / `BufferBase` 等启动期固化数据仍不属于运行时热更新
+- [ ] 滚动重启/灰度发布（游戏逻辑 / 启动期固化 CSV）⚠️ M0/M1 已完成：协议编号、`RoomTransferPayload`、`game-proxy` 的 rollout session 与 room/player route 底座已落地；`game-server` 的 freeze/export/import/retire/redirect 链路仍待完成
 - [x] 性能指标采集（QPS、延迟、在线人数） ✅
 - [x] 配置中心（动态下发配置）✅ 已具备 `game-server` 运行时配置项更新链路；复杂变更走滚动重启/灰度发布
 - [x] 统一登录 SSO ✅ 已通过 ticket 机制实现，game-server/chat-server 共用同一套票据验证
