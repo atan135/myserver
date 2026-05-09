@@ -64,6 +64,7 @@ SECURITY_AUDIT_ENABLED=true
   - ticket 校验实际发生在 `game-server`
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`
 - ticket 不是“使用后立即删除”的一次性票据；当前 `game-server` 校验时只检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
+- 当前同一张 ticket 还会被 `game-proxy` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
 
 ---
 
@@ -143,6 +144,7 @@ MAX_BODY_LEN=4096
 - `game-server` 在认证阶段会验证 ticket 签名和 Redis 中的 ticket 所有权，因此 ticket 校验的真正落点在这里，而不是 `auth-http`
 - `game-server` 校验 ticket 时依赖 `TICKET_SECRET` 和 `REDIS_KEY_PREFIX`；这两个值需要与 `auth-http` 的签发侧保持一致
 - ticket 校验成功后当前不会自动删除 Redis 中的 ticket，因此并非严格的一次性消费模型
+- 这种设计和当前“同一 ticket 供 `game-proxy` / `game-server` / `chat-server` 复用”的接入方式是一致的；如果后续要降低重放风险，更适合考虑缩短 TTL、增加用途隔离或引入换票流程
 - 心跳和包体长度限制属于当前已经生效的安全边界；消息频率限制、异常解析失败率阈值等仍属于设计目标，尚未看到对应配置入口
 
 ---

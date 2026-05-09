@@ -39,6 +39,7 @@ docs/                # 架构与协议文档
 - [聊天与邮件系统设计](./docs/game-server-chat-design.md)
 - [匹配服务设计](./docs/match-service-design.md)
 - [网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+- [安全设计](./docs/security-design.md)
 - [限流与风控设计](./docs/rate-limit-and-security.md)
 - [管理后台设计](./docs/admin-panel.md)
 

@@ -45,6 +45,7 @@ scripts/             # 环境检查与本地启动辅助脚本
 | [聊天与邮件系统](./docs/game-server-chat-design.md) | 单聊/群聊、邮件、公告架构 |
 | [匹配服务](./docs/match-service-design.md) | 匹配池、撮合算法、gRPC 接口 |
 | [网络延迟补偿](./docs/network-lag-compensation-design.md) | 帧同步/状态同步/射击回溯设计 |
+| [安全设计](./docs/security-design.md) | 安全边界、协议加密、反作弊、审计与黑白名单 |
 | [限流与风控](./docs/rate-limit-and-security.md) | 分层防护策略 |
 | [管理后台](./docs/admin-panel.md) | admin-api/admin-web 使用说明 |
 
