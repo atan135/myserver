@@ -604,6 +604,11 @@ export function decodeByMessageType(messageType, body) {
         mailType: readString(fields, 4),
         createdAt: readInt64(fields, 5)
       };
+    case MESSAGE_TYPE.SESSION_KICK_PUSH:
+      return {
+        reason: readString(fields, 1),
+        timestamp: readInt64(fields, 2)
+      };
     case MESSAGE_TYPE.ERROR_RES:
       return {
         errorCode: readString(fields, 1),

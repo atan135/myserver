@@ -99,6 +99,25 @@ pub async fn handle_auth(
                     Some(serde_json::json!({ "seq": packet.header.seq })),
                 )
                 .await;
+
+            // Register in player registry; kick old connection on same server
+            {
+                let mut registry = services.player_registry.write().await;
+                if let Some((old_notify, old_sid)) = registry.insert(
+                    player_id.clone(),
+                    (connection.kick_notify.clone(), connection.session.id),
+                ) {
+                    if old_sid != connection.session.id {
+                        info!(
+                            player_id = %player_id,
+                            old_session_id = old_sid,
+                            new_session_id = connection.session.id,
+                            "kicking old connection on same server"
+                        );
+                        old_notify.notify_one();
+                    }
+                }
+            }
         }
         Err(error_code) => {
             connection.queue_message(

@@ -6,6 +6,7 @@ mod gameroom;
 mod gameconfig;
 mod gameservice;
 mod internal_server;
+mod kick_subscriber;
 mod local_socket;
 mod match_client;
 mod metrics;

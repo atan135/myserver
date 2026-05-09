@@ -158,6 +158,111 @@ export async function runLogout(options) {
 }
 
 /**
+ * Run kick-session scenario: login twice with same account, verify old session is kicked
+ * Phase 1: HTTP session invalidation
+ * Phase 2: TCP active kick push via game-server
+ * @param {Object} options
+ */
+export async function runKickSession(options) {
+  // ===== Phase 1: HTTP session kick =====
+  console.log("[kick-session] ===== Phase 1: HTTP session kick =====");
+
+  // Step 1: Login first time
+  console.log("[kick-session] step 1: first login...");
+  const loginA = await fetchTicket(options);
+  console.log("[kick-session] session A:", JSON.stringify(formatLoginSummary(loginA), null, 2));
+
+  // Step 2: Verify session A is active
+  console.log("[kick-session] step 2: verifying session A with /me...");
+  const meA = await fetch(`${options.httpBaseUrl}/api/v1/auth/me`, {
+    headers: { authorization: `Bearer ${loginA.accessToken}` }
+  });
+  const meAPayload = await meA.json();
+  if (meA.status !== 200 || !meAPayload.ok) {
+    throw new Error(`expected session A /me to succeed, got status=${meA.status}: ${JSON.stringify(meAPayload)}`);
+  }
+  console.log("[kick-session] session A /me OK:", JSON.stringify({ playerId: meAPayload.playerId }));
+
+  // Step 3: Login again with same account (should kick session A)
+  console.log("[kick-session] step 3: second login (same account)...");
+  const loginB = await fetchTicket(options);
+  console.log("[kick-session] session B:", JSON.stringify(formatLoginSummary(loginB), null, 2));
+
+  // Step 4: Verify session A is now invalid (kicked)
+  console.log("[kick-session] step 4: verifying session A is kicked...");
+  const meAAfter = await fetch(`${options.httpBaseUrl}/api/v1/auth/me`, {
+    headers: { authorization: `Bearer ${loginA.accessToken}` }
+  });
+  const meAAfterPayload = await meAAfter.json();
+  if (meAAfter.status !== 401) {
+    throw new Error(`expected session A /me to return 401 after kick, got status=${meAAfter.status}: ${JSON.stringify(meAAfterPayload)}`);
+  }
+  console.log("[kick-session] session A correctly returned 401 (kicked)");
+
+  // Step 5: Verify session B is still valid
+  console.log("[kick-session] step 5: verifying session B is still valid...");
+  const meB = await fetch(`${options.httpBaseUrl}/api/v1/auth/me`, {
+    headers: { authorization: `Bearer ${loginB.accessToken}` }
+  });
+  const meBPayload = await meB.json();
+  if (meB.status !== 200 || !meBPayload.ok) {
+    throw new Error(`expected session B /me to succeed, got status=${meB.status}: ${JSON.stringify(meBPayload)}`);
+  }
+  console.log("[kick-session] session B /me OK:", JSON.stringify({ playerId: meBPayload.playerId }));
+
+  console.log("[kick-session] Phase 1 all checks passed");
+
+  // ===== Phase 2: TCP active kick push =====
+  console.log("\n[kick-session] ===== Phase 2: TCP active kick push =====");
+
+  const { TcpProtocolClient } = await import("./client.js");
+  const { MESSAGE_TYPE } = await import("./constants.js");
+  const { encodeAuthReq, decodeByMessageType } = await import("./messages.js");
+
+  // Step 6: Login to get a fresh ticket for TCP auth
+  console.log("[kick-session] step 6: login for TCP auth...");
+  const loginC = await fetchTicket(options);
+  console.log("[kick-session] session C:", JSON.stringify(formatLoginSummary(loginC), null, 2));
+
+  // Step 7: Connect to game-server TCP and authenticate
+  console.log("[kick-session] step 7: connecting to game-server and authenticating...");
+  const client = new TcpProtocolClient(options, "kick-test");
+  await client.connect();
+
+  try {
+    await client.send(MESSAGE_TYPE.AUTH_REQ, 1, encodeAuthReq(loginC.ticket));
+    const authPacket = await client.readNextPacket(options.timeoutMs);
+    const authRes = decodeByMessageType(authPacket.messageType, authPacket.body);
+    if (authPacket.messageType !== MESSAGE_TYPE.AUTH_RES) {
+      throw new Error(`expected AUTH_RES (${MESSAGE_TYPE.AUTH_RES}), got messageType=${authPacket.messageType}`);
+    }
+    if (!authRes.ok) {
+      throw new Error(`TCP auth failed: ${authRes.errorCode}`);
+    }
+    console.log("[kick-session] TCP auth OK, playerId:", authRes.playerId);
+
+    // Step 8: Second login via HTTP (triggers kick on the TCP connection)
+    console.log("[kick-session] step 8: second login to trigger TCP kick...");
+    const loginD = await fetchTicket(options);
+    console.log("[kick-session] session D created:", JSON.stringify(formatLoginSummary(loginD), null, 2));
+
+    // Step 9: Wait for SESSION_KICK_PUSH on TCP
+    console.log("[kick-session] step 9: waiting for SESSION_KICK_PUSH on TCP...");
+    const kickPacket = await client.readNextPacket(options.timeoutMs);
+    const kickData = decodeByMessageType(kickPacket.messageType, kickPacket.body);
+
+    if (kickPacket.messageType !== MESSAGE_TYPE.SESSION_KICK_PUSH) {
+      throw new Error(`expected SESSION_KICK_PUSH (${MESSAGE_TYPE.SESSION_KICK_PUSH}), got messageType=${kickPacket.messageType}: ${JSON.stringify(kickData)}`);
+    }
+    console.log("[kick-session] received SESSION_KICK_PUSH:", JSON.stringify(kickData));
+  } finally {
+    client.close();
+  }
+
+  console.log("[kick-session] all Phase 1 + Phase 2 checks passed");
+}
+
+/**
  * Fetch authentication ticket from HTTP auth service
  * @param {Object} options
  * @param {Object} overrides - Override loginName/password/guestId

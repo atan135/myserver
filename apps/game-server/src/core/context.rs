@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use redis::aio::MultiplexedConnection;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
@@ -16,6 +17,8 @@ use crate::session::{Session, SessionState};
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
+/// Maps player_id -> (kick_notify, session_id)
+pub type PlayerRegistry = Arc<RwLock<HashMap<String, (Arc<Notify>, u64)>>>;
 
 #[derive(Clone)]
 pub struct ServiceContext {
@@ -26,6 +29,7 @@ pub struct ServiceContext {
     pub config_tables: ConfigTableRuntime,
     pub player_manager: PlayerManager,
     pub online_player_count: Arc<AtomicU64>,
+    pub player_registry: PlayerRegistry,
 }
 
 pub struct ConnectionContext {
@@ -33,6 +37,7 @@ pub struct ConnectionContext {
     pub redis: MultiplexedConnection,
     pub session: Session,
     pub tx: mpsc::UnboundedSender<OutboundMessage>,
+    pub kick_notify: Arc<Notify>,
 }
 
 pub struct ServerSharedState {

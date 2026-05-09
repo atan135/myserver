@@ -527,6 +527,7 @@ dependencies = [
  "chrono",
  "deadpool-redis",
  "dotenvy",
+ "futures-util",
  "hmac",
  "interprocess",
  "mysql_async",

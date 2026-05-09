@@ -29,6 +29,10 @@ function ticketKey(ticket) {
   return `ticket:${hashTicket(ticket)}`;
 }
 
+function playerSessionKey(playerId) {
+  return `player-session:${playerId}`;
+}
+
 function createAuthError(code, message = code) {
   const error = new Error(message);
   error.code = code;
@@ -144,6 +148,26 @@ export class AuthStore {
       loginName: account.loginName || null,
       createdAt: new Date().toISOString()
     };
+
+    // Kick old session if exists
+    const psKey = this.prefixedKey(playerSessionKey(account.playerId));
+    const oldAccessToken = await this.redis.get(psKey);
+    if (oldAccessToken) {
+      await this.redis.del(this.prefixedKey(sessionKey(oldAccessToken)));
+      await this.redis.del(this.prefixedKey(sessionActivityKey(oldAccessToken)));
+      await this.redis.publish(
+        this.prefixedKey(`session:kick:${account.playerId}`),
+        JSON.stringify({ reason: "new_login" })
+      );
+      await this.mysqlStore?.appendAuthAudit({
+        playerId: account.playerId,
+        eventType: "session_kicked",
+        accessToken: oldAccessToken,
+        clientIp,
+        details: { reason: "new_login" }
+      });
+    }
+
     const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
 
     await this.redis.set(
@@ -152,6 +176,7 @@ export class AuthStore {
       "EX",
       this.config.sessionTtlSeconds
     );
+    await this.redis.set(psKey, accessToken, "EX", this.config.sessionTtlSeconds);
     await this.markSessionActive(accessToken);
 
     await this.mysqlStore?.appendAuthAudit({
@@ -227,6 +252,13 @@ export class AuthStore {
 
     await this.redis.del(this.prefixedKey(sessionKey(accessToken)));
     await this.redis.del(this.prefixedKey(sessionActivityKey(accessToken)));
+
+    // Clean up player-session mapping if it still points to this token
+    const psKey = this.prefixedKey(playerSessionKey(sessionData.playerId));
+    const currentToken = await this.redis.get(psKey);
+    if (currentToken === accessToken) {
+      await this.redis.del(psKey);
+    }
 
     await this.mysqlStore?.appendAuthAudit({
       playerId: sessionData.playerId,

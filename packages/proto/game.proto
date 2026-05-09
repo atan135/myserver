@@ -524,3 +524,8 @@ message ItemObtainPush {
   repeated Item items = 1;
   string source = 2;
 }
+
+message SessionKickPush {
+  string reason = 1;
+  int64 timestamp = 2;
+}

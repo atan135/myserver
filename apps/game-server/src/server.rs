@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -6,13 +7,13 @@ use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::context::{ConnectionContext, ServerSharedState, ServiceContext};
+use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::player::{PlayerManager, MySqlPlayerStore};
 use crate::core::room::OutboundMessage;
@@ -25,6 +26,7 @@ use crate::gameservice::room_query;
 use crate::match_client::{init_match_client, MatchClientConfig};
 use crate::metrics::METRICS;
 use crate::mysql_store::MySqlAuditStore;
+use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::Session;
 
@@ -111,6 +113,8 @@ pub async fn run(
     // Initialize MySqlPlayerStore for inventory persistence
     let mysql_player_store = MySqlPlayerStore::new(config).await?;
 
+    let player_registry: PlayerRegistry = Arc::new(RwLock::new(HashMap::new()));
+
     let services = ServiceContext {
         config: config.clone(),
         mysql_store: mysql_store.clone(),
@@ -119,6 +123,7 @@ pub async fn run(
         config_tables,
         player_manager: PlayerManager::new(mysql_player_store),
         online_player_count: shared_state.online_player_count.clone(),
+        player_registry: player_registry.clone(),
     };
     info!(
         addr = %config.bind_addr(),
@@ -149,6 +154,12 @@ pub async fn run(
     let internal_socket_task = tokio::spawn(crate::internal_server::run_listener(
         internal_socket_listener,
         services.clone(),
+    ));
+
+    let kick_task = tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
+        redis_client.clone(),
+        config.redis_key_prefix.clone(),
+        player_registry,
     ));
 
     let mut next_session_id: u64 = 1;
@@ -186,6 +197,8 @@ pub async fn run(
     let _ = local_socket_task.await;
     internal_socket_task.abort();
     let _ = internal_socket_task.await;
+    kick_task.abort();
+    let _ = kick_task.await;
 
     info!("game server shutdown completed");
     Ok(())
@@ -271,6 +284,7 @@ where
         redis,
         session: Session::new(session_id),
         tx,
+        kick_notify: Arc::new(Notify::new()),
     };
 
     let writer_task = tokio::spawn(async move {
@@ -288,11 +302,40 @@ where
     loop {
         let runtime = *runtime_config.read().await;
         let mut header_buf = [0u8; HEADER_LEN];
-        let read_header = timeout(
-            Duration::from_secs(runtime.heartbeat_timeout_secs),
-            reader.read_exact(&mut header_buf),
-        )
-        .await;
+
+        // select! between kick notification and normal packet read
+        let read_header = tokio::select! {
+            _ = connection.kick_notify.notified() => {
+                info!(
+                    session_id = connection.session.id,
+                    player_id = ?connection.session.player_id,
+                    "session kicked by new login"
+                );
+                let _ = connection.queue_message(
+                    MessageType::SessionKickPush,
+                    0,
+                    SessionKickPush {
+                        reason: "new_login".to_string(),
+                        timestamp: current_unix_ms(),
+                    },
+                );
+                services
+                    .mysql_store
+                    .append_connection_event(
+                        connection.session.id,
+                        connection.session.player_id.as_deref(),
+                        Some(&connection.peer_addr),
+                        "session_kicked",
+                        Some(json!({ "reason": "new_login" })),
+                    )
+                    .await;
+                break;
+            }
+            result = timeout(
+                Duration::from_secs(runtime.heartbeat_timeout_secs),
+                reader.read_exact(&mut header_buf),
+            ) => result,
+        };
 
         match read_header {
             Ok(Ok(_)) => {}
@@ -380,6 +423,16 @@ where
     }
 
     room_service::handle_disconnect_cleanup(&services, &connection).await;
+
+    // Unregister from player registry (only if our session_id still matches)
+    if let Some(player_id) = &connection.session.player_id {
+        let mut registry = services.player_registry.write().await;
+        if let Some((_, sid)) = registry.get(player_id) {
+            if *sid == connection.session.id {
+                registry.remove(player_id);
+            }
+        }
+    }
 
     if connection.session.state == crate::session::SessionState::Authenticated {
         let previous = services.online_player_count.fetch_sub(1, Ordering::Relaxed);

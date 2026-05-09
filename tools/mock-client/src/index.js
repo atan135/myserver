@@ -1,6 +1,6 @@
 import { parseArgs } from "./args.js";
 import { SCENARIO } from "./constants.js";
-import { fetchTicket, formatLoginSummary, runLogout } from "./auth.js";
+import { fetchTicket, formatLoginSummary, runLogout, runKickSession } from "./auth.js";
 import { TcpProtocolClient } from "./client.js";
 import {
   MESSAGE_TYPE,
@@ -263,6 +263,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.LOGOUT) {
     await runLogout(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.KICK_SESSION) {
+    await runKickSession(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

@@ -41,6 +41,8 @@ export const MESSAGE_TYPE = {
   ROOM_MEMBER_OFFLINE_PUSH: 1205,
   MOVEMENT_SNAPSHOT_PUSH: 1206,
   MOVEMENT_REJECT_PUSH: 1207,
+  SERVER_REDIRECT_PUSH: 1208,
+  SESSION_KICK_PUSH: 1209,
   // Inventory
   ITEM_EQUIP_REQ: 1401,
   ITEM_EQUIP_RES: 1402,
@@ -174,5 +176,6 @@ export const SCENARIO = {
   INVENTORY_GET: "inventory-get",
   INVENTORY_FULL: "inventory-full",
   // Auth scenarios
-  LOGOUT: "logout"
+  LOGOUT: "logout",
+  KICK_SESSION: "kick-session"
 };
