@@ -81,6 +81,12 @@ Rust 侧推荐继续用 `tracing`，原因是：
 - Rust TCP 鉴权、心跳、错误响应
 - Rust KCP 接入代理 (game-proxy)
 - 统一日志配置模型
+- 修改密码接口 (POST /api/v1/auth/change-password)
+- Session 滑动窗口续期 (客户端定期调 /auth/me 保活)
+- X-Request-Id 请求追踪 (AsyncLocalStorage 自动注入日志)
+- /healthz 增强 (Redis PING + MySQL SELECT 1 探测)
+- 限流响应 Retry-After 头 (IP 限流 429 + 账号锁定 403)
+- 并发登录控制与踢旧会话 (Redis Pub/Sub 通知 game-server)
 
 ### 房间与帧同步
 - 房间核心闭环：加入、离开、准备、房间快照广播、owner 转移
