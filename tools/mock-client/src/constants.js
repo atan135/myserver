@@ -172,5 +172,7 @@ export const SCENARIO = {
   INVENTORY_WAREHOUSE: "inventory-warehouse",
   INVENTORY_ADD: "inventory-add",
   INVENTORY_GET: "inventory-get",
-  INVENTORY_FULL: "inventory-full"
+  INVENTORY_FULL: "inventory-full",
+  // Auth scenarios
+  LOGOUT: "logout"
 };

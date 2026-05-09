@@ -279,6 +279,29 @@ export function createRoutes(
     });
   });
 
+  router.post("/api/v1/auth/logout", async (req, res) => {
+    const accessToken = getBearerToken(req);
+    if (!accessToken) {
+      return unauthorized(res, "MISSING_BEARER_TOKEN");
+    }
+
+    const result = await authStore.destroySession(accessToken, getClientIp(req));
+    if (!result.destroyed) {
+      return unauthorized(res, "INVALID_ACCESS_TOKEN");
+    }
+
+    // Revoke ticket if provided
+    const { ticket } = req.body || {};
+    if (ticket && typeof ticket === "string") {
+      await authStore.revokeTicket(ticket, getClientIp(req));
+    }
+
+    return res.json({
+      ok: true,
+      message: "Logged out"
+    });
+  });
+
   router.post("/api/v1/game-ticket/issue", async (req, res) => {
     const accessToken = getBearerToken(req);
     if (!accessToken) {

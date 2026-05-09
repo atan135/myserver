@@ -219,6 +219,29 @@ export class AuthStore {
     };
   }
 
+  async destroySession(accessToken, clientIp = null) {
+    const sessionData = await this.getSessionByAccessToken(accessToken);
+    if (!sessionData) {
+      return { destroyed: false };
+    }
+
+    await this.redis.del(this.prefixedKey(sessionKey(accessToken)));
+    await this.redis.del(this.prefixedKey(sessionActivityKey(accessToken)));
+
+    await this.mysqlStore?.appendAuthAudit({
+      playerId: sessionData.playerId,
+      guestId: sessionData.guestId || null,
+      eventType: "logout",
+      accessToken,
+      clientIp,
+      details: {
+        loginName: sessionData.loginName || null
+      }
+    });
+
+    return { destroyed: true, playerId: sessionData.playerId };
+  }
+
   async revokeTicket(ticket, clientIp = null) {
     const key = this.prefixedKey(ticketKey(ticket));
     const playerId = await this.redis.get(key);
