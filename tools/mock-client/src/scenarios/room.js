@@ -125,9 +125,14 @@ async function waitForRoomStatePush(client, timeoutMs, expectedEvent, label = "r
 }
 
 async function updateGameServerConfig(options, key, value) {
+  const headers = { "content-type": "application/json" };
+  if (options.serviceToken) {
+    headers["x-service-token"] = options.serviceToken;
+  }
+
   const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ key, value })
   });
 
@@ -144,7 +149,12 @@ async function updateGameServerConfig(options, key, value) {
 }
 
 async function fetchGameServerStatus(options) {
-  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/status`);
+  const headers = {};
+  if (options.serviceToken) {
+    headers["x-service-token"] = options.serviceToken;
+  }
+
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/status`, { headers });
   if (!response.ok) {
     throw new Error(`fetch game-server status failed with status ${response.status}`);
   }

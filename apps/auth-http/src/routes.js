@@ -29,6 +29,25 @@ function handleGameServerError(res, error) {
   });
 }
 
+function verifyInternalToken(req, res, config) {
+  const token = config.internalApiToken;
+  if (!token) {
+    return true;
+  }
+
+  const provided = req.headers["x-service-token"];
+  if (provided === token) {
+    return true;
+  }
+
+  res.status(401).json({
+    ok: false,
+    error: "INVALID_SERVICE_TOKEN",
+    message: "Missing or invalid X-Service-Token header"
+  });
+  return false;
+}
+
 async function buildServicePayload(config, serviceDiscovery) {
   if (!serviceDiscovery) {
     return {
@@ -309,7 +328,9 @@ export function createRoutes(
     });
   });
 
-  router.get("/api/v1/internal/game-server/status", async (_req, res) => {
+  router.get("/api/v1/internal/game-server/status", async (req, res) => {
+    if (!verifyInternalToken(req, res, config)) return;
+
     try {
       const status = await gameAdminClient.getServerStatus();
       return res.json({
@@ -322,6 +343,8 @@ export function createRoutes(
   });
 
   router.post("/api/v1/internal/game-server/config", async (req, res) => {
+    if (!verifyInternalToken(req, res, config)) return;
+
     const key = req.body?.key;
     const value = req.body?.value;
 

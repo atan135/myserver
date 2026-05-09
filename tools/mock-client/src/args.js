@@ -98,7 +98,9 @@ const DEFAULT_OPTIONS = {
   warehouseAction: "deposit",
   addItemId: 0,
   addCount: 1,
-  addBinded: false
+  addBinded: false,
+  // Internal API token
+  serviceToken: ""
 };
 
 /**
@@ -359,6 +361,9 @@ export function parseArgs(argv) {
           collectOptionValue(argv, index).value === "true" ||
           collectOptionValue(argv, index).value === "1";
         index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--service-token":
+        ({ value: result.serviceToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
     }
   }

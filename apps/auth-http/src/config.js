@@ -67,6 +67,9 @@ export function getConfig() {
     ticketValidateEnabled: parseBoolean(process.env.TICKET_VALIDATE_ENABLED, true),
 
     // Security Audit
-    securityAuditEnabled: parseBoolean(process.env.SECURITY_AUDIT_ENABLED, true)
+    securityAuditEnabled: parseBoolean(process.env.SECURITY_AUDIT_ENABLED, true),
+
+    // Internal API Token
+    internalApiToken: process.env.INTERNAL_API_TOKEN || ""
   };
 }
