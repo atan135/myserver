@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import { badRequest, unauthorized, rateLimited, forbidden } from "./http-errors.js";
-import { assertValidGuestId, assertValidLoginName, normalizeGuestId } from "./password-utils.js";
+import { assertValidGuestId, assertValidLoginName, normalizeGuestId, verifyPassword, createPasswordSalt, hashPassword } from "./password-utils.js";
 
 function getBearerToken(req) {
   const authorization = req.headers.authorization;
@@ -315,6 +315,103 @@ export function createRoutes(
     return res.json({
       ok: true,
       message: "Logged out"
+    });
+  });
+
+  router.post("/api/v1/auth/change-password", async (req, res, next) => {
+    const accessToken = getBearerToken(req);
+    if (!accessToken) {
+      return unauthorized(res, "MISSING_BEARER_TOKEN");
+    }
+
+    const session = await authStore.getSessionByAccessToken(accessToken);
+    if (!session) {
+      return unauthorized(res, "INVALID_ACCESS_TOKEN");
+    }
+
+    if (!config.mysqlEnabled || !mysqlStore?.enabled) {
+      return badRequest(res, "PASSWORD_CHANGE_UNAVAILABLE", "mysql auth store is disabled");
+    }
+
+    const { oldPassword, newPassword } = req.body || {};
+
+    if (typeof oldPassword !== "string" || oldPassword.length === 0) {
+      return badRequest(res, "INVALID_OLD_PASSWORD", "oldPassword must be a non-empty string");
+    }
+
+    if (typeof newPassword !== "string" || newPassword.length === 0) {
+      return badRequest(res, "INVALID_NEW_PASSWORD", "newPassword must be a non-empty string");
+    }
+
+    if (newPassword.length < 6 || newPassword.length > 128) {
+      return badRequest(res, "INVALID_NEW_PASSWORD", "newPassword must be between 6 and 128 characters");
+    }
+
+    const clientIp = getClientIp(req);
+
+    // Find the account by playerId (must be a password account)
+    const account = await mysqlStore.findPasswordAccountByPlayerId(session.playerId);
+    if (!account) {
+      return badRequest(res, "NOT_PASSWORD_ACCOUNT", "This account does not support password change");
+    }
+
+    // Verify old password
+    const passwordMatches =
+      account.passwordAlgo === "scrypt" &&
+      verifyPassword(oldPassword, account.passwordSalt, account.passwordHash);
+
+    if (!passwordMatches) {
+      mysqlStore.appendSecurityAudit({
+        eventType: "change_password_failed",
+        targetType: "account",
+        targetValue: account.loginName,
+        clientIp,
+        severity: "warning",
+        details: { reason: "invalid_old_password", playerId: session.playerId }
+      });
+      return forbidden(res, "OLD_PASSWORD_MISMATCH", "Old password is incorrect");
+    }
+
+    // Generate new salt + hash
+    const newSalt = createPasswordSalt();
+    const newHash = hashPassword(newPassword, newSalt);
+
+    await mysqlStore.updatePassword(session.playerId, {
+      passwordSalt: newSalt,
+      passwordHash: newHash
+    });
+
+    // Audit log
+    await mysqlStore.appendAuthAudit({
+      playerId: session.playerId,
+      eventType: "password_changed",
+      accessToken,
+      clientIp,
+      details: { loginName: account.loginName }
+    });
+
+    // Kick existing sessions (force re-login with new password)
+    // Destroy current session's player-session mapping and publish kick
+    const psKey = authStore.prefixedKey(`player-session:${session.playerId}`);
+    const currentMappedToken = await authStore.redis.get(psKey);
+    if (currentMappedToken && currentMappedToken !== accessToken) {
+      // There's another session for this player; kick it
+      await authStore.redis.del(authStore.prefixedKey(`session:${currentMappedToken}`));
+      await authStore.redis.del(authStore.prefixedKey(`session-activity:${currentMappedToken}`));
+    }
+    await authStore.redis.publish(
+      authStore.prefixedKey(`session:kick:${session.playerId}`),
+      JSON.stringify({ reason: "password_changed" })
+    );
+
+    // Destroy current session as well (user must re-login)
+    await authStore.redis.del(authStore.prefixedKey(`session:${accessToken}`));
+    await authStore.redis.del(authStore.prefixedKey(`session-activity:${accessToken}`));
+    await authStore.redis.del(psKey);
+
+    return res.json({
+      ok: true,
+      message: "Password changed successfully. Please login again."
     });
   });
 

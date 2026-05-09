@@ -210,6 +210,60 @@ export class MySqlAuthStore {
     };
   }
 
+  async updatePassword(playerId, { passwordSalt, passwordHash, passwordAlgo = "scrypt" }) {
+    if (!this.enabled) {
+      throw new Error("MySQL auth store is disabled");
+    }
+
+    await this.pool.execute(
+      `UPDATE player_accounts
+       SET password_algo = ?,
+           password_salt = ?,
+           password_hash = ?
+       WHERE player_id = ?
+         AND account_type = 'password'`,
+      [passwordAlgo, passwordSalt, passwordHash, playerId]
+    );
+  }
+
+  async findPasswordAccountByPlayerId(playerId) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const [rows] = await this.pool.execute(
+      `SELECT player_id,
+              login_name,
+              display_name,
+              account_type,
+              status,
+              password_algo,
+              password_salt,
+              password_hash
+       FROM player_accounts
+       WHERE player_id = ?
+         AND account_type = 'password'
+       LIMIT 1`,
+      [playerId]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const account = rows[0];
+    return {
+      playerId: account.player_id,
+      loginName: account.login_name,
+      displayName: account.display_name,
+      accountType: account.account_type,
+      status: account.status,
+      passwordAlgo: account.password_algo,
+      passwordSalt: account.password_salt,
+      passwordHash: account.password_hash
+    };
+  }
+
   async appendAuthAudit({
     playerId = null,
     guestId = null,
