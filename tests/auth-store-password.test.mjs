@@ -19,6 +19,16 @@ class FakeRedis {
   async get(key) {
     return this.store.get(key) ?? null;
   }
+
+  async del(key) {
+    this.store.delete(key);
+  }
+
+  async expire() {}
+
+  async publish() {
+    return 0;
+  }
 }
 
 test("AuthStore password login validates credentials from mysql store", async () => {

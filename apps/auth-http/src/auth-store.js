@@ -204,8 +204,22 @@ export class AuthStore {
       return null;
     }
 
+    // Sliding window: renew session TTL on every access
+    await this.redis.expire(
+      this.prefixedKey(sessionKey(accessToken)),
+      this.config.sessionTtlSeconds
+    );
+    const session = JSON.parse(raw);
+    // Also renew player-session mapping
+    if (session.playerId) {
+      await this.redis.expire(
+        this.prefixedKey(playerSessionKey(session.playerId)),
+        this.config.sessionTtlSeconds
+      );
+    }
+
     await this.markSessionActive(accessToken);
-    return JSON.parse(raw);
+    return session;
   }
 
   async issueGameTicket(playerId, clientIp = null) {
