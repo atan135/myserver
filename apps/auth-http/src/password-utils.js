@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-const LOGIN_NAME_PATTERN = /^[a-z0-9._-]{3,64}$/;
+const LOGIN_NAME_PATTERN = /^[a-z0-9_]{3,32}$/;
 const GUEST_ID_PATTERN = /^[a-z0-9._-]{3,128}$/;
 
 export function normalizeLoginName(value) {
@@ -17,7 +17,7 @@ export function assertValidLoginName(value) {
   const normalized = normalizeLoginName(value);
   if (!LOGIN_NAME_PATTERN.test(normalized)) {
     throw new Error(
-      "loginName must be 3-64 chars and only contain a-z, 0-9, dot, underscore or dash"
+      "loginName must be 3-32 chars and only contain a-z, 0-9 or underscore"
     );
   }
 

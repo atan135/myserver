@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import { badRequest, unauthorized, rateLimited, forbidden } from "./http-errors.js";
-import { assertValidGuestId, normalizeGuestId } from "./password-utils.js";
+import { assertValidGuestId, assertValidLoginName, normalizeGuestId } from "./password-utils.js";
 
 function getBearerToken(req) {
   const authorization = req.headers.authorization;
@@ -155,11 +155,25 @@ export function createRoutes(
       );
     }
 
+    try {
+      assertValidLoginName(loginName);
+    } catch (err) {
+      return badRequest(res, "INVALID_LOGIN_NAME", err.message);
+    }
+
     if (typeof password !== "string" || password.length === 0) {
       return badRequest(
         res,
         "INVALID_PASSWORD",
         "password must be a non-empty string"
+      );
+    }
+
+    if (password.length < 6 || password.length > 128) {
+      return badRequest(
+        res,
+        "INVALID_PASSWORD",
+        "password must be between 6 and 128 characters"
       );
     }
 
