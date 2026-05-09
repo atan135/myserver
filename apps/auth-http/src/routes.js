@@ -119,11 +119,35 @@ export function createRoutes(
   });
 
   router.get("/healthz", async (_req, res) => {
-    res.json({
-      ok: true,
+    const checks = { redis: "ok", mysql: "skipped" };
+    let healthy = true;
+
+    // Redis PING
+    try {
+      await authStore.redis.ping();
+    } catch {
+      checks.redis = "error";
+      healthy = false;
+    }
+
+    // MySQL SELECT 1 (only if enabled)
+    if (config.mysqlEnabled && mysqlStore?.enabled) {
+      try {
+        await mysqlStore.pool.execute("SELECT 1");
+        checks.mysql = "ok";
+      } catch {
+        checks.mysql = "error";
+        healthy = false;
+      }
+    }
+
+    const status = healthy ? 200 : 503;
+    return res.status(status).json({
+      ok: healthy,
       service: config.appName,
       env: config.env,
-      storage: config.mysqlEnabled ? "redis+mysql" : "redis"
+      storage: config.mysqlEnabled ? "redis+mysql" : "redis",
+      checks
     });
   });
 
