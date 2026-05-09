@@ -1,9 +1,11 @@
+import crypto from "node:crypto";
+
 import express from "express";
 
 import { AuthStore } from "./auth-store.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
-import { configureLogger, log } from "./logger.js";
+import { configureLogger, log, requestContext } from "./logger.js";
 import { createMySqlPool } from "./mysql-client.js";
 import { MySqlAuthStore } from "./mysql-store.js";
 import { RateLimiter, AccountLockout } from "./rate-limiter.js";
@@ -39,12 +41,19 @@ export async function createApp() {
   app.disable("x-powered-by");
   app.use(express.json({ limit: "64kb" }));
 
-  app.use((req, _res, next) => {
-    log("info", "http.request", {
-      method: req.method,
-      path: req.path
+  // Request ID middleware: generate or read X-Request-Id, wrap in AsyncLocalStorage
+  app.use((req, res, next) => {
+    const requestId = req.headers["x-request-id"] || crypto.randomBytes(8).toString("hex");
+    req.requestId = requestId;
+    res.setHeader("X-Request-Id", requestId);
+
+    requestContext.run({ requestId }, () => {
+      log("info", "http.request", {
+        method: req.method,
+        path: req.path
+      });
+      next();
     });
-    next();
   });
 
   // Metrics middleware - track QPS and latency

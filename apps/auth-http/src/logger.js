@@ -1,10 +1,13 @@
-﻿import fs from "node:fs";
+﻿import { AsyncLocalStorage } from "node:async_hooks";
+import fs from "node:fs";
 import path from "node:path";
 
 import log4js from "log4js";
 
 let configured = false;
 let logger = null;
+
+export const requestContext = new AsyncLocalStorage();
 
 function normalizeLevel(level) {
   return (level || "info").toUpperCase();
@@ -75,7 +78,11 @@ export function getLogger() {
 
 export function log(level, message, extra = {}) {
   const activeLogger = getLogger();
-  const payload = Object.keys(extra).length === 0 ? message : `${message} ${JSON.stringify(extra)}`;
+  const ctx = requestContext.getStore();
+  const prefix = ctx?.requestId ? `[${ctx.requestId}] ` : "";
+  const payload = Object.keys(extra).length === 0
+    ? `${prefix}${message}`
+    : `${prefix}${message} ${JSON.stringify(extra)}`;
 
   if (typeof activeLogger[level] === "function") {
     activeLogger[level](payload);
