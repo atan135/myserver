@@ -98,8 +98,8 @@ export function createRoutes(
     const clientIp = getClientIp(req);
 
     if (config.ratelimitEnabled && rateLimiter) {
-      const isLimited = await rateLimiter.isIpRateLimited(clientIp);
-      if (isLimited) {
+      const { limited, retryAfterSeconds } = await rateLimiter.isIpRateLimited(clientIp);
+      if (limited) {
         // Log security event
         mysqlStore?.appendSecurityAudit?.({
           eventType: "ip_rate_limited",
@@ -107,9 +107,10 @@ export function createRoutes(
           targetValue: clientIp,
           clientIp,
           severity: "warning",
-          details: { path: req.path }
+          details: { path: req.path, retryAfterSeconds }
         });
 
+        res.set("Retry-After", String(retryAfterSeconds));
         return rateLimited(res, "IP_RATE_LIMITED", "Too many requests from this IP");
       }
     }
@@ -198,6 +199,7 @@ export function createRoutes(
           details: { remainingSeconds: lockStatus.remainingSeconds }
         });
 
+        res.set("Retry-After", String(lockStatus.remainingSeconds));
         return forbidden(
           res,
           "ACCOUNT_LOCKED",

@@ -17,7 +17,7 @@ export class RateLimiter {
 
   async isIpRateLimited(ip) {
     if (!this.config.ratelimitEnabled) {
-      return false;
+      return { limited: false, retryAfterSeconds: 0 };
     }
 
     const key = this.prefixedKey(`ratelimit:ip:${ip}`);
@@ -31,10 +31,24 @@ export class RateLimiter {
     pipeline.zadd(key, now, `${now}-${Math.random()}`);
     pipeline.zcard(key);
     pipeline.expire(key, Math.ceil(windowMs / 1000) + 1);
+    pipeline.zrange(key, 0, 0, "WITHSCORES");
     const results = await pipeline.exec();
 
     const count = results[2][1];
-    return count > max;
+    if (count <= max) {
+      return { limited: false, retryAfterSeconds: 0 };
+    }
+
+    // Calculate retry-after from oldest entry in window
+    const zrangeResult = results[4][1];
+    let retryAfterSeconds = Math.ceil(windowMs / 1000);
+    if (zrangeResult && zrangeResult.length >= 2) {
+      const oldestTs = Number(zrangeResult[1]);
+      const expiresAt = oldestTs + windowMs;
+      retryAfterSeconds = Math.max(1, Math.ceil((expiresAt - now) / 1000));
+    }
+
+    return { limited: true, retryAfterSeconds };
   }
 
   async getIpRequestCount(ip) {
