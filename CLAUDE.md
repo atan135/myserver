@@ -42,6 +42,7 @@ docs/                # 架构与协议文档
 - [安全设计](./docs/security-design.md)
 - [限流与风控设计](./docs/rate-limit-and-security.md)
 - [管理后台设计](./docs/admin-panel.md)
+- [大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)
 
 ## 统一日志方案
 
