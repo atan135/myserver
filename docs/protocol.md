@@ -7,17 +7,19 @@
 - `game-server` 玩家 TCP 协议
 - `chat-server` 聊天 TCP 协议
 - `game-server` admin 控制通道的消息号占用
+- `game-proxy` 透传和路由所需的玩家协议消息号
 
-不在本文 `msgType` 命名空间中的协议：
+额外协议说明：
 
 - `match-service` 对外接口和 `game-server -> match-service` 回调使用 gRPC，定义在 `packages/proto/match.proto`
 - `match-service -> game-server` 的 matched room 创建复用 `packages/proto/game.proto` 中的 `CreateMatchedRoomReq/CreateMatchedRoomRes`，通过 `game-server` 内部 socket 承载
-- 管理控制消息结构定义在 `packages/proto/admin.proto`，但它们仍通过独立 TCP admin 通道承载
+- 管理控制消息结构定义在 `packages/proto/admin.proto`，消息号见本文 admin 段；它们通过独立 TCP admin 通道承载，不走玩家连接
 
 代码基准：
 
 - `packages/proto/game.proto`
 - `apps/game-server/src/protocol/message_type.rs`
+- `apps/game-proxy/src/protocol.rs`
 - `apps/chat-server/src/proto/chat.proto`
 - `apps/chat-server/src/chat_server.rs`
 
@@ -25,7 +27,7 @@
 
 ## 2. 通用 TCP 包结构
 
-`game-server` 与 `chat-server` 共享同一套包头格式：
+`game-server`、`game-proxy` 与 `chat-server` 共享同一套包头格式。`game-proxy` 主要解析首包认证、房间路由相关请求和部分 rollout 消息，其余业务包按原始包头与 body 透传到上游 `game-server`：
 
 ```text
 | magic(2) | version(1) | flags(1) | msgType(2) | seq(4) | bodyLen(4) | body(N) |
@@ -69,9 +71,11 @@
 | `1300-1399` | 查询类消息 |
 | `1400-1499` | 背包/属性/外观请求响应 |
 | `1500-1599` | 背包/属性/外观推送 |
-| `1600-1999` | 预留给 `game-server` 后续功能模块，按每模块 `100` 号段继续划分 |
-| `2000-2099` | admin 控制消息 |
-| `2100-8999` | 预留给 `game-server` 后续功能模块，按每模块 `100` 号段继续划分 |
+| `1600-1699` | room rollout / drain / transfer 控制消息 |
+| `1700-1999` | 预留给 `game-server` 后续功能模块，按每模块 `100` 号段继续划分 |
+| `2000-2099` | admin 基础控制消息 |
+| `3000-3099` | GM 控制消息 |
+| `2100-2999`、`3100-8999` | 预留给 `game-server` 后续功能模块，按每模块 `100` 号段继续划分 |
 | `9000-9099` | 通用错误响应 |
 | `9100-19999` | 预留给 `game-server` 后续功能模块，按每模块 `100` 号段继续划分 |
 | `20000-20099` | chat 认证 |
@@ -87,7 +91,7 @@
 
 ---
 
-## 4. game-server 玩家 TCP 协议
+## 4. game-server / game-proxy 玩家协议消息号
 
 ### 4.1 当前消息号
 
@@ -136,6 +140,8 @@
 | `1205` | `RoomMemberOfflinePush` |
 | `1206` | `MovementSnapshotPush` |
 | `1207` | `MovementRejectPush` |
+| `1208` | `ServerRedirectPush` |
+| `1209` | `SessionKickPush` |
 
 #### 查询类消息
 
@@ -164,6 +170,27 @@
 | `1502` | `AttrChangePush` |
 | `1503` | `VisualChangePush` |
 | `1504` | `ItemObtainPush` |
+
+#### Room rollout / drain / transfer
+
+| msgType | 名称 |
+|---------|------|
+| `1601` | `FreezeRoomForTransferReq` |
+| `1602` | `FreezeRoomForTransferRes` |
+| `1603` | `ExportRoomTransferReq` |
+| `1604` | `ExportRoomTransferRes` |
+| `1605` | `ImportRoomTransferReq` |
+| `1606` | `ImportRoomTransferRes` |
+| `1607` | `RetireTransferredRoomReq` |
+| `1608` | `RetireTransferredRoomRes` |
+| `1609` | `GetRolloutDrainStatusReq` |
+| `1610` | `GetRolloutDrainStatusRes` |
+
+说明：
+
+- 这些消息结构已在 `packages/proto/game.proto` 和 `game-server` / `game-proxy` 消息号枚举中定义。
+- 当前代码已落地 `drain_mode` 对新建房的拦截，以及 `game-proxy` 侧 rollout 路由状态；完整房间冻结、导出、导入、迁移退休链路仍以 `docs/game-server-room-rollout-spec.md` 和实际代码为准。
+- `ServerRedirectPush` 已作为协议结构和代理路由语义保留，当前主要用于 rollout 重连链路的后续补齐。
 
 #### 通用错误
 
@@ -214,6 +241,10 @@
 - `input_type: MoveInputType`
 - `dir_x: float`
 - `dir_y: float`
+- `has_client_state: bool`
+- `client_x: float`
+- `client_y: float`
+- `client_frame_id: uint32`
 
 #### `MovementSnapshotPush`
 
@@ -222,6 +253,10 @@
 - `entities: repeated EntityTransform`
 - `full_sync: bool`
 - `reason: string`
+- `correction_kind: MovementCorrectionKind`
+- `reason_code: MovementCorrectionReason`
+- `target_player_ids: repeated string`
+- `reference_frame_id: uint32`
 
 #### `MovementRejectPush`
 
@@ -230,6 +265,27 @@
 - `player_id: string`
 - `error_code: string`
 - `corrected: EntityTransform`
+- `correction_kind: MovementCorrectionKind`
+- `reason_code: MovementCorrectionReason`
+- `reference_frame_id: uint32`
+- `has_client_state: bool`
+- `client_x: float`
+- `client_y: float`
+- `server_x: float`
+- `server_y: float`
+
+#### `ServerRedirectPush`
+
+- `reason: string`
+- `room_id: string`
+- `rollout_epoch: string`
+- `reconnect_required: bool`
+- `retry_after_ms: uint32`
+
+#### `SessionKickPush`
+
+- `reason: string`
+- `timestamp: int64`
 
 ### 4.3 房间快照结构
 
@@ -379,7 +435,7 @@
 
 ## 6. admin 控制消息号
 
-`game-server` 的 admin 通道当前占用 `2000-2099` 段：
+`game-server` 的 admin 通道当前占用 `2000-2099` 与 `3000-3099` 段：
 
 | msgType | 名称 |
 |---------|------|
@@ -387,6 +443,14 @@
 | `2002` | `AdminServerStatusRes` |
 | `2003` | `AdminUpdateConfigReq` |
 | `2004` | `AdminUpdateConfigRes` |
+| `3001` | `GmBroadcastReq` |
+| `3002` | `GmBroadcastRes` |
+| `3003` | `GmSendItemReq` |
+| `3004` | `GmSendItemRes` |
+| `3005` | `GmKickPlayerReq` |
+| `3006` | `GmKickPlayerRes` |
+| `3007` | `GmBanPlayerReq` |
+| `3008` | `GmBanPlayerRes` |
 
 消息结构定义位于：
 
@@ -396,6 +460,9 @@
 
 - admin 消息不走玩家 TCP 通道
 - 但为了保持统一封包方式，仍使用同一套包头和独立消息号段
+- `AdminServerStatusReq/Res` 与 `AdminUpdateConfigReq/Res` 使用 `packages/proto/admin.proto`
+- `GmSendItemReq/Res` 当前复用 `GrantItemsReq/GrantItemsRes`，并保留 JSON 旧格式兼容
+- `GmBroadcast`、`GmKickPlayer`、`GmBanPlayer` 目前有消息号和后台入口占位，但 `game-server` admin handler 尚未完整实现，收到后会按不支持消息处理
 
 ---
 
@@ -410,14 +477,18 @@ base64url(payload_json).base64url(hmac_sha256_signature)
 当前校验规则：
 
 - `game-server` 使用同一 `TICKET_SECRET` 校验签名
-- `chat-server` 也复用同一套 ticket 校验逻辑
+- `game-proxy` 会先校验签名并检查 Redis ticket 记录，随后把认证包 replay 到 `game-server`
+- `chat-server` 也复用同一套签名校验逻辑
 - `exp` 过期则拒绝
 - `game-server` 还会继续检查 Redis 中是否存在对应 ticket 记录
+- `chat-server` 当前只校验 ticket 签名和过期时间，不查询 Redis ticket 记录
 
 Redis 相关键：
 
 - `session:<accessToken>`
 - `ticket:<sha256(ticket)>`
+- `player-session:<playerId>`
+- `session:kick:<playerId>`
 
 ---
 

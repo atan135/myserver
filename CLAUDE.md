@@ -19,7 +19,7 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 - `game-proxy` 作为客户端游戏接入层，屏蔽后端 `game-server` 实例与路由细节。
 - `game-server` 是游戏逻辑核心，负责玩家鉴权、房间生命周期、帧推进、配置表热加载、内部管理接口和主要游戏运行时。
 - `chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的独立能力服务。
-- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 和监控能力。
+- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/architecture.md` 和代码为准。
 - Redis 用于 session、ticket、限流、服务注册、metrics/heartbeat 和部分 Pub/Sub 通知。
 - MariaDB / MySQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
@@ -43,7 +43,7 @@ announce-service / mail-service / game-server / game-proxy -> service registry
 ```text
 apps/
 ├── auth-http/         # Node.js + Express 登录服
-├── game-proxy/       # Rust + Tokio KCP 接入代理
+├── game-proxy/       # Rust + Tokio KCP 接入代理，保留本地 TCP fallback
 ├── game-server/      # Rust + Tokio 游戏逻辑服
 ├── chat-server/      # Rust + Tokio 聊天服
 ├── match-service/    # Rust + tonic gRPC 匹配服务
@@ -86,11 +86,11 @@ docs/                 # 当前正式设计文档
 
 - [整体架构](./docs/architecture.md)
 - [协议设计](./docs/protocol.md)
-- [Rust 游戏服开发指南](./docs/game-server-rust-guide.md)
-- [底层框架路线图](./docs/game-server-framework-roadmap.md)
 
 游戏服与接入层：
 
+- [Rust 游戏服开发指南](./docs/game-server-rust-guide.md)
+- [底层框架路线图](./docs/game-server-framework-roadmap.md)
 - [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
 - [更新策略拆分](./docs/game-server-update-strategy.md)
 - [空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)

@@ -63,11 +63,11 @@
 | 服务 | 默认端口 | 技术栈 | 主要职责 |
 |------|----------|--------|----------|
 | `auth-http` | `3000` | Node.js + Express | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
-| `admin-api` | `3001` | Node.js + Express | 管理员认证、审计查询、玩家管理、GM 接口、监控接口 |
+| `admin-api` | `3001` | Node.js + Express | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口 |
 | `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端 |
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
-| `game-proxy` | `4000` | Rust + Tokio KCP | 客户端游戏入口，转发到 `game-server` 本地 socket |
+| `game-proxy` | `4000` | Rust + Tokio KCP / TCP fallback | 客户端游戏入口，校验 ticket 后转发到 `game-server` 本地 socket；本地调试保留 TCP fallback |
 | `game-proxy admin` | `7101` | Rust + Tokio | 查看上游、切换路由、维护模式 |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
@@ -137,16 +137,16 @@
 - `game ticket`
 - 当前配置下发的 `gameProxyHost/gameProxyPort`
 - 统一的 `services` 对象；其中 `chat` / `mail` / `announce` 可由注册中心动态发现
-3. 客户端使用 ticket 连接 `game-proxy`。
-4. `game-proxy` 将连接转发到 `game-server` 的本地 socket。
-5. `game-server` 校验 ticket 签名与 Redis 中的 ticket 记录，成功后建立会话。
+3. 客户端使用 ticket 连接 `game-proxy`，默认入口协议是 KCP；本地调试可走 proxy 的 TCP fallback。
+4. `game-proxy` 本地校验 ticket 签名与 Redis 中的 ticket 记录，向客户端返回 `AuthRes`，并在选定上游后把认证包 replay 到 `game-server` 的本地 socket。
+5. `game-server` 仍会再次校验 ticket 签名与 Redis 记录，成功后建立最终游戏会话。
 
 当前主链路特征：
 
 - 登录入口是 HTTP JSON
 - 进入游戏入口是 `game-proxy`
 - 游戏逻辑服不直接暴露给公网客户端
-- `game-server` 负责最终鉴权和房间/逻辑状态
+- `game-proxy` 负责接入层鉴权、路由和转发，`game-server` 负责最终鉴权与游戏状态
 
 ### 6.2 房间与对局
 
@@ -162,10 +162,14 @@
 
 当前房间策略至少包括：
 
+- `default_match`
 - `persistent_world`
 - `disposable_match`
 - `sandbox`
 - `movement_demo`
+- `combat_demo`
+
+未知 `policy_id` 当前会回退到 `TestRoomLogic`。
 
 ### 6.3 管理后台
 
@@ -176,10 +180,11 @@
 
 `admin-api` 会通过 `game-server` 的 admin 通道执行内部控制命令，例如：
 
-- 广播
-- 发物品
-- 踢人
-- 封禁
+- 服务器状态查询
+- 运行时配置更新，包括 `drain_mode`
+- GM 发物品
+
+注意：`admin-web/admin-api` 当前保留了广播、踢人、封禁的页面入口、HTTP API 和消息号占位，但 `game-server` admin handler 尚未完整实现这些命令，不能视为端到端闭环能力。
 
 ### 6.4 聊天与邮件
 
@@ -262,6 +267,8 @@ Redis 当前承担以下职责：
 - 匹配建房
 - 移动输入与纠正
 - 背包/仓库/属性/外观推送
+- 并发登录踢旧会话推送
+- drain / rollout / room transfer 相关预留消息
 
 ### 8.2 管理控制协议
 
@@ -269,7 +276,7 @@ Redis 当前承担以下职责：
 
 - `packages/proto/admin.proto`
 
-当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。
+当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。已落地的 admin 消息包括状态查询、运行时配置更新和 GM 发物品；GM 广播、踢人、封禁目前只是消息号与后台入口预留，`game-server` 侧尚未完整处理。
 
 ### 8.3 匹配内部协议
 
@@ -336,7 +343,7 @@ Redis 当前承担以下职责：
 - 登录、ticket、游戏接入、游戏逻辑、后台、邮件、聊天、匹配都已有独立服务
 - `game-server` 已有较完整的房间运行时框架
 - `game-proxy` 已具备静态上游和基于注册中心的动态发现能力
-- `admin-web + admin-api` 已能支撑审计、玩家管理、GM、监控
+- `admin-web + admin-api` 已能支撑审计、玩家管理、监控和部分 GM 闭环能力；广播、踢人、封禁仍需补齐 `game-server` 侧处理
 - Redis 与 MySQL 都已经在多条主链路中实际使用
 
 当前仍需注意的事实：

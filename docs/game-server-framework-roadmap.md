@@ -1,347 +1,192 @@
-# game-server 底层框架建设路线图
+# game-server 底层框架路线图
 
-这份文档的目标不是描述某一种具体玩法，而是为 `MyServer` 提供一条清晰的“底层框架化”演进路径。
+## 1. 文档定位
 
-当前仓库已经具备最小闭环：
+本文记录 `game-server` 从最小房间服演进为通用游戏运行时框架的路线图和当前状态。
 
-- `auth-http` 已支持 guest/password 登录、access token、game ticket
-- `game-server` 已支持 TCP 鉴权、心跳、房间加入/离开/准备/开始/结束
-- `game-server` 已支持基础房间快照广播和玩家输入广播
-- `auth-http` 已支持对 `game-server` 的内部状态查询与运行时配置代理
-- `game-server` 已支持 CSV 配置表加载与运行时热更新
-- 仓库已具备基础的 HTTP 测试和跨服务集成测试
+本文不是当前架构主说明：
 
-但从“可联调最小闭环”到“可复用游戏底层框架”，还缺少一组更稳定的运行时抽象、治理能力和验收标准。
+- 当前服务边界以 [architecture.md](./architecture.md) 为准
+- 当前协议号和字段以 [protocol.md](./protocol.md) 为准
+- 已落地的房间运行时细节以 [game-server-frame-sync-design.md](./game-server-frame-sync-design.md) 为准
 
-## 1. 路线图目标
+路线图可以保留为独立文档，因为它回答的是“接下来按什么顺序补底层能力”，不适合并入架构或协议文档。
 
-这条路线图优先解决以下问题：
+## 2. 当前状态概览
 
-- 把当前偏“连接处理 + 房间逻辑混写”的实现，拆成可维护的框架分层
-- 把当前“输入即时广播”的模型，演进为“房间级调度 + 按帧推进”的通用框架
-- 把当前“房间状态全在内存、空房直接删”的实现，演进为可配置生命周期模型
-- 补齐断线重连、慢连接治理、限流和管理面鉴权等底层能力
-- 为后续玩法逻辑接入提供稳定扩展点，而不是继续把业务判断堆到 `server.rs`
+当前项目已经不再是早期“连接处理 + 简单房间逻辑混写”的版本，`apps/game-server/src` 已经完成第一轮框架化拆分：
 
-## 2. 当前实现判断
+- `core/`
+  - 通用运行时与抽象：`context`、`logic`、`runtime`、`room`、`service`、`system`、`config_table`、`player`、`inventory`
+- `gameroom/`
+  - 具体房间逻辑：`test_room`、`persistent_world`、`disposable_match`、`sandbox`、`movement_demo`、`combat_demo`
+- `gameservice/`
+  - 游戏侧业务消息入口，如 `room_query`、`config`、`debug`
+- `gameconfig/`
+  - 具体 CSV 表注册和装配
 
-当前项目更接近：
+当前稳定能力：
 
-- 可运行的房间服
-- 可联调的输入广播服
-- 具备基础控制面的单机原型
+- `RoomManager + RoomRuntimePolicy + RoomLogic` 分层已形成
+- 房间级 tick、帧输入聚合、定时快照、输入历史已落地
+- 常驻房、临时房、sandbox、移动 demo、战斗 demo 等策略/逻辑已经接入
+- 观战和断线重连可返回快照、最近输入、等待输入和移动恢复状态
+- CSV 表支持启动加载和运行时热更新
+- `game-proxy` 已作为 KCP 接入层落地，并支持 TCP fallback、静态上游和注册中心发现
+- `game-server` 已有 admin 口、internal socket、metrics、MySQL 审计、服务注册和 session kick
+- drain mode 已能阻止新建房，并允许已存在房间的加入、重连和观战
 
-当前项目还不算：
+当前需要继续注意：
 
-- 完整的房间生命周期框架
-- 服务端权威帧同步框架
-- 可长期承载多玩法的通用运行时底座
+- 发送队列仍是无界 `mpsc::UnboundedSender`，慢连接治理还不完整
+- 玩家消息频率限制、非法包惩罚和更完整的风控边界仍需补齐
+- `game-server` admin 口已支持状态、配置、drain 和 GM 发物品；广播、踢人、封禁仍是后台入口和消息号预留，服务端 handler 未完整实现
+- room transfer 的 proto 和消息号已定义，proxy 侧也有 rollout 状态管理，但完整冻结、导出、导入、迁移退休链路仍未闭环
+- 服务发现仍是部分服务接入，尚未统一到所有服务同一实现和同一健康判定模型
 
 ## 3. 建设原则
 
-后续演进建议遵守这几个原则：
+后续演进继续遵守这些原则：
 
 - 框架层只处理连接、调度、生命周期、输入聚合、广播、恢复和治理能力
 - 业务层只处理具体玩法规则，不反向侵入框架调度结构
-- 房间是否销毁、房间跑多少 fps、房间是否允许重连，必须配置化或策略化
-- 管理面、风控、监控和测试必须视为框架组成部分，而不是后补工具
-- 优先先完成单机内的抽象收敛，再做跨节点、多服和分布式扩展
+- 房间是否销毁、跑多少 fps、是否允许重连、缺帧怎么处理，必须策略化
+- 管理面、风控、监控和测试视为框架组成部分，而不是后补工具
+- 优先完成单机内抽象收敛，再推进跨节点、多服和分布式扩展
 
-## 3.1 当前已落地的分层
-
-本轮重构后，`apps/game-server/src` 已按“框架层 / 游戏层”完成第一轮整理：
-
-- `core/`
-  - 放通用运行时与抽象：`logic`、`runtime`、`room`、`service`、`system`、`config_table`
-- `gameroom/`
-  - 放具体房间类型与 `GameRoomLogicFactory`
-- `gameservice/`
-  - 放游戏侧业务消息入口，当前已拆出 `room_query`
-- `gameconfig/`
-  - 放具体游戏 CSV 表装配，和 `core/config_table` 的通用 runtime 解耦
-
-当前依赖方向约束：
-
-- `core` 只定义抽象与通用运行时，不直接依赖 `gameroom`、`gameservice`、`gameconfig`
-- `gameroom` 实现 `core::logic::RoomLogic` 和 `core::logic::RoomLogicFactory`
-- `server.rs` 在启动阶段注入 `GameRoomLogicFactory` 给 `RoomManager`
-- `gameservice` 只处理业务消息分发，不承载房间调度主逻辑
-
-## 4. 分阶段路线图
+## 4. 阶段状态
 
 ### P0：框架骨架收敛
 
-目标：
+状态：已基本完成。
 
-- 建立清晰的 `ConnectionLayer + RoomManager + RoomLogic` 分层
-- 把房间生命周期、调度和输入处理从 `server.rs` 中迁出
-- 让 `game-server` 从“功能能跑”进入“结构可扩展”
+已落地：
 
-建议交付：
+- `ConnectionLayer + RoomManager + RoomLogic` 分层
+- `RoomRuntimePolicy`
+- `RoomLogic trait` 与 `RoomLogicFactory`
+- 房间生命周期迁出 `server.rs`
+- `core/` 与 `gameroom/` 依赖方向基本清晰
 
-- 新增 `RoomManager`
-- 新增 `RoomRuntimePolicy`
-- 新增 `RoomRuntime`
-- 新增 `RoomLogic trait`
-- 为房间引入 `current_frame`、`policy_id`、`pending_inputs`
-- 把房间创建、加入、离开、开始、结束和输入校验迁移到独立模块
+剩余关注：
 
-建议改动模块：
-
-- `apps/game-server/src/server.rs`
-- `apps/game-server/src/core/room/mod.rs`
-- 新增 `apps/game-server/src/core/runtime/room_manager.rs`
-- 新增 `apps/game-server/src/core/runtime/room_policy.rs`
-- 新增 `apps/game-server/src/core/logic/room_logic.rs`
-- 新增 `apps/game-server/src/core/logic/factory.rs`
-- `apps/game-server/src/main.rs`
-
-验收标准：
-
-- `server.rs` 只负责连接接入、鉴权、拆包、分发和调用管理器
-- 房间生命周期不再依赖 `server.rs` 内部辅助函数拼接
-- 房间逻辑具备明确扩展点，新增玩法不需要继续修改连接处理主流程
-- 空房是否销毁不再硬编码为“成员为 0 立即删除”
-
-依赖关系：
-
-- 这是后续所有阶段的基础
-- 如果不先做这一步，后续帧同步、恢复和持久化都会继续堆在连接层
+- 继续减少 `server.rs` 对具体业务消息的认知
+- 对跨模块公共错误码和日志字段做进一步统一
 
 ### P1：房间级帧推进与生命周期策略
 
-目标：
+状态：已基本完成。
 
-- 把房间从“输入即时广播”升级为“按帧聚合 + 按房间调度”
-- 支持常驻房间、临时房间和空房低频运行
-- 让框架具备真正的运行时生命周期模型
-
-建议交付：
+已落地：
 
 - 房间级 tick task
-- `silent_room_fps / idle_room_fps / active_room_fps / busy_room_fps`
-- `destroy_enabled / destroy_when_empty / empty_ttl_secs`
-- `PlayerInputReq` 增加 `frame_id`
-- 新增 `FrameBundlePush`
-- 房间按帧聚合输入，不再“收到就广播”
-- 房主离开、成员离开、空房保留和销毁逻辑统一交给 `RoomManager`
+- `FrameBundlePush`
+- 输入按帧聚合
+- 未来帧输入缓存、过期帧拒绝、缺帧策略
+- `silent / idle / active / busy` fps 策略
+- 空房保留、离线 TTL、cleanup task
+- 观战与重连恢复数据
 
-建议改动模块：
+剩余关注：
 
-- `packages/proto/game.proto`
-- `apps/game-server/src/protocol.rs`
-- `apps/game-server/src/core/room/mod.rs`
-- `apps/game-server/src/core/runtime/room_manager.rs`
-- `apps/game-server/src/core/logic/room_logic.rs`
-- `apps/game-server/src/server.rs`
-- `tools/mock-client`
-- `apps/simple-client/Assets/Scripts/MyServer`
-
-验收标准：
-
-- 房间有独立 `current_frame`
-- 服务端能够按帧收集并广播输入集合
-- 无人房间可以低频运行，而不是直接停掉
-- 临时房间支持 TTL 销毁，常驻房间支持空房保留
-- 当前设计文档 `docs/game-server-frame-sync-design.md` 中的核心抽象已落到代码
-
-已知后续项：
-
-- 第一版 `FrameBundlePush` 可以只广播输入集合
-- 完整增量状态广播可以留到下一阶段
+- 更完整的增量状态同步和回放结构
+- 不同玩法对快照频率、AOI 和恢复数据的定制化
 
 ### P2：连接恢复、背压治理与安全边界
 
-目标：
+状态：部分完成。
 
-- 补齐长连接服务最容易出事故的基础能力
-- 让框架能承载真实客户端，而不是只适合 happy path 联调
+已落地：
 
-建议交付：
+- 断线重连窗口和离线成员保留
+- 同账号并发登录踢旧连接
+- header 校验、body 长度限制、心跳超时
+- drain mode 下新建房拦截
+- `auth-http` IP 限流、账号锁定和安全审计
 
-- 断线重连窗口
-- 会话恢复和房间重入
-- 顶号或重复登录策略
-- 写队列有界化
-- 慢连接检测、丢弃或断连策略
-- 玩家消息频率限制
-- 登录限流、IP 限流、非法包计数
-- ticket 单次消费或防重放策略
+仍需补齐：
 
-建议改动模块：
-
-- `apps/game-server/src/session.rs`
-- `apps/game-server/src/server.rs`
-- `apps/game-server/src/core/runtime/room_manager.rs`
-- `apps/game-server/src/ticket.rs`
-- `apps/auth-http/src/routes.js`
-- `apps/auth-http/src/auth-store.js`
-- `apps/auth-http/src/redis-client.js`
-
-验收标准：
-
-- 玩家断线后可在窗口期内恢复会话
-- 慢连接不会导致广播链路无限堆积
-- 单连接、单玩家、单 IP 都有明确限流边界
-- 不合法连接和异常输入有统一惩罚与审计
+- 有界写队列、慢连接检测和丢弃策略
+- 单连接 / 单玩家消息频率限制
+- 非法包计数、封禁或短期惩罚策略
+- ticket 单次消费、刷新、吊销与 proxy/game-server/chat-server 的一致校验模型
 
 ### P3：控制面、观测性和状态持久化
 
-目标：
+状态：部分完成。
 
-- 把“能跑”提升到“可维护、可排障、可运营”
-- 把控制能力从 demo 接口提升为正式框架能力
+已落地：
 
-建议交付：
+- `game-server` admin 状态查询、运行时配置更新和 drain mode
+- Redis metrics 与 heartbeat
+- `admin-api + admin-web` 监控页面
+- MySQL 账号、审计、连接事件、房间事件、玩家背包数据等持久化
+- metrics 归档服务
 
-- admin 鉴权和权限模型
-- 管理命令审计
-- 指标采集：连接数、房间数、广播量、错误码、慢连接数、tick 耗时
+仍需补齐：
+
+- `game-server` admin 口自身的认证和权限边界
+- GM 广播、踢人、封禁的服务端闭环
 - 房间快照持久化接口
-- 对局事件流或回放基础结构
-- 配置版本号和变更来源追踪
-
-建议改动模块：
-
-- `packages/proto/admin.proto`
-- `apps/game-server/src/admin_server.rs`
-- `apps/auth-http/src/routes.js`
-- `apps/game-server/src/mysql_store.rs`
-- 新增 metrics 相关模块
-
-验收标准：
-
-- 管理面不再是裸暴露接口
-- 服务问题可以通过日志和指标快速判断位置
-- 房间状态和关键事件具备最小恢复与追踪能力
+- 对局事件流、回放和可恢复状态版本
+- 配置版本号、变更来源和灰度追踪
 
 ### P4：玩法接入层与多房间模板能力
 
-目标：
+状态：部分完成。
 
-- 让“框架”和“玩法实现”真正解耦
-- 让后续不同房间类型复用同一套运行时
+已落地：
 
-建议交付：
+- 多个 `RoomLogic` 实现
+- `GameRoomLogicFactory`
+- 多种 `RoomRuntimePolicy`
+- `movement_demo`、`combat_demo` 等玩法样例
+- CSV 表与场景、移动、战斗、背包系统的初步装配
 
-- 多种 `RoomLogic` 实现注册机制
-- 房间模板或策略模板
-- 自动建房、匹配分配、常驻房间预创建
-- 配置驱动的房间类型装配
+仍需补齐：
 
-建议改动模块：
-
-- `apps/game-server/src/gameroom/factory.rs`
-- `apps/game-server/src/gameroom/*/mod.rs`
-- `apps/game-server/src/core/runtime/room_policy.rs`
-- `apps/game-server/src/core/runtime/room_manager.rs`
-- `apps/game-server/src/gameservice/`
-- `apps/game-server/src/gameconfig/`
-- `apps/auth-http`
-- `tools/mock-client`
-
-验收标准：
-
-- 新增一种玩法逻辑时，不需要改连接层和通用调度层
-- 房间是否可销毁、目标 fps、是否保留状态由模板控制
-- 自动建房与手动指定房间两种模式可以共存
+- 配置驱动的房间模板注册
+- 自动建房、匹配分配和常驻房预创建
+- 更清晰的玩法模块目录规范、状态导出接口和测试模板
 
 ### P5：分布式与容量扩展
 
-目标：
+状态：未完成，不建议过早推进。
 
-- 在单机框架稳定后，再解决多节点和扩容问题
+当前已具备基础：
 
-建议交付：
+- `game-proxy` 路由层
+- Redis service registry
+- `game-server` 注册实例和 internal socket metadata
+- proxy 按注册中心发现上游
+- rollout session 与 room route store 的初步结构
 
-- 网关或接入层拆分
-- 房间分片与服务发现
-- 节点间房间路由
-- 跨节点状态同步或迁移机制
+仍需补齐：
 
-说明：
+- 房间 owner 路由的统一控制面
+- 完整 room transfer 协议处理
+- 跨节点状态迁移和失败回滚
+- 多 proxy、多 game-server 下的一致路由与健康判定
 
-- 这一阶段不建议过早进入
-- 在 P0-P4 未稳定前，分布式只会放大当前抽象问题
+## 5. 推荐后续顺序
 
-## 5. 推荐落地顺序
+建议按以下顺序继续：
 
-建议实际开发顺序如下：
+1. 先补齐 P2 的背压和消息频率限制，避免长连接服务在真实客户端下出现内存和刷包风险。
+2. 补齐 admin / GM 控制面的真实闭环，尤其是后台已有入口但服务端尚未处理的广播、踢人、封禁。
+3. 完成 room transfer 的最小可验证链路，把 `1601-1610` 从协议预留推进到可联调能力。
+4. 统一 service registry、metrics heartbeat 和服务健康判定口径。
+5. 再推进配置驱动房间模板和更多玩法接入规范。
+6. 最后再考虑多节点迁移、分片和跨服扩容。
 
-1. 先完成 P0，收敛结构分层
-2. 再完成 P1，拿到真正的房间级运行时框架
-3. 之后完成 P2，补齐长连接服务的稳定性底线
-4. 再完成 P3，让控制、观测和排障能力成型
-5. 最后进入 P4 和 P5，扩展玩法装配和多节点能力
+## 6. 相关文档
 
-## 5.1 当前阶段调整
-
-当前项目已完成 P0 与 P1 的主体收敛。
-
-从 P2 往后的路线暂时不继续推进，当前优先级切换为一条新的接入层支线：
-
-- 新增 `apps/game-proxy`
-- 在客户端与 `game-server` 之间增加一层 proxy
-- 把 `game-server` 的滚动重启 / 灰度发布、摘流和连接代理能力前置到 proxy
-- 客户端与 proxy 使用 `KCP`
-- proxy 与 `game-server` 使用 `UDS`
-
-当前设计文档见：
-
-- `docs/game-proxy-hot-update-design.md`
-
-这条支线的目标不是替代 `game-server`，而是补一层独立的连接代理与热切换层。
-
-后续建议开发顺序调整为：
-
-1. 先确认 `game-proxy` 文档细节
-2. 再实现 `apps/game-proxy` 最小骨架
-3. 再让 `mock-client` 和 `simple-client` 改为优先连接 `game-proxy`
-4. 最后再决定是否恢复 P2-P5 的继续开发
-
-## 6. 当前不建议优先做的事
-
-这些方向有价值，但不建议现在优先：
-
-- 过早上多服、多节点和复杂服务发现
-- 在没有房间调度框架前就直接做完整状态同步
-- 在没有恢复机制前就把客户端做得很复杂
-- 在没有统一观测指标前就做大规模压测结论
-
-## 7. 文档对应关系
-
-当前仓库内和本路线图直接相关的文档有：
-
-- `docs/game-server-frame-sync-design.md`
-- `docs/game-server-csv-config-design.md`
-- `docs/game-server-scene-map-format-design.md`
-- `docs/protocol.md`
-
-建议使用方式：
-
-- 本文负责说明“先做什么、后做什么”
-- `game-server-frame-sync-design.md` 负责说明 P1 的核心运行时设计
-- `game-server-scene-map-format-design.md` 负责说明场景地图、阻挡、出生点和 AOI 的数据格式
-- `protocol.md` 负责说明协议层的当前约束与演进点
-
-## 8. 第一阶段建议拆单
-
-如果按最近一次开发迭代拆任务，建议直接拆成这几项：
-
-1. 拆出 `RoomManager`，把 `join_room / leave_room / start_game / end_game` 从 `server.rs` 迁出
-2. 为 `Room` 增加运行时字段和策略引用
-3. 定义 `RoomLogic trait` 和最小 `TestRoomLogic`
-4. 为 `PlayerInputReq` 增加 `frame_id`，补 `FrameBundlePush`
-5. 引入房间 tick task 和基础 fps 策略
-6. 调整 `mock-client` 和测试，让新链路可验证
-
-## 9. 路线图完成标志
-
-当满足以下条件时，可以认为“底层框架第一阶段完成”：
-
-- 连接层、房间调度层、玩法逻辑层已明确分离
-- 房间级帧推进已可运行
-- 房间生命周期已策略化
-- 断线恢复和慢连接治理已具备最小能力
-- 管理面与观测面已达到基础可运维水平
-- 玩法开发可以主要围绕 `RoomLogic` 扩展，而不是改底层接入主干
+- [整体架构](./architecture.md)
+- [协议设计](./protocol.md)
+- [帧同步与房间生命周期设计](./game-server-frame-sync-design.md)
+- [更新策略拆分](./game-server-update-strategy.md)
+- [game-proxy 热切换代理设计](./game-proxy-hot-update-design.md)
+- [空房接管式灰度规范](./game-server-room-rollout-spec.md)
+- [CSV 配置表设计](./game-server-csv-config-design.md)
+- [场景地图格式设计](./game-server-scene-map-format-design.md)
+- [战斗 ECS 设计](./game-server-combat-ecs-design.md)
