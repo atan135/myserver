@@ -4,21 +4,38 @@
 
 本文档描述基于 ECS（Entity-Component-System）架构的战斗系统设计方案，采用 **SOA（Structure of Arrays）** 数据布局实现高性能帧同步游戏。
 
+### 当前实现状态
+
+当前代码已经落地了战斗 ECS 的可运行闭环：
+
+- `core/system/combat/` 已实现 `RoomCombatEcs`、组件、技能、Buff、战斗事件、快照、输入解析和 CSV catalog。
+- `SkillBase.csv` / `BufferBase.csv` 会在服务启动时加工成 `CsvCombatCatalog`，`combat_demo` 房间策略使用这份 catalog。
+- `CombatDemoLogic` 已接入 `RoomLogic`，支持玩家入房生成实体、训练假人、技能输入、战斗 tick、事件广播和周期快照。
+- 客户端输入仍走帧同步的 `PlayerInputReq`，战斗动作通过 `combat_cast_skill` / `combat_apply_buff` 解析。
+- 当前战斗事件和快照通过 `GameMessagePush` 承载 JSON payload，并没有独立的战斗 Protobuf 消息。
+- `tools/mock-client` 已有 `combat-dual-client` 场景用于双客户端战斗联调。
+
+当前仍属于后续目标的部分：
+
+- 技能/Buff CSV reload 后只更新配置快照，不会自动替换已构造的 `CsvCombatCatalog`。
+- 还没有专用战斗协议、AOI 兴趣过滤、战斗状态持久化、技能编辑器或复杂场景碰撞接入。
+- 当前实现重视固定容量上限和 SOA 遍历，但并不是严格“运行中零分配”的固定数组实现。
+
 ### 1.1 设计目标
 
 - **确定性**：相同输入产生相同输出，保证帧同步一致性
 - **高性能**：预分配内存 + SOA 布局 + 批量遍历
-- **可扩展**：技能/Buff 配置化，支持运行时扩展
-- **低开销**：无运行时内存分配（GC friendly）
+- **可扩展**：技能/Buff 配置化，后续可补 catalog 原子替换
+- **低开销**：控制运行时分配，优先使用固定上限和连续数组布局
 
 ### 1.2 核心约束
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | MAX_ENTITIES | 2048 | 每房间最大实体数（含玩家、NPC、怪物、投射物、召唤物） |
-| MAX_PLAYERS | 100 | 每房间最大玩家数 |
+| MAX_PLAYERS | 100 | 每房间最大玩家数目标值，当前由房间策略约束 |
 | MAX_NPCS | 500 | 每房间最大 NPC / 怪物规模建议值 |
-| MAX_PROJECTILES | 1000 | 投射物与短生命周期实体预算 |
+| MAX_PROJECTILES | 1000 | 投射物与短生命周期实体预算建议值 |
 | MAX_SKILLS_PER_ENTITY | 8 | 每个实体最大技能槽数 |
 | MAX_BUFFS_PER_ENTITY | 6 | 每个实体最大 Buff 槽数 |
 | FPS | 30 | 帧率（帧同步基础） |
@@ -51,15 +68,16 @@ hp:    [e0_hp, e1_hp, e2_hp, ...]
 
 ### 2.2 组件定义
 
-所有组件均为 `#[repr(C)]` 纯数据，无逻辑方法（逻辑在 System 层）：
+组件设计目标是保持纯数据、少逻辑，把主要结算放在 System / ECS 层。当前代码使用普通 Rust struct / enum，并为快照与调试保留 `serde` 序列化能力：
 
 ```rust
 // 位置组件 [x, y]
-#[repr(C)]
-struct Position([f32; 2]);
+struct Position {
+    x: f32,
+    y: f32,
+}
 
 // 生命值组件
-#[repr(C)]
 struct Health {
     current: i32,
     max: i32,
@@ -67,14 +85,12 @@ struct Health {
 };
 
 // 技能槽组件
-#[repr(C)]
 struct SkillSlot {
     skill_id: u16,
     cooldown_remaining: u16,  // 帧数，0=可用
 };
 
 // Buff 槽组件
-#[repr(C)]
 struct BuffSlot {
     buff_id: u16,
     duration_remaining: u16,
@@ -82,7 +98,6 @@ struct BuffSlot {
 };
 
 // 移动状态
-#[repr(C)]
 struct MoveState {
     state_type: u8,   // 0=Idle, 1=Sliding, 2=Knockback
     start_x: f32,
@@ -99,13 +114,16 @@ struct MoveState {
 ```rust
 pub struct RoomCombatEcs {
     // 实体元数据
-    entities: Vec<Entity>,
+    next_entity_id: EntityId,
+    entities: Vec<EntityMeta>,
 
     // 战斗组件（SOA 布局）
-    positions: Vec<Position>,
-    velocities: Vec<Velocity>,
+    positions_x: Vec<f32>,
+    positions_y: Vec<f32>,
+    directions_x: Vec<f32>,
+    directions_y: Vec<f32>,
     healths: Vec<Health>,
-    stats: Vec<Stats>,
+    base_stats: Vec<Stats>,
     move_states: Vec<MoveState>,
 
     // 技能组件
@@ -113,7 +131,11 @@ pub struct RoomCombatEcs {
 
     // Buff 组件
     buff_slots: Vec<[BuffSlot; 6]>,     // 每实体6个Buff槽
-    dot_contexts: Vec<DotContext>,
+
+    // 映射表
+    player_entity_map: HashMap<String, EntityId>,
+    entity_index_map: HashMap<EntityId, DenseIndex>,
+    index_entity_map: Vec<EntityId>,
 
     // 事件系统
     pending_events: Vec<CombatEvent>,
@@ -132,7 +154,7 @@ pub struct RoomCombatEcs {
 - `entity_id`
   - 统一实体身份，玩家 / NPC / 怪物 / 投射物都拥有
 - `dense_index`
-  - ECS 内部连续数组下标，专供 `Vec<Position>`、`Vec<MoveState>` 等组件访问
+  - ECS 内部连续数组下标，专供 `positions_x/y`、`move_states` 等组件数组访问
 
 推荐结构：
 
@@ -185,17 +207,19 @@ player_id -> entity_id -> dense_index -> move_states[dense_index]
 
 ### 3.1 技能定义
 
-技能配置在编译期确定，支持模板定义：
+技能配置当前主要来自 `SkillBase.csv`，服务启动时由 `CsvCombatCatalog::from_tables` 转成运行时定义；`BuiltinCombatCatalog` 只作为 fallback / 测试辅助。定义形态类似：
 
 ```rust
 struct SkillDefinition {
     id: u16,
-    name: &'static str,
+    code: String,
+    name: String,
+    description: String,
     cooldown_frames: u16,
     cast_frames: u16,
     range: f32,
-    target_type: u8,       // 0=敌方, 1=友方, 2=自己, 3=地面
-    effects: &'static [SkillEffect],
+    target_type: SkillTargetType,
+    effects: Vec<SkillEffect>,
 }
 
 struct SkillEffect {
@@ -207,7 +231,7 @@ struct SkillEffect {
 }
 ```
 
-### 3.2 内置技能模板
+### 3.2 示例技能模板
 
 | ID | 名称 | 冷却 | 范围 | 效果 |
 |----|------|------|------|------|
@@ -248,17 +272,19 @@ fn process_skill_requests(&mut self) {
 ```rust
 struct BuffDefinition {
     id: u16,
-    name: &'static str,
+    code: String,
+    name: String,
+    description: String,
     buff_type: BuffType,     // Buff/Debuff/Dot/Hot
     max_stacks: u8,
     duration_frames: u16,
     interval_frames: u16,    // Dot/Hot 间隔
-    effects: &'static [BuffEffect],
+    effects: Vec<BuffEffect>,
     can_dispel: bool,
 }
 ```
 
-### 4.2 内置 Buff 模板
+### 4.2 示例 Buff 模板
 
 | ID | 名称 | 类型 | 层数 | 持续 | 效果 |
 |----|------|------|------|------|------|
@@ -270,21 +296,23 @@ struct BuffDefinition {
 
 ### 4.3 Dot/Hot 处理
 
+当前实现不单独维护 `DotContext` 数组，而是在 `BuffSlot` 中保存 `duration_remaining`、`interval_remaining` 和 `stacks`，由 `tick_buffs` 按间隔应用 `DamagePeriodic` / `HealPeriodic` 效果。设计形态类似：
+
 ```rust
-struct DotContext {
-    dots: [DamageOverTime; 4],  // 最多4个Dot
-    dot_count: usize,
+struct BuffSlot {
+    buff_id: u16,
+    duration_remaining: u16,
+    stacks: u8,
+    interval_remaining: u16,
 }
 
-fn tick_all(&mut self) -> i32 {
-    let mut total = 0;
-    for dot in &mut self.dots[..self.dot_count] {
-        if dot.is_active() {
-            total += dot.tick();
+fn tick_buffs(&mut self, frame_id: u32) {
+    for slot in active_buff_slots {
+        if slot.interval_remaining == 0 {
+            apply_periodic_effect(slot.buff_id, frame_id);
+            slot.interval_remaining = buff.interval_frames;
         }
     }
-    self.clear_expired();
-    total
 }
 ```
 
@@ -297,7 +325,7 @@ fn tick_all(&mut self) -> i32 {
 ```rust
 enum DamageFormula {
     Fixed(i32),                          // 固定伤害
-    Scaling { base: i32, attack_scale: f32 },  // 缩放伤害
+    Scaling { base: i32, attack_scale_bps: u16 },  // 缩放伤害
     TrueDamage(i32),                      // 真实伤害
 }
 
@@ -313,8 +341,8 @@ fn apply_damage(&mut self, target: EntityIndex, base_damage: i32) {
 
 ### 5.2 确定性保障
 
-- 伤害随机浮动使用 `frame_id % N` 作为种子，避免真随机
-- 所有计算使用整数 i32，避免浮点精度问题
+- 伤害随机浮动如需引入，应使用 `frame_id % N` 或房间固定种子，避免真随机
+- 核心伤害结算尽量使用整数和 basis points 表达比例，减少浮点差异
 - 服务器权威模式，客户端仅预表现
 
 ---
@@ -400,6 +428,8 @@ fn tick_movements(&mut self) {
 
 ### 7.1 RoomLogic 帧循环
 
+当前 `combat_demo` 已按这个模式接入 `RoomLogic::on_tick`：先解析帧输入，再执行战斗命令和 tick，随后 drain 事件并按间隔推送快照。
+
 ```rust
 impl RoomLogic {
     pub fn tick(&mut self, frame_id: u32) {
@@ -419,13 +449,13 @@ impl RoomLogic {
 
 ### 7.2 事件广播
 
-每帧收集战斗事件，广播给客户端：
+每帧收集战斗事件，当前通过 `GameMessagePush { event: "combat", action, payload_json }` 广播给客户端：
 
 ```rust
 struct CombatEvent {
     event_type: u8,     // DAMAGE=1, HEAL=2, BUFF_APPLY=3, ...
-    source_entity: u16,
-    target_entity: u16,
+    source_entity: u32,
+    target_entity: u32,
     value: i32,
     extra: u16,
 }
@@ -447,9 +477,10 @@ for event in events {
 impl RoomCombatEcs {
     pub fn new() -> Self {
         Self {
-            entities: vec![Entity::default(); MAX_ENTITIES],
-            positions: vec![Position::default(); MAX_ENTITIES],
-            healths: vec![Health::default(); MAX_ENTITIES],
+            entities: Vec::with_capacity(MAX_ENTITIES),
+            positions_x: Vec::with_capacity(MAX_ENTITIES),
+            positions_y: Vec::with_capacity(MAX_ENTITIES),
+            healths: Vec::with_capacity(MAX_ENTITIES),
             // ...
         }
     }
@@ -482,9 +513,9 @@ fn tick_dots(&mut self) {
 
 ### 8.3 标识符优化
 
-- 实体 ID 使用 `u16`（16实体只需2字节）
+- 实体 ID 当前使用 `u32`
 - 技能/Buff ID 使用 `u16`
-- 位图标记存活状态替代 `Vec<bool>`
+- 存活状态保存在实体元数据中，后续如果需要可再引入位图优化
 
 ---
 
@@ -492,18 +523,21 @@ fn tick_dots(&mut self) {
 
 ```
 apps/game-server/src/core/system/combat/
-├── mod.rs        # 模块入口，CombatSystem trait
+├── mod.rs        # 模块入口与导出
 ├── components.rs # 组件定义（Position, Health, SkillSlot...）
-├── skills.rs     # 技能定义与技能模板
-├── buffs.rs      # Buff 定义与 Buff 模板
-└── ecs.rs        # RoomCombatEcs 容器实现
+├── skills.rs     # 技能定义与 EffectScript 解析
+├── buffs.rs      # Buff 定义与 EffectScript 解析
+├── catalog.rs    # CSV / 内置 CombatCatalog
+├── input.rs      # 玩家帧输入解析
+└── ecs.rs        # RoomCombatEcs 容器、tick、事件和快照
 ```
 
 ---
 
 ## 10. 下一步
 
-1. **与 RoomLogic 集成**：将 CombatSystem 接入现有 RoomRuntimePolicy
-2. **协议对接**：定义战斗事件的 Protobuf 消息格式
-3. **配置表支持**：从 CSV/JSON 加载技能和 Buff 配置
-4. **技能编辑器**：可视化编辑技能模板
+1. **专用协议对接**：评估是否把当前 `GameMessagePush` JSON payload 收敛为专用 Protobuf 战斗消息。
+2. **配置派生对象热更**：CSV reload 后重建并原子替换 `CsvCombatCatalog`，同时定义旧房间版本策略。
+3. **AOI 与场景接入**：战斗事件、快照和位置校正按视野过滤，并接入场景阻挡 / 击退落点校验。
+4. **状态迁移与持久化**：为大世界常驻房间补战斗状态快照、恢复和跨版本迁移策略。
+5. **技能编辑器**：可视化编辑技能模板，并导出当前 CSV / EffectScript 格式。

@@ -93,11 +93,14 @@ docs/                 # 当前正式设计文档
 - 更新与灰度边界：[更新策略拆分](./docs/game-server-update-strategy.md)、[空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)、[空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
 - 路线图与算法/目标设计：[底层框架路线图](./docs/game-server-framework-roadmap.md)、[大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)、[网络延迟补偿设计](./docs/network-lag-compensation-design.md)
 
-配置、场景与战斗：
+配置与场景：
 
 - [CSV 配置表设计](./docs/game-server-csv-config-design.md)
 - [CSV 热更现状清单](./docs/game-server-csv-hot-reload-status.md)
 - [场景地图格式设计](./docs/game-server-scene-map-format-design.md)
+
+具体游戏逻辑：
+
 - [背包系统设计](./docs/game-server-inventory-design.md)
 - [战斗 ECS 设计](./docs/game-server-combat-ecs-design.md)
 

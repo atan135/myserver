@@ -1,8 +1,25 @@
-# game-server 场景地图格式设计（草案）
+# game-server 场景地图格式设计
 
-这份文档用于确认 `apps/game-server` 后续位移同步、阻挡校验、出生点、AOI 分块与场景切换所依赖的地图格式。
+这份文档用于确认 `apps/game-server` 位移同步、阻挡校验、出生点、AOI 分块与场景切换所依赖的地图格式。
 
-目标不是一次性覆盖完整编辑器方案，而是先确定一套**服务端可落地、可热更、可扩展**的场景数据格式。
+目标不是一次性覆盖完整编辑器方案，而是确定一套**服务端可落地、热更边界清晰、可扩展**的场景数据格式。
+
+## 当前实现状态
+
+当前代码已经落地了场景系统的核心读取与查询链路：
+
+- `SceneTable.csv`、`SceneSpawnPoint.csv`、独立 `.grid.json` 已接入 `SceneCatalog::load_from_dir`。
+- `.grid.json` 当前只支持直接数组编码的 layer，`walkable` 和 `block` 已用于服务端可行走校验。
+- `SceneQuery` 当前提供 `scene`、`spawn_point`、`is_walkable`、`clamp_position`。
+- 启动时会校验场景 code、宽高、`cell_size`、默认出生点和出生点可行走性。
+- 位移 demo 会通过 `SceneQuery` 做出生点和移动落点约束。
+
+当前仍属于预留或目标设计的部分：
+
+- `ScenePortal.csv`、`SceneRegion.csv`、`SceneMonsterSpawn.csv` 会被配置系统加载和 reload，但还没有接入 `SceneCatalog` 的业务查询。
+- AOI 分块数据已在格式中保留，当前没有 `resolve_aoi_block` 查询接口。
+- `.grid.json` 暂不支持 RLE / Base64 压缩编码。
+- 场景 CSV reload 后只更新 `ConfigTableRuntime` 快照，不会自动重建已经持有的 `SceneCatalog`；生效需要滚动重启或后续补原子替换能力。
 
 ## 1. 设计目标
 
@@ -213,7 +230,7 @@ int,int,int,int,int,int,float,Array<string>
 
 ## 5.2 `.grid.json` 顶层结构
 
-建议格式：
+当前实现使用直接数组编码：
 
 ```json
 {
@@ -223,9 +240,9 @@ int,int,int,int,int,int,float,Array<string>
   "height": 256,
   "cell_size": 0.5,
   "layers": {
-    "walkable": "base64-or-rle-data",
-    "block": "base64-or-rle-data",
-    "water": "base64-or-rle-data"
+    "walkable": [1, 1, 1, 0, 0, 1],
+    "block": [0, 0, 0, 1, 1, 0],
+    "water": [0, 0, 0, 0, 0, 0]
   },
   "aoi": {
     "block_size": 16
@@ -299,7 +316,7 @@ int,int,int,int,int,int,float,Array<string>
 - `walkable`: RLE 字符串
 - `block`: RLE 字符串
 
-第一阶段建议先用 **直接数组或简单 RLE**，不要一开始就上复杂二进制格式。
+当前代码只支持 **直接数组**。RLE / Base64 可以作为后续正式服大地图优化，但需要先扩展 `SceneGrid::load_from_file`。
 
 ## 6. 世界坐标与网格坐标约定
 
@@ -326,14 +343,21 @@ cell = (20, 8)
 
 ## 7. 服务端使用方式
 
-场景系统至少需要提供这些查询接口：
+当前 `SceneQuery` 已提供这些查询接口：
 
 ```rust
 trait SceneQuery {
+    fn scene(&self, scene_id: i32) -> Option<&SceneDefinition>;
+    fn spawn_point(&self, spawn_id: i32) -> Option<&SceneSpawnPointDefinition>;
     fn is_walkable(&self, scene_id: i32, x: f32, y: f32) -> bool;
-    fn is_blocked(&self, scene_id: i32, x: f32, y: f32) -> bool;
-    fn clamp_position(&self, scene_id: i32, x: f32, y: f32) -> (f32, f32);
-    fn resolve_aoi_block(&self, scene_id: i32, x: f32, y: f32) -> (i32, i32);
+    fn clamp_position(
+        &self,
+        scene_id: i32,
+        from_x: f32,
+        from_y: f32,
+        to_x: f32,
+        to_y: f32,
+    ) -> ClampPositionResult;
 }
 ```
 
@@ -342,7 +366,8 @@ trait SceneQuery {
 - 普通移动校验
 - 冲刺 / 击退落点校验
 - 出生点合法性校验
-- AOI 分块归属
+
+`is_blocked` 可由 `is_walkable == false` 推导；`resolve_aoi_block` 仍是后续 AOI / 兴趣管理要补的接口。
 
 ## 8. 位移同步中的使用原则
 
@@ -366,13 +391,15 @@ trait SceneQuery {
 
 ### 9.1 元数据热更
 
-可通过现有 CSV 热更机制支持：
+当前这些 CSV 会被现有配置热更机制 reload：
 
 - 场景名称
 - 出生点
 - 传送点
 - 区域定义
 - 刷怪配置
+
+但要特别注意：`SceneCatalog` 在服务启动时由配置快照加工生成，当前不会随着 CSV reload 自动重建。因此场景元数据热更目前只代表配置快照更新，不代表运行中的场景查询立即生效。
 
 ### 9.2 拓扑热更
 
@@ -384,35 +411,45 @@ trait SceneQuery {
 
 ## 10. 校验规则
 
-服务端启动时建议做这些校验：
+服务端启动时当前已经覆盖的校验：
 
 - `SceneTable.Code` 与 `grid.json.scene_code` 必须一致
 - `SceneTable.Width / Height / CellSize` 与网格文件一致
 - 默认出生点必须存在
 - 所有出生点必须落在可行走区域
+
+仍待接入业务后补齐的校验：
+
 - 所有传送点目标出生点必须存在
 - 所有区域框必须在场景边界内
 - AOI 分块大小必须大于 `0`
+- 刷怪点与怪物刷新规则合法性
 
-## 11. 第一阶段范围建议
+## 11. 当前阶段范围与后续扩展
 
-第一阶段先落下面这些能力：
+当前已落地：
 
 - `SceneTable.csv`
 - `SceneSpawnPoint.csv`
-- `ScenePortal.csv`
-- `SceneRegion.csv`
 - 单独的 `.grid.json`
-- 服务端 `is_walkable / is_blocked / resolve_aoi_block`
+- 服务端 `is_walkable / clamp_position`
 - 出生点和阻挡校验
 
-先不要做：
+当前已生成或加载但未接入主业务查询：
+
+- `ScenePortal.csv`
+- `SceneRegion.csv`
+- `SceneMonsterSpawn.csv`
+
+后续再做：
 
 - 多层高度导航
 - 斜坡 / 楼梯
 - 客户端可视化编辑器
 - 二进制专有地图格式
 - 寻路网格和导航网格双轨
+- AOI 分块查询与兴趣管理接入
+- 场景派生对象随 CSV reload 原子替换
 
 ## 12. 关键设计结论
 

@@ -1,4 +1,4 @@
-# game-server CSV 配置系统设计（草案）
+# game-server CSV 配置系统设计
 
 这份文档描述 `apps/game-server/csv` 下配置表的加载、代码生成、索引和热更新方案，并对齐当前 `core/config_table + gameconfig` 分层实现。
 
@@ -10,6 +10,21 @@
 - 统一口径见 `docs/game-server-update-strategy.md`
 
 目标不是做一个完全动态的通用 csv 解析器，而是做一个适合游戏服长期维护的“编译期结构生成 + 运行时数据热更”系统。
+
+## 当前实现状态
+
+当前代码已经落地了这套方案的主干：
+
+- `apps/game-server/tools/csv_codegen.rs` 在编译期扫描 `apps/game-server/csv/*.csv` 并生成 `apps/game-server/src/csv_code/*.rs`。
+- `core/config_table/` 提供 `CsvTableLoader`、行解析、字符串池、运行时快照和按文件 reload。
+- `gameconfig/registry.rs` 聚合当前业务表，包括场景、物品、技能、Buff 和测试表。
+- 运行时 reload 支持结构签名校验、整表构建、成功后替换，失败时保留旧表。
+
+需要注意当前类型支持边界：
+
+- 端到端加载已实现：`int`、`int64`、`float`、`string`、`Array<string>`、`Dict<string,int>`。
+- 生成器能解析更多类型声明，但除上述组合外，当前生成的加载表达式仍会落到 `unimplemented!`，不能视为业务可用。
+- 当前二级索引只内置在生成器策略里，实际配置集中在 `TestTable_100` 和 `TestTable_110` 样例表；业务表目前主要使用 `id` 查询和 `all()` 遍历。
 
 ## 1. 设计目标
 
@@ -102,17 +117,20 @@ int,Array<string>,float,Dict<string,int>
 
 ## 5. 支持的类型语法
 
-第一版固定支持以下类型：
+当前稳定可用于运行时加载的类型：
 
 - `int`
 - `int64`
 - `float`
 - `string`
 - `Array<string>`
+- `Dict<string,int>`
+
+生成器类型系统预留了以下声明，但加载逻辑尚未补齐，新增业务表不要直接依赖：
+
 - `Array<int>`
 - `Array<int64>`
 - `Array<float>`
-- `Dict<string,int>`
 - `Dict<string,string>`
 - `Dict<int,int>`
 
@@ -120,7 +138,7 @@ int,Array<string>,float,Dict<string,int>
 
 ### 5.1 当前约束
 
-第一版先只实现明确声明过的组合，不做任意泛型嵌套，不支持：
+当前只实现明确声明过且已接入 `CsvRowReader` 的组合，不做任意泛型嵌套，不支持：
 
 - `Array<Dict<...>>`
 - `Dict<string,Array<...>>`
@@ -264,9 +282,10 @@ apps/game-server/tools/csv_codegen.rs
 
 ```text
 apps/game-server/src/csv_code/mod.rs
-apps/game-server/src/csv_code/testtable_100.rs
-apps/game-server/src/csv_code/testtable_110.rs
+apps/game-server/src/csv_code/*.rs
 ```
+
+当前生成物已经覆盖测试表、场景表、物品表、技能表和 Buff 表；具体文件以 `apps/game-server/src/csv_code/` 为准。
 
 ### 8.1 每张表生成内容
 
@@ -525,10 +544,13 @@ pub const TEST_TABLE_100_SCHEMA_SIGNATURE: &str =
 
 后续如果出现新表使用：
 
+- `Array<int>`
+- `Array<int64>`
+- `Array<float>`
 - `Dict<string,string>`
 - `Dict<int,int>`
 
-则生成器和解析器都需要直接支持。
+则生成器和解析器都需要补齐端到端加载逻辑，而不只是让类型声明通过解析。
 
 ## 17. 内存优化补充说明
 
@@ -605,9 +627,9 @@ pub trait CsvTableLoader: Sized {
 
 这样运行时热更新逻辑可以复用，不用每张表手写一套。
 
-## 20. 第一阶段范围建议
+## 20. 当前阶段范围与后续扩展
 
-第一阶段只做下面这些：
+当前已经落地的范围：
 
 - 读取 `apps/game-server/csv/*.csv`
 - 生成 Rust 结构代码
@@ -616,26 +638,15 @@ pub trait CsvTableLoader: Sized {
 - 支持单表数据热更新
 - 支持 schema signature 校验
 - 支持单表字符串池
-- 支持以下类型：
-  - `int`
-  - `int64`
-  - `float`
-  - `string`
-  - `Array<string>`
-  - `Array<int>`
-  - `Array<int64>`
-  - `Array<float>`
-  - `Dict<string,int>`
-  - `Dict<string,string>`
-  - `Dict<int,int>`
 
-先不要做：
+仍不属于当前能力边界：
 
 - 任意泛型嵌套
 - float 索引
 - Array / Dict 索引
 - 跨表引用校验
 - 自动从运行时动态推断结构
+- 除 `Array<string>`、`Dict<string,int>` 外的容器类型端到端加载
 
 ## 21. 当前落地说明
 

@@ -4,12 +4,31 @@
 
 背包系统管理玩家的物品存储、装备穿戴和属性计算。玩家物品分散存放于三个位置：**背包**（随身）、**仓库**（固定位置）、**装备栏**（穿戴中）。
 
+### 当前实现状态
+
+当前代码已经实现背包系统的主链路：
+
+- 玩家数据包含背包、仓库、装备栏、等级、属性、外观、Buff 和 dirty 标记。
+- 背包默认容量 `48`，仓库默认容量 `64`。
+- 协议已覆盖装备、使用、丢弃、测试加物品、仓库存取、背包拉取和增量推送。
+- `ItemTable.csv` 已接入物品存在性、装备槽位、装备属性和消耗品效果判断。
+- 玩家背包、仓库、装备、属性、外观、Buff 已支持 MySQL JSON 持久化。
+- GM 发奖已通过 game-server admin 口接入，并支持 `request_id` 幂等记录。
+
+当前仍未落地或只保留设计目标的部分：
+
+- 非关键操作延迟批量写库尚未实现；当前成功的物品操作会立即调用 `PlayerManager::save_player`。
+- 仓库存取的位置校验尚未在 `inventory_service` 中执行，代码中仍由调用方负责。
+- 物品堆叠当前按 `uid` 或 `item_id + binded` 合并，没有按 `ItemTable.MaxStack` 拆分多格。
+- 交易、合成、商店、掉落、PK 掉落还没有主业务实现。
+- `VisualChangePush` 当前发送给本人连接，尚未接入 AOI 视野广播。
+
 ### 1.1 核心设计原则
 
 - **服务端权威**：所有物品操作以服务端数据为准
 - **预计算属性**：装备/Buff 变更时重新计算属性，战斗时直接读取
 - **来源追踪**：属性变化记录具体来源，用于面板展示
-- **延迟写库**：非关键操作批量写库，减少 IO 压力
+- **延迟写库**：目标是非关键操作批量写库，当前实现仍是成功后立即保存
 - **变更检测**：脏标记机制驱动通知和持久化
 
 ---
@@ -17,6 +36,8 @@
 ## 2. 存储架构
 
 ### 2.1 数据流
+
+下图是目标架构视角。当前实现中没有独立 `InventoryManager` / `NotificationDispatcher` 模块，实际入口主要是 `core/service/inventory_service.rs`、`core/player/player_manager.rs` 和 `core/inventory/*`。
 
 ```
 DB（MySQL）                    游戏服务内存                    Client
@@ -48,12 +69,12 @@ DB（MySQL）                    游戏服务内存                    Client
 | 位置 | 说明 | 访问限制 |
 |------|------|----------|
 | 背包 (Inventory) | 随身携带，存放道具、材料、任务物品 | 在线即可操作 |
-| 仓库 (Warehouse) | 固定于主城/据点 NPC 处 | 必须位于仓库 NPC 附近 |
+| 仓库 (Warehouse) | 固定于主城/据点 NPC 处 | 目标是必须位于仓库 NPC 附近，当前服务层未校验位置 |
 | 装备栏 (Equipment) | 穿戴中的装备，影响角色属性和外观 | 在线即可穿戴/卸下 |
 
 ### 2.3 物品堆叠规则
 
-- 不同物品有各自的堆叠上限（MaxStack）
+- 不同物品有各自的堆叠上限（MaxStack，当前表字段存在但容器合并逻辑尚未强制使用）
 - 不可堆叠物品（装备）每个占用独立格子
 - 堆叠物品达到上限后自动占用新格子
 
@@ -321,6 +342,8 @@ fn notify_visual_change(&mut self, player_id: u64, visual: &PlayerVisual) {
 }
 ```
 
+当前 `inventory_service` 只把 `VisualChangePush` 发回当前连接；真正的视野内广播需要等场景 AOI / 兴趣管理接入后再落地。
+
 ---
 
 ## 6. 核心操作
@@ -394,6 +417,8 @@ fn warehouse_withdraw(&mut self, item_uid: u64, count: u32) -> Result<()> {
 }
 ```
 
+当前代码中的 `warehouse_deposit` / `warehouse_withdraw` 只做容器间转移，位置校验还没有接入请求处理链路。
+
 ### 6.3 物品使用
 
 ```rust
@@ -422,6 +447,8 @@ fn use_item(&mut self, item_uid: u64) -> Result<()> {
 
 ### 6.4 交易
 
+交易系统尚未实现，下面是后续设计方向。
+
 ```rust
 fn trade_request(&mut self, target_id: u64) -> Result<()> {
     // 1. 双方都在线
@@ -441,6 +468,8 @@ fn trade_confirm(&mut self, trade_id: u64) -> Result<()> {
 ```
 
 ### 6.5 PK掉落
+
+PK 掉落尚未实现，下面是后续设计方向。
 
 ```rust
 fn handle_pk_defeat(&mut self, killer_id: u64) -> Result<Vec<ItemDrop>> {
@@ -464,7 +493,7 @@ fn handle_pk_defeat(&mut self, killer_id: u64) -> Result<Vec<ItemDrop>> {
 | 操作类型 | 策略 |
 |----------|------|
 | 交易、合成、PK掉落 | 实时写库 |
-| 物品使用、Buff变更 | 延迟批量写库 |
+| 物品使用、Buff变更 | 目标是延迟批量写库，当前实现为成功后立即写库 |
 | 登录登出 | 强制写库 |
 
 ### 7.2 脏数据收集
@@ -490,6 +519,8 @@ impl DirtyCollector {
 }
 ```
 
+当前 `PlayerData` 和 `PlayerManager` 已有 dirty 标记与 dirty 查询接口，但还没有周期性 dirty collector / batch flush 循环。现有请求处理在成功修改后直接保存玩家数据。
+
 ---
 
 ## 8. 协议设计
@@ -498,7 +529,7 @@ impl DirtyCollector {
 
 | 协议 | 方向 | 说明 |
 |------|------|------|
-| `WarehouseAccessReq/Res` | Client→Server | 仓库存取请求（含位置校验） |
+| `WarehouseAccessReq/Res` | Client→Server | 仓库存取请求（当前未接入位置校验） |
 | `ItemEquipReq/Res` | Client→Server | 装备穿戴/卸下 |
 | `ItemUseReq/Res` | Client→Server | 物品使用 |
 | `InventoryUpdatePush` | Server→Client | 背包增量更新 |
@@ -525,6 +556,6 @@ impl DirtyCollector {
 |------|------|
 | 背包数据存储位置 | 独立于 RoomState，登录时从 DB 加载到内存 |
 | 属性计算方式 | 预计算 + 来源记录，变更时重算并标记 dirty |
-| 仓库访问限制 | 必须位于仓库 NPC 附近，支持反作弊校验 |
-| 通知范围 | 属性→本人，外观→视野内玩家 |
-| DB 写入策略 | 关键操作实时写，其余延迟批量 |
+| 仓库访问限制 | 目标是必须位于仓库 NPC 附近，当前服务层未校验位置 |
+| 通知范围 | 属性→本人，外观目标→视野内玩家；当前外观推送先发本人连接 |
+| DB 写入策略 | 当前成功操作立即保存；后续再补关键操作实时写、其余延迟批量 |
