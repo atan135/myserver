@@ -1,320 +1,149 @@
 # MyServer
 
-通用游戏后端框架，当前已实现完整的多服务架构：
+MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 monorepo：登录、游戏接入、游戏逻辑、聊天、匹配、邮件、公告、管理后台、协议包、服务注册中心、联调工具和本地脚本都在同一仓库内维护。
 
-## 项目结构
+## 文档定位
 
+本文件是给 AI 和协作者使用的项目入口说明，只保留整体设计理念、架构边界、基础设定和文档导航。具体功能细节、协议字段、接口行为、实现状态和任务拆解应阅读对应 `docs/` 文档或直接查看代码。
+
+优先级约定：
+
+- 当前代码与配置优先于文档。
+- `docs/architecture.md` 是当前整体架构的主说明。
+- 专题设计以 `docs/` 下对应文档为准；部分专题文档可能描述目标态，不等于已经全部落地。
+- `docs/prompts/` 已不再使用，仅保留项目初始设计阶段的历史提示词。AI 或协作者了解项目时不需要读取该目录，也不要以其中内容作为当前设计依据。
+
+## 整体架构理念
+
+- `auth-http` 负责 HTTP 登录、会话、ticket 和登录安全边界。
+- `game-proxy` 作为客户端游戏接入层，屏蔽后端 `game-server` 实例与路由细节。
+- `game-server` 是游戏逻辑核心，负责玩家鉴权、房间生命周期、帧推进、配置表热加载、内部管理接口和主要游戏运行时。
+- `chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的独立能力服务。
+- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 和监控能力。
+- Redis 用于 session、ticket、限流、服务注册、metrics/heartbeat 和部分 Pub/Sub 通知。
+- MariaDB / MySQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
+- 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
+
+简化拓扑：
+
+```text
+Client / mock-client
+  -> auth-http -> Redis / MySQL
+  -> game-proxy -> game-server -> rooms / runtime / admin / configs
+
+admin-web -> admin-api -> game-server admin / Redis / MySQL
+
+game-server <-> match-service
+mail-service -> Redis Pub/Sub -> chat-server
+announce-service / mail-service / game-server / game-proxy -> service registry
 ```
+
+## 仓库结构
+
+```text
 apps/
-├── auth-http/        # Node.js + Express 登录服 (端口 3000)
-├── game-server/     # Rust + Tokio TCP 游戏服 (端口 7000)
-├── game-proxy/      # Rust + Tokio KCP 接入代理 (端口 4000)
-├── chat-server/     # Rust + Tokio TCP 聊天服 (端口 9001)
-├── match-service/   # Rust + gRPC 匹配服务 (端口 9002)
-├── announce-service/ # Node.js HTTP 公告服务 (端口 9004)
-├── mail-service/    # Node.js HTTP 邮件服务 (端口 9003)
-├── admin-api/       # Node.js + Express 管理后台 API (端口 3001)
-├── admin-web/       # Vue 3 + Element Plus 管理前台 (端口 3002)
-├── simple-client/   # Unity 客户端测试工程
-tools/
-├── mock-client/     # Node.js 无客户端联调工具
+├── auth-http/         # Node.js + Express 登录服
+├── game-proxy/       # Rust + Tokio KCP 接入代理
+├── game-server/      # Rust + Tokio 游戏逻辑服
+├── chat-server/      # Rust + Tokio 聊天服
+├── match-service/    # Rust + tonic gRPC 匹配服务
+├── announce-service/ # Node.js HTTP 公告服务
+├── mail-service/     # Node.js HTTP 邮件服务
+├── admin-api/        # Node.js + Express 管理后台 API
+├── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
+└── simple-client/    # Unity 测试客户端工程
 packages/
-├── proto/           # 玩家协议与内部控制协议 (Protobuf)
-├── service-registry/ # 基于 Redis 的服务注册中心
-scripts/             # 环境检查与本地启动辅助脚本
-db/                  # 数据库初始化脚本
-docs/                # 架构与协议文档
+├── proto/            # 共享 Protobuf 协议
+└── service-registry/ # Redis 服务注册中心包
+tools/
+└── mock-client/      # Node.js 无客户端联调工具
+scripts/              # 本地启动、环境检查、数据初始化辅助脚本
+db/                   # 数据库初始化脚本
+docs/                 # 当前正式设计文档
 ```
+
+## 服务与端口
+
+固定入口端口以 `apps/port.txt` 为准；内部服务端口主要用于本地开发默认值，部署和联调时应优先看实际配置、环境变量和服务注册中心。
+
+| 服务 | 默认端口 | 说明 |
+|------|----------|------|
+| `auth-http` | `3000` | 登录、session、ticket |
+| `admin-api` | `3001` | 管理后台 API |
+| `admin-web` | `3002` | 本地 Vite 管理前端 |
+| `game-proxy` | `4000` | 客户端游戏接入入口 |
+| `game-server` | `7000` | 游戏服玩家协议默认端口 |
+| `game-server admin` | `7500` | 内部管理口 |
+| `game-proxy admin` | `7101` | 代理内部管理口，代码默认值 |
+| `chat-server` | `9001` | 内部聊天服务默认值 |
+| `match-service` | `9002` | 内部匹配服务默认值 |
+| `mail-service` | `9003` | 内部邮件服务默认值 |
+| `announce-service` | `9004` | 内部公告服务默认值 |
 
 ## 文档导航
 
+整体与协议：
+
+- [整体架构](./docs/architecture.md)
+- [协议设计](./docs/protocol.md)
+- [Rust 游戏服开发指南](./docs/game-server-rust-guide.md)
 - [底层框架路线图](./docs/game-server-framework-roadmap.md)
-- [更新策略拆分](./docs/game-server-update-strategy.md)
+
+游戏服与接入层：
+
 - [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
+- [更新策略拆分](./docs/game-server-update-strategy.md)
+- [空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)
+- [空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
 - [game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
+- [大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)
+- [网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+
+配置、场景与战斗：
+
 - [CSV 配置表设计](./docs/game-server-csv-config-design.md)
 - [CSV 热更现状清单](./docs/game-server-csv-hot-reload-status.md)
-- [协议设计](./docs/protocol.md)
+- [场景地图格式设计](./docs/game-server-scene-map-format-design.md)
+- [背包系统设计](./docs/game-server-inventory-design.md)
+- [战斗 ECS 设计](./docs/game-server-combat-ecs-design.md)
+
+周边服务与后台：
+
 - [服务注册中心设计](./docs/service-registry-design.md)
 - [聊天与邮件系统设计](./docs/game-server-chat-design.md)
 - [匹配服务设计](./docs/match-service-design.md)
-- [网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+- [管理后台设计](./docs/admin-panel.md)
+- [监控设计](./docs/monitoring-design.md)
+
+安全：
+
 - [安全设计](./docs/security-design.md)
 - [限流与风控设计](./docs/rate-limit-and-security.md)
-- [管理后台设计](./docs/admin-panel.md)
-- [大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)
 
-## 统一日志方案
+## 基础设定
 
-当前两边统一采用相同的日志配置思想：
+日志配置统一使用以下环境变量模型：
 
 - `LOG_LEVEL`
 - `LOG_ENABLE_CONSOLE`
 - `LOG_ENABLE_FILE`
 - `LOG_DIR`
 
-### auth-http / announce-service / mail-service / admin-api
-
-- 使用 `log4js`
-- 支持 console 输出
-- 支持按天滚动文件输出
-
-### game-server / game-proxy / chat-server / match-service
-
-- 使用 `tracing + tracing-subscriber + tracing-appender`
-- 支持 console 输出
-- 支持按天滚动文件输出
-- 保留 Rust 异步服务里更合适的结构化日志能力
-
-Rust 侧推荐继续用 `tracing`，原因是：
-- `tracing` 是 Rust 异步网络服务更合适的日志/事件体系
-- 对字段化日志、span、异步上下文更友好
-- 和当前 `game-server` 的写法最兼容
-- 同时仍然可以实现和 `auth-http` 一样的 console/file 双输出与目录配置
-
-## 当前已完成
-
-### 核心服务
-- HTTP 登录、access token、game ticket
-- Redis 会话与 ticket 存储
-- MariaDB 玩家账号与认证审计落库
-- MariaDB 游戏连接与房间事件审计落库
-- Rust TCP 鉴权、心跳、错误响应
-- Rust KCP 接入代理 (game-proxy)
-- 统一日志配置模型
-- 修改密码接口 (POST /api/v1/auth/change-password)
-- Session 滑动窗口续期 (客户端定期调 /auth/me 保活)
-- X-Request-Id 请求追踪 (AsyncLocalStorage 自动注入日志)
-- /healthz 增强 (Redis PING + MySQL SELECT 1 探测)
-- 限流响应 Retry-After 头 (IP 限流 429 + 账号锁定 403)
-- 并发登录控制与踢旧会话 (Redis Pub/Sub 通知 game-server)
-
-### 房间与帧同步
-- 房间核心闭环：加入、离开、准备、房间快照广播、owner 转移
-- 房间级帧推进 (RoomManager + RoomRuntimePolicy)
-- RoomLogic trait 和多种实现 (TestRoomLogic, PersistentWorldLogic, DisposableMatchLogic, SandboxLogic)
-- 观战者支持 (MemberRole + Observer)
-- 断线重连恢复 (snapshot + frame_id + recent_inputs)
-- 定时快照生成 (每 N 帧)
-- 输入历史记录 (最近 300 帧)
-- 未来帧输入正确处理
-
-### 微服务
-- chat-server: 单聊、群聊、离线消息
-- match-service: 匹配池、撮合算法、gRPC 接口
-- announce-service: 公告 CRUD、有效公告查询、服务注册与监控上报
-- mail-service: 邮件 CRUD、附件领取、Redis Pub/Sub 通知
-- admin-api + admin-web: 运营后台 (账号管理、审计日志)
-- service-registry: 基于 Redis 的服务注册与发现
-
-### 工具链
-- Node mock client 单客户端与双客户端联调场景
-- 协议与使用文档
-- 启动脚本 (dev-auth.ps1, dev-game.ps1, dev-proxy.ps1, dev-chat.ps1, dev-match.ps1, dev-announce.ps1)
-
-## 日志配置
-
-### auth-http
-
-参考 [apps/auth-http/.env.example](./apps/auth-http/.env.example)
-
-- `LOG_LEVEL=info`
-- `LOG_ENABLE_CONSOLE=true`
-- `LOG_ENABLE_FILE=true`
-- `LOG_DIR=logs/auth-http`
-- `REDIS_KEY_PREFIX=`
-- `MYSQL_ENABLED=false`
-- `MYSQL_URL=mysql://root:password@127.0.0.1:3306/myserver_auth`
-- `MYSQL_POOL_SIZE=10`
-
-### game-server
-
-参考 [apps/game-server/.env.example](./apps/game-server/.env.example)
-
-- `LOG_LEVEL=info`
-- `LOG_ENABLE_CONSOLE=true`
-- `LOG_ENABLE_FILE=true`
-- `LOG_DIR=logs/game-server`
-- `REDIS_KEY_PREFIX=`
-- `MYSQL_ENABLED=false`
-- `MYSQL_URL=mysql://root:password@127.0.0.1:3306/myserver_game`
-- `MYSQL_POOL_SIZE=10`
-
-## 数据库初始化
-
-初始化脚本：
-
-- `db/init.sql`
-
-执行示例：
-
-```powershell
-mysql -uroot -p < db/init.sql
-```
-
-当前存储职责：
-
-- Redis：session、ticket、短期在线态、服务注册中心
-- MariaDB：玩家账号、认证审计、TCP 连接审计、房间事件审计
-
-## auth-http 测试账号录入
-
-前提：
-
-- `apps/auth-http/.env` 里把 `MYSQL_ENABLED=true`
-- `MYSQL_URL` 指向你的 `myserver_auth` 库
-- 首次可先执行 `mysql -uroot -p < db/init.sql`
-
-一键录入内置测试账号：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1
-```
-
-默认会写入这些账号：
-
-- `test001 / Passw0rd!`
-- `test002 / Passw0rd!`
-- `gm001 / AdminPass123!`
-
-录入单个账号：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1 -Account test003 -Password Passw0rd! -DisplayName "Test User 003"
-```
-
-从 JSON 批量导入：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\seed-auth-test-accounts.ps1 -File .\apps\auth-http\scripts\test-accounts.example.json
-```
-
-也可以直接在 `apps/auth-http` 下执行：
-
-```powershell
-npm run seed:test-accounts
-```
-
-## 自动化测试
-
-当前已补两层自动化测试：
-
-- `tests/auth-http.test.mjs`：HTTP 登录服接口测试
-- `tests/integration-flow.test.mjs`：拉起 `auth-http + game-server` 后复用 `mock-client` 的端到端测试
-
-执行入口：
-
-```powershell
-npm test
-```
-
-只跑 HTTP 测试：
-
-```powershell
-npm run test:auth-http
-```
-
-只跑跨服务集成测试：
-
-```powershell
-npm run test:integration
-```
-
-协作约定：
-
-- 在本项目中，模块功能开发完成后，不要直接自动运行项目检测、集成测试、联调脚本或自动启动相关服务；应先明确提示用户需要启动哪些项目 / 服务及依赖项，待用户确认已启动后，再根据用户的明确指令执行对应测试。
-
-测试默认使用本地 Redis：
-
-- `TEST_REDIS_URL` 默认 `redis://127.0.0.1:6379`
-- 每次测试会自动生成独立 `REDIS_KEY_PREFIX`
-- 测试结束后会按前缀清理 Redis key，避免污染开发数据
-
-## 安装依赖
-
-### auth-http
-
-因为新增了 `mysql2`，如果你还没安装新依赖，需要执行：
-
-```powershell
-cd apps/auth-http
-npm install
-```
-
-### game-server
-
-因为新增了 `mysql_async`，如果你要重新验证编译，需要执行：
-
-```powershell
-cd apps/game-server
-cargo check
-```
-
-## 正常房间流验证
-
-```powershell
-npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-a
-```
-
-## 双客户端房间联调
-
-```powershell
-npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-b
-```
-
-## mock-client 账号密码登录
-
-单客户端场景可以直接走真实账号登录：
-
-```powershell
-npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-account --login-name test001 --password Passw0rd!
-```
-
-双客户端场景可以分别指定 A/B 两套账号：
-
-```powershell
-npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-account-multi --login-name-a test001 --password-a Passw0rd! --login-name-b test002 --password-b Passw0rd!
-```
-
-不传账号参数时，`mock-client` 仍默认走 guest 登录。
-
-## 启动脚本
-
-| 脚本 | 用途 |
-|------|------|
-| `scripts/check-env.ps1` | 环境检查 |
-| `scripts/dev-auth.ps1` | 启动 auth-http |
-| `scripts/dev-game.ps1` | 启动 game-server |
-| `scripts/dev-proxy.ps1` | 启动 game-proxy |
-| `scripts/dev-chat.ps1` | 启动 chat-server |
-| `scripts/dev-match.ps1` | 启动 match-service |
-| `scripts/dev-announce.ps1` | 启动 announce-service |
-| `scripts/seed-auth-test-accounts.ps1` | 录入测试账号 |
-| `scripts/test-auth-http-login.ps1` | 测试登录接口 |
-
-## Git 提交规范
-
-- 提交按**功能模块**拆分：一个 commit 只解决一类问题，避免把协议、服务实现、测试工具、文档更新混在同一个提交里。
-- 提交标题格式统一为：`<type>: <简短主题>`
-- `type` 推荐使用：`feat`、`fix`、`docs`、`refactor`、`test`、`chore`
-- 提交标题中的“主题”统一使用中文，不使用英文短语或中英混写主题。
-- 标题要直接说明“改了什么”，优先写具体模块或能力，不写空泛描述。
-- 提交正文与标题之间保留一个空行。
-- 提交正文至少说明两点：
-- 这次一起改了哪些关键项
-- 为什么要这样改，解决了什么问题，或避免了什么联调/维护风险
-- 如果改动涉及端口、配置、协议、脚本或跨服务联动，正文里要明确写出受影响的服务名、关键配置项或关键文件。
-
-示例：
-
-```text
-chore: 统一 game-proxy 默认端口配置
-
-将 game-proxy 默认监听端口和 auth-http 默认下发的 GAME_PROXY_PORT 一并调整为 4000，并同步更新 port.txt 与示例环境变量，避免与 game-server 端口段混用，减少联调时连错入口的问题。
-```
-
-## 下一步建议
-
-1. 完成 P2：连接恢复、背压治理与安全边界
-2. 完成 P3：控制面、观测性和状态持久化
-3. 完善匹配服务与各服务的集成
+Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subscriber + tracing-appender`。
+
+常见配置来源：
+
+- 固定入口端口：`apps/port.txt`
+- Node.js 服务示例配置：各服务 `.env.example`
+- Rust 服务示例配置：各服务 `.env.example` 或启动脚本
+- 数据库初始化：`db/init.sql`
+- 根 npm 脚本：`package.json`
+- 本地 PowerShell 辅助脚本：`scripts/`
+
+## 开发协作约定
+
+- 修改功能前先看对应代码和专题文档，不要从 `docs/prompts/` 推断当前行为。
+- 若文档与代码冲突，应以代码为准，并在需要时同步修正文档。
+- 模块功能开发完成后，不要直接自动运行项目检测、集成测试、联调脚本或自动启动相关服务；先提示用户需要启动哪些服务和依赖，待用户确认后再执行测试。
+- 除非用户明确要求，不要提交 git commit 或执行 push。
+- 提交信息按功能模块拆分，标题使用 `<type>: <中文主题>`，正文说明关键改动和原因；涉及端口、配置、协议、脚本或跨服务联动时要写明影响范围。
