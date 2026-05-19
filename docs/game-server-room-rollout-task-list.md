@@ -10,11 +10,12 @@
 - 旧 room 必须冻结后才能导出
 - 未实现完整 transfer payload 的玩法暂不纳入灰度接管范围
 
-当前核对说明（截至 `2026-04-20`）:
+当前核对说明（截至 `2026-05-19`）:
 
 - `[x]` 表示仓库内已有明确代码或协议实现支撑。
 - `[ ]` 表示当前未见实现。
 - 保持 `[ ]` 但附注“部分完成/仅协议预留”表示只完成了协议、数据结构或局部链路，尚未达到任务原意。
+- 若本清单与当前代码冲突，以当前代码为准，并同步更新本清单。
 
 当前总体判断:
 
@@ -110,14 +111,14 @@
 
 ## 4. M2 old_server 任务
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - `game-server` 的 `internal_server`、`admin_server` 和主消息分发里都还没有 rollout 请求处理。
 - 当前最多只完成了 proto / `MessageType` 级别的消息预留，尚未形成“排空 -> 冻结 -> 导出 -> 退役”的服务端闭环。
 
 ### 4.1 旧服排空与 drain 模式
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - `game-server` 已有 server 级 `drain mode` 状态，`ServerStatusRes.status` 会返回 `ok` 或 `draining`。
 - `admin_server` 已支持通过 `UpdateConfigReq(key=drain_mode|drain_mode_enabled)` 开启 / 关闭 drain，并可经 `auth-http` 内部接口转发。
@@ -237,7 +238,7 @@
 
 ## 5. M3 new_server 任务
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - `ImportRoomTransferReq/Res` 只在 proto 和消息枚举中出现，未看到 `game-server` 侧导入处理。
 - `ConfirmRoomOwnershipReq/Res` 还未进入 `packages/proto`。
@@ -270,7 +271,7 @@
 
 ## 6. M4 客户端显式重连任务
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - 只完成了 `ServerRedirectPush` 协议定义。
 - `game-server` 未下发 redirect，`simple-client` 也还没有 redirect / reconnect 处理。
@@ -304,7 +305,7 @@
 
 ## 7. M5 RoomTransferPayload 与玩法运行态迁移任务
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - 只完成了 `RoomTransferPayload` 的协议结构定义。
 - 尚未看到 export/import 运行态的 trait、旧服导出、新服导入和玩法恢复逻辑。
@@ -358,7 +359,7 @@
 
 ## 8. M6 旧服停服与灰度收尾任务
 
-当前状态（截至 `2026-04-20`）:
+当前状态（截至 `2026-05-19`）:
 
 - `GetRolloutDrainStatusRes` 已在 proto 中定义，但 `game-server` 还没有对应处理。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，但尚未实现基于旧服状态的自动收尾。

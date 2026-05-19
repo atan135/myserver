@@ -30,6 +30,28 @@
 
 - `空房接管式灰度`
 
+## 当前实现状态
+
+截至 `2026-05-19`, 本文仍是“空房接管式灰度”的目标规范, 不代表所有能力已经落地。
+
+已落地的基础能力:
+
+- `packages/proto/game.proto` 已预留 `ServerRedirectPush`、room transfer、drain status 等协议结构和消息号。
+- `game-proxy` 已有 `RolloutSession`、`RoomRouteRecord`、`PlayerRouteRecord`、room/player 路由选择和 admin 查询/更新接口。
+- `game-proxy` 已区分 upstream 运维状态与健康状态, 支持 `Active` / `Draining` / `Disabled` / `Unavailable` 的合成决策。
+- `game-server` 已有 server 级 `drain_mode` / `drain_mode_enabled`, 可阻止创建新房并允许已有房 join / reconnect / observer。
+- `tools/mock-client` 已有第一批 drain 验证场景。
+
+尚未完整落地的目标能力:
+
+- 旧服主动下发 `ServerRedirectPush` 并断开连接。
+- 客户端收到 redirect 后显式重连并进入新 owner。
+- `game-server` 对 `FreezeRoomForTransfer`、`ExportRoomTransfer`、`ImportRoomTransfer`、`RetireTransferredRoom` 的处理闭环。
+- 可恢复完整玩法运行态的 transfer trait 与 payload 导出 / 导入。
+- `proxy` 基于旧服排空状态自动结束 rollout。
+
+因此阅读本文时应把它当作后续实现约束；当前代码状态以 [空房接管式灰度任务清单](./game-server-room-rollout-task-list.md) 和实际代码为准。
+
 ## 1. 目标
 
 该方案要满足以下目标:

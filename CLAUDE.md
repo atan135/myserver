@@ -89,15 +89,9 @@ docs/                 # 当前正式设计文档
 
 游戏服与接入层：
 
-- [Rust 游戏服开发指南](./docs/game-server-rust-guide.md)
-- [底层框架路线图](./docs/game-server-framework-roadmap.md)
-- [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
-- [更新策略拆分](./docs/game-server-update-strategy.md)
-- [空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)
-- [空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
-- [game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
-- [大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)
-- [网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+- 当前实现与代码阅读：[Rust 游戏服开发指南](./docs/game-server-rust-guide.md)、[帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)、[game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
+- 更新与灰度边界：[更新策略拆分](./docs/game-server-update-strategy.md)、[空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)、[空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
+- 路线图与算法/目标设计：[底层框架路线图](./docs/game-server-framework-roadmap.md)、[大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)、[网络延迟补偿设计](./docs/network-lag-compensation-design.md)
 
 配置、场景与战斗：
 

@@ -2,6 +2,28 @@
 
 本文档描述大世界类型游戏中，常驻 Room（持久化 Zone）的热更新策略。
 
+## 当前实现状态
+
+截至 `2026-05-19`, 本文是大世界常驻 Room 热更新的目标设计, 不是当前完整实现说明。
+
+当前已经具备的基础:
+
+- `RoomRuntimePolicy::persistent_world()` 已存在, 可表达不按空房销毁、保留状态、较长离线 TTL 和 AOI 参数。
+- `PersistentWorldLogic` 已作为占位 `RoomLogic` 接入 `GameRoomLogicFactory`。
+- `ConfigTableRuntime` 已支持 CSV reload 和表快照原子替换。
+- `game-proxy` 已具备 rollout session、room route、player route 和 upstream 摘流基础。
+- `game-server` 已具备 server 级 `drain_mode`。
+
+当前尚未落地:
+
+- 真正的大世界实体、NPC、怪物、资源点和行为树运行态。
+- `SceneCatalog` / `CsvCombatCatalog` reload 后的派生对象原子替换。
+- 公式引擎、行为树执行器、状态机配置热更。
+- `PersistentRoomLogic` 或等价完整状态迁移 trait。
+- freeze / serialize / restore / route switch 的完整 room transfer 链路。
+
+因此本文应作为后续能力设计参考；当前实现边界以 [CSV 热更现状清单](./game-server-csv-hot-reload-status.md)、[game-proxy 热切换代理设计](./game-proxy-hot-update-design.md) 和代码为准。
+
 术语说明：
 
 - 本文讨论的是大世界持久化场景下的热更新方案
@@ -35,7 +57,7 @@
 │  Layer 2: 行为配置层 (CSV/JSON 数据文件)         │  ← 中频变更，Catalog 原子替换
 │  技能公式、AI 行为树、状态机转换表、Buff 规则   │
 ├─────────────────────────────────────────────────┤
-│  Layer 1: 数值配置层 (CSV 数据行)                │  ← 高频变更，当前已支持热更
+│  Layer 1: 数值配置层 (CSV 数据行)                │  ← 高频变更，当前已有基础热更
 │  伤害系数、刷怪间隔、掉落概率、区域参数        │
 └─────────────────────────────────────────────────┘
 ```
@@ -46,7 +68,7 @@
 - 大部分日常迭代落在 Layer 1 和 Layer 2，不需要重启
 - 只有极少数结构性变更才需要走 Layer 3 的实例替换
 
-## 4. Layer 1：数值配置热更（当前已支持）
+## 4. Layer 1：数值配置热更（当前已有基础支持）
 
 这是现有 `ConfigTableRuntime` 已实现的能力：
 
@@ -54,7 +76,7 @@
 - 原子替换表快照（`Arc<RwLock<Arc<ConfigTables>>>`）
 - 请求链路在下一次处理时读到新值
 
-覆盖范围：伤害系数、刷怪间隔、掉落概率、区域参数等纯数值调整。
+当前已能直接在线生效的表以 [CSV 热更现状清单](./game-server-csv-hot-reload-status.md) 为准。伤害系数、刷怪间隔、掉落概率、区域参数等纯数值调整属于该层的目标覆盖范围；只有当业务链路在请求或 tick 中重新读取最新 `ConfigTableRuntime` 快照时，才能视为运行时生效。
 
 详见 `docs/game-server-csv-hot-reload-status.md`。
 

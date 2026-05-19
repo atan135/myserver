@@ -76,10 +76,16 @@
 
 - `max_body_len`
 - `heartbeat_timeout_secs`
+- `drain_mode` / `drain_mode_enabled`
 
 对应代码:
 
 - `apps/game-server/src/admin_server.rs`
+
+说明:
+
+- `drain_mode` 是 server 级摘流开关, 属于运行时配置更新, 但它本身不等于完整灰度发布。
+- 完整灰度仍需要 `game-proxy` 路由、旧服排空、redirect / reconnect、room transfer 等能力配合。
 
 #### 可按最新快照读取的 CSV
 
@@ -151,6 +157,7 @@
 | 变更类型 | 归类 | 当前建议 |
 |------|------|------|
 | `max_body_len` / `heartbeat_timeout_secs` | 运行时热更新 | 直接走 admin 配置更新 |
+| `drain_mode` / `drain_mode_enabled` | 运行时热更新 | 直接走 admin 配置更新, 用于旧服摘流 |
 | `TestTable_100.csv` 数据值 | 运行时热更新 | 直接改 CSV, 等 reload 生效 |
 | `ItemTable.csv` 中新物品/道具效果配置 | 运行时热更新 | 直接改 CSV, 通过背包链路复验 |
 | `SceneTable.csv` / `SceneSpawnPoint.csv` | 滚动重启 / 灰度发布 | 新实例加载后切流 |
