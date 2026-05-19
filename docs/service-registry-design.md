@@ -24,6 +24,18 @@
 - **扩缩容支持**：支持多 game-server 实例部署，自动负载均衡
 - **故障恢复**：game-server 异常时自动从注册表移除
 
+### 1.4 当前实现状态与阅读口径
+
+当前仓库已经落地 Redis 版服务注册中心，但实现形态和早期设计有几处边界需要明确：
+
+- Rust 侧通用实现位于 `packages/service-registry/`，直接读写 Redis，不提供独立 HTTP Registry API。
+- `game-server`、`chat-server`、`match-service` 使用 `packages/service-registry` 注册自身并维持实例级心跳。
+- `game-proxy` 消费注册中心发现 `game-server`，自身当前不注册到注册中心。
+- `match-service` 同时注册自身，并在创建 matched room 时优先从注册中心发现 `game-server` 的内部 socket。
+- `mail-service`、`announce-service` 是 Node.js 服务，当前各自实现了独立 Redis 注册客户端，未复用 Rust 包。
+- `auth-http` 只做消费者：`REGISTRY_ENABLED=true` 时发现 `chat-server` / `mail-service` / `announce-service` 并写入登录响应的 `services` 对象；`game` 地址仍来自静态 `gameProxyHost/gameProxyPort`。
+- 本文后半部分的“HTTP API 设计”和“实现步骤”保留为早期设计背景，不代表当前仓库已经暴露了注册中心 HTTP 服务。
+
 ---
 
 ## 2. 服务角色划分
@@ -273,6 +285,7 @@ apps/
 ├── chat-server/        # 注册 chat-server 服务
 ├── match-service/      # 注册 match-service 服务
 ├── mail-service/      # 注册 mail-service 服务
+├── announce-service/  # 注册 announce-service 服务
 ├── game-proxy/         # 查询 game-server（消费者）
 ├── auth-http/          # 查询服务列表用于登录响应
 packages/
@@ -583,7 +596,9 @@ var mailClient = new MailClient(loginResponse.services.mail);
 
 ---
 
-## 6. API 设计
+## 6. HTTP API 目标设计（当前未实现）
+
+当前注册中心没有独立 HTTP 服务，Rust 服务通过 `packages/service-registry` 直接读写 Redis，Node.js 的 `mail-service` / `announce-service` 也直接写 Redis。下面接口是早期可选目标设计，不能作为当前可调用 API。
 
 ### 6.1 服务注册
 
@@ -630,7 +645,9 @@ GET /api/v1/registry/services/:serviceName
 
 ---
 
-## 7. 实现步骤
+## 7. 原始实现步骤（历史）
+
+本节保留早期拆分计划。当前实际落地状态以 `12. 实际实现说明` 为准。
 
 ### 阶段一：创建 service-registry 包（0.5天）
 

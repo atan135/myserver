@@ -115,7 +115,7 @@ docs/                 # 当前正式设计文档
 安全：
 
 - [安全设计](./docs/security-design.md)
-- [限流与风控设计](./docs/rate-limit-and-security.md)
+- [限流与安全现状](./docs/rate-limit-and-security.md)
 
 ## 基础设定
 

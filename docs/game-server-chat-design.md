@@ -10,8 +10,8 @@
 | 离线存储 | ✅ (离线消息) | ✅ (未读邮件) |
 | 持久化存储 | ✅ | ✅ |
 | 群组模式 | ✅ (群聊) | ❌ |
-| 实时性 | ✅ | ❌ |
-| 频率限制 | ✅ | ❌ |
+| 实时性 | ✅ | 部分支持：新邮件通过 Redis Pub/Sub 通知在线玩家 |
+| 频率限制 | 目标能力，当前未实现 | ❌ |
 
 **结论**：两者可以共用一套消息存储层，但在业务逻辑上保持独立。
 
@@ -23,42 +23,28 @@
 - “聊天与邮件共用同一套存储层”目前仍未实现
 - 离线聊天当前更接近“历史可查询”，未实现“登录后自动补发离线消息”的完整闭环
 
-## 2. 消息系统架构
+## 2. 当前消息系统架构
+
+当前仓库没有把聊天、邮件、公告统一挂到 `game-proxy` 后面，也没有实现共用 `message-store`。实际链路是：
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      客户端                              │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          │ KCP / HTTP
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                     game-proxy                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│  │  聊天接入   │  │  邮件接入   │  │  公告接入   │    │
-│  │  (KCP)     │  │  (HTTP)    │  │  (HTTP)    │    │
-│  └─────────────┘  └─────────────┘  └─────────────┘    │
-└─────────────────────────────────────────────────────────┘
-                          │
-          ┌───────────────┼───────────────┐
-          │               │               │
-          ▼               ▼               ▼
-┌─────────────────┐ ┌─────────────┐ ┌─────────────┐
-│   chat-service  │ │  mail-service│ │announce-svc │
-│  (在 game-server │ │  (独立服务)  │ │ (独立服务)  │
-│   或独立)       │ │             │ │             │
-└─────────────────┘ └─────────────┘ └─────────────┘
-          │               │               │
-          └───────────────┼───────────────┘
-                          ▼
-              ┌─────────────────────┐
-              │    message-store    │
-              │  (共用存储层)        │
-              │  - chat_messages    │
-              │  - mail_messages    │
-              │  - announcements    │
-              └─────────────────────┘
+Client
+  -> auth-http 登录，获取 services.chat / services.mail / services.announce
+  -> chat-server:9001 TCP + Protobuf 聊天协议
+  -> mail-service:9003 HTTP 邮件接口
+  -> announce-service:9004 HTTP 公告接口
+
+mail-service
+  -> Redis Pub/Sub: mail:notify:{player_id}
+  -> chat-server mail_subscriber
+  -> 在线聊天 TCP 连接推送 MailNotifyPush
+
+chat-server -> MySQL chat_messages / chat_groups / chat_group_members
+mail-service -> MySQL mails 或内存存储
+announce-service -> MySQL announcements 或内存存储
 ```
+
+`game-proxy` 当前只承担游戏流量接入，不负责聊天、邮件或公告 HTTP/TCP 转发。
 
 ## 3. 聊天系统设计
 
@@ -67,6 +53,8 @@
 - **单聊**：用户A ↔ 用户B
 - **群聊**：用户群组内共享消息
 - **聊天与房间解耦**：聊天不依赖游戏房间
+- **历史查询**：支持私聊 / 群聊历史消息分页查询
+- **邮件通知**：订阅 `mail:notify:*` 并向在线聊天连接推送 `MailNotifyPush`
 
 ### 3.2 群组管理
 
@@ -180,6 +168,8 @@ CREATE TABLE chat_group_members (
 - 用户上线时查询 `created_at > last_login_time` 的消息
 - 推送离线消息给用户
 
+当前实现尚未做“上线后自动补发离线消息”，但已经支持客户端主动通过 `ChatHistoryReq` 查询私聊或群聊历史。
+
 ## 4. 邮件系统设计
 
 ### 4.1 与聊天系统共用部分
@@ -193,7 +183,7 @@ CREATE TABLE chat_group_members (
 - `mail-service` 已独立落地为 Node.js HTTP 服务
 - 新邮件通知通过 Redis Pub/Sub 下发到 `mail:notify:{player_id}`
 - 附件领取由 `mail-service` 调用 `game-server admin` 完成真实发奖
-- 当前未与 `chat-service` 共用同一套存储表
+- 当前未与 `chat-server` 共用同一套存储表
 
 ### 4.2 邮件特有字段
 
@@ -359,8 +349,8 @@ CREATE TABLE announcements (
 | `auth-http` | 登录、认证、token 发放（保持现状） |
 | `game-proxy` | KCP 接入、流量代理 |
 | `game-server` | 游戏逻辑、房间系统 |
-| `chat-service` | 聊天（单聊、群聊）、离线消息 |
-| `mail-service` | 邮件系统（可共用 chat-service 的存储层） |
+| `chat-server` | 聊天（单聊、群聊）、历史消息查询、邮件通知推送 |
+| `mail-service` | 邮件系统、附件领取、Redis Pub/Sub 通知 |
 | `announce-service` | 公告系统 |
 
 ## 7. 客户端获取公告的流程
@@ -392,7 +382,7 @@ CREATE TABLE announcements (
 }
 ```
 
-或者：
+以下是未实现的备选方案，不是当前链路：
 
 ```
 1. 客户端连接 game-proxy 时
@@ -421,5 +411,5 @@ CREATE TABLE announcements (
 - [x] 当前实现已经采用独立 `announce-service`
 
 ### 8.4 部署架构
-- [ ] chat-service 和 mail-service 是否合并为一个服务？
+- [x] 当前实现已经把 `chat-server` 和 `mail-service` 拆成独立服务
 - [x] 当前实现已经独立部署 `announce-service`
