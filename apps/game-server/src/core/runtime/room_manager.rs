@@ -17,8 +17,8 @@ use crate::core::runtime::room_policy::{
 use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
 use crate::pb::{
-    FrameBundlePush, FrameInput, MovementCorrectionReason, MovementRecoveryState as PbMovementRecoveryState,
-    RoomSnapshot, RoomStatePush,
+    FrameBundlePush, FrameInput, MovementCorrectionReason,
+    MovementRecoveryState as PbMovementRecoveryState, RoomSnapshot, RoomStatePush,
 };
 use crate::protocol::{MessageType, encode_body};
 
@@ -133,7 +133,8 @@ impl RoomManager {
                         }
 
                         let policy = policies.resolve(&room.policy_id);
-                        let expired_players = room.collect_expired_offline_players(policy.offline_ttl_secs);
+                        let expired_players =
+                            room.collect_expired_offline_players(policy.offline_ttl_secs);
                         if !expired_players.is_empty() {
                             info!(
                                 room_id = room_id,
@@ -159,7 +160,10 @@ impl RoomManager {
                             RoomPhase::InGame => room.members.is_empty(),
                             RoomPhase::Waiting => !room.has_online_members(),
                         };
-                        if !policy.destroy_enabled || !policy.destroy_when_empty || !should_cleanup_as_empty {
+                        if !policy.destroy_enabled
+                            || !policy.destroy_when_empty
+                            || !should_cleanup_as_empty
+                        {
                             continue;
                         }
 
@@ -211,7 +215,10 @@ impl RoomManager {
                 for (match_id, room_id) in matches_to_abort {
                     let mut guard = match_client.lock().await;
                     if let Some(ref mut client) = *guard {
-                        if let Err(error) = client.match_end(&match_id, &room_id, "offline_ttl_expired").await {
+                        if let Err(error) = client
+                            .match_end(&match_id, &room_id, "offline_ttl_expired")
+                            .await
+                        {
                             tracing::error!(
                                 match_id = %match_id,
                                 room_id = %room_id,
@@ -286,7 +293,8 @@ impl RoomManager {
         drop(rooms);
         drop(runtimes);
 
-        self.notify_room_created(match_id, room_id, player_ids, mode).await;
+        self.notify_room_created(match_id, room_id, player_ids, mode)
+            .await;
 
         Ok(snapshot)
     }
@@ -300,9 +308,16 @@ impl RoomManager {
     ) {
         let mut guard = self.match_client.lock().await;
         if let Some(ref mut client) = *guard {
-            match client.create_room_and_join(match_id, room_id, player_ids, mode).await {
+            match client
+                .create_room_and_join(match_id, room_id, player_ids, mode)
+                .await
+            {
                 Ok(()) => {
-                    info!(match_id = match_id, room_id = room_id, "Notified MatchService: room created");
+                    info!(
+                        match_id = match_id,
+                        room_id = room_id,
+                        "Notified MatchService: room created"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(match_id = match_id, error = %e, "Failed to notify MatchService: room created");
@@ -316,7 +331,12 @@ impl RoomManager {
         if let Some(ref mut client) = *guard {
             match client.player_joined(match_id, player_id, room_id).await {
                 Ok(()) => {
-                    info!(match_id = match_id, player_id = player_id, room_id = room_id, "Notified MatchService: player joined");
+                    info!(
+                        match_id = match_id,
+                        player_id = player_id,
+                        room_id = room_id,
+                        "Notified MatchService: player joined"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(match_id = match_id, player_id = player_id, error = %e, "Failed to notify MatchService: player joined");
@@ -330,7 +350,13 @@ impl RoomManager {
         if let Some(ref mut client) = *guard {
             match client.player_left(match_id, player_id, reason).await {
                 Ok(should_abort) => {
-                    info!(match_id = match_id, player_id = player_id, reason = reason, should_abort = should_abort, "Notified MatchService: player left");
+                    info!(
+                        match_id = match_id,
+                        player_id = player_id,
+                        reason = reason,
+                        should_abort = should_abort,
+                        "Notified MatchService: player left"
+                    );
                     return should_abort;
                 }
                 Err(e) => {
@@ -346,7 +372,12 @@ impl RoomManager {
         if let Some(ref mut client) = *guard {
             match client.match_end(match_id, room_id, reason).await {
                 Ok(()) => {
-                    info!(match_id = match_id, room_id = room_id, reason = reason, "Notified MatchService: match ended");
+                    info!(
+                        match_id = match_id,
+                        room_id = room_id,
+                        reason = reason,
+                        "Notified MatchService: match ended"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(match_id = match_id, room_id = room_id, error = %e, "Failed to notify MatchService: match ended");
@@ -476,7 +507,12 @@ impl RoomManager {
         let policy = self.policies.resolve(&room.policy_id);
 
         if room.owner_player_id == player_id {
-            if let Some(next_owner) = room.members.values().find(|m| !m.offline).map(|m| m.player_id.clone()) {
+            if let Some(next_owner) = room
+                .members
+                .values()
+                .find(|m| !m.offline)
+                .map(|m| m.player_id.clone())
+            {
                 room.owner_player_id = next_owner;
             }
         }
@@ -500,7 +536,11 @@ impl RoomManager {
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "normal").await;
             if should_abort {
-                info!(room_id = room_id, match_id = mid, "MatchService requested abort due to player leaving");
+                info!(
+                    room_id = room_id,
+                    match_id = mid,
+                    "MatchService requested abort due to player leaving"
+                );
                 self.notify_match_end(mid, room_id, "aborted").await;
             }
         }
@@ -551,7 +591,12 @@ impl RoomManager {
         }
 
         if room.owner_player_id == player_id {
-            if let Some(next_owner) = room.members.values().find(|m| !m.offline).map(|m| m.player_id.clone()) {
+            if let Some(next_owner) = room
+                .members
+                .values()
+                .find(|m| !m.offline)
+                .map(|m| m.player_id.clone())
+            {
                 room.owner_player_id = next_owner;
             }
         }
@@ -572,7 +617,11 @@ impl RoomManager {
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "disconnect").await;
             if should_abort {
-                info!(room_id = room_id, match_id = mid, "MatchService requested abort due to player disconnect");
+                info!(
+                    room_id = room_id,
+                    match_id = mid,
+                    "MatchService requested abort due to player disconnect"
+                );
                 self.notify_match_end(mid, room_id, "aborted").await;
             }
         }
@@ -702,10 +751,9 @@ impl RoomManager {
             let waiting_frame_id = room.current_waiting_frame_id();
             let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
             let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
-            let movement_recovery = room.logic.movement_recovery_state(
-                None,
-                MovementCorrectionReason::ObserverRecovery,
-            );
+            let movement_recovery = room
+                .logic
+                .movement_recovery_state(None, MovementCorrectionReason::ObserverRecovery);
 
             RoomRecoveryState {
                 snapshot,
@@ -828,7 +876,9 @@ impl RoomManager {
             return Err("INPUT_FRAME_EXPIRED");
         }
 
-        let max_future_frame = room.current_frame.saturating_add(policy.input_delay_frames.max(1));
+        let max_future_frame = room
+            .current_frame
+            .saturating_add(policy.input_delay_frames.max(1));
         if frame_id > max_future_frame {
             return Err("INPUT_FRAME_TOO_FAR");
         }
@@ -1003,7 +1053,11 @@ impl RoomManager {
         let ready_count = room
             .pending_inputs_for_frame(waiting_frame_id)
             .into_iter()
-            .filter(|input| participants.iter().any(|player_id| player_id == &input.player_id))
+            .filter(|input| {
+                participants
+                    .iter()
+                    .any(|player_id| player_id == &input.player_id)
+            })
             .count();
         let all_inputs_arrived = ready_count == participants.len();
         let wait_timed_out = room
@@ -1022,8 +1076,7 @@ impl RoomManager {
             return None;
         }
 
-        let tick_inputs =
-            resolve_tick_inputs(room, &participants, waiting_frame_id, &policy);
+        let tick_inputs = resolve_tick_inputs(room, &participants, waiting_frame_id, &policy);
         let inputs = tick_inputs
             .iter()
             .map(frame_input_from_record)
@@ -1125,16 +1178,8 @@ impl RoomManager {
                 continue;
             };
 
-            for RoomLogicBroadcast {
-                message_type,
-                body,
-                target_player_ids,
-            } in pending_broadcasts
-            {
-                let _ = self
-                    .broadcast_message(&room_id, &target_player_ids, message_type, body)
-                    .await;
-            }
+            self.broadcast_logic_broadcasts(&room_id, pending_broadcasts)
+                .await;
 
             let body = encode_body(&frame_bundle);
             let _ = self
@@ -1266,17 +1311,15 @@ impl RoomManager {
     ) -> Result<(), std::io::Error> {
         let sender = {
             let rooms = self.rooms.lock().await;
-            rooms
-                .values()
-                .find_map(|room| {
-                    room.members.get(player_id).and_then(|member| {
-                        if member.offline {
-                            None
-                        } else {
-                            Some(member.sender.clone())
-                        }
-                    })
+            rooms.values().find_map(|room| {
+                room.members.get(player_id).and_then(|member| {
+                    if member.offline {
+                        None
+                    } else {
+                        Some(member.sender.clone())
+                    }
                 })
+            })
         };
 
         if let Some(sender) = sender {
@@ -1412,10 +1455,7 @@ mod tests {
 
     impl RoomLogic for RecordingRoomLogic {
         fn on_tick(&mut self, frame_id: u32, _fps: u16, inputs: &[PlayerInputRecord]) {
-            self.ticks
-                .lock()
-                .unwrap()
-                .push((frame_id, inputs.to_vec()));
+            self.ticks.lock().unwrap().push((frame_id, inputs.to_vec()));
         }
     }
 
@@ -1430,7 +1470,11 @@ mod tests {
     async fn setup_started_room(
         policy_id: &str,
         players: &[&str],
-    ) -> (RoomManager, RecordingRoomLogicFactory, Vec<mpsc::UnboundedReceiver<OutboundMessage>>) {
+    ) -> (
+        RoomManager,
+        RecordingRoomLogicFactory,
+        Vec<mpsc::UnboundedReceiver<OutboundMessage>>,
+    ) {
         let factory = RecordingRoomLogicFactory::default();
         let manager = RoomManager::with_match_client(
             crate::match_client::create_match_client_shared(),
@@ -1442,7 +1486,13 @@ mod tests {
             let (tx, rx) = mpsc::unbounded_channel();
             receivers.push(rx);
             manager
-                .join_room("room-test", player_id, tx, MemberRole::Player, Some(policy_id))
+                .join_room(
+                    "room-test",
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some(policy_id),
+                )
                 .await
                 .unwrap();
             manager
@@ -1476,7 +1526,13 @@ mod tests {
 
         let (tx, _rx) = mpsc::unbounded_channel();
         manager
-            .join_room("room-test", "player-a", tx, MemberRole::Player, Some("default_match"))
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
             .await
             .unwrap();
 
@@ -1516,7 +1572,13 @@ mod tests {
             setup_started_room("movement_demo", &["player-a", "player-b"]).await;
 
         manager
-            .accept_player_input("room-test", "player-a", 1, "move_dir", "{\"dirX\":1,\"dirY\":0}")
+            .accept_player_input(
+                "room-test",
+                "player-a",
+                1,
+                "move_dir",
+                "{\"dirX\":1,\"dirY\":0}",
+            )
             .await
             .unwrap();
 
@@ -1527,7 +1589,12 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, 1);
         assert_eq!(recorded[0].1.len(), 2);
-        assert!(recorded[0].1.iter().any(|input| input.player_id == "player-b" && input.action.is_empty()));
+        assert!(
+            recorded[0]
+                .1
+                .iter()
+                .any(|input| input.player_id == "player-b" && input.action.is_empty())
+        );
     }
 
     #[tokio::test]
@@ -1602,11 +1669,23 @@ mod tests {
             setup_started_room("movement_demo", &["player-a"]).await;
 
         manager
-            .accept_player_input("room-test", "player-a", 1, "move_dir", "{\"dirX\":1,\"dirY\":0}")
+            .accept_player_input(
+                "room-test",
+                "player-a",
+                1,
+                "move_dir",
+                "{\"dirX\":1,\"dirY\":0}",
+            )
             .await
             .unwrap();
         manager
-            .accept_player_input("room-test", "player-a", 1, "face_to", "{\"dirX\":0,\"dirY\":1}")
+            .accept_player_input(
+                "room-test",
+                "player-a",
+                1,
+                "face_to",
+                "{\"dirX\":0,\"dirY\":1}",
+            )
             .await
             .unwrap();
 
@@ -1628,11 +1707,23 @@ mod tests {
         let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
         let (other_tx, _other_rx) = mpsc::unbounded_channel();
         manager
-            .join_room("room-test", "player-a", owner_tx, MemberRole::Player, Some("default_match"))
+            .join_room(
+                "room-test",
+                "player-a",
+                owner_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
             .await
             .unwrap();
         manager
-            .join_room("room-test", "player-b", other_tx, MemberRole::Player, Some("default_match"))
+            .join_room(
+                "room-test",
+                "player-b",
+                other_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
             .await
             .unwrap();
         manager

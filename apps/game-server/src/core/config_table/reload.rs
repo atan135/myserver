@@ -94,7 +94,8 @@ fn collect_changed_files(
 }
 
 fn snapshot_file_states(paths: &[PathBuf]) -> HashMap<PathBuf, CsvFileState> {
-    paths.iter()
+    paths
+        .iter()
         .cloned()
         .map(|path| {
             let state = match std::fs::metadata(&path) {

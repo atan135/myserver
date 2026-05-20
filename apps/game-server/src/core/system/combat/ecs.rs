@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::catalog::CombatCatalog;
 use super::buffs::BuffEffectType;
+use super::catalog::CombatCatalog;
 use super::components::{
     BuffSlot, DamageFormula, EntityMeta, EntityType, Health, MoveState, MoveStateType, Position,
     SkillSlot, Stats,
@@ -374,7 +374,8 @@ impl RoomCombatEcs {
             };
         }
         self.skill_slots.push(skill_slots);
-        self.buff_slots.push([BuffSlot::empty(); MAX_BUFFS_PER_ENTITY]);
+        self.buff_slots
+            .push([BuffSlot::empty(); MAX_BUFFS_PER_ENTITY]);
 
         if let Some(player_id) = blueprint.player_id {
             self.player_entity_map.insert(player_id, entity_id);
@@ -891,7 +892,9 @@ impl RoomCombatEcs {
 
         if effect.aoe_radius <= 0.0 {
             return requested_target
-                .filter(|target_entity| self.is_valid_target(source_entity, *target_entity, target_type))
+                .filter(|target_entity| {
+                    self.is_valid_target(source_entity, *target_entity, target_type)
+                })
                 .into_iter()
                 .collect();
         }
@@ -914,7 +917,10 @@ impl RoomCombatEcs {
         target_type: SkillTargetType,
     ) -> bool {
         if source_entity == candidate_entity {
-            return matches!(target_type, SkillTargetType::SelfOnly | SkillTargetType::Ally);
+            return matches!(
+                target_type,
+                SkillTargetType::SelfOnly | SkillTargetType::Ally
+            );
         }
 
         let Some(source_team_id) = self.team_id(source_entity) else {
@@ -1130,8 +1136,12 @@ impl RoomCombatEcs {
             DamageFormula::Scaling {
                 base,
                 attack_scale_bps,
-            } => base
-                .saturating_add(source_stats.attack.saturating_mul(i32::from(attack_scale_bps)) / 10_000),
+            } => base.saturating_add(
+                source_stats
+                    .attack
+                    .saturating_mul(i32::from(attack_scale_bps))
+                    / 10_000,
+            ),
             DamageFormula::TrueDamage(value) => value.max(0),
         };
         let mut is_true_damage = matches!(formula, DamageFormula::TrueDamage(_));
@@ -1144,8 +1154,7 @@ impl RoomCombatEcs {
                 ^ target_entity
                 ^ u32::from(skill_id.unwrap_or_default());
             if roll_seed % 10_000 < u32::from(source_stats.crit_rate_bps) {
-                amount = amount
-                    .saturating_mul(10_000 + i32::from(source_stats.crit_damage_bps))
+                amount = amount.saturating_mul(10_000 + i32::from(source_stats.crit_damage_bps))
                     / 10_000;
                 was_critical = true;
             }
@@ -1279,7 +1288,9 @@ impl RoomCombatEcs {
             return Err("COMBAT_TARGET_DEAD".to_string());
         }
 
-        let duration = duration_frames.unwrap_or(buff_definition.duration_frames).max(1);
+        let duration = duration_frames
+            .unwrap_or(buff_definition.duration_frames)
+            .max(1);
         let source_entity = source_entity.unwrap_or_default();
 
         if let Some(slot_index) = self.buff_slots[target_dense_index]
@@ -1318,7 +1329,8 @@ impl RoomCombatEcs {
 
         let Some(empty_slot_index) = self.buff_slots[target_dense_index]
             .iter()
-            .position(|slot| slot.is_empty()) else {
+            .position(|slot| slot.is_empty())
+        else {
             return Err("COMBAT_BUFF_SLOT_FULL".to_string());
         };
 
@@ -1362,7 +1374,8 @@ impl RoomCombatEcs {
 
         let Some(slot) = self.buff_slots[target_dense_index]
             .iter_mut()
-            .find(|slot| slot.buff_id == buff_id && !slot.is_empty()) else {
+            .find(|slot| slot.buff_id == buff_id && !slot.is_empty())
+        else {
             return false;
         };
 
@@ -1433,7 +1446,11 @@ impl RoomCombatEcs {
         });
     }
 
-    fn effective_stats_at_dense(&self, dense_index: DenseIndex, catalog: &dyn CombatCatalog) -> Stats {
+    fn effective_stats_at_dense(
+        &self,
+        dense_index: DenseIndex,
+        catalog: &dyn CombatCatalog,
+    ) -> Stats {
         let mut effective = self.base_stats[dense_index];
         for slot in self.buff_slots[dense_index]
             .iter()

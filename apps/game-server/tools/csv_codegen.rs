@@ -6,8 +6,12 @@ pub fn generate(csv_dir: &Path, out_dir: &Path) -> Result<(), String> {
     let mut tables = collect_csv_tables(csv_dir)?;
     tables.sort_by(|left, right| left.file_stem.cmp(&right.file_stem));
 
-    fs::create_dir_all(out_dir)
-        .map_err(|error| format!("failed to create csv code dir {}: {error}", out_dir.display()))?;
+    fs::create_dir_all(out_dir).map_err(|error| {
+        format!(
+            "failed to create csv code dir {}: {error}",
+            out_dir.display()
+        )
+    })?;
 
     let mut module_names = Vec::new();
     for table in &tables {
@@ -136,7 +140,10 @@ fn collect_csv_tables(csv_dir: &Path) -> Result<Vec<CsvTable>, String> {
 
         for (header, type_name) in headers.iter().zip(types.iter()) {
             if header.is_empty() {
-                return Err(format!("csv file {} contains an empty field name", path.display()));
+                return Err(format!(
+                    "csv file {} contains an empty field name",
+                    path.display()
+                ));
             }
 
             if !used_field_names.insert(header.clone()) {
@@ -146,8 +153,9 @@ fn collect_csv_tables(csv_dir: &Path) -> Result<Vec<CsvTable>, String> {
                 ));
             }
 
-            let csv_type = parse_csv_type(type_name)
-                .map_err(|error| format!("csv file {} field `{header}`: {error}", path.display()))?;
+            let csv_type = parse_csv_type(type_name).map_err(|error| {
+                format!("csv file {} field `{header}`: {error}", path.display())
+            })?;
 
             fields.push(CsvField {
                 original_name: header.clone(),
@@ -349,10 +357,22 @@ impl CsvField {
             CsvType::Int => format!("reader.parse_i32({}, {:?})?", index, self.original_name),
             CsvType::Int64 => format!("reader.parse_i64({}, {:?})?", index, self.original_name),
             CsvType::Float => format!("reader.parse_f32({}, {:?})?", index, self.original_name),
-            CsvType::String => format!("reader.parse_string_key({}, {:?}, &mut string_pool)?", index, self.original_name),
-            CsvType::Array(ScalarType::String) => format!("reader.parse_string_array({}, {:?}, &mut string_pool)?", index, self.original_name),
-            CsvType::Dict(ScalarType::String, ScalarType::Int) => format!("reader.parse_string_int_dict({}, {:?}, &mut string_pool)?", index, self.original_name),
-            _ => format!("unimplemented!(\"loader for field {}\")", self.original_name),
+            CsvType::String => format!(
+                "reader.parse_string_key({}, {:?}, &mut string_pool)?",
+                index, self.original_name
+            ),
+            CsvType::Array(ScalarType::String) => format!(
+                "reader.parse_string_array({}, {:?}, &mut string_pool)?",
+                index, self.original_name
+            ),
+            CsvType::Dict(ScalarType::String, ScalarType::Int) => format!(
+                "reader.parse_string_int_dict({}, {:?}, &mut string_pool)?",
+                index, self.original_name
+            ),
+            _ => format!(
+                "unimplemented!(\"loader for field {}\")",
+                self.original_name
+            ),
         }
     }
 
@@ -431,7 +451,10 @@ fn render_table(table: &CsvTable, out: &mut String) {
     }
     out.push_str("}\n\n");
 
-    out.push_str(&format!("impl CsvTableLoader for {} {{\n", table.table_struct_name));
+    out.push_str(&format!(
+        "impl CsvTableLoader for {} {{\n",
+        table.table_struct_name
+    ));
     out.push_str(&format!(
         "    const TABLE_NAME: &'static str = {:?};\n",
         table.file_stem
@@ -445,7 +468,9 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("        let mut lines = contents.lines();\n");
     out.push_str("        let header_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!(\"table {} missing header line\", Self::TABLE_NAME)))?;\n");
     out.push_str("        let type_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!(\"table {} missing type line\", Self::TABLE_NAME)))?;\n");
-    out.push_str("        let header_columns = crate::config_table::parse_csv_columns(header_line);\n");
+    out.push_str(
+        "        let header_columns = crate::config_table::parse_csv_columns(header_line);\n",
+    );
     out.push_str("        let type_columns = crate::config_table::parse_csv_columns(type_line);\n");
     out.push_str("        let signature = crate::config_table::schema_signature(&header_columns, &type_columns);\n");
     out.push_str("        if signature != Self::SCHEMA_SIGNATURE {\n");
@@ -465,8 +490,13 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("            if columns.len() != header_columns.len() {\n");
     out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\"table {} row {} column count mismatch: expected {}, got {}\", Self::TABLE_NAME, row_offset + 3, header_columns.len(), columns.len())));\n");
     out.push_str("            }\n");
-    out.push_str("            let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);\n");
-    out.push_str(&format!("            let row = {} {{\n", table.row_struct_name));
+    out.push_str(
+        "            let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);\n",
+    );
+    out.push_str(&format!(
+        "            let row = {} {{\n",
+        table.row_struct_name
+    ));
     for (index, field) in table.fields.iter().enumerate() {
         out.push_str(&format!(
             "                {}: {},\n",
@@ -502,7 +532,10 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("            .get(&id)\n");
     out.push_str("            .and_then(|&row_index| self.rows.get(row_index))\n");
     out.push_str("    }\n\n");
-    out.push_str(&format!("    pub fn all(&self) -> &[{}] {{\n", table.row_struct_name));
+    out.push_str(&format!(
+        "    pub fn all(&self) -> &[{}] {{\n",
+        table.row_struct_name
+    ));
     out.push_str("        &self.rows\n");
     out.push_str("    }\n\n");
     if table.has_string_pool {
@@ -521,7 +554,9 @@ fn render_table(table: &CsvTable, out: &mut String) {
             out.push_str("            .map(|row_indexes| {\n");
             out.push_str("                row_indexes\n");
             out.push_str("                    .iter()\n");
-            out.push_str("                    .filter_map(|&row_index| self.rows.get(row_index))\n");
+            out.push_str(
+                "                    .filter_map(|&row_index| self.rows.get(row_index))\n",
+            );
             out.push_str("                    .collect()\n");
             out.push_str("            })\n");
             out.push_str("            .unwrap_or_default()\n");
@@ -579,11 +614,43 @@ fn to_snake_case(value: &str) -> String {
 fn is_rust_keyword(s: &str) -> bool {
     matches!(
         s,
-        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn"
-            | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
-            | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
-            | "self" | "Self" | "static" | "struct" | "super" | "trait" | "true" | "type"
-            | "unsafe" | "use" | "where" | "while"
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
     )
 }
 
@@ -617,5 +684,3 @@ fn split_identifier(value: &str) -> Vec<String> {
         parts
     }
 }
-
-

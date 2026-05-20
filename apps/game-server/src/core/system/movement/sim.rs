@@ -102,13 +102,8 @@ pub fn tick_movement<S: SceneQuery>(
         };
         let desired_x = position.x + direction.x * speed * delta_seconds;
         let desired_y = position.y + direction.y * speed * delta_seconds;
-        let clamped = scene_query.clamp_position(
-            scene_id,
-            position.x,
-            position.y,
-            desired_x,
-            desired_y,
-        );
+        let clamped =
+            scene_query.clamp_position(scene_id, position.x, position.y, desired_x, desired_y);
 
         let _ = state.set_position_at(
             dense_index,

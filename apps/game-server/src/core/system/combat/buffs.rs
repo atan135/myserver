@@ -150,7 +150,10 @@ fn split_script_fields<'a>(
     expected_len: usize,
     context: &str,
 ) -> Result<Vec<&'a str>, CsvLoadError> {
-    let parts = entry.split(',').map(|value| value.trim()).collect::<Vec<_>>();
+    let parts = entry
+        .split(',')
+        .map(|value| value.trim())
+        .collect::<Vec<_>>();
     if parts.len() != expected_len {
         return Err(CsvLoadError::Parse(format!(
             "{context}: expected {expected_len} effect columns, got {} in `{entry}`",

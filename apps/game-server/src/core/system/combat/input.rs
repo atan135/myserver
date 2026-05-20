@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::room::PlayerInputRecord;
 
-use super::ecs::{CombatCommand, EntityId, RoomCombatEcs, SkillCastRequest};
 use super::Position;
+use super::ecs::{CombatCommand, EntityId, RoomCombatEcs, SkillCastRequest};
 
 pub const ACTION_COMBAT_CAST_SKILL: &str = "combat_cast_skill";
 pub const ACTION_COMBAT_APPLY_BUFF: &str = "combat_apply_buff";
@@ -45,15 +45,16 @@ pub fn parse_player_input(
 ) -> Result<Option<CombatCommand>, CombatInputError> {
     match record.action.as_str() {
         ACTION_COMBAT_CAST_SKILL => {
-            let payload: CastSkillInputPayload =
-                serde_json::from_str(&record.payload_json).map_err(|_| CombatInputError {
+            let payload: CastSkillInputPayload = serde_json::from_str(&record.payload_json)
+                .map_err(|_| CombatInputError {
                     error_code: "INVALID_COMBAT_CAST_SKILL_PAYLOAD",
                 })?;
-            let source_entity = combat
-                .entity_id_by_player(&record.player_id)
-                .ok_or(CombatInputError {
-                    error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
-                })?;
+            let source_entity =
+                combat
+                    .entity_id_by_player(&record.player_id)
+                    .ok_or(CombatInputError {
+                        error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
+                    })?;
             let target_entity = resolve_target_entity(
                 payload.target_entity_id,
                 payload.target_player_id.as_deref(),
@@ -78,15 +79,16 @@ pub fn parse_player_input(
             })))
         }
         ACTION_COMBAT_APPLY_BUFF => {
-            let payload: ApplyBuffInputPayload =
-                serde_json::from_str(&record.payload_json).map_err(|_| CombatInputError {
+            let payload: ApplyBuffInputPayload = serde_json::from_str(&record.payload_json)
+                .map_err(|_| CombatInputError {
                     error_code: "INVALID_COMBAT_APPLY_BUFF_PAYLOAD",
                 })?;
-            let source_entity = combat
-                .entity_id_by_player(&record.player_id)
-                .ok_or(CombatInputError {
-                    error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
-                })?;
+            let source_entity =
+                combat
+                    .entity_id_by_player(&record.player_id)
+                    .ok_or(CombatInputError {
+                        error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
+                    })?;
             let target_entity = resolve_target_entity(
                 payload.target_entity_id,
                 payload.target_player_id.as_deref(),
@@ -115,12 +117,14 @@ fn resolve_target_entity(
 ) -> Result<Option<EntityId>, CombatInputError> {
     match (target_entity_id, target_player_id) {
         (Some(entity_id), None) => Ok(Some(entity_id)),
-        (None, Some(player_id)) => combat
-            .entity_id_by_player(player_id)
-            .map(Some)
-            .ok_or(CombatInputError {
-                error_code: "COMBAT_TARGET_PLAYER_NOT_FOUND",
-            }),
+        (None, Some(player_id)) => {
+            combat
+                .entity_id_by_player(player_id)
+                .map(Some)
+                .ok_or(CombatInputError {
+                    error_code: "COMBAT_TARGET_PLAYER_NOT_FOUND",
+                })
+        }
         (None, None) => Ok(None),
         (Some(_), Some(_)) => Err(CombatInputError {
             error_code: "COMBAT_TARGET_AMBIGUOUS",

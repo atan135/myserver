@@ -10,9 +10,7 @@ use crate::core::system::GameplaySystem;
 #[allow(unused_imports)]
 pub use buffs::{BuffDefinition, BuffEffect, BuffEffectType, BuffType};
 #[allow(unused_imports)]
-pub use catalog::{
-    BuiltinCombatCatalog, CombatCatalog, CsvCombatCatalog, SharedCombatCatalog,
-};
+pub use catalog::{BuiltinCombatCatalog, CombatCatalog, CsvCombatCatalog, SharedCombatCatalog};
 #[allow(unused_imports)]
 pub use components::{
     BuffSlot, DamageFormula, EntityMeta, EntityType, Health, MoveState, MoveStateType, Position,

@@ -220,7 +220,15 @@ pub async fn handle_room_leave(
     } else if leave_result.room_removed {
         services
             .mysql_store
-            .append_room_event(&room_id, Some(&player_id), None, "room_disbanded", None, 0, None)
+            .append_room_event(
+                &room_id,
+                Some(&player_id),
+                None,
+                "room_disbanded",
+                None,
+                0,
+                None,
+            )
             .await;
     }
 
@@ -506,7 +514,13 @@ pub async fn handle_move_input(
 
     let input_result = services
         .room_manager
-        .accept_player_input(&room_id, &player_id, request.frame_id, action, &payload_json)
+        .accept_player_input(
+            &room_id,
+            &player_id,
+            request.frame_id,
+            action,
+            &payload_json,
+        )
         .await;
 
     match input_result {
@@ -637,10 +651,7 @@ pub async fn handle_room_end(
     Ok(())
 }
 
-pub async fn handle_disconnect_cleanup(
-    services: &ServiceContext,
-    connection: &ConnectionContext,
-) {
+pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &ConnectionContext) {
     let session = &connection.session;
     let room_id = session.room_id.clone();
     let player_id = session.player_id.clone();
@@ -877,12 +888,7 @@ pub async fn handle_join_as_observer(
     }
 
     if drain_mode_blocks_new_room_creation(services, &room_id).await {
-        log_drain_mode_room_creation_rejected(
-            "observer_join",
-            Some(&player_id),
-            &room_id,
-            None,
-        );
+        log_drain_mode_room_creation_rejected("observer_join", Some(&player_id), &room_id, None);
         connection.queue_message(
             MessageType::RoomJoinAsObserverRes,
             packet.header.seq,
@@ -988,13 +994,18 @@ pub async fn handle_create_matched_room(
         return Ok(());
     };
 
-    let request = match packet.decode_body::<CreateMatchedRoomReq>("INVALID_CREATE_MATCHED_ROOM_BODY") {
-        Ok(value) => value,
-        Err(error_code) => {
-            connection.queue_error(packet.header.seq, error_code, "invalid create matched room body")?;
-            return Ok(());
-        }
-    };
+    let request =
+        match packet.decode_body::<CreateMatchedRoomReq>("INVALID_CREATE_MATCHED_ROOM_BODY") {
+            Ok(value) => value,
+            Err(error_code) => {
+                connection.queue_error(
+                    packet.header.seq,
+                    error_code,
+                    "invalid create matched room body",
+                )?;
+                return Ok(());
+            }
+        };
 
     let CreateMatchedRoomReq {
         match_id,
@@ -1192,10 +1203,7 @@ async fn create_matched_room_impl(
     }
 }
 
-async fn drain_mode_blocks_new_room_creation(
-    services: &ServiceContext,
-    room_id: &str,
-) -> bool {
+async fn drain_mode_blocks_new_room_creation(services: &ServiceContext, room_id: &str) -> bool {
     let drain_mode_enabled = services.runtime_config.read().await.drain_mode_enabled;
     if !drain_mode_enabled {
         return false;

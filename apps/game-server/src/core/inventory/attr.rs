@@ -186,10 +186,18 @@ impl PlayerAttr {
                 let source = AttrSource::Equipment(item.uid);
 
                 if row.attack != 0 {
-                    all_bonus.push(AttrRecord::new(source.clone(), AttrType::Attack, row.attack));
+                    all_bonus.push(AttrRecord::new(
+                        source.clone(),
+                        AttrType::Attack,
+                        row.attack,
+                    ));
                 }
                 if row.defense != 0 {
-                    all_bonus.push(AttrRecord::new(source.clone(), AttrType::Defense, row.defense));
+                    all_bonus.push(AttrRecord::new(
+                        source.clone(),
+                        AttrType::Defense,
+                        row.defense,
+                    ));
                 }
                 if row.maxhp != 0 {
                     all_bonus.push(AttrRecord::new(source.clone(), AttrType::MaxHp, row.maxhp));
@@ -278,10 +286,7 @@ mod tests {
 
         let mut equipment = EquipmentSlots::new();
         equipment
-            .equip(
-                EquipSlot::Weapon,
-                Item::new(1, 1001, 1, false),
-            )
+            .equip(EquipSlot::Weapon, Item::new(1, 1001, 1, false))
             .unwrap();
 
         // 假设 ItemTable 有对应的物品定义

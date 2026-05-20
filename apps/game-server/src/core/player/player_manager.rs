@@ -108,7 +108,9 @@ impl PlayerManager {
         let mut player_data = self.get_or_create_player(player_id).await;
 
         for item in items {
-            player_data.add_item(item.clone()).map_err(|error| error.as_str().to_string())?;
+            player_data
+                .add_item(item.clone())
+                .map_err(|error| error.as_str().to_string())?;
         }
 
         let applied = if self.store.enabled() {

@@ -9,8 +9,8 @@ use tonic::transport::Channel;
 
 use crate::proto::myserver::matchservice::match_internal_client::MatchInternalClient;
 use crate::proto::myserver::matchservice::{
-    CreateRoomAndJoinReq, CreateRoomAndJoinRes, MatchEndReq, MatchEndRes,
-    PlayerJoinedReq, PlayerJoinedRes, PlayerLeftReq, PlayerLeftRes,
+    CreateRoomAndJoinReq, CreateRoomAndJoinRes, MatchEndReq, MatchEndRes, PlayerJoinedReq,
+    PlayerJoinedRes, PlayerLeftReq, PlayerLeftRes,
 };
 
 /// MatchClient 配置
@@ -29,29 +29,37 @@ impl MatchClientConfig {
             .unwrap_or(false);
 
         if !registry_enabled {
-            return Self { addr: fallback_addr };
+            return Self {
+                addr: fallback_addr,
+            };
         }
 
         let registry_url = std::env::var("REGISTRY_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-        let service_name = std::env::var("MATCH_SERVICE_NAME")
-            .unwrap_or_else(|_| "match-service".to_string());
+        let service_name =
+            std::env::var("MATCH_SERVICE_NAME").unwrap_or_else(|_| "match-service".to_string());
 
         match RegistryClient::new(&registry_url, "game-server", "match-discovery").await {
             Ok(client) => match client.discover_one(&service_name).await {
                 Ok(Some(instance)) => Self {
                     addr: format!("http://{}:{}", instance.host, instance.port),
                 },
-                Ok(None) => Self { addr: fallback_addr },
+                Ok(None) => Self {
+                    addr: fallback_addr,
+                },
                 Err(error) => {
                     tracing::warn!(error = %error, "failed to discover match-service, using fallback");
-                    Self { addr: fallback_addr }
+                    Self {
+                        addr: fallback_addr,
+                    }
                 }
             },
             Err(error) => {
                 tracing::warn!(error = %error, "failed to create registry client for match discovery, using fallback");
-                Self { addr: fallback_addr }
+                Self {
+                    addr: fallback_addr,
+                }
             }
         }
     }
@@ -64,7 +72,9 @@ pub struct MatchClient {
 
 impl MatchClient {
     /// 创建 MatchClient
-    pub async fn new(config: MatchClientConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new(
+        config: MatchClientConfig,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let addr: Box<str> = config.addr.clone().into_boxed_str();
         let channel = tonic::transport::Endpoint::from_static(Box::leak(addr))
             .connect()

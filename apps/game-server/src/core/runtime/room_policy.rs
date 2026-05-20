@@ -214,10 +214,19 @@ impl Default for RoomPolicyRegistry {
         let default_policy = RoomRuntimePolicy::default_match();
         let mut policies = std::collections::HashMap::new();
         policies.insert(default_policy.policy_id.clone(), default_policy.clone());
-        policies.insert("persistent_world".to_string(), RoomRuntimePolicy::persistent_world());
-        policies.insert("disposable_match".to_string(), RoomRuntimePolicy::disposable_match());
+        policies.insert(
+            "persistent_world".to_string(),
+            RoomRuntimePolicy::persistent_world(),
+        );
+        policies.insert(
+            "disposable_match".to_string(),
+            RoomRuntimePolicy::disposable_match(),
+        );
         policies.insert("sandbox".to_string(), RoomRuntimePolicy::sandbox());
-        policies.insert("movement_demo".to_string(), RoomRuntimePolicy::movement_demo());
+        policies.insert(
+            "movement_demo".to_string(),
+            RoomRuntimePolicy::movement_demo(),
+        );
         policies.insert("combat_demo".to_string(), RoomRuntimePolicy::combat_demo());
 
         Self {

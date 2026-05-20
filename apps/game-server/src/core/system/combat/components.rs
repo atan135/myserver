@@ -7,10 +7,7 @@ pub type EntityId = u32;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DamageFormula {
     Fixed(i32),
-    Scaling {
-        base: i32,
-        attack_scale_bps: u16,
-    },
+    Scaling { base: i32, attack_scale_bps: u16 },
     TrueDamage(i32),
 }
 

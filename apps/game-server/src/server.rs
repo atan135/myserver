@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
-use crate::core::player::{PlayerManager, MySqlPlayerStore};
+use crate::core::player::{MySqlPlayerStore, PlayerManager};
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, inventory_service, room_service};
@@ -23,7 +23,7 @@ use crate::core::system::combat::{CsvCombatCatalog, SharedCombatCatalog};
 use crate::core::system::scene::SceneCatalog;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
-use crate::match_client::{init_match_client, MatchClientConfig};
+use crate::match_client::{MatchClientConfig, init_match_client};
 use crate::metrics::METRICS;
 use crate::mysql_store::MySqlAuditStore;
 use crate::pb::SessionKickPush;
@@ -82,7 +82,10 @@ pub async fn run(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("scene");
-    let scene_catalog = Arc::new(SceneCatalog::load_from_dir(&scene_dir, tables_snapshot.as_ref())?);
+    let scene_catalog = Arc::new(SceneCatalog::load_from_dir(
+        &scene_dir,
+        tables_snapshot.as_ref(),
+    )?);
     let combat_catalog: SharedCombatCatalog =
         Arc::new(CsvCombatCatalog::from_tables(tables_snapshot.as_ref())?);
     let movement_demo_scene_id = scene_catalog
@@ -470,27 +473,55 @@ async fn dispatch_packet(
         Some(MessageType::GetRoomDataReq) => {
             room_query::handle_get_room_data(services, connection, packet).await
         }
-        Some(MessageType::RoomJoinReq) => room_service::handle_room_join(services, connection, packet).await,
-        Some(MessageType::RoomLeaveReq) => room_service::handle_room_leave(services, connection, packet).await,
-        Some(MessageType::RoomReadyReq) => room_service::handle_room_ready(services, connection, packet).await,
-        Some(MessageType::RoomStartReq) => room_service::handle_room_start(services, connection, packet).await,
+        Some(MessageType::RoomJoinReq) => {
+            room_service::handle_room_join(services, connection, packet).await
+        }
+        Some(MessageType::RoomLeaveReq) => {
+            room_service::handle_room_leave(services, connection, packet).await
+        }
+        Some(MessageType::RoomReadyReq) => {
+            room_service::handle_room_ready(services, connection, packet).await
+        }
+        Some(MessageType::RoomStartReq) => {
+            room_service::handle_room_start(services, connection, packet).await
+        }
         Some(MessageType::PlayerInputReq) => {
             room_service::handle_player_input(services, connection, packet).await
         }
         Some(MessageType::MoveInputReq) => {
             room_service::handle_move_input(services, connection, packet).await
         }
-        Some(MessageType::RoomEndReq) => room_service::handle_room_end(services, connection, packet).await,
-        Some(MessageType::RoomReconnectReq) => room_service::handle_room_reconnect(services, connection, packet).await,
-        Some(MessageType::RoomJoinAsObserverReq) => room_service::handle_join_as_observer(services, connection, packet).await,
-        Some(MessageType::CreateMatchedRoomReq) => room_service::handle_create_matched_room(services, connection, packet).await,
+        Some(MessageType::RoomEndReq) => {
+            room_service::handle_room_end(services, connection, packet).await
+        }
+        Some(MessageType::RoomReconnectReq) => {
+            room_service::handle_room_reconnect(services, connection, packet).await
+        }
+        Some(MessageType::RoomJoinAsObserverReq) => {
+            room_service::handle_join_as_observer(services, connection, packet).await
+        }
+        Some(MessageType::CreateMatchedRoomReq) => {
+            room_service::handle_create_matched_room(services, connection, packet).await
+        }
         // Inventory handlers
-        Some(MessageType::ItemEquipReq) => inventory_service::handle_item_equip(services, connection, packet).await,
-        Some(MessageType::ItemUseReq) => inventory_service::handle_item_use(services, connection, packet).await,
-        Some(MessageType::ItemDiscardReq) => inventory_service::handle_item_discard(services, connection, packet).await,
-        Some(MessageType::ItemAddReq) => inventory_service::handle_item_add(services, connection, packet).await,
-        Some(MessageType::WarehouseAccessReq) => inventory_service::handle_warehouse_access(services, connection, packet).await,
-        Some(MessageType::GetInventoryReq) => inventory_service::handle_get_inventory(services, connection, packet).await,
+        Some(MessageType::ItemEquipReq) => {
+            inventory_service::handle_item_equip(services, connection, packet).await
+        }
+        Some(MessageType::ItemUseReq) => {
+            inventory_service::handle_item_use(services, connection, packet).await
+        }
+        Some(MessageType::ItemDiscardReq) => {
+            inventory_service::handle_item_discard(services, connection, packet).await
+        }
+        Some(MessageType::ItemAddReq) => {
+            inventory_service::handle_item_add(services, connection, packet).await
+        }
+        Some(MessageType::WarehouseAccessReq) => {
+            inventory_service::handle_warehouse_access(services, connection, packet).await
+        }
+        Some(MessageType::GetInventoryReq) => {
+            inventory_service::handle_get_inventory(services, connection, packet).await
+        }
         Some(_) => {
             connection.queue_error(
                 packet.header.seq,
@@ -500,7 +531,11 @@ async fn dispatch_packet(
             Ok(())
         }
         None => {
-            connection.queue_error(packet.header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type")?;
+            connection.queue_error(
+                packet.header.seq,
+                "UNKNOWN_MESSAGE_TYPE",
+                "unknown message type",
+            )?;
             services
                 .mysql_store
                 .append_connection_event(
@@ -525,6 +560,3 @@ pub fn current_unix_ms() -> i64 {
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
 }
-
-
-

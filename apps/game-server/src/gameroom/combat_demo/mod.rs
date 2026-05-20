@@ -99,10 +99,11 @@ impl CombatDemoLogic {
             action: action.to_string(),
             payload_json,
         };
-        self.pending_broadcasts.push(RoomLogicBroadcast::broadcast_to_room(
-            MessageType::GameMessagePush,
-            encode_body(&message),
-        ));
+        self.pending_broadcasts
+            .push(RoomLogicBroadcast::broadcast_to_room(
+                MessageType::GameMessagePush,
+                encode_body(&message),
+            ));
     }
 
     fn queue_snapshot_push(&mut self, frame_id: u32, reason: &str, full_sync: bool) {
@@ -197,15 +198,17 @@ impl RoomLogic for CombatDemoLogic {
         let mut hooks = NoopCombatHooks;
         for input in inputs {
             match parse_player_input(input, &self.combat) {
-                Ok(Some(command)) => match self
-                    .combat
-                    .execute_command(command, self.catalog.as_ref(), &mut hooks)
-                {
-                    CombatCommandResult::Accepted | CombatCommandResult::Ignored => {}
-                    CombatCommandResult::Rejected { reason } => {
-                        self.queue_input_reject_push(frame_id, &input.player_id, &reason);
+                Ok(Some(command)) => {
+                    match self
+                        .combat
+                        .execute_command(command, self.catalog.as_ref(), &mut hooks)
+                    {
+                        CombatCommandResult::Accepted | CombatCommandResult::Ignored => {}
+                        CombatCommandResult::Rejected { reason } => {
+                            self.queue_input_reject_push(frame_id, &input.player_id, &reason);
+                        }
                     }
-                },
+                }
                 Ok(None) => {}
                 Err(error) => {
                     self.queue_input_reject_push(frame_id, &input.player_id, error.error_code);
@@ -232,7 +235,11 @@ impl RoomLogic for CombatDemoLogic {
         }
 
         if frame_id % SNAPSHOT_INTERVAL_FRAMES == 0 || force_snapshot {
-            self.queue_snapshot_push(frame_id, "tick_sync", frame_id % SNAPSHOT_INTERVAL_FRAMES == 0);
+            self.queue_snapshot_push(
+                frame_id,
+                "tick_sync",
+                frame_id % SNAPSHOT_INTERVAL_FRAMES == 0,
+            );
         }
     }
 

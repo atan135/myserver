@@ -122,8 +122,7 @@ impl SkillEffect {
         let buff_id = parse_u16_field(parts[4], "BuffId", context)?;
         let buff_duration = parse_u16_field(parts[5], "BuffDuration", context)?;
         let aoe_radius = parse_f32_field(parts[6], "AoeRadius", context)?;
-        let displacement_distance =
-            parse_f32_field(parts[7], "DisplacementDistance", context)?;
+        let displacement_distance = parse_f32_field(parts[7], "DisplacementDistance", context)?;
 
         Ok(Self {
             effect_type,
@@ -167,7 +166,10 @@ fn split_script_fields<'a>(
     expected_len: usize,
     context: &str,
 ) -> Result<Vec<&'a str>, CsvLoadError> {
-    let parts = entry.split(',').map(|value| value.trim()).collect::<Vec<_>>();
+    let parts = entry
+        .split(',')
+        .map(|value| value.trim())
+        .collect::<Vec<_>>();
     if parts.len() != expected_len {
         return Err(CsvLoadError::Parse(format!(
             "{context}: expected {expected_len} effect columns, got {} in `{entry}`",

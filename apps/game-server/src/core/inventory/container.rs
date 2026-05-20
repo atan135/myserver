@@ -104,9 +104,7 @@ impl ItemContainer {
 
     /// 从容器中移除物品
     pub fn remove_item(&mut self, uid: u64, count: u32) -> Result<Item, ItemError> {
-        let idx = self
-            .find_item_index(uid)
-            .ok_or(ItemError::ItemNotFound)?;
+        let idx = self.find_item_index(uid).ok_or(ItemError::ItemNotFound)?;
 
         let slot = self.slots.get_mut(idx).unwrap();
         let item = slot.as_mut().ok_or(ItemError::ItemNotFound)?;
@@ -146,10 +144,7 @@ impl ItemContainer {
 
     /// 获取所有非空物品
     pub fn non_empty_items(&self) -> Vec<&Item> {
-        self.slots
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .collect()
+        self.slots.iter().filter_map(|s| s.as_ref()).collect()
     }
 
     /// 清空容器

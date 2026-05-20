@@ -44,7 +44,11 @@ pub const DEFAULT_WAREHOUSE_CAPACITY: usize = 64;
 impl PlayerData {
     /// 创建新玩家数据
     pub fn new(player_id: String) -> Self {
-        Self::with_capacity(player_id, DEFAULT_INVENTORY_CAPACITY, DEFAULT_WAREHOUSE_CAPACITY)
+        Self::with_capacity(
+            player_id,
+            DEFAULT_INVENTORY_CAPACITY,
+            DEFAULT_WAREHOUSE_CAPACITY,
+        )
     }
 
     /// 使用指定容量创建玩家数据
@@ -111,11 +115,7 @@ impl PlayerData {
     // ========== 装备操作 ==========
 
     /// 穿戴装备
-    pub fn equip_item(
-        &mut self,
-        item_uid: u64,
-        item_table: &ItemTable,
-    ) -> Result<(), ItemError> {
+    pub fn equip_item(&mut self, item_uid: u64, item_table: &ItemTable) -> Result<(), ItemError> {
         // 1. 从背包找到物品
         let item = self
             .inventory
@@ -146,10 +146,7 @@ impl PlayerData {
     }
 
     /// 卸下装备
-    pub fn unequip_item(
-        &mut self,
-        slot: EquipSlot,
-    ) -> Result<Option<Item>, ItemError> {
+    pub fn unequip_item(&mut self, slot: EquipSlot) -> Result<Option<Item>, ItemError> {
         // 1. 卸下装备
         let unequipped = self.equipment.unequip(slot)?;
 
@@ -178,9 +175,7 @@ impl PlayerData {
         item_id: i32,
         item_table: &ItemTable,
     ) -> Result<EquipSlot, ItemError> {
-        let row = item_table
-            .get(item_id)
-            .ok_or(ItemError::ItemNotFound)?;
+        let row = item_table.get(item_id).ok_or(ItemError::ItemNotFound)?;
 
         let slot_str = item_table
             .resolve_string(row.equipslot)
@@ -206,11 +201,7 @@ impl PlayerData {
     }
 
     /// 使用物品
-    pub fn use_item(
-        &mut self,
-        item_uid: u64,
-        item_table: &ItemTable,
-    ) -> Result<(), ItemError> {
+    pub fn use_item(&mut self, item_uid: u64, item_table: &ItemTable) -> Result<(), ItemError> {
         let item = self
             .inventory
             .find_item(item_uid)
@@ -222,15 +213,14 @@ impl PlayerData {
             .ok_or(ItemError::ItemNotFound)?;
 
         // 检查使用效果类型
-        let effect_str = item_table
-            .resolve_string(row.useeffect)
-            .unwrap_or("");
+        let effect_str = item_table.resolve_string(row.useeffect).unwrap_or("");
 
         match effect_str {
             "Heal" => {
                 // 消耗品：直接移除，产生效果
                 self.inventory.remove_item(item_uid, 1)?;
-                self.attr.final_.hp = (self.attr.final_.hp + row.usevalue as i64).min(self.attr.final_.max_hp);
+                self.attr.final_.hp =
+                    (self.attr.final_.hp + row.usevalue as i64).min(self.attr.final_.max_hp);
                 self.set_attr_dirty();
             }
             "Buff" => {
@@ -260,11 +250,7 @@ impl PlayerData {
     // ========== 仓库操作 ==========
 
     /// 仓库存取（位置校验由调用方负责）
-    pub fn warehouse_deposit(
-        &mut self,
-        item_uid: u64,
-        count: u32,
-    ) -> Result<(), ItemError> {
+    pub fn warehouse_deposit(&mut self, item_uid: u64, count: u32) -> Result<(), ItemError> {
         let item = self.inventory.remove_item(item_uid, count)?;
         self.warehouse.add_item(item)?;
         self.set_data_dirty();
@@ -272,11 +258,7 @@ impl PlayerData {
     }
 
     /// 仓库取出
-    pub fn warehouse_withdraw(
-        &mut self,
-        item_uid: u64,
-        count: u32,
-    ) -> Result<(), ItemError> {
+    pub fn warehouse_withdraw(&mut self, item_uid: u64, count: u32) -> Result<(), ItemError> {
         let item = self.warehouse.remove_item(item_uid, count)?;
         self.inventory.add_item(item)?;
         self.set_data_dirty();

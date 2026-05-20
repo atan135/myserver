@@ -78,7 +78,8 @@ impl Config {
         let log_enable_console = parse_bool("LOG_ENABLE_CONSOLE", true);
         let log_enable_file = parse_bool("LOG_ENABLE_FILE", true);
         let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "logs/game-server".to_string());
-        let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_url =
+            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
         let mysql_enabled = parse_bool("MYSQL_ENABLED", false);
         let mysql_url = env::var("MYSQL_URL")
@@ -87,8 +88,8 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(10);
-        let ticket_secret =
-            env::var("TICKET_SECRET").unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
+        let ticket_secret = env::var("TICKET_SECRET")
+            .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let heartbeat_timeout_secs = env::var("HEARTBEAT_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())

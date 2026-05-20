@@ -3,13 +3,13 @@
 //! 监控指标收集与 Redis 上报
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use tokio::time::interval;
 use tracing::{error, info};
 
@@ -148,7 +148,10 @@ impl MetricsCollector {
                 }
 
                 // 写入指标 Hash，TTL 7天
-                if let Err(e) = con.hset_multiple::<_, _, _, ()>(&metrics_key, &fields).await {
+                if let Err(e) = con
+                    .hset_multiple::<_, _, _, ()>(&metrics_key, &fields)
+                    .await
+                {
                     error!(error = %e, metrics_key = %metrics_key, "failed to write metrics to redis");
                 }
 

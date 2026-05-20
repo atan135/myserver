@@ -195,7 +195,8 @@ mod tests {
         };
         let request_body = encode_body(&request);
         let request_packet = encode_packet(MessageType::GetRoomDataReq, 11, &request_body);
-        let request_header = parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let request_header =
+            parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
         let request_packet = Packet::new(request_header, request_packet[HEADER_LEN..].to_vec());
         let decoded = request_packet
             .decode_body::<GetRoomDataReq>("INVALID_GET_ROOM_DATA_BODY")
@@ -209,7 +210,8 @@ mod tests {
         };
         let response_body = encode_body(&response);
         let response_packet = encode_packet(MessageType::GetRoomDataRes, 11, &response_body);
-        let response_header = parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let response_header =
+            parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
         let response_packet = Packet::new(response_header, response_packet[HEADER_LEN..].to_vec());
         let decoded = response_packet
             .decode_body::<GetRoomDataRes>("INVALID_GET_ROOM_DATA_RES_BODY")
@@ -222,7 +224,8 @@ mod tests {
         let request = ServerStatusReq {};
         let request_body = encode_body(&request);
         let request_packet = encode_packet(MessageType::AdminServerStatusReq, 9, &request_body);
-        let request_header = parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let request_header =
+            parse_header(request_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
         let packet = Packet::new(request_header, request_packet[HEADER_LEN..].to_vec());
         let decoded = packet
             .decode_body::<ServerStatusReq>("INVALID_ADMIN_STATUS_BODY")
@@ -238,7 +241,8 @@ mod tests {
         };
         let response_body = encode_body(&response);
         let response_packet = encode_packet(MessageType::AdminServerStatusRes, 9, &response_body);
-        let response_header = parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
+        let response_header =
+            parse_header(response_packet[..HEADER_LEN].try_into().unwrap()).unwrap();
         let response_packet = Packet::new(response_header, response_packet[HEADER_LEN..].to_vec());
         let decoded = response_packet
             .decode_body::<ServerStatusRes>("INVALID_ADMIN_STATUS_RES_BODY")

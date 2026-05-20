@@ -250,7 +250,11 @@ impl Room {
         }
     }
 
-    pub fn mark_online(&mut self, player_id: &str, sender: mpsc::UnboundedSender<OutboundMessage>) -> bool {
+    pub fn mark_online(
+        &mut self,
+        player_id: &str,
+        sender: mpsc::UnboundedSender<OutboundMessage>,
+    ) -> bool {
         if let Some(member) = self.members.get_mut(player_id) {
             member.offline = false;
             member.offline_since = None;
@@ -260,7 +264,11 @@ impl Room {
         false
     }
 
-    pub fn update_sender(&mut self, player_id: &str, sender: mpsc::UnboundedSender<OutboundMessage>) {
+    pub fn update_sender(
+        &mut self,
+        player_id: &str,
+        sender: mpsc::UnboundedSender<OutboundMessage>,
+    ) {
         if let Some(member) = self.members.get_mut(player_id) {
             member.sender = sender;
         }
@@ -324,10 +332,7 @@ impl Room {
     }
 
     pub fn upsert_pending_input(&mut self, input: PlayerInputRecord) -> PendingInputUpsert {
-        let frame_inputs = self
-            .pending_inputs
-            .entry(input.frame_id)
-            .or_default();
+        let frame_inputs = self.pending_inputs.entry(input.frame_id).or_default();
         let outcome = if frame_inputs.contains_key(&input.player_id) {
             PendingInputUpsert::Replaced
         } else {
@@ -351,7 +356,10 @@ impl Room {
             .unwrap_or_default()
     }
 
-    pub fn take_pending_inputs_for_frame(&mut self, frame_id: u32) -> BTreeMap<String, PlayerInputRecord> {
+    pub fn take_pending_inputs_for_frame(
+        &mut self,
+        frame_id: u32,
+    ) -> BTreeMap<String, PlayerInputRecord> {
         self.pending_inputs.remove(&frame_id).unwrap_or_default()
     }
 
@@ -380,7 +388,8 @@ impl Room {
     }
 
     pub fn set_last_applied_input(&mut self, player_id: &str, input: PlayerInputRecord) {
-        self.last_applied_inputs.insert(player_id.to_string(), input);
+        self.last_applied_inputs
+            .insert(player_id.to_string(), input);
     }
 
     pub fn reset_missing_input_streak(&mut self, player_id: &str) {

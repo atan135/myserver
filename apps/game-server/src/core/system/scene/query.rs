@@ -250,8 +250,12 @@ impl SceneQuery for SceneCatalog {
             return false;
         };
 
-        let walkable = self.layer_value(scene_id, "walkable", cell_x, cell_y).unwrap_or(0);
-        let blocked = self.layer_value(scene_id, "block", cell_x, cell_y).unwrap_or(1);
+        let walkable = self
+            .layer_value(scene_id, "walkable", cell_x, cell_y)
+            .unwrap_or(0);
+        let blocked = self
+            .layer_value(scene_id, "block", cell_x, cell_y)
+            .unwrap_or(1);
         walkable == 1 && blocked == 0
     }
 

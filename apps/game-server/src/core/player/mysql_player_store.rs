@@ -1,4 +1,4 @@
-use mysql_async::{Opts, OptsBuilder, Pool, TxOpts, params, prelude::Queryable, Row};
+use mysql_async::{Opts, OptsBuilder, Pool, Row, TxOpts, params, prelude::Queryable};
 use tracing::info;
 
 use crate::config::Config;
@@ -213,11 +213,15 @@ impl MySqlPlayerStore {
         {
             Ok(()) => {}
             Err(error) if is_duplicate_request_error(&error) => {
-                tx.rollback().await.map_err(|rollback_error| rollback_error.to_string())?;
+                tx.rollback()
+                    .await
+                    .map_err(|rollback_error| rollback_error.to_string())?;
                 return Ok(false);
             }
             Err(error) => {
-                tx.rollback().await.map_err(|rollback_error| rollback_error.to_string())?;
+                tx.rollback()
+                    .await
+                    .map_err(|rollback_error| rollback_error.to_string())?;
                 return Err(error.to_string());
             }
         }
@@ -305,10 +309,14 @@ impl MySqlPlayerStore {
             Some(row) => {
                 let level: i32 = row.get("level").ok_or("missing level")?;
                 let hp: i64 = row.get("hp").ok_or("missing hp")?;
-                let inventory_data: String = row.get("inventory_data").ok_or("missing inventory_data")?;
-                let warehouse_data: String = row.get("warehouse_data").ok_or("missing warehouse_data")?;
-                let equipment_data: String = row.get("equipment_data").ok_or("missing equipment_data")?;
-                let attr_base_data: String = row.get("attr_base_data").ok_or("missing attr_base_data")?;
+                let inventory_data: String =
+                    row.get("inventory_data").ok_or("missing inventory_data")?;
+                let warehouse_data: String =
+                    row.get("warehouse_data").ok_or("missing warehouse_data")?;
+                let equipment_data: String =
+                    row.get("equipment_data").ok_or("missing equipment_data")?;
+                let attr_base_data: String =
+                    row.get("attr_base_data").ok_or("missing attr_base_data")?;
                 let visual_data: String = row.get("visual_data").ok_or("missing visual_data")?;
                 let buffs_data: String = row.get("buffs_data").ok_or("missing buffs_data")?;
 

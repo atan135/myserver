@@ -39,16 +39,15 @@ pub async fn run_listener(
         let config_tables = config_tables.clone();
 
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_admin_connection(
-                    socket,
-                    room_manager,
-                    runtime_config,
-                    connection_count,
-                    player_manager,
-                    config_tables,
-                )
-                .await
+            if let Err(error) = handle_admin_connection(
+                socket,
+                room_manager,
+                runtime_config,
+                connection_count,
+                player_manager,
+                config_tables,
+            )
+            .await
             {
                 warn!(peer = %peer_addr, error = %error, "admin connection failed");
             }
@@ -103,7 +102,8 @@ async fn handle_admin_connection(
                 let request = packet
                     .decode_body::<UpdateConfigReq>("INVALID_ADMIN_UPDATE_CONFIG_BODY")
                     .map_err(std::io::Error::other)?;
-                let result = apply_runtime_config(&runtime_config, &request.key, &request.value).await;
+                let result =
+                    apply_runtime_config(&runtime_config, &request.key, &request.value).await;
 
                 write_message(
                     &mut writer,
@@ -177,10 +177,22 @@ async fn handle_admin_connection(
                 }
             }
             Some(_) => {
-                write_error(&mut writer, packet.header.seq, "MESSAGE_NOT_SUPPORTED", "message not supported on admin channel").await?;
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    "MESSAGE_NOT_SUPPORTED",
+                    "message not supported on admin channel",
+                )
+                .await?;
             }
             None => {
-                write_error(&mut writer, packet.header.seq, "UNKNOWN_MESSAGE_TYPE", "unknown message type").await?;
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    "UNKNOWN_MESSAGE_TYPE",
+                    "unknown message type",
+                )
+                .await?;
             }
         }
     }
@@ -213,7 +225,9 @@ async fn validate_grant_items_request(
     Ok(())
 }
 
-fn decode_grant_items_request(packet: &Packet) -> Result<GrantItemsReq, Box<dyn std::error::Error>> {
+fn decode_grant_items_request(
+    packet: &Packet,
+) -> Result<GrantItemsReq, Box<dyn std::error::Error>> {
     if let Ok(request) = packet.decode_body::<GrantItemsReq>("INVALID_GRANT_ITEMS_BODY") {
         if !request.player_id.is_empty() {
             return Ok(request);
@@ -246,7 +260,8 @@ fn decode_grant_items_request(packet: &Packet) -> Result<GrantItemsReq, Box<dyn 
 
     let legacy: LegacySendItemRequest = serde_json::from_slice(&packet.body)?;
     let items = if let Some(items) = legacy.items {
-        items.into_iter()
+        items
+            .into_iter()
             .map(|item| {
                 let item_id = parse_item_id_value(item.item_id)?;
                 Ok(GrantItem {
@@ -290,7 +305,8 @@ fn parse_item_id_value(value: serde_json::Value) -> Result<i32, Box<dyn std::err
     match value {
         serde_json::Value::Number(number) => Ok(number
             .as_i64()
-            .ok_or_else(|| std::io::Error::other("INVALID_ITEM_ID"))? as i32),
+            .ok_or_else(|| std::io::Error::other("INVALID_ITEM_ID"))?
+            as i32),
         serde_json::Value::String(text) => Ok(text.parse::<i32>()?),
         _ => Err(Box::new(std::io::Error::other("INVALID_ITEM_ID"))),
     }

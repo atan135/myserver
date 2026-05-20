@@ -3,9 +3,10 @@ use tracing::{info, warn};
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::inventory::{EquipSlot, ItemError, PlayerData};
 use crate::pb::{
-    AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryReq, GetInventoryRes,
-    Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq, ItemDiscardRes, ItemEquipReq, ItemEquipRes,
-    ItemUseReq, ItemUseRes, InventoryUpdatePush, VisualChangePush, WarehouseAccessReq, WarehouseAccessRes,
+    AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryReq,
+    GetInventoryRes, InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq,
+    ItemDiscardRes, ItemEquipReq, ItemEquipRes, ItemUseReq, ItemUseRes, VisualChangePush,
+    WarehouseAccessReq, WarehouseAccessRes,
 };
 use crate::protocol::{MessageType, Packet};
 

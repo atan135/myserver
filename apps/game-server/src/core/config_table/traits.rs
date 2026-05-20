@@ -43,44 +43,75 @@ pub struct CsvRowReader<'a> {
 
 impl<'a> CsvRowReader<'a> {
     pub fn new(table_name: &'static str, row_index: usize, fields: &'a [String]) -> Self {
-        Self { table_name, row_index, fields }
+        Self {
+            table_name,
+            row_index,
+            fields,
+        }
     }
 
     pub fn field(&self, index: usize, name: &str) -> Result<&str, CsvLoadError> {
-        self.fields.get(index).map(|value| value.as_str()).ok_or_else(|| {
-            CsvLoadError::InvalidRow(format!(
-                "table {} row {} missing field `{}` at column {}",
-                self.table_name, self.row_index, name, index
-            ))
-        })
+        self.fields
+            .get(index)
+            .map(|value| value.as_str())
+            .ok_or_else(|| {
+                CsvLoadError::InvalidRow(format!(
+                    "table {} row {} missing field `{}` at column {}",
+                    self.table_name, self.row_index, name, index
+                ))
+            })
     }
 
     pub fn parse_i32(&self, index: usize, name: &str) -> Result<i32, CsvLoadError> {
-        self.field(index, name)?.parse::<i32>().map_err(|error| self.parse_error(name, error))
+        self.field(index, name)?
+            .parse::<i32>()
+            .map_err(|error| self.parse_error(name, error))
     }
 
     pub fn parse_i64(&self, index: usize, name: &str) -> Result<i64, CsvLoadError> {
-        self.field(index, name)?.parse::<i64>().map_err(|error| self.parse_error(name, error))
+        self.field(index, name)?
+            .parse::<i64>()
+            .map_err(|error| self.parse_error(name, error))
     }
 
     pub fn parse_f32(&self, index: usize, name: &str) -> Result<f32, CsvLoadError> {
-        self.field(index, name)?.parse::<f32>().map_err(|error| self.parse_error(name, error))
+        self.field(index, name)?
+            .parse::<f32>()
+            .map_err(|error| self.parse_error(name, error))
     }
 
-    pub fn parse_string_key(&self, index: usize, name: &str, string_pool: &mut StringPoolBuilder) -> Result<u32, CsvLoadError> {
+    pub fn parse_string_key(
+        &self,
+        index: usize,
+        name: &str,
+        string_pool: &mut StringPoolBuilder,
+    ) -> Result<u32, CsvLoadError> {
         Ok(string_pool.intern(self.field(index, name)?))
     }
 
-    pub fn parse_string_array(&self, index: usize, name: &str, string_pool: &mut StringPoolBuilder) -> Result<Vec<u32>, CsvLoadError> {
+    pub fn parse_string_array(
+        &self,
+        index: usize,
+        name: &str,
+        string_pool: &mut StringPoolBuilder,
+    ) -> Result<Vec<u32>, CsvLoadError> {
         let value = self.field(index, name)?;
         if value.is_empty() {
             return Ok(Vec::new());
         }
 
-        Ok(value.split('|').map(|item| string_pool.intern(item.trim())).collect())
+        Ok(value
+            .split('|')
+            .map(|item| string_pool.intern(item.trim()))
+            .collect())
     }
 
-    pub fn parse_string_int_dict(&self, index: usize, name: &str, string_pool: &mut StringPoolBuilder) -> Result<HashMap<u32, i32>, CsvLoadError> {
+    pub fn parse_string_int_dict(
+        &self,
+        index: usize,
+        name: &str,
+        string_pool: &mut StringPoolBuilder,
+    ) -> Result<HashMap<u32, i32>, CsvLoadError> {
         let value = self.field(index, name)?;
         if value.is_empty() {
             return Ok(HashMap::new());
@@ -95,7 +126,10 @@ impl<'a> CsvRowReader<'a> {
                 ))
             })?;
             let string_key = string_pool.intern(key.trim());
-            let parsed_value = raw_value.trim().parse::<i32>().map_err(|error| self.parse_error(name, error))?;
+            let parsed_value = raw_value
+                .trim()
+                .parse::<i32>()
+                .map_err(|error| self.parse_error(name, error))?;
             map.insert(string_key, parsed_value);
         }
         Ok(map)

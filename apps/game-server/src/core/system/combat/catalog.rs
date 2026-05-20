@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 #[cfg(test)]
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::core::config_table::CsvLoadError;
 use crate::csv_code::bufferbase::BufferBase;
@@ -35,20 +35,21 @@ impl CsvCombatCatalog {
             let context = format!("SkillBase id={id}");
             let code = resolve_skill_string(&tables.skillbase, row.code, &context, "Code")?;
             let name = resolve_skill_string(&tables.skillbase, row.name, &context, "Name")?;
-            let description = resolve_skill_string(
-                &tables.skillbase,
-                row.description,
-                &context,
-                "Description",
-            )?;
+            let description =
+                resolve_skill_string(&tables.skillbase, row.description, &context, "Description")?;
             let target_type = SkillTargetType::parse(
                 resolve_skill_string(&tables.skillbase, row.targettype, &context, "TargetType")?
                     .as_str(),
                 &context,
             )?;
             let effects = parse_skill_effects(
-                resolve_skill_string(&tables.skillbase, row.effectscript, &context, "EffectScript")?
-                    .as_str(),
+                resolve_skill_string(
+                    &tables.skillbase,
+                    row.effectscript,
+                    &context,
+                    "EffectScript",
+                )?
+                .as_str(),
                 &context,
             )?;
 
@@ -76,12 +77,8 @@ impl CsvCombatCatalog {
             let context = format!("BufferBase id={id}");
             let code = resolve_buff_string(&tables.bufferbase, row.code, &context, "Code")?;
             let name = resolve_buff_string(&tables.bufferbase, row.name, &context, "Name")?;
-            let description = resolve_buff_string(
-                &tables.bufferbase,
-                row.description,
-                &context,
-                "Description",
-            )?;
+            let description =
+                resolve_buff_string(&tables.bufferbase, row.description, &context, "Description")?;
             let buff_type = BuffType::parse(
                 resolve_buff_string(&tables.bufferbase, row.bufftype, &context, "BuffType")?
                     .as_str(),
@@ -334,13 +331,17 @@ impl CombatCatalog for BuiltinCombatCatalog {
 
 fn cast_u16(value: i32, table: &str, field: &str) -> Result<u16, CsvLoadError> {
     u16::try_from(value).map_err(|_| {
-        CsvLoadError::Parse(format!("{table} field `{field}` out of range for u16: {value}"))
+        CsvLoadError::Parse(format!(
+            "{table} field `{field}` out of range for u16: {value}"
+        ))
     })
 }
 
 fn cast_u8(value: i32, table: &str, field: &str) -> Result<u8, CsvLoadError> {
     u8::try_from(value).map_err(|_| {
-        CsvLoadError::Parse(format!("{table} field `{field}` out of range for u8: {value}"))
+        CsvLoadError::Parse(format!(
+            "{table} field `{field}` out of range for u8: {value}"
+        ))
     })
 }
 
@@ -350,11 +351,14 @@ fn resolve_skill_string(
     context: &str,
     field: &str,
 ) -> Result<String, CsvLoadError> {
-    table.resolve_string(key).map(ToOwned::to_owned).ok_or_else(|| {
-        CsvLoadError::Parse(format!(
-            "{context}: missing string pool entry for field `{field}` key {key}"
-        ))
-    })
+    table
+        .resolve_string(key)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            CsvLoadError::Parse(format!(
+                "{context}: missing string pool entry for field `{field}` key {key}"
+            ))
+        })
 }
 
 fn resolve_buff_string(
@@ -363,11 +367,14 @@ fn resolve_buff_string(
     context: &str,
     field: &str,
 ) -> Result<String, CsvLoadError> {
-    table.resolve_string(key).map(ToOwned::to_owned).ok_or_else(|| {
-        CsvLoadError::Parse(format!(
-            "{context}: missing string pool entry for field `{field}` key {key}"
-        ))
-    })
+    table
+        .resolve_string(key)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            CsvLoadError::Parse(format!(
+                "{context}: missing string pool entry for field `{field}` key {key}"
+            ))
+        })
 }
 
 #[cfg(test)]

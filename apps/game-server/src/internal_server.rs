@@ -55,11 +55,8 @@ where
                     .decode_body::<CreateMatchedRoomReq>("INVALID_CREATE_MATCHED_ROOM_BODY")
                     .map_err(std::io::Error::other)?;
 
-                let response = room_service::handle_create_matched_room_internal(
-                    &services,
-                    request,
-                )
-                .await;
+                let response =
+                    room_service::handle_create_matched_room_internal(&services, request).await;
 
                 write_message(
                     &mut writer,
@@ -93,9 +90,7 @@ where
     Ok(())
 }
 
-async fn read_packet<R>(
-    reader: &mut R,
-) -> Result<Option<Packet>, Box<dyn std::error::Error>>
+async fn read_packet<R>(reader: &mut R) -> Result<Option<Packet>, Box<dyn std::error::Error>>
 where
     R: AsyncRead + Unpin,
 {
@@ -125,9 +120,7 @@ where
     Ok(Some(Packet::new(header, body)))
 }
 
-async fn read_header_bytes<R>(
-    reader: &mut R,
-) -> Result<Option<[u8; HEADER_LEN]>, std::io::Error>
+async fn read_header_bytes<R>(reader: &mut R) -> Result<Option<[u8; HEADER_LEN]>, std::io::Error>
 where
     R: AsyncRead + Unpin,
 {

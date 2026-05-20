@@ -56,8 +56,7 @@ pub struct ConfigTableRowCounts {
 impl ConfigTables {
     pub fn load_from_dir(csv_dir: &Path) -> Result<Self, CsvLoadError> {
         let scenetable = SceneTable::load_from_csv(&csv_dir.join(SCENETABLE_FILE))?;
-        let scenespawnpoint =
-            SceneSpawnPoint::load_from_csv(&csv_dir.join(SCENESPAWNPOINT_FILE))?;
+        let scenespawnpoint = SceneSpawnPoint::load_from_csv(&csv_dir.join(SCENESPAWNPOINT_FILE))?;
         let sceneportal = ScenePortal::load_from_csv(&csv_dir.join(SCENEPORTAL_FILE))?;
         let sceneregion = SceneRegion::load_from_csv(&csv_dir.join(SCENEREGION_FILE))?;
         let scenemonsterspawn =
@@ -122,13 +121,17 @@ impl ConfigTables {
         };
 
         let testtable_100 = if changed_files.contains(TESTTABLE_100_FILE) {
-            Arc::new(TestTable100::load_from_csv(&csv_dir.join(TESTTABLE_100_FILE))?)
+            Arc::new(TestTable100::load_from_csv(
+                &csv_dir.join(TESTTABLE_100_FILE),
+            )?)
         } else {
             self.testtable_100.clone()
         };
 
         let testtable_110 = if changed_files.contains(TESTTABLE_110_FILE) {
-            Arc::new(TestTable110::load_from_csv(&csv_dir.join(TESTTABLE_110_FILE))?)
+            Arc::new(TestTable110::load_from_csv(
+                &csv_dir.join(TESTTABLE_110_FILE),
+            )?)
         } else {
             self.testtable_110.clone()
         };

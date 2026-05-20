@@ -2,8 +2,8 @@ mod admin_server;
 mod config;
 mod config_table;
 mod core;
-mod gameroom;
 mod gameconfig;
+mod gameroom;
 mod gameservice;
 mod internal_server;
 mod kick_subscriber;
@@ -128,7 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
-                let client = client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let client =
+                    client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let instance = ServiceInstance::new(
                     config.service_instance_id.clone(),
                     config.service_name.clone(),
@@ -184,7 +185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动 metrics 上报任务
     let metrics_redis_url = config.redis_url.clone();
     tokio::spawn(async move {
-        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+        metrics::METRICS
+            .start_reporting(&metrics_redis_url, 5)
+            .await;
     });
 
     let result = server::run(&config, mysql_store.clone(), config_table_runtime.clone()).await;
@@ -215,5 +218,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = mysql_store.close().await;
     result
 }
-
-
