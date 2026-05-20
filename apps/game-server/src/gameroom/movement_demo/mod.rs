@@ -34,7 +34,8 @@ impl MovementDemoLogic {
         aoi_radius: f32,
         aoi_enabled: bool,
     ) -> Self {
-        let mut movement_state = RoomMovementState::new(default_scene_id, correction_interval_frames);
+        let mut movement_state =
+            RoomMovementState::new(default_scene_id, correction_interval_frames);
         movement_state.set_correction_config(
             correction_interval_frames,
             correction_threshold,
@@ -64,7 +65,10 @@ impl MovementDemoLogic {
         }
 
         let Some(scene) = scene_catalog.scene(self.default_scene_id) else {
-            warn!(scene_id = self.default_scene_id, "movement demo scene missing");
+            warn!(
+                scene_id = self.default_scene_id,
+                "movement demo scene missing"
+            );
             return;
         };
         let Some(spawn) = scene_catalog.spawn_point(scene.default_spawn_id) else {
@@ -107,6 +111,32 @@ impl RoomLogic for MovementDemoLogic {
         self.recipients.retain(|existing| existing != player_id);
     }
 
+    fn on_player_offline(&mut self, _room_id: &str, player_id: &str) {
+        let Some(movement_state) = self.movement_state.as_mut() else {
+            return;
+        };
+
+        let frame_id = movement_state
+            .last_snapshot_frame
+            .max(self.tick_count as u32);
+        let Some(corrected) = movement_state.stop_player(player_id, frame_id) else {
+            return;
+        };
+
+        let correction = movement_state.incremental_correction(
+            frame_id,
+            MovementCorrectionReason::PlayerOffline,
+            Vec::new(),
+            vec![corrected],
+        );
+        self.pending_broadcasts
+            .extend(snapshot_broadcasts(&self.room_id, vec![correction]));
+        info!(
+            room_id = self.room_id,
+            player_id, frame_id, "movement demo player stopped after offline"
+        );
+    }
+
     fn on_game_started(&mut self, _room_id: &str) {
         let Some(movement_state) = self.movement_state.as_mut() else {
             return;
@@ -127,7 +157,13 @@ impl RoomLogic for MovementDemoLogic {
             return;
         };
 
-        let result = tick_movement(movement_state, frame_id, fps, inputs, scene_catalog.as_ref());
+        let result = tick_movement(
+            movement_state,
+            frame_id,
+            fps,
+            inputs,
+            scene_catalog.as_ref(),
+        );
         for reject in &result.rejects {
             info!(
                 room_id = self.room_id,
@@ -140,12 +176,7 @@ impl RoomLogic for MovementDemoLogic {
                 .push(reject_broadcast(&self.room_id, frame_id, reject));
         }
 
-        let corrections = decide_corrections(
-            movement_state,
-            frame_id,
-            &self.recipients,
-            &result,
-        );
+        let corrections = decide_corrections(movement_state, frame_id, &self.recipients, &result);
         if !corrections.is_empty() {
             info!(
                 room_id = self.room_id,
@@ -216,11 +247,15 @@ impl RoomLogic for MovementDemoLogic {
         reason: MovementCorrectionReason,
     ) -> Option<MovementRecoveryState> {
         let movement_state = self.movement_state.as_ref()?;
-        Some(movement_state.recovery_state_for_player(
-            requester_player_id,
-            movement_state.last_snapshot_frame.max(self.tick_count as u32),
-            reason,
-        ))
+        Some(
+            movement_state.recovery_state_for_player(
+                requester_player_id,
+                movement_state
+                    .last_snapshot_frame
+                    .max(self.tick_count as u32),
+                reason,
+            ),
+        )
     }
 
     fn take_pending_broadcasts(&mut self) -> Vec<RoomLogicBroadcast> {

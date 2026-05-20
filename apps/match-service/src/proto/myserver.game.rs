@@ -679,6 +679,7 @@ pub enum MovementCorrectionReason {
     GameStarted = 5,
     ReconnectRecovery = 6,
     ObserverRecovery = 7,
+    PlayerOffline = 8,
 }
 impl MovementCorrectionReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -695,6 +696,7 @@ impl MovementCorrectionReason {
             Self::GameStarted => "MOVEMENT_CORRECTION_REASON_GAME_STARTED",
             Self::ReconnectRecovery => "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY",
             Self::ObserverRecovery => "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY",
+            Self::PlayerOffline => "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -716,6 +718,7 @@ impl MovementCorrectionReason {
             "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY" => {
                 Some(Self::ObserverRecovery)
             }
+            "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE" => Some(Self::PlayerOffline),
             _ => None,
         }
     }

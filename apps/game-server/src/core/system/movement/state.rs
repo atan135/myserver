@@ -323,6 +323,23 @@ impl RoomMovementState {
         }
     }
 
+    pub fn stop_player(&mut self, player_id: &str, frame_id: u32) -> Option<EntityTransform> {
+        let dense_index = self.dense_index_by_player(player_id)?;
+        let was_moving = self.is_moving_at(dense_index).unwrap_or(false);
+        let current_frame = self
+            .entity_state_at(dense_index)
+            .map(|entity| entity.last_input_frame)
+            .unwrap_or_default();
+
+        if !was_moving && current_frame == frame_id {
+            return self.entity_proto_at(dense_index);
+        }
+
+        let _ = self.set_moving_at(dense_index, false);
+        let _ = self.set_last_input_frame_at(dense_index, frame_id);
+        self.entity_proto_at(dense_index)
+    }
+
     pub fn all_transforms(&self) -> Vec<EntityTransform> {
         self.dense_indices()
             .filter_map(|dense_index| self.entity_proto_at(dense_index))
@@ -351,7 +368,13 @@ impl RoomMovementState {
     pub fn drift_distance_for_player(&self, player_id: &str) -> Option<f32> {
         let client = self.client_state_for_player(player_id)?;
         let entity = self.entity(player_id)?;
-        Some(distance(entity.position, Vec2 { x: client.x, y: client.y }))
+        Some(distance(
+            entity.position,
+            Vec2 {
+                x: client.x,
+                y: client.y,
+            },
+        ))
     }
 
     pub fn should_force_correction_for_player(&self, player_id: &str) -> bool {
@@ -388,7 +411,10 @@ impl RoomMovementState {
             return self.all_transforms();
         }
 
-        let Some(origin) = self.entity(requester_player_id).map(|entity| entity.position) else {
+        let Some(origin) = self
+            .entity(requester_player_id)
+            .map(|entity| entity.position)
+        else {
             return self.all_transforms();
         };
 
@@ -504,4 +530,44 @@ fn distance(lhs: Vec2, rhs: Vec2) -> f32 {
     let dx = lhs.x - rhs.x;
     let dy = lhs.y - rhs.y;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_spawn() -> SceneSpawnPointDefinition {
+        SceneSpawnPointDefinition {
+            id: 1001,
+            scene_id: 1,
+            code: "spawn".to_string(),
+            spawn_type: "player".to_string(),
+            x: 1.0,
+            y: 1.0,
+            dir_x: 1.0,
+            dir_y: 0.0,
+            radius: 0.0,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stop_player_clears_moving_flag_and_updates_frame() {
+        let mut state = RoomMovementState::new(1, 3);
+        let spawn = build_spawn();
+        state.spawn_player("player-a", &spawn, 4.0);
+
+        let dense_index = state.dense_index_by_player("player-a").unwrap();
+        state.apply_command_at(
+            dense_index,
+            5,
+            MovementCommand::MoveDir(Vec2 { x: 1.0, y: 0.0 }),
+        );
+
+        let corrected = state.stop_player("player-a", 9).unwrap();
+
+        assert!(!corrected.moving);
+        assert_eq!(corrected.last_input_frame, 9);
+        assert!(!state.entity("player-a").unwrap().moving);
+    }
 }

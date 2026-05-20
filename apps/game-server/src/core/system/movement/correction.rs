@@ -17,13 +17,15 @@ pub fn decide_corrections(
 
     for reject in &result.rejects {
         targeted_players.insert(reject.player_id.clone());
-        corrections.push(state.strong_correction(
-            frame_id,
-            MovementCorrectionReason::try_from(reject.reason_code)
-                .unwrap_or(MovementCorrectionReason::MovementRejected),
-            vec![reject.player_id.clone()],
-            state.targets_for_player(&reject.player_id),
-        ));
+        corrections.push(
+            state.strong_correction(
+                frame_id,
+                MovementCorrectionReason::try_from(reject.reason_code)
+                    .unwrap_or(MovementCorrectionReason::MovementRejected),
+                vec![reject.player_id.clone()],
+                state.targets_for_player(&reject.player_id),
+            ),
+        );
     }
 
     for drift in &result.drifted_players {
@@ -73,7 +75,11 @@ pub fn snapshot_broadcasts(
         .collect()
 }
 
-pub fn reject_broadcast(room_id: &str, frame_id: u32, reject: &MovementRejectRecord) -> RoomLogicBroadcast {
+pub fn reject_broadcast(
+    room_id: &str,
+    frame_id: u32,
+    reject: &MovementRejectRecord,
+) -> RoomLogicBroadcast {
     let reason = MovementCorrectionReason::try_from(reject.reason_code)
         .unwrap_or(MovementCorrectionReason::MovementRejected);
     let message = MovementRejectPush {
@@ -84,7 +90,10 @@ pub fn reject_broadcast(room_id: &str, frame_id: u32, reject: &MovementRejectRec
         corrected: Some(reject.corrected.clone()),
         correction_kind: MovementCorrectionKind::Strong as i32,
         reason_code: reason as i32,
-        reference_frame_id: reject.client_state.map(|state| state.frame_id).unwrap_or(frame_id),
+        reference_frame_id: reject
+            .client_state
+            .map(|state| state.frame_id)
+            .unwrap_or(frame_id),
         has_client_state: reject.client_state.is_some(),
         client_x: reject.client_state.map(|state| state.x).unwrap_or_default(),
         client_y: reject.client_state.map(|state| state.y).unwrap_or_default(),
@@ -113,7 +122,9 @@ fn snapshot_broadcast_from_envelope(
         entities: correction.entities,
         full_sync: matches!(
             kind,
-            MovementCorrectionKind::FullSync | MovementCorrectionKind::Strong | MovementCorrectionKind::Recovery
+            MovementCorrectionKind::FullSync
+                | MovementCorrectionKind::Strong
+                | MovementCorrectionKind::Recovery
         ),
         reason: correction_reason_label(reason).to_string(),
         correction_kind: correction.correction_kind,
@@ -146,5 +157,6 @@ pub fn correction_reason_label(reason: MovementCorrectionReason) -> &'static str
         MovementCorrectionReason::GameStarted => "game_started",
         MovementCorrectionReason::ReconnectRecovery => "reconnect_recovery",
         MovementCorrectionReason::ObserverRecovery => "observer_recovery",
+        MovementCorrectionReason::PlayerOffline => "player_offline",
     }
 }

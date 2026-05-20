@@ -7,6 +7,7 @@ use crate::pb::{MoveInputReq, MoveInputType};
 pub const ACTION_MOVE_DIR: &str = "move_dir";
 pub const ACTION_MOVE_STOP: &str = "move_stop";
 pub const ACTION_FACE_TO: &str = "face_to";
+const MAX_SAFE_MOVEMENT_NUMBER_ABS: f32 = 1.0e19;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveDirectionPayload {
@@ -79,6 +80,7 @@ pub fn player_input_from_move_req(
         client_y: request.client_y,
         client_frame_id: request.client_frame_id,
     };
+    validate_client_state_payload(&client_state)?;
     let input_type = MoveInputType::try_from(request.input_type).unwrap_or(MoveInputType::Unknown);
     match input_type {
         MoveInputType::MoveDir => {
@@ -123,11 +125,13 @@ pub fn player_input_from_move_req(
     }
 }
 
-pub fn parse_player_input(record: &PlayerInputRecord) -> Result<ParsedMovementInput, MovementInputError> {
+pub fn parse_player_input(
+    record: &PlayerInputRecord,
+) -> Result<ParsedMovementInput, MovementInputError> {
     match record.action.as_str() {
         ACTION_MOVE_DIR => {
-            let payload: MoveDirectionPayload =
-                serde_json::from_str(&record.payload_json).map_err(|_| MovementInputError {
+            let payload: MoveDirectionPayload = serde_json::from_str(&record.payload_json)
+                .map_err(|_| MovementInputError {
                     error_code: "INVALID_MOVE_DIR_PAYLOAD",
                 })?;
             validate_direction(payload.dir_x, payload.dir_y)?;
@@ -136,7 +140,7 @@ pub fn parse_player_input(record: &PlayerInputRecord) -> Result<ParsedMovementIn
                     x: payload.dir_x,
                     y: payload.dir_y,
                 })),
-                client_state: decode_client_state(record.frame_id, &payload.client_state),
+                client_state: decode_client_state(record.frame_id, &payload.client_state)?,
             })
         }
         ACTION_MOVE_STOP => {
@@ -149,7 +153,7 @@ pub fn parse_player_input(record: &PlayerInputRecord) -> Result<ParsedMovementIn
             };
             Ok(ParsedMovementInput {
                 command: Some(MovementCommand::MoveStop),
-                client_state: decode_client_state(record.frame_id, &payload.client_state),
+                client_state: decode_client_state(record.frame_id, &payload.client_state)?,
             })
         }
         ACTION_FACE_TO => {
@@ -163,7 +167,7 @@ pub fn parse_player_input(record: &PlayerInputRecord) -> Result<ParsedMovementIn
                     x: payload.dir_x,
                     y: payload.dir_y,
                 })),
-                client_state: decode_client_state(record.frame_id, &payload.client_state),
+                client_state: decode_client_state(record.frame_id, &payload.client_state)?,
             })
         }
         _ => Ok(ParsedMovementInput {
@@ -174,8 +178,13 @@ pub fn parse_player_input(record: &PlayerInputRecord) -> Result<ParsedMovementIn
 }
 
 fn validate_direction(dir_x: f32, dir_y: f32) -> Result<(), MovementInputError> {
-    let len_sq = dir_x * dir_x + dir_y * dir_y;
-    if len_sq <= f32::EPSILON {
+    validate_finite_number(dir_x, "MOVE_DIRECTION_NOT_FINITE")?;
+    validate_finite_number(dir_y, "MOVE_DIRECTION_NOT_FINITE")?;
+    validate_safe_range(dir_x, "MOVE_DIRECTION_OUT_OF_RANGE")?;
+    validate_safe_range(dir_y, "MOVE_DIRECTION_OUT_OF_RANGE")?;
+
+    let len_sq = (dir_x as f64) * (dir_x as f64) + (dir_y as f64) * (dir_y as f64);
+    if len_sq <= f64::from(f32::EPSILON) {
         return Err(MovementInputError {
             error_code: "MOVE_DIRECTION_ZERO",
         });
@@ -183,15 +192,46 @@ fn validate_direction(dir_x: f32, dir_y: f32) -> Result<(), MovementInputError> 
     Ok(())
 }
 
+fn validate_client_state_payload(
+    payload: &ClientMovementStatePayload,
+) -> Result<(), MovementInputError> {
+    if !payload.has_client_state {
+        return Ok(());
+    }
+
+    validate_finite_number(payload.client_x, "CLIENT_POSITION_NOT_FINITE")?;
+    validate_finite_number(payload.client_y, "CLIENT_POSITION_NOT_FINITE")?;
+    validate_safe_range(payload.client_x, "CLIENT_POSITION_OUT_OF_RANGE")?;
+    validate_safe_range(payload.client_y, "CLIENT_POSITION_OUT_OF_RANGE")?;
+    Ok(())
+}
+
+fn validate_finite_number(value: f32, error_code: &'static str) -> Result<(), MovementInputError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(MovementInputError { error_code })
+    }
+}
+
+fn validate_safe_range(value: f32, error_code: &'static str) -> Result<(), MovementInputError> {
+    if value.abs() <= MAX_SAFE_MOVEMENT_NUMBER_ABS {
+        Ok(())
+    } else {
+        Err(MovementInputError { error_code })
+    }
+}
+
 fn decode_client_state(
     default_frame_id: u32,
     payload: &ClientMovementStatePayload,
-) -> Option<ClientMovementState> {
+) -> Result<Option<ClientMovementState>, MovementInputError> {
     if !payload.has_client_state {
-        return None;
+        return Ok(None);
     }
+    validate_client_state_payload(payload)?;
 
-    Some(ClientMovementState {
+    Ok(Some(ClientMovementState {
         frame_id: if payload.client_frame_id == 0 {
             default_frame_id
         } else {
@@ -201,7 +241,7 @@ fn decode_client_state(
             x: payload.client_x,
             y: payload.client_y,
         },
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -227,5 +267,53 @@ mod tests {
         assert!(payload_json.contains("\"dirY\":4.0"));
         assert!(payload_json.contains("\"hasClientState\":true"));
         assert!(payload_json.contains("\"clientX\":10.0"));
+    }
+
+    #[test]
+    fn move_input_req_rejects_non_finite_direction() {
+        let request = MoveInputReq {
+            frame_id: 3,
+            input_type: MoveInputType::MoveDir as i32,
+            dir_x: f32::NAN,
+            dir_y: 0.0,
+            has_client_state: false,
+            client_x: 0.0,
+            client_y: 0.0,
+            client_frame_id: 0,
+        };
+
+        let error = player_input_from_move_req(&request).unwrap_err();
+        assert_eq!(error.error_code, "MOVE_DIRECTION_NOT_FINITE");
+    }
+
+    #[test]
+    fn move_input_req_rejects_non_finite_client_state() {
+        let request = MoveInputReq {
+            frame_id: 3,
+            input_type: MoveInputType::MoveStop as i32,
+            dir_x: 0.0,
+            dir_y: 0.0,
+            has_client_state: true,
+            client_x: f32::INFINITY,
+            client_y: 12.0,
+            client_frame_id: 3,
+        };
+
+        let error = player_input_from_move_req(&request).unwrap_err();
+        assert_eq!(error.error_code, "CLIENT_POSITION_NOT_FINITE");
+    }
+
+    #[test]
+    fn parse_player_input_rejects_out_of_range_direction() {
+        let record = PlayerInputRecord {
+            frame_id: 3,
+            player_id: "player-a".to_string(),
+            action: ACTION_MOVE_DIR.to_string(),
+            payload_json: "{\"dirX\":1.0e30,\"dirY\":0.0}".to_string(),
+            received_at: std::time::Instant::now(),
+        };
+
+        let error = parse_player_input(&record).unwrap_err();
+        assert_eq!(error.error_code, "MOVE_DIRECTION_OUT_OF_RANGE");
     }
 }

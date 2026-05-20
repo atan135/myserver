@@ -488,10 +488,14 @@ impl RoomManager {
         let _ = policy;
         room.reset_to_waiting();
 
+        let pending_broadcasts = room.logic.take_pending_broadcasts();
         let snapshot = room.snapshot();
         let match_id = room.match_id.clone();
         drop(rooms);
         drop(runtimes);
+
+        self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
+            .await;
 
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "normal").await;
@@ -557,9 +561,13 @@ impl RoomManager {
             room.wait_started_at = None;
         }
 
+        let pending_broadcasts = room.logic.take_pending_broadcasts();
         let snapshot = room.snapshot();
         let match_id = room.match_id.clone();
         drop(rooms);
+
+        self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
+            .await;
 
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "disconnect").await;
@@ -1234,6 +1242,19 @@ impl RoomManager {
         } else {
             self.broadcast_to_players(room_id, target_player_ids, message_type, body)
                 .await
+        }
+    }
+
+    async fn broadcast_logic_broadcasts(&self, room_id: &str, broadcasts: Vec<RoomLogicBroadcast>) {
+        for RoomLogicBroadcast {
+            message_type,
+            body,
+            target_player_ids,
+        } in broadcasts
+        {
+            let _ = self
+                .broadcast_message(room_id, &target_player_ids, message_type, body)
+                .await;
         }
     }
 
