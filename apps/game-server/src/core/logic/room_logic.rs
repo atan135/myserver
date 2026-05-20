@@ -46,8 +46,12 @@ pub trait RoomLogic: Send {
 
     fn on_game_ended(&mut self, _room_id: &str) {}
 
+    // Called only after framework validation and pending-input upsert.
+    // Use this for telemetry or non-authoritative collection only. Authoritative
+    // gameplay state changes must be applied in on_tick with resolved frame inputs.
     fn on_player_input(&mut self, _player_id: &str, _action: &str, _payload_json: &str) {}
 
+    // Authoritative frame simulation entry point.
     fn on_tick(&mut self, _frame_id: u32, _fps: u16, _inputs: &[PlayerInputRecord]) {}
 
     fn should_destroy(&self) -> bool {

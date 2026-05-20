@@ -870,8 +870,6 @@ impl RoomManager {
         let policy = self.policies.resolve(&room.policy_id);
 
         room.can_send_input(player_id)?;
-        room.update_activity();
-        room.logic.on_player_input(player_id, action, payload_json);
         if frame_id <= room.current_frame {
             return Err("INPUT_FRAME_EXPIRED");
         }
@@ -891,6 +889,8 @@ impl RoomManager {
             received_at: Instant::now(),
         };
         let outcome = room.upsert_pending_input(input_record);
+        room.update_activity();
+        room.logic.on_player_input(player_id, action, payload_json);
         if matches!(outcome, PendingInputUpsert::Replaced) {
             info!(
                 room_id = room_id,
@@ -1441,19 +1441,33 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingRoomLogicFactory {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
+        inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
     }
 
     impl RecordingRoomLogicFactory {
         fn recorded_ticks(&self) -> Vec<(u32, Vec<PlayerInputRecord>)> {
             self.ticks.lock().unwrap().clone()
         }
+
+        fn recorded_inputs(&self) -> Vec<(String, String, String)> {
+            self.inputs.lock().unwrap().clone()
+        }
     }
 
     struct RecordingRoomLogic {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
+        inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
     }
 
     impl RoomLogic for RecordingRoomLogic {
+        fn on_player_input(&mut self, player_id: &str, action: &str, payload_json: &str) {
+            self.inputs.lock().unwrap().push((
+                player_id.to_string(),
+                action.to_string(),
+                payload_json.to_string(),
+            ));
+        }
+
         fn on_tick(&mut self, frame_id: u32, _fps: u16, inputs: &[PlayerInputRecord]) {
             self.ticks.lock().unwrap().push((frame_id, inputs.to_vec()));
         }
@@ -1463,6 +1477,7 @@ mod tests {
         fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
             Box::new(RecordingRoomLogic {
                 ticks: Arc::clone(&self.ticks),
+                inputs: Arc::clone(&self.inputs),
             })
         }
     }
@@ -1661,6 +1676,38 @@ mod tests {
             .accept_player_input("room-test", "player-a", 5, "move", "{\"x\":1}")
             .await;
         assert_eq!(result, Err("INPUT_FRAME_TOO_FAR"));
+    }
+
+    #[tokio::test]
+    async fn rejected_input_does_not_trigger_player_input_hook() {
+        let (manager, factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+
+        let too_far = manager
+            .accept_player_input("room-test", "player-a", 5, "move", "{\"x\":1}")
+            .await;
+        assert_eq!(too_far, Err("INPUT_FRAME_TOO_FAR"));
+        assert!(factory.recorded_inputs().is_empty());
+
+        manager
+            .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
+            .await
+            .unwrap();
+        manager
+            .accept_player_input("room-test", "player-b", 1, "move", "{\"x\":2}")
+            .await
+            .unwrap();
+        let _ = manager.process_room_tick("room-test", 10).await;
+
+        let expired = manager
+            .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":3}")
+            .await;
+        assert_eq!(expired, Err("INPUT_FRAME_EXPIRED"));
+
+        let recorded = factory.recorded_inputs();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].0, "player-a");
+        assert_eq!(recorded[1].0, "player-b");
     }
 
     #[tokio::test]
@@ -1949,11 +1996,12 @@ mod tests {
     async fn drop_after_misses_marks_player_offline_after_threshold() {
         let (sender, _receiver) = mpsc::unbounded_channel();
         let ticks = Arc::new(StdMutex::new(Vec::new()));
+        let inputs = Arc::new(StdMutex::new(Vec::new()));
         let mut room = Room::new(
             "room-test".to_string(),
             "player-a".to_string(),
             "default_match".to_string(),
-            Box::new(RecordingRoomLogic { ticks }),
+            Box::new(RecordingRoomLogic { ticks, inputs }),
         );
         room.members.insert(
             "player-a".to_string(),

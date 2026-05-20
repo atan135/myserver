@@ -130,7 +130,9 @@ server.rs / core/service
 4. 拒绝 `frame_id <= current_frame` 的过期输入。
 5. 拒绝超过 `current_frame + input_delay_frames` 的过远未来帧。
 6. 对同一玩家同一帧输入执行 upsert，后到输入会替换前一条。
-7. 调用 `RoomLogic::on_player_input`，让玩法层做即时记录或校验。
+7. 输入被框架接受后，调用 `RoomLogic::on_player_input`，让玩法层做统计、审计、临时缓存等非权威记录。
+
+`on_player_input` 不应修改玩法权威状态。移动、战斗、技能等会影响房间结果的状态变更必须在 `RoomLogic::on_tick(frame_id, fps, inputs)` 中基于已解析出的帧输入集合统一完成。这样可以避免过期帧、过远未来帧或其他被拒绝的输入在收包阶段提前产生副作用，也便于回放、重连恢复和房间迁移。
 
 ### 5.2 每帧推进
 
