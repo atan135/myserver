@@ -1,64 +1,68 @@
-# 文档与代码不一致汇总
+# 文档校准状态汇总
 
-## 对比范围
+## 当前结论
 
-- 文档：`CLAUDE.md`、`README.md`、`docs/*.md`
-- 未纳入本次对比：`docs/prompts/*`
-- 代码：按文档涉及的核心服务、协议、配置与启动链路进行核对，重点覆盖 `auth-http`、`admin-api`、`admin-web`、`mail-service`、`chat-server`、`match-service`、`game-proxy`、`game-server`、`packages/proto`
+截至当前仓库状态，`summary.md` 之前记录的多项“文档与代码不一致”已经通过后续文档校准处理，不应继续作为待修复清单使用。
 
-## 分类口径
+当前正式阅读入口应以这些文件为准：
 
-- `文档未写明`：代码里已经存在能力，或者当前实现状态已经变化，但文档缺失、过时或描述错误
-- `代码未实现`：文档把能力写成当前方案/既定能力/已完成设计，但代码未实现、只实现了一部分，或者仍是 stub
-- 说明：对于设计类文档，如果文档已经明确写成“待完成/后续阶段/开放问题”，这类内容不计入本次不一致
+- `CLAUDE.md`：AI 与协作者入口，只保留整体理念、架构边界、基础设定和文档导航
+- `docs/architecture.md`：当前整体架构主说明
+- `docs/protocol.md`：当前协议设计主说明
+- 各专题文档：对应模块的当前实现、目标设计和未完成项
 
-### 7. `docs/game-server-chat-design.md` 描述的聊天/邮件整体方案只实现了一部分
+`docs/prompts/*` 只保留初始设计阶段历史提示词，不再作为当前设计依据。
 
-- 判定：`代码未实现`
-- 文档侧：文档画出了 `chat-service + mail-service + announce-svc` 的整体结构，并描述了附件领取、邮件/聊天关系、离线消息体验等。
-- 代码侧：
-- `announce-service` 已实现，并支持公告 CRUD、有效公告查询、Redis 注册、metrics 上报；`mock-client` 已有 `announce-list/get/create/update/delete` 调试场景
-- 没有看到“聊天与邮件共用存储层”的实现
-- 邮件附件领取已经实现：`mail-service` 提供了 `POST /api/v1/mails/:mailId/claim`，会先调用 `game-server admin` 发奖，再将邮件状态更新为 `claimed`
-- 离线聊天当前更接近“历史可查询”，代码中未看到“登录后自动补发离线消息”的闭环
-- 相关文件：`docs/game-server-chat-design.md`，`apps/chat-server/src/chat_store.rs`，`apps/chat-server/src/chat_service.rs`，`apps/chat-server/src/mail_subscriber.rs`，`apps/mail-service/src/routes.js`，`apps/announce-service/src/routes.js`，`tools/mock-client/src/scenarios/announce.js`
+## 已完成校准的范围
 
-### 8. `docs/rate-limit-and-security.md` 描述的风控分层只实现了 `auth-http` 的一部分
+### 整体与协议
 
-- 判定：`代码未实现`
-- 文档侧：文档描述了 `auth-http`、`game-proxy`、`game-server` 三层风控。
-- 代码侧：
-- ticket 不是一次性消费，`game-server` 验证通过后没有删除 Redis ticket
-- ticket 默认 TTL 是 24 小时，不是文档中的 5 分钟
-- `game-proxy` 的 IP 限速、单 IP 连接数限制、黑名单未实现
-- `game-server` 的消息频率限制、操作冷却未看到实现
-- 相关文件：`docs/rate-limit-and-security.md`，`apps/auth-http/src/auth-store.js`，`apps/auth-http/src/config.js`，`apps/game-server/src/core/service/core_service.rs`，`apps/game-proxy/src/*`，`apps/game-server/src/*`
+- `CLAUDE.md` 已调整为入口文档，不再承载大量细节实现。
+- `docs/architecture.md` 已作为当前整体架构主说明。
+- `docs/protocol.md` 已按当前协议与服务边界重新校准。
 
-### 9. `docs/game-server-scene-map-format-design.md` 里的第一阶段查询接口未完整实现
+### 游戏服与接入层
 
-- 判定：`代码未实现`
-- 文档侧：文档列出了 `is_walkable / is_blocked / resolve_aoi_block / clamp_position` 一组查询能力。
-- 代码侧：当前 `SceneQuery` 只实现了 `is_walkable` 和 `clamp_position`，没有 `is_blocked`、`resolve_aoi_block`。
-- 相关文件：`docs/game-server-scene-map-format-design.md`，`apps/game-server/src/core/system/scene/query.rs`
+- `docs/game-server-rust-guide.md`、`docs/game-server-framework-roadmap.md`、`docs/game-server-frame-sync-design.md`、`docs/game-proxy-hot-update-design.md` 等已按当前 `game-server` / `game-proxy` 代码口径做过校准。
+- 文档已区分当前已实现能力、目标设计和仍未落地的能力。
 
-### 10. `docs/admin-panel.md` 的“所有管理接口都需要 Bearer token”与代码实现不符
+### 配置、场景与具体游戏逻辑
 
-- 判定：`代码未实现`
-- 文档侧：安全说明写的是“所有管理接口需要 `Authorization: Bearer <token>`”。
-- 代码侧：监控接口在认证中间件之前挂载，当前是匿名可访问。
-- 相关文件：`docs/admin-panel.md`，`apps/admin-api/src/routes.js`
+- CSV 配置、CSV 热更、场景地图文档已按当前实现状态补充说明。
+- 背包和战斗已从“配置与场景”中拆为“具体游戏逻辑”文档分类。
+- `docs/game-server-scene-map-format-design.md` 已明确当前 `SceneQuery` 只提供 `scene`、`spawn_point`、`is_walkable`、`clamp_position`，`resolve_aoi_block` 仍是后续能力。
 
----
+### 周边服务与后台
 
-## 三、建议优先修正顺序
+- `docs/service-registry-design.md` 已补充当前 Redis 注册中心实现状态，明确没有独立 HTTP Registry API。
+- `docs/game-server-chat-design.md` 已修正聊天、邮件、公告的当前真实链路：`chat-server`、`mail-service`、`announce-service` 独立部署，未共用 `message-store`，`game-proxy` 不负责聊天/邮件/公告转发。
+- `docs/admin-panel.md` 已补充监控服务清单和当前权限边界。
 
-### 高优先级
+### 安全
 
-- 修正文档中的端口、协议和实现状态，避免开发/联调时直接连错端口或误判功能是否可用
-- 修复 ticket 一次性消费、监控接口鉴权这两项“文档承诺已存在但代码未兑现”的问题，并修正文档/汇总里对 `mail-service` 附件领取实现状态的误判
-- 补齐 `service-registry` 的登录响应和实例级心跳口径，避免文档、注册中心和监控系统各自维护不同事实
+- `docs/security-design.md` 已补充 `auth-http`、`game-proxy`、`game-server`、`chat-server` 的当前安全边界。
+- `docs/rate-limit-and-security.md` 已明确当前 ticket 校验、限流和风控现状：
+  - `auth-http` 负责 ticket 签发、存储、撤销和登录侧限流
+  - `game-proxy` 会校验 `AuthReq` ticket 签名与 Redis ticket 记录
+  - `game-server` 会校验 ticket 签名与 Redis 归属
+  - `chat-server` 当前只校验 ticket 签名和过期时间，不查询 Redis ticket 记录
 
-### 中优先级
+## 仍需注意的真实缺口
 
-- 更新 `docs/admin-panel.md`、`docs/monitoring-design.md`、`docs/protocol.md`
-- 把 `match-service`、背包、聊天/邮件、场景查询这些“部分实现”明确标注为当前进度，避免文档看起来像已经全部可用
+以下内容不是“文档没写清楚”，而是当前代码能力本身仍未完整落地，相关文档已经或应该明确标注为当前缺口：
+
+- `admin-api` 后端接口当前只有 JWT 登录校验，尚未真正执行基于角色的接口授权。
+- `/api/admin/monitoring/*` 监控接口当前没有鉴权，不应直接暴露到公网。
+- `game-server` admin 侧 GM 广播、踢人、封禁仍未形成完整端到端闭环。
+- `game-proxy` 当前没有 IP 黑名单、单 IP / 单账号连接上限和成熟公网加密方案。
+- `game-server` 当前没有统一消息频率限制、时间戳窗口、反重放和通用作弊计数。
+- `chat-server` 当前没有 Redis ticket 存在性校验、统一消息频率限制和公网 TLS 策略。
+- `mail-service` / `announce-service` 当前缺少统一玩家鉴权、后台鉴权或角色约束。
+- `SceneCatalog` 当前不会随 CSV reload 自动重建，场景元数据热更不等于运行中查询立即生效。
+- AOI 分块查询、兴趣管理接入、更多场景业务查询仍是后续能力。
+
+## 后续维护口径
+
+1. 如果继续发现文档与代码不一致，优先修正文档中的“当前实现”描述，不要把目标设计写成已完成能力。
+2. 如果代码补齐了上述真实缺口，应同步更新对应专题文档和本汇总。
+3. 新增功能文档时应放入 `docs/` 的对应分类，不要再依赖 `docs/prompts/`。
