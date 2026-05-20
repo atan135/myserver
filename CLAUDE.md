@@ -116,6 +116,7 @@ docs/                 # 当前正式设计文档
 
 - [安全设计](./docs/security-design.md)
 - [限流与安全现状](./docs/rate-limit-and-security.md)
+- [游戏服务安全分层与敏感操作处理指南](./docs/game-security-operation-guide.md)
 
 ## 基础设定
 
