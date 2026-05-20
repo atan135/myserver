@@ -42,6 +42,7 @@ pub struct PlayerInputRecord {
     pub action: String,
     pub payload_json: String,
     pub received_at: Instant,
+    pub is_synthetic: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

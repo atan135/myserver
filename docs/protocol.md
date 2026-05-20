@@ -246,6 +246,13 @@
 - `client_y: float`
 - `client_frame_id: uint32`
 
+说明：
+
+- `MOVE_INPUT_TYPE_MOVE_DIR` 和 `MOVE_INPUT_TYPE_MOVE_STOP` 是移动控制输入，客户端移动期间应持续发送。
+- `MOVE_INPUT_TYPE_FACE_TO` 只表示朝向变化，不会让服务端继续保持移动。
+- 服务端会拒绝非有限数值或超出安全范围的方向、客户端位置字段。
+- 连续缺少真实移动控制输入达到房间策略阈值后，服务端会强制停步，并通过 `MovementSnapshotPush.reason_code = MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT` 下发权威状态。
+
 #### `MovementSnapshotPush`
 
 - `room_id: string`

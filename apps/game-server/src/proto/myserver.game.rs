@@ -851,6 +851,7 @@ pub enum MovementCorrectionReason {
     ReconnectRecovery = 6,
     ObserverRecovery = 7,
     PlayerOffline = 8,
+    ControlTimeout = 9,
 }
 impl MovementCorrectionReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -868,6 +869,7 @@ impl MovementCorrectionReason {
             Self::ReconnectRecovery => "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY",
             Self::ObserverRecovery => "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY",
             Self::PlayerOffline => "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE",
+            Self::ControlTimeout => "MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -890,6 +892,7 @@ impl MovementCorrectionReason {
                 Some(Self::ObserverRecovery)
             }
             "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE" => Some(Self::PlayerOffline),
+            "MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT" => Some(Self::ControlTimeout),
             _ => None,
         }
     }

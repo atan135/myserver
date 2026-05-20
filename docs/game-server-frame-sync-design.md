@@ -98,6 +98,7 @@ server.rs / core/service
 | `movement_correction_threshold` | 位移误差强校正阈值 |
 | `movement_aoi_enabled` | 是否启用位移校正 AOI 过滤 |
 | `movement_aoi_radius` | AOI 半径 |
+| `movement_control_stop_frames` | 连续缺少真实移动控制输入后自动停步的帧数，`0` 表示禁用 |
 
 当前内置策略：
 
@@ -250,9 +251,12 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 - 根据 `movement_correction_interval_frames` 周期性生成权威快照。
 - 根据 `movement_correction_threshold` 对异常漂移触发强校正。
 - 根据 `movement_aoi_enabled` 和 `movement_aoi_radius` 过滤下发对象。
+- 根据 `movement_control_stop_frames` 在玩家持续缺少真实移动控制输入时自动停步，并用 `CONTROL_TIMEOUT` 校正通知客户端。
 - 在重连或观战恢复时提供 `movement_recovery`。
 
 客户端不应把当前位置当作权威状态直接提交给服务端。服务端应以输入和场景规则计算权威位置，再通过 `MovementSnapshotPush` 或 `MovementRejectPush` 做校正。
+
+当前简化移动模型仍是固定速度：`MoveDir` 表示持续移动控制，`MoveStop` 表示显式停止，二者都会刷新移动控制状态；`FaceTo` 只改变朝向，不会被视为移动控制。框架补帧或复用上一帧产生的合成输入也不会刷新移动控制状态，因此客户端需要持续发送真实移动控制输入；超过策略阈值后，服务端会把该玩家权威状态置为停止。
 
 更完整的算法背景见 [网络延迟补偿设计](./network-lag-compensation-design.md)。
 

@@ -160,6 +160,7 @@ mod tests {
             action: ACTION_COMBAT_CAST_SKILL.to_string(),
             payload_json: "{\"skillId\":1,\"targetPlayerId\":\"player-b\"}".to_string(),
             received_at: std::time::Instant::now(),
+            is_synthetic: false,
         };
 
         let command = parse_player_input(&record, &combat).unwrap().unwrap();

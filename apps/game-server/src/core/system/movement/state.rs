@@ -78,6 +78,7 @@ pub struct RoomMovementState {
     pub correction_interval_frames: u32,
     pub aoi_radius: f32,
     pub aoi_enabled: bool,
+    pub movement_control_stop_frames: u32,
     entities: Vec<EntityMeta>,
     positions_x: Vec<f32>,
     positions_y: Vec<f32>,
@@ -91,6 +92,7 @@ pub struct RoomMovementState {
     index_entity_map: Vec<EntityId>,
     latest_client_state_by_player: HashMap<String, ClientStateSample>,
     last_sent_frame_by_player: HashMap<String, u32>,
+    missing_control_frames_by_player: HashMap<String, u32>,
 }
 
 impl RoomMovementState {
@@ -105,6 +107,7 @@ impl RoomMovementState {
             correction_interval_frames: snapshot_interval_frames.max(1),
             aoi_radius: 0.0,
             aoi_enabled: false,
+            movement_control_stop_frames: 3,
             entities: Vec::new(),
             positions_x: Vec::new(),
             positions_y: Vec::new(),
@@ -118,6 +121,7 @@ impl RoomMovementState {
             index_entity_map: Vec::new(),
             latest_client_state_by_player: HashMap::new(),
             last_sent_frame_by_player: HashMap::new(),
+            missing_control_frames_by_player: HashMap::new(),
         }
     }
 
@@ -148,6 +152,8 @@ impl RoomMovementState {
             .insert(player_id.to_string(), entity_id);
         self.entity_index_map.insert(entity_id, dense_index);
         self.index_entity_map.push(entity_id);
+        self.missing_control_frames_by_player
+            .insert(player_id.to_string(), 0);
 
         self.entity_state_at(dense_index)
             .expect("spawned movement entity missing")
@@ -178,6 +184,7 @@ impl RoomMovementState {
 
         self.latest_client_state_by_player.remove(player_id);
         self.last_sent_frame_by_player.remove(player_id);
+        self.missing_control_frames_by_player.remove(player_id);
     }
 
     pub fn entity(&self, player_id: &str) -> Option<MovementEntityState> {
@@ -337,6 +344,7 @@ impl RoomMovementState {
 
         let _ = self.set_moving_at(dense_index, false);
         let _ = self.set_last_input_frame_at(dense_index, frame_id);
+        self.reset_missing_movement_control_frames(player_id);
         self.entity_proto_at(dense_index)
     }
 
@@ -404,6 +412,27 @@ impl RoomMovementState {
         self.correction_distance_threshold = correction_distance_threshold.max(0.0);
         self.aoi_radius = aoi_radius.max(0.0);
         self.aoi_enabled = aoi_enabled && self.aoi_radius > 0.0;
+    }
+
+    pub fn set_movement_control_stop_frames(&mut self, movement_control_stop_frames: u32) {
+        self.movement_control_stop_frames = movement_control_stop_frames;
+    }
+
+    pub fn reset_missing_movement_control_frames(&mut self, player_id: &str) {
+        self.missing_control_frames_by_player
+            .insert(player_id.to_string(), 0);
+    }
+
+    pub fn increment_missing_movement_control_frames(&mut self, player_id: &str) -> u32 {
+        let next = self
+            .missing_control_frames_by_player
+            .get(player_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.missing_control_frames_by_player
+            .insert(player_id.to_string(), next);
+        next
     }
 
     pub fn targets_for_player(&self, requester_player_id: &str) -> Vec<EntityTransform> {

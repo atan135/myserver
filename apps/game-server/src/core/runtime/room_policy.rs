@@ -37,6 +37,7 @@ pub struct RoomRuntimePolicy {
     pub movement_correction_threshold: f32,
     pub movement_aoi_enabled: bool,
     pub movement_aoi_radius: f32,
+    pub movement_control_stop_frames: u32,
 }
 
 impl RoomRuntimePolicy {
@@ -64,6 +65,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.5,
             movement_aoi_enabled: false,
             movement_aoi_radius: 0.0,
+            movement_control_stop_frames: 3,
         }
     }
 
@@ -91,6 +93,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.5,
             movement_aoi_enabled: true,
             movement_aoi_radius: 18.0,
+            movement_control_stop_frames: 3,
         }
     }
 
@@ -118,6 +121,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.4,
             movement_aoi_enabled: true,
             movement_aoi_radius: 12.0,
+            movement_control_stop_frames: 3,
         }
     }
 
@@ -145,6 +149,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.35,
             movement_aoi_enabled: true,
             movement_aoi_radius: 20.0,
+            movement_control_stop_frames: 3,
         }
     }
 
@@ -172,6 +177,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.35,
             movement_aoi_enabled: true,
             movement_aoi_radius: 16.0,
+            movement_control_stop_frames: 3,
         }
     }
 
@@ -199,6 +205,7 @@ impl RoomRuntimePolicy {
             movement_correction_threshold: 0.4,
             movement_aoi_enabled: true,
             movement_aoi_radius: 18.0,
+            movement_control_stop_frames: 3,
         }
     }
 }

@@ -28,6 +28,15 @@ pub fn decide_corrections(
         );
     }
 
+    if !result.control_timeout_entities.is_empty() {
+        corrections.push(state.incremental_correction(
+            frame_id,
+            MovementCorrectionReason::ControlTimeout,
+            all_player_ids.to_vec(),
+            result.control_timeout_entities.clone(),
+        ));
+    }
+
     for drift in &result.drifted_players {
         if targeted_players.contains(&drift.player_id) {
             continue;
@@ -158,5 +167,6 @@ pub fn correction_reason_label(reason: MovementCorrectionReason) -> &'static str
         MovementCorrectionReason::ReconnectRecovery => "reconnect_recovery",
         MovementCorrectionReason::ObserverRecovery => "observer_recovery",
         MovementCorrectionReason::PlayerOffline => "player_offline",
+        MovementCorrectionReason::ControlTimeout => "control_timeout",
     }
 }

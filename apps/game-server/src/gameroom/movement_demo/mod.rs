@@ -33,6 +33,7 @@ impl MovementDemoLogic {
         correction_threshold: f32,
         aoi_radius: f32,
         aoi_enabled: bool,
+        movement_control_stop_frames: u32,
     ) -> Self {
         let mut movement_state =
             RoomMovementState::new(default_scene_id, correction_interval_frames);
@@ -42,6 +43,7 @@ impl MovementDemoLogic {
             aoi_radius,
             aoi_enabled,
         );
+        movement_state.set_movement_control_stop_frames(movement_control_stop_frames);
         Self {
             room_id: String::new(),
             tick_count: 0,

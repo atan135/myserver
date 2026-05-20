@@ -60,6 +60,12 @@ pub enum MovementCommand {
     FaceTo(Vec2),
 }
 
+impl MovementCommand {
+    pub fn is_locomotion_control(&self) -> bool {
+        matches!(self, Self::MoveDir(_) | Self::MoveStop)
+    }
+}
+
 #[derive(Debug)]
 pub struct MovementInputError {
     pub error_code: &'static str,
@@ -311,6 +317,7 @@ mod tests {
             action: ACTION_MOVE_DIR.to_string(),
             payload_json: "{\"dirX\":1.0e30,\"dirY\":0.0}".to_string(),
             received_at: std::time::Instant::now(),
+            is_synthetic: false,
         };
 
         let error = parse_player_input(&record).unwrap_err();

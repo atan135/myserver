@@ -26,6 +26,7 @@ pub struct MovementDriftRecord {
 #[derive(Debug, Clone, Default)]
 pub struct SimulationTickResult {
     pub changed_entities: Vec<EntityTransform>,
+    pub control_timeout_entities: Vec<EntityTransform>,
     pub rejects: Vec<MovementRejectRecord>,
     pub drifted_players: Vec<MovementDriftRecord>,
 }
@@ -40,6 +41,7 @@ pub fn tick_movement<S: SceneQuery>(
     let mut changed_by_entity = std::collections::HashSet::new();
     let mut rejects = Vec::new();
     let mut players_with_client_state = std::collections::BTreeSet::new();
+    let mut players_with_locomotion_control = std::collections::BTreeSet::new();
 
     for input in inputs {
         let Some(dense_index) = state.dense_index_by_player(&input.player_id) else {
@@ -55,6 +57,10 @@ pub fn tick_movement<S: SceneQuery>(
                     players_with_client_state.insert(input.player_id.clone());
                 }
                 if let Some(command) = parsed.command {
+                    if command.is_locomotion_control() && !input.is_synthetic {
+                        state.reset_missing_movement_control_frames(&input.player_id);
+                        players_with_locomotion_control.insert(input.player_id.clone());
+                    }
                     if state.apply_command_at(dense_index, input.frame_id, command) {
                         let Some(after) = state.entity_proto_at(dense_index) else {
                             continue;
@@ -79,6 +85,23 @@ pub fn tick_movement<S: SceneQuery>(
                     server_y: corrected.y,
                 });
             }
+        }
+    }
+
+    let control_timeout_entities = stop_players_without_locomotion_control(
+        state,
+        frame_id,
+        &players_with_locomotion_control,
+        &mut changed_by_entity,
+    );
+    for timeout_entity in &control_timeout_entities {
+        for reject in rejects
+            .iter_mut()
+            .filter(|reject| reject.player_id == timeout_entity.player_id)
+        {
+            reject.corrected = timeout_entity.clone();
+            reject.server_x = timeout_entity.x;
+            reject.server_y = timeout_entity.y;
         }
     }
 
@@ -163,12 +186,55 @@ pub fn tick_movement<S: SceneQuery>(
         .filter(|entity| changed_by_entity.contains(&entity.entity_id))
         .collect();
 
-    let _ = frame_id;
     SimulationTickResult {
         changed_entities,
+        control_timeout_entities,
         rejects,
         drifted_players,
     }
+}
+
+fn stop_players_without_locomotion_control(
+    state: &mut RoomMovementState,
+    frame_id: u32,
+    players_with_locomotion_control: &std::collections::BTreeSet<String>,
+    changed_by_entity: &mut std::collections::HashSet<u64>,
+) -> Vec<EntityTransform> {
+    if state.movement_control_stop_frames == 0 {
+        return Vec::new();
+    }
+
+    let player_ids = state
+        .dense_indices()
+        .filter_map(|dense_index| state.entity_player_id(dense_index).map(str::to_string))
+        .collect::<Vec<_>>();
+
+    let mut stopped_entities = Vec::new();
+    for player_id in player_ids {
+        let Some(dense_index) = state.dense_index_by_player(&player_id) else {
+            continue;
+        };
+        let is_moving = state.is_moving_at(dense_index).unwrap_or(false);
+        if !is_moving {
+            state.reset_missing_movement_control_frames(&player_id);
+            continue;
+        }
+        if players_with_locomotion_control.contains(&player_id) {
+            continue;
+        }
+
+        let missing_frames = state.increment_missing_movement_control_frames(&player_id);
+        if missing_frames < state.movement_control_stop_frames {
+            continue;
+        }
+
+        if let Some(stopped) = state.stop_player(&player_id, frame_id) {
+            changed_by_entity.insert(stopped.entity_id);
+            stopped_entities.push(stopped);
+        }
+    }
+
+    stopped_entities
 }
 
 fn entity_changed(before: &EntityTransform, after: &EntityTransform) -> bool {
@@ -205,6 +271,54 @@ mod tests {
             dir_y: 0.0,
             radius: 0.0,
             tags: Vec::new(),
+        }
+    }
+
+    struct OpenScene;
+
+    impl SceneQuery for OpenScene {
+        fn scene(&self, _scene_id: i32) -> Option<&SceneDefinition> {
+            None
+        }
+
+        fn spawn_point(&self, _spawn_id: i32) -> Option<&SceneSpawnPointDefinition> {
+            None
+        }
+
+        fn is_walkable(&self, _scene_id: i32, _world_x: f32, _world_y: f32) -> bool {
+            true
+        }
+
+        fn clamp_position(
+            &self,
+            _scene_id: i32,
+            _from_x: f32,
+            _from_y: f32,
+            to_x: f32,
+            to_y: f32,
+        ) -> ClampPositionResult {
+            ClampPositionResult {
+                x: to_x,
+                y: to_y,
+                blocked: false,
+            }
+        }
+    }
+
+    fn movement_input(
+        frame_id: u32,
+        player_id: &str,
+        action: &str,
+        payload_json: &str,
+        is_synthetic: bool,
+    ) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            player_id: player_id.to_string(),
+            action: action.to_string(),
+            payload_json: payload_json.to_string(),
+            received_at: Instant::now(),
+            is_synthetic,
         }
     }
 
@@ -245,13 +359,13 @@ mod tests {
         let spawn = build_spawn();
         state.spawn_player("player-a", &spawn, 4.0);
 
-        let input = PlayerInputRecord {
-            frame_id: 1,
-            player_id: "player-a".to_string(),
-            action: "move_dir".to_string(),
-            payload_json: "{\"dirX\":1.0,\"dirY\":0.0}".to_string(),
-            received_at: Instant::now(),
-        };
+        let input = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            false,
+        );
 
         let result = tick_movement(&mut state, 1, 20, &[input], &BlockingScene);
         assert_eq!(result.rejects.len(), 1);
@@ -260,54 +374,109 @@ mod tests {
 
     #[test]
     fn client_drift_is_detected_when_threshold_exceeded() {
-        struct OpenScene;
-
-        impl SceneQuery for OpenScene {
-            fn scene(&self, _scene_id: i32) -> Option<&SceneDefinition> {
-                None
-            }
-
-            fn spawn_point(&self, _spawn_id: i32) -> Option<&SceneSpawnPointDefinition> {
-                None
-            }
-
-            fn is_walkable(&self, _scene_id: i32, _world_x: f32, _world_y: f32) -> bool {
-                true
-            }
-
-            fn clamp_position(
-                &self,
-                _scene_id: i32,
-                _from_x: f32,
-                _from_y: f32,
-                to_x: f32,
-                to_y: f32,
-            ) -> ClampPositionResult {
-                ClampPositionResult {
-                    x: to_x,
-                    y: to_y,
-                    blocked: false,
-                }
-            }
-        }
-
         let mut state = RoomMovementState::new(1, 3);
         state.set_correction_config(3, 0.5, 0.0, false);
         let spawn = build_spawn();
         state.spawn_player("player-a", &spawn, 4.0);
 
-        let input = PlayerInputRecord {
-            frame_id: 1,
-            player_id: "player-a".to_string(),
-            action: "move_dir".to_string(),
-            payload_json:
-                "{\"dirX\":1.0,\"dirY\":0.0,\"hasClientState\":true,\"clientX\":99.0,\"clientY\":99.0,\"clientFrameId\":1}"
-                    .to_string(),
-            received_at: Instant::now(),
-        };
+        let input = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0,\"hasClientState\":true,\"clientX\":99.0,\"clientY\":99.0,\"clientFrameId\":1}",
+            false,
+        );
 
         let result = tick_movement(&mut state, 1, 20, &[input], &OpenScene);
         assert_eq!(result.drifted_players.len(), 1);
         assert_eq!(result.drifted_players[0].player_id, "player-a");
+    }
+
+    #[test]
+    fn missing_movement_control_stops_after_threshold() {
+        let mut state = RoomMovementState::new(1, 3);
+        state.set_movement_control_stop_frames(2);
+        let spawn = build_spawn();
+        state.spawn_player("player-a", &spawn, 4.0);
+
+        let move_dir = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            false,
+        );
+        let result = tick_movement(&mut state, 1, 20, &[move_dir], &OpenScene);
+        assert!(result.control_timeout_entities.is_empty());
+        assert!(state.entity("player-a").unwrap().moving);
+
+        let result = tick_movement(&mut state, 2, 20, &[], &OpenScene);
+        assert!(result.control_timeout_entities.is_empty());
+        assert!(state.entity("player-a").unwrap().moving);
+
+        let result = tick_movement(&mut state, 3, 20, &[], &OpenScene);
+        assert_eq!(result.control_timeout_entities.len(), 1);
+        let entity = state.entity("player-a").unwrap();
+        assert!(!entity.moving);
+        assert_eq!(entity.last_input_frame, 3);
+    }
+
+    #[test]
+    fn face_to_does_not_keep_movement_control_alive() {
+        let mut state = RoomMovementState::new(1, 3);
+        state.set_movement_control_stop_frames(1);
+        let spawn = build_spawn();
+        state.spawn_player("player-a", &spawn, 4.0);
+
+        let move_dir = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            false,
+        );
+        tick_movement(&mut state, 1, 20, &[move_dir], &OpenScene);
+
+        let face_to = movement_input(
+            2,
+            "player-a",
+            "face_to",
+            "{\"dirX\":0.0,\"dirY\":1.0}",
+            false,
+        );
+        let result = tick_movement(&mut state, 2, 20, &[face_to], &OpenScene);
+        assert_eq!(result.control_timeout_entities.len(), 1);
+        let entity = state.entity("player-a").unwrap();
+        assert!(!entity.moving);
+        assert_eq!(entity.direction.x, 0.0);
+        assert_eq!(entity.direction.y, 1.0);
+    }
+
+    #[test]
+    fn synthetic_repeated_movement_does_not_keep_control_alive() {
+        let mut state = RoomMovementState::new(1, 3);
+        state.set_movement_control_stop_frames(1);
+        let spawn = build_spawn();
+        state.spawn_player("player-a", &spawn, 4.0);
+
+        let move_dir = movement_input(
+            1,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            false,
+        );
+        tick_movement(&mut state, 1, 20, &[move_dir], &OpenScene);
+
+        let repeated_move_dir = movement_input(
+            2,
+            "player-a",
+            "move_dir",
+            "{\"dirX\":1.0,\"dirY\":0.0}",
+            true,
+        );
+        let result = tick_movement(&mut state, 2, 20, &[repeated_move_dir], &OpenScene);
+        assert_eq!(result.control_timeout_entities.len(), 1);
+        assert!(!state.entity("player-a").unwrap().moving);
     }
 }

@@ -43,6 +43,7 @@ impl RoomLogicFactory for GameRoomLogicFactory {
                     policy.movement_correction_threshold,
                     policy.movement_aoi_radius,
                     policy.movement_aoi_enabled,
+                    policy.movement_control_stop_frames,
                 ))
             }
             "persistent_world" => Box::new(PersistentWorldLogic { tick_count: 0 }),

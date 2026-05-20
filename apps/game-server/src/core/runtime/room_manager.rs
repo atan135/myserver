@@ -887,6 +887,7 @@ impl RoomManager {
             action: action.to_string(),
             payload_json: payload_json.to_string(),
             received_at: Instant::now(),
+            is_synthetic: false,
         };
         let outcome = room.upsert_pending_input(input_record);
         room.update_activity();
@@ -1364,6 +1365,7 @@ fn synthetic_empty_input(frame_id: u32, player_id: &str) -> PlayerInputRecord {
         action: String::new(),
         payload_json: String::new(),
         received_at: Instant::now(),
+        is_synthetic: true,
     }
 }
 
@@ -1374,6 +1376,7 @@ fn clone_input_for_frame(frame_id: u32, input: &PlayerInputRecord) -> PlayerInpu
         action: input.action.clone(),
         payload_json: input.payload_json.clone(),
         received_at: Instant::now(),
+        is_synthetic: true,
     }
 }
 
