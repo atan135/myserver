@@ -10,7 +10,7 @@
 | 离线存储 | ✅ (离线消息) | ✅ (未读邮件) |
 | 持久化存储 | ✅ | ✅ |
 | 群组模式 | ✅ (群聊) | ❌ |
-| 实时性 | ✅ | 部分支持：新邮件通过 Redis Pub/Sub 通知在线玩家 |
+| 实时性 | ✅ | 部分支持：新邮件通过 Core NATS 通知在线玩家 |
 | 频率限制 | 目标能力，当前未实现 | ❌ |
 
 **结论**：两者可以共用一套消息存储层，但在业务逻辑上保持独立。
@@ -19,7 +19,7 @@
 
 - `chat-server` 已作为独立 Rust TCP 服务落地
 - `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
-- `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 metrics 上报
+- `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 NATS metrics 上报
 - “聊天与邮件共用同一套存储层”目前仍未实现
 - 离线聊天当前更接近“历史可查询”，未实现“登录后自动补发离线消息”的完整闭环
 
@@ -35,7 +35,7 @@ Client
   -> announce-service:9004 HTTP 公告接口
 
 mail-service
-  -> Redis Pub/Sub: mail:notify:{player_id}
+  -> Core NATS: myserver.mail.notify.<player_id_token>
   -> chat-server mail_subscriber
   -> 在线聊天 TCP 连接推送 MailNotifyPush
 
@@ -54,7 +54,7 @@ announce-service -> MySQL announcements 或内存存储
 - **群聊**：用户群组内共享消息
 - **聊天与房间解耦**：聊天不依赖游戏房间
 - **历史查询**：支持私聊 / 群聊历史消息分页查询
-- **邮件通知**：订阅 `mail:notify:*` 并向在线聊天连接推送 `MailNotifyPush`
+- **邮件通知**：订阅 `myserver.mail.notify.*` 并向在线聊天连接推送 `MailNotifyPush`
 
 ### 3.2 群组管理
 
@@ -181,7 +181,7 @@ CREATE TABLE chat_group_members (
 
 当前仓库实现说明：
 - `mail-service` 已独立落地为 Node.js HTTP 服务
-- 新邮件通知通过 Redis Pub/Sub 下发到 `mail:notify:{player_id}`
+- 新邮件通知通过 Core NATS 下发到 `myserver.mail.notify.<player_id_token>`
 - 附件领取由 `mail-service` 调用 `game-server admin` 完成真实发奖
 - 当前未与 `chat-server` 共用同一套存储表
 
@@ -350,7 +350,7 @@ CREATE TABLE announcements (
 | `game-proxy` | KCP 接入、流量代理 |
 | `game-server` | 游戏逻辑、房间系统 |
 | `chat-server` | 聊天（单聊、群聊）、历史消息查询、邮件通知推送 |
-| `mail-service` | 邮件系统、附件领取、Redis Pub/Sub 通知 |
+| `mail-service` | 邮件系统、附件领取、Core NATS 通知 |
 | `announce-service` | 公告系统 |
 
 ## 7. 客户端获取公告的流程

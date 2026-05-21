@@ -183,10 +183,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mysql_store = MySqlAuditStore::new(&config).await?;
 
     // 启动 metrics 上报任务
-    let metrics_redis_url = config.redis_url.clone();
+    let metrics_nats_url = config.nats_url.clone();
+    let metrics_instance_id = config.service_instance_id.clone();
     tokio::spawn(async move {
         metrics::METRICS
-            .start_reporting(&metrics_redis_url, 5)
+            .start_reporting(&metrics_nats_url, metrics_instance_id, 5)
             .await;
     });
 

@@ -12,7 +12,8 @@
 
 这套能力由以下模块共同组成：
 
-- 各服务内部 metrics 模块，周期性写入 Redis
+- 各服务内部 metrics 模块，周期性发布到 Core NATS
+- `metrics-collector` 订阅 `myserver.metrics.>`，写入 Redis metrics / metrics heartbeat 快照
 - `admin-api` 监控接口，读取 Redis，并提供手动归档入口
 - `admin-web` 监控页面，展示总览卡片与详情图表
 
@@ -24,7 +25,8 @@
 
 ```text
 服务运行时采集指标
-  -> 每 5 秒写入 Redis metrics / metrics heartbeat
+  -> 每 5 秒发布 Core NATS myserver.metrics.<service>.<instance>
+  -> metrics-collector 写入 Redis metrics / metrics heartbeat
   -> admin-api 读取 Redis 生成监控接口响应
   -> admin-web 通过监控页面轮询展示
 ```
@@ -41,6 +43,10 @@
 - `apps/chat-server/src/metrics.rs`
 - `apps/match-service/src/metrics.rs`
 - `apps/game-proxy/src/metrics.rs`
+
+采集落库：
+
+- `apps/metrics-collector/src/server.js`
 
 管理接口：
 
@@ -68,6 +74,8 @@
 - `admin-api`
 
 ## 3. Redis 数据结构
+
+Redis 中的 metrics 数据当前由 `metrics-collector` 写入，服务本身不再直接写 Redis metrics。
 
 ### 3.1 Metrics 数据
 

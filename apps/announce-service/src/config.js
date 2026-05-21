@@ -27,6 +27,7 @@ export function getConfig() {
     logEnableFile: parseBoolean(process.env.LOG_ENABLE_FILE, true),
     logDir: process.env.LOG_DIR || "logs/announce-service",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
+    natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     mysqlEnabled: parseBoolean(process.env.MYSQL_ENABLED, false),
     mysqlUrl:
       process.env.MYSQL_URL ||

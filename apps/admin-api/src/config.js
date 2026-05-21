@@ -25,6 +25,9 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/admin-api",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
+    serviceInstanceId:
+      process.env.SERVICE_INSTANCE_ID || "admin-api-001",
     mysqlUrl: process.env.MYSQL_URL || "mysql://root:password@127.0.0.1:3306/myserver_auth",
     mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",

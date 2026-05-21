@@ -423,10 +423,7 @@ export function createRoutes(
       await authStore.redis.del(authStore.prefixedKey(`session:${currentMappedToken}`));
       await authStore.redis.del(authStore.prefixedKey(`session-activity:${currentMappedToken}`));
     }
-    await authStore.redis.publish(
-      authStore.prefixedKey(`session:kick:${session.playerId}`),
-      JSON.stringify({ reason: "password_changed" })
-    );
+    await authStore.publishSessionKick(session.playerId, "password_changed");
 
     // Destroy current session as well (user must re-login)
     await authStore.redis.del(authStore.prefixedKey(`session:${accessToken}`));

@@ -8,13 +8,28 @@ import { GameAdminClient } from "./game-admin-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 import { createMetricsCollector } from "./metrics.js";
+import { createNatsClient } from "./nats-client.js";
 
 export async function createApp() {
   const config = getConfig();
   configureLogger(config);
 
   const redis = await createRedisClient(config);
-  const pool = await createMySqlPool(config);
+  let nats;
+  try {
+    nats = await createNatsClient(config);
+  } catch (error) {
+    await redis.quit();
+    throw error;
+  }
+  let pool;
+  try {
+    pool = await createMySqlPool(config);
+  } catch (error) {
+    await nats.close();
+    await redis.quit();
+    throw error;
+  }
   const adminStore = new AdminStore(pool);
   const gameAdminClient = new GameAdminClient(config);
 
@@ -22,7 +37,7 @@ export async function createApp() {
   await adminStore.ensureInitialAdmin(config);
 
   // Create and start metrics collector
-  const metrics = createMetricsCollector(redis, "admin-api", config.redisKeyPrefix || "");
+  const metrics = createMetricsCollector(nats, "admin-api", config.serviceInstanceId);
 
   const app = express();
   app.disable("x-powered-by");
@@ -50,5 +65,5 @@ export async function createApp() {
     res.status(500).json({ ok: false, error: "INTERNAL_ERROR" });
   });
 
-  return { app, config, pool, redis, metrics };
+  return { app, config, pool, redis, nats, metrics };
 }

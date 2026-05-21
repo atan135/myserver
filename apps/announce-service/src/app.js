@@ -8,24 +8,33 @@ import { AnnouncementStore } from "./mysql-store.js";
 import { createRedisClient } from "./redis-client.js";
 import { RegistryClient } from "./registry-client.js";
 import { createRoutes } from "./routes.js";
+import { createNatsClient } from "./nats-client.js";
 
 export async function createApp() {
   const config = getConfig();
   configureLogger(config);
 
   const redis = await createRedisClient(config);
+  let nats;
+  try {
+    nats = await createNatsClient(config);
+  } catch (error) {
+    await redis.quit();
+    throw error;
+  }
   let mysqlPool = null;
 
   try {
     mysqlPool = await createMySqlPool(config);
   } catch (error) {
+    await nats.close();
     await redis.quit();
     throw error;
   }
 
   const announcementStore = new AnnouncementStore(mysqlPool);
   const registryClient = new RegistryClient(redis, config);
-  const metrics = createMetricsCollector(redis, "announce-service");
+  const metrics = createMetricsCollector(nats, "announce-service", config.serviceInstanceId);
 
   const app = express();
   app.disable("x-powered-by");
@@ -60,5 +69,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis, mysqlPool, registryClient, metrics };
+  return { app, config, redis, nats, mysqlPool, registryClient, metrics };
 }

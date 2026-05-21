@@ -20,7 +20,7 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 - `game-server` 是游戏逻辑核心，负责玩家鉴权、房间生命周期、帧推进、配置表热加载、内部管理接口和主要游戏运行时。
 - `chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的独立能力服务。
 - `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/architecture.md` 和代码为准。
-- Redis 用于 session、ticket、限流、服务注册、metrics/heartbeat 和部分 Pub/Sub 通知。
+- Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - MariaDB / MySQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
 
@@ -34,7 +34,7 @@ Client / mock-client
 admin-web -> admin-api -> game-server admin / Redis / MySQL
 
 game-server <-> match-service
-mail-service -> Redis Pub/Sub -> chat-server
+mail-service -> Core NATS -> chat-server
 announce-service / mail-service / game-server / game-proxy -> service registry
 ```
 
@@ -119,6 +119,8 @@ docs/                 # 当前正式设计文档
 - [游戏服务安全分层与敏感操作处理指南](./docs/game-security-operation-guide.md)
 
 ## 基础设定
+
+本地二进制工具优先放在项目根目录 `bin/` 下，例如 `bin/nats-server.exe`。脚本和环境检查应优先使用该目录中的可执行文件；未找到时再回退到系统 `PATH` 或常见安装目录。
 
 日志配置统一使用以下环境变量模型：
 

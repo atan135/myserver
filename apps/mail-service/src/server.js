@@ -11,7 +11,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { app, config, redis, mysqlPool, registryClient, metrics } = appContext;
+  const { app, config, redis, nats, mysqlPool, registryClient, metrics } = appContext;
 
   // Register service to Redis
   try {
@@ -38,6 +38,12 @@ async function main() {
       await registryClient.deregister();
     } catch (error) {
       log("error", "shutdown.deregister_failed", { error: error.message });
+    }
+
+    try {
+      await nats.close();
+    } catch (error) {
+      log("error", "shutdown.nats_close_failed", { error: error.message });
     }
 
     try {

@@ -16,7 +16,7 @@ Client / mock-client
 admin-web -> admin-api -> game-server admin / Redis / MySQL
 
 game-server <-> match-service
-mail-service -> Redis Pub/Sub -> chat-server
+mail-service -> Core NATS -> chat-server
 announce-service / mail-service / game-server / game-proxy -> service registry
 ```
 
@@ -27,7 +27,7 @@ announce-service / mail-service / game-server / game-proxy -> service registry
 - `game-server` 已有房间生命周期、帧推进、配置加载、内部管理口和部分具体游戏逻辑。
 - `game-proxy` 已支持 KCP / TCP fallback、ticket 本地校验、静态上游和基于注册中心的动态发现。
 - `chat-server`、`mail-service`、`announce-service` 当前独立部署；`game-proxy` 不负责聊天、邮件或公告转发。
-- Redis 用于 session、ticket、限流、服务注册、metrics/heartbeat 和部分 Pub/Sub 通知。
+- Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - MariaDB / MySQL 用于账号、审计、游戏事件、公告、邮件等持久化数据。
 
 仍需注意的当前缺口：
@@ -123,9 +123,16 @@ docs/                 # 当前正式设计文档
 ## 环境依赖
 
 - Node.js 18+：`auth-http`、`admin-api`、`admin-web`、`announce-service`、`mail-service`、`mock-client`
-- Rust 1.75+：`game-server`、`game-proxy`、`chat-server`、`match-service`
-- Redis：session、ticket、限流、服务注册、metrics、Pub/Sub
+- Rust 1.88+：`game-server`、`game-proxy`、`chat-server`、`match-service`
+- Redis：session、ticket、限流、服务注册、metrics 快照
+- NATS：邮件通知、session kick、metrics 采集
 - MariaDB / MySQL：账号、审计、游戏事件、公告、邮件等持久化数据
+
+本地二进制工具优先放在项目根目录的 `bin/` 下，例如：
+
+- `bin/nats-server.exe`
+
+脚本和环境检查会优先使用 `bin/` 中的可执行文件；未找到时再回退到系统 `PATH` 或常见安装目录。
 
 数据库初始化脚本：
 

@@ -28,6 +28,9 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/auth-http",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
+    serviceInstanceId:
+      process.env.SERVICE_INSTANCE_ID || "auth-http-001",
     mysqlEnabled: parseBoolean(process.env.MYSQL_ENABLED, false),
     mysqlUrl:
       process.env.MYSQL_URL ||

@@ -9,6 +9,7 @@
     "apps/admin-web",
     "apps/announce-service",
     "apps/mail-service",
+    "apps/metrics-collector",
     "tools/mock-client"
   ],
   "scripts": {
@@ -24,6 +25,8 @@
     "start:announce": "npm run start --workspace announce-service",
     "dev:mail": "npm run dev --workspace mail-service",
     "start:mail": "npm run start --workspace mail-service",
+    "dev:metrics-collector": "npm run dev --workspace metrics-collector",
+    "start:metrics-collector": "npm run start --workspace metrics-collector",
     "dev:mock-client": "npm run dev --workspace mock-client",
     "flow:mock-client": "npm run flow --workspace mock-client --",
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",

@@ -4,7 +4,7 @@ import { createApp } from "./app.js";
 import { log } from "./logger.js";
 
 async function main() {
-  const { app, config, redis, mysqlPool, metrics } = await createApp();
+  const { app, config, redis, nats, mysqlPool, metrics } = await createApp();
 
   let shuttingDown = false;
 
@@ -31,7 +31,15 @@ async function main() {
       log("error", "shutdown.metrics_stop_failed", { error: error.message });
     }
 
-    // 3. Close Redis connection
+    // 3. Close NATS connection
+    try {
+      await nats.close();
+      log("info", "shutdown.nats_closed");
+    } catch (error) {
+      log("error", "shutdown.nats_close_failed", { error: error.message });
+    }
+
+    // 4. Close Redis connection
     try {
       await redis.quit();
       log("info", "shutdown.redis_closed");
@@ -39,7 +47,7 @@ async function main() {
       log("error", "shutdown.redis_close_failed", { error: error.message });
     }
 
-    // 4. Close MySQL connection pool
+    // 5. Close MySQL connection pool
     if (mysqlPool) {
       try {
         await mysqlPool.end();

@@ -171,7 +171,7 @@ MAX_BODY_LEN=4096
 - ticket 校验：校验 HMAC 签名与过期时间
 - 心跳超时：首包读取和会话循环使用 `HEARTBEAT_TIMEOUT_SECS`
 - 最大包体限制：包体超过 `MAX_BODY_LEN` 时拒绝处理
-- 在线推送与邮件通知订阅：依赖 Redis Pub/Sub 与内存会话表
+- 在线推送与邮件通知订阅：依赖 Core NATS 与内存会话表
 
 ### 5.2 当前实际配置项
 

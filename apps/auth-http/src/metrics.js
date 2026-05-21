@@ -2,11 +2,11 @@
  * Metrics module for auth-http
  *
  * Collects: QPS, HTTP request latency, online sessions count
- * Reports to Redis every 5 seconds
+ * Reports to NATS every 5 seconds
  */
 
-const METRICS_TTL = 604800; // 7 days in seconds
-const HEARTBEAT_TTL = 30; // seconds
+import { encodeSubjectToken } from "./nats-client.js";
+
 const REPORT_INTERVAL_MS = 5000;
 const ACTIVE_SESSION_WINDOW_SECONDS = 300;
 
@@ -15,9 +15,11 @@ function currentBucket() {
 }
 
 export class MetricsCollector {
-  constructor(redis, serviceName, redisKeyPrefix = "") {
+  constructor(redis, nats, serviceName, redisKeyPrefix = "", serviceInstanceId = serviceName) {
     this.redis = redis;
+    this.nats = nats;
     this.serviceName = serviceName;
+    this.serviceInstanceId = serviceInstanceId;
     this.keyPrefix = redisKeyPrefix;
 
     // Counters
@@ -112,12 +114,10 @@ export class MetricsCollector {
   }
 
   /**
-   * Flush metrics to Redis
+   * Flush metrics to NATS
    */
   async flush() {
     const bucket = currentBucket();
-    const metricsKey = `metrics:${this.serviceName}:${bucket}`;
-    const heartbeatKey = `metrics:heartbeat:${this.serviceName}`;
 
     await Promise.all([
       this.countSessionStats(),
@@ -133,18 +133,23 @@ export class MetricsCollector {
     this.latencyCount = 0;
 
     try {
-      const pipe = this.redis.pipeline();
-      pipe.hset(metricsKey, {
-        qps,
-        latency_ms: latencyMs,
-        online_sessions: this.onlineSessions,
-        unique_players: this.uniquePlayers,
-        active_sessions_5m: this.activeSessions5m,
-        active_window_seconds: ACTIVE_SESSION_WINDOW_SECONDS
-      });
-      pipe.expire(metricsKey, METRICS_TTL);
-      pipe.set(heartbeatKey, Date.now(), "EX", HEARTBEAT_TTL);
-      await pipe.exec();
+      await this.nats.publishJson(
+        `myserver.metrics.${this.serviceName}.${encodeSubjectToken(this.serviceInstanceId)}`,
+        {
+          service: this.serviceName,
+          instance_id: this.serviceInstanceId,
+          bucket,
+          timestamp: Math.floor(Date.now() / 1000),
+          metrics: {
+            qps,
+            latency_ms: latencyMs,
+            online_sessions: this.onlineSessions,
+            unique_players: this.uniquePlayers,
+            active_sessions_5m: this.activeSessions5m,
+            active_window_seconds: ACTIVE_SESSION_WINDOW_SECONDS
+          }
+        }
+      );
     } catch (error) {
       console.error("[metrics] flush error:", error);
     }
@@ -175,12 +180,25 @@ export class MetricsCollector {
 /**
  * Create and start a metrics collector
  * @param {import("ioredis").Redis} redis
+ * @param {{ publishJson(subject: string, payload: object): Promise<void> }} nats
  * @param {string} serviceName
  * @param {string} redisKeyPrefix
  * @returns {MetricsCollector}
  */
-export function createMetricsCollector(redis, serviceName, redisKeyPrefix = "") {
-  const collector = new MetricsCollector(redis, serviceName, redisKeyPrefix);
+export function createMetricsCollector(
+  redis,
+  nats,
+  serviceName,
+  redisKeyPrefix = "",
+  serviceInstanceId = serviceName
+) {
+  const collector = new MetricsCollector(
+    redis,
+    nats,
+    serviceName,
+    redisKeyPrefix,
+    serviceInstanceId
+  );
   collector.start();
   return collector;
 }

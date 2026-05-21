@@ -1,6 +1,6 @@
 //! Mail notification subscriber
 //!
-//! Subscribes to Redis Pub/Sub channel "mail:notify:*" and pushes
+//! Subscribes to NATS subject "myserver.mail.notify.*" and pushes
 //! mail notifications to connected chat clients.
 
 use futures_util::StreamExt;
@@ -14,6 +14,7 @@ use crate::proto::chat::MailNotifyPush;
 /// Mail notification payload from pubsub
 #[derive(Debug, serde::Deserialize)]
 struct MailNotification {
+    player_id: String,
     mail_id: String,
     title: String,
     from: String,
@@ -22,13 +23,13 @@ struct MailNotification {
     created_at: i64,
 }
 
-/// Subscribe to mail:notify:* channel and push notifications to players
+/// Subscribe to myserver.mail.notify.* and push notifications to players
 pub async fn subscribe_mail_notifications(
-    client: redis::Client,
+    nats_url: String,
     sessions: ChatSessionMap,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
-        match run_subscriber(client.clone(), sessions.clone()).await {
+        match run_subscriber(&nats_url, sessions.clone()).await {
             Ok(()) => {
                 info!("mail subscriber completed normally");
                 break;
@@ -43,27 +44,18 @@ pub async fn subscribe_mail_notifications(
 }
 
 async fn run_subscriber(
-    client: redis::Client,
+    nats_url: &str,
     sessions: ChatSessionMap,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut pubsub = client.get_async_pubsub().await?;
-    pubsub.psubscribe("mail:notify:*").await?;
-    info!("subscribed to mail:notify:* channel");
+    let client = async_nats::connect(nats_url).await?;
+    let mut subscriber = client.subscribe("myserver.mail.notify.*").await?;
+    info!("subscribed to myserver.mail.notify.* subject");
 
-    let mut msg_stream = pubsub.on_message();
-    while let Some(msg) = msg_stream.next().await {
-        // Get the channel to extract player_id
-        let channel: String = msg.get_channel_name().to_string();
-        // Channel format: "mail:notify:{player_id}"
-        let player_id = channel
-            .strip_prefix("mail:notify:")
-            .unwrap_or("");
-
-        let payload: Result<String, _> = msg.get_payload();
-        match payload {
+    while let Some(msg) = subscriber.next().await {
+        match std::str::from_utf8(msg.payload.as_ref()) {
             Ok(payload_str) => {
-                if let Err(e) = handle_notification(&sessions, player_id, &payload_str).await {
-                    warn!("failed to handle mail notification: {}", e);
+                if let Err(e) = handle_notification(&sessions, payload_str).await {
+                    warn!(subject = %msg.subject, "failed to handle mail notification: {}", e);
                 }
             }
             Err(e) => {
@@ -77,16 +69,16 @@ async fn run_subscriber(
 
 async fn handle_notification(
     sessions: &ChatSessionMap,
-    player_id: &str,
     payload: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let notification: MailNotification = serde_json::from_str(payload)
+        .map_err(|e| format!("failed to parse notification: {}", e))?;
+    let player_id = notification.player_id.as_str();
+
     if player_id.is_empty() {
         warn!("empty player_id in mail notification");
         return Ok(());
     }
-
-    let notification: MailNotification = serde_json::from_str(payload)
-        .map_err(|e| format!("failed to parse notification: {}", e))?;
 
     info!(
         mail_id = %notification.mail_id,

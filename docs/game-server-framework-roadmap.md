@@ -118,7 +118,7 @@
 已落地：
 
 - `game-server` admin 状态查询、运行时配置更新和 drain mode
-- Redis metrics 与 heartbeat
+- Core NATS metrics 上报与 Redis metrics/heartbeat 快照
 - `admin-api + admin-web` 监控页面
 - MySQL 账号、审计、连接事件、房间事件、玩家背包数据等持久化
 - metrics 归档服务

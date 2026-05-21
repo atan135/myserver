@@ -188,7 +188,7 @@ export function createRoutes(config, mailStore, pubsubClient, gameAdminClient) {
 
       await mailStore.createMail(mail);
 
-      // Publish notification via Redis Pub/Sub
+      // Publish notification via NATS Core
       await pubsubClient.publishMailNotification(to_player_id, mail);
 
       log("info", "mail.sent", {

@@ -164,13 +164,13 @@ Content-Type: application/json
 当前实现同时存在两类链路：
 
 ```
-1. 新邮件通知：Redis Pub/Sub
+1. 新邮件通知：Core NATS
 
 mail-service 收到新邮件
        ↓
-Redis Pub/Sub: mail:notify:{player_id}
+Core NATS: myserver.mail.notify.<player_id_token>
        ↓
-chat-server / game-server 订阅该频道
+chat-server 订阅该 subject
        ↓
 在已有 TCP 连接上推送通知给客户端
 
@@ -188,7 +188,7 @@ mail-service 将邮件标记为 claimed
 ```
 
 **当前特点**：
-- 新邮件通知仍然保持 Pub/Sub 解耦
+- 新邮件通知通过 Core NATS 保持发布/订阅解耦
 - 附件发奖由 game-server 统一负责真实背包变更、在线推送与持久化
 - `mail-service` 在附件领取链路上对 `game-server admin` 存在直接依赖
 
@@ -216,7 +216,7 @@ mail-service 将邮件标记为 claimed
 2. **多语言客户端成熟**：Node.js (ioredis)、Rust (redis-rs)、C# (StackExchange.Redis) 均有稳定客户端
 3. **部署简单**：开发/生产环境已有 Redis 实例
 4. **性能足够**：当前规模（5-10人房间）下 Redis 性能远超需求
-5. **功能可扩展**：可利用 Redis Pub/Sub 实现变更通知
+5. **功能可扩展**：Redis 仍可保存注册状态，消息广播与 metrics 上报改由 Core NATS 承担
 
 **潜在缺点：**
 - 非专门服务注册组件，需要自行实现健康检查
@@ -699,7 +699,7 @@ packages/
 1. 新建 mail-service（Node.js/Go）
 2. 引入 `service-registry` 包，注册到 Redis
 3. 实现邮件 CRUD 与附件领取 API
-4. 通过 Redis Pub/Sub 发送新邮件通知
+4. 通过 Core NATS 发送新邮件通知
 5. 通过 game-server admin 发放附件奖励
 6. auth-http 登录响应添加 mail-service 地址
 

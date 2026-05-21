@@ -8,6 +8,7 @@ target/
 logs/
 coverage/
 .tmp/
+bin/
 .DS_Store
 Thumbs.db
 

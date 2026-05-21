@@ -19,6 +19,7 @@ pub struct Config {
     pub log_enable_file: bool,
     pub log_dir: String,
     pub redis_url: String,
+    pub nats_url: String,
     pub registry_enabled: bool,
     pub registry_url: String,
     pub registry_heartbeat_interval_secs: u64,
@@ -101,6 +102,8 @@ impl Config {
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            nats_url: std::env::var("NATS_URL")
+                .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),

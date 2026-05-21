@@ -2,11 +2,11 @@
  * Metrics module for announce-service
  *
  * Collects: QPS, HTTP request latency
- * Reports to Redis every 5 seconds
+ * Reports to NATS every 5 seconds
  */
 
-const METRICS_TTL = 604800;
-const HEARTBEAT_TTL = 30;
+import { encodeSubjectToken } from "./nats-client.js";
+
 const REPORT_INTERVAL_MS = 5000;
 
 function currentBucket() {
@@ -14,9 +14,10 @@ function currentBucket() {
 }
 
 export class MetricsCollector {
-  constructor(redis, serviceName) {
-    this.redis = redis;
+  constructor(nats, serviceName, serviceInstanceId = serviceName) {
+    this.nats = nats;
     this.serviceName = serviceName;
+    this.serviceInstanceId = serviceInstanceId;
     this.qps = 0;
     this.latencySum = 0;
     this.latencyCount = 0;
@@ -37,8 +38,6 @@ export class MetricsCollector {
 
   async flush() {
     const bucket = currentBucket();
-    const metricsKey = `metrics:${this.serviceName}:${bucket}`;
-    const heartbeatKey = `metrics:heartbeat:${this.serviceName}`;
 
     const qps = this.qps;
     const latencyMs =
@@ -51,14 +50,19 @@ export class MetricsCollector {
     this.latencyCount = 0;
 
     try {
-      const pipe = this.redis.pipeline();
-      pipe.hset(metricsKey, {
-        qps,
-        latency_ms: latencyMs
-      });
-      pipe.expire(metricsKey, METRICS_TTL);
-      pipe.set(heartbeatKey, Date.now(), "EX", HEARTBEAT_TTL);
-      await pipe.exec();
+      await this.nats.publishJson(
+        `myserver.metrics.${this.serviceName}.${encodeSubjectToken(this.serviceInstanceId)}`,
+        {
+          service: this.serviceName,
+          instance_id: this.serviceInstanceId,
+          bucket,
+          timestamp: Math.floor(Date.now() / 1000),
+          metrics: {
+            qps,
+            latency_ms: latencyMs
+          }
+        }
+      );
     } catch (error) {
       console.error("[metrics] flush error:", error);
     }
@@ -78,8 +82,8 @@ export class MetricsCollector {
   }
 }
 
-export function createMetricsCollector(redis, serviceName) {
-  const collector = new MetricsCollector(redis, serviceName);
+export function createMetricsCollector(nats, serviceName, serviceInstanceId = serviceName) {
+  const collector = new MetricsCollector(nats, serviceName, serviceInstanceId);
   collector.start();
   return collector;
 }

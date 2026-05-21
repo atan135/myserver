@@ -25,6 +25,7 @@ struct Config {
     max_body_len: usize,
     ticket_secret: String,
     redis_url: String,
+    nats_url: String,
     registry_enabled: bool,
     registry_url: String,
     registry_heartbeat_interval_secs: u64,
@@ -60,6 +61,8 @@ impl Config {
                 .unwrap_or_else(|_| "default_secret_change_in_production".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            nats_url: std::env::var("NATS_URL")
+                .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
@@ -195,14 +198,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let chat_store = chat_store::ChatStore::new(&config.mysql_url, config.mysql_pool_size).await?;
 
-    // Create Redis client for mail notification subscriber
-    let redis_client = redis::Client::open(config.redis_url.clone())?;
-    let _redis_conn = redis_client.get_multiplexed_async_connection().await?;
-
     // 启动 metrics 上报任务
-    let metrics_redis_url = config.redis_url.clone();
+    let metrics_nats_url = config.nats_url.clone();
+    let metrics_instance_id = config.service_instance_id.clone();
     tokio::spawn(async move {
-        metrics::METRICS.start_reporting(&metrics_redis_url, 5).await;
+        metrics::METRICS
+            .start_reporting(&metrics_nats_url, metrics_instance_id, 5)
+            .await;
     });
 
     let server_config = chat_server::Config {
@@ -217,8 +219,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start mail notification subscriber
     let sessions_for_mail = chat_sessions.clone();
+    let nats_url_for_mail = config.nats_url.clone();
     tokio::spawn(async move {
-        if let Err(e) = mail_subscriber::subscribe_mail_notifications(redis_client, sessions_for_mail).await {
+        if let Err(e) = mail_subscriber::subscribe_mail_notifications(nats_url_for_mail, sessions_for_mail).await {
             tracing::error!("mail subscriber error: {}", e);
         }
     });

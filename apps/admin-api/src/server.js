@@ -1,6 +1,6 @@
 import { createApp } from "./app.js";
 
-const { app, config, pool, redis, metrics } = await createApp();
+const { app, config, pool, redis, nats, metrics } = await createApp();
 
 // Register shutdown handler
 const shutdown = async (signal) => {
@@ -16,6 +16,12 @@ const shutdown = async (signal) => {
     await redis.quit();
   } catch (error) {
     console.error("redis.quit error:", error);
+  }
+
+  try {
+    await nats.close();
+  } catch (error) {
+    console.error("nats.close error:", error);
   }
 
   try {

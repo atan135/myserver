@@ -495,7 +495,10 @@ Redis 相关键：
 - `session:<accessToken>`
 - `ticket:<sha256(ticket)>`
 - `player-session:<playerId>`
-- `session:kick:<playerId>`
+
+并发登录/改密踢旧连接通知已迁移为 Core NATS subject：
+
+- `myserver.session.kick.<player_id_token>`
 
 ---
 

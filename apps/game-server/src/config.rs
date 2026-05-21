@@ -18,6 +18,7 @@ pub struct Config {
     pub log_dir: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub nats_url: String,
     pub mysql_enabled: bool,
     pub mysql_url: String,
     pub mysql_pool_size: usize,
@@ -81,6 +82,7 @@ impl Config {
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let mysql_enabled = parse_bool("MYSQL_ENABLED", false);
         let mysql_url = env::var("MYSQL_URL")
             .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/myserver_game".to_string());
@@ -126,6 +128,7 @@ impl Config {
             log_dir,
             redis_url,
             redis_key_prefix,
+            nats_url,
             mysql_enabled,
             mysql_url,
             mysql_pool_size,

@@ -87,8 +87,8 @@
 - `session.rs`：单连接状态
 - `ticket.rs`：ticket 签名、过期校验和 hash
 - `mysql_store.rs`：连接与房间事件审计
-- `metrics.rs`：Redis metrics 上报
-- `kick_subscriber.rs`：订阅 `session:kick:*`，处理并发登录踢旧连接
+- `metrics.rs`：Core NATS metrics 上报
+- `kick_subscriber.rs`：订阅 `myserver.session.kick.*`，处理并发登录踢旧连接
 
 服务入口：
 

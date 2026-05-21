@@ -1,16 +1,18 @@
 import { log } from "./logger.js";
+import { encodeSubjectToken } from "./nats-client.js";
 
 export class PubSubClient {
-  constructor(redis) {
-    this.redis = redis;
+  constructor(nats) {
+    this.nats = nats;
   }
 
   async publishMailNotification(playerId, mail) {
-    const channel = `mail:notify:${playerId}`;
+    const subject = `myserver.mail.notify.${encodeSubjectToken(playerId)}`;
     const senderId = typeof mail.sender_id === "string" && mail.sender_id.toLowerCase() === "system"
       ? "system"
       : (mail.sender_id || mail.from_player_id);
     const payload = {
+      player_id: playerId,
       mail_id: mail.mail_id,
       title: mail.title,
       from: senderId,
@@ -20,16 +22,15 @@ export class PubSubClient {
     };
 
     try {
-      const count = await this.redis.publish(channel, JSON.stringify(payload));
-      log("info", "pubsub.mail_notification", {
-        channel,
+      await this.nats.publishJson(subject, payload);
+      log("info", "nats.mail_notification", {
+        subject,
         playerId,
-        mailId: mail.mail_id,
-        subscribers: count
+        mailId: mail.mail_id
       });
-      return count;
+      return 0;
     } catch (error) {
-      log("error", "pubsub.publish_failed", {
+      log("error", "nats.publish_failed", {
         error: error.message,
         playerId,
         mailId: mail.mail_id

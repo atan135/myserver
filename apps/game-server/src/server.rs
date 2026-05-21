@@ -160,8 +160,7 @@ pub async fn run(
     ));
 
     let kick_task = tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
-        redis_client.clone(),
-        config.redis_key_prefix.clone(),
+        config.nats_url.clone(),
         player_registry,
     ));
 

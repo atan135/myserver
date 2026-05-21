@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { encodeSubjectToken } from "./nats-client.js";
 import { normalizeLoginName, verifyPassword } from "./password-utils.js";
 
 function base64UrlEncode(value) {
@@ -39,11 +40,16 @@ function createAuthError(code, message = code) {
   return error;
 }
 
+const noopNatsClient = {
+  async publishJson() {}
+};
+
 export class AuthStore {
-  constructor(config, redis, mysqlStore = null) {
+  constructor(config, redis, mysqlStore = null, nats = noopNatsClient) {
     this.config = config;
     this.redis = redis;
     this.mysqlStore = mysqlStore;
+    this.nats = nats;
   }
 
   prefixedKey(key) {
@@ -155,10 +161,7 @@ export class AuthStore {
     if (oldAccessToken) {
       await this.redis.del(this.prefixedKey(sessionKey(oldAccessToken)));
       await this.redis.del(this.prefixedKey(sessionActivityKey(oldAccessToken)));
-      await this.redis.publish(
-        this.prefixedKey(`session:kick:${account.playerId}`),
-        JSON.stringify({ reason: "new_login" })
-      );
+      await this.publishSessionKick(account.playerId, "new_login");
       await this.mysqlStore?.appendAuthAudit({
         playerId: account.playerId,
         eventType: "session_kicked",
@@ -196,6 +199,15 @@ export class AuthStore {
       ...session,
       gameTicket
     };
+  }
+
+  async publishSessionKick(playerId, reason) {
+    const payload = { player_id: playerId, reason };
+
+    await this.nats.publishJson(
+      `myserver.session.kick.${encodeSubjectToken(playerId)}`,
+      payload
+    );
   }
 
   async getSessionByAccessToken(accessToken) {

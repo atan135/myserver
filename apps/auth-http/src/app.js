@@ -13,22 +13,31 @@ import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 import { ServiceDiscovery } from "./service-discovery.js";
 import { createMetricsCollector } from "./metrics.js";
+import { createNatsClient } from "./nats-client.js";
 
 export async function createApp() {
   const config = getConfig();
   configureLogger(config);
   const redis = await createRedisClient(config);
+  let nats;
+  try {
+    nats = await createNatsClient(config);
+  } catch (error) {
+    await redis.quit();
+    throw error;
+  }
   let mysqlPool = null;
 
   try {
     mysqlPool = await createMySqlPool(config);
   } catch (error) {
+    await nats.close();
     await redis.quit();
     throw error;
   }
 
   const mysqlStore = new MySqlAuthStore(mysqlPool);
-  const authStore = new AuthStore(config, redis, mysqlStore);
+  const authStore = new AuthStore(config, redis, mysqlStore, nats);
   const gameAdminClient = new GameAdminClient(config);
   const rateLimiter = new RateLimiter(redis, config);
   const accountLockout = new AccountLockout(redis, config);
@@ -36,7 +45,13 @@ export async function createApp() {
   const app = express();
 
   // Create and start metrics collector
-  const metrics = createMetricsCollector(redis, "auth-http", config.redisKeyPrefix || "");
+  const metrics = createMetricsCollector(
+    redis,
+    nats,
+    "auth-http",
+    config.redisKeyPrefix || "",
+    config.serviceInstanceId
+  );
 
   app.disable("x-powered-by");
   app.use(express.json({ limit: "64kb" }));
@@ -89,5 +104,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis, mysqlPool, metrics };
+  return { app, config, redis, nats, mysqlPool, metrics };
 }

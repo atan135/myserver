@@ -22,12 +22,14 @@ pub struct Config {
     pub local_socket_name: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub nats_url: String,
     pub ticket_secret: String,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
     pub registry_discover_interval_secs: u64,
     pub upstream_service_name: String,
+    pub service_instance_id: String,
     // 保留旧配置用于向后兼容（当 registry 禁用时）
     pub upstream_server_id: String,
     pub upstream_local_socket_name: String,
@@ -60,6 +62,7 @@ impl Config {
             .or_else(|_| env::var("REGISTRY_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let ticket_secret = env::var("TICKET_SECRET")
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
 
@@ -74,6 +77,8 @@ impl Config {
             .unwrap_or(5);
         let upstream_service_name =
             env::var("UPSTREAM_SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
+        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
+            .unwrap_or_else(|_| format!("game-proxy-{}", port));
 
         // 向后兼容的旧配置
         let upstream_server_id = env::var("UPSTREAM_SERVER_ID")
@@ -95,11 +100,13 @@ impl Config {
             local_socket_name,
             redis_url,
             redis_key_prefix,
+            nats_url,
             ticket_secret,
             registry_enabled,
             registry_url,
             registry_discover_interval_secs,
             upstream_service_name,
+            service_instance_id,
             upstream_server_id,
             upstream_local_socket_name,
         }

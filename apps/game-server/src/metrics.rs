@@ -1,6 +1,6 @@
 //! Game Server Metrics Module
 //!
-//! 监控指标收集与 Redis 上报
+//! 监控指标收集与 NATS 上报
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -8,8 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use deadpool_redis::redis::AsyncCommands;
-use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
+use serde_json::json;
 use tokio::time::interval;
 use tracing::{error, info};
 
@@ -21,6 +20,53 @@ fn current_bucket() -> u64 {
         .as_secs()
         / 5
         * 5
+}
+
+fn subject_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+async fn publish_metrics(
+    client: &async_nats::Client,
+    service_name: &str,
+    service_instance_id: &str,
+    bucket: u64,
+    fields: Vec<(String, String)>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let metrics = fields
+        .into_iter()
+        .map(|(key, value)| (key, serde_json::Value::String(value)))
+        .collect::<serde_json::Map<_, _>>();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let payload = json!({
+        "service": service_name,
+        "instance_id": service_instance_id,
+        "bucket": bucket,
+        "timestamp": timestamp,
+        "metrics": metrics,
+    });
+    let subject = format!(
+        "myserver.metrics.{}.{}",
+        service_name,
+        subject_token(service_instance_id)
+    );
+
+    client
+        .publish(subject, serde_json::to_vec(&payload)?.into())
+        .await?;
+    client.flush().await?;
+    Ok(())
 }
 
 /// MetricsCollector 结构体
@@ -82,14 +128,19 @@ impl MetricsCollector {
     /// 启动指标上报任务
     ///
     /// # Arguments
-    /// * `redis_url` - Redis 连接 URL
+    /// * `nats_url` - NATS 连接 URL
+    /// * `service_instance_id` - 服务实例 ID
     /// * `interval_secs` - 上报间隔（秒）
-    pub async fn start_reporting(&'static self, redis_url: &str, interval_secs: u64) {
-        let redis_config = RedisConfig::from_url(redis_url);
-        let pool = match redis_config.create_pool(Some(RedisRuntime::Tokio1)) {
-            Ok(p) => p,
+    pub async fn start_reporting(
+        &'static self,
+        nats_url: &str,
+        service_instance_id: String,
+        interval_secs: u64,
+    ) {
+        let client = match async_nats::connect(nats_url).await {
+            Ok(client) => client,
             Err(e) => {
-                error!(error = %e, "failed to create redis pool for metrics");
+                error!(error = %e, "failed to connect nats for metrics");
                 return;
             }
         };
@@ -117,25 +168,12 @@ impl MetricsCollector {
                 };
 
                 let bucket = current_bucket();
-                let metrics_key = format!("metrics:{}:{}", service_name, bucket);
-                let heartbeat_key = format!("metrics:heartbeat:{}", service_name);
-
                 // 收集扩展字段
                 let extra = {
                     let guard = self.extra.lock().unwrap();
                     guard.clone()
                 };
 
-                // 上报到 Redis
-                let mut con = match pool.get().await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!(error = %e, "failed to get redis connection for metrics");
-                        continue;
-                    }
-                };
-
-                // 使用 HSET 写入指标
                 let mut fields: Vec<(String, String)> = vec![
                     ("qps".to_string(), qps.to_string()),
                     ("latency_ms".to_string(), latency_ms.to_string()),
@@ -147,28 +185,11 @@ impl MetricsCollector {
                     fields.push((k, v));
                 }
 
-                // 写入指标 Hash，TTL 7天
-                if let Err(e) = con
-                    .hset_multiple::<_, _, _, ()>(&metrics_key, &fields)
-                    .await
+                if let Err(e) =
+                    publish_metrics(&client, service_name, &service_instance_id, bucket, fields)
+                        .await
                 {
-                    error!(error = %e, metrics_key = %metrics_key, "failed to write metrics to redis");
-                }
-
-                // 设置 TTL
-                if let Err(e) = con.expire::<_, ()>(&metrics_key, 604800).await {
-                    error!(error = %e, metrics_key = %metrics_key, "failed to set TTL");
-                }
-
-                // 更新心跳
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    .to_string();
-
-                if let Err(e) = con.set_ex::<_, _, ()>(&heartbeat_key, now, 30).await {
-                    error!(error = %e, "failed to update heartbeat");
+                    error!(error = %e, "failed to publish metrics to nats");
                 }
 
                 info!(

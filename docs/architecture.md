@@ -120,7 +120,7 @@
        +-------------------------------> chat-server
                                          ^
                                          |
-                                   Redis Pub/Sub
+                                   Core NATS
                                          |
                                      mail-service
 ```
@@ -191,7 +191,7 @@
 - `chat-server` 负责聊天会话、聊天历史和在线推送
 - `announce-service` 负责公告 CRUD 和当前有效公告查询
 - `mail-service` 负责邮件 CRUD
-- `mail-service` 通过 Redis Pub/Sub 通知 `chat-server`
+- `mail-service` 通过 Core NATS 通知 `chat-server`
 - `chat-server` 再把邮件通知推送给在线玩家
 
 ### 6.5 匹配服务
@@ -207,8 +207,8 @@
 - `game-server` 已支持按实例注册
 - `game-proxy` 已支持从注册中心发现上游 `game-server`
 - `mail-service` 已有自己的 registry 注册逻辑
-- `announce-service` 复用与 `mail-service` 一致的 Redis registry 与 HTTP metrics 模式
-- 各服务会把 metrics/heartbeat 写入 Redis
+- `announce-service` 复用与 `mail-service` 一致的 Redis registry 接入
+- 各服务会把 metrics/heartbeat 发布到 Core NATS，由 `metrics-collector` 写回 Redis 供后台读取
 - `admin-api` 提供监控聚合接口，`admin-web` 提供监控页面
 
 注意：服务发现目前仍是“部分接入”，并非所有服务都已经统一使用同一套注册中心实现。
@@ -225,10 +225,18 @@ Redis 当前承担以下职责：
 - game ticket 存储
 - 限流与账号锁定相关数据
 - 服务注册中心
-- metrics 与 heartbeat
-- `mail-service -> chat-server` 的 Pub/Sub 通知
+- metrics/heartbeat 快照（由 `metrics-collector` 写入）
 
-### 7.2 MySQL / MariaDB
+### 7.2 NATS
+
+Core NATS 当前承担以下职责：
+
+- `mail-service -> chat-server` 的新邮件通知：`myserver.mail.notify.<player_id_token>`
+- `auth-http -> game-server` 的并发登录/改密踢旧连接通知：`myserver.session.kick.<player_id_token>`
+- 各服务 metrics 上报：`myserver.metrics.<service_name>.<instance_id_token>`
+- `metrics-collector` 订阅 `myserver.metrics.>`，并把最新 metrics/heartbeat 写回 Redis，兼容当前 `admin-api` 监控读取逻辑
+
+### 7.3 MySQL / MariaDB
 
 数据库当前主要承担：
 

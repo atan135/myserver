@@ -1,0 +1,25 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import dotenv from "dotenv";
+
+const envPath = path.resolve(process.cwd(), ".env");
+if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+}
+
+export function getConfig() {
+  return {
+    natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
+    redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
+    metricsSubject: process.env.METRICS_SUBJECT || "myserver.metrics.>",
+    metricsTtlSeconds: Number.parseInt(
+      process.env.METRICS_TTL_SECONDS || "604800",
+      10
+    ),
+    heartbeatTtlSeconds: Number.parseInt(
+      process.env.METRICS_HEARTBEAT_TTL_SECONDS || "30",
+      10
+    )
+  };
+}

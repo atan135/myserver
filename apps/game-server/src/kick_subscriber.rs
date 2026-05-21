@@ -1,6 +1,6 @@
 //! Session kick subscriber
 //!
-//! Subscribes to Redis Pub/Sub channel "{prefix}session:kick:*" and notifies
+//! Subscribes to NATS subject "myserver.session.kick.*" and notifies
 //! the corresponding player connection to disconnect.
 
 use futures_util::StreamExt;
@@ -8,14 +8,19 @@ use tracing::{error, info, warn};
 
 use crate::core::context::PlayerRegistry;
 
+#[derive(Debug, serde::Deserialize)]
+struct SessionKickEvent {
+    player_id: String,
+    reason: Option<String>,
+}
+
 /// Subscribe to session kick events with automatic reconnection.
 pub async fn subscribe_session_kicks(
-    client: redis::Client,
-    key_prefix: String,
+    nats_url: String,
     player_registry: PlayerRegistry,
 ) {
     loop {
-        match run_subscriber(&client, &key_prefix, &player_registry).await {
+        match run_subscriber(&nats_url, &player_registry).await {
             Ok(()) => {
                 info!("kick subscriber completed normally");
                 break;
@@ -29,39 +34,47 @@ pub async fn subscribe_session_kicks(
 }
 
 async fn run_subscriber(
-    client: &redis::Client,
-    key_prefix: &str,
+    nats_url: &str,
     player_registry: &PlayerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut pubsub = client.get_async_pubsub().await?;
-    let pattern = format!("{}session:kick:*", key_prefix);
-    pubsub.psubscribe(&pattern).await?;
-    info!(pattern = %pattern, "subscribed to session kick channel");
+    let client = async_nats::connect(nats_url).await?;
+    let mut subscriber = client.subscribe("myserver.session.kick.*").await?;
+    info!("subscribed to myserver.session.kick.* subject");
 
-    let channel_prefix = format!("{}session:kick:", key_prefix);
-    let mut msg_stream = pubsub.on_message();
-
-    while let Some(msg) = msg_stream.next().await {
-        let channel: String = msg.get_channel_name().to_string();
-        let player_id = match channel.strip_prefix(&channel_prefix) {
-            Some(pid) if !pid.is_empty() => pid,
-            _ => {
-                warn!(channel = %channel, "unexpected kick channel format");
+    while let Some(msg) = subscriber.next().await {
+        let payload = match std::str::from_utf8(msg.payload.as_ref()) {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(subject = %msg.subject, error = %error, "invalid session kick payload");
+                continue;
+            }
+        };
+        let event: SessionKickEvent = match serde_json::from_str(payload) {
+            Ok(event) => event,
+            Err(error) => {
+                warn!(subject = %msg.subject, error = %error, "failed to parse session kick payload");
                 continue;
             }
         };
 
+        if event.player_id.is_empty() {
+            warn!(subject = %msg.subject, "empty player_id in session kick event");
+            continue;
+        }
+
         let registry = player_registry.read().await;
-        if let Some((notify, session_id)) = registry.get(player_id) {
+        if let Some((notify, session_id)) = registry.get(&event.player_id) {
             info!(
-                player_id = %player_id,
+                player_id = %event.player_id,
                 session_id = session_id,
+                reason = ?event.reason,
                 "received session kick event, notifying connection"
             );
             notify.notify_one();
         } else {
             info!(
-                player_id = %player_id,
+                player_id = %event.player_id,
+                reason = ?event.reason,
                 "received session kick event, player not on this server"
             );
         }

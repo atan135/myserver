@@ -10,27 +10,36 @@ import { PubSubClient } from "./pubsub-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { createRoutes } from "./routes.js";
 import { createMetricsCollector } from "./metrics.js";
+import { createNatsClient } from "./nats-client.js";
 
 export async function createApp() {
   const config = getConfig();
   configureLogger(config);
   const redis = await createRedisClient(config);
+  let nats;
+  try {
+    nats = await createNatsClient(config);
+  } catch (error) {
+    await redis.quit();
+    throw error;
+  }
   let mysqlPool = null;
 
   try {
     mysqlPool = await createMySqlPool(config);
   } catch (error) {
+    await nats.close();
     await redis.quit();
     throw error;
   }
 
   const mailStore = new MySqlMailStore(mysqlPool);
-  const pubsubClient = new PubSubClient(redis);
+  const pubsubClient = new PubSubClient(nats);
   const gameAdminClient = new GameAdminClient(config);
   const registryClient = new RegistryClient(redis, config);
 
   // Create and start metrics collector
-  const metrics = createMetricsCollector(redis, "mail-service", "");
+  const metrics = createMetricsCollector(nats, "mail-service", config.serviceInstanceId);
 
   const app = express();
 
@@ -68,5 +77,5 @@ export async function createApp() {
     });
   });
 
-  return { app, config, redis, mysqlPool, registryClient, metrics };
+  return { app, config, redis, nats, mysqlPool, registryClient, metrics };
 }
