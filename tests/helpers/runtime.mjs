@@ -92,14 +92,23 @@ export async function startAuthHttpServer({
     GAME_SERVER_ADMIN_PORT: String(gameServerAdminPort)
   });
 
+  let context;
+
   try {
     const { createApp } = await import(pathToFileURL(path.join(projectRoot, "apps", "auth-http", "src", "app.js")));
-    const { app, config, redis, mysqlPool } = await createApp();
+    context = await createApp();
+    const { app, config, redis, mysqlPool, nestApp } = context;
 
-    const httpServer = await new Promise((resolve, reject) => {
-      const instance = app.listen(config.port, config.host, () => resolve(instance));
-      instance.once("error", reject);
-    });
+    let httpServer;
+    if (nestApp) {
+      await nestApp.listen(config.port, config.host);
+      httpServer = nestApp.getHttpServer();
+    } else {
+      httpServer = await new Promise((resolve, reject) => {
+        const instance = app.listen(config.port, config.host, () => resolve(instance));
+        instance.once("error", reject);
+      });
+    }
 
     const address = httpServer.address();
     assert.ok(address && typeof address === "object", "http server did not expose an address");
@@ -111,23 +120,30 @@ export async function startAuthHttpServer({
       redisUrl,
       redisKeyPrefix,
       async close() {
-        await new Promise((resolve, reject) => {
-          httpServer.close((error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
+        if (context.close) {
+          await context.close();
+        } else {
+          await new Promise((resolve, reject) => {
+            httpServer.close((error) => {
+              if (error) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
           });
-        });
-        await redis.quit();
-        if (mysqlPool) {
-          await mysqlPool.end();
+          await redis.quit();
+          if (mysqlPool) {
+            await mysqlPool.end();
+          }
         }
         restoreEnv();
       }
     };
   } catch (error) {
+    if (context?.close) {
+      await context.close().catch(() => {});
+    }
     restoreEnv();
     throw error;
   }

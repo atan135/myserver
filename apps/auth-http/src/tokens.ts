@@ -1,0 +1,11 @@
+export const AUTH_CONFIG = Symbol("AUTH_CONFIG");
+export const AUTH_REDIS = Symbol("AUTH_REDIS");
+export const AUTH_NATS = Symbol("AUTH_NATS");
+export const AUTH_MYSQL_POOL = Symbol("AUTH_MYSQL_POOL");
+export const AUTH_MYSQL_STORE = Symbol("AUTH_MYSQL_STORE");
+export const AUTH_STORE = Symbol("AUTH_STORE");
+export const AUTH_GAME_ADMIN_CLIENT = Symbol("AUTH_GAME_ADMIN_CLIENT");
+export const AUTH_RATE_LIMITER = Symbol("AUTH_RATE_LIMITER");
+export const AUTH_ACCOUNT_LOCKOUT = Symbol("AUTH_ACCOUNT_LOCKOUT");
+export const AUTH_SERVICE_DISCOVERY = Symbol("AUTH_SERVICE_DISCOVERY");
+export const AUTH_METRICS = Symbol("AUTH_METRICS");

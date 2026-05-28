@@ -45,7 +45,8 @@
 
 | 层级 | 技术 |
 |------|------|
-| Node.js 服务 | Node.js 18+、Express |
+| Node.js 登录/后台 HTTP 服务 | Node.js 18+、NestJS（`auth-http` / `admin-api`） |
+| Node.js 周边 HTTP 服务 | Node.js 18+、Express（`announce-service` / `mail-service`） |
 | Rust 长连接服务 | Rust、Tokio、tracing |
 | 前端后台 | Vue 3、Vite、Element Plus |
 | 玩家协议 | 自定义包头 + Protobuf |
@@ -62,8 +63,8 @@
 
 | 服务 | 默认端口 | 技术栈 | 主要职责 |
 |------|----------|--------|----------|
-| `auth-http` | `3000` | Node.js + Express | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
-| `admin-api` | `3001` | Node.js + Express | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口 |
+| `auth-http` | `3000` | Node.js + NestJS | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
+| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口 |
 | `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端 |
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
@@ -87,7 +88,7 @@
                                  v
                        +-------------------+
                        |    admin-api      |
-                       | Express + JWT     |
+                       | NestJS + JWT      |
                        +----+---------+----+
                             |         |
                             |         v

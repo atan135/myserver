@@ -1,69 +1,28 @@
-import express from "express";
-
-import { getConfig } from "./config.js";
-import { configureLogger, log } from "./logger.js";
-import { createMySqlPool } from "./mysql-client.js";
-import { AdminStore } from "./admin-store.js";
-import { GameAdminClient } from "./game-admin-client.js";
-import { createRedisClient } from "./redis-client.js";
-import { createRoutes } from "./routes.js";
-import { createMetricsCollector } from "./metrics.js";
-import { createNatsClient } from "./nats-client.js";
-
 export async function createApp() {
-  const config = getConfig();
-  configureLogger(config);
+  const { register } = await import("node:module");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  process.env.TS_NODE_PROJECT ??= fileURLToPath(new URL("../tsconfig.json", import.meta.url));
+  process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
+  register("ts-node/esm", pathToFileURL("./"));
 
-  const redis = await createRedisClient(config);
-  let nats;
-  try {
-    nats = await createNatsClient(config);
-  } catch (error) {
-    await redis.quit();
-    throw error;
-  }
-  let pool;
-  try {
-    pool = await createMySqlPool(config);
-  } catch (error) {
-    await nats.close();
-    await redis.quit();
-    throw error;
-  }
-  const adminStore = new AdminStore(pool);
-  const gameAdminClient = new GameAdminClient(config);
+  const { createNestApp } = await import("./nest-app.ts");
+  const {
+    ADMIN_CONFIG,
+    ADMIN_METRICS,
+    ADMIN_MYSQL_POOL,
+    ADMIN_NATS,
+    ADMIN_REDIS
+  } = await import("./tokens.ts");
 
-  // Ensure initial admin exists
-  await adminStore.ensureInitialAdmin(config);
+  const nestApp = await createNestApp();
 
-  // Create and start metrics collector
-  const metrics = createMetricsCollector(nats, "admin-api", config.serviceInstanceId);
-
-  const app = express();
-  app.disable("x-powered-by");
-  app.use(express.json({ limit: "64kb" }));
-
-  app.use((req, _res, next) => {
-    log("info", "http.request", {
-      method: req.method,
-      path: req.path
-    });
-    next();
-  });
-
-  // Metrics middleware - track QPS and latency
-  app.use(metrics.middleware());
-
-  app.use(createRoutes(config, adminStore, gameAdminClient, redis, pool));
-
-  app.use((req, res) => {
-    res.status(404).json({ ok: false, error: "NOT_FOUND" });
-  });
-
-  app.use((err, _req, res, _next) => {
-    log("error", "http.unhandled_error", { error: err.message });
-    res.status(500).json({ ok: false, error: "INTERNAL_ERROR" });
-  });
-
-  return { app, config, pool, redis, nats, metrics };
+  return {
+    app: nestApp.getHttpAdapter().getInstance(),
+    nestApp,
+    config: nestApp.get(ADMIN_CONFIG),
+    pool: nestApp.get(ADMIN_MYSQL_POOL, { strict: false }),
+    redis: nestApp.get(ADMIN_REDIS, { strict: false }),
+    nats: nestApp.get(ADMIN_NATS, { strict: false }),
+    metrics: nestApp.get(ADMIN_METRICS, { strict: false })
+  };
 }

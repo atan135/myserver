@@ -50,7 +50,8 @@
 
 管理接口：
 
-- `apps/admin-api/src/routes/monitoring.js`
+- `apps/admin-api/src/monitoring/monitoring.controller.ts`
+- `apps/admin-api/src/monitoring/monitoring.service.ts`
 - `apps/admin-api/src/services/archive.js`
 
 前端页面与接线：
@@ -154,11 +155,12 @@ TTL:    30 秒
 
 ### 5.1 挂载位置
 
-监控路由定义在：
+监控控制器与服务定义在：
 
-- `apps/admin-api/src/routes/monitoring.js`
+- `apps/admin-api/src/monitoring/monitoring.controller.ts`
+- `apps/admin-api/src/monitoring/monitoring.service.ts`
 
-并由 `apps/admin-api/src/routes.js` 通过下面的前缀挂载：
+通过 NestJS Controller 按下面的前缀挂载：
 
 ```text
 /api/admin/monitoring

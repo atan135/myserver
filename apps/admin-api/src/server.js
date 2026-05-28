@@ -1,42 +1,9 @@
-import { createApp } from "./app.js";
+import { register } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const { app, config, pool, redis, nats, metrics } = await createApp();
+process.env.TS_NODE_PROJECT ??= fileURLToPath(new URL("../tsconfig.json", import.meta.url));
+process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
+register("ts-node/esm", pathToFileURL("./"));
 
-// Register shutdown handler
-const shutdown = async (signal) => {
-  console.log(`Shutdown signal: ${signal}`);
-
-  try {
-    await metrics.stop();
-  } catch (error) {
-    console.error("metrics.stop error:", error);
-  }
-
-  try {
-    await redis.quit();
-  } catch (error) {
-    console.error("redis.quit error:", error);
-  }
-
-  try {
-    await nats.close();
-  } catch (error) {
-    console.error("nats.close error:", error);
-  }
-
-  try {
-    await pool.end();
-  } catch (error) {
-    console.error("pool.end error:", error);
-  }
-
-  console.log("Shutdown complete");
-  process.exit(0);
-};
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-app.listen(config.port, config.host, () => {
-  console.log(`admin-api listening on ${config.host}:${config.port}`);
-});
+const { bootstrap } = await import("./main.ts");
+await bootstrap();

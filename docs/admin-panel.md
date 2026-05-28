@@ -6,7 +6,7 @@
 
 现状由两部分组成：
 
-- `apps/admin-api`：Node.js + Express 管理 API，默认监听 `3001`
+- `apps/admin-api`：Node.js + NestJS 管理 API，默认监听 `3001`
 - `apps/admin-web`：Vue 3 + Element Plus 管理前端，默认监听 `3002`
 
 已经落地的后台能力包括：
@@ -25,7 +25,7 @@
 
 ```text
 apps/
-├── admin-api/   # Node.js + Express API (端口 3001)
+├── admin-api/   # Node.js + NestJS API (端口 3001)
 └── admin-web/   # Vue 3 + Element Plus 前端 (端口 3002)
 ```
 
@@ -96,8 +96,8 @@ npm run dev:admin-web
 
 - `admin-web` 的菜单和前端路由按角色做了显示与跳转限制
 - `GM.vue` 页面中“封禁玩家”表单只对 `admin` 显示
-- `admin-api` 当前所有 `/api/v1/*` 接口都做了 JWT 校验
-- 但后端路由里 `requireAuth("admin", "operator")` 这类写法目前没有真正执行角色判断，`requireRole` 辅助函数已定义但未接入路由
+- `admin-api` 当前所有 `/api/v1/*` 接口都通过 NestJS Guard 做 JWT 校验
+- 后端接口级角色校验目前仍未真正按角色拦截
 
 因此当前权限控制现状应理解为：
 

@@ -989,7 +989,9 @@ REGISTRY_NAMESPACE=production  # 或 development/staging
 
 对应代码位置：
 
-- `apps/auth-http/src/routes.js`
+- `apps/auth-http/src/auth/auth.controller.ts`
+- `apps/auth-http/src/auth/auth.service.ts`
+- `apps/auth-http/src/game-ticket/game-ticket.controller.ts`
 - `apps/auth-http/src/config.js`
 
 ### 12.5 测试验证

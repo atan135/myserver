@@ -42,14 +42,14 @@ announce-service / mail-service / game-server / game-proxy -> service registry
 
 ```text
 apps/
-├── auth-http/         # Node.js + Express 登录服
+├── auth-http/         # Node.js + NestJS 登录服
 ├── game-proxy/       # Rust + Tokio KCP 接入代理，保留本地 TCP fallback
 ├── game-server/      # Rust + Tokio 游戏逻辑服
 ├── chat-server/      # Rust + Tokio 聊天服
 ├── match-service/    # Rust + tonic gRPC 匹配服务
 ├── announce-service/ # Node.js HTTP 公告服务
 ├── mail-service/     # Node.js HTTP 邮件服务
-├── admin-api/        # Node.js + Express 管理后台 API
+├── admin-api/        # Node.js + NestJS 管理后台 API
 ├── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
 └── simple-client/    # Unity 测试客户端工程
 packages/
