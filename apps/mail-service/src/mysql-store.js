@@ -1,9 +1,73 @@
+function toDateOrNull(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function parseAttachments(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return JSON.parse(value);
+  }
+
+  return value;
+}
+
+function cloneAttachments(value) {
+  if (!value) {
+    return null;
+  }
+
+  return JSON.parse(JSON.stringify(value));
+}
+
 export class MySqlMailStore {
   constructor(pool) {
     this.pool = pool;
+    this.memory = new Map();
+    this.memoryNextId = 1;
   }
 
   async createMail(mail) {
+    if (!this.pool) {
+      const id = this.memoryNextId++;
+      const createdAt = toDateOrNull(mail.created_at) || new Date();
+      const normalizedSenderId = mail.sender_id && mail.sender_id.toLowerCase() === "system"
+        ? "system"
+        : (mail.sender_id || mail.from_player_id);
+      const isSystemSender = normalizedSenderId === "system";
+
+      this.memory.set(mail.mail_id, {
+        id,
+        mail_id: mail.mail_id,
+        sender_type: mail.sender_type || (isSystemSender ? "system" : "player"),
+        sender_id: normalizedSenderId,
+        sender_name: mail.sender_name || (isSystemSender ? "系统" : normalizedSenderId),
+        from_player_id: mail.from_player_id,
+        to_player_id: mail.to_player_id,
+        title: mail.title,
+        content: mail.content || null,
+        attachments: cloneAttachments(mail.attachments),
+        mail_type: mail.mail_type || "system",
+        created_by_type: mail.created_by_type || (isSystemSender ? "system" : "player"),
+        created_by_id: mail.created_by_id || normalizedSenderId,
+        created_by_name: mail.created_by_name || mail.sender_name || (isSystemSender ? "系统" : normalizedSenderId),
+        status: mail.status || "unread",
+        created_at: createdAt,
+        read_at: toDateOrNull(mail.read_at),
+        claimed_at: toDateOrNull(mail.claimed_at),
+        expires_at: toDateOrNull(mail.expires_at)
+      });
+
+      return id;
+    }
+
     const sql = `INSERT INTO mails
       (
         mail_id,
@@ -48,6 +112,10 @@ export class MySqlMailStore {
   }
 
   async getMailById(mailId) {
+    if (!this.pool) {
+      return this.parseMailRow(this.memory.get(mailId));
+    }
+
     const sql = `SELECT * FROM mails WHERE mail_id = ?`;
     const [rows] = await this.pool.execute(sql, [mailId]);
 
@@ -60,6 +128,15 @@ export class MySqlMailStore {
 
   async getMailsByPlayerId(playerId, options = {}) {
     const { status, limit = 50, offset = 0 } = options;
+
+    if (!this.pool) {
+      return Array.from(this.memory.values())
+        .filter((mail) => mail.to_player_id === playerId)
+        .filter((mail) => !status || mail.status === status)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(offset, offset + limit)
+        .map((mail) => this.parseMailRow(mail));
+    }
 
     let sql = `SELECT * FROM mails WHERE to_player_id = ?`;
     const params = [playerId];
@@ -77,12 +154,48 @@ export class MySqlMailStore {
   }
 
   async markAsRead(mailId) {
+    if (!this.pool) {
+      const mail = this.memory.get(mailId);
+      if (!mail || mail.status !== "unread") {
+        return false;
+      }
+
+      mail.status = "read";
+      mail.read_at = new Date();
+      this.memory.set(mailId, mail);
+      return true;
+    }
+
     const sql = `UPDATE mails SET status = 'read', read_at = NOW(3) WHERE mail_id = ? AND status = 'unread'`;
     const [result] = await this.pool.execute(sql, [mailId]);
     return result.affectedRows > 0;
   }
 
   async claimAttachments(mailId) {
+    if (!this.pool) {
+      const mail = this.memory.get(mailId);
+      if (!mail) {
+        return {
+          claimed: false,
+          mail: null
+        };
+      }
+
+      const claimed = mail.status !== "claimed" && !mail.claimed_at;
+      if (claimed) {
+        const now = new Date();
+        mail.status = "claimed";
+        mail.read_at ||= now;
+        mail.claimed_at ||= now;
+        this.memory.set(mailId, mail);
+      }
+
+      return {
+        claimed,
+        mail: this.parseMailRow(mail)
+      };
+    }
+
     const updateSql = `UPDATE mails
       SET status = 'claimed',
           read_at = COALESCE(read_at, NOW(3)),
@@ -101,18 +214,32 @@ export class MySqlMailStore {
   }
 
   async deleteMail(mailId) {
+    if (!this.pool) {
+      return this.memory.delete(mailId);
+    }
+
     const sql = `DELETE FROM mails WHERE mail_id = ?`;
     const [result] = await this.pool.execute(sql, [mailId]);
     return result.affectedRows > 0;
   }
 
   async countUnread(playerId) {
+    if (!this.pool) {
+      return Array.from(this.memory.values())
+        .filter((mail) => mail.to_player_id === playerId && mail.status === "unread")
+        .length;
+    }
+
     const sql = `SELECT COUNT(*) as count FROM mails WHERE to_player_id = ? AND status = 'unread'`;
     const [rows] = await this.pool.execute(sql, [playerId]);
     return rows[0].count;
   }
 
   parseMailRow(row) {
+    if (!row) {
+      return null;
+    }
+
     const normalizedSenderId = row.sender_id && row.sender_id.toLowerCase() === "system"
       ? "system"
       : (row.sender_id || row.from_player_id);
@@ -128,7 +255,7 @@ export class MySqlMailStore {
       to_player_id: row.to_player_id,
       title: row.title,
       content: row.content,
-      attachments: row.attachments ? JSON.parse(row.attachments) : null,
+      attachments: parseAttachments(row.attachments),
       mail_type: row.mail_type,
       created_by_type: row.created_by_type || (isSystemSender ? "system" : "player"),
       created_by_id: row.created_by_id || normalizedSenderId,
