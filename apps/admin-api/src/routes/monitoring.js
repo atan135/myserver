@@ -1,5 +1,5 @@
 /**
- * Compatibility stub for the previous Express monitoring route factory.
+ * Compatibility stub for the previous monitoring route factory.
  *
  * admin-api monitoring has been migrated to src/monitoring/*.ts.
  */

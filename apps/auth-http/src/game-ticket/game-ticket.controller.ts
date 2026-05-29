@@ -20,7 +20,7 @@ function getClientIp(req: any): string | null {
     return forwardedFor.split(",")[0].trim();
   }
 
-  return req.socket.remoteAddress || null;
+  return req.ip || req.socket?.remoteAddress || null;
 }
 
 @ApiTags("game-ticket")

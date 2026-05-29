@@ -1,73 +1,31 @@
-import express from "express";
-
-import { getConfig } from "./config.js";
-import { configureLogger, log } from "./logger.js";
-import { createMetricsCollector } from "./metrics.js";
-import { createMySqlPool } from "./mysql-client.js";
-import { AnnouncementStore } from "./mysql-store.js";
-import { createRedisClient } from "./redis-client.js";
-import { RegistryClient } from "./registry-client.js";
-import { createRoutes } from "./routes.js";
-import { createNatsClient } from "./nats-client.js";
-
 export async function createApp() {
-  const config = getConfig();
-  configureLogger(config);
+  const { register } = await import("node:module");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  process.env.TS_NODE_PROJECT ??= fileURLToPath(new URL("../tsconfig.json", import.meta.url));
+  process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
+  register("ts-node/esm", pathToFileURL("./"));
 
-  const redis = await createRedisClient(config);
-  let nats;
-  try {
-    nats = await createNatsClient(config);
-  } catch (error) {
-    await redis.quit();
-    throw error;
-  }
-  let mysqlPool = null;
+  const { createNestApp, closeNestApp } = await import("./nest-app.ts");
+  const {
+    ANNOUNCE_CONFIG,
+    ANNOUNCE_METRICS,
+    ANNOUNCE_MYSQL_POOL,
+    ANNOUNCE_NATS,
+    ANNOUNCE_REDIS,
+    ANNOUNCE_REGISTRY
+  } = await import("./tokens.ts");
 
-  try {
-    mysqlPool = await createMySqlPool(config);
-  } catch (error) {
-    await nats.close();
-    await redis.quit();
-    throw error;
-  }
+  const nestApp = await createNestApp();
 
-  const announcementStore = new AnnouncementStore(mysqlPool);
-  const registryClient = new RegistryClient(redis, config);
-  const metrics = createMetricsCollector(nats, "announce-service", config.serviceInstanceId);
-
-  const app = express();
-  app.disable("x-powered-by");
-  app.use(express.json({ limit: "64kb" }));
-
-  app.use((req, _res, next) => {
-    log("info", "http.request", {
-      method: req.method,
-      path: req.path
-    });
-    next();
-  });
-
-  app.use(metrics.middleware());
-  app.use(createRoutes(config, announcementStore));
-
-  app.use((req, res) => {
-    res.status(404).json({
-      ok: false,
-      error: "NOT_FOUND",
-      path: req.path
-    });
-  });
-
-  app.use((err, _req, res, _next) => {
-    log("error", "http.unhandled_error", {
-      error: err.message
-    });
-    res.status(500).json({
-      ok: false,
-      error: "INTERNAL_ERROR"
-    });
-  });
-
-  return { app, config, redis, nats, mysqlPool, registryClient, metrics };
+  return {
+    app: nestApp.getHttpAdapter().getInstance(),
+    nestApp,
+    config: nestApp.get(ANNOUNCE_CONFIG),
+    redis: nestApp.get(ANNOUNCE_REDIS, { strict: false }),
+    nats: nestApp.get(ANNOUNCE_NATS, { strict: false }),
+    mysqlPool: nestApp.get(ANNOUNCE_MYSQL_POOL, { strict: false }),
+    registryClient: nestApp.get(ANNOUNCE_REGISTRY, { strict: false }),
+    metrics: nestApp.get(ANNOUNCE_METRICS, { strict: false }),
+    close: () => closeNestApp(nestApp)
+  };
 }

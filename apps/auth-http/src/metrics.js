@@ -41,12 +41,16 @@ export class MetricsCollector {
     return (req, res, next) => {
       const start = Date.now();
       res.on("finish", () => {
-        this.qps += 1;
-        this.latencySum += Date.now() - start;
-        this.latencyCount += 1;
+        this.recordRequest(Date.now() - start);
       });
       next();
     };
+  }
+
+  recordRequest(latencyMs = 0) {
+    this.qps += 1;
+    this.latencySum += latencyMs;
+    this.latencyCount += 1;
   }
 
   async countSessionStats() {

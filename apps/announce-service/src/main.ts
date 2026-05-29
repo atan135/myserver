@@ -2,11 +2,20 @@ import log4js from "log4js";
 
 import { createNestApp, closeNestApp } from "./nest-app.js";
 import { log } from "./logger.js";
-import { AUTH_CONFIG } from "./tokens.js";
+import { ANNOUNCE_CONFIG, ANNOUNCE_REGISTRY } from "./tokens.js";
 
 export async function bootstrap() {
   const app = await createNestApp();
-  const config = app.get<any>(AUTH_CONFIG);
+  const config = app.get<any>(ANNOUNCE_CONFIG);
+  const registryClient = app.get<any>(ANNOUNCE_REGISTRY, { strict: false });
+
+  try {
+    await registryClient.register();
+    registryClient.startHeartbeat(10);
+  } catch (error: any) {
+    log("error", "startup.registry_failed", { error: error.message });
+  }
+
   const httpServer = await app.listen(config.port, config.host);
   let shuttingDown = false;
 
@@ -34,14 +43,12 @@ export async function bootstrap() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
-  log("info", "http.server_started", {
+  log("info", "server.started", {
     host: config.host,
     port: config.port,
-    logEnableConsole: config.logEnableConsole,
-    logEnableFile: config.logEnableFile,
-    logDir: config.logDir,
-    mysqlEnabled: config.mysqlEnabled
+    env: config.env
   });
+  console.log(`Announce service listening on ${config.host}:${config.port}`);
 
   return { app, config, httpServer };
 }

@@ -21,7 +21,7 @@ function getClientIp(req: any): string | null {
     return forwardedFor.split(",")[0].trim();
   }
 
-  return req.socket.remoteAddress || null;
+  return req.ip || req.socket?.remoteAddress || null;
 }
 
 @Injectable()
@@ -115,7 +115,11 @@ export class AuthService {
           details: { remainingSeconds: lockStatus.remainingSeconds }
         });
 
-        res.setHeader("Retry-After", String(lockStatus.remainingSeconds));
+        if (typeof res?.setHeader === "function") {
+          res.setHeader("Retry-After", String(lockStatus.remainingSeconds));
+        } else {
+          res?.header?.("Retry-After", String(lockStatus.remainingSeconds));
+        }
         throw forbidden("ACCOUNT_LOCKED", `Account is locked. Try again in ${lockStatus.remainingSeconds} seconds`);
       }
     }

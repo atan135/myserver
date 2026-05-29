@@ -2,6 +2,7 @@ import "reflect-metadata";
 
 import { INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import { FastifyAdapter, NestFastifyApplication } from "@nestjs/platform-fastify";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 
 import { AppModule } from "./app.module.js";
@@ -16,21 +17,28 @@ import {
 } from "./tokens.js";
 
 export async function createNestApp() {
-  const app = await NestFactory.create(AppModule, {
-    logger: false,
-    bodyParser: false
-  });
+  const app = await NestFactory.create<NestFastifyApplication>(
+    AppModule,
+    new FastifyAdapter({
+      bodyLimit: 64 * 1024
+    }),
+    {
+      logger: false,
+      abortOnError: false
+    }
+  );
 
   const config = app.get<any>(ADMIN_CONFIG);
   configureLogger(config);
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const expressApp = app.getHttpAdapter().getInstance();
-  expressApp.disable("x-powered-by");
-  (app as any).useBodyParser("json", { limit: "64kb" });
-  expressApp.use((req: any, res: any, next: () => void) => {
+  const fastify = app.getHttpAdapter().getInstance();
+  fastify.addHook("onRequest", async (request: any) => {
+    request.metricsStartedAt = Date.now();
+  });
+  fastify.addHook("onResponse", async (request: any) => {
     const metrics = app.get<any>(ADMIN_METRICS, { strict: false });
-    return metrics.middleware()(req, res, next);
+    metrics?.recordRequest?.(Date.now() - (request.metricsStartedAt || Date.now()));
   });
 
   const swaggerConfig = new DocumentBuilder()

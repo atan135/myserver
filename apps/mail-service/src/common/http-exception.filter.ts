@@ -16,6 +16,7 @@ function sendJson(response: any, status: number, body: Record<string, unknown>) 
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
+    const req = ctx.getRequest();
     const res = ctx.getResponse();
 
     if (exception instanceof HttpException) {
@@ -28,7 +29,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       if (status === HttpStatus.NOT_FOUND) {
         return sendJson(res, status, {
           ok: false,
-          error: "NOT_FOUND"
+          error: "NOT_FOUND",
+          path: req.url
         });
       }
 

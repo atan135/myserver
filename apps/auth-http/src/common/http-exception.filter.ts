@@ -2,6 +2,16 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from
 
 import { log } from "../logger.js";
 
+function sendJson(response: any, status: number, body: Record<string, unknown>) {
+  if (typeof response.status === "function") {
+    response.status(status);
+  } else if (typeof response.code === "function") {
+    response.code(status);
+  }
+
+  return response.send(body);
+}
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
@@ -13,18 +23,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const response = exception.getResponse();
       if (typeof response === "object" && response !== null && "ok" in response) {
-        return res.status(status).json(response);
+        return sendJson(res, status, response as Record<string, unknown>);
       }
 
       if (status === HttpStatus.NOT_FOUND) {
-        return res.status(status).json({
+        return sendJson(res, status, {
           ok: false,
           error: "NOT_FOUND",
-          path: req.path
+          path: req.url
         });
       }
 
-      return res.status(status).json(response);
+      return sendJson(res, status, typeof response === "object" ? response as Record<string, unknown> : { message: response });
     }
 
     const error = exception as Error;
@@ -32,7 +42,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       error: error?.message
     });
 
-    return res.status(500).json({
+    return sendJson(res, 500, {
       ok: false,
       error: "INTERNAL_ERROR"
     });

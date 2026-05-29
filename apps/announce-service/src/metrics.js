@@ -28,12 +28,16 @@ export class MetricsCollector {
     return (_req, res, next) => {
       const startedAt = Date.now();
       res.on("finish", () => {
-        this.qps += 1;
-        this.latencySum += Date.now() - startedAt;
-        this.latencyCount += 1;
+        this.recordRequest(Date.now() - startedAt);
       });
       next();
     };
+  }
+
+  recordRequest(latencyMs = 0) {
+    this.qps += 1;
+    this.latencySum += latencyMs;
+    this.latencyCount += 1;
   }
 
   async flush() {

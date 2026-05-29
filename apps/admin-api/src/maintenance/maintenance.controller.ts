@@ -9,7 +9,7 @@ function getClientIp(req: any): string | null {
   if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
     return forwardedFor.split(",")[0].trim();
   }
-  return req.socket.remoteAddress || null;
+  return req.ip || req.socket?.remoteAddress || null;
 }
 
 @ApiTags("maintenance")

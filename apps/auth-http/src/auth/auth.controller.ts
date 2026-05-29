@@ -15,8 +15,8 @@ export class AuthController {
   @ApiOperation({ summary: "Password account login" })
   @ApiBody({ type: LoginDto })
   @ApiCreatedResponse({ type: LoginResponseDto })
+  @HttpCode(HttpStatus.CREATED)
   login(@Body() dto: LoginDto, @Req() req: any, @Res({ passthrough: true }) res: any) {
-    res.status(HttpStatus.CREATED);
     return this.authService.login(dto, req, res);
   }
 
@@ -24,8 +24,8 @@ export class AuthController {
   @ApiOperation({ summary: "Guest login" })
   @ApiBody({ type: GuestLoginDto })
   @ApiCreatedResponse({ type: LoginResponseDto })
-  guestLogin(@Body() dto: GuestLoginDto, @Req() req: any, @Res({ passthrough: true }) res: any) {
-    res.status(HttpStatus.CREATED);
+  @HttpCode(HttpStatus.CREATED)
+  guestLogin(@Body() dto: GuestLoginDto, @Req() req: any) {
     return this.authService.guestLogin(dto, req);
   }
 

@@ -10,15 +10,9 @@ export async function bootstrap() {
     console.log(`Shutdown signal: ${signal}`);
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((error: Error | undefined) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+      if (typeof httpServer.close === "function") {
+        await httpServer.close();
+      }
     } catch (error) {
       console.error("httpServer.close error:", error);
     }

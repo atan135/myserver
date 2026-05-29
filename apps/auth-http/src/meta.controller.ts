@@ -1,6 +1,7 @@
-import { Controller, Get, Inject, Res } from "@nestjs/common";
+import { Controller, Get, HttpCode, HttpStatus, Inject } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 
+import { ApiHttpException } from "./common/http-exception.js";
 import { AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_STORE } from "./tokens.js";
 
 @ApiTags("meta")
@@ -13,7 +14,8 @@ export class MetaController {
   ) {}
 
   @Get("/healthz")
-  async healthz(@Res({ passthrough: true }) res: any) {
+  @HttpCode(HttpStatus.OK)
+  async healthz() {
     const checks = { redis: "ok", mysql: "skipped" };
     let healthy = true;
 
@@ -34,7 +36,16 @@ export class MetaController {
       }
     }
 
-    res.status(healthy ? 200 : 503);
+    if (!healthy) {
+      throw new ApiHttpException(503, {
+        ok: false,
+        service: this.config.appName,
+        env: this.config.env,
+        storage: this.config.mysqlEnabled ? "redis+mysql" : "redis",
+        checks
+      });
+    }
+
     return {
       ok: healthy,
       service: this.config.appName,

@@ -46,7 +46,7 @@
 | 层级 | 技术 |
 |------|------|
 | Node.js 登录/后台 HTTP 服务 | Node.js 18+、NestJS（`auth-http` / `admin-api`） |
-| Node.js 周边 HTTP 服务 | Node.js 18+、Express（`announce-service` / `mail-service`） |
+| Node.js 周边 HTTP 服务 | Node.js 18+、NestJS + Fastify（`announce-service` / `mail-service`） |
 | Rust 长连接服务 | Rust、Tokio、tracing |
 | 前端后台 | Vue 3、Vite、Element Plus |
 | 玩家协议 | 自定义包头 + Protobuf |
@@ -72,8 +72,8 @@
 | `game-proxy admin` | `7101` | Rust + Tokio | 查看上游、切换路由、维护模式 |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
-| `announce-service` | `9004` | Node.js + Express | 公告 CRUD、有效公告查询、服务注册与监控上报 |
-| `mail-service` | `9003` | Node.js + Express | 邮件 CRUD、邮件通知发布、部分服务注册接入 |
+| `announce-service` | `9004` | Node.js + NestJS + Fastify | 公告 CRUD、有效公告查询、服务注册与监控上报 |
+| `mail-service` | `9003` | Node.js + NestJS + Fastify | 邮件 CRUD、邮件通知发布、部分服务注册接入 |
 
 ---
 

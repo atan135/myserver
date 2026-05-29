@@ -9,7 +9,7 @@ function getClientIp(req: any): string | null {
     return forwardedFor.split(",")[0].trim();
   }
 
-  return req.socket.remoteAddress || null;
+  return req.ip || req.socket?.remoteAddress || null;
 }
 
 @Injectable()
@@ -32,10 +32,14 @@ export class RateLimitMiddleware implements NestMiddleware {
           targetValue: clientIp,
           clientIp,
           severity: "warning",
-          details: { path: req.path, retryAfterSeconds }
+          details: { path: req.url, retryAfterSeconds }
         });
 
-        res.setHeader("Retry-After", String(retryAfterSeconds));
+        if (typeof res.setHeader === "function") {
+          res.setHeader("Retry-After", String(retryAfterSeconds));
+        } else {
+          res.header("Retry-After", String(retryAfterSeconds));
+        }
         throw rateLimited("IP_RATE_LIMITED", "Too many requests from this IP");
       }
     }
