@@ -51,6 +51,15 @@ pub trait RoomLogic: Send {
     // gameplay state changes must be applied in on_tick with resolved frame inputs.
     fn on_player_input(&mut self, _player_id: &str, _action: &str, _payload_json: &str) {}
 
+    fn validate_player_input(
+        &self,
+        _player_id: &str,
+        _action: &str,
+        _payload_json: &str,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     // Authoritative frame simulation entry point.
     fn on_tick(&mut self, _frame_id: u32, _fps: u16, _inputs: &[PlayerInputRecord]) {}
 

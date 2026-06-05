@@ -99,6 +99,10 @@ pub async fn handle_room_join(
     match join_result {
         Ok(snapshot) => {
             connection.session.room_id = Some(room_id.clone());
+            let sync_before_broadcast = services
+                .room_manager
+                .is_member_syncing(&room_id, &player_id)
+                .await;
             connection.queue_message(
                 MessageType::RoomJoinRes,
                 packet.header.seq,
@@ -108,6 +112,16 @@ pub async fn handle_room_join(
                     error_code: String::new(),
                 },
             )?;
+            if sync_before_broadcast {
+                connection.queue_message(
+                    MessageType::RoomStatePush,
+                    0,
+                    crate::pb::RoomStatePush {
+                        event: "member_joined".to_string(),
+                        snapshot: Some(snapshot.clone()),
+                    },
+                )?;
+            }
             services
                 .mysql_store
                 .append_room_event(
@@ -127,10 +141,17 @@ pub async fn handle_room_join(
                     })),
                 )
                 .await;
-            services
+            let broadcast_result = services
                 .room_manager
                 .broadcast_snapshot(&room_id, "member_joined", snapshot)
-                .await?;
+                .await;
+            if sync_before_broadcast {
+                services
+                    .room_manager
+                    .finish_member_sync(&room_id, &player_id)
+                    .await;
+            }
+            broadcast_result?;
         }
         Err(error_code) => {
             connection.queue_message(

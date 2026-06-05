@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::core::logic::{RoomLogicBroadcast, SharedRoomLogicFactory};
 use crate::core::room::{
@@ -431,6 +431,8 @@ impl RoomManager {
             }
 
             let is_new_member = !room.members.contains_key(player_id);
+            let sync_before_broadcast =
+                is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
             room.members.insert(
                 player_id.to_string(),
                 RoomMemberState {
@@ -440,6 +442,7 @@ impl RoomManager {
                     offline: false,
                     offline_since: None,
                     role,
+                    syncing: sync_before_broadcast,
                 },
             );
 
@@ -465,6 +468,30 @@ impl RoomManager {
         }
 
         Ok(snapshot)
+    }
+
+    pub async fn finish_member_sync(&self, room_id: &str, player_id: &str) {
+        let sync_completed = {
+            let mut rooms = self.rooms.lock().await;
+            let Some(room) = rooms.get_mut(room_id) else {
+                return;
+            };
+            room.finish_member_sync(player_id)
+        };
+
+        if sync_completed {
+            info!(room_id = room_id, player_id = player_id, "room member sync completed");
+            self.update_room_fps(room_id).await;
+        }
+    }
+
+    pub async fn is_member_syncing(&self, room_id: &str, player_id: &str) -> bool {
+        let rooms = self.rooms.lock().await;
+        rooms
+            .get(room_id)
+            .and_then(|room| room.members.get(player_id))
+            .map(|member| member.syncing)
+            .unwrap_or(false)
     }
 
     pub async fn leave_room(&self, room_id: &str, player_id: &str) -> RoomLeaveResult {
@@ -652,6 +679,7 @@ impl RoomManager {
             member.offline = false;
             member.offline_since = None;
             member.sender = sender;
+            member.syncing = false;
             room.logic.on_player_online(room_id, player_id);
             room.clear_empty();
             room.update_activity();
@@ -735,6 +763,7 @@ impl RoomManager {
                     offline: false,
                     offline_since: None,
                     role: MemberRole::Observer,
+                    syncing: false,
                 },
             );
 
@@ -873,6 +902,8 @@ impl RoomManager {
         let policy = self.policies.resolve(&room.policy_id);
 
         room.can_send_input(player_id)?;
+        room.logic
+            .validate_player_input(player_id, action, payload_json)?;
         if frame_id <= room.current_frame {
             return Err("INPUT_FRAME_EXPIRED");
         }
@@ -1011,7 +1042,7 @@ impl RoomManager {
 
     fn compute_room_fps(&self, room: &Room) -> u16 {
         let policy = self.policies.resolve(&room.policy_id);
-        let online_count = room.online_members().len();
+        let online_count = room.broadcast_members().len();
 
         if online_count == 0 {
             return policy.silent_room_fps.max(1);
@@ -1125,7 +1156,7 @@ impl RoomManager {
                 fps
             );
             for input in &tick_inputs {
-                info!(
+                debug!(
                     room_id = %room_id,
                     frame_id = waiting_frame_id,
                     player_id = %input.player_id,
@@ -1212,7 +1243,7 @@ impl RoomManager {
                 return Ok(());
             };
 
-            let online = room.online_members();
+            let online = room.broadcast_members();
             info!(
                 room_id = room_id,
                 message_type = ?message_type,
@@ -1254,7 +1285,7 @@ impl RoomManager {
             let targets = target_player_ids
                 .iter()
                 .filter_map(|player_id| room.members.get(player_id))
-                .filter(|member| !member.offline)
+                .filter(|member| !member.offline && !member.syncing)
                 .map(|member| member.sender.clone())
                 .collect::<Vec<_>>();
 
@@ -2018,6 +2049,7 @@ mod tests {
                 offline: false,
                 offline_since: None,
                 role: MemberRole::Player,
+                syncing: false,
             },
         );
 

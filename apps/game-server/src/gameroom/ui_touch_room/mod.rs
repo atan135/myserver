@@ -7,6 +7,8 @@ use crate::core::logic::RoomLogic;
 use crate::core::room::PlayerInputRecord;
 
 pub const UI_TOUCH_ACTION: &str = "ui_touch";
+const UI_TOUCH_PAYLOAD_MAX_BYTES: usize = 2048;
+const UI_TOUCH_MAX_SAMPLES: usize = 64;
 
 #[derive(Default)]
 pub struct UITouchRoomLogic {
@@ -68,6 +70,19 @@ impl RoomLogic for UITouchRoomLogic {
         }
     }
 
+    fn validate_player_input(
+        &self,
+        _player_id: &str,
+        action: &str,
+        payload_json: &str,
+    ) -> Result<(), &'static str> {
+        if action != UI_TOUCH_ACTION {
+            return Err("INVALID_UI_TOUCH_ACTION");
+        }
+
+        validate_touch_payload(payload_json)
+    }
+
     fn on_tick(&mut self, frame_id: u32, _fps: u16, inputs: &[PlayerInputRecord]) {
         self.tick_count = self.tick_count.saturating_add(1);
 
@@ -127,5 +142,59 @@ impl RoomLogic for UITouchRoomLogic {
             players: self.player_states.values().collect(),
         })
         .unwrap_or_default()
+    }
+}
+
+fn validate_touch_payload(payload_json: &str) -> Result<(), &'static str> {
+    if payload_json.len() > UI_TOUCH_PAYLOAD_MAX_BYTES {
+        return Err("UI_TOUCH_PAYLOAD_TOO_LARGE");
+    }
+
+    let payload = serde_json::from_str::<TouchInputPayload>(payload_json)
+        .map_err(|_| "INVALID_UI_TOUCH_PAYLOAD")?;
+    if payload.samples.len() > UI_TOUCH_MAX_SAMPLES {
+        return Err("UI_TOUCH_SAMPLE_COUNT_TOO_LARGE");
+    }
+
+    for sample in &payload.samples {
+        if !sample.x.is_finite() || !sample.y.is_finite() {
+            return Err("UI_TOUCH_SAMPLE_NOT_FINITE");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_touch_payload_bounds() {
+        let payload = r#"{"version":1,"seq":1,"space":"viewport01","pointerId":0,"pressed":true,"samples":[{"phase":"down","x":0.25,"y":0.75}]}"#;
+        assert_eq!(validate_touch_payload(payload), Ok(()));
+
+        let logic = UITouchRoomLogic::default();
+        assert_eq!(
+            logic.validate_player_input("player-a", "move", payload),
+            Err("INVALID_UI_TOUCH_ACTION")
+        );
+
+        let too_many_samples = format!(
+            "{{\"samples\":[{}]}}",
+            (0..=UI_TOUCH_MAX_SAMPLES)
+                .map(|_| "{\"x\":0.5,\"y\":0.5}")
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(
+            validate_touch_payload(&too_many_samples),
+            Err("UI_TOUCH_SAMPLE_COUNT_TOO_LARGE")
+        );
+
+        assert_eq!(
+            validate_touch_payload("{\"samples\":[{\"x\":null,\"y\":0.5}]}"),
+            Err("INVALID_UI_TOUCH_PAYLOAD")
+        );
     }
 }

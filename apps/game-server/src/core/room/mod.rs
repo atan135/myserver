@@ -33,6 +33,7 @@ pub struct RoomMemberState {
     pub offline: bool,
     pub offline_since: Option<Instant>,
     pub role: MemberRole,
+    pub syncing: bool,
 }
 
 #[derive(Clone)]
@@ -260,6 +261,7 @@ impl Room {
             member.offline = false;
             member.offline_since = None;
             member.sender = sender;
+            member.syncing = false;
             return true;
         }
         false
@@ -378,6 +380,7 @@ impl Room {
             .members
             .values()
             .filter(|member| !member.offline && member.role == MemberRole::Player)
+            .filter(|member| !member.syncing)
             .map(|member| member.player_id.clone())
             .collect::<Vec<_>>();
         players.sort();
@@ -409,8 +412,21 @@ impl Room {
         next
     }
 
-    pub fn online_members(&self) -> Vec<&RoomMemberState> {
-        self.members.values().filter(|m| !m.offline).collect()
+    pub fn broadcast_members(&self) -> Vec<&RoomMemberState> {
+        self.members
+            .values()
+            .filter(|m| !m.offline && !m.syncing)
+            .collect()
+    }
+
+    pub fn finish_member_sync(&mut self, player_id: &str) -> bool {
+        if let Some(member) = self.members.get_mut(player_id) {
+            if member.syncing {
+                member.syncing = false;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn set_match_id(&mut self, match_id: String) {
