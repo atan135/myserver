@@ -15,10 +15,7 @@ struct SessionKickEvent {
 }
 
 /// Subscribe to session kick events with automatic reconnection.
-pub async fn subscribe_session_kicks(
-    nats_url: String,
-    player_registry: PlayerRegistry,
-) {
+pub async fn subscribe_session_kicks(nats_url: String, player_registry: PlayerRegistry) {
     loop {
         match run_subscriber(&nats_url, &player_registry).await {
             Ok(()) => {
