@@ -233,7 +233,7 @@ impl RoomRuntimePolicy {
             retain_state_when_empty: true,
             offline_ttl_secs: 120,
             snapshot_interval_frames: 20,
-            input_delay_frames: 4,
+            input_delay_frames: 2,
             wait_timeout_ms: 100,
             wait_strategy: InputWaitStrategy::Optimistic,
             missing_input_strategy: MissingInputStrategy::Empty,
