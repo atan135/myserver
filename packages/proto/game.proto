@@ -294,6 +294,67 @@ message ServerRedirectPush {
   uint32 retry_after_ms = 5;
 }
 
+enum AuthorityKind {
+  AUTHORITY_KIND_SERVER = 0;
+  AUTHORITY_KIND_CLIENT = 1;
+  AUTHORITY_KIND_LOCAL = 2;
+}
+
+message AuthorityEndpoint {
+  AuthorityKind kind = 1;
+  string authority_id = 2;
+  string player_id = 3;
+  string host = 4;
+  uint32 port = 5;
+  string transport = 6;
+  string room_id = 7;
+  uint64 authority_epoch = 8;
+}
+
+message AuthorityInput {
+  string player_id = 1;
+  uint32 frame_id = 2;
+  string action = 3;
+  string payload_json = 4;
+}
+
+message AuthoritySnapshot {
+  string room_id = 1;
+  uint64 authority_epoch = 2;
+  uint32 frame_id = 3;
+  string authority_player_id = 4;
+  repeated string player_ids = 5;
+  string game_state_json = 6;
+  string checksum = 7;
+}
+
+message AuthorityMigrationPayload {
+  string room_id = 1;
+  uint64 authority_epoch = 2;
+  uint32 frozen_frame_id = 3;
+  AuthorityEndpoint old_authority = 4;
+  AuthorityEndpoint new_authority = 5;
+  AuthoritySnapshot snapshot = 6;
+  repeated AuthorityInput pending_inputs = 7;
+  string logic_state_json = 8;
+  string runtime_state_json = 9;
+  string checksum = 10;
+}
+
+message AuthorityMigrationStartPush {
+  string reason = 1;
+  AuthorityMigrationPayload payload = 2;
+  bool reconnect_required = 3;
+  uint32 retry_after_ms = 4;
+}
+
+message AuthorityMigrationCompletePush {
+  string room_id = 1;
+  uint64 authority_epoch = 2;
+  AuthorityEndpoint authority = 3;
+  AuthoritySnapshot snapshot = 4;
+}
+
 message RoomTransferPayload {
   string rollout_epoch = 1;
   string room_id = 2;

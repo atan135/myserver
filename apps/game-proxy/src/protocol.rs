@@ -39,6 +39,8 @@ pub enum MessageType {
     MovementSnapshotPush = 1206,
     MovementRejectPush = 1207,
     ServerRedirectPush = 1208,
+    AuthorityMigrationStartPush = 1210,
+    AuthorityMigrationCompletePush = 1211,
     GetRoomDataReq = 1301,
     GetRoomDataRes = 1302,
     ItemEquipReq = 1401,
@@ -117,6 +119,8 @@ impl MessageType {
             1206 => Some(Self::MovementSnapshotPush),
             1207 => Some(Self::MovementRejectPush),
             1208 => Some(Self::ServerRedirectPush),
+            1210 => Some(Self::AuthorityMigrationStartPush),
+            1211 => Some(Self::AuthorityMigrationCompletePush),
             1301 => Some(Self::GetRoomDataReq),
             1302 => Some(Self::GetRoomDataRes),
             1401 => Some(Self::ItemEquipReq),
@@ -244,7 +248,10 @@ pub fn encode_raw_packet(msg_type: u16, seq: u32, body: &[u8]) -> Vec<u8> {
     packet
 }
 
-pub async fn read_packet<R>(reader: &mut R, max_body_len: usize) -> Result<Option<Packet>, std::io::Error>
+pub async fn read_packet<R>(
+    reader: &mut R,
+    max_body_len: usize,
+) -> Result<Option<Packet>, std::io::Error>
 where
     R: AsyncRead + Unpin,
 {

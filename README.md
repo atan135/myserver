@@ -55,6 +55,7 @@ apps/
 └── simple-client/    # Unity 测试客户端工程
 packages/
 ├── proto/            # 共享 Protobuf 协议
+├── authority-core/   # 服务端和客户端共用的控制机迁移/快照/输入基础结构
 └── service-registry/ # Redis 服务注册中心包
 tools/
 └── mock-client/      # Node.js 无客户端联调工具
@@ -217,6 +218,7 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 
 - `MAGIC = 0xCAFE`
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`
+- 控制机迁移、控制机 endpoint、权威快照和待处理输入使用 `packages/proto/game.proto` 中的 `Authority*` 消息，并在 Rust 侧由 `packages/authority-core` 复用基础结构
 - `chat-server` 当前仍保留独立聊天协议定义，具体见 `apps/chat-server/src/proto/chat.proto`
 
 ## Git 提交规则

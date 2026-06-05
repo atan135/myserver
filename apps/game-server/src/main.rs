@@ -1,4 +1,5 @@
 mod admin_server;
+mod authority_bridge;
 mod config;
 mod config_table;
 mod core;

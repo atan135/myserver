@@ -394,6 +394,98 @@ pub struct ServerRedirectPush {
     pub retry_after_ms: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorityEndpoint {
+    #[prost(enumeration = "AuthorityKind", tag = "1")]
+    pub kind: i32,
+    #[prost(string, tag = "2")]
+    pub authority_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub port: u32,
+    #[prost(string, tag = "6")]
+    pub transport: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "8")]
+    pub authority_epoch: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorityInput {
+    #[prost(string, tag = "1")]
+    pub player_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub frame_id: u32,
+    #[prost(string, tag = "3")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub payload_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthoritySnapshot {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub authority_epoch: u64,
+    #[prost(uint32, tag = "3")]
+    pub frame_id: u32,
+    #[prost(string, tag = "4")]
+    pub authority_player_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "5")]
+    pub player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "6")]
+    pub game_state_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub checksum: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorityMigrationPayload {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub authority_epoch: u64,
+    #[prost(uint32, tag = "3")]
+    pub frozen_frame_id: u32,
+    #[prost(message, optional, tag = "4")]
+    pub old_authority: ::core::option::Option<AuthorityEndpoint>,
+    #[prost(message, optional, tag = "5")]
+    pub new_authority: ::core::option::Option<AuthorityEndpoint>,
+    #[prost(message, optional, tag = "6")]
+    pub snapshot: ::core::option::Option<AuthoritySnapshot>,
+    #[prost(message, repeated, tag = "7")]
+    pub pending_inputs: ::prost::alloc::vec::Vec<AuthorityInput>,
+    #[prost(string, tag = "8")]
+    pub logic_state_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub runtime_state_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub checksum: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorityMigrationStartPush {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub payload: ::core::option::Option<AuthorityMigrationPayload>,
+    #[prost(bool, tag = "3")]
+    pub reconnect_required: bool,
+    #[prost(uint32, tag = "4")]
+    pub retry_after_ms: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorityMigrationCompletePush {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub authority_epoch: u64,
+    #[prost(message, optional, tag = "3")]
+    pub authority: ::core::option::Option<AuthorityEndpoint>,
+    #[prost(message, optional, tag = "4")]
+    pub snapshot: ::core::option::Option<AuthoritySnapshot>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomTransferPayload {
     #[prost(string, tag = "1")]
     pub rollout_epoch: ::prost::alloc::string::String,
@@ -934,6 +1026,35 @@ impl RoomMigrationState {
             "ROOM_MIGRATION_STATE_OWNED_BY_NEW" => Some(Self::OwnedByNew),
             "ROOM_MIGRATION_STATE_TRANSFER_FAILED" => Some(Self::TransferFailed),
             "ROOM_MIGRATION_STATE_RETIRED_ON_OLD" => Some(Self::RetiredOnOld),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AuthorityKind {
+    Server = 0,
+    Client = 1,
+    Local = 2,
+}
+impl AuthorityKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Server => "AUTHORITY_KIND_SERVER",
+            Self::Client => "AUTHORITY_KIND_CLIENT",
+            Self::Local => "AUTHORITY_KIND_LOCAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AUTHORITY_KIND_SERVER" => Some(Self::Server),
+            "AUTHORITY_KIND_CLIENT" => Some(Self::Client),
+            "AUTHORITY_KIND_LOCAL" => Some(Self::Local),
             _ => None,
         }
     }
