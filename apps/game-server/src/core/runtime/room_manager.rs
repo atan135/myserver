@@ -419,7 +419,10 @@ impl RoomManager {
             });
 
             let policy = self.policies.resolve(&room.policy_id);
-            if room.phase == RoomPhase::InGame && !room.members.contains_key(player_id) {
+            if room.phase == RoomPhase::InGame
+                && !policy.allow_join_in_game
+                && !room.members.contains_key(player_id)
+            {
                 return Err("ROOM_ALREADY_IN_GAME");
             }
 

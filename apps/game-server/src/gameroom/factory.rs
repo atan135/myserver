@@ -6,7 +6,7 @@ use crate::core::system::{combat::SharedCombatCatalog, scene::SceneCatalog};
 
 use super::{
     CombatDemoLogic, DisposableMatchLogic, MovementDemoLogic, PersistentWorldLogic, SandboxLogic,
-    TestRoomLogic,
+    TestRoomLogic, UITouchRoomLogic,
 };
 
 #[derive(Clone)]
@@ -33,6 +33,7 @@ impl GameRoomLogicFactory {
 impl RoomLogicFactory for GameRoomLogicFactory {
     fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
         match policy_id {
+            "ui_touch_room" | "UITouchRoom" => Box::new(UITouchRoomLogic::default()),
             "combat_demo" => Box::new(CombatDemoLogic::new(self.combat_catalog.clone())),
             "movement_demo" => {
                 let policy = RoomRuntimePolicy::movement_demo();

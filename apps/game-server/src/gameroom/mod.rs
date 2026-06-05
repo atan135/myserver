@@ -5,6 +5,7 @@ pub mod movement_demo;
 pub mod persistent_world;
 pub mod sandbox;
 pub mod test_room;
+pub mod ui_touch_room;
 
 pub use combat_demo::CombatDemoLogic;
 pub use disposable_match::DisposableMatchLogic;
@@ -13,3 +14,4 @@ pub use movement_demo::MovementDemoLogic;
 pub use persistent_world::PersistentWorldLogic;
 pub use sandbox::SandboxLogic;
 pub use test_room::TestRoomLogic;
+pub use ui_touch_room::UITouchRoomLogic;

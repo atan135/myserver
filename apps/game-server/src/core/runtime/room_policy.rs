@@ -18,6 +18,7 @@ pub struct RoomRuntimePolicy {
     pub policy_id: String,
     pub max_members: usize,
     pub min_start_players: usize,
+    pub allow_join_in_game: bool,
     pub silent_room_fps: u16,
     pub idle_room_fps: u16,
     pub active_room_fps: u16,
@@ -46,6 +47,7 @@ impl RoomRuntimePolicy {
             policy_id: DEFAULT_ROOM_POLICY_ID.to_string(),
             max_members: 10,
             min_start_players: 2,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 2,
             active_room_fps: 10,
@@ -74,6 +76,7 @@ impl RoomRuntimePolicy {
             policy_id: "persistent_world".to_string(),
             max_members: 100,
             min_start_players: 1,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 2,
             active_room_fps: 10,
@@ -102,6 +105,7 @@ impl RoomRuntimePolicy {
             policy_id: "disposable_match".to_string(),
             max_members: 10,
             min_start_players: 2,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 5,
             active_room_fps: 15,
@@ -130,6 +134,7 @@ impl RoomRuntimePolicy {
             policy_id: "sandbox".to_string(),
             max_members: 50,
             min_start_players: 1,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 5,
             active_room_fps: 20,
@@ -158,6 +163,7 @@ impl RoomRuntimePolicy {
             policy_id: "movement_demo".to_string(),
             max_members: 32,
             min_start_players: 1,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 10,
             active_room_fps: 20,
@@ -186,6 +192,7 @@ impl RoomRuntimePolicy {
             policy_id: "combat_demo".to_string(),
             max_members: 32,
             min_start_players: 1,
+            allow_join_in_game: false,
             silent_room_fps: 1,
             idle_room_fps: 10,
             active_room_fps: 20,
@@ -206,6 +213,35 @@ impl RoomRuntimePolicy {
             movement_aoi_enabled: true,
             movement_aoi_radius: 18.0,
             movement_control_stop_frames: 3,
+        }
+    }
+
+    pub fn ui_touch_room() -> Self {
+        Self {
+            policy_id: "ui_touch_room".to_string(),
+            max_members: 32,
+            min_start_players: 1,
+            allow_join_in_game: true,
+            silent_room_fps: 1,
+            idle_room_fps: 10,
+            active_room_fps: 20,
+            busy_room_fps: 20,
+            busy_room_player_threshold: 8,
+            destroy_enabled: true,
+            destroy_when_empty: false,
+            empty_ttl_secs: 300,
+            retain_state_when_empty: true,
+            offline_ttl_secs: 120,
+            snapshot_interval_frames: 20,
+            input_delay_frames: 2,
+            wait_timeout_ms: 100,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 0,
+            movement_correction_threshold: 0.0,
+            movement_aoi_enabled: false,
+            movement_aoi_radius: 0.0,
+            movement_control_stop_frames: 0,
         }
     }
 }
@@ -235,6 +271,17 @@ impl Default for RoomPolicyRegistry {
             RoomRuntimePolicy::movement_demo(),
         );
         policies.insert("combat_demo".to_string(), RoomRuntimePolicy::combat_demo());
+        policies.insert(
+            "ui_touch_room".to_string(),
+            RoomRuntimePolicy::ui_touch_room(),
+        );
+        policies.insert(
+            "UITouchRoom".to_string(),
+            RoomRuntimePolicy {
+                policy_id: "ui_touch_room".to_string(),
+                ..RoomRuntimePolicy::ui_touch_room()
+            },
+        );
 
         Self {
             default_policy,

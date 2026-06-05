@@ -28,6 +28,7 @@
 - 断线重连恢复：snapshot、当前帧、最近输入、等待帧输入、`input_delay_frames`、移动恢复状态。
 - 离线成员保留和 `offline_ttl_secs` 清理。
 - `movement_demo` 的服务端权威位移、AOI 过滤、`MovementSnapshotPush` 和 `MovementRejectPush`。
+- `ui_touch_room` 的 UI 触控输入帧同步，使用 `PlayerInputReq` / `FrameBundlePush` 同步 `ui_touch` 输入。
 - `combat_demo` 的基础战斗逻辑和快照广播。
 
 仍未完整落地：
@@ -54,7 +55,7 @@
 - `apps/game-server/src/gameroom/factory.rs`
   - 游戏侧按 `policy_id` 映射具体 `RoomLogic`。
 - `apps/game-server/src/gameroom/*`
-  - 具体玩法房间逻辑，如 `movement_demo`、`combat_demo`、`persistent_world`、`disposable_match`、`sandbox`、`test_room`。
+  - 具体玩法房间逻辑，如 `movement_demo`、`ui_touch_room`、`combat_demo`、`persistent_world`、`disposable_match`、`sandbox`、`test_room`。
 
 依赖方向：
 
@@ -109,6 +110,7 @@ server.rs / core/service
 | `disposable_match` | 临时对局策略，空房可销毁 |
 | `sandbox` | 沙盒策略，乐观推进，缺帧补空输入 |
 | `movement_demo` | 位移同步联调策略，乐观推进，开启 AOI 与权威校正 |
+| `ui_touch_room` | UI 触控同步策略，乐观推进，缺帧补空输入，通过 `ui_touch` payload 同步归一化触控采样 |
 | `combat_demo` | 战斗联调策略，乐观推进，开启战斗快照 |
 
 未知策略会通过 `RoomPolicyRegistry` 回退到默认策略。
