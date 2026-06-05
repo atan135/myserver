@@ -1,5 +1,5 @@
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
@@ -466,6 +466,7 @@ pub async fn handle_player_input(
                     0,
                     Some(json!({
                         "seq": packet.header.seq,
+                        "frameId": request.frame_id,
                         "action": request.action,
                         "payloadJson": request.payload_json
                     })),
@@ -473,6 +474,14 @@ pub async fn handle_player_input(
                 .await;
         }
         Err(error_code) => {
+            warn!(
+                room_id = %room_id,
+                player_id = %player_id,
+                frame_id = request.frame_id,
+                action = %request.action,
+                error_code = %error_code,
+                "player input rejected"
+            );
             connection.queue_message(
                 MessageType::PlayerInputRes,
                 packet.header.seq,

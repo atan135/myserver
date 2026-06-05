@@ -480,7 +480,11 @@ impl RoomManager {
         };
 
         if sync_completed {
-            info!(room_id = room_id, player_id = player_id, "room member sync completed");
+            info!(
+                room_id = room_id,
+                player_id = player_id,
+                "room member sync completed"
+            );
             self.update_room_fps(room_id).await;
         }
     }
