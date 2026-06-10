@@ -169,6 +169,15 @@ export async function waitForMovementSnapshotWhere(client, timeoutMs, predicate,
   throw new Error(`Timeout waiting for matching MovementSnapshotPush after ${timeoutMs}ms`);
 }
 
+async function waitForMovementSnapshotAtOrAfter(client, timeoutMs, minFrameId, label = "movementSnapshotAtOrAfter") {
+  return waitForMovementSnapshotWhere(
+    client,
+    timeoutMs,
+    (snapshot) => snapshot.frameId >= minFrameId,
+    label
+  );
+}
+
 async function waitForAnyFrameBundle(client, timeoutMs, label = "frameBundle") {
   return client.readUntil(
     timeoutMs,
@@ -597,13 +606,28 @@ export async function runMovementDualClientSync(options) {
       if (!res.ok) throw new Error(`clientA MoveDir step ${step} failed: ${res.errorCode}`);
     }
 
-    // Wait for snapshots on both clients and compare entity positions
-    const snapA1 = await waitForMovementSnapshot(clientA, options.timeoutMs * 3);
-    const snapB1 = await waitForMovementSnapshot(clientB, options.timeoutMs * 3);
+    // Wait for snapshots from the same simulation frame. Comparing each
+    // client's next available snapshot is racy because queued snapshots can
+    // be at different frame IDs while movement is still advancing.
+    const firstAfterMoveA = await waitForMovementSnapshotAtOrAfter(
+      clientA,
+      options.timeoutMs * 3,
+      1,
+      "dualSync.afterMoveA"
+    );
+    const targetFrameId = firstAfterMoveA.frameId;
+    const snapB1 = await waitForMovementSnapshotWhere(
+      clientB,
+      options.timeoutMs * 3,
+      (snapshot) => snapshot.frameId === targetFrameId,
+      "dualSync.afterMoveB"
+    );
+    const snapA1 = firstAfterMoveA;
 
     const posA = Object.fromEntries(snapA1.entities.map((e) => [e.playerId, { x: e.x, y: e.y }]));
     const posB = Object.fromEntries(snapB1.entities.map((e) => [e.playerId, { x: e.x, y: e.y }]));
 
+    console.log(`\n[SYNC CHECK] Comparing frameId=${targetFrameId}`);
     console.log(`\n[SYNC CHECK] ClientA snapshot entities:`);
     for (const e of snapA1.entities) {
       console.log(`  ${e.playerId}: (${e.x.toFixed(3)}, ${e.y.toFixed(3)}) moving=${e.moving}`);
@@ -692,14 +716,25 @@ export async function runMovementSnapshotThrottle(options) {
       throw new Error(`Expected first snapshot reason='game_started', got '${snap0.reason}'`);
     }
 
-    // Send MoveDir, collect several snapshots, verify throttle interval
-    const throttleFrame = await reserveFutureInputFrame(client, options.timeoutMs * 2, "snapshotThrottle.move");
-    await client.send(MESSAGE_TYPE.MOVE_INPUT_REQ, 100, encodeMoveInputReq(throttleFrame, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0));
-    const res0 = await client.readUntil(options.timeoutMs, (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100, "moveRes0");
-    if (!res0.ok) throw new Error(`MoveDir failed: ${res0.errorCode}`);
-
+    // Keep sending real locomotion control while collecting snapshots. The
+    // movement_demo policy intentionally stops movement after missing
+    // movement_control_stop_frames, so a single MoveDir is not expected to
+    // produce an unlimited stream of changed-position snapshots.
     const snapFrames = [];
     for (let i = 0; i < 6; i++) {
+      const throttleFrame = await reserveFutureInputFrame(client, options.timeoutMs * 2, `snapshotThrottle.move${i}`);
+      await client.send(
+        MESSAGE_TYPE.MOVE_INPUT_REQ,
+        100 + i,
+        encodeMoveInputReq(throttleFrame, MOVE_INPUT_TYPE.MOVE_DIR, 1, 0)
+      );
+      const res = await client.readUntil(
+        options.timeoutMs,
+        (p) => p.messageType === MESSAGE_TYPE.MOVE_INPUT_RES && p.seq === 100 + i,
+        `moveRes${i}`
+      );
+      if (!res.ok) throw new Error(`MoveDir ${i} failed: ${res.errorCode}`);
+
       const snap = await waitForMovementSnapshot(client, options.timeoutMs * 3);
       snapFrames.push(snap.frameId);
       console.log(`[THROTTLE] snap[${i}]: frameId=${snap.frameId} fullSync=${snap.fullSync} reason=${snap.reason} entities=${snap.entities.length}`);
