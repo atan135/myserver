@@ -52,16 +52,25 @@ pub async fn run(
     route_store: ProxyRouteStore,
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
+    admin_token: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
+    let admin_token = Arc::new(admin_token);
     loop {
         let (socket, peer_addr) = listener.accept().await?;
         let route_store = route_store.clone();
         let connection_count = connection_count.clone();
         let maintenance = maintenance.clone();
+        let admin_token = admin_token.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_connection(socket, route_store, connection_count, maintenance).await
+            if let Err(error) = handle_connection(
+                socket,
+                route_store,
+                connection_count,
+                maintenance,
+                admin_token,
+            )
+            .await
             {
                 warn!(peer = %peer_addr, error = %error, "proxy admin connection failed");
             }
@@ -74,6 +83,7 @@ async fn handle_connection(
     route_store: ProxyRouteStore,
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
+    admin_token: Arc<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 4096];
     let read = socket.read(&mut buffer).await?;
@@ -86,6 +96,16 @@ async fn handle_connection(
     let method = first_line.split_whitespace().next().unwrap_or_default();
     let path = first_line.split_whitespace().nth(1).unwrap_or_default();
     let (route_path, query) = split_path_and_query(path);
+
+    if !is_authorized(&request, admin_token.as_str()) {
+        let response = http_response(
+            401,
+            "text/plain; charset=utf-8",
+            "missing or invalid admin token".to_string(),
+        );
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
 
     let response = match (method, route_path) {
         ("GET", "/status") => {
@@ -232,18 +252,22 @@ async fn handle_room_route_upsert(
         .cloned();
 
     let result = route_store
-        .upsert_room_route(RoomRouteRecord {
-            room_id: room_id.to_string(),
-            owner_server_id: owner_server_id.to_string(),
-            migration_state,
-            member_count,
-            online_member_count,
-            empty_since_ms,
-            room_version,
-            rollout_epoch,
-            last_transfer_checksum,
-            updated_at_ms: 0,
-        }, expected_room_version, expected_last_transfer_checksum)
+        .upsert_room_route(
+            RoomRouteRecord {
+                room_id: room_id.to_string(),
+                owner_server_id: owner_server_id.to_string(),
+                migration_state,
+                member_count,
+                online_member_count,
+                empty_since_ms,
+                room_version,
+                rollout_epoch,
+                last_transfer_checksum,
+                updated_at_ms: 0,
+            },
+            expected_room_version,
+            expected_last_transfer_checksum,
+        )
         .await;
 
     match result {
@@ -286,7 +310,10 @@ async fn handle_player_route_upsert(
 }
 
 fn required<'a>(query: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
-    query.get(key).map(String::as_str).filter(|value| !value.is_empty())
+    query
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_u32(query: &HashMap<String, String>, key: &str) -> Option<u32> {
@@ -316,8 +343,37 @@ fn split_path_and_query(path: &str) -> (&str, HashMap<String, String>) {
     (route_path, query)
 }
 
+fn is_authorized(request: &str, admin_token: &str) -> bool {
+    request
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .any(|line| header_matches_token(line, admin_token))
+}
+
+fn header_matches_token(line: &str, admin_token: &str) -> bool {
+    let Some((name, value)) = line.split_once(':') else {
+        return false;
+    };
+    let name = name.trim();
+    let value = value.trim();
+
+    if name.eq_ignore_ascii_case("authorization") {
+        let Some(token) = value.strip_prefix("Bearer ") else {
+            return false;
+        };
+        return token.trim() == admin_token;
+    }
+
+    name.eq_ignore_ascii_case("x-admin-token") && value == admin_token
+}
+
 fn write_json<T: Serialize>(payload: T) -> String {
-    http_response(200, "application/json", serde_json::to_string(&payload).unwrap())
+    http_response(
+        200,
+        "application/json",
+        serde_json::to_string(&payload).unwrap(),
+    )
 }
 
 fn write_plain(body: &str) -> String {
@@ -331,6 +387,7 @@ fn bad_request(body: &str) -> String {
 fn http_response(status: u16, content_type: &str, body: String) -> String {
     let reason = match status {
         200 => "OK",
+        401 => "Unauthorized",
         400 => "Bad Request",
         404 => "Not Found",
         _ => "OK",
@@ -343,4 +400,32 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
         body.len(),
         body
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_authorized;
+
+    const TOKEN: &str = "dev-only-change-this-proxy-admin-token";
+
+    #[test]
+    fn rejects_missing_admin_token() {
+        let request = "GET /status HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
+
+        assert!(!is_authorized(request, TOKEN));
+    }
+
+    #[test]
+    fn accepts_bearer_admin_token() {
+        let request = format!("GET /status HTTP/1.1\r\nauthorization: Bearer {TOKEN}\r\n\r\n");
+
+        assert!(is_authorized(&request, TOKEN));
+    }
+
+    #[test]
+    fn accepts_x_admin_token() {
+        let request = format!("GET /status HTTP/1.1\r\nx-admin-token: {TOKEN}\r\n\r\n");
+
+        assert!(is_authorized(&request, TOKEN));
+    }
 }

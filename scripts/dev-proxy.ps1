@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $env:REGISTRY_ENABLED="true"
+$env:PROXY_ADMIN_TOKEN="dev-only-change-this-proxy-admin-token"
 
 Write-Host "Starting game-proxy with service discovery enabled" -ForegroundColor Cyan
 

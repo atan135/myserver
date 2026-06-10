@@ -30,6 +30,8 @@ use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::Session;
 
+pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
     pub heartbeat_timeout_secs: u64,
@@ -145,6 +147,7 @@ pub async fn run(
         shared_state.connection_count.clone(),
         services.player_manager.clone(),
         services.config_tables.clone(),
+        config.admin_token.clone(),
     ));
 
     let local_socket_task = tokio::spawn(run_local_socket_listener(
@@ -157,6 +160,7 @@ pub async fn run(
     let internal_socket_task = tokio::spawn(crate::internal_server::run_listener(
         internal_socket_listener,
         services.clone(),
+        config.internal_token.clone(),
     ));
 
     let kick_task = tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
@@ -280,7 +284,7 @@ where
 {
     let redis = redis_client.get_multiplexed_async_connection().await?;
     let (mut reader, mut writer) = tokio::io::split(socket);
-    let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
+    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(DEFAULT_OUTBOUND_QUEUE_CAPACITY);
     let mut connection = ConnectionContext {
         peer_addr,
         redis,
@@ -313,14 +317,14 @@ where
                     player_id = ?connection.session.player_id,
                     "session kicked by new login"
                 );
-                let _ = connection.queue_message(
+                connection.queue_message(
                     MessageType::SessionKickPush,
                     0,
                     SessionKickPush {
                         reason: "new_login".to_string(),
                         timestamp: current_unix_ms(),
                     },
-                );
+                )?;
                 services
                     .mysql_store
                     .append_connection_event(

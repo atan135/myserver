@@ -17,6 +17,7 @@ const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_RES: 2002,
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
+  ADMIN_AUTH_REQ: 2099,
   ERROR_RES: 9000
 };
 
@@ -106,6 +107,11 @@ async function sendAdminRequest(config, messageType, payload, expectedType, deco
 
   try {
     await onceConnected(socket, config.gameAdminConnectTimeoutMs);
+    await onceWritten(
+      socket,
+      encodePacket(MESSAGE_TYPE.ADMIN_AUTH_REQ, 0, Buffer.from(config.gameAdminToken || "", "utf8")),
+      config.gameAdminWriteTimeoutMs
+    );
     await onceWritten(
       socket,
       encodePacket(messageType, 1, Buffer.from(payload.serializeBinary())),

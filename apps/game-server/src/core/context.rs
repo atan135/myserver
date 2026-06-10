@@ -8,12 +8,13 @@ use tokio::sync::{Notify, RwLock, mpsc};
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::player::PlayerManager;
-use crate::core::room::OutboundMessage;
+use crate::core::room::{OutboundMessage, OutboundSender};
 use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::RuntimeConfig;
 use crate::session::{Session, SessionState};
+use tracing::warn;
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
@@ -36,7 +37,7 @@ pub struct ConnectionContext {
     pub peer_addr: String,
     pub redis: MultiplexedConnection,
     pub session: Session,
-    pub tx: mpsc::UnboundedSender<OutboundMessage>,
+    pub tx: OutboundSender,
     pub kick_notify: Arc<Notify>,
 }
 
@@ -81,11 +82,26 @@ impl ConnectionContext {
     ) -> Result<(), std::io::Error> {
         let body = encode_body(&message);
         self.tx
-            .send(OutboundMessage {
+            .try_send(OutboundMessage {
                 message_type,
                 seq,
                 body,
             })
-            .map_err(|_| std::io::Error::other("failed to queue outbound"))
+            .map_err(|error| {
+                let reason = match error {
+                    mpsc::error::TrySendError::Full(_) => "full",
+                    mpsc::error::TrySendError::Closed(_) => "closed",
+                };
+                warn!(
+                    session_id = self.session.id,
+                    player_id = ?self.session.player_id,
+                    peer = %self.peer_addr,
+                    message_type = ?message_type,
+                    seq = seq,
+                    reason = reason,
+                    "failed to queue outbound message"
+                );
+                std::io::Error::other(format!("failed to queue outbound: {reason}"))
+            })
     }
 }

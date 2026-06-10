@@ -29,6 +29,7 @@ pub async fn run_listener(
     connection_count: Arc<AtomicU64>,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    admin_token: String,
 ) -> Result<(), std::io::Error> {
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -37,6 +38,7 @@ pub async fn run_listener(
         let connection_count = connection_count.clone();
         let player_manager = player_manager.clone();
         let config_tables = config_tables.clone();
+        let admin_token = admin_token.clone();
 
         tokio::spawn(async move {
             if let Err(error) = handle_admin_connection(
@@ -46,6 +48,7 @@ pub async fn run_listener(
                 connection_count,
                 player_manager,
                 config_tables,
+                admin_token,
             )
             .await
             {
@@ -62,8 +65,23 @@ async fn handle_admin_connection(
     connection_count: Arc<AtomicU64>,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    admin_token: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut reader, mut writer) = socket.into_split();
+
+    let Some(auth_packet) = read_packet(&mut reader).await? else {
+        return Ok(());
+    };
+    if !authenticate_admin_packet(&auth_packet, &admin_token) {
+        write_error(
+            &mut writer,
+            auth_packet.header.seq,
+            "UNAUTHORIZED_ADMIN",
+            "invalid admin token",
+        )
+        .await?;
+        return Ok(());
+    }
 
     loop {
         let Some(packet) = read_packet(&mut reader).await? else {
@@ -198,6 +216,16 @@ async fn handle_admin_connection(
     }
 
     Ok(())
+}
+
+fn authenticate_admin_packet(packet: &Packet, admin_token: &str) -> bool {
+    if packet.message_type() != Some(MessageType::AdminAuthReq) {
+        return false;
+    }
+
+    std::str::from_utf8(&packet.body)
+        .map(|token| token == admin_token)
+        .unwrap_or(false)
 }
 
 async fn validate_grant_items_request(

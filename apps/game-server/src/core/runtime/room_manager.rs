@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::core::logic::{RoomLogicBroadcast, SharedRoomLogicFactory};
 use crate::core::room::{
@@ -390,7 +390,7 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::UnboundedSender<OutboundMessage>,
+        sender: mpsc::Sender<OutboundMessage>,
         role: MemberRole,
         requested_policy_id: Option<&str>,
     ) -> Result<RoomSnapshot, &'static str> {
@@ -670,7 +670,7 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::UnboundedSender<OutboundMessage>,
+        sender: mpsc::Sender<OutboundMessage>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
@@ -729,7 +729,7 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::UnboundedSender<OutboundMessage>,
+        sender: mpsc::Sender<OutboundMessage>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
@@ -1262,11 +1262,18 @@ impl RoomManager {
         };
 
         for sender in senders {
-            let _ = sender.send(OutboundMessage {
+            if let Err(error) = sender.try_send(OutboundMessage {
                 message_type,
                 seq: 0,
                 body: body.clone(),
-            });
+            }) {
+                warn!(
+                    room_id = room_id,
+                    message_type = ?message_type,
+                    error = %error,
+                    "failed to queue room broadcast"
+                );
+            }
         }
 
         Ok(())
@@ -1304,11 +1311,18 @@ impl RoomManager {
         };
 
         for sender in senders {
-            let _ = sender.send(OutboundMessage {
+            if let Err(error) = sender.try_send(OutboundMessage {
                 message_type,
                 seq: 0,
                 body: body.clone(),
-            });
+            }) {
+                warn!(
+                    room_id = room_id,
+                    message_type = ?message_type,
+                    error = %error,
+                    "failed to queue targeted room broadcast"
+                );
+            }
         }
 
         Ok(())
@@ -1362,11 +1376,18 @@ impl RoomManager {
         };
 
         if let Some(sender) = sender {
-            let _ = sender.send(OutboundMessage {
+            if let Err(error) = sender.try_send(OutboundMessage {
                 message_type,
                 seq: 0,
                 body,
-            });
+            }) {
+                warn!(
+                    player_id = player_id,
+                    message_type = ?message_type,
+                    error = %error,
+                    "failed to queue player message"
+                );
+            }
         }
 
         Ok(())
@@ -1539,7 +1560,7 @@ mod tests {
 
         let mut receivers = Vec::new();
         for player_id in players {
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(1024);
             receivers.push(rx);
             manager
                 .join_room(
@@ -1580,7 +1601,7 @@ mod tests {
 
         assert!(!manager.room_exists("room-test").await);
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(1024);
         manager
             .join_room(
                 "room-test",
@@ -1792,8 +1813,8 @@ mod tests {
             Arc::new(factory),
         );
 
-        let (owner_tx, _owner_rx) = mpsc::unbounded_channel();
-        let (other_tx, _other_rx) = mpsc::unbounded_channel();
+        let (owner_tx, _owner_rx) = mpsc::channel(1024);
+        let (other_tx, _other_rx) = mpsc::channel(1024);
         manager
             .join_room(
                 "room-test",
@@ -1846,7 +1867,7 @@ mod tests {
             member.offline_since = Some(Instant::now());
         }
 
-        let (reconnect_tx, _reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
         let recovery = manager
             .reconnect_room("room-test", "player-a", reconnect_tx)
             .await
@@ -1856,7 +1877,7 @@ mod tests {
         assert_eq!(recovery.waiting_inputs.len(), 1);
         assert_eq!(recovery.waiting_inputs[0].frame_id, 1);
 
-        let (observer_tx, _observer_rx) = mpsc::unbounded_channel();
+        let (observer_tx, _observer_rx) = mpsc::channel(1024);
         let observer = manager
             .join_room_as_observer("room-test", "observer-1", observer_tx)
             .await
@@ -1922,7 +1943,7 @@ mod tests {
         assert_eq!(snapshot.state, "in_game");
         assert_eq!(snapshot.current_frame_id, 0);
 
-        let (reconnect_tx, _reconnect_rx) = mpsc::unbounded_channel();
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
         let recovery = manager
             .reconnect_room("room-test", "player-a", reconnect_tx)
             .await
@@ -1952,14 +1973,14 @@ mod tests {
 
         manager.cleanup_expired_offline_players().await;
 
-        let (reconnect_a_tx, _reconnect_a_rx) = mpsc::unbounded_channel();
+        let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
         let reconnect_a = manager
             .reconnect_room("room-test", "player-a", reconnect_a_tx)
             .await
             .unwrap();
         assert_eq!(reconnect_a.snapshot.state, "in_game");
 
-        let (reconnect_b_tx, _reconnect_b_rx) = mpsc::unbounded_channel();
+        let (reconnect_b_tx, _reconnect_b_rx) = mpsc::channel(1024);
         let reconnect_b = manager
             .reconnect_room("room-test", "player-b", reconnect_b_tx)
             .await
@@ -2017,12 +2038,12 @@ mod tests {
         let offline_tick = manager.process_room_tick("room-test", 10).await;
         assert!(offline_tick.is_none());
 
-        let (reconnect_a_tx, _reconnect_a_rx) = mpsc::unbounded_channel();
+        let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
         manager
             .reconnect_room("room-test", "player-a", reconnect_a_tx)
             .await
             .unwrap();
-        let (reconnect_b_tx, _reconnect_b_rx) = mpsc::unbounded_channel();
+        let (reconnect_b_tx, _reconnect_b_rx) = mpsc::channel(1024);
         manager
             .reconnect_room("room-test", "player-b", reconnect_b_tx)
             .await
@@ -2035,7 +2056,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_after_misses_marks_player_offline_after_threshold() {
-        let (sender, _receiver) = mpsc::unbounded_channel();
+        let (sender, _receiver) = mpsc::channel(1024);
         let ticks = Arc::new(StdMutex::new(Vec::new()));
         let inputs = Arc::new(StdMutex::new(Vec::new()));
         let mut room = Room::new(

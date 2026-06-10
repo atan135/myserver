@@ -14,6 +14,7 @@ pub struct Config {
     pub match_cleanup_interval_secs: u64,
     pub game_server_service_name: String,
     pub game_server_internal_socket_name: String,
+    pub game_internal_token: String,
     pub log_level: String,
     pub log_enable_console: bool,
     pub log_enable_file: bool,
@@ -36,8 +37,8 @@ pub struct ModeConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let bind_addr = std::env::var("MATCH_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:9002".to_string());
+        let bind_addr =
+            std::env::var("MATCH_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:9002".to_string());
         let port = parse_port(&bind_addr).unwrap_or(9002);
         let mut modes = HashMap::new();
         modes.insert(
@@ -90,6 +91,8 @@ impl Config {
             game_server_internal_socket_name: std::env::var("GAME_SERVER_INTERNAL_SOCKET_NAME")
                 .or_else(|_| std::env::var("GAME_INTERNAL_SOCKET_NAME"))
                 .unwrap_or_else(|_| derive_internal_socket_name(&game_server_local_socket_name)),
+            game_internal_token: std::env::var("GAME_INTERNAL_TOKEN")
+                .unwrap_or_else(|_| "dev-only-change-this-game-internal-token".to_string()),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             log_enable_console: std::env::var("LOG_ENABLE_CONSOLE")
                 .unwrap_or_else(|_| "true".to_string())

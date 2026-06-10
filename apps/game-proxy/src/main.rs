@@ -1,11 +1,11 @@
-mod auth;
 mod admin_server;
+mod auth;
 mod config;
 mod local_socket;
 mod metrics;
 mod proto;
-mod proxy_server;
 mod protocol;
+mod proxy_server;
 mod route_store;
 mod session;
 mod transport;
@@ -18,9 +18,7 @@ use std::sync::atomic::AtomicU64;
 use auth::ProxyAuthService;
 use config::Config;
 pub use proto::myserver::game as pb;
-use route_store::{
-    ProxyRouteStore, UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
-};
+use route_store::{ProxyRouteStore, UpstreamHealthState, UpstreamOperationState, UpstreamRoute};
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -105,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maintenance = Arc::new(RwLock::new(false));
 
     let admin_bind_addr = config.admin_bind_addr();
+    let admin_token = config.admin_token.clone();
     let admin_route_store = route_store.clone();
     let admin_connection_count = connection_count.clone();
     let admin_maintenance = maintenance.clone();
@@ -114,7 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             admin_route_store,
             admin_connection_count,
             admin_maintenance,
-        ).await {
+            admin_token,
+        )
+        .await
+        {
             tracing::warn!(error = %error, "proxy admin server stopped");
         }
     });

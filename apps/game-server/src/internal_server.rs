@@ -14,17 +14,19 @@ const INTERNAL_MAX_BODY_LEN: usize = 64 * 1024;
 pub async fn run_listener(
     listener: Listener,
     services: ServiceContext,
+    internal_token: String,
 ) -> Result<(), std::io::Error> {
     let mut next_connection_id = 2_000_000u64;
 
     loop {
         let socket = listener.accept().await?;
         let services = services.clone();
+        let internal_token = internal_token.clone();
         let connection_id = next_connection_id;
         next_connection_id = next_connection_id.saturating_add(1);
 
         tokio::spawn(async move {
-            if let Err(error) = handle_internal_connection(socket, services).await {
+            if let Err(error) = handle_internal_connection(socket, services, internal_token).await {
                 warn!(
                     connection_id = connection_id,
                     error = %error,
@@ -38,11 +40,27 @@ pub async fn run_listener(
 async fn handle_internal_connection<S>(
     socket: S,
     services: ServiceContext,
+    internal_token: String,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(socket);
+
+    let Some(auth_packet) = read_packet(&mut reader).await? else {
+        return Ok(());
+    };
+
+    if !authenticate_internal_packet(&auth_packet, &internal_token) {
+        write_error(
+            &mut writer,
+            auth_packet.header.seq,
+            "UNAUTHORIZED_INTERNAL_CHANNEL",
+            "invalid internal channel token",
+        )
+        .await?;
+        return Ok(());
+    }
 
     loop {
         let Some(packet) = read_packet(&mut reader).await? else {
@@ -88,6 +106,16 @@ where
     }
 
     Ok(())
+}
+
+fn authenticate_internal_packet(packet: &Packet, internal_token: &str) -> bool {
+    if packet.message_type() != Some(MessageType::InternalAuthReq) {
+        return false;
+    }
+
+    std::str::from_utf8(&packet.body)
+        .map(|token| token == internal_token)
+        .unwrap_or(false)
 }
 
 async fn read_packet<R>(reader: &mut R) -> Result<Option<Packet>, Box<dyn std::error::Error>>

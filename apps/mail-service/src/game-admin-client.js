@@ -5,6 +5,7 @@ const VERSION = 1;
 const HEADER_LEN = 14;
 
 const MESSAGE_TYPE = {
+  ADMIN_AUTH_REQ: 2099,
   GM_SEND_ITEM_REQ: 3003,
   GM_SEND_ITEM_RES: 3004,
   ERROR_RES: 9000
@@ -84,8 +85,13 @@ async function sendRequest(config, messageType, payload, expectedType) {
     };
 
     socket.on("connect", () => {
+      const authPacket = encodePacket(
+        MESSAGE_TYPE.ADMIN_AUTH_REQ,
+        0,
+        Buffer.from(config.gameAdminToken || "", "utf8")
+      );
       const packet = encodePacket(messageType, nextSeq(), payload);
-      socket.write(packet, (err) => {
+      socket.write(Buffer.concat([authPacket, packet]), (err) => {
         if (err) {
           cleanup();
           reject(err);

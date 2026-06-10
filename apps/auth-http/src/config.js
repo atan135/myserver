@@ -52,6 +52,7 @@ export function getConfig() {
       process.env.GAME_SERVER_ADMIN_PORT || "7500",
       10
     ),
+    gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminConnectTimeoutMs: Number.parseInt(
       process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS || "3000",
       10

@@ -10,6 +10,7 @@ const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_RES: 2002,
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
+  ADMIN_AUTH_REQ: 2099,
   // GM Commands
   GM_BROADCAST_REQ: 3001,
   GM_BROADCAST_RES: 3002,
@@ -96,8 +97,13 @@ async function sendRequest(config, messageType, payload, expectedType) {
     };
 
     socket.on("connect", () => {
+      const authPacket = encodePacket(
+        MESSAGE_TYPE.ADMIN_AUTH_REQ,
+        0,
+        Buffer.from(config.gameAdminToken || "", "utf8")
+      );
       const packet = encodePacket(messageType, nextSeq(), payload);
-      socket.write(packet, (err) => {
+      socket.write(Buffer.concat([authPacket, packet]), (err) => {
         if (err) {
           cleanup();
           reject(err);

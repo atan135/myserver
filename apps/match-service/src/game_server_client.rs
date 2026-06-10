@@ -1,8 +1,5 @@
-use interprocess::local_socket::{
-    GenericFilePath, ToFsName,
-    tokio::Stream,
-};
 use interprocess::local_socket::traits::tokio::Stream as _;
+use interprocess::local_socket::{GenericFilePath, ToFsName, tokio::Stream};
 use prost::Message;
 use service_registry::RegistryClient;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -16,6 +13,7 @@ const MAGIC: u16 = 0xCAFE;
 const VERSION: u8 = 1;
 const CREATE_MATCHED_ROOM_REQ: u16 = 1119;
 const CREATE_MATCHED_ROOM_RES: u16 = 1120;
+const INTERNAL_AUTH_REQ: u16 = 2199;
 const ERROR_RES: u16 = 9000;
 
 #[derive(Clone)]
@@ -38,13 +36,20 @@ impl GameServerClient {
         mode: &str,
     ) -> Result<String, MatchError> {
         let socket_name = self.resolve_internal_socket_name().await?;
-        let mut stream = connect_local_socket(&socket_name)
-            .await
-            .map_err(|error| {
-                MatchError::RoomCreateFailed(format!(
-                    "connect internal socket {socket_name} failed: {error}"
-                ))
-            })?;
+        let mut stream = connect_local_socket(&socket_name).await.map_err(|error| {
+            MatchError::RoomCreateFailed(format!(
+                "connect internal socket {socket_name} failed: {error}"
+            ))
+        })?;
+
+        let auth_packet = encode_packet(
+            INTERNAL_AUTH_REQ,
+            0,
+            self.config.game_internal_token.as_bytes(),
+        );
+        stream.write_all(&auth_packet).await.map_err(|error| {
+            MatchError::RoomCreateFailed(format!("write InternalAuthReq failed: {error}"))
+        })?;
 
         let request = CreateMatchedRoomReq {
             match_id: match_id.to_string(),
@@ -76,9 +81,10 @@ impl GameServerClient {
                 }
             }
             ERROR_RES => {
-                let response = ErrorRes::decode(response_packet.body.as_slice()).map_err(|error| {
-                    MatchError::RoomCreateFailed(format!("decode ErrorRes failed: {error}"))
-                })?;
+                let response =
+                    ErrorRes::decode(response_packet.body.as_slice()).map_err(|error| {
+                        MatchError::RoomCreateFailed(format!("decode ErrorRes failed: {error}"))
+                    })?;
                 Err(MatchError::RoomCreateFailed(response.error_code))
             }
             other => Err(MatchError::RoomCreateFailed(format!(
@@ -103,7 +109,10 @@ impl GameServerClient {
             return Ok(self.config.game_server_internal_socket_name.clone());
         };
 
-        match client.discover_one(&self.config.game_server_service_name).await {
+        match client
+            .discover_one(&self.config.game_server_service_name)
+            .await
+        {
             Ok(Some(instance)) => {
                 if let Some(internal_socket) = instance
                     .metadata
@@ -200,15 +209,21 @@ where
 fn parse_header(header: [u8; HEADER_LEN]) -> Result<(u16, usize), MatchError> {
     let magic = u16::from_be_bytes([header[0], header[1]]);
     if magic != MAGIC {
-        return Err(MatchError::RoomCreateFailed("invalid response magic".to_string()));
+        return Err(MatchError::RoomCreateFailed(
+            "invalid response magic".to_string(),
+        ));
     }
 
     if header[2] != VERSION {
-        return Err(MatchError::RoomCreateFailed("invalid response version".to_string()));
+        return Err(MatchError::RoomCreateFailed(
+            "invalid response version".to_string(),
+        ));
     }
 
     if header[3] != 0 {
-        return Err(MatchError::RoomCreateFailed("unsupported response flags".to_string()));
+        return Err(MatchError::RoomCreateFailed(
+            "unsupported response flags".to_string(),
+        ));
     }
 
     let msg_type = u16::from_be_bytes([header[4], header[5]]);

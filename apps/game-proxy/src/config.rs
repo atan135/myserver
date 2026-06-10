@@ -13,6 +13,7 @@ pub struct Config {
     pub port: u16,
     pub admin_host: String,
     pub admin_port: u16,
+    pub admin_token: String,
     pub tcp_fallback_host: String,
     pub tcp_fallback_port: u16,
     pub log_level: String,
@@ -47,7 +48,10 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7101);
-        let tcp_fallback_host = env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
+        let admin_token = env::var("PROXY_ADMIN_TOKEN")
+            .unwrap_or_else(|_| "dev-only-change-this-proxy-admin-token".to_string());
+        let tcp_fallback_host =
+            env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
         let tcp_fallback_port = env::var("PROXY_TCP_FALLBACK_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
@@ -77,12 +81,12 @@ impl Config {
             .unwrap_or(5);
         let upstream_service_name =
             env::var("UPSTREAM_SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
-        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
-            .unwrap_or_else(|_| format!("game-proxy-{}", port));
+        let service_instance_id =
+            env::var("SERVICE_INSTANCE_ID").unwrap_or_else(|_| format!("game-proxy-{}", port));
 
         // 向后兼容的旧配置
-        let upstream_server_id = env::var("UPSTREAM_SERVER_ID")
-            .unwrap_or_else(|_| "game-server-1".to_string());
+        let upstream_server_id =
+            env::var("UPSTREAM_SERVER_ID").unwrap_or_else(|_| "game-server-1".to_string());
         let upstream_local_socket_name = env::var("UPSTREAM_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
@@ -91,6 +95,7 @@ impl Config {
             port,
             admin_host,
             admin_port,
+            admin_token,
             tcp_fallback_host,
             tcp_fallback_port,
             log_level,

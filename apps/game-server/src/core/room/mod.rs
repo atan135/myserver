@@ -13,6 +13,8 @@ pub struct OutboundMessage {
     pub body: Vec<u8>,
 }
 
+pub type OutboundSender = mpsc::Sender<OutboundMessage>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomPhase {
     Waiting,
@@ -29,7 +31,7 @@ pub enum MemberRole {
 pub struct RoomMemberState {
     pub player_id: String,
     pub ready: bool,
-    pub sender: mpsc::UnboundedSender<OutboundMessage>,
+    pub sender: OutboundSender,
     pub offline: bool,
     pub offline_since: Option<Instant>,
     pub role: MemberRole,
@@ -252,11 +254,7 @@ impl Room {
         }
     }
 
-    pub fn mark_online(
-        &mut self,
-        player_id: &str,
-        sender: mpsc::UnboundedSender<OutboundMessage>,
-    ) -> bool {
+    pub fn mark_online(&mut self, player_id: &str, sender: OutboundSender) -> bool {
         if let Some(member) = self.members.get_mut(player_id) {
             member.offline = false;
             member.offline_since = None;
@@ -267,11 +265,7 @@ impl Room {
         false
     }
 
-    pub fn update_sender(
-        &mut self,
-        player_id: &str,
-        sender: mpsc::UnboundedSender<OutboundMessage>,
-    ) {
+    pub fn update_sender(&mut self, player_id: &str, sender: OutboundSender) {
         if let Some(member) = self.members.get_mut(player_id) {
             member.sender = sender;
         }

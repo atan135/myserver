@@ -10,6 +10,8 @@ pub struct Config {
     pub room_cleanup_interval_secs: u64,
     pub admin_host: String,
     pub admin_port: u16,
+    pub admin_token: String,
+    pub internal_token: String,
     pub local_socket_name: String,
     pub internal_socket_name: String,
     pub log_level: String,
@@ -71,6 +73,10 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7500);
+        let admin_token = env::var("GAME_ADMIN_TOKEN")
+            .unwrap_or_else(|_| "dev-only-change-this-game-admin-token".to_string());
+        let internal_token = env::var("GAME_INTERNAL_TOKEN")
+            .unwrap_or_else(|_| "dev-only-change-this-game-internal-token".to_string());
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
@@ -120,6 +126,8 @@ impl Config {
             room_cleanup_interval_secs,
             admin_host,
             admin_port,
+            admin_token,
+            internal_token,
             local_socket_name,
             internal_socket_name,
             log_level,

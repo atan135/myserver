@@ -34,6 +34,7 @@ export function getConfig() {
     mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
+    gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "mail-001"
