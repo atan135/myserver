@@ -274,7 +274,7 @@
 当前状态（截至 `2026-05-19`）:
 
 - 只完成了 `ServerRedirectPush` 协议定义。
-- `game-server` 未下发 redirect，`simple-client` 也还没有 redirect / reconnect 处理。
+- `game-server` 未下发 redirect，外部 `mybevy` 客户端也还没有在本仓库形成可验证的 redirect / reconnect 对接说明。
 
 ### 6.1 协议定义
 
@@ -292,9 +292,9 @@
 - [ ] 旧服下发 `ServerRedirectPush` 后主动断开连接。
 - [ ] 断开前记录 room_id、player_id、rollout_epoch 审计日志。
 
-### 6.3 客户端 / mock-client 处理
+### 6.3 mybevy 客户端 / mock-client 处理
 
-- [ ] 客户端收到 `ServerRedirectPush` 后执行断线重连。
+- [ ] 外部 `mybevy` 客户端收到 `ServerRedirectPush` 后执行断线重连。
 - [ ] 重连后重新发起 `AuthReq`。
 - [ ] 重连后重新发起 `RoomJoinReq` 或 `RoomReconnectReq`。
 - [ ] `mock-client` 增加 redirect 场景支持。

@@ -93,7 +93,7 @@
 ## 4. 当前拓扑
 
 ```text
-client / mock-client
+mybevy client / mock-client
   -> auth-http
   -> game-proxy(KCP, TCP fallback)
     -> game-server(local socket)

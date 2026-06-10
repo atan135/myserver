@@ -12,7 +12,7 @@
 
 ## 2. 当前仓库现状
 
-仓库已经是一个多服务 monorepo，包含登录、游戏接入、游戏逻辑、聊天、匹配、邮件、管理后台、协议包、服务注册中心、脚本和测试工程。
+仓库已经是一个多服务 monorepo，包含登录、游戏接入、游戏逻辑、聊天、匹配、邮件、管理后台、协议包、服务注册中心、脚本和联调工具。正式游戏客户端已迁移到独立仓库 `mybevy`，不作为本仓库子目录维护。
 
 当前目录概览：
 
@@ -28,7 +28,7 @@
 │  ├─ match-service/    # 匹配服务
 │  ├─ announce-service/ # 公告服务
 │  ├─ mail-service/     # 邮件服务
-│  └─ simple-client/    # Unity 测试客户端
+│  └─ simple-client/    # 已废弃的 Unity 历史 demo
 ├─ packages/
 │  ├─ proto/            # 共享协议定义
 │  └─ service-registry/ # Redis 服务注册中心包
@@ -100,7 +100,7 @@
 
 +-------------+      +-------------------+      +-------------------+
 |   Client    | ---> |    auth-http      | ---> |  Redis / MySQL    |
-| Unity/mock  |      | login + ticket    |      | session/ticket/...|
+| mybevy/mock |      | login + ticket    |      | session/ticket/...|
 +------+------+      +---------+---------+      +-------------------+
        |                       |
        | ticket + proxy addr   |
@@ -148,6 +148,7 @@
 - 进入游戏入口是 `game-proxy`
 - 游戏逻辑服不直接暴露给公网客户端
 - `game-proxy` 负责接入层鉴权、路由和转发，`game-server` 负责最终鉴权与游戏状态
+- 正式客户端实现归属外部 `mybevy` 仓库；本仓库 `tools/mock-client` 只用于服务端联调和回归验证
 
 ### 6.2 房间与对局
 
@@ -312,7 +313,7 @@ Core NATS 当前承担以下职责：
 
 ### 9.1 `apps/`
 
-放可启动的业务服务和客户端工程。
+放可启动的业务服务。`apps/simple-client` 是已废弃的 Unity 历史 demo，不再作为当前客户端事实源。
 
 ### 9.2 `packages/`
 
@@ -384,6 +385,7 @@ Core NATS 当前承担以下职责：
 
 - `README.md`
 - `CLAUDE.md`
+- `docs/client-integration.md`
 - `docs/protocol.md`
 - `docs/game-server-frame-sync-design.md`
 - `docs/service-registry-design.md`

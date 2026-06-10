@@ -1,0 +1,58 @@
+# 外部客户端接入说明
+
+## 1. 定位
+
+MyServer 仓库只维护服务端、协议包、后台、联调工具和本地脚本。正式游戏客户端已迁移到独立仓库 `mybevy`，不作为 MyServer monorepo 的子目录维护。
+
+本机开发示例路径可以是：
+
+```text
+C:\project\mybevy
+```
+
+该路径只用于个人开发示例，不能作为文档、脚本或 CI 的固定依赖。其他环境应按实际 clone 路径配置。
+
+## 2. 路径配置
+
+需要让脚本或本地工具访问外部客户端时，统一使用环境变量：
+
+```powershell
+$env:MYSERVER_CLIENT_ROOT = "C:\project\mybevy"
+```
+
+未设置 `MYSERVER_CLIENT_ROOT` 时，本仓库只使用 `tools/mock-client` 做服务端联调。
+
+## 3. 仓库边界
+
+- `mybevy`：正式游戏客户端，实现真实输入、渲染、预测、重连、资源和用户体验。
+- `tools/mock-client`：服务端联调和回归验证工具，用于覆盖登录、房间、移动、战斗、rollout 等协议流程。
+- `apps/simple-client`：已废弃的 Unity 历史 demo，不再参与协议同步、常规联调或测试准入。
+
+## 4. 客户端接入契约
+
+外部客户端应按以下服务边界接入：
+
+- 登录入口：`auth-http`，本地默认 `http://127.0.0.1:3000`
+- 游戏入口：优先连接 `auth-http` 返回的 `gameProxyHost/gameProxyPort` 或 `services.game`
+- 本地主链路：`game-proxy:4000`；TCP fallback 调试端口通常是 `14000`
+- 直连调试：`game-server:7000` 仅用于定位游戏服协议或房间逻辑问题，不作为正式客户端入口
+- 协议事实源：`packages/proto`
+
+客户端应实现并持续校验的关键流程：
+
+- 登录并获取 access token、game ticket 和服务地址
+- 使用 ticket 连接 `game-proxy` 并发送 `AuthReq`
+- 房间加入、离开、准备、开始、断线重连和观战
+- 持续发送移动/帧输入，只提交意图，不提交权威结果
+- 处理 `ServerRedirectPush`，断线后重新鉴权并执行 `RoomJoinReq` 或 `RoomReconnectReq`
+- 按当前服务边界接入聊天、公告、邮件和匹配能力
+
+## 5. 协议维护
+
+新增或修改协议时，应同步处理：
+
+1. `packages/proto`
+2. Rust / Node 服务端枚举和编解码逻辑
+3. `tools/mock-client`
+4. 外部 `mybevy` 客户端协议绑定
+5. `docs/protocol.md` 和相关专题文档
