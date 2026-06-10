@@ -277,14 +277,39 @@ export class MailsService {
         throw badRequest("UNSUPPORTED_ATTACHMENT_FORMAT", error.message);
       }
 
+      const claimBegin = await this.mailStore.beginClaimAttachments(mailId);
+      if (!claimBegin.mail) {
+        throw notFound("MAIL_NOT_FOUND", "Mail not found");
+      }
+
+      if (claimBegin.alreadyClaimed) {
+        const currentMail = claimBegin.mail;
+        return {
+          ok: true,
+          mail_id: currentMail.mail_id,
+          claimed: false,
+          already_claimed: true,
+          status: currentMail.status,
+          attachments: currentMail.attachments,
+          read_at: currentMail.read_at,
+          claimed_at: currentMail.claimed_at
+        };
+      }
+
+      if (claimBegin.inProgress || !claimBegin.reserved) {
+        throw conflict("MAIL_CLAIM_IN_PROGRESS", "Mail attachments are being claimed");
+      }
+
+      let result;
       try {
         await this.gameAdminClient.grantMailAttachments(
           player_id,
-          mail.mail_id,
+          `mail_claim:${mail.mail_id}`,
           normalizedAttachments,
           `claim mail ${mail.mail_id}`
         );
       } catch (error: any) {
+        await this.mailStore.releaseClaimAttachments(mailId);
         log("error", "mail.claim_grant_failed", {
           mailId,
           playerId: player_id,
@@ -294,7 +319,8 @@ export class MailsService {
         throw badGateway("GAME_SERVER_GRANT_FAILED", error.message);
       }
 
-      const result = await this.mailStore.claimAttachments(mailId);
+      result = await this.mailStore.completeClaimAttachments(mailId);
+
       const currentMail = result.mail || mail;
 
       log("info", result.claimed ? "mail.claimed" : "mail.claimed_idempotent", {

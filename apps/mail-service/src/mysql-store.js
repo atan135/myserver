@@ -213,6 +213,129 @@ export class MySqlMailStore {
     };
   }
 
+  async beginClaimAttachments(mailId) {
+    if (!this.pool) {
+      const mail = this.memory.get(mailId);
+      if (!mail) {
+        return {
+          reserved: false,
+          alreadyClaimed: false,
+          inProgress: false,
+          mail: null
+        };
+      }
+
+      if (mail.status === "claimed" || mail.claimed_at) {
+        return {
+          reserved: false,
+          alreadyClaimed: true,
+          inProgress: false,
+          mail: this.parseMailRow(mail)
+        };
+      }
+
+      if (mail.status === "claiming") {
+        return {
+          reserved: false,
+          alreadyClaimed: false,
+          inProgress: true,
+          mail: this.parseMailRow(mail)
+        };
+      }
+
+      mail.status = "claiming";
+      this.memory.set(mailId, mail);
+
+      return {
+        reserved: true,
+        alreadyClaimed: false,
+        inProgress: false,
+        mail: this.parseMailRow(mail)
+      };
+    }
+
+    const updateSql = `UPDATE mails
+      SET status = 'claiming'
+      WHERE mail_id = ?
+        AND status <> 'claimed'
+        AND status <> 'claiming'
+        AND claimed_at IS NULL`;
+
+    const [updateResult] = await this.pool.execute(updateSql, [mailId]);
+    const mail = await this.getMailById(mailId);
+
+    return {
+      reserved: updateResult.affectedRows > 0,
+      alreadyClaimed: !!mail && (mail.status === "claimed" || !!mail.claimed_at),
+      inProgress: !!mail && mail.status === "claiming" && updateResult.affectedRows === 0,
+      mail
+    };
+  }
+
+  async completeClaimAttachments(mailId) {
+    if (!this.pool) {
+      const mail = this.memory.get(mailId);
+      if (!mail) {
+        return {
+          claimed: false,
+          mail: null
+        };
+      }
+
+      const claimed = mail.status === "claiming" && !mail.claimed_at;
+      if (claimed) {
+        const now = new Date();
+        mail.status = "claimed";
+        mail.read_at ||= now;
+        mail.claimed_at ||= now;
+        this.memory.set(mailId, mail);
+      }
+
+      return {
+        claimed,
+        mail: this.parseMailRow(mail)
+      };
+    }
+
+    const updateSql = `UPDATE mails
+      SET status = 'claimed',
+          read_at = COALESCE(read_at, NOW(3)),
+          claimed_at = COALESCE(claimed_at, NOW(3))
+      WHERE mail_id = ?
+        AND status = 'claiming'
+        AND claimed_at IS NULL`;
+
+    const [updateResult] = await this.pool.execute(updateSql, [mailId]);
+    const mail = await this.getMailById(mailId);
+
+    return {
+      claimed: updateResult.affectedRows > 0,
+      mail
+    };
+  }
+
+  async releaseClaimAttachments(mailId) {
+    if (!this.pool) {
+      const mail = this.memory.get(mailId);
+      if (!mail || mail.status !== "claiming") {
+        return false;
+      }
+
+      mail.status = mail.read_at ? "read" : "unread";
+      this.memory.set(mailId, mail);
+      return true;
+    }
+
+    const sql = `UPDATE mails
+      SET status = CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END
+      WHERE mail_id = ?
+        AND status = 'claiming'
+        AND claimed_at IS NULL`;
+
+    const [result] = await this.pool.execute(sql, [mailId]);
+    return result.affectedRows > 0;
+  }
+
   async deleteMail(mailId) {
     if (!this.pool) {
       return this.memory.delete(mailId);
