@@ -3,7 +3,9 @@ import { v4 as uuidv4 } from "uuid";
 
 import { badRequest, notFound } from "../common/http-exception.js";
 import { log } from "../logger.js";
-import { ANNOUNCE_STORE } from "../tokens.js";
+import { ANNOUNCE_CONFIG, ANNOUNCE_REDIS, ANNOUNCE_STORE } from "../tokens.js";
+
+const ANNOUNCEMENT_LIST_CACHE_PREFIX = "announce:list:";
 
 function parseBoolean(value: any, fallback: boolean) {
   if (value === undefined) {
@@ -200,9 +202,91 @@ function normalizeUpdatePayload(body: any = {}, existing: any) {
   };
 }
 
+function buildListCacheKey(options: any) {
+  return `${ANNOUNCEMENT_LIST_CACHE_PREFIX}${JSON.stringify({
+    locale: options.locale ?? null,
+    target_group: options.targetGroup ?? null,
+    min_priority: options.minPriority ?? null,
+    active_only: Boolean(options.activeOnly),
+    limit: options.limit,
+    offset: options.offset
+  })}`;
+}
+
 @Injectable()
 export class AnnouncementsService {
-  constructor(@Inject(ANNOUNCE_STORE) private readonly announcementStore: any) {}
+  constructor(
+    @Inject(ANNOUNCE_STORE) private readonly announcementStore: any,
+    @Inject(ANNOUNCE_REDIS) private readonly redis: any = null,
+    @Inject(ANNOUNCE_CONFIG) private readonly config: any = {}
+  ) {}
+
+  private getListCacheTtlSeconds() {
+    const ttl = Number.parseInt(
+      String(this.config?.announceCacheTtlSeconds ?? 10),
+      10
+    );
+
+    return Number.isFinite(ttl) ? ttl : 10;
+  }
+
+  private async getCachedList(cacheKey: string) {
+    if (!this.redis) {
+      return null;
+    }
+
+    try {
+      const cached = await this.redis.get(cacheKey);
+      if (!cached) {
+        return null;
+      }
+
+      return JSON.parse(cached);
+    } catch (error: any) {
+      log("warn", "announcement.cache_get_failed", { error: error.message });
+      return null;
+    }
+  }
+
+  private async setCachedList(cacheKey: string, value: any, ttlSeconds: number) {
+    if (!this.redis || ttlSeconds <= 0) {
+      return;
+    }
+
+    try {
+      await this.redis.set(cacheKey, JSON.stringify(value), "EX", ttlSeconds);
+    } catch (error: any) {
+      log("warn", "announcement.cache_set_failed", { error: error.message });
+    }
+  }
+
+  private async invalidateListCache() {
+    if (!this.redis) {
+      return;
+    }
+
+    try {
+      let cursor = "0";
+      do {
+        const [nextCursor, keys] = await this.redis.scan(
+          cursor,
+          "MATCH",
+          `${ANNOUNCEMENT_LIST_CACHE_PREFIX}*`,
+          "COUNT",
+          100
+        );
+        cursor = nextCursor;
+
+        if (keys.length > 0) {
+          await this.redis.del(...keys);
+        }
+      } while (cursor !== "0");
+    } catch (error: any) {
+      log("warn", "announcement.cache_invalidate_failed", {
+        error: error.message
+      });
+    }
+  }
 
   async list(query: any) {
     let limit;
@@ -226,7 +310,7 @@ export class AnnouncementsService {
     }
 
     try {
-      const announcements = await this.announcementStore.listAnnouncements({
+      const listOptions = {
         locale:
           typeof query.locale === "string" && query.locale.trim().length > 0
             ? query.locale.trim()
@@ -240,14 +324,30 @@ export class AnnouncementsService {
         activeOnly,
         limit,
         offset
-      });
+      };
 
-      return {
+      const cacheTtlSeconds = this.getListCacheTtlSeconds();
+      const cacheKey = buildListCacheKey(listOptions);
+      if (cacheTtlSeconds > 0) {
+        const cached = await this.getCachedList(cacheKey);
+        if (cached) {
+          return cached;
+        }
+      }
+
+      const announcements = await this.announcementStore.listAnnouncements(
+        listOptions
+      );
+
+      const result = {
         ok: true,
         announcements,
         limit,
         offset
       };
+
+      await this.setCachedList(cacheKey, result, cacheTtlSeconds);
+      return result;
     } catch (error: any) {
       log("error", "route.list_announcements_failed", { error: error.message });
       throw error;
@@ -292,6 +392,8 @@ export class AnnouncementsService {
         targetGroup: created.target_group
       });
 
+      await this.invalidateListCache();
+
       return {
         ok: true,
         announcement: created
@@ -321,6 +423,8 @@ export class AnnouncementsService {
 
       log("info", "announcement.updated", { announceId });
 
+      await this.invalidateListCache();
+
       return {
         ok: true,
         announcement: updated
@@ -343,6 +447,8 @@ export class AnnouncementsService {
       }
 
       log("info", "announcement.deleted", { announceId });
+
+      await this.invalidateListCache();
 
       return {
         ok: true,

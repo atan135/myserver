@@ -33,6 +33,10 @@ export function getConfig() {
       process.env.MYSQL_URL ||
       "mysql://root:password@127.0.0.1:3306/myserver_announce",
     mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
+    announceCacheTtlSeconds: Number.parseInt(
+      process.env.ANNOUNCE_CACHE_TTL_SECONDS || "10",
+      10
+    ),
     serviceName: process.env.SERVICE_NAME || "announce-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "announce-001"
