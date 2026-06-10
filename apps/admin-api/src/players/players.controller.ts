@@ -2,7 +2,9 @@ import { Body, Controller, Get, Inject, Param, Put, Query, Req, UseGuards } from
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { badRequest, notFound } from "../common/http-exception.js";
+import { Roles } from "../auth/roles.decorator.js";
+import { RolesGuard } from "../auth/roles.guard.js";
+import { badRequest, forbidden, notFound } from "../common/http-exception.js";
 import { ADMIN_STORE } from "../tokens.js";
 
 function getClientIp(req: any): string | null {
@@ -23,12 +25,13 @@ function pageOffset(value: any) {
 
 @ApiTags("players")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller("/api/v1/players")
 export class PlayersController {
   constructor(@Inject(ADMIN_STORE) private readonly adminStore: any) {}
 
   @Get()
+  @Roles("viewer", "operator", "admin")
   async list(@Query() query: any) {
     const { login_name, guest_id, status, limit = 50, offset = 0 } = query;
 
@@ -56,6 +59,7 @@ export class PlayersController {
   }
 
   @Get(":playerId")
+  @Roles("viewer", "operator", "admin")
   async detail(@Param("playerId") playerId: string) {
     const player = await this.adminStore.findPlayerById(playerId);
     if (!player) {
@@ -66,11 +70,16 @@ export class PlayersController {
   }
 
   @Put(":playerId/status")
+  @Roles("operator", "admin")
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
     const { status } = body || {};
 
     if (!status || !["active", "disabled", "banned"].includes(status)) {
       throw badRequest("INVALID_STATUS", "status must be active, disabled, or banned");
+    }
+
+    if (status === "banned" && req.admin.role !== "admin") {
+      throw forbidden("INSUFFICIENT_ROLE", "Only admin can ban players");
     }
 
     const player = await this.adminStore.findPlayerById(playerId);

@@ -11,6 +11,7 @@ import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
+import { RolesGuard } from "./auth/roles.guard.js";
 import { AuditController } from "./audit/audit.controller.js";
 import { PlayersController } from "./players/players.controller.js";
 import { MaintenanceController } from "./maintenance/maintenance.controller.js";
@@ -45,6 +46,7 @@ import {
   providers: [
     AuthService,
     JwtAuthGuard,
+    RolesGuard,
     MonitoringService,
     {
       provide: ADMIN_CONFIG,

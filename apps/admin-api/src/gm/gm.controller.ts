@@ -2,6 +2,8 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req, UseGuards } 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { Roles } from "../auth/roles.decorator.js";
+import { RolesGuard } from "../auth/roles.guard.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
 import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_STORE } from "../tokens.js";
 
@@ -23,7 +25,7 @@ function gameServerError(error: any) {
 
 @ApiTags("gm")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller("/api/v1/gm")
 export class GmController {
   constructor(
@@ -32,6 +34,7 @@ export class GmController {
   ) {}
 
   @Post("broadcast")
+  @Roles("operator", "admin")
   @HttpCode(HttpStatus.OK)
   async broadcast(@Body() body: any, @Req() req: any) {
     const { title, content, sender } = body || {};
@@ -64,6 +67,7 @@ export class GmController {
   }
 
   @Post("send-item")
+  @Roles("operator", "admin")
   @HttpCode(HttpStatus.OK)
   async sendItem(@Body() body: any, @Req() req: any) {
     const { playerId, itemId, itemCount, reason } = body || {};
@@ -100,6 +104,7 @@ export class GmController {
   }
 
   @Post("kick-player")
+  @Roles("operator", "admin")
   @HttpCode(HttpStatus.OK)
   async kickPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, reason } = body || {};
@@ -128,6 +133,7 @@ export class GmController {
   }
 
   @Post("ban-player")
+  @Roles("admin")
   @HttpCode(HttpStatus.OK)
   async banPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, durationSeconds, reason } = body || {};

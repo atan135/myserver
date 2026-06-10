@@ -2,6 +2,8 @@ import { Controller, Get, Inject, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { Roles } from "../auth/roles.decorator.js";
+import { RolesGuard } from "../auth/roles.guard.js";
 import { ADMIN_STORE } from "../tokens.js";
 
 function pageLimit(value: any) {
@@ -14,7 +16,8 @@ function pageOffset(value: any) {
 
 @ApiTags("audit")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles("viewer", "operator", "admin")
 @Controller("/api/v1")
 export class AuditController {
   constructor(@Inject(ADMIN_STORE) private readonly adminStore: any) {}

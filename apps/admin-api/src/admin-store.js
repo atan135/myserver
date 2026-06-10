@@ -108,6 +108,28 @@ export class AdminStore {
     );
   }
 
+  async appendSecurityAuditLog({
+    eventType,
+    targetType,
+    targetValue,
+    severity = "warning",
+    clientIp,
+    details
+  }) {
+    await this.pool.execute(
+      `INSERT INTO security_audit_logs (event_type, target_type, target_value, severity, client_ip, details_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        eventType,
+        targetType || null,
+        targetValue || null,
+        severity,
+        clientIp || null,
+        details ? JSON.stringify(details) : null
+      ]
+    );
+  }
+
   async getSecurityLogs({ limit = 50, offset = 0, eventType, targetType, severity, clientIp } = {}) {
     let query = `SELECT * FROM security_audit_logs WHERE 1=1`;
     const params = [];
