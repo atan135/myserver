@@ -63,8 +63,9 @@ import {
     },
     {
       provide: MAIL_PUBSUB_CLIENT,
-      inject: [MAIL_NATS],
-      useFactory: (nats: any) => new PubSubClient(nats)
+      inject: [MAIL_NATS, MAIL_REDIS, MAIL_CONFIG],
+      useFactory: (nats: any, redis: any, config: any) =>
+        new PubSubClient(nats, redis, { redisKeyPrefix: config.redisKeyPrefix })
     },
     {
       provide: MAIL_GAME_ADMIN_CLIENT,

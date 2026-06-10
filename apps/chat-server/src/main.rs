@@ -3,6 +3,7 @@ mod chat_service;
 mod chat_store;
 mod mail_subscriber;
 mod metrics;
+mod online_route;
 mod proto;
 mod protocol;
 mod ticket;
@@ -32,6 +33,7 @@ struct Config {
     registry_heartbeat_interval_secs: u64,
     service_name: String,
     service_instance_id: String,
+    online_route_ttl_secs: u64,
     public_host: String,
     log_level: String,
     log_enable_console: bool,
@@ -79,6 +81,10 @@ impl Config {
                 .unwrap_or_else(|_| "chat-server".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| "chat-server-001".to_string()),
+            online_route_ttl_secs: std::env::var("CHAT_ONLINE_ROUTE_TTL_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .unwrap_or(60),
             public_host: std::env::var("CHAT_PUBLIC_HOST")
                 .unwrap_or_else(|_| "127.0.0.1".to_string()),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
@@ -216,6 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ticket_secret: config.ticket_secret.clone(),
         redis_url: config.redis_url.clone(),
         redis_key_prefix: config.redis_key_prefix.clone(),
+        service_instance_id: config.service_instance_id.clone(),
+        online_route_ttl_secs: config.online_route_ttl_secs,
     };
 
     // Create chat sessions map for mail notification pusher
@@ -224,8 +232,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start mail notification subscriber
     let sessions_for_mail = chat_sessions.clone();
     let nats_url_for_mail = config.nats_url.clone();
+    let instance_id_for_mail = config.service_instance_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = mail_subscriber::subscribe_mail_notifications(nats_url_for_mail, sessions_for_mail).await {
+        if let Err(e) = mail_subscriber::subscribe_mail_notifications(nats_url_for_mail, instance_id_for_mail, sessions_for_mail).await {
             tracing::error!("mail subscriber error: {}", e);
         }
     });

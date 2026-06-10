@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
 use crate::metrics::METRICS;
+use crate::online_route;
 use crate::protocol::{encode_packet, parse_header, OutboundMessage, Packet, HEADER_LEN};
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
 use crate::ticket::verify_ticket;
@@ -77,6 +78,8 @@ pub struct Config {
     pub ticket_secret: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub service_instance_id: String,
+    pub online_route_ttl_secs: u64,
 }
 
 pub async fn run(
@@ -147,6 +150,22 @@ where
 
     // 注册聊天会话
     chat_service::register_session(&chat_sessions, player_id.clone(), tx.clone()).await;
+    if let Err(e) = online_route::set_online_route(
+        &config.redis_url,
+        &config.redis_key_prefix,
+        &player_id,
+        &config.service_instance_id,
+        config.online_route_ttl_secs,
+    )
+    .await
+    {
+        warn!(
+            player_id = %player_id,
+            instance_id = %config.service_instance_id,
+            error = %e,
+            "failed to set chat online route"
+        );
+    }
 
     // 写线程：处理所有出站消息
     let writer_task = tokio::spawn(async move {
@@ -291,6 +310,21 @@ where
 
     // 注销聊天会话
     chat_service::unregister_session(&chat_sessions, &player_id).await;
+    if let Err(e) = online_route::clear_online_route(
+        &config.redis_url,
+        &config.redis_key_prefix,
+        &player_id,
+        &config.service_instance_id,
+    )
+    .await
+    {
+        warn!(
+            player_id = %player_id,
+            instance_id = %config.service_instance_id,
+            error = %e,
+            "failed to clear chat online route"
+        );
+    }
 
     let _ = writer_task.await;
 
