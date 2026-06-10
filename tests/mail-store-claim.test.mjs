@@ -81,3 +81,45 @@ test("failed mail attachment claim can be released for retry", async () => {
   assert.equal(retry.reserved, true);
   assert.equal(retry.mail.status, "claiming");
 });
+
+test("mail creation writes notification outbox in memory store", async () => {
+  const store = new MySqlMailStore(null);
+  await createMail(store);
+
+  const outbox = await store.getMailNotificationOutboxByMailId("mail_001");
+
+  assert.equal(outbox.mail_id, "mail_001");
+  assert.equal(outbox.to_player_id, "player_001");
+  assert.equal(outbox.status, "pending");
+  assert.equal(outbox.attempts, 0);
+  assert.equal(outbox.payload.to_player_id, "player_001");
+  assert.equal(outbox.payload.mail.mail_id, "mail_001");
+});
+
+test("mail notification outbox can be reserved, failed, retried, and marked sent", async () => {
+  const store = new MySqlMailStore(null);
+  await createMail(store);
+
+  const firstReserve = await store.reservePendingMailNotificationOutbox(10);
+  assert.equal(firstReserve.length, 1);
+  assert.equal(firstReserve[0].status, "sending");
+  assert.equal(firstReserve[0].attempts, 1);
+
+  await store.markMailNotificationOutboxFailed(firstReserve[0].id, "nats down");
+  let outbox = await store.getMailNotificationOutboxByMailId("mail_001");
+  assert.equal(outbox.status, "failed");
+  assert.equal(outbox.attempts, 1);
+  assert.equal(outbox.last_error, "nats down");
+
+  outbox.next_attempt_at = new Date(Date.now() - 1);
+  store.memoryOutbox.set(outbox.id, outbox);
+
+  const retryReserve = await store.reservePendingMailNotificationOutbox(10);
+  assert.equal(retryReserve.length, 1);
+  assert.equal(retryReserve[0].attempts, 2);
+
+  await store.markMailNotificationOutboxSent(retryReserve[0].id);
+  outbox = await store.getMailNotificationOutboxByMailId("mail_001");
+  assert.equal(outbox.status, "sent");
+  assert.ok(outbox.sent_at);
+});

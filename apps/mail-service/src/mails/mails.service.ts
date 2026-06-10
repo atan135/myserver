@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 
 import { badGateway, badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
@@ -89,12 +89,78 @@ function normalizeMailAttachmentItems(attachments: any) {
 }
 
 @Injectable()
-export class MailsService {
+export class MailsService implements OnModuleInit, OnModuleDestroy {
+  private outboxTimer: NodeJS.Timeout | null = null;
+  private outboxProcessing = false;
+
   constructor(
     @Inject(MAIL_STORE) private readonly mailStore: any,
     @Inject(MAIL_PUBSUB_CLIENT) private readonly pubsubClient: any,
     @Inject(MAIL_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
   ) {}
+
+  onModuleInit() {
+    this.outboxTimer = setInterval(() => {
+      this.processPendingNotificationOutbox().catch((error: any) => {
+        log("error", "mail.outbox_worker_failed", { error: error.message });
+      });
+    }, 5000);
+    this.outboxTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.outboxTimer) {
+      clearInterval(this.outboxTimer);
+      this.outboxTimer = null;
+    }
+  }
+
+  async processPendingNotificationOutbox(limit = 20) {
+    if (this.outboxProcessing) {
+      return {
+        processed: 0,
+        sent: 0,
+        failed: 0,
+        skipped: true
+      };
+    }
+
+    this.outboxProcessing = true;
+    let processed = 0;
+    let sent = 0;
+    let failed = 0;
+
+    try {
+      const entries = await this.mailStore.reservePendingMailNotificationOutbox(limit);
+      for (const entry of entries) {
+        processed += 1;
+        try {
+          const payload = entry.payload || {};
+          await this.pubsubClient.publishMailNotification(payload.to_player_id || entry.to_player_id, payload.mail);
+          await this.mailStore.markMailNotificationOutboxSent(entry.id);
+          sent += 1;
+        } catch (error: any) {
+          await this.mailStore.markMailNotificationOutboxFailed(entry.id, error.message);
+          failed += 1;
+          log("warn", "mail.outbox_publish_failed", {
+            outboxId: entry.id,
+            mailId: entry.mail_id,
+            attempts: entry.attempts,
+            error: error.message
+          });
+        }
+      }
+
+      return {
+        processed,
+        sent,
+        failed,
+        skipped: false
+      };
+    } finally {
+      this.outboxProcessing = false;
+    }
+  }
 
   async list(query: any) {
     try {
@@ -178,16 +244,18 @@ export class MailsService {
         expires_at: expires_at || null
       };
 
-      await this.mailStore.createMail(mail);
-      await this.pubsubClient.publishMailNotification(to_player_id, mail);
+      await this.mailStore.createMailWithNotificationOutbox(mail);
+      const outboxResult = await this.processPendingNotificationOutbox(1);
 
-      log("info", "mail.sent", {
+      log("info", outboxResult.sent > 0 ? "mail.sent" : "mail.outbox_pending", {
         mailId: mail.mail_id,
         toPlayerId: to_player_id,
         senderType: mail.sender_type,
         senderId: mail.sender_id,
         createdByType: mail.created_by_type,
-        createdById: mail.created_by_id
+        createdById: mail.created_by_id,
+        outboxSent: outboxResult.sent,
+        outboxFailed: outboxResult.failed
       });
 
       return {

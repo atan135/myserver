@@ -30,6 +30,26 @@ CREATE TABLE IF NOT EXISTS mails (
   UNIQUE KEY uk_mails_mail_id (mail_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS mail_notification_outbox (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  mail_id VARCHAR(64) NOT NULL,
+  to_player_id VARCHAR(64) NOT NULL,
+  payload JSON NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  attempts INT UNSIGNED NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(3),
+  locked_until DATETIME(3) NULL,
+  last_error VARCHAR(512) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  sent_at DATETIME(3) NULL,
+  UNIQUE KEY uk_mail_notification_outbox_mail_id (mail_id),
+  INDEX idx_mail_notification_outbox_pending (status, next_attempt_at, id),
+  INDEX idx_mail_notification_outbox_to_player_id (to_player_id),
+  CONSTRAINT fk_mail_notification_outbox_mail_id
+    FOREIGN KEY (mail_id) REFERENCES mails(mail_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Sample data for testing
 INSERT INTO mails (
   mail_id,

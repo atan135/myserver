@@ -27,14 +27,48 @@ function cloneAttachments(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function buildMailNotificationPayload(mail) {
+  return {
+    to_player_id: mail.to_player_id,
+    mail: {
+      mail_id: mail.mail_id,
+      sender_id: mail.sender_id,
+      sender_name: mail.sender_name,
+      from_player_id: mail.from_player_id,
+      to_player_id: mail.to_player_id,
+      title: mail.title,
+      mail_type: mail.mail_type || "system",
+      created_at: mail.created_at
+    }
+  };
+}
+
+function parseJson(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return JSON.parse(value);
+  }
+
+  return value;
+}
+
 export class MySqlMailStore {
   constructor(pool) {
     this.pool = pool;
     this.memory = new Map();
     this.memoryNextId = 1;
+    this.memoryOutbox = new Map();
+    this.memoryOutboxNextId = 1;
   }
 
   async createMail(mail) {
+    return this.createMailWithNotificationOutbox(mail).then((result) => result.mailId);
+  }
+
+  async createMailWithNotificationOutbox(mail) {
     if (!this.pool) {
       const id = this.memoryNextId++;
       const createdAt = toDateOrNull(mail.created_at) || new Date();
@@ -65,9 +99,48 @@ export class MySqlMailStore {
         expires_at: toDateOrNull(mail.expires_at)
       });
 
-      return id;
+      const outbox = this.enqueueMailNotificationOutboxMemory({
+        mail_id: mail.mail_id,
+        to_player_id: mail.to_player_id,
+        payload: buildMailNotificationPayload(mail),
+        created_at: createdAt
+      });
+
+      return {
+        mailId: id,
+        outboxId: outbox.id
+      };
     }
 
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const mailId = await this.insertMail(connection, mail);
+      const [outboxResult] = await connection.execute(
+        `INSERT INTO mail_notification_outbox
+          (mail_id, to_player_id, payload, status, next_attempt_at)
+         VALUES (?, ?, ?, 'pending', NOW(3))`,
+        [
+          mail.mail_id,
+          mail.to_player_id,
+          JSON.stringify(buildMailNotificationPayload(mail))
+        ]
+      );
+      await connection.commit();
+
+      return {
+        mailId,
+        outboxId: outboxResult.insertId
+      };
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async insertMail(executor, mail) {
     const sql = `INSERT INTO mails
       (
         mail_id,
@@ -109,6 +182,153 @@ export class MySqlMailStore {
     ]);
 
     return result.insertId;
+  }
+
+  enqueueMailNotificationOutboxMemory(entry) {
+    const id = this.memoryOutboxNextId++;
+    const now = toDateOrNull(entry.created_at) || new Date();
+    const row = {
+      id,
+      mail_id: entry.mail_id,
+      to_player_id: entry.to_player_id,
+      payload: JSON.parse(JSON.stringify(entry.payload)),
+      status: "pending",
+      attempts: 0,
+      next_attempt_at: now,
+      locked_until: null,
+      last_error: null,
+      created_at: now,
+      sent_at: null
+    };
+    this.memoryOutbox.set(id, row);
+    return this.parseOutboxRow(row);
+  }
+
+  async reservePendingMailNotificationOutbox(limit = 20) {
+    if (!this.pool) {
+      const now = Date.now();
+      const reserved = Array.from(this.memoryOutbox.values())
+        .filter((row) => row.status !== "sent")
+        .filter((row) => !row.next_attempt_at || new Date(row.next_attempt_at).getTime() <= now)
+        .filter((row) => row.status !== "sending" || !row.locked_until || new Date(row.locked_until).getTime() <= now)
+        .sort((a, b) => a.id - b.id)
+        .slice(0, limit);
+
+      for (const row of reserved) {
+        row.status = "sending";
+        row.attempts += 1;
+        row.locked_until = new Date(now + 30_000);
+        this.memoryOutbox.set(row.id, row);
+      }
+
+      return reserved.map((row) => this.parseOutboxRow(row));
+    }
+
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute(
+        `SELECT *
+           FROM mail_notification_outbox
+          WHERE status <> 'sent'
+            AND (next_attempt_at IS NULL OR next_attempt_at <= NOW(3))
+            AND (status <> 'sending' OR locked_until IS NULL OR locked_until <= NOW(3))
+          ORDER BY id ASC
+          LIMIT ?
+          FOR UPDATE`,
+        [limit]
+      );
+
+      if (rows.length > 0) {
+        const ids = rows.map((row) => row.id);
+        await connection.query(
+          `UPDATE mail_notification_outbox
+              SET status = 'sending',
+                  attempts = attempts + 1,
+                  locked_until = DATE_ADD(NOW(3), INTERVAL 30 SECOND)
+            WHERE id IN (?)`,
+          [ids]
+        );
+      }
+
+      await connection.commit();
+      return rows.map((row) => this.parseOutboxRow({
+        ...row,
+        status: "sending",
+        attempts: row.attempts + 1
+      }));
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async markMailNotificationOutboxSent(outboxId) {
+    if (!this.pool) {
+      const row = this.memoryOutbox.get(outboxId);
+      if (!row) {
+        return false;
+      }
+
+      row.status = "sent";
+      row.sent_at = new Date();
+      row.locked_until = null;
+      this.memoryOutbox.set(outboxId, row);
+      return true;
+    }
+
+    const [result] = await this.pool.execute(
+      `UPDATE mail_notification_outbox
+          SET status = 'sent',
+              sent_at = NOW(3),
+              locked_until = NULL
+        WHERE id = ?`,
+      [outboxId]
+    );
+    return result.affectedRows > 0;
+  }
+
+  async markMailNotificationOutboxFailed(outboxId, errorMessage) {
+    if (!this.pool) {
+      const row = this.memoryOutbox.get(outboxId);
+      if (!row) {
+        return false;
+      }
+
+      const delayMs = Math.min(60_000, 1000 * (2 ** Math.max(0, row.attempts - 1)));
+      row.status = "failed";
+      row.last_error = String(errorMessage || "").slice(0, 512);
+      row.next_attempt_at = new Date(Date.now() + delayMs);
+      row.locked_until = null;
+      this.memoryOutbox.set(outboxId, row);
+      return true;
+    }
+
+    const [result] = await this.pool.execute(
+      `UPDATE mail_notification_outbox
+          SET status = 'failed',
+              last_error = ?,
+              next_attempt_at = DATE_ADD(NOW(3), INTERVAL LEAST(60, POW(2, GREATEST(attempts - 1, 0))) SECOND),
+              locked_until = NULL
+        WHERE id = ?`,
+      [String(errorMessage || "").slice(0, 512), outboxId]
+    );
+    return result.affectedRows > 0;
+  }
+
+  async getMailNotificationOutboxByMailId(mailId) {
+    if (!this.pool) {
+      const row = Array.from(this.memoryOutbox.values()).find((entry) => entry.mail_id === mailId);
+      return this.parseOutboxRow(row);
+    }
+
+    const [rows] = await this.pool.execute(
+      `SELECT * FROM mail_notification_outbox WHERE mail_id = ? ORDER BY id ASC LIMIT 1`,
+      [mailId]
+    );
+    return this.parseOutboxRow(rows[0]);
   }
 
   async getMailById(mailId) {
@@ -388,6 +608,26 @@ export class MySqlMailStore {
       read_at: row.read_at,
       claimed_at: row.claimed_at,
       expires_at: row.expires_at
+    };
+  }
+
+  parseOutboxRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      mail_id: row.mail_id,
+      to_player_id: row.to_player_id,
+      payload: parseJson(row.payload),
+      status: row.status,
+      attempts: row.attempts || 0,
+      next_attempt_at: row.next_attempt_at,
+      locked_until: row.locked_until,
+      last_error: row.last_error,
+      created_at: row.created_at,
+      sent_at: row.sent_at
     };
   }
 }

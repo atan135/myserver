@@ -56,7 +56,15 @@ function createService() {
   const MailsService = createService.MailsService;
   const mailStore = new MySqlMailStore(null);
   const pubsubClient = {
-    publishMailNotification: async () => {}
+    publishes: [],
+    failuresRemaining: 0,
+    async publishMailNotification(playerId, mail) {
+      this.publishes.push({ playerId, mailId: mail.mail_id });
+      if (this.failuresRemaining > 0) {
+        this.failuresRemaining -= 1;
+        throw new Error("nats down");
+      }
+    }
   };
   const gameAdminClient = {
     grants: [],
@@ -68,6 +76,7 @@ function createService() {
 
   return {
     mailStore,
+    pubsubClient,
     gameAdminClient,
     service: new MailsService(mailStore, pubsubClient, gameAdminClient)
   };
@@ -117,4 +126,66 @@ test("MailsService claim grants once with stable requestId and repeats idempoten
   assert.equal(gameAdminClient.grants.length, 1);
   assert.equal(gameAdminClient.grants[0].playerId, "player_001");
   assert.equal(gameAdminClient.grants[0].requestId, "mail_claim:mail_001");
+});
+
+test("MailsService create keeps mail and outbox when notification publish fails", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService();
+  pubsubClient.failuresRemaining = 1;
+
+  const result = await service.create({
+    to_player_id: "player_001",
+    title: "Reward",
+    content: "claim it"
+  });
+
+  assert.equal(result.ok, true);
+  const mail = await mailStore.getMailById(result.mail_id);
+  const outbox = await mailStore.getMailNotificationOutboxByMailId(result.mail_id);
+
+  assert.equal(mail.title, "Reward");
+  assert.equal(outbox.status, "failed");
+  assert.equal(outbox.attempts, 1);
+  assert.equal(outbox.last_error, "nats down");
+});
+
+test("MailsService retry sends pending notification outbox and marks it sent", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService();
+  pubsubClient.failuresRemaining = 1;
+
+  const result = await service.create({
+    to_player_id: "player_001",
+    title: "Reward"
+  });
+
+  let outbox = await mailStore.getMailNotificationOutboxByMailId(result.mail_id);
+  outbox.next_attempt_at = new Date(Date.now() - 1);
+  mailStore.memoryOutbox.set(outbox.id, outbox);
+
+  const retry = await service.processPendingNotificationOutbox();
+  outbox = await mailStore.getMailNotificationOutboxByMailId(result.mail_id);
+
+  assert.equal(retry.processed, 1);
+  assert.equal(retry.sent, 1);
+  assert.equal(retry.failed, 0);
+  assert.equal(outbox.status, "sent");
+  assert.equal(outbox.attempts, 2);
+  assert.deepEqual(pubsubClient.publishes.map((publish) => publish.mailId), [result.mail_id, result.mail_id]);
+});
+
+test("MailsService create marks outbox sent when immediate publish succeeds", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService();
+
+  const result = await service.create({
+    to_player_id: "player_001",
+    title: "Reward"
+  });
+
+  const outbox = await mailStore.getMailNotificationOutboxByMailId(result.mail_id);
+
+  assert.equal(outbox.status, "sent");
+  assert.equal(outbox.attempts, 1);
+  assert.equal(pubsubClient.publishes.length, 1);
 });
