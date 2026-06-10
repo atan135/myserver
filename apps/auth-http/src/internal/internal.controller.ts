@@ -7,6 +7,13 @@ import { AUTH_CONFIG, AUTH_GAME_ADMIN_CLIENT } from "../tokens.js";
 function verifyInternalToken(req: any, config: any) {
   const token = config.internalApiToken;
   if (!token) {
+    if (config.strictSecurity) {
+      throw new ApiHttpException(503, {
+        ok: false,
+        error: "INTERNAL_API_TOKEN_REQUIRED",
+        message: "INTERNAL_API_TOKEN is required when strict security is enabled"
+      });
+    }
     return;
   }
 

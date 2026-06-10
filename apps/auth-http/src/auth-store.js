@@ -126,7 +126,7 @@ export class AuthStore {
 
     const passwordMatches =
       account.passwordAlgo === "scrypt" &&
-      verifyPassword(password, account.passwordSalt, account.passwordHash);
+      await verifyPassword(password, account.passwordSalt, account.passwordHash);
 
     if (!passwordMatches) {
       await this.mysqlStore.appendAuthAudit({
@@ -159,12 +159,16 @@ export class AuthStore {
       createdAt: new Date().toISOString()
     };
 
-    // Kick old session if exists
     const psKey = this.prefixedKey(playerSessionKey(account.playerId));
-    const oldAccessToken = await this.redis.get(psKey);
+    const sessionKeyName = this.prefixedKey(sessionKey(accessToken));
+    const oldAccessToken = await this.replacePlayerSession({
+      playerSessionKeyName: psKey,
+      accessToken,
+      sessionKeyName,
+      sessionData: JSON.stringify(session)
+    });
+
     if (oldAccessToken) {
-      await this.redis.del(this.prefixedKey(sessionKey(oldAccessToken)));
-      await this.redis.del(this.prefixedKey(sessionActivityKey(oldAccessToken)));
       await this.publishSessionKick(account.playerId, "new_login");
       await this.mysqlStore?.appendAuthAudit({
         playerId: account.playerId,
@@ -176,14 +180,6 @@ export class AuthStore {
     }
 
     const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
-
-    await this.redis.set(
-      this.prefixedKey(sessionKey(accessToken)),
-      JSON.stringify(session),
-      "EX",
-      this.config.sessionTtlSeconds
-    );
-    await this.redis.set(psKey, accessToken, "EX", this.config.sessionTtlSeconds);
     await this.markSessionActive(accessToken);
 
     await this.mysqlStore?.appendAuthAudit({
@@ -203,6 +199,49 @@ export class AuthStore {
       ...session,
       gameTicket
     };
+  }
+
+  async replacePlayerSession({
+    playerSessionKeyName,
+    accessToken,
+    sessionKeyName,
+    sessionData
+  }) {
+    const script = `
+      local player_session_key = KEYS[1]
+      local new_session_key = KEYS[2]
+      local old_token = redis.call("GET", player_session_key)
+      if old_token then
+        redis.call("DEL", ARGV[1] .. old_token)
+        redis.call("DEL", ARGV[2] .. old_token)
+      end
+      redis.call("SET", new_session_key, ARGV[3], "EX", tonumber(ARGV[5]))
+      redis.call("SET", player_session_key, ARGV[4], "EX", tonumber(ARGV[5]))
+      return old_token
+    `;
+
+    if (typeof this.redis.eval === "function") {
+      return this.redis.eval(
+        script,
+        2,
+        playerSessionKeyName,
+        sessionKeyName,
+        this.prefixedKey("session:"),
+        this.prefixedKey("session-activity:"),
+        sessionData,
+        accessToken,
+        this.config.sessionTtlSeconds
+      );
+    }
+
+    const oldAccessToken = await this.redis.get(playerSessionKeyName);
+    if (oldAccessToken) {
+      await this.redis.del(this.prefixedKey(sessionKey(oldAccessToken)));
+      await this.redis.del(this.prefixedKey(sessionActivityKey(oldAccessToken)));
+    }
+    await this.redis.set(sessionKeyName, sessionData, "EX", this.config.sessionTtlSeconds);
+    await this.redis.set(playerSessionKeyName, accessToken, "EX", this.config.sessionTtlSeconds);
+    return oldAccessToken;
   }
 
   async publishSessionKick(playerId, reason) {

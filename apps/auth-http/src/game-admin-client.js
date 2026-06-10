@@ -92,6 +92,12 @@ function decodeError(body) {
   return { errorCode, message };
 }
 
+function createAdminError(code, message = code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 async function sendAdminRequest(config, messageType, payload, expectedType, decodeMessage) {
   const socket = net.createConnection({
     host: config.gameServerAdminHost,
@@ -99,9 +105,17 @@ async function sendAdminRequest(config, messageType, payload, expectedType, deco
   });
 
   try {
-    await onceConnected(socket);
-    await onceWritten(socket, encodePacket(messageType, 1, Buffer.from(payload.serializeBinary())));
-    const responseBuffer = await readSinglePacket(socket);
+    await onceConnected(socket, config.gameAdminConnectTimeoutMs);
+    await onceWritten(
+      socket,
+      encodePacket(messageType, 1, Buffer.from(payload.serializeBinary())),
+      config.gameAdminWriteTimeoutMs
+    );
+    const responseBuffer = await readSinglePacket(
+      socket,
+      config.gameAdminReadTimeoutMs,
+      config.gameAdminMaxResponseBytes
+    );
     const response = decodePacket(responseBuffer);
 
     if (response.messageType === MESSAGE_TYPE.ERROR_RES) {
@@ -124,16 +138,49 @@ async function sendAdminRequest(config, messageType, payload, expectedType, deco
   }
 }
 
-function onceConnected(socket) {
+function onceConnected(socket, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_CONNECT_TIMEOUT", "game-server admin connect timeout"));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("error", onError);
+    };
+
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
   });
 }
 
-function onceWritten(socket, data) {
+function onceWritten(socket, data, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_WRITE_TIMEOUT", "game-server admin write timeout"));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+    };
+
     socket.write(data, (error) => {
+      cleanup();
       if (error) {
         reject(error);
         return;
@@ -143,18 +190,37 @@ function onceWritten(socket, data) {
   });
 }
 
-function readSinglePacket(socket) {
+function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_READ_TIMEOUT", "game-server admin read timeout"));
+    }, timeoutMs);
 
     const onData = (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length > maxResponseBytes) {
+        cleanup();
+        socket.destroy();
+        reject(createAdminError("GAME_ADMIN_RESPONSE_TOO_LARGE", "game-server admin response too large"));
+        return;
+      }
+
       if (buffer.length < HEADER_LEN) {
         return;
       }
 
       const bodyLen = buffer.readUInt32BE(10);
       const packetLen = HEADER_LEN + bodyLen;
+      if (packetLen > maxResponseBytes) {
+        cleanup();
+        socket.destroy();
+        reject(createAdminError("GAME_ADMIN_RESPONSE_TOO_LARGE", "game-server admin response too large"));
+        return;
+      }
+
       if (buffer.length < packetLen) {
         return;
       }
@@ -174,6 +240,7 @@ function readSinglePacket(socket) {
     };
 
     const cleanup = () => {
+      clearTimeout(timer);
       socket.off("data", onData);
       socket.off("error", onError);
       socket.off("close", onClose);

@@ -40,7 +40,7 @@ class FakeRedis {
 
 test("AuthStore password login validates credentials from mysql store", async () => {
   const passwordSalt = createPasswordSalt();
-  const passwordHash = hashPassword("Passw0rd!", passwordSalt);
+  const passwordHash = await hashPassword("Passw0rd!", passwordSalt);
   const audits = [];
   const touchedPlayerIds = [];
   const redis = new FakeRedis();
@@ -101,7 +101,7 @@ test("AuthStore password login validates credentials from mysql store", async ()
 
 test("AuthStore password login rejects invalid password", async () => {
   const passwordSalt = createPasswordSalt();
-  const passwordHash = hashPassword("Passw0rd!", passwordSalt);
+  const passwordHash = await hashPassword("Passw0rd!", passwordSalt);
   const audits = [];
   const authStore = new AuthStore(
     {

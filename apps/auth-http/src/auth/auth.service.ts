@@ -257,7 +257,7 @@ export class AuthService {
 
     const passwordMatches =
       account.passwordAlgo === "scrypt" &&
-      verifyPassword(oldPassword, account.passwordSalt, account.passwordHash);
+      await verifyPassword(oldPassword, account.passwordSalt, account.passwordHash);
 
     if (!passwordMatches) {
       this.mysqlStore.appendSecurityAudit({
@@ -272,7 +272,7 @@ export class AuthService {
     }
 
     const newSalt = createPasswordSalt();
-    const newHash = hashPassword(newPassword, newSalt);
+    const newHash = await hashPassword(newPassword, newSalt);
 
     await this.mysqlStore.updatePassword(session.playerId, {
       passwordSalt: newSalt,

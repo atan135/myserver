@@ -39,15 +39,23 @@ export function createPasswordSalt() {
 }
 
 export function hashPassword(password, salt) {
-  return crypto.scryptSync(String(password || ""), String(salt || ""), 64).toString("hex");
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(String(password || ""), String(salt || ""), 64, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(derivedKey.toString("hex"));
+    });
+  });
 }
 
-export function verifyPassword(password, salt, expectedHash) {
+export async function verifyPassword(password, salt, expectedHash) {
   if (!salt || !expectedHash) {
     return false;
   }
 
-  const actualBuffer = Buffer.from(hashPassword(password, salt), "hex");
+  const actualBuffer = Buffer.from(await hashPassword(password, salt), "hex");
   const expectedBuffer = Buffer.from(String(expectedHash), "hex");
 
   if (actualBuffer.length !== expectedBuffer.length) {

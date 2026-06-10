@@ -179,7 +179,7 @@ async function main() {
   try {
     for (const account of accounts) {
       const passwordSalt = createPasswordSalt();
-      const passwordHash = hashPassword(account.password, passwordSalt);
+      const passwordHash = await hashPassword(account.password, passwordSalt);
       const result = await store.upsertPasswordAccount({
         loginName: account.loginName,
         displayName: account.displayName,

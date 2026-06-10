@@ -17,9 +17,10 @@ function parseBoolean(value, fallback) {
 }
 
 export function getConfig() {
+  const env = process.env.NODE_ENV || "development";
   return {
     appName: "auth-http",
-    env: process.env.NODE_ENV || "development",
+    env,
     host: process.env.HOST || "127.0.0.1",
     port: Number.parseInt(process.env.PORT || "3000", 10),
     logLevel: process.env.LOG_LEVEL || "info",
@@ -51,6 +52,22 @@ export function getConfig() {
       process.env.GAME_SERVER_ADMIN_PORT || "7500",
       10
     ),
+    gameAdminConnectTimeoutMs: Number.parseInt(
+      process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS || "3000",
+      10
+    ),
+    gameAdminReadTimeoutMs: Number.parseInt(
+      process.env.GAME_ADMIN_READ_TIMEOUT_MS || "3000",
+      10
+    ),
+    gameAdminWriteTimeoutMs: Number.parseInt(
+      process.env.GAME_ADMIN_WRITE_TIMEOUT_MS || "3000",
+      10
+    ),
+    gameAdminMaxResponseBytes: Number.parseInt(
+      process.env.GAME_ADMIN_MAX_RESPONSE_BYTES || "1048576",
+      10
+    ),
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
@@ -78,6 +95,10 @@ export function getConfig() {
     securityAuditEnabled: parseBoolean(process.env.SECURITY_AUDIT_ENABLED, true),
 
     // Internal API Token
-    internalApiToken: process.env.INTERNAL_API_TOKEN || ""
+    internalApiToken: process.env.INTERNAL_API_TOKEN || "",
+    strictSecurity: parseBoolean(
+      process.env.AUTH_STRICT_SECURITY,
+      env === "production"
+    )
   };
 }
