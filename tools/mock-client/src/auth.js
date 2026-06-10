@@ -72,8 +72,91 @@ export function formatLoginSummary(login) {
     loginName: login.loginName || null,
     guestId: login.guestId || null,
     hasAccessToken: Boolean(login.accessToken),
-    ticketPreview: login.ticket ? `${login.ticket.slice(0, 16)}...` : null
+    ticketPreview: login.ticket ? `${login.ticket.slice(0, 16)}...` : null,
+    ticketExpiresAt: login.ticketExpiresAt || null,
+    services: summarizeServices(login.services)
   };
+}
+
+function summarizeServices(services) {
+  if (!services) {
+    return null;
+  }
+
+  return {
+    game: services.game ? `${services.game.host}:${services.game.port}` : null,
+    chat: services.chat ? `${services.chat.host}:${services.chat.port}` : null,
+    mail: services.mail ? `${services.mail.host}:${services.mail.port}` : null,
+    announce: services.announce ? `${services.announce.host}:${services.announce.port}` : null
+  };
+}
+
+function applyTcpService(options, service, hostKey, portKey) {
+  if (!service?.host || !service?.port) {
+    return;
+  }
+
+  if (service.protocol && service.protocol !== "tcp") {
+    return;
+  }
+
+  options[hostKey] = service.host;
+  options[portKey] = Number(service.port);
+}
+
+function applyHttpService(options, service, baseUrlKey) {
+  if (!service?.host || !service?.port) {
+    return;
+  }
+
+  const protocol = service.protocol === "https" ? "https" : "http";
+  options[baseUrlKey] = `${protocol}://${service.host}:${service.port}`;
+}
+
+export function applyDiscoveredServices(options, login) {
+  if (!options.useServiceDiscovery || !login?.services) {
+    return;
+  }
+
+  applyTcpService(options, login.services.game, "gameHost", "port");
+  applyTcpService(options, login.services.chat, "chatHost", "chatPort");
+  applyHttpService(options, login.services.mail, "mailBaseUrl");
+  applyHttpService(options, login.services.announce, "announceBaseUrl");
+}
+
+function ticketExpiresSoon(login, skewMs = 30000) {
+  if (!login?.ticketExpiresAt) {
+    return false;
+  }
+
+  const expiresAt = new Date(login.ticketExpiresAt).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now() + skewMs;
+}
+
+export async function refreshTicketIfNeeded(options, login, skewMs = 30000) {
+  if (!ticketExpiresSoon(login, skewMs)) {
+    return login;
+  }
+
+  if (!login.accessToken) {
+    throw new Error("ticket is near expiry but accessToken is unavailable; fetch a new login or omit --ticket");
+  }
+
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/game-ticket/issue`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${login.accessToken}` }
+  });
+
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(`ticket refresh failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
+
+  login.ticket = payload.ticket;
+  login.ticketExpiresAt = payload.ticketExpiresAt;
+  login.services = payload.services || login.services;
+  applyDiscoveredServices(options, login);
+  return login;
 }
 
 /**
@@ -262,6 +345,92 @@ export async function runKickSession(options) {
   console.log("[kick-session] all Phase 1 + Phase 2 checks passed");
 }
 
+async function changePassword(options, accessToken, oldPassword, newPassword) {
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/auth/change-password`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ oldPassword, newPassword })
+  });
+
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(`change-password failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
+
+  return payload;
+}
+
+async function assertGameAuth(options, login, expectedOk, expectedErrorCode = "") {
+  const { TcpProtocolClient } = await import("./client.js");
+  const { MESSAGE_TYPE } = await import("./constants.js");
+  const { encodeAuthReq, decodeByMessageType } = await import("./messages.js");
+
+  const client = new TcpProtocolClient(options, "auth-check");
+  await client.connect();
+  try {
+    await client.send(MESSAGE_TYPE.AUTH_REQ, 1, encodeAuthReq(login.ticket));
+    const packet = await client.readNextPacket(options.timeoutMs);
+    const authRes = decodeByMessageType(packet.messageType, packet.body);
+    if (packet.messageType !== MESSAGE_TYPE.AUTH_RES) {
+      throw new Error(`expected AUTH_RES (${MESSAGE_TYPE.AUTH_RES}), got messageType=${packet.messageType}`);
+    }
+    if (authRes.ok !== expectedOk) {
+      throw new Error(`expected auth ok=${expectedOk}, got ${JSON.stringify(authRes)}`);
+    }
+    if (expectedErrorCode && authRes.errorCode !== expectedErrorCode) {
+      throw new Error(`expected auth errorCode=${expectedErrorCode}, got ${authRes.errorCode}`);
+    }
+    console.log("[password-ticket-revoke] auth check:", JSON.stringify(authRes));
+  } finally {
+    client.close();
+  }
+}
+
+export async function runPasswordTicketRevoke(options) {
+  if (!options.loginName || !options.password || !options.newPassword) {
+    throw new Error("password-ticket-revoke requires --login-name, --password and --new-password");
+  }
+
+  if (options.password === options.newPassword) {
+    throw new Error("--new-password must differ from --password");
+  }
+
+  console.log("[password-ticket-revoke] step 1: login with old password...");
+  const oldLogin = await fetchTicket(options);
+  console.log("[password-ticket-revoke] old login:", JSON.stringify(formatLoginSummary(oldLogin), null, 2));
+
+  console.log("[password-ticket-revoke] step 2: old ticket should authenticate before password change...");
+  await assertGameAuth(options, oldLogin, true);
+
+  console.log("[password-ticket-revoke] step 3: changing password...");
+  await changePassword(options, oldLogin.accessToken, options.password, options.newPassword);
+
+  console.log("[password-ticket-revoke] step 4: old ticket should be revoked after password change...");
+  await assertGameAuth(options, oldLogin, false, "TICKET_REVOKED");
+
+  console.log("[password-ticket-revoke] step 5: login with new password and verify fresh ticket...");
+  const originalPassword = options.password;
+  let newLogin = null;
+  options.password = options.newPassword;
+  try {
+    newLogin = await fetchTicket(options);
+    console.log("[password-ticket-revoke] new login:", JSON.stringify(formatLoginSummary(newLogin), null, 2));
+    await assertGameAuth(options, newLogin, true);
+  } finally {
+    options.password = originalPassword;
+  }
+
+  if (options.restorePasswordAfterTest && newLogin?.accessToken) {
+    console.log("[password-ticket-revoke] step 6: restoring original password...");
+    await changePassword(options, newLogin.accessToken, options.newPassword, originalPassword);
+  }
+
+  console.log("[password-ticket-revoke] all checks passed");
+}
+
 /**
  * Fetch authentication ticket from HTTP auth service
  * @param {Object} options
@@ -271,7 +440,7 @@ export async function runKickSession(options) {
 export async function fetchTicket(options, overrides = {}) {
   // If ticket is provided and no overrides, use it directly
   if (options.ticket && Object.keys(overrides).length === 0) {
-    return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket };
+    return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket, manualTicket: true };
   }
 
   // If guestId is explicitly provided in overrides, use guest login directly
@@ -292,6 +461,7 @@ export async function fetchTicket(options, overrides = {}) {
       throw new Error(`guest-login failed: ${JSON.stringify(payload)}`);
     }
 
+    applyDiscoveredServices(options, payload);
     return payload;
   }
 
@@ -313,6 +483,7 @@ export async function fetchTicket(options, overrides = {}) {
       throw new Error(`account login failed: ${JSON.stringify(payload)}`);
     }
 
+    applyDiscoveredServices(options, payload);
     return payload;
   }
 
@@ -333,5 +504,6 @@ export async function fetchTicket(options, overrides = {}) {
     throw new Error(`guest-login failed: ${JSON.stringify(payload)}`);
   }
 
+  applyDiscoveredServices(options, payload);
   return payload;
 }

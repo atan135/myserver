@@ -70,6 +70,8 @@ Protobuf 风格的编解码工具：
 ### auth.js
 认证辅助函数：
 - `fetchTicket(options, overrides)` - 从 HTTP 认证服务获取 ticket
+- `refreshTicketIfNeeded(options, login)` - ticket 快过期时通过 access token 重新签发
+- `applyDiscoveredServices(options, login)` - 使用 auth-http 返回的 `services` 自动更新测试目标地址
 - `resolveAccountCredentials()` - 解析账号密码
 - `formatLoginSummary()` - 格式化登录信息
 
@@ -191,6 +193,13 @@ Protobuf 风格的编解码工具：
 | `inventory-get` | 获取当前背包和仓库状态 |
 | `inventory-full` | 完整背包流程测试 |
 
+### 认证与安全场景 (auth.js)
+| 场景 | 说明 |
+|------|------|
+| `logout` | 登录、校验 `/me`、退出登录并确认 session 失效 |
+| `kick-session` | 同账号重复登录踢旧 session，并验证 TCP kick push |
+| `password-ticket-revoke` | 改密后旧 game ticket 应被拒绝，新密码登录后的新 ticket 可用 |
+
 ## 使用方法
 
 ### 基础用法
@@ -265,6 +274,12 @@ node tools/mock-client/src/index.js --scenario announce-create \
   --announce-type popup \
   --announce-priority 20 \
   --announce-duration-seconds 3600
+
+# 改密后旧 ticket 失效验证
+node tools/mock-client/src/index.js --scenario password-ticket-revoke \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password OldPass123! \
+  --new-password NewPass456!
 ```
 
 ### 命令行参数
@@ -276,16 +291,21 @@ node tools/mock-client/src/index.js --scenario announce-create \
 | `--announce-base-url` | 公告服务地址 | `http://127.0.0.1:9004` |
 | `--mail-base-url` | 邮件服务地址 | `http://127.0.0.1:9003` |
 | `--host` | 游戏服务器地址 | `127.0.0.1` |
+| `--game-host` | 游戏 TCP 服务器地址；未传时使用 `--host` | 空 |
 | `--port` | 游戏服务器端口 | `7000` |
+| `--chat-host` | 聊天 TCP 服务器地址；未传时使用 `--host` | 空 |
 | `--chat-port` | 聊天服务器端口 | `9001` |
 | `--room-id` | 房间ID | `room-default` |
 | `--login-name` | 登录用户名 | - |
 | `--password` | 登录密码 | - |
+| `--new-password` | `password-ticket-revoke` 改密后的新密码 | - |
+| `--no-restore-password` | `password-ticket-revoke` 结束后不恢复原密码 | 默认恢复 |
 | `--login-name-a` | 客户端A登录用户名 | - |
 | `--password-a` | 客户端A登录密码 | - |
 | `--login-name-b` | 客户端B登录用户名 | - |
 | `--password-b` | 客户端B登录密码 | - |
 | `--ticket` | 直接指定 ticket | - |
+| `--no-service-discovery` | 禁用 auth-http 登录响应中的 `services` 自动覆盖测试目标地址 | 默认启用 |
 | `--timeout-ms` | 超时毫秒 | `5000` |
 | `--policy-id` | 入房时指定房间策略 | 空 |
 | `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |

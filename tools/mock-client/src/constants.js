@@ -178,5 +178,6 @@ export const SCENARIO = {
   INVENTORY_FULL: "inventory-full",
   // Auth scenarios
   LOGOUT: "logout",
-  KICK_SESSION: "kick-session"
+  KICK_SESSION: "kick-session",
+  PASSWORD_TICKET_REVOKE: "password-ticket-revoke"
 };

@@ -30,7 +30,11 @@ export async function authenticateChatClient(client, options, login, seq = 1) {
  * Connect to chat server
  */
 export async function connectToChatServer(options) {
-  const chatOptions = { ...options, port: options.chatPort };
+  const chatOptions = {
+    ...options,
+    gameHost: options.chatHost || options.host,
+    port: options.chatPort
+  };
   const client = new TcpProtocolClient(chatOptions, "chat");
   await client.connect();
   return client;

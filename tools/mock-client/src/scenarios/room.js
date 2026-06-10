@@ -15,7 +15,7 @@ import {
   encodeCreateMatchedRoomReq
 } from "../messages.js";
 import { decodeByMessageType } from "../messages.js";
-import { fetchTicket, formatLoginSummary } from "../auth.js";
+import { fetchTicket, formatLoginSummary, refreshTicketIfNeeded } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
@@ -70,6 +70,7 @@ export async function authenticateClient(
   authResType = MESSAGE_TYPE.AUTH_RES
 ) {
   const { encodeAuthReq } = await import("../messages.js");
+  await refreshTicketIfNeeded(options, login);
   const fn = encodeAuthFn || encodeAuthReq;
   await client.send(authReqType, seq, fn(login.ticket));
   const packet = await client.readNextPacket(options.timeoutMs);

@@ -39,7 +39,8 @@ export class TcpProtocolClient {
     });
 
     await new Promise((resolve, reject) => {
-      this.socket.connect(this.options.port, this.options.host, resolve);
+      const host = this.options.gameHost || this.options.host;
+      this.socket.connect(this.options.port, host, resolve);
       this.socket.once("error", reject);
     });
   }

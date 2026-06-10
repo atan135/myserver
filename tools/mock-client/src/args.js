@@ -26,7 +26,9 @@ function collectJsonLikeOptionValue(argv, startIndex) {
 
 const DEFAULT_OPTIONS = {
   host: "127.0.0.1",
+  gameHost: "",
   port: 7000,
+  chatHost: "",
   chatPort: 9001,
   httpBaseUrl: "http://127.0.0.1:3000",
   announceBaseUrl: "http://127.0.0.1:9004",
@@ -35,6 +37,8 @@ const DEFAULT_OPTIONS = {
   guestId: "",
   loginName: "",
   password: "",
+  newPassword: "",
+  restorePasswordAfterTest: true,
   loginNameA: "",
   passwordA: "",
   loginNameB: "",
@@ -100,7 +104,8 @@ const DEFAULT_OPTIONS = {
   addCount: 1,
   addBinded: false,
   // Internal API token
-  serviceToken: ""
+  serviceToken: "",
+  useServiceDiscovery: true
 };
 
 /**
@@ -117,6 +122,12 @@ export function parseArgs(argv) {
     switch (arg) {
       case "--host":
         ({ value: result.host, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--game-host":
+        ({ value: result.gameHost, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--chat-host":
+        ({ value: result.chatHost, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--port":
         result.port = Number.parseInt(collectOptionValue(argv, index).value, 10);
@@ -147,6 +158,12 @@ export function parseArgs(argv) {
       case "--password":
         ({ value: result.password, nextIndex: index } = collectOptionValue(argv, index));
         break;
+      case "--new-password":
+        ({ value: result.newPassword, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--no-restore-password":
+        result.restorePasswordAfterTest = false;
+        break;
       case "--login-name-a":
         ({ value: result.loginNameA, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -161,6 +178,9 @@ export function parseArgs(argv) {
         break;
       case "--ticket":
         ({ value: result.ticket, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--no-service-discovery":
+        result.useServiceDiscovery = false;
         break;
       case "--timeout-ms":
         result.timeoutMs = Number.parseInt(collectOptionValue(argv, index).value, 10);
