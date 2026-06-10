@@ -1,4 +1,5 @@
 import { log } from "./logger.js";
+import { createServiceInstancePayload } from "../../../packages/service-registry/node/registry-schema.js";
 
 export class RegistryClient {
   constructor(redis, config) {
@@ -11,17 +12,16 @@ export class RegistryClient {
 
   async register() {
     const key = `service:${this.serviceName}:instances:${this.instanceId}`;
-    const data = {
+    const data = createServiceInstancePayload({
       id: this.instanceId,
       name: this.serviceName,
       host: this.config.host,
       port: this.config.port,
+      admin_port: 0,
+      local_socket: "",
       tags: ["mail", "http"],
-      weight: 100,
-      metadata: {},
-      registered_at: Date.now(),
-      healthy: true
-    };
+      metadata: {}
+    });
 
     await this.redis.hset(key, "data", JSON.stringify(data));
     log("info", "registry.registered", {

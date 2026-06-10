@@ -666,7 +666,7 @@ $proxyEnv = Join-Path $ProjectRoot "apps\game-proxy\.env"
 
 $authPort = [int](Get-EnvValue -Path $authEnv -Name "PORT" -Default "3000")
 $adminApiPort = [int](Get-EnvValue -Path $adminApiEnv -Name "PORT" -Default "3001")
-$adminWebHost = "localhost"
+$adminWebHost = "127.0.0.1"
 $adminWebPort = 3002
 $proxyPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_PORT" -Default "4000")
 $proxyAdminPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_ADMIN_PORT" -Default "7101")

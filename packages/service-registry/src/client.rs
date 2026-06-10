@@ -173,11 +173,15 @@ impl RegistryClient {
             let data: Option<String> = conn.hget(&key, "data").await?;
             if let Some(json) = data {
                 if let Ok(instance) = serde_json::from_str::<ServiceInstance>(&json) {
+                    if !instance.healthy {
+                        continue;
+                    }
                     instances.push(instance);
                 }
             }
         }
 
+        instances.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(instances)
     }
 
@@ -189,9 +193,7 @@ impl RegistryClient {
             return Ok(None);
         }
 
-        // 简单策略：返回第一个健康的实例
-        // 未来可扩展为加权随机、轮询等
-        Ok(Some(instances[0].clone()))
+        Ok(pick_weighted_stable(&instances).cloned())
     }
 
     /// 获取当前实例的 Key
@@ -215,6 +217,31 @@ impl RegistryClient {
     }
 }
 
+fn pick_weighted_stable(instances: &[ServiceInstance]) -> Option<&ServiceInstance> {
+    instances
+        .iter()
+        .filter(|instance| instance.healthy && instance.weight > 0)
+        .max_by(|a, b| {
+            weighted_score(a)
+                .partial_cmp(&weighted_score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.id.cmp(&a.id))
+        })
+}
+
+fn weighted_score(instance: &ServiceInstance) -> f64 {
+    stable_hash(&instance.id) as f64 / u32::MAX as f64 * instance.weight as f64
+}
+
+fn stable_hash(value: &str) -> u32 {
+    let mut hash = 2_166_136_261_u32;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +261,29 @@ mod tests {
         assert_eq!(instance.port, 7000);
         assert_eq!(instance.admin_port, 7001);
         assert_eq!(instance.local_socket, "test.sock");
+    }
+
+    #[test]
+    fn test_weighted_pick_ignores_unhealthy_instances() {
+        let unhealthy = ServiceInstance::new(
+            "unhealthy".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_weight(1000);
+        let mut unhealthy = unhealthy;
+        unhealthy.healthy = false;
+
+        let healthy = ServiceInstance::new(
+            "healthy".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7001,
+        );
+
+        let instances = vec![unhealthy, healthy.clone()];
+        let picked = pick_weighted_stable(&instances).expect("healthy instance");
+        assert_eq!(picked.id, healthy.id);
     }
 }

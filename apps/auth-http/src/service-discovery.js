@@ -1,3 +1,5 @@
+import { normalizeServiceInstance, pickServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
+
 function createGameService(config) {
   return {
     host: config.gameProxyHost,
@@ -50,6 +52,7 @@ export class ServiceDiscovery {
 
   async discoverOne(serviceName) {
     const keys = await scanKeys(this.redis, `service:${serviceName}:instances:*`);
+    const instances = [];
 
     for (const key of keys.sort()) {
       const instanceId = key.split(":").at(-1);
@@ -65,13 +68,16 @@ export class ServiceDiscovery {
       }
 
       try {
-        return JSON.parse(data);
+        const instance = normalizeServiceInstance(JSON.parse(data));
+        if (instance) {
+          instances.push(instance);
+        }
       } catch (error) {
         console.error("[service-discovery] parse error:", error);
       }
     }
 
-    return null;
+    return pickServiceInstance(instances);
   }
 }
 

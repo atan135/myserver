@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myserver.local/schemas/service-instance.schema.json",
+  "title": "MyServer service registry instance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "host",
+    "port",
+    "admin_port",
+    "local_socket",
+    "tags",
+    "weight",
+    "metadata",
+    "registered_at",
+    "healthy"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "host": { "type": "string", "minLength": 1 },
+    "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "admin_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "local_socket": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "weight": { "type": "integer", "minimum": 0 },
+    "metadata": { "type": "object" },
+    "registered_at": { "type": "integer", "minimum": 0 },
+    "healthy": { "type": "boolean" }
+  }
+}
