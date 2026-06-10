@@ -27,6 +27,12 @@ param(
     [switch]$NoProxy,
 
     [Parameter(Mandatory=$false)]
+    [switch]$NoAdminApi,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoAdminWeb,
+
+    [Parameter(Mandatory=$false)]
     [switch]$WithChat,
 
     [Parameter(Mandatory=$false)]
@@ -34,6 +40,9 @@ param(
 
     [Parameter(Mandatory=$false)]
     [switch]$WithAnnounce,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$NoMetricsCollector,
 
     [Parameter(Mandatory=$false)]
     [switch]$WithMetricsCollector,
@@ -183,6 +192,9 @@ function Wait-TcpPort {
         [Parameter(Mandatory=$true)]
         [int]$Port,
 
+        [Parameter(Mandatory=$false)]
+        [int]$ProcessId = 0,
+
         [Parameter(Mandatory=$true)]
         [int]$TimeoutSeconds
     )
@@ -194,11 +206,45 @@ function Wait-TcpPort {
             return $true
         }
 
+        if ($ProcessId -gt 0 -and -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            throw "$Name exited before opening $HostName`:$Port. Check logs under $LogDir."
+        }
+
         Start-Sleep -Milliseconds 500
     }
 
     Write-Warning "$Name did not open $HostName`:$Port within $TimeoutSeconds seconds. Check logs under $LogDir."
     return $false
+}
+
+function Assert-TcpPort {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+
+        [Parameter(Mandatory=$true)]
+        [string]$HostName,
+
+        [Parameter(Mandatory=$true)]
+        [int]$Port,
+
+        [Parameter(Mandatory=$false)]
+        [int]$ProcessId = 0,
+
+        [Parameter(Mandatory=$true)]
+        [int]$TimeoutSeconds
+    )
+
+    $ready = Wait-TcpPort `
+        -Name $Name `
+        -HostName $HostName `
+        -Port $Port `
+        -ProcessId $ProcessId `
+        -TimeoutSeconds $TimeoutSeconds
+
+    if (-not $ready) {
+        throw "$Name did not open $HostName`:$Port within $TimeoutSeconds seconds. Check logs under $LogDir."
+    }
 }
 
 function Read-DevStackPids {
@@ -280,6 +326,10 @@ function Get-ProjectProcessIds {
             $_.CommandLine -and
             (
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "scripts\dev-")) -or
+                $_.CommandLine -match [regex]::Escape("dev:admin-api") -or
+                $_.CommandLine -match [regex]::Escape("dev:admin-web") -or
+                $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\admin-api")) -or
+                $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\admin-web")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\game-server")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\game-proxy")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\chat-server")) -or
@@ -429,6 +479,51 @@ function Start-PowerShellScript {
     return Start-ManagedProcess -Name $Name -FilePath $PowerShellHost -Arguments $arguments -WorkingDirectory $ProjectRoot
 }
 
+function Start-NpmScriptIfNeeded {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ScriptName,
+
+        [Parameter(Mandatory=$false)]
+        [string]$HostName = "127.0.0.1",
+
+        [Parameter(Mandatory=$true)]
+        [int[]]$RequiredTcpPorts
+    )
+
+    $readyPorts = @()
+    foreach ($port in $RequiredTcpPorts) {
+        if (Test-TcpPort -HostName $HostName -Port $port -TimeoutMs 300) {
+            $readyPorts += $port
+        }
+    }
+
+    if ($readyPorts.Count -eq $RequiredTcpPorts.Count) {
+        Write-Host "$Name already has required port(s): $($readyPorts -join ', '); reusing it." -ForegroundColor Green
+        return $null
+    }
+
+    $blockingPorts = @()
+    foreach ($port in ($RequiredTcpPorts | Sort-Object -Unique)) {
+        if (Test-PortInUse -Port $port) {
+            $blockingPorts += $port
+        }
+    }
+
+    if ($blockingPorts.Count -gt 0) {
+        throw "$Name has partial or conflicting listening port(s): $($blockingPorts -join ', '). Stop stale processes or rerun with -Restart."
+    }
+
+    return Start-ManagedProcess `
+        -Name $Name `
+        -FilePath "cmd.exe" `
+        -Arguments @("/d", "/s", "/c", "npm", "run", $ScriptName) `
+        -WorkingDirectory $ProjectRoot
+}
+
 function Start-ServiceScriptIfNeeded {
     param(
         [Parameter(Mandatory=$true)]
@@ -510,11 +605,14 @@ function Warn-IfMysqlLooksUnavailable {
         [string]$ServiceName,
 
         [Parameter(Mandatory=$true)]
-        [string]$EnvPath
+        [string]$EnvPath,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$Required
     )
 
     $mysqlEnabled = Get-EnvValue -Path $EnvPath -Name "MYSQL_ENABLED" -Default "false"
-    if ($mysqlEnabled -notin @("true", "TRUE", "True", "1")) {
+    if (-not $Required -and $mysqlEnabled -notin @("true", "TRUE", "True", "1")) {
         return
     }
 
@@ -562,10 +660,14 @@ if ($existingItems.Count -gt 0) {
 }
 
 $authEnv = Join-Path $ProjectRoot "apps\auth-http\.env"
+$adminApiEnv = Join-Path $ProjectRoot "apps\admin-api\.env"
 $gameEnv = Join-Path $ProjectRoot "apps\game-server\.env"
 $proxyEnv = Join-Path $ProjectRoot "apps\game-proxy\.env"
 
 $authPort = [int](Get-EnvValue -Path $authEnv -Name "PORT" -Default "3000")
+$adminApiPort = [int](Get-EnvValue -Path $adminApiEnv -Name "PORT" -Default "3001")
+$adminWebHost = "localhost"
+$adminWebPort = 3002
 $proxyPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_PORT" -Default "4000")
 $proxyAdminPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_ADMIN_PORT" -Default "7101")
 $proxyFallbackPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_TCP_FALLBACK_PORT" -Default ([string]($proxyPort + 10000)))
@@ -575,6 +677,8 @@ if ($StopExistingProjectProcesses) {
     Stop-ExistingProjectProcesses
     Stop-ListeningProcessesOnPorts -Ports @(
         $authPort,
+        $adminApiPort,
+        $adminWebPort,
         $GamePort,
         $GameAdminPort,
         $proxyPort,
@@ -589,10 +693,12 @@ if ($authGameProxyPort -ne $proxyPort) {
 }
 
 Warn-IfMysqlLooksUnavailable -ServiceName "auth-http" -EnvPath $authEnv
+Warn-IfMysqlLooksUnavailable -ServiceName "admin-api" -EnvPath $adminApiEnv -Required
 Warn-IfMysqlLooksUnavailable -ServiceName "game-server" -EnvPath $gameEnv
 
 $started = @()
 $selectedServices = @()
+$serviceProcesses = @{}
 
 try {
     if (-not $NoRedis) {
@@ -609,6 +715,7 @@ try {
             -Arguments @("--port", [string]$DefaultRedisPort)
         if ($redisProcess) {
             $started += $redisProcess
+            $serviceProcesses["redis"] = $redisProcess
         }
     }
 
@@ -623,6 +730,7 @@ try {
             -Arguments @("-p", [string]$DefaultNatsPort)
         if ($natsProcess) {
             $started += $natsProcess
+            $serviceProcesses["nats"] = $natsProcess
         }
     }
 
@@ -634,6 +742,7 @@ try {
             -RequiredTcpPorts @($authPort)
         if ($authProcess) {
             $started += $authProcess
+            $serviceProcesses["auth-http"] = $authProcess
         }
     }
 
@@ -650,6 +759,7 @@ try {
             )
         if ($gameProcess) {
             $started += $gameProcess
+            $serviceProcesses["game-server"] = $gameProcess
         }
     }
 
@@ -662,36 +772,70 @@ try {
             -ConflictPorts @($proxyPort)
         if ($proxyProcess) {
             $started += $proxyProcess
+            $serviceProcesses["game-proxy"] = $proxyProcess
+        }
+    }
+
+    if (-not $NoAdminApi) {
+        $selectedServices += "admin-api"
+        $adminApiProcess = Start-NpmScriptIfNeeded `
+            -Name "admin-api" `
+            -ScriptName "dev:admin-api" `
+            -RequiredTcpPorts @($adminApiPort)
+        if ($adminApiProcess) {
+            $started += $adminApiProcess
+            $serviceProcesses["admin-api"] = $adminApiProcess
+        }
+    }
+
+    if (-not $NoAdminWeb) {
+        $selectedServices += "admin-web"
+        $adminWebProcess = Start-NpmScriptIfNeeded `
+            -Name "admin-web" `
+            -ScriptName "dev:admin-web" `
+            -HostName $adminWebHost `
+            -RequiredTcpPorts @($adminWebPort)
+        if ($adminWebProcess) {
+            $started += $adminWebProcess
+            $serviceProcesses["admin-web"] = $adminWebProcess
         }
     }
 
     if ($WithChat) {
         $selectedServices += "chat-server"
-        $started += Start-PowerShellScript `
+        $chatProcess = Start-PowerShellScript `
             -Name "chat-server" `
             -ScriptPath (Join-Path $PSScriptRoot "dev-chat.ps1")
+        $started += $chatProcess
+        $serviceProcesses["chat-server"] = $chatProcess
     }
 
     if ($WithMatch) {
         $selectedServices += "match-service"
-        $started += Start-PowerShellScript `
+        $matchProcess = Start-PowerShellScript `
             -Name "match-service" `
             -ScriptPath (Join-Path $PSScriptRoot "dev-match.ps1")
+        $started += $matchProcess
+        $serviceProcesses["match-service"] = $matchProcess
     }
 
     if ($WithAnnounce) {
         $selectedServices += "announce-service"
-        $started += Start-PowerShellScript `
+        $announceProcess = Start-PowerShellScript `
             -Name "announce-service" `
             -ScriptPath (Join-Path $PSScriptRoot "dev-announce.ps1") `
             -ScriptArguments @("-NoWatch")
+        $started += $announceProcess
+        $serviceProcesses["announce-service"] = $announceProcess
     }
 
-    if ($WithMetricsCollector) {
+    if (-not $NoMetricsCollector) {
         $selectedServices += "metrics-collector"
-        $started += Start-PowerShellScript `
+        $metricsCollectorProcess = Start-PowerShellScript `
             -Name "metrics-collector" `
             -ScriptPath (Join-Path $PSScriptRoot "dev-metrics-collector.ps1")
+        $started += $metricsCollectorProcess
+        $serviceProcesses["metrics-collector"] = $metricsCollectorProcess
     }
 
     if ($selectedServices.Count -eq 0) {
@@ -707,20 +851,32 @@ try {
     }
 
     if (-not $NoRedis) {
-        Wait-TcpPort -Name "redis" -HostName "127.0.0.1" -Port $DefaultRedisPort -TimeoutSeconds 10 | Out-Null
+        Assert-TcpPort -Name "redis" -HostName "127.0.0.1" -Port $DefaultRedisPort -TimeoutSeconds 10
     }
     if (-not $NoNats) {
-        Wait-TcpPort -Name "nats" -HostName "127.0.0.1" -Port $DefaultNatsPort -TimeoutSeconds 10 | Out-Null
+        $natsPid = if ($serviceProcesses.ContainsKey("nats")) { [int]$serviceProcesses["nats"].pid } else { 0 }
+        Assert-TcpPort -Name "nats" -HostName "127.0.0.1" -Port $DefaultNatsPort -ProcessId $natsPid -TimeoutSeconds 10
     }
     if (-not $NoAuth) {
-        Wait-TcpPort -Name "auth-http" -HostName "127.0.0.1" -Port $authPort -TimeoutSeconds $WaitTimeoutSeconds | Out-Null
+        $authPid = if ($serviceProcesses.ContainsKey("auth-http")) { [int]$serviceProcesses["auth-http"].pid } else { 0 }
+        Assert-TcpPort -Name "auth-http" -HostName "127.0.0.1" -Port $authPort -ProcessId $authPid -TimeoutSeconds $WaitTimeoutSeconds
     }
     if (-not $NoGame) {
-        Wait-TcpPort -Name "game-server" -HostName "127.0.0.1" -Port $GamePort -TimeoutSeconds $WaitTimeoutSeconds | Out-Null
-        Wait-TcpPort -Name "game-server admin" -HostName "127.0.0.1" -Port $GameAdminPort -TimeoutSeconds 30 | Out-Null
+        $gamePid = if ($serviceProcesses.ContainsKey("game-server")) { [int]$serviceProcesses["game-server"].pid } else { 0 }
+        Assert-TcpPort -Name "game-server" -HostName "127.0.0.1" -Port $GamePort -ProcessId $gamePid -TimeoutSeconds $WaitTimeoutSeconds
+        Assert-TcpPort -Name "game-server admin" -HostName "127.0.0.1" -Port $GameAdminPort -ProcessId $gamePid -TimeoutSeconds 30
     }
     if (-not $NoProxy) {
-        Wait-TcpPort -Name "game-proxy kcp/tcp bind probe" -HostName "127.0.0.1" -Port $proxyFallbackPort -TimeoutSeconds $WaitTimeoutSeconds | Out-Null
+        $proxyPid = if ($serviceProcesses.ContainsKey("game-proxy")) { [int]$serviceProcesses["game-proxy"].pid } else { 0 }
+        Assert-TcpPort -Name "game-proxy kcp/tcp bind probe" -HostName "127.0.0.1" -Port $proxyFallbackPort -ProcessId $proxyPid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if (-not $NoAdminApi) {
+        $adminApiPid = if ($serviceProcesses.ContainsKey("admin-api")) { [int]$serviceProcesses["admin-api"].pid } else { 0 }
+        Assert-TcpPort -Name "admin-api" -HostName "127.0.0.1" -Port $adminApiPort -ProcessId $adminApiPid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if (-not $NoAdminWeb) {
+        $adminWebPid = if ($serviceProcesses.ContainsKey("admin-web")) { [int]$serviceProcesses["admin-web"].pid } else { 0 }
+        Assert-TcpPort -Name "admin-web" -HostName $adminWebHost -Port $adminWebPort -ProcessId $adminWebPid -TimeoutSeconds $WaitTimeoutSeconds
     }
 
     Write-Host ""
@@ -734,6 +890,12 @@ try {
     if (-not $NoProxy) {
         Write-Host "  game-proxy: 127.0.0.1:$proxyPort (KCP), 127.0.0.1:$proxyFallbackPort (TCP fallback), 127.0.0.1:$proxyAdminPort (admin)" -ForegroundColor Gray
     }
+    if (-not $NoAdminApi) {
+        Write-Host "  admin-api: http://127.0.0.1:$adminApiPort" -ForegroundColor Gray
+    }
+    if (-not $NoAdminWeb) {
+        Write-Host "  admin-web: http://$adminWebHost`:$adminWebPort" -ForegroundColor Gray
+    }
     if ($WithChat) {
         Write-Host "  chat-server: enabled" -ForegroundColor Gray
     }
@@ -743,7 +905,7 @@ try {
     if ($WithAnnounce) {
         Write-Host "  announce-service: enabled" -ForegroundColor Gray
     }
-    if ($WithMetricsCollector) {
+    if (-not $NoMetricsCollector) {
         Write-Host "  metrics-collector: enabled" -ForegroundColor Gray
     }
     Write-Host "  logs: $LogDir" -ForegroundColor Gray
