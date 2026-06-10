@@ -1,9 +1,11 @@
 import Redis from "ioredis";
 import { connect, StringCodec } from "nats";
+import { pathToFileURL } from "node:url";
 
 import { getConfig } from "./config.js";
 
 const codec = StringCodec();
+const DEFAULT_INSTANCE_ID = "default";
 
 function normalizeMetricFields(metrics) {
   const fields = {};
@@ -18,7 +20,23 @@ function normalizeMetricFields(metrics) {
   return fields;
 }
 
-async function writeMetrics(redis, config, message) {
+export function normalizeInstanceId(instanceId) {
+  if (instanceId === undefined || instanceId === null || String(instanceId).trim() === "") {
+    return DEFAULT_INSTANCE_ID;
+  }
+
+  return String(instanceId);
+}
+
+export function buildMetricsKey(serviceName, instanceId, bucket) {
+  return `metrics:${serviceName}:${normalizeInstanceId(instanceId)}:${bucket}`;
+}
+
+export function isDirectRun(metaUrl = import.meta.url, argvPath = process.argv[1]) {
+  return Boolean(argvPath) && metaUrl === pathToFileURL(argvPath).href;
+}
+
+export async function writeMetrics(redis, config, message) {
   const raw = codec.decode(message.data);
   const payload = JSON.parse(raw);
 
@@ -33,15 +51,14 @@ async function writeMetrics(redis, config, message) {
     10
   );
   const fields = normalizeMetricFields(payload.metrics);
-  if (payload.instance_id) {
-    fields.instance_id = String(payload.instance_id);
-  }
+  const instanceId = normalizeInstanceId(payload.instance_id);
+  fields.instance_id = instanceId;
 
   if (!Number.isFinite(bucket) || Object.keys(fields).length === 0) {
     throw new Error("invalid metrics fields");
   }
 
-  const metricsKey = `metrics:${serviceName}:${bucket}`;
+  const metricsKey = buildMetricsKey(serviceName, instanceId, bucket);
   const heartbeatKey = `metrics:heartbeat:${serviceName}`;
   const pipe = redis.pipeline();
 
@@ -103,7 +120,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error("[metrics-collector] fatal:", error);
-  process.exit(1);
-});
+if (isDirectRun()) {
+  main().catch((error) => {
+    console.error("[metrics-collector] fatal:", error);
+    process.exit(1);
+  });
+}

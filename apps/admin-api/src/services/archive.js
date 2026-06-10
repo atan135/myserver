@@ -1,6 +1,12 @@
 /**
  * Archive Service - 将超期 metrics 数据从 Redis 归档到 MySQL
  */
+import {
+  aggregateMetricRecords,
+  getOnlineValue,
+  parseMetricInt,
+  parseMetricKey
+} from "../monitoring/metrics-aggregation.js";
 
 const REPORT_INTERVAL_MS = 5000;
 
@@ -22,17 +28,16 @@ const SERVICE_NAMES = [
   "admin-api"
 ];
 
-function parseMetricInt(value) {
-  return parseInt(value || "0", 10);
-}
-
-function getArchiveOnlineValue(serviceName, data) {
-  if (serviceName === "auth-http") {
-    return parseMetricInt(data.unique_players);
-  }
-
-  return parseMetricInt(data.online_players || data.connections || data.pool_size || data.online_sessions);
-}
+const ARCHIVE_SERVICE_CONFIGS = {
+  "auth-http": { onlineField: "unique_players" },
+  "game-server": { onlineField: "online_players" },
+  "game-proxy": { onlineField: "connections" },
+  "chat-server": { onlineField: "online_players" },
+  "match-service": { onlineField: "pool_size" },
+  "announce-service": { onlineField: null },
+  "mail-service": { onlineField: null },
+  "admin-api": { onlineField: null }
+};
 
 /**
  * 执行归档任务
@@ -66,9 +71,10 @@ export async function runArchiveTask(redis, mysqlPool) {
 /**
  * 归档单个服务的 metrics 数据
  */
-async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, toBucket) {
+export async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, toBucket) {
   let archived = 0;
   let cursor = "0";
+  const recordsByBucket = new Map();
 
   do {
     // 扫描该服务的 metrics keys
@@ -77,24 +83,36 @@ async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, 
     cursor = nextCursor;
 
     for (const key of keys) {
-      // 提取 bucket 时间戳
-      const parts = key.split(":");
-      const bucketStr = parts[parts.length - 1];
-      const bucket = parseInt(bucketStr, 10);
+      const parsed = parseMetricKey(serviceName, key);
+      if (!parsed) {
+        continue;
+      }
+      const bucket = parsed.bucket;
 
       // 只处理 7 天前 ~ 8 天前的数据
       if (bucket >= fromBucket && bucket < toBucket) {
         const data = await redis.hgetall(key);
         if (data && Object.keys(data).length > 0) {
-          // 写入 MySQL
-          await insertArchiveRecord(mysqlPool, serviceName, bucket, data);
-          // 从 Redis 删除
-          await redis.del(key);
-          archived++;
+          const records = recordsByBucket.get(bucket) || [];
+          records.push({
+            key,
+            ...parsed,
+            data
+          });
+          recordsByBucket.set(bucket, records);
         }
       }
     }
   } while (cursor !== "0");
+
+  for (const [bucket, records] of recordsByBucket.entries()) {
+    const data = aggregateMetricRecords(records);
+    await insertArchiveRecord(mysqlPool, serviceName, bucket, data);
+    for (const record of records) {
+      await redis.del(record.key);
+    }
+    archived++;
+  }
 
   return archived;
 }
@@ -105,7 +123,7 @@ async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, 
 async function insertArchiveRecord(mysqlPool, serviceName, bucketTime, data) {
   const qps = parseMetricInt(data.qps);
   const latencyMs = parseMetricInt(data.latency_ms);
-  const onlineValue = getArchiveOnlineValue(serviceName, data);
+  const onlineValue = getOnlineValue(serviceName, data, ARCHIVE_SERVICE_CONFIGS);
 
   // 收集扩展字段
   const extra = {};

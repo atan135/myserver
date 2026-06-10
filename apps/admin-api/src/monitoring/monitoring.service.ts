@@ -4,6 +4,13 @@ import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_MYSQL_POOL, ADMIN_REDIS } from "../tokens.js";
+import {
+  aggregateMetricRecords,
+  buildMetricPoint,
+  getOnlineValue,
+  parseMetricInt,
+  parseMetricKey
+} from "./metrics-aggregation.js";
 
 const SERVICE_CONFIGS: Record<string, { onlineField: string | null }> = {
   "auth-http": { onlineField: "unique_players" },
@@ -25,19 +32,6 @@ const WINDOW_SECONDS: Record<string, number> = {
   "15m": 900,
   "1h": 3600
 };
-
-function parseMetricInt(value: any) {
-  return parseInt(value || "0", 10);
-}
-
-function getOnlineValue(serviceName: string, data: Record<string, any>) {
-  const onlineField = SERVICE_CONFIGS[serviceName]?.onlineField;
-  if (!onlineField) {
-    return 0;
-  }
-
-  return parseMetricInt(data[onlineField]);
-}
 
 @Injectable()
 export class MonitoringService {
@@ -71,7 +65,7 @@ export class MonitoringService {
         if (latestMetrics) {
           qps = parseMetricInt(latestMetrics.qps);
           latencyMs = parseMetricInt(latestMetrics.latency_ms);
-          onlineValue = getOnlineValue(serviceName, latestMetrics);
+          onlineValue = getOnlineValue(serviceName, latestMetrics, SERVICE_CONFIGS);
           metricsData = latestMetrics;
         }
       }
@@ -131,30 +125,46 @@ export class MonitoringService {
 
   private async getLatestMetrics(serviceName: string) {
     let cursor = "0";
-    let latestKey = null;
     let latestBucket = 0;
+    const latestKeys = [];
 
     do {
       const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", `metrics:${serviceName}:*`, "COUNT", 100);
       cursor = nextCursor;
 
       for (const key of keys) {
-        const parts = key.split(":");
-        const bucket = parseInt(parts[parts.length - 1], 10);
-        if (bucket > latestBucket) {
-          latestBucket = bucket;
-          latestKey = key;
+        const parsed = parseMetricKey(serviceName, key);
+        if (!parsed) {
+          continue;
+        }
+
+        if (parsed.bucket > latestBucket) {
+          latestKeys.length = 0;
+          latestBucket = parsed.bucket;
+          latestKeys.push({ key, ...parsed });
+        } else if (parsed.bucket === latestBucket) {
+          latestKeys.push({ key, ...parsed });
         }
       }
     } while (cursor !== "0");
 
-    if (!latestKey) return null;
+    if (latestKeys.length === 0) return null;
 
-    return this.redis.hgetall(latestKey);
+    const records = [];
+    for (const item of latestKeys) {
+      const data = await this.redis.hgetall(item.key);
+      if (data && Object.keys(data).length > 0) {
+        records.push({ ...item, data });
+      }
+    }
+
+    if (records.length === 0) return null;
+
+    return aggregateMetricRecords(records);
   }
 
   private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number) {
-    const points = [];
+    const recordsByBucket = new Map<number, any[]>();
     let cursor = "0";
 
     do {
@@ -162,25 +172,32 @@ export class MonitoringService {
       cursor = nextCursor;
 
       for (const key of keys) {
-        const parts = key.split(":");
-        const bucket = parseInt(parts[parts.length - 1], 10);
+        const parsed = parseMetricKey(serviceName, key);
+        if (!parsed) {
+          continue;
+        }
+        const bucket = parsed.bucket;
 
         if (bucket >= fromBucket && bucket <= toBucket) {
           const data = await this.redis.hgetall(key);
           if (data && Object.keys(data).length > 0) {
-            points.push({
-              timestamp: bucket,
-              qps: parseMetricInt(data.qps),
-              latency_ms: parseMetricInt(data.latency_ms),
-              online_value: getOnlineValue(serviceName, data),
-              online_sessions: parseMetricInt(data.online_sessions),
-              unique_players: parseMetricInt(data.unique_players),
-              active_sessions_5m: parseMetricInt(data.active_sessions_5m)
+            const records = recordsByBucket.get(bucket) || [];
+            records.push({
+              key,
+              ...parsed,
+              data
             });
+            recordsByBucket.set(bucket, records);
           }
         }
       }
     } while (cursor !== "0");
+
+    const points = [];
+    for (const [bucket, records] of recordsByBucket.entries()) {
+      const data = aggregateMetricRecords(records);
+      points.push(buildMetricPoint(serviceName, data, SERVICE_CONFIGS, bucket));
+    }
 
     points.sort((a, b) => a.timestamp - b.timestamp);
 
