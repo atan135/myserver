@@ -746,6 +746,18 @@ try {
         }
     }
 
+    if ($WithMatch) {
+        $selectedServices += "match-service"
+        $matchProcess = Start-PowerShellScript `
+            -Name "match-service" `
+            -ScriptPath (Join-Path $PSScriptRoot "dev-match.ps1")
+        $started += $matchProcess
+        $serviceProcesses["match-service"] = $matchProcess
+
+        $matchPid = if ($serviceProcesses.ContainsKey("match-service")) { [int]$serviceProcesses["match-service"].pid } else { 0 }
+        Assert-TcpPort -Name "match-service" -HostName "127.0.0.1" -Port 9002 -ProcessId $matchPid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+
     if (-not $NoGame) {
         $selectedServices += "game-server"
         $gameProcess = Start-ServiceScriptIfNeeded `
@@ -808,15 +820,6 @@ try {
             -ScriptPath (Join-Path $PSScriptRoot "dev-chat.ps1")
         $started += $chatProcess
         $serviceProcesses["chat-server"] = $chatProcess
-    }
-
-    if ($WithMatch) {
-        $selectedServices += "match-service"
-        $matchProcess = Start-PowerShellScript `
-            -Name "match-service" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-match.ps1")
-        $started += $matchProcess
-        $serviceProcesses["match-service"] = $matchProcess
     }
 
     if ($WithAnnounce) {
