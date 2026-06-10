@@ -29,12 +29,14 @@ function buildMailUrl(baseUrl, pathname, query = {}) {
 }
 
 async function requestMailJson(url, options, init = {}) {
+  const headers = {
+    ...(init.body ? { "content-type": "application/json" } : {}),
+    ...(init.headers || {})
+  };
+
   const response = await fetch(url, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(init.headers || {})
-    },
+    headers,
     signal: AbortSignal.timeout(options.timeoutMs)
   });
 
