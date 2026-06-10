@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+summary/
 .env
 .env.local
 *.local.json
