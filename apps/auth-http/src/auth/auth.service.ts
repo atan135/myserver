@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 
 import { assertValidGuestId, assertValidLoginName, createPasswordSalt, hashPassword, verifyPassword } from "../password-utils.js";
 import { AUTH_ACCOUNT_LOCKOUT, AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_SERVICE_DISCOVERY, AUTH_STORE } from "../tokens.js";
+import { getClientIp } from "../common/client-ip.js";
 import { badRequest, forbidden, unauthorized } from "../common/http-exception.js";
 import type { GuestLoginDto } from "./dto/guest-login.dto.js";
 import type { LoginDto } from "./dto/login.dto.js";
@@ -13,15 +14,6 @@ function getBearerToken(req: any): string | null {
   }
 
   return authorization.slice("Bearer ".length).trim();
-}
-
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-
-  return req.ip || req.socket?.remoteAddress || null;
 }
 
 @Injectable()
@@ -79,7 +71,7 @@ export class AuthService {
   async login(dto: LoginDto, req: any, res: any) {
     const loginName = dto?.loginName;
     const password = dto?.password;
-    const clientIp = getClientIp(req);
+    const clientIp = getClientIp(req, this.config);
 
     if (typeof loginName !== "string" || loginName.trim().length === 0) {
       throw badRequest("INVALID_LOGIN_NAME", "loginName must be a non-empty string");
@@ -181,7 +173,7 @@ export class AuthService {
       }
     }
 
-    const session = await this.authStore.createGuestSession(normalizedGuestId, getClientIp(req));
+    const session = await this.authStore.createGuestSession(normalizedGuestId, getClientIp(req, this.config));
     return this.buildLoginSuccess(session);
   }
 
@@ -211,14 +203,15 @@ export class AuthService {
       throw unauthorized("MISSING_BEARER_TOKEN");
     }
 
-    const result = await this.authStore.destroySession(accessToken, getClientIp(req));
+    const clientIp = getClientIp(req, this.config);
+    const result = await this.authStore.destroySession(accessToken, clientIp);
     if (!result.destroyed) {
       throw unauthorized("INVALID_ACCESS_TOKEN");
     }
 
     const { ticket } = body || {};
     if (ticket && typeof ticket === "string") {
-      await this.authStore.revokeTicket(ticket, getClientIp(req));
+      await this.authStore.revokeTicket(ticket, clientIp, { expectedPlayerId: result.playerId });
     }
 
     return {
@@ -256,7 +249,7 @@ export class AuthService {
       throw badRequest("INVALID_NEW_PASSWORD", "newPassword must be between 6 and 128 characters");
     }
 
-    const clientIp = getClientIp(req);
+    const clientIp = getClientIp(req, this.config);
     const account = await this.mysqlStore.findPasswordAccountByPlayerId(session.playerId);
     if (!account) {
       throw badRequest("NOT_PASSWORD_ACCOUNT", "This account does not support password change");
@@ -301,6 +294,7 @@ export class AuthService {
       await this.authStore.redis.del(this.authStore.prefixedKey(`session-activity:${currentMappedToken}`));
     }
     await this.authStore.publishSessionKick(session.playerId, "password_changed");
+    await this.authStore.invalidatePlayerTickets(session.playerId);
 
     await this.authStore.redis.del(this.authStore.prefixedKey(`session:${accessToken}`));
     await this.authStore.redis.del(this.authStore.prefixedKey(`session-activity:${accessToken}`));

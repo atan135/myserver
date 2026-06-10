@@ -1,16 +1,8 @@
 import { Inject, Injectable, NestMiddleware } from "@nestjs/common";
 
 import { rateLimited } from "./http-exception.js";
+import { getClientIp } from "./client-ip.js";
 import { AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_RATE_LIMITER } from "../tokens.js";
-
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-
-  return req.ip || req.socket?.remoteAddress || null;
-}
 
 @Injectable()
 export class RateLimitMiddleware implements NestMiddleware {
@@ -21,7 +13,7 @@ export class RateLimitMiddleware implements NestMiddleware {
   ) {}
 
   async use(req: any, res: any, next: () => void) {
-    const clientIp = getClientIp(req);
+    const clientIp = getClientIp(req, this.config);
 
     if (this.config.ratelimitEnabled && this.rateLimiter) {
       const { limited, retryAfterSeconds } = await this.rateLimiter.isIpRateLimited(clientIp);

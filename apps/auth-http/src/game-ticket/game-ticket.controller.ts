@@ -1,8 +1,9 @@
 import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 
-import { unauthorized, badRequest } from "../common/http-exception.js";
-import { AUTH_STORE } from "../tokens.js";
+import { unauthorized, badRequest, forbidden } from "../common/http-exception.js";
+import { getClientIp } from "../common/client-ip.js";
+import { AUTH_CONFIG, AUTH_STORE } from "../tokens.js";
 import { AuthService } from "../auth/auth.service.js";
 
 function getBearerToken(req: any): string | null {
@@ -14,20 +15,12 @@ function getBearerToken(req: any): string | null {
   return authorization.slice("Bearer ".length).trim();
 }
 
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-
-  return req.ip || req.socket?.remoteAddress || null;
-}
-
 @ApiTags("game-ticket")
 @Controller("/api/v1/game-ticket")
 export class GameTicketController {
   constructor(
     @Inject(AUTH_STORE) private readonly authStore: any,
+    @Inject(AUTH_CONFIG) private readonly config: any,
     private readonly authService: AuthService
   ) {}
 
@@ -44,7 +37,7 @@ export class GameTicketController {
       throw unauthorized("INVALID_ACCESS_TOKEN");
     }
 
-    const ticket = await this.authStore.issueGameTicket(session.playerId, getClientIp(req));
+    const ticket = await this.authStore.issueGameTicket(session.playerId, getClientIp(req, this.config));
     const services = await this.authService.buildServicePayload();
 
     return {
@@ -77,7 +70,16 @@ export class GameTicketController {
       throw badRequest("INVALID_TICKET", "ticket must be a non-empty string");
     }
 
-    await this.authStore.revokeTicket(ticket, getClientIp(req));
+    try {
+      await this.authStore.revokeTicket(ticket, getClientIp(req, this.config), {
+        expectedPlayerId: session.playerId
+      });
+    } catch (error: any) {
+      if (error.code === "TICKET_OWNER_MISMATCH") {
+        throw forbidden("TICKET_OWNER_MISMATCH", "ticket does not belong to current player");
+      }
+      throw error;
+    }
 
     return {
       ok: true,

@@ -34,6 +34,10 @@ function playerSessionKey(playerId) {
   return `player-session:${playerId}`;
 }
 
+function playerTicketVersionKey(playerId) {
+  return `player-ticket-version:${playerId}`;
+}
+
 function createAuthError(code, message = code) {
   const error = new Error(message);
   error.code = code;
@@ -235,12 +239,20 @@ export class AuthStore {
   }
 
   async issueGameTicket(playerId, clientIp = null) {
+    const versionKey = this.prefixedKey(playerTicketVersionKey(playerId));
+    let ticketVersion = await this.redis.get(versionKey);
+    if (!ticketVersion) {
+      ticketVersion = "1";
+      await this.redis.set(versionKey, ticketVersion);
+    }
+
     const expiresAt = new Date(
       Date.now() + this.config.ticketTtlSeconds * 1000
     ).toISOString();
     const payload = {
       playerId,
       nonce: crypto.randomBytes(12).toString("hex"),
+      ver: Number.parseInt(ticketVersion, 10) || 1,
       exp: expiresAt
     };
     const payloadB64 = base64UrlEncode(JSON.stringify(payload));
@@ -300,9 +312,28 @@ export class AuthStore {
     return { destroyed: true, playerId: sessionData.playerId };
   }
 
-  async revokeTicket(ticket, clientIp = null) {
+  async getTicketOwner(ticket) {
+    const key = this.prefixedKey(ticketKey(ticket));
+    return this.redis.get(key);
+  }
+
+  async invalidatePlayerTickets(playerId) {
+    return this.redis.incr(this.prefixedKey(playerTicketVersionKey(playerId)));
+  }
+
+  async revokeTicket(ticket, clientIp = null, options = {}) {
     const key = this.prefixedKey(ticketKey(ticket));
     const playerId = await this.redis.get(key);
+
+    if (
+      options.expectedPlayerId &&
+      playerId &&
+      playerId !== options.expectedPlayerId
+    ) {
+      const error = createAuthError("TICKET_OWNER_MISMATCH");
+      error.ticketOwner = playerId;
+      throw error;
+    }
 
     await this.redis.del(key);
 

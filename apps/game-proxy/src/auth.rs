@@ -19,6 +19,7 @@ pub struct ProxyAuthService {
 struct TicketPayload {
     #[serde(rename = "playerId")]
     player_id: String,
+    ver: Option<u64>,
     exp: String,
 }
 
@@ -36,8 +37,10 @@ impl ProxyAuthService {
     }
 
     pub async fn authenticate_ticket(&self, ticket: &str) -> Result<String, &'static str> {
-        let player_id = verify_ticket(&self.ticket_secret, ticket)?;
+        let ticket_payload = verify_ticket(&self.ticket_secret, ticket)?;
+        let player_id = ticket_payload.player_id;
         let ticket_key = format!("{}ticket:{}", self.redis_key_prefix, hash_ticket(ticket));
+        let ticket_version_key = format!("{}player-ticket-version:{}", self.redis_key_prefix, player_id);
         let mut conn = self
             .redis_client
             .get_multiplexed_async_connection()
@@ -52,6 +55,14 @@ impl ProxyAuthService {
             return Err("TICKET_NOT_FOUND");
         }
 
+        let current_ticket_version: Option<u64> = conn
+            .get(ticket_version_key)
+            .await
+            .map_err(|_| "AUTH_BACKEND_UNAVAILABLE")?;
+        if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+            return Err("TICKET_REVOKED");
+        }
+
         Ok(player_id)
     }
 }
@@ -61,7 +72,7 @@ fn hash_ticket(ticket: &str) -> String {
     format!("{:x}", digest)
 }
 
-fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str> {
+fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'static str> {
     let (payload_b64, signature_b64) = ticket.split_once('.').ok_or("INVALID_TICKET_FORMAT")?;
 
     let mut mac =
@@ -89,5 +100,5 @@ fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str> {
         return Err("TICKET_EXPIRED");
     }
 
-    Ok(payload.player_id)
+    Ok(payload)
 }

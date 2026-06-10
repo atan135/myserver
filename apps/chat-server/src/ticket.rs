@@ -8,16 +8,17 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Deserialize)]
-struct TicketPayload {
+pub struct TicketPayload {
     #[serde(rename = "playerId")]
-    player_id: String,
-    exp: String,
+    pub player_id: String,
+    pub ver: Option<u64>,
+    pub exp: String,
 }
 
 /// 验证票据，返回 player_id
 /// 票据格式: base64(payload).base64(signature)
 /// payload 是 JSON: {"playerId":"xxx","exp":"2024-01-01T00:00:00Z"}
-pub fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str> {
+pub fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'static str> {
     let (payload_b64, signature_b64) = ticket.split_once('.').ok_or("INVALID_TICKET_FORMAT")?;
 
     let mut mac =
@@ -45,5 +46,5 @@ pub fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str>
         return Err("TICKET_EXPIRED");
     }
 
-    Ok(payload.player_id)
+    Ok(payload)
 }

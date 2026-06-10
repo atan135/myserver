@@ -25,6 +25,7 @@ struct Config {
     max_body_len: usize,
     ticket_secret: String,
     redis_url: String,
+    redis_key_prefix: String,
     nats_url: String,
     registry_enabled: bool,
     registry_url: String,
@@ -61,6 +62,7 @@ impl Config {
                 .unwrap_or_else(|_| "default_secret_change_in_production".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            redis_key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_default(),
             nats_url: std::env::var("NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
@@ -212,6 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         heartbeat_timeout_secs: config.heartbeat_timeout_secs,
         max_body_len: config.max_body_len,
         ticket_secret: config.ticket_secret.clone(),
+        redis_url: config.redis_url.clone(),
+        redis_key_prefix: config.redis_key_prefix.clone(),
     };
 
     // Create chat sessions map for mail notification pusher

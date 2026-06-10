@@ -8,10 +8,11 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Deserialize)]
-struct TicketPayload {
+pub struct TicketPayload {
     #[serde(rename = "playerId")]
-    player_id: String,
-    exp: String,
+    pub player_id: String,
+    pub ver: Option<u64>,
+    pub exp: String,
 }
 
 pub fn hash_ticket(ticket: &str) -> String {
@@ -19,7 +20,7 @@ pub fn hash_ticket(ticket: &str) -> String {
     format!("{:x}", digest)
 }
 
-pub fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str> {
+pub fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'static str> {
     let (payload_b64, signature_b64) = ticket.split_once('.').ok_or("INVALID_TICKET_FORMAT")?;
 
     let mut mac =
@@ -47,5 +48,5 @@ pub fn verify_ticket(secret: &str, ticket: &str) -> Result<String, &'static str>
         return Err("TICKET_EXPIRED");
     }
 
-    Ok(payload.player_id)
+    Ok(payload)
 }

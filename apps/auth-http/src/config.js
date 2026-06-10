@@ -43,7 +43,7 @@ export function getConfig() {
     ticketSecret:
       process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     ticketTtlSeconds: Number.parseInt(
-      process.env.TICKET_TTL_SECONDS || "86400",
+      process.env.TICKET_TTL_SECONDS || "900",
       10
     ),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
@@ -54,6 +54,11 @@ export function getConfig() {
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
+    trustedProxies: (process.env.TRUSTED_PROXIES || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
 
     // Rate Limiting
     ratelimitEnabled: parseBoolean(process.env.RATELIMIT_ENABLED, true),

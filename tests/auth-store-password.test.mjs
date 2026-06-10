@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
 import { AuthStore } from "../apps/auth-http/src/auth-store.js";
@@ -22,6 +23,12 @@ class FakeRedis {
 
   async del(key) {
     this.store.delete(key);
+  }
+
+  async incr(key) {
+    const next = Number.parseInt(this.store.get(key) ?? "0", 10) + 1;
+    this.store.set(key, String(next));
+    return next;
   }
 
   async expire() {}
@@ -82,6 +89,10 @@ test("AuthStore password login validates credentials from mysql store", async ()
   assert.ok(session.gameTicket.value);
   assert.deepEqual(touchedPlayerIds, ["player-001"]);
   assert.equal(audits.some((entry) => entry.eventType === "password_login"), true);
+  const ticketPayload = JSON.parse(
+    Buffer.from(session.gameTicket.value.split(".")[0], "base64url").toString("utf8")
+  );
+  assert.equal(ticketPayload.ver, 1);
 
   const storedSession = await authStore.getSessionByAccessToken(session.accessToken);
   assert.equal(storedSession.playerId, "player-001");
@@ -127,4 +138,29 @@ test("AuthStore password login rejects invalid password", async () => {
   );
 
   assert.equal(audits.some((entry) => entry.eventType === "password_login_failed"), true);
+});
+
+test("AuthStore rejects ticket revoke for another player", async () => {
+  const redis = new FakeRedis();
+  const authStore = new AuthStore(
+    {
+      redisKeyPrefix: "test:",
+      sessionTtlSeconds: 600,
+      ticketTtlSeconds: 300,
+      ticketSecret: "test-secret"
+    },
+    redis
+  );
+
+  const ticket = await authStore.issueGameTicket("player-001", "127.0.0.1");
+
+  await assert.rejects(
+    () =>
+      authStore.revokeTicket(ticket.value, "127.0.0.1", {
+        expectedPlayerId: "player-002"
+      }),
+    (error) => error.code === "TICKET_OWNER_MISMATCH"
+  );
+
+  assert.equal(await authStore.getTicketOwner(ticket.value), "player-001");
 });

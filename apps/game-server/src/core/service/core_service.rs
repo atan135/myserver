@@ -34,11 +34,16 @@ pub async fn handle_auth(
     };
 
     match verify_ticket(&services.config.ticket_secret, &request.ticket) {
-        Ok(player_id) => {
+        Ok(ticket_payload) => {
+            let player_id = ticket_payload.player_id;
             let ticket_key = format!(
                 "{}ticket:{}",
                 services.config.redis_key_prefix,
                 crate::ticket::hash_ticket(&request.ticket)
+            );
+            let ticket_version_key = format!(
+                "{}player-ticket-version:{}",
+                services.config.redis_key_prefix, player_id
             );
             let ticket_owner: Option<String> = connection.redis.get(ticket_key).await?;
 
@@ -59,6 +64,31 @@ pub async fn handle_auth(
                         Some(&player_id),
                         Some(&connection.peer_addr),
                         "auth_ticket_not_found",
+                        Some(serde_json::json!({ "seq": packet.header.seq })),
+                    )
+                    .await;
+                return Ok(());
+            }
+
+            let current_ticket_version: Option<u64> =
+                connection.redis.get(ticket_version_key).await?;
+            if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+                connection.queue_message(
+                    MessageType::AuthRes,
+                    packet.header.seq,
+                    AuthRes {
+                        ok: false,
+                        player_id: String::new(),
+                        error_code: "TICKET_REVOKED".to_string(),
+                    },
+                )?;
+                services
+                    .mysql_store
+                    .append_connection_event(
+                        connection.session.id,
+                        Some(&player_id),
+                        Some(&connection.peer_addr),
+                        "auth_ticket_revoked",
                         Some(serde_json::json!({ "seq": packet.header.seq })),
                     )
                     .await;

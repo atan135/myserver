@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use prost::Message;
+use redis::AsyncCommands;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -74,6 +75,8 @@ pub struct Config {
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
     pub ticket_secret: String,
+    pub redis_url: String,
+    pub redis_key_prefix: String,
 }
 
 pub async fn run(
@@ -334,7 +337,24 @@ where
 
     // 使用与 game-server 相同的票据验证逻辑
     match verify_ticket(&config.ticket_secret, &auth_req.token) {
-        Ok(player_id) => {
+        Ok(ticket_payload) => {
+            let player_id = ticket_payload.player_id;
+            let redis_client = redis::Client::open(config.redis_url.as_str())?;
+            let mut redis = redis_client.get_multiplexed_async_connection().await?;
+            let ticket_version_key = format!(
+                "{}player-ticket-version:{}",
+                config.redis_key_prefix, player_id
+            );
+            let current_ticket_version: Option<u64> = redis.get(ticket_version_key).await?;
+            if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+                let res = ChatAuthRes { ok: false, error_code: "TICKET_REVOKED".to_string() };
+                let mut buf = Vec::new();
+                res.encode(&mut buf)?;
+                let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
+                writer.write_all(&packet).await?;
+                return Err("auth failed: TICKET_REVOKED".into());
+            }
+
             let res = ChatAuthRes { ok: true, error_code: String::new() };
             let mut buf = Vec::new();
             res.encode(&mut buf)?;
