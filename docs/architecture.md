@@ -59,13 +59,13 @@
 
 ## 4. 服务清单
 
-固定入口端口以 `apps/port.txt` 为准；未纳入该清单的附属管理口或内部端口，以各服务代码默认值为准。
+固定入口端口以 `apps/port.txt` 为准；未纳入该清单的本地前端开发端口、附属管理口或内部端口，以各服务代码默认值和实际配置为准。
 
 | 服务 | 默认端口 | 技术栈 | 主要职责 |
 |------|----------|--------|----------|
 | `auth-http` | `3000` | Node.js + NestJS | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
-| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口 |
-| `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端 |
+| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口；后端 RBAC 尚未完整闭环 |
+| `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端，本地 Vite 开发端口 |
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
 | `game-proxy` | `4000` | Rust + Tokio KCP / TCP fallback | 客户端游戏入口，校验 ticket 后转发到 `game-server` 本地 socket；本地调试保留 TCP fallback |
@@ -177,7 +177,7 @@
 管理后台分为两层：
 
 - `admin-web`：前端页面与操作入口
-- `admin-api`：鉴权、权限控制、审计、GM 指令、监控查询
+- `admin-api`：管理员认证、审计、GM 指令、监控查询；后端基于角色的接口授权尚未完整闭环
 
 `admin-api` 会通过 `game-server` 的 admin 通道执行内部控制命令，例如：
 
@@ -374,6 +374,7 @@ Core NATS 当前承担以下职责：
 - `game-server` -> `7000`
 - `game-server admin` -> `7500`
 - `auth-http`、`admin-api`、`game-server`、`game-proxy` 的默认配置已同步到上述固定端口
+- `admin-web` 本地 Vite 默认使用 `3002`，属于本地前端开发端口，不是 `apps/port.txt` 管理的后端入口端口
 - `game-proxy admin` 当前仍使用代码默认值 `7101`，属于代理自身的内部管理口，不在 `apps/port.txt` 的固定入口清单里
 - `chat-server`、`match-service`、`announce-service`、`mail-service` 属于内部服务；文档中的 `9001/9002/9004/9003` 主要用于本地开发与默认示例，部署时仍应以实际配置和注册中心信息为准
 

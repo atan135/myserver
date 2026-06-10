@@ -1,6 +1,6 @@
 # MyServer
 
-MyServer 是一个通用游戏后端框架 monorepo，当前已经形成完整的多服务形态：登录、游戏接入、游戏逻辑、聊天、匹配、邮件、公告、管理后台、协议包、服务注册中心、联调工具和本地脚本都在同一仓库内维护。
+MyServer 是一个通用游戏后端框架 monorepo，当前已经形成多服务形态：登录、游戏接入、游戏逻辑、聊天、匹配、邮件、公告、管理后台、协议包、服务注册中心、联调工具和本地脚本都在同一仓库内维护。
 
 本文是面向开发者的快速入口。具体协议、接口行为、实现状态和任务拆解以 `docs/` 下专题文档与当前代码为准；`docs/prompts/` 仅保留初始设计阶段的历史提示词，不再作为当前设计依据。
 
@@ -66,7 +66,7 @@ docs/                 # 当前正式设计文档
 
 ## 服务与端口
 
-固定入口端口以 `apps/port.txt` 为准。内部服务端口主要用于本地开发默认值，部署和联调时应优先看实际配置、环境变量和服务注册中心。
+固定入口端口以 `apps/port.txt` 为准。`admin-web:3002` 是本地 Vite 开发端口，不属于后端入口端口清单；内部服务端口主要用于本地开发默认值，部署和联调时应优先看实际配置、环境变量和服务注册中心。
 
 | 服务 | 默认端口 | 说明 |
 |------|----------|------|
@@ -161,6 +161,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev-match.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-announce.ps1
 ```
 
+核心开发栈也可以一键启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1
+```
+
+默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce` 启用；`mail-service` 当前不在 `dev-stack.ps1` 的默认编排中，可用 `npm run dev:mail` 单独启动。
+
 Node.js 服务也可以通过根脚本启动：
 
 ```powershell
@@ -195,6 +203,15 @@ npm run test:security
 ```
 
 mock-client 房间联调：
+
+主链路应经过 `game-proxy`。本地 TCP fallback 默认是 `game-proxy` 端口加 `10000`，即 `14000`：
+
+```powershell
+npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-a
+npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-b
+```
+
+下面是绕过 `game-proxy`、直连 `game-server:7000` 的调试方式，仅用于定位游戏服协议或房间逻辑问题：
 
 ```powershell
 npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-a
