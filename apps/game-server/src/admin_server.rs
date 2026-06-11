@@ -1436,6 +1436,22 @@ async fn build_rollout_drain_status_response(
         .rollout_drain_snapshot(owner_server_id, ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT)
         .await;
     let runtime = *runtime_config.read().await;
+    let connection_count = connection_count.load(Ordering::Relaxed);
+
+    if connection_count == 0 && snapshot.owned_room_count == 0 && snapshot.migrating_room_count == 0
+    {
+        info!(
+            channel = "admin_tcp",
+            drain_mode_enabled = runtime.drain_mode_enabled,
+            connection_count = connection_count,
+            owned_room_count = snapshot.owned_room_count,
+            migrating_room_count = snapshot.migrating_room_count,
+            transferable_empty_room_count = snapshot.transferable_empty_room_count,
+            rollout_epoch = %snapshot.rollout_epoch,
+            owner_server_id = %snapshot.owner_server_id,
+            "game-server rollout drain completed"
+        );
+    }
 
     GetRolloutDrainStatusRes {
         ok: true,
@@ -1444,7 +1460,7 @@ async fn build_rollout_drain_status_response(
         owner_server_id: snapshot.owner_server_id,
         owned_room_count: snapshot.owned_room_count,
         migrating_room_count: snapshot.migrating_room_count,
-        connection_count: connection_count.load(Ordering::Relaxed),
+        connection_count,
         routes: snapshot.routes,
         drain_mode_enabled: runtime.drain_mode_enabled,
         drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),

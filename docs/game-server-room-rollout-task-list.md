@@ -173,9 +173,11 @@
   - 广播提示
   - 禁止新开局
   - 对局结束后不再自动回默认房
-- [ ] 为 `room` 进入“成员为空，可接管”状态增加关键日志。
+- [x] 为 `room` 进入“成员为空，可接管”状态增加关键日志:
+  - 仅在 `leave_room` / `disconnect_room_member` 导致 room 从有在线成员变为 `online_member_count == 0` 时记录，避免重复离线或重复断连刷日志。
 - [x] 为“新房创建被 drain 拒绝”增加关键日志。
-- [ ] 为“旧服排空完成”增加关键日志。
+- [x] 为“旧服排空完成”增加关键日志:
+  - `GetRolloutDrainStatusReq/Res` 的 admin/internal 构造路径在 `connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时记录关键字段，保留 `drain_mode_enabled` 作为观测字段。
 - [ ] 增加单元测试覆盖:
   - drain 开启 / 关闭状态切换
   - drain 下默认 room 创建被拒
@@ -397,6 +399,7 @@
 当前状态（截至 `2026-05-19`，后续补充至 `2026-06-11`）:
 
 - `GetRolloutDrainStatusReq/Res` 已在 `game-server` 已鉴权 admin/internal 通道落地处理，返回本进程真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`connection_count`、`owned_room_count`、`migrating_room_count`、`transferable_empty_room_count`、最多 50 条 `RoomRouteStatus` 样本与最多 50 条可接管空房样本。`transferable_empty_room_count` 仅统计仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room；在线 `Owned` room 仍计入 `owned_room_count`，但不计入可接管空房；`Frozen` / `Exported` / `Importing` 属于迁移中，不计入可接管空房。`drain_mode_entered_at_ms` 未进入 drain mode 时为 `0`；`owner_server_id` 使用当前 `SERVICE_INSTANCE_ID` / 派生实例 id；`rollout_epoch` 仅在本进程 room transfer 状态能归纳出单一 epoch 时返回。当前 `empty_since_ms` 表示本进程内已空置时长，不是 wall-clock 绝对时间戳。
+- `game-server` 已为 room 进入可接管空房候选状态和旧服真实排空完成补齐关键日志：前者只在 `leave_room` / `disconnect_room_member` 让在线成员数从大于 `0` 变为 `0` 时记录；后者只在 admin/internal drain status 构造路径观测到 `connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时记录。
 - `auth-http` 已把 `GetRolloutDrainStatusReq/Res` 暴露为已鉴权内部控制接口 `GET /api/v1/internal/game-server/rollout-drain-status`，可作为 proxy 自动收尾后、停旧服前的人工或控制面校验入口。
 - `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数、可接管空房数量、route 样本和可接管空房样本。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。

@@ -132,6 +132,35 @@ fn room_rollout_route_status(room: &Room, owner_server_id: &str) -> RoomRouteSta
     }
 }
 
+fn log_room_entered_transferable_empty_candidate(
+    room: &Room,
+    trigger_player_id: &str,
+    trigger_action: &'static str,
+) {
+    let online_member_count = room
+        .members
+        .values()
+        .filter(|member| !member.offline)
+        .count();
+
+    info!(
+        room_id = %room.room_id,
+        rollout_epoch = %room.transfer_state.rollout_epoch.as_deref().unwrap_or_default(),
+        migration_state = ?room.transfer_state.status.migration_state(),
+        current_status = transfer_status_label(room.transfer_state.status),
+        member_count = room.members.len(),
+        online_member_count = online_member_count,
+        empty_since_ms = room
+            .empty_since
+            .map(|empty_since| empty_since.elapsed().as_millis() as u64)
+            .unwrap_or_default(),
+        room_version = room.transfer_state.room_version,
+        trigger_player_id = %trigger_player_id,
+        trigger_action = trigger_action,
+        "room entered empty transferable candidate state"
+    );
+}
+
 impl RoomManager {
     pub fn new(logic_factory: SharedRoomLogicFactory) -> Self {
         Self::with_match_client_and_cleanup_interval(
@@ -678,6 +707,11 @@ impl RoomManager {
                 room_removed: false,
             };
         };
+        let previous_online_member_count = room
+            .members
+            .values()
+            .filter(|member| !member.offline)
+            .count();
 
         if let Some(member) = room.members.get_mut(player_id) {
             member.offline = true;
@@ -718,6 +752,9 @@ impl RoomManager {
 
         if !room.has_online_members() {
             room.mark_empty();
+            if previous_online_member_count > 0 {
+                log_room_entered_transferable_empty_candidate(room, player_id, "leave_room");
+            }
         }
 
         let _ = policy;
@@ -766,6 +803,11 @@ impl RoomManager {
                 room_removed: false,
             };
         };
+        let previous_online_member_count = room
+            .members
+            .values()
+            .filter(|member| !member.offline)
+            .count();
 
         if let Some(member) = room.members.get_mut(player_id) {
             member.offline = true;
@@ -805,6 +847,13 @@ impl RoomManager {
         if !room.has_online_members() {
             room.mark_empty();
             room.wait_started_at = None;
+            if previous_online_member_count > 0 {
+                log_room_entered_transferable_empty_candidate(
+                    room,
+                    player_id,
+                    "disconnect_room_member",
+                );
+            }
         }
 
         let pending_broadcasts = room.logic.take_pending_broadcasts();

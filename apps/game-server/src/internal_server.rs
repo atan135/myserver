@@ -352,6 +352,24 @@ where
                     )
                     .await;
                 let runtime = *services.runtime_config.read().await;
+                let connection_count = services.connection_count.load(Ordering::Relaxed);
+
+                if connection_count == 0
+                    && snapshot.owned_room_count == 0
+                    && snapshot.migrating_room_count == 0
+                {
+                    info!(
+                        channel = "internal_socket",
+                        drain_mode_enabled = runtime.drain_mode_enabled,
+                        connection_count = connection_count,
+                        owned_room_count = snapshot.owned_room_count,
+                        migrating_room_count = snapshot.migrating_room_count,
+                        transferable_empty_room_count = snapshot.transferable_empty_room_count,
+                        rollout_epoch = %snapshot.rollout_epoch,
+                        owner_server_id = %snapshot.owner_server_id,
+                        "game-server rollout drain completed"
+                    );
+                }
 
                 write_message(
                     &mut writer,
@@ -364,7 +382,7 @@ where
                         owner_server_id: snapshot.owner_server_id,
                         owned_room_count: snapshot.owned_room_count,
                         migrating_room_count: snapshot.migrating_room_count,
-                        connection_count: services.connection_count.load(Ordering::Relaxed),
+                        connection_count,
                         routes: snapshot.routes,
                         drain_mode_enabled: runtime.drain_mode_enabled,
                         drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
