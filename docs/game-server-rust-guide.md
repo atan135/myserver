@@ -72,7 +72,7 @@
 1. accept 到连接
 2. 为连接分配 `session_id`
 3. 拆分读写半边
-4. 创建容量为 `DEFAULT_OUTBOUND_QUEUE_CAPACITY=1024` 的有界 `mpsc::Sender<OutboundMessage>` 作为写队列
+4. 创建容量由 `OUTBOUND_QUEUE_CAPACITY` 控制的有界 `mpsc::Sender<OutboundMessage>` 作为写队列；未配置、解析失败或配置为 `0` 时使用 `DEFAULT_OUTBOUND_QUEUE_CAPACITY=1024`
 5. 单独 spawn 一个 writer task 串行写出 socket
 6. 读循环解析包头和 body，再交给 service handler 分发
 

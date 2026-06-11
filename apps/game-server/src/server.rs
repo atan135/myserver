@@ -28,8 +28,6 @@ use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::{Session, SessionState};
 
-pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
-
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeConfig {
     pub heartbeat_timeout_secs: u64,
@@ -599,7 +597,7 @@ where
 {
     let redis = redis_client.get_multiplexed_async_connection().await?;
     let (mut reader, mut writer) = tokio::io::split(socket);
-    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(DEFAULT_OUTBOUND_QUEUE_CAPACITY);
+    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(services.config.outbound_queue_capacity);
     let mut connection = ConnectionContext {
         peer_addr,
         redis,

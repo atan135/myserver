@@ -10,7 +10,7 @@
 
 - `auth-http`：已经实现 IP 限流、Redis 动态 IP / 玩家黑名单、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截、上游发现，以及 admin 写操作的 actor 解析和 JSONL 持久审计；文档里旧的 KCP 令牌桶限流配置项目前并不存在
-- `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
+- `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、有界出站写队列、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
 - `admin-api`：当前已实现 JWT 与角色校验、登录失败锁定、安全审计、可信代理来源 IP 解析、请求级 TLS 强制和来源 IP allowlist；生产仍应通过运营网段、堡垒机、VPN、安全组或等价网络隔离限制访问
 
@@ -190,6 +190,7 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`，其它业务消息在 dispatch 层返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`，不会进入房间、移动、背包等业务 handler
 - 心跳超时：读取包头时使用 `heartbeat_timeout_secs`
 - 最大包体限制：包体超过 `max_body_len` 时拒绝处理
+- 有界出站写队列：每连接出站消息队列使用 `OUTBOUND_QUEUE_CAPACITY` 限制容量，队列满时 `try_send` 返回 `failed to queue outbound: full`，调用方记录错误或返回响应错误
 - 单连接消息频率限制：读到完整 packet 后、业务 dispatch 前检查窗口计数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 单玩家消息频率限制：连接级限流通过后，对已鉴权连接按 `player_id` 在当前 `game-server` 实例内统计窗口消息数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 管理接口支持动态调整 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms` 与 `player_msg_rate_max`
@@ -210,6 +211,7 @@ GAME_INTERNAL_TOKEN=dev-only-change-this-game-internal-token
 REDIS_KEY_PREFIX=
 HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
+OUTBOUND_QUEUE_CAPACITY=1024
 MSG_RATE_WINDOW_MS=1000
 MSG_RATE_MAX=0
 PLAYER_MSG_RATE_WINDOW_MS=1000
@@ -223,6 +225,7 @@ INPUT_ANOMALY_MAX=0
 说明：
 
 - `MSG_RATE_WINDOW_MS` 默认 `1000`，表示单连接频率统计窗口。
+- `OUTBOUND_QUEUE_CAPACITY` 默认 `1024`，表示单连接出站写队列容量；未配置、解析失败或配置为 `0` 时使用默认值。
 - `MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一连接在窗口内超过该消息数会收到 `MSG_RATE_EXCEEDED`。
 - `PLAYER_MSG_RATE_WINDOW_MS` 默认 `1000`，表示单玩家频率统计窗口。
 - `PLAYER_MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一玩家在当前 `game-server` 实例内的多连接合计消息数超过阈值会收到 `MSG_RATE_EXCEEDED`。
@@ -360,7 +363,7 @@ ADMIN_API_IP_ALLOWLIST=
   - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
   - 使用 `PROXY_REDIS_BLOCKLIST_ENABLED`、`PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS` 控制 Redis 动态黑名单；消息频率限制是单连接本地状态，不是跨 proxy 全局限额
 - `game-server`：
-  - 使用 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`、`INPUT_TIMESTAMP_REQUIRED`、`INPUT_TIMESTAMP_MAX_SKEW_MS`
+  - 使用 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`OUTBOUND_QUEUE_CAPACITY`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`、`INPUT_TIMESTAMP_REQUIRED`、`INPUT_TIMESTAMP_MAX_SKEW_MS`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
   - 当前没有单 IP、Redis 黑名单或反重放环境变量；玩家输入时间戳窗口已落地可配置校验并默认兼容旧客户端，单玩家消息频率限制是单 `game-server` 实例内本地状态，不是跨实例全局限额
 - `chat-server`：

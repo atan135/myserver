@@ -3,6 +3,7 @@ use std::env;
 pub const DEFAULT_TICKET_SECRET: &str = "dev-only-change-this-ticket-secret";
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-game-admin-token";
 pub const DEFAULT_INTERNAL_TOKEN: &str = "dev-only-change-this-game-internal-token";
+pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Clone)]
 pub struct Config {
@@ -34,6 +35,7 @@ pub struct Config {
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    pub outbound_queue_capacity: usize,
     pub msg_rate_window_ms: u64,
     pub msg_rate_max: u64,
     pub player_msg_rate_window_ms: u64,
@@ -71,6 +73,14 @@ fn parse_usize(name: &str, default: usize) -> usize {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_positive_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(default)
 }
 
@@ -132,6 +142,8 @@ impl Config {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30);
         let max_body_len = parse_usize("MAX_BODY_LEN", 4096);
+        let outbound_queue_capacity =
+            parse_positive_usize("OUTBOUND_QUEUE_CAPACITY", DEFAULT_OUTBOUND_QUEUE_CAPACITY);
         let msg_rate_window_ms = parse_u64("MSG_RATE_WINDOW_MS", 1000);
         let msg_rate_max = parse_u64("MSG_RATE_MAX", 0);
         let player_msg_rate_window_ms = parse_u64("PLAYER_MSG_RATE_WINDOW_MS", 1000);
@@ -180,6 +192,7 @@ impl Config {
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,
+            outbound_queue_capacity,
             msg_rate_window_ms,
             msg_rate_max,
             player_msg_rate_window_ms,
@@ -318,6 +331,8 @@ mod tests {
         "GAME_INTERNAL_TOKEN",
     ];
 
+    const OUTBOUND_QUEUE_ENV_NAMES: &[&str] = &["NODE_ENV", "APP_ENV", "OUTBOUND_QUEUE_CAPACITY"];
+
     fn clear_production_env() {
         unsafe {
             env::remove_var("NODE_ENV");
@@ -361,6 +376,64 @@ mod tests {
     #[test]
     fn parse_u64_value_accepts_valid_value() {
         assert_eq!(parse_u64_value(Some("250".to_string()), 1000), 250);
+    }
+
+    #[test]
+    fn outbound_queue_capacity_defaults_when_env_missing() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(OUTBOUND_QUEUE_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("OUTBOUND_QUEUE_CAPACITY");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(
+            config.outbound_queue_capacity,
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn outbound_queue_capacity_accepts_positive_env_value() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(OUTBOUND_QUEUE_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("OUTBOUND_QUEUE_CAPACITY", "2048");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.outbound_queue_capacity, 2048);
+    }
+
+    #[test]
+    fn outbound_queue_capacity_falls_back_for_invalid_or_zero_value() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(OUTBOUND_QUEUE_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("OUTBOUND_QUEUE_CAPACITY", "invalid");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.outbound_queue_capacity,
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+
+        unsafe {
+            env::set_var("OUTBOUND_QUEUE_CAPACITY", "0");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.outbound_queue_capacity,
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
     }
 
     #[test]
