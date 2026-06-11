@@ -37,6 +37,7 @@
 - `game-server` 仍执行最终鉴权。
 - admin HTTP 口，默认 `PROXY_ADMIN_PORT=7101`。
 - 本进程维护模式开关：`/maintenance/on`、`/maintenance/off`。
+- admin 写操作 `X-Admin-Actor` 操作人解析、结构化日志审计与 JSONL 持久审计。
 - upstream 操作状态：`Active`、`Draining`、`Disabled`。
 - upstream 健康状态：`Healthy`、`Unavailable`。
 - rollout session、room route、player route 的 route store；默认内存态，本地开发无需 Redis，生产可通过 `PROXY_ROUTE_STORE_BACKEND=redis` 持久化到 Redis。
@@ -325,12 +326,20 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `POST` | `/player-route/upsert?...` | 手动 upsert player route；校验 player/room/server id、upstream 存在性和 rollout epoch |
 | `POST` | `/switch/<server_id>` | 将目标 upstream 置为 active，其余置为 draining |
 
-当前 admin 修改接口会记录结构化日志审计，包含 `action`、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。启用 Redis route store 时，admin 写入会同步更新 route store 快照；审计目前仍仅落在日志中，尚未接入 MySQL 等持久审计库。
+当前 admin 修改接口会记录结构化日志审计，包含 `action`、操作人、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。启用 Redis route store 时，admin 写入会同步更新 route store 快照；持久审计第一阶段采用本地 JSONL 文件，尚未接入 MySQL 审计查询或集中留存。
+
+当前 admin 写接口同时支持轻量 JSONL 持久审计，默认开启：
+
+- 操作人来自 `X-Admin-Actor` header，允许字母、数字、`-`、`_`、`.`、`@`，最大 128 字节。
+- 未提供或格式非法时记录 `actor=unknown` 且 `actor_missing=true`；配置 `PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=true` 后，缺失 actor 的写操作会返回 `400 missing X-Admin-Actor`。
+- JSONL 文件路径由 `PROXY_ADMIN_AUDIT_PATH` 控制，默认 `logs/game-proxy/admin-audit.jsonl`；每行包含 `ts_ms`、`actor`、`actor_missing`、`method`、`path`、`action`、`result`、`error`、`server_id`、`room_id`、`player_id`、`rollout_epoch`。
+- 审计文件创建或追加失败时，admin 写操作按安全优先返回 `500` 并记录 warning，不静默放行。
+- 该审计是控制面补充，不是公网暴露依据；生产仍必须把 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT` 放在内网、VPN、堡垒机或安全组边界内。
 
 仍未完成的生产化能力：
 
-- 更细操作级 RBAC / 操作者身份；当前仅支持读写 token 分离。
-- 持久审计、审计查询和统一 trace/request id。
+- 更细操作级 RBAC；当前仅支持读写 token 分离。
+- 审计查询、集中留存和统一 trace/request id。
 - 多 proxy 部署下 route store 的 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测，以及必要的锁/冲突合并策略。
 - 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
 
@@ -372,6 +381,9 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `PROXY_ADMIN_PORT` | admin 监听端口 | `7101` |
 | `PROXY_ADMIN_TOKEN` | admin HTTP 口鉴权 token；支持 Bearer 和 `X-Admin-Token` header；生产环境禁止空值或默认值 | 开发默认值 |
 | `PROXY_ADMIN_READ_TOKEN` | 可选 admin 只读 token；仅允许 GET；支持 Bearer 和 `X-Admin-Token` header；生产环境设置时禁止空值、默认值或与写 token 相同 | 未设置 |
+| `PROXY_ADMIN_AUDIT_ENABLED` | 是否启用 admin 写操作 JSONL 持久审计 | `true` |
+| `PROXY_ADMIN_AUDIT_PATH` | admin 写操作 JSONL 审计文件路径 | `logs/game-proxy/admin-audit.jsonl` |
+| `PROXY_ADMIN_AUDIT_REQUIRE_ACTOR` | 是否要求 admin 写操作携带合法 `X-Admin-Actor` header | `false` |
 | `PROXY_TCP_FALLBACK_HOST` | TCP fallback host | 同 `PROXY_HOST` |
 | `PROXY_TCP_FALLBACK_PORT` | TCP fallback 端口 | `PROXY_PORT + 10000` |
 | `UPSTREAM_SERVER_ID` | 静态上游 server id | `game-server-1` |
@@ -398,7 +410,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 短期建议优先补：
 
-1. proxy admin 更细操作级权限、持久审计和操作人身份。
+1. proxy admin 更细操作级权限、审计查询、集中留存和统一 trace/request id。
 2. route store 多 proxy 一致性：在已有 Redis 单 key CAS 基础上补 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
 3. 跨 proxy 全局单 IP / 单玩家连接限额、消息频率限制和 Redis 动态黑名单。
 4. 自动 rollout 结束检测。

@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
@@ -15,6 +18,8 @@ use crate::route_store::{
 const MAX_ID_LEN: usize = 128;
 const MAX_CHECKSUM_LEN: usize = 256;
 const MAX_ROOM_MEMBER_COUNT: u32 = 1_000_000;
+const MAX_ACTOR_LEN: usize = 128;
+const DEFAULT_ADMIN_ACTOR: &str = "unknown";
 
 #[derive(Serialize)]
 struct StatusResponse {
@@ -67,6 +72,107 @@ impl AdminAuthConfig {
     }
 }
 
+#[derive(Clone)]
+pub struct AdminAuditConfig {
+    enabled: bool,
+    path: PathBuf,
+    require_actor: bool,
+}
+
+impl AdminAuditConfig {
+    pub fn new(enabled: bool, path: impl Into<PathBuf>, require_actor: bool) -> Self {
+        Self {
+            enabled,
+            path: path.into(),
+            require_actor,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AdminAuditLogger {
+    config: AdminAuditConfig,
+}
+
+impl AdminAuditLogger {
+    pub fn new(config: AdminAuditConfig) -> Self {
+        Self { config }
+    }
+
+    async fn ensure_ready(&self) -> Result<(), AdminAuditError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        ensure_parent_dir(&self.config.path).await?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.config.path)
+            .await
+            .map_err(AdminAuditError::Io)?;
+        Ok(())
+    }
+
+    async fn append(&self, event: &AdminAuditEvent<'_>) -> Result<(), AdminAuditError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        ensure_parent_dir(&self.config.path).await?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.config.path)
+            .await
+            .map_err(AdminAuditError::Io)?;
+        let mut line = serde_json::to_string(event).map_err(AdminAuditError::Serialize)?;
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .await
+            .map_err(AdminAuditError::Io)
+    }
+}
+
+#[derive(Debug)]
+enum AdminAuditError {
+    Io(std::io::Error),
+    Serialize(serde_json::Error),
+}
+
+impl std::fmt::Display for AdminAuditError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{}", error),
+            Self::Serialize(error) => write!(formatter, "{}", error),
+        }
+    }
+}
+
+impl std::error::Error for AdminAuditError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdminRequestContext {
+    actor: String,
+    actor_missing: bool,
+    method: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct AdminAuditEvent<'a> {
+    ts_ms: u64,
+    actor: &'a str,
+    actor_missing: bool,
+    method: &'a str,
+    path: &'a str,
+    action: &'a str,
+    result: &'a str,
+    error: &'a str,
+    server_id: &'a str,
+    room_id: &'a str,
+    player_id: &'a str,
+    rollout_epoch: &'a str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AdminPermission {
     Read,
@@ -79,15 +185,18 @@ pub async fn run(
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: AdminAuthConfig,
+    audit_logger: AdminAuditLogger,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     let auth_config = Arc::new(auth_config);
+    let audit_logger = Arc::new(audit_logger);
     loop {
         let (socket, peer_addr) = listener.accept().await?;
         let route_store = route_store.clone();
         let connection_count = connection_count.clone();
         let maintenance = maintenance.clone();
         let auth_config = auth_config.clone();
+        let audit_logger = audit_logger.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 socket,
@@ -95,6 +204,7 @@ pub async fn run(
                 connection_count,
                 maintenance,
                 auth_config,
+                audit_logger,
             )
             .await
             {
@@ -110,6 +220,7 @@ async fn handle_connection(
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: Arc<AdminAuthConfig>,
+    audit_logger: Arc<AdminAuditLogger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 4096];
     let read = socket.read(&mut buffer).await?;
@@ -127,6 +238,41 @@ async fn handle_connection(
         let response = http_response(status, "text/plain; charset=utf-8", body.to_string());
         socket.write_all(response.as_bytes()).await?;
         return Ok(());
+    }
+
+    let context = admin_request_context(&request, method, route_path);
+    if method != "GET" {
+        if let Err(error) = audit_logger.ensure_ready().await {
+            warn!(
+                method,
+                path = route_path,
+                error = %error,
+                audit_path = %audit_logger.config.path.display(),
+                "proxy admin audit log is not writable"
+            );
+            let response = http_response(
+                500,
+                "text/plain; charset=utf-8",
+                "admin audit unavailable".to_string(),
+            );
+            socket.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
+        if audit_logger.config.require_actor && context.actor_missing {
+            let response = audited_bad_request(
+                &audit_logger,
+                &context,
+                "admin_actor_required",
+                "missing X-Admin-Actor",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            socket.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
     }
 
     let response = match (method, route_path) {
@@ -159,16 +305,46 @@ async fn handle_connection(
             routes: route_store.list_player_routes().await,
         }),
         ("POST", "/maintenance/on") => {
-            *maintenance.write().await = true;
-            audit_ok("maintenance_on", None, None, None, None);
-            write_plain("ok")
+            match audit_ok(
+                &audit_logger,
+                &context,
+                "maintenance_on",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(()) => {
+                    *maintenance.write().await = true;
+                    write_plain("ok")
+                }
+                Err(error) => audit_write_failed(&audit_logger, "maintenance_on", &error),
+            }
         }
         ("POST", "/maintenance/off") => {
-            *maintenance.write().await = false;
-            audit_ok("maintenance_off", None, None, None, None);
-            write_plain("ok")
+            match audit_ok(
+                &audit_logger,
+                &context,
+                "maintenance_off",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(()) => {
+                    *maintenance.write().await = false;
+                    write_plain("ok")
+                }
+                Err(error) => audit_write_failed(&audit_logger, "maintenance_off", &error),
+            }
         }
-        ("POST", "/rollout/start") => handle_rollout_start(&route_store, &query).await,
+        ("POST", "/rollout/start") => {
+            handle_rollout_start(&route_store, &query, &audit_logger, &context).await
+        }
         ("POST", "/rollout/end") => {
             let rollout_epoch = route_store
                 .get_rollout_session()
@@ -176,25 +352,48 @@ async fn handle_connection(
                 .map(|session| session.rollout_epoch);
             match route_store.end_rollout().await {
                 Ok(()) => {
-                    audit_ok("rollout_end", None, None, None, rollout_epoch.as_deref());
-                    write_plain("ok")
+                    match audit_ok(
+                        &audit_logger,
+                        &context,
+                        "rollout_end",
+                        None,
+                        None,
+                        None,
+                        rollout_epoch.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(()) => write_plain("ok"),
+                        Err(error) => audit_write_failed(&audit_logger, "rollout_end", &error),
+                    }
                 }
-                Err(error) => audited_update_error(
-                    "rollout_end",
-                    &error,
-                    None,
-                    None,
-                    None,
-                    rollout_epoch.as_deref(),
-                ),
+                Err(error) => {
+                    audited_update_error(
+                        &audit_logger,
+                        &context,
+                        "rollout_end",
+                        &error,
+                        None,
+                        None,
+                        None,
+                        rollout_epoch.as_deref(),
+                    )
+                    .await
+                }
             }
         }
-        ("POST", "/rollout/state") => handle_rollout_state(&route_store, &query).await,
-        ("POST", "/room-route/upsert") => handle_room_route_upsert(&route_store, &query).await,
-        ("POST", "/player-route/upsert") => handle_player_route_upsert(&route_store, &query).await,
+        ("POST", "/rollout/state") => {
+            handle_rollout_state(&route_store, &query, &audit_logger, &context).await
+        }
+        ("POST", "/room-route/upsert") => {
+            handle_room_route_upsert(&route_store, &query, &audit_logger, &context).await
+        }
+        ("POST", "/player-route/upsert") => {
+            handle_player_route_upsert(&route_store, &query, &audit_logger, &context).await
+        }
         ("POST", route_path) => {
             if let Some(server_id) = route_path.strip_prefix("/switch/") {
-                handle_switch(&route_store, server_id).await
+                handle_switch(&route_store, server_id, &audit_logger, &context).await
             } else {
                 http_response(404, "text/plain; charset=utf-8", "not found".to_string())
             }
@@ -209,53 +408,86 @@ async fn handle_connection(
 async fn handle_rollout_start(
     route_store: &ProxyRouteStore,
     query: &HashMap<String, String>,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
 ) -> String {
     let action = "rollout_start";
     let rollout_epoch = match required_identifier(query, "rollout_epoch") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, None, None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
     };
     let old_server_id = match required_identifier(query, "old_server_id") {
         Ok(value) => value,
         Err(error) => {
-            return audited_bad_request(action, error, None, None, None, Some(rollout_epoch));
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                None,
+                Some(rollout_epoch),
+            )
+            .await;
         }
     };
     let new_server_id = match required_identifier(query, "new_server_id") {
         Ok(value) => value,
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(old_server_id),
                 None,
                 None,
                 Some(rollout_epoch),
-            );
+            )
+            .await;
         }
     };
 
     if old_server_id == new_server_id {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "old_server_id and new_server_id must differ",
             Some(old_server_id),
             None,
             None,
             Some(rollout_epoch),
-        );
+        )
+        .await;
     }
 
     for server_id in [old_server_id, new_server_id] {
         if !upstream_exists(route_store, server_id).await {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 "unknown upstream server_id",
                 Some(server_id),
                 None,
                 None,
                 Some(rollout_epoch),
-            );
+            )
+            .await;
         }
     }
 
@@ -268,76 +500,172 @@ async fn handle_rollout_start(
         .await
     {
         Ok(()) => {
-            audit_ok(action, Some(new_server_id), None, None, Some(rollout_epoch));
-            write_plain("ok")
+            match audit_ok(
+                audit_logger,
+                context,
+                action,
+                Some(new_server_id),
+                None,
+                None,
+                Some(rollout_epoch),
+            )
+            .await
+            {
+                Ok(()) => write_plain("ok"),
+                Err(error) => audit_write_failed(audit_logger, action, &error),
+            }
         }
-        Err(error) => audited_update_error(
-            action,
-            &error,
-            Some(new_server_id),
-            None,
-            None,
-            Some(rollout_epoch),
-        ),
+        Err(error) => {
+            audited_update_error(
+                audit_logger,
+                context,
+                action,
+                &error,
+                Some(new_server_id),
+                None,
+                None,
+                Some(rollout_epoch),
+            )
+            .await
+        }
     }
 }
 
 async fn handle_rollout_state(
     route_store: &ProxyRouteStore,
     query: &HashMap<String, String>,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
 ) -> String {
     let action = "rollout_state";
     let Some(state) = required(query, "state") else {
-        return audited_bad_request(action, "missing state", None, None, None, None);
+        return audited_bad_request(
+            audit_logger,
+            context,
+            action,
+            "missing state",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
     };
 
     let rollout_state = match state {
         "Active" => RolloutSessionState::Active,
         "Ending" => RolloutSessionState::Ending,
         "Interrupted" => RolloutSessionState::Interrupted,
-        _ => return audited_bad_request(action, "invalid state", None, None, None, None),
+        _ => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                "invalid state",
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
     };
     let Some(session) = route_store.get_rollout_session().await else {
-        return audited_bad_request(action, "no active rollout", None, None, None, None);
+        return audited_bad_request(
+            audit_logger,
+            context,
+            action,
+            "no active rollout",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
     };
     match route_store.mark_rollout_state(rollout_state).await {
         Ok(()) => {
-            audit_ok(
+            match audit_ok(
+                audit_logger,
+                context,
                 action,
                 None,
                 None,
                 None,
                 Some(session.rollout_epoch.as_str()),
-            );
-            write_plain("ok")
+            )
+            .await
+            {
+                Ok(()) => write_plain("ok"),
+                Err(error) => audit_write_failed(audit_logger, action, &error),
+            }
         }
-        Err(error) => audited_update_error(
-            action,
-            &error,
-            None,
-            None,
-            None,
-            Some(session.rollout_epoch.as_str()),
-        ),
+        Err(error) => {
+            audited_update_error(
+                audit_logger,
+                context,
+                action,
+                &error,
+                None,
+                None,
+                None,
+                Some(session.rollout_epoch.as_str()),
+            )
+            .await
+        }
     }
 }
 
-async fn handle_switch(route_store: &ProxyRouteStore, server_id: &str) -> String {
+async fn handle_switch(
+    route_store: &ProxyRouteStore,
+    server_id: &str,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
+) -> String {
     let action = "switch";
     let server_id = match validate_identifier("server_id", server_id) {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, None, None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
     };
     let routes = route_store.list_routes().await;
     if !routes.iter().any(|route| route.server_id == server_id) {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "unknown upstream server_id",
             Some(server_id),
             None,
             None,
             None,
-        );
+        )
+        .await;
+    }
+
+    if let Err(error) = audit_ok(
+        audit_logger,
+        context,
+        action,
+        Some(server_id),
+        None,
+        None,
+        None,
+    )
+    .await
+    {
+        return audit_write_failed(audit_logger, action, &error);
     }
 
     for route in &routes {
@@ -350,153 +678,211 @@ async fn handle_switch(route_store: &ProxyRouteStore, server_id: &str) -> String
             .update_operation_state(&route.server_id, next_state)
             .await;
     }
-    audit_ok(action, Some(server_id), None, None, None);
     write_plain("ok")
 }
 
 async fn handle_room_route_upsert(
     route_store: &ProxyRouteStore,
     query: &HashMap<String, String>,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
 ) -> String {
     let action = "room_route_upsert";
     let room_id = match required_identifier(query, "room_id") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, None, None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
     };
     let owner_server_id = match required_identifier(query, "owner_server_id") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, Some(room_id), None, None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                Some(room_id),
+                None,
+                None,
+            )
+            .await;
+        }
     };
     if !upstream_exists(route_store, owner_server_id).await {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "unknown upstream owner_server_id",
             Some(owner_server_id),
             Some(room_id),
             None,
             None,
-        );
+        )
+        .await;
     }
 
     let migration_state = match optional_migration_state(query, "migration_state") {
         Ok(value) => value.unwrap_or(RoomMigrationState::OwnedByNew),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     let member_count = match optional_u32(query, "member_count") {
         Ok(value) => value.unwrap_or(0),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     let online_member_count = match optional_u32(query, "online_member_count") {
         Ok(value) => value.unwrap_or(0),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     if member_count > MAX_ROOM_MEMBER_COUNT {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "member_count out of range",
             Some(owner_server_id),
             Some(room_id),
             None,
             None,
-        );
+        )
+        .await;
     }
     if online_member_count > member_count {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "online_member_count cannot exceed member_count",
             Some(owner_server_id),
             Some(room_id),
             None,
             None,
-        );
+        )
+        .await;
     }
     let empty_since_ms = match optional_u64(query, "empty_since_ms") {
         Ok(value) => value,
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     let room_version = match optional_u64(query, "room_version") {
         Ok(value) => value.unwrap_or(1),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     if room_version == 0 {
         return audited_bad_request(
+            audit_logger,
+            context,
             action,
             "room_version must be greater than 0",
             Some(owner_server_id),
             Some(room_id),
             None,
             None,
-        );
+        )
+        .await;
     }
     let expected_room_version = match optional_u64(query, "expected_room_version") {
         Ok(value) => value,
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     let rollout_epoch = match optional_identifier(query, "rollout_epoch") {
         Ok(value) => value.unwrap_or_default(),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 None,
-            );
+            )
+            .await;
         }
     };
     let last_transfer_checksum =
@@ -504,13 +890,16 @@ async fn handle_room_route_upsert(
             Ok(value) => value.unwrap_or_default(),
             Err(error) => {
                 return audited_bad_request(
+                    audit_logger,
+                    context,
                     action,
                     error,
                     Some(owner_server_id),
                     Some(room_id),
                     None,
                     Some(rollout_epoch.as_str()),
-                );
+                )
+                .await;
             }
         };
     let expected_last_transfer_checksum =
@@ -518,13 +907,16 @@ async fn handle_room_route_upsert(
             Ok(value) => value,
             Err(error) => {
                 return audited_bad_request(
+                    audit_logger,
+                    context,
                     action,
                     error,
                     Some(owner_server_id),
                     Some(room_id),
                     None,
                     Some(rollout_epoch.as_str()),
-                );
+                )
+                .await;
             }
         };
 
@@ -549,66 +941,121 @@ async fn handle_room_route_upsert(
 
     match result {
         Ok(()) => {
-            audit_ok(
+            match audit_ok(
+                audit_logger,
+                context,
                 action,
                 Some(owner_server_id),
                 Some(room_id),
                 None,
                 Some(rollout_epoch.as_str()),
-            );
-            write_plain("ok")
+            )
+            .await
+            {
+                Ok(()) => write_plain("ok"),
+                Err(error) => audit_write_failed(audit_logger, action, &error),
+            }
         }
-        Err(error) => audited_update_error(
-            action,
-            &error,
-            Some(owner_server_id),
-            Some(room_id),
-            None,
-            Some(rollout_epoch.as_str()),
-        ),
+        Err(error) => {
+            audited_update_error(
+                audit_logger,
+                context,
+                action,
+                &error,
+                Some(owner_server_id),
+                Some(room_id),
+                None,
+                Some(rollout_epoch.as_str()),
+            )
+            .await
+        }
     }
 }
 
 async fn handle_player_route_upsert(
     route_store: &ProxyRouteStore,
     query: &HashMap<String, String>,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
 ) -> String {
     let action = "player_route_upsert";
     let player_id = match required_identifier(query, "player_id") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, None, None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
     };
     let current_room_id = match optional_identifier(query, "current_room_id") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, Some(player_id), None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                Some(player_id),
+                None,
+            )
+            .await;
+        }
     };
     let preferred_server_id = match optional_identifier(query, "preferred_server_id") {
         Ok(value) => value,
-        Err(error) => return audited_bad_request(action, error, None, None, Some(player_id), None),
+        Err(error) => {
+            return audited_bad_request(
+                audit_logger,
+                context,
+                action,
+                error,
+                None,
+                None,
+                Some(player_id),
+                None,
+            )
+            .await;
+        }
     };
     if let Some(server_id) = preferred_server_id.as_deref() {
         if !upstream_exists(route_store, server_id).await {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 "unknown upstream preferred_server_id",
                 Some(server_id),
                 current_room_id.as_deref(),
                 Some(player_id),
                 None,
-            );
+            )
+            .await;
         }
     }
     let rollout_epoch = match optional_identifier(query, "rollout_epoch") {
         Ok(value) => value.unwrap_or_default(),
         Err(error) => {
             return audited_bad_request(
+                audit_logger,
+                context,
                 action,
                 error,
                 preferred_server_id.as_deref(),
                 current_room_id.as_deref(),
                 Some(player_id),
                 None,
-            );
+            )
+            .await;
         }
     };
 
@@ -624,23 +1071,34 @@ async fn handle_player_route_upsert(
 
     match result {
         Ok(()) => {
-            audit_ok(
+            match audit_ok(
+                audit_logger,
+                context,
                 action,
                 preferred_server_id.as_deref(),
                 current_room_id.as_deref(),
                 Some(player_id),
                 Some(rollout_epoch.as_str()),
-            );
-            write_plain("ok")
+            )
+            .await
+            {
+                Ok(()) => write_plain("ok"),
+                Err(error) => audit_write_failed(audit_logger, action, &error),
+            }
         }
-        Err(error) => audited_update_error(
-            action,
-            &error,
-            preferred_server_id.as_deref(),
-            current_room_id.as_deref(),
-            Some(player_id),
-            Some(rollout_epoch.as_str()),
-        ),
+        Err(error) => {
+            audited_update_error(
+                audit_logger,
+                context,
+                action,
+                &error,
+                preferred_server_id.as_deref(),
+                current_room_id.as_deref(),
+                Some(player_id),
+                Some(rollout_epoch.as_str()),
+            )
+            .await
+        }
     }
 }
 
@@ -826,15 +1284,27 @@ async fn upstream_exists(route_store: &ProxyRouteStore, server_id: &str) -> bool
         .any(|route| route.server_id == server_id)
 }
 
-fn audit_ok(
+#[derive(Clone, Copy, Default)]
+struct AuditTarget<'a> {
+    server_id: Option<&'a str>,
+    room_id: Option<&'a str>,
+    player_id: Option<&'a str>,
+    rollout_epoch: Option<&'a str>,
+}
+
+async fn audit_ok(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
     action: &'static str,
     server_id: Option<&str>,
     room_id: Option<&str>,
     player_id: Option<&str>,
     rollout_epoch: Option<&str>,
-) {
+) -> Result<(), AdminAuditError> {
     info!(
         action,
+        actor = %context.actor,
+        actor_missing = context.actor_missing,
         server_id = %server_id.unwrap_or_default(),
         room_id = %room_id.unwrap_or_default(),
         player_id = %player_id.unwrap_or_default(),
@@ -842,18 +1312,38 @@ fn audit_ok(
         result = "ok",
         "proxy admin write operation"
     );
+    audit_logger
+        .append(&AdminAuditEvent {
+            ts_ms: unix_time_ms(),
+            actor: &context.actor,
+            actor_missing: context.actor_missing,
+            method: &context.method,
+            path: &context.path,
+            action,
+            result: "ok",
+            error: "",
+            server_id: server_id.unwrap_or_default(),
+            room_id: room_id.unwrap_or_default(),
+            player_id: player_id.unwrap_or_default(),
+            rollout_epoch: rollout_epoch.unwrap_or_default(),
+        })
+        .await
 }
 
-fn audit_error(
+async fn audit_error(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
     action: &'static str,
     error: &str,
     server_id: Option<&str>,
     room_id: Option<&str>,
     player_id: Option<&str>,
     rollout_epoch: Option<&str>,
-) {
+) -> Result<(), AdminAuditError> {
     warn!(
         action,
+        actor = %context.actor,
+        actor_missing = context.actor_missing,
         server_id = %server_id.unwrap_or_default(),
         room_id = %room_id.unwrap_or_default(),
         player_id = %player_id.unwrap_or_default(),
@@ -862,9 +1352,27 @@ fn audit_error(
         error,
         "proxy admin write operation failed"
     );
+    audit_logger
+        .append(&AdminAuditEvent {
+            ts_ms: unix_time_ms(),
+            actor: &context.actor,
+            actor_missing: context.actor_missing,
+            method: &context.method,
+            path: &context.path,
+            action,
+            result: "error",
+            error,
+            server_id: server_id.unwrap_or_default(),
+            room_id: room_id.unwrap_or_default(),
+            player_id: player_id.unwrap_or_default(),
+            rollout_epoch: rollout_epoch.unwrap_or_default(),
+        })
+        .await
 }
 
-fn audited_bad_request(
+async fn audited_bad_request(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
     action: &'static str,
     error: &'static str,
     server_id: Option<&str>,
@@ -872,11 +1380,32 @@ fn audited_bad_request(
     player_id: Option<&str>,
     rollout_epoch: Option<&str>,
 ) -> String {
-    audit_error(action, error, server_id, room_id, player_id, rollout_epoch);
-    bad_request(error)
+    let target = AuditTarget {
+        server_id,
+        room_id,
+        player_id,
+        rollout_epoch,
+    };
+    match audit_error(
+        audit_logger,
+        context,
+        action,
+        error,
+        target.server_id,
+        target.room_id,
+        target.player_id,
+        target.rollout_epoch,
+    )
+    .await
+    {
+        Ok(()) => bad_request(error),
+        Err(audit_error) => audit_write_failed(audit_logger, action, &audit_error),
+    }
 }
 
-fn audited_update_error(
+async fn audited_update_error(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
     action: &'static str,
     error: &RouteStoreUpdateError,
     server_id: Option<&str>,
@@ -885,15 +1414,58 @@ fn audited_update_error(
     rollout_epoch: Option<&str>,
 ) -> String {
     let error_code = error.code();
-    audit_error(
+    match audit_error(
+        audit_logger,
+        context,
         action,
         error_code,
         server_id,
         room_id,
         player_id,
         rollout_epoch,
+    )
+    .await
+    {
+        Ok(()) => bad_request(error_code),
+        Err(audit_error) => audit_write_failed(audit_logger, action, &audit_error),
+    }
+}
+
+fn audit_write_failed(
+    audit_logger: &AdminAuditLogger,
+    action: &'static str,
+    error: &AdminAuditError,
+) -> String {
+    warn!(
+        action,
+        error = %error,
+        audit_path = %audit_logger.config.path.display(),
+        "proxy admin audit write failed"
     );
-    bad_request(error_code)
+    http_response(
+        500,
+        "text/plain; charset=utf-8",
+        "admin audit write failed".to_string(),
+    )
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+async fn ensure_parent_dir(path: &Path) -> Result<(), AdminAuditError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(AdminAuditError::Io)?;
+    }
+    Ok(())
 }
 
 fn split_path_and_query(path: &str) -> (&str, HashMap<String, String>) {
@@ -913,6 +1485,51 @@ fn split_path_and_query(path: &str) -> (&str, HashMap<String, String>) {
         query.insert(key.to_string(), value.to_string());
     }
     (route_path, query)
+}
+
+fn admin_request_context(request: &str, method: &str, path: &str) -> AdminRequestContext {
+    let actor = request_header(request, "x-admin-actor")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(normalize_actor);
+
+    match actor {
+        Some(actor) => AdminRequestContext {
+            actor,
+            actor_missing: false,
+            method: method.to_string(),
+            path: path.to_string(),
+        },
+        None => AdminRequestContext {
+            actor: DEFAULT_ADMIN_ACTOR.to_string(),
+            actor_missing: true,
+            method: method.to_string(),
+            path: path.to_string(),
+        },
+    }
+}
+
+fn normalize_actor(value: &str) -> Option<String> {
+    if value.len() > MAX_ACTOR_LEN {
+        return None;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
+        .then(|| value.to_string())
+}
+
+fn request_header<'a>(request: &'a str, header_name: &str) -> Option<&'a str> {
+    request
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case(header_name)
+                .then_some(value.trim())
+        })
 }
 
 fn authorize(request: &str, auth_config: &AdminAuthConfig) -> Option<AdminPermission> {
@@ -1028,6 +1645,7 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
         403 => "Forbidden",
         400 => "Bad Request",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "OK",
     };
     format!(
@@ -1043,11 +1661,17 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        AdminAuthConfig, AdminPermission, authorize, authorize_method, handle_player_route_upsert,
-        handle_rollout_start, handle_rollout_state, handle_room_route_upsert, handle_switch,
-        is_authorized, split_path_and_query,
+        AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
+        admin_request_context, audit_ok, audit_write_failed, authorize, authorize_method,
+        handle_connection, handle_player_route_upsert, handle_rollout_start, handle_rollout_state,
+        handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
     };
     use crate::route_store::{
         ProxyRouteStore, RolloutSessionState, UpstreamHealthState, UpstreamOperationState,
@@ -1093,6 +1717,19 @@ mod tests {
 
     fn auth_config() -> AdminAuthConfig {
         AdminAuthConfig::new(TOKEN.to_string(), Some(READ_TOKEN.to_string()))
+    }
+
+    fn test_audit_logger() -> AdminAuditLogger {
+        AdminAuditLogger::new(AdminAuditConfig::new(false, "", false))
+    }
+
+    fn test_context(path: &str) -> AdminRequestContext {
+        AdminRequestContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+            method: "POST".to_string(),
+            path: path.to_string(),
+        }
     }
 
     #[test]
@@ -1192,12 +1829,16 @@ mod tests {
     #[tokio::test]
     async fn rollout_start_rejects_unknown_or_same_upstream() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/rollout/start");
 
         let same = handle_rollout_start(
             &store,
             &query(
                 "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-1",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&same), 400);
@@ -1208,6 +1849,8 @@ mod tests {
             &query(
                 "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=missing",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&unknown), 400);
@@ -1217,17 +1860,28 @@ mod tests {
     #[tokio::test]
     async fn rollout_start_and_state_accept_valid_query() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let state_context = test_context("/rollout/state");
 
         let start = handle_rollout_start(
             &store,
             &query(
                 "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
             ),
+            &audit_logger,
+            &start_context,
         )
         .await;
         assert_eq!(status_code(&start), 200);
 
-        let state = handle_rollout_state(&store, &query("/rollout/state?state=Ending")).await;
+        let state = handle_rollout_state(
+            &store,
+            &query("/rollout/state?state=Ending"),
+            &audit_logger,
+            &state_context,
+        )
+        .await;
         assert_eq!(status_code(&state), 200);
         assert_eq!(
             store.get_rollout_session().await.unwrap().state,
@@ -1238,8 +1892,17 @@ mod tests {
     #[tokio::test]
     async fn rollout_state_rejects_invalid_or_missing_session() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let state_context = test_context("/rollout/state");
 
-        let no_session = handle_rollout_state(&store, &query("/rollout/state?state=Ending")).await;
+        let no_session = handle_rollout_state(
+            &store,
+            &query("/rollout/state?state=Ending"),
+            &audit_logger,
+            &state_context,
+        )
+        .await;
         assert_eq!(status_code(&no_session), 400);
 
         let start = handle_rollout_start(
@@ -1247,11 +1910,19 @@ mod tests {
             &query(
                 "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
             ),
+            &audit_logger,
+            &start_context,
         )
         .await;
         assert_eq!(status_code(&start), 200);
 
-        let invalid = handle_rollout_state(&store, &query("/rollout/state?state=Unknown")).await;
+        let invalid = handle_rollout_state(
+            &store,
+            &query("/rollout/state?state=Unknown"),
+            &audit_logger,
+            &state_context,
+        )
+        .await;
         assert_eq!(status_code(&invalid), 400);
         assert_eq!(
             store.get_rollout_session().await.unwrap().state,
@@ -1262,12 +1933,16 @@ mod tests {
     #[tokio::test]
     async fn room_route_upsert_rejects_invalid_query_without_write() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/room-route/upsert");
 
         let invalid_number = handle_room_route_upsert(
             &store,
             &query(
                 "/room-route/upsert?room_id=room-1&owner_server_id=game-server-1&member_count=abc",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&invalid_number), 400);
@@ -1277,6 +1952,8 @@ mod tests {
             &query(
                 "/room-route/upsert?room_id=room-1&owner_server_id=game-server-1&migration_state=Bad",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&invalid_state), 400);
@@ -1286,6 +1963,8 @@ mod tests {
             &query(
                 "/room-route/upsert?room_id=room-1&owner_server_id=game-server-1&member_count=1&online_member_count=2",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&invalid_count), 400);
@@ -1293,6 +1972,8 @@ mod tests {
         let unknown_owner = handle_room_route_upsert(
             &store,
             &query("/room-route/upsert?room_id=room-1&owner_server_id=missing"),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&unknown_owner), 400);
@@ -1303,12 +1984,16 @@ mod tests {
     #[tokio::test]
     async fn room_route_upsert_accepts_valid_query() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/room-route/upsert");
 
         let response = handle_room_route_upsert(
             &store,
             &query(
                 "/room-route/upsert?room_id=room-1&owner_server_id=game-server-1&migration_state=OwnedByOld&member_count=2&online_member_count=1&room_version=1&expected_room_version=0",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
 
@@ -1324,10 +2009,14 @@ mod tests {
     #[tokio::test]
     async fn player_route_upsert_rejects_invalid_query_without_write() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/player-route/upsert");
 
         let bad_player = handle_player_route_upsert(
             &store,
             &query("/player-route/upsert?player_id=bad/player&preferred_server_id=game-server-1"),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&bad_player), 400);
@@ -1335,6 +2024,8 @@ mod tests {
         let unknown_server = handle_player_route_upsert(
             &store,
             &query("/player-route/upsert?player_id=player-1&preferred_server_id=missing"),
+            &audit_logger,
+            &context,
         )
         .await;
         assert_eq!(status_code(&unknown_server), 400);
@@ -1345,12 +2036,16 @@ mod tests {
     #[tokio::test]
     async fn player_route_upsert_accepts_valid_query() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/player-route/upsert");
 
         let response = handle_player_route_upsert(
             &store,
             &query(
                 "/player-route/upsert?player_id=player-1&current_room_id=room-1&preferred_server_id=game-server-1",
             ),
+            &audit_logger,
+            &context,
         )
         .await;
 
@@ -1368,11 +2063,13 @@ mod tests {
     #[tokio::test]
     async fn switch_rejects_unknown_server_and_accepts_existing() {
         let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let context = test_context("/switch/game-server-2");
 
-        let unknown = handle_switch(&store, "missing").await;
+        let unknown = handle_switch(&store, "missing", &audit_logger, &context).await;
         assert_eq!(status_code(&unknown), 400);
 
-        let ok = handle_switch(&store, "game-server-2").await;
+        let ok = handle_switch(&store, "game-server-2", &audit_logger, &context).await;
         assert_eq!(status_code(&ok), 200);
 
         let routes = store.list_routes().await;
@@ -1392,5 +2089,154 @@ mod tests {
                 .operation_state,
             UpstreamOperationState::Draining
         );
+    }
+
+    #[test]
+    fn parses_admin_actor_header_and_defaults_missing_actor() {
+        let request = format!(
+            "POST /maintenance/on HTTP/1.1\r\nx-admin-token: {TOKEN}\r\nX-Admin-Actor: ops@example.com\r\n\r\n"
+        );
+        let context = admin_request_context(&request, "POST", "/maintenance/on");
+
+        assert_eq!(context.actor, "ops@example.com");
+        assert!(!context.actor_missing);
+
+        let missing = admin_request_context(
+            "POST /maintenance/on HTTP/1.1\r\nx-admin-token: token\r\n\r\n",
+            "POST",
+            "/maintenance/on",
+        );
+        assert_eq!(missing.actor, "unknown");
+        assert!(missing.actor_missing);
+
+        let invalid = admin_request_context(
+            "POST /maintenance/on HTTP/1.1\r\nX-Admin-Actor: bad actor\r\n\r\n",
+            "POST",
+            "/maintenance/on",
+        );
+        assert_eq!(invalid.actor, "unknown");
+        assert!(invalid.actor_missing);
+    }
+
+    #[tokio::test]
+    async fn writes_admin_audit_jsonl_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "game-proxy-admin-audit-{}-{}.jsonl",
+            std::process::id(),
+            "ok"
+        ));
+        let _ = tokio::fs::remove_file(&path).await;
+        let audit_logger = AdminAuditLogger::new(AdminAuditConfig::new(true, &path, false));
+        let context = AdminRequestContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+            method: "POST".to_string(),
+            path: "/room-route/upsert".to_string(),
+        };
+
+        audit_ok(
+            &audit_logger,
+            &context,
+            "room_route_upsert",
+            Some("game-server-1"),
+            Some("room-1"),
+            None,
+            Some("rollout-1"),
+        )
+        .await
+        .unwrap();
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(event["actor"], "ops@example.com");
+        assert_eq!(event["actor_missing"], false);
+        assert_eq!(event["method"], "POST");
+        assert_eq!(event["path"], "/room-route/upsert");
+        assert_eq!(event["action"], "room_route_upsert");
+        assert_eq!(event["result"], "ok");
+        assert_eq!(event["server_id"], "game-server-1");
+        assert_eq!(event["room_id"], "room-1");
+        assert_eq!(event["rollout_epoch"], "rollout-1");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn required_actor_rejects_write_before_state_change() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let route_store = route_store().await;
+        let connection_count = Arc::new(AtomicU64::new(0));
+        let maintenance = Arc::new(tokio::sync::RwLock::new(false));
+        let audit_path = std::env::temp_dir().join(format!(
+            "game-proxy-admin-audit-{}-require-actor.jsonl",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_file(&audit_path).await;
+        let auth_config = Arc::new(auth_config());
+        let audit_logger = Arc::new(AdminAuditLogger::new(AdminAuditConfig::new(
+            true,
+            &audit_path,
+            true,
+        )));
+
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_connection(
+                socket,
+                route_store,
+                connection_count,
+                maintenance.clone(),
+                auth_config,
+                audit_logger,
+            )
+            .await
+            .unwrap();
+            assert!(!*maintenance.read().await);
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    format!("POST /maintenance/on HTTP/1.1\r\nx-admin-token: {TOKEN}\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+
+        let (_, response) = tokio::join!(server, client);
+
+        assert_eq!(status_code(&response), 400);
+        assert!(response.ends_with("missing X-Admin-Actor"));
+
+        let content = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(event["actor"], "unknown");
+        assert_eq!(event["actor_missing"], true);
+        assert_eq!(event["path"], "/maintenance/on");
+        assert_eq!(event["action"], "admin_actor_required");
+        assert_eq!(event["result"], "error");
+        assert_eq!(event["error"], "missing X-Admin-Actor");
+
+        let _ = tokio::fs::remove_file(&audit_path).await;
+    }
+
+    #[test]
+    fn audit_write_failure_response_is_500() {
+        let audit_logger = AdminAuditLogger::new(AdminAuditConfig::new(
+            true,
+            "logs/game-proxy/audit.jsonl",
+            false,
+        ));
+        let error = super::AdminAuditError::Io(std::io::Error::other("disk full"));
+
+        let response = audit_write_failed(&audit_logger, "maintenance_on", &error);
+
+        assert_eq!(status_code(&response), 500);
+        assert!(response.ends_with("admin audit write failed"));
     }
 }

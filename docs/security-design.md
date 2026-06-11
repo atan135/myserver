@@ -86,7 +86,7 @@
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有跨实例全局连接数限制、账号级消息频率限制和公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
-| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、读写 token 分离、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin 尚缺更细操作级 RBAC、持久审计和操作人身份，多 proxy route store 强一致仍未完全闭环 |
+| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、读写 token 分离、生产默认 token 拒绝、写操作基础输入校验、`X-Admin-Actor` 操作人解析、结构化日志和 JSONL 持久审计 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin 尚缺更细操作级 RBAC、审计查询、集中留存和统一 trace/request id，多 proxy route store 强一致仍未完全闭环 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接；GM 广播仍是本实例范围 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵仍待补齐 |
 
@@ -469,6 +469,9 @@ SECURITY_ALLOWLIST_REDIS_PREFIX=security:allowlist:
 ```env
 PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
 # PROXY_ADMIN_READ_TOKEN=dev-only-change-this-proxy-admin-read-token
+PROXY_ADMIN_AUDIT_ENABLED=true
+PROXY_ADMIN_AUDIT_PATH=logs/game-proxy/admin-audit.jsonl
+PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=false
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
 PROXY_MSG_RATE_WINDOW_MS=1000
@@ -496,7 +499,7 @@ AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000
 - `PROXY_IP_DENYLIST` 是逗号分隔的静态 IP 或 CIDR 列表，命中的来源会在 session 建立初期被拒绝；为空表示不启用。
 - `PROXY_MAX_CONNECTIONS_PER_IP=0` 表示不限制单来源 IP 并发连接数；配置为正整数时，超过上限的新连接会被拒绝，连接关闭时释放计数。
 - `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 表示不限制单玩家已鉴权并发连接数；配置为正整数时，`AuthReq` 本地鉴权成功后会登记玩家连接，超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放旧计数。
-- proxy admin 写接口会记录结构化日志审计，包含 action、关键目标和 ok/error 结果，不记录 token；当前尚未接入持久审计库，也没有更细操作级 RBAC 或操作人身份。
+- proxy admin 写接口会解析 `X-Admin-Actor`，记录结构化日志审计，并在 `PROXY_ADMIN_AUDIT_ENABLED=true` 时追加 JSONL 持久审计。审计包含 action、操作人、关键目标和 ok/error 结果，不记录 token；缺失 actor 默认记录为 `unknown`，`PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时拒绝缺失 actor 的写操作。审计文件不可写时，写操作返回 `500` 并记录 warning。当前尚未接入 MySQL 审计查询、集中留存或更细操作级 RBAC。proxy admin 口生产环境仍必须内网隔离，审计不是公网暴露依据。
 
 仍属于设计目标、当前未读取的接入层配置示例：
 
@@ -593,7 +596,7 @@ ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
 5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地，`chat-server` 已有有界出站写队列用于慢连接背压，并已在生产环境拒绝默认 `TICKET_SECRET`；单 IP 频率限制、`chat-server` 消息频率限制和跨实例全局玩家频率限制仍需继续补齐
 6. `announce-service` 公告写接口 token 鉴权已落地，仍需保持默认内网化；`mail-service` 和公告只读查询的玩家/网关鉴权边界后续继续收敛
-7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计和读写 token 分离，仍缺持久审计、更细操作级 RBAC 和操作人身份
+7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计、JSONL 持久审计、操作人字段和读写 token 分离，仍缺更细操作级 RBAC、审计查询、集中留存和统一 trace/request id
 
 ### M1：当前阶段最值得做的安全增强
 

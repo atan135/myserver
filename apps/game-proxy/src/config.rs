@@ -7,6 +7,7 @@ pub const DEFAULT_ADMIN_READ_TOKEN: &str = "dev-only-change-this-proxy-admin-rea
 const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
+const DEFAULT_PROXY_ADMIN_AUDIT_PATH: &str = "logs/game-proxy/admin-audit.jsonl";
 
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
@@ -53,6 +54,9 @@ pub struct Config {
     pub admin_port: u16,
     pub admin_token: String,
     pub admin_read_token: Option<String>,
+    pub admin_audit_enabled: bool,
+    pub admin_audit_path: String,
+    pub admin_audit_require_actor: bool,
     pub tcp_fallback_host: String,
     pub tcp_fallback_port: u16,
     pub log_level: String,
@@ -111,6 +115,13 @@ impl Config {
             .map(|value| value.trim().to_string());
         validate_admin_tokens(&admin_token, admin_read_token.as_deref())?;
         let admin_read_token = admin_read_token.filter(|token| !token.is_empty());
+        let admin_audit_enabled = parse_bool("PROXY_ADMIN_AUDIT_ENABLED", true);
+        let admin_audit_path = env::var("PROXY_ADMIN_AUDIT_PATH")
+            .map(|value| value.trim().to_string())
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_PROXY_ADMIN_AUDIT_PATH.to_string());
+        let admin_audit_require_actor = parse_bool("PROXY_ADMIN_AUDIT_REQUIRE_ACTOR", false);
         let tcp_fallback_host =
             env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
         let tcp_fallback_port = env::var("PROXY_TCP_FALLBACK_PORT")
@@ -187,6 +198,9 @@ impl Config {
             admin_port,
             admin_token,
             admin_read_token,
+            admin_audit_enabled,
+            admin_audit_path,
+            admin_audit_require_actor,
             tcp_fallback_host,
             tcp_fallback_port,
             log_level,
@@ -358,6 +372,9 @@ mod tests {
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
             "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_AUDIT_ENABLED",
+            "PROXY_ADMIN_AUDIT_PATH",
+            "PROXY_ADMIN_AUDIT_REQUIRE_ACTOR",
         ]);
 
         unsafe {
@@ -373,6 +390,9 @@ mod tests {
             env::set_var("PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS", "500");
             env::remove_var("PROXY_ADMIN_TOKEN");
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::remove_var("PROXY_ADMIN_AUDIT_ENABLED");
+            env::remove_var("PROXY_ADMIN_AUDIT_PATH");
+            env::remove_var("PROXY_ADMIN_AUDIT_REQUIRE_ACTOR");
         }
 
         let config = Config::from_env();
@@ -491,6 +511,38 @@ mod tests {
 
         assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
         assert_eq!(config.admin_read_token, None);
+        assert!(config.admin_audit_enabled);
+        assert_eq!(config.admin_audit_path, "logs/game-proxy/admin-audit.jsonl");
+        assert!(!config.admin_audit_require_actor);
+    }
+
+    #[test]
+    fn parses_proxy_admin_audit_config_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_AUDIT_ENABLED",
+            "PROXY_ADMIN_AUDIT_PATH",
+            "PROXY_ADMIN_AUDIT_REQUIRE_ACTOR",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::set_var("PROXY_ADMIN_AUDIT_ENABLED", "false");
+            env::set_var("PROXY_ADMIN_AUDIT_PATH", "logs/custom/proxy-admin.jsonl");
+            env::set_var("PROXY_ADMIN_AUDIT_REQUIRE_ACTOR", "true");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(!config.admin_audit_enabled);
+        assert_eq!(config.admin_audit_path, "logs/custom/proxy-admin.jsonl");
+        assert!(config.admin_audit_require_actor);
     }
 
     #[test]

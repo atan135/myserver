@@ -9,7 +9,7 @@
 当前安全与限流相关服务的状态如下：
 
 - `auth-http`：已经实现 IP 限流、Redis 动态 IP / 玩家黑名单、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截、上游发现，以及 admin 写操作的 actor 解析和 JSONL 持久审计；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
 
@@ -108,7 +108,7 @@ AUTH_STRICT_SECURITY=false
 - 维护模式：保留本进程 admin 开关，并在 `AuthReq` 阶段读取 `${REDIS_KEY_PREFIX}maintenance:global` 共享状态；任一开关开启都会返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`
 - admin HTTP 口 token 鉴权，支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`；`PROXY_ADMIN_TOKEN` 允许 GET/POST，`PROXY_ADMIN_READ_TOKEN` 可选且仅允许 GET
 - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空的或明显默认的 `PROXY_ADMIN_TOKEN`；如果设置 `PROXY_ADMIN_READ_TOKEN`，也拒绝空值、明显默认值或与写 token 相同
-- admin 写接口基础输入校验与结构化日志审计，不记录 token
+- admin 写接口基础输入校验、`X-Admin-Actor` 操作人解析、结构化日志审计与 JSONL 持久审计，不记录 token
 - 固定最大包体限制：`MAX_PROXY_BODY_LEN=1MiB`，当前不是环境变量
 
 ### 3.2 当前实际配置项
@@ -122,6 +122,9 @@ PROXY_ADMIN_HOST=127.0.0.1
 PROXY_ADMIN_PORT=7101
 PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
 # PROXY_ADMIN_READ_TOKEN=dev-only-change-this-proxy-admin-read-token
+PROXY_ADMIN_AUDIT_ENABLED=true
+PROXY_ADMIN_AUDIT_PATH=logs/game-proxy/admin-audit.jsonl
+PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=false
 PROXY_TCP_FALLBACK_HOST=127.0.0.1
 PROXY_TCP_FALLBACK_PORT=14000
 PROXY_LOCAL_SOCKET_NAME=myserver-game-proxy.sock
@@ -163,7 +166,9 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - Redis 动态黑名单 key 为 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；值可以是任意非空字符串，也可以是 JSON `{"reason":"...","until":<unix_ms>}`，其中 `until` 小于当前时间时视为未封禁；部署侧仍推荐通过 Redis TTL 管理过期
 - 当前 `game-proxy` 的静态 denylist 和连接数限制是单 proxy 进程内本地状态，不是 Redis 分布式全局限额；Redis 动态黑名单可跨 proxy 共享封禁状态，但不是连接数限额
 - 当前 `game-proxy` admin HTTP 口已经有 token 鉴权、读写 token 分离和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
-- 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有更细操作级 RBAC 或操作人身份
+- 当前 proxy admin 修改接口会记录 action、操作人、关键目标和 ok/error 结果到结构化日志，并在 `PROXY_ADMIN_AUDIT_ENABLED=true` 时追加 JSONL 持久审计。操作人来自 `X-Admin-Actor`，缺失时记录为 `unknown` 且 `actor_missing=true`；`PROXY_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时缺失 actor 的写操作会被拒绝。JSONL 写入失败按安全优先拒绝写操作并记录 warning。当前仍未接入 MySQL 审计查询，也没有更细操作级 RBAC。
+- `PROXY_ADMIN_AUDIT_ENABLED=true` 默认开启轻量文件审计，`PROXY_ADMIN_AUDIT_PATH` 默认 `logs/game-proxy/admin-audit.jsonl`。本地可关闭，但生产仍建议开启并把文件纳入日志采集/留存策略。
+- proxy admin 持久审计是控制面补充，不改变网络边界：生产环境仍必须通过私网、VPN、堡垒机、安全组或等价机制隔离 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`，不能据此把 admin 口暴露公网。
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接

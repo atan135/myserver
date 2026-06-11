@@ -143,6 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.admin_token.clone(),
         config.admin_read_token.clone(),
     );
+    let admin_audit_logger =
+        admin_server::AdminAuditLogger::new(admin_server::AdminAuditConfig::new(
+            config.admin_audit_enabled,
+            config.admin_audit_path.clone(),
+            config.admin_audit_require_actor,
+        ));
     let admin_route_store = route_store.clone();
     let admin_connection_count = connection_count.clone();
     let admin_maintenance = maintenance.clone();
@@ -153,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             admin_connection_count,
             admin_maintenance,
             admin_auth_config,
+            admin_audit_logger,
         )
         .await
         {
