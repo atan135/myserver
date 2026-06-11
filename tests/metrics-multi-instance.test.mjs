@@ -12,7 +12,10 @@ import { pathToFileURL } from "node:url";
 import { archiveServiceMetrics } from "../apps/admin-api/src/services/archive.js";
 import {
   aggregateMetricRecords,
+  aggregateMetricRecordsDetailed,
+  buildInstanceMetricPoint,
   buildMetricPoint,
+  parseMetricHeartbeatKey,
   parseMetricKey
 } from "../apps/admin-api/src/monitoring/metrics-aggregation.js";
 
@@ -142,6 +145,8 @@ test("metrics collector writes instance scoped key and stable fallback key", asy
     instance_id: "default"
   });
   assert.equal(redis.values.get("metrics:heartbeat:game-server"), "1700000002");
+  assert.equal(redis.values.get("metrics:heartbeat:game-server:gs-1"), "1700000001");
+  assert.equal(redis.values.get("metrics:heartbeat:game-server:default"), "1700000002");
 });
 
 test("metrics collector direct-run detection uses file URLs across platforms", () => {
@@ -162,7 +167,16 @@ test("admin metrics parser accepts legacy and instance scoped keys", () => {
     instanceId: "gs-1",
     legacy: false
   });
+  assert.deepEqual(parseMetricKey("game-server", "metrics:game-server:az:gs-1:1700000000"), {
+    bucket: 1700000000,
+    instanceId: "az:gs-1",
+    legacy: false
+  });
   assert.equal(parseMetricKey("game-server", "metrics:heartbeat:game-server"), null);
+  assert.deepEqual(
+    parseMetricHeartbeatKey("game-server", "metrics:heartbeat:game-server:gs-1"),
+    { instanceId: "gs-1" }
+  );
 });
 
 test("admin metrics aggregation combines same bucket instances into one point", () => {
@@ -214,6 +228,105 @@ test("admin metrics aggregation combines same bucket instances into one point", 
   assert.equal(point.online_value, 34);
   assert.equal(point.online_sessions, 38);
   assert.equal(point.instance_count, 2);
+});
+
+test("admin metrics aggregation exposes per-instance details for a bucket", () => {
+  const serviceConfigs = {
+    "game-server": {
+      onlineField: "online_players"
+    }
+  };
+  const aggregated = aggregateMetricRecordsDetailed([
+    {
+      instanceId: "gs-2",
+      data: {
+        qps: "7",
+        latency_ms: "9",
+        online_players: "20",
+        custom_label: "blue",
+        instance_id: "gs-2"
+      }
+    },
+    {
+      instanceId: "gs-1",
+      data: {
+        qps: "5",
+        latency_ms: "15",
+        online_players: "10",
+        custom_label: "green",
+        instance_id: "gs-1"
+      }
+    },
+    {
+      legacy: true,
+      data: {
+        qps: "3",
+        latency_ms: "30",
+        online_players: "4",
+        custom_label: "legacy"
+      }
+    }
+  ]);
+  const point = buildMetricPoint(
+    "game-server",
+    aggregated.data,
+    serviceConfigs,
+    1700000000,
+    aggregated.instances
+  );
+
+  assert.deepEqual(
+    point.instances.map((instance) => instance.instance_id),
+    ["gs-1", "gs-2", "legacy"]
+  );
+  assert.deepEqual(point.instances[0], {
+    instance_id: "gs-1",
+    qps: 5,
+    latency_ms: 15,
+    online_players: 10,
+    custom_label: "green",
+    online_value: 10,
+    online_sessions: 0,
+    unique_players: 0,
+    active_sessions_5m: 0
+  });
+  assert.equal(point.instances[2].legacy, true);
+  assert.equal(point.qps, 15);
+  assert.equal(point.latency_ms, 30);
+  assert.equal(point.online_value, 34);
+});
+
+test("admin instance metric point keeps unknown fields as per-instance extra", () => {
+  const serviceConfigs = {
+    "game-proxy": {
+      onlineField: "connections"
+    }
+  };
+  const point = buildInstanceMetricPoint(
+    "game-proxy",
+    {
+      instance_id: "proxy-1",
+      data: {
+        qps: "2",
+        latency_ms: "6",
+        connections: "40",
+        build: "2026.06"
+      }
+    },
+    serviceConfigs
+  );
+
+  assert.deepEqual(point, {
+    instance_id: "proxy-1",
+    qps: 2,
+    latency_ms: 6,
+    connections: 40,
+    build: "2026.06",
+    online_value: 40,
+    online_sessions: 0,
+    unique_players: 0,
+    active_sessions_5m: 0
+  });
 });
 
 test("archive aggregates same bucket legacy and instance keys before insert and deletes sources", async () => {

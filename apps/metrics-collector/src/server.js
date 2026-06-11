@@ -60,11 +60,13 @@ export async function writeMetrics(redis, config, message) {
 
   const metricsKey = buildMetricsKey(serviceName, instanceId, bucket);
   const heartbeatKey = `metrics:heartbeat:${serviceName}`;
+  const instanceHeartbeatKey = `${heartbeatKey}:${instanceId}`;
   const pipe = redis.pipeline();
 
   pipe.hset(metricsKey, fields);
   pipe.expire(metricsKey, config.metricsTtlSeconds);
   pipe.set(heartbeatKey, String(timestamp), "EX", config.heartbeatTtlSeconds);
+  pipe.set(instanceHeartbeatKey, String(timestamp), "EX", config.heartbeatTtlSeconds);
   await pipe.exec();
 }
 

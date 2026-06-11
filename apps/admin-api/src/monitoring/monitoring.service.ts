@@ -5,10 +5,12 @@ import { ApiHttpException } from "../common/http-exception.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_MYSQL_POOL, ADMIN_REDIS } from "../tokens.js";
 import {
-  aggregateMetricRecords,
+  aggregateMetricRecordsDetailed,
   buildMetricPoint,
+  buildInstanceMetricPoint,
   getOnlineValue,
   parseMetricInt,
+  parseMetricHeartbeatKey,
   parseMetricKey
 } from "./metrics-aggregation.js";
 
@@ -52,6 +54,7 @@ export class MonitoringService {
       let latencyMs = 0;
       let onlineValue = 0;
       let metricsData = {};
+      let instances = [];
 
       if (lastHeartbeat) {
         const heartbeatAge = Date.now() / 1000 - parseInt(lastHeartbeat, 10);
@@ -66,18 +69,21 @@ export class MonitoringService {
           qps = parseMetricInt(latestMetrics.qps);
           latencyMs = parseMetricInt(latestMetrics.latency_ms);
           onlineValue = getOnlineValue(serviceName, latestMetrics, SERVICE_CONFIGS);
-          metricsData = latestMetrics;
+          instances = await this.buildServiceInstances(serviceName, latestMetrics.instances || []);
+          const { instances: _rawInstances, ...latestMetricFields } = latestMetrics;
+          metricsData = latestMetricFields;
         }
       }
 
       services.push({
         name: serviceName,
         status,
+        ...metricsData,
         qps,
         latency_ms: latencyMs,
         online_value: onlineValue,
         last_heartbeat: lastHeartbeat ? parseInt(lastHeartbeat, 10) * 1000 : null,
-        ...metricsData
+        instances
       });
     }
 
@@ -123,7 +129,7 @@ export class MonitoringService {
     }
   }
 
-  private async getLatestMetrics(serviceName: string) {
+  private async getLatestMetrics(serviceName: string): Promise<any | null> {
     let cursor = "0";
     let latestBucket = 0;
     const latestKeys = [];
@@ -160,10 +166,14 @@ export class MonitoringService {
 
     if (records.length === 0) return null;
 
-    return aggregateMetricRecords(records);
+    const aggregated = aggregateMetricRecordsDetailed(records);
+    return {
+      ...aggregated.data,
+      instances: aggregated.instances
+    };
   }
 
-  private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number) {
+  private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number): Promise<any[]> {
     const recordsByBucket = new Map<number, any[]>();
     let cursor = "0";
 
@@ -195,12 +205,66 @@ export class MonitoringService {
 
     const points = [];
     for (const [bucket, records] of recordsByBucket.entries()) {
-      const data = aggregateMetricRecords(records);
-      points.push(buildMetricPoint(serviceName, data, SERVICE_CONFIGS, bucket));
+      const aggregated = aggregateMetricRecordsDetailed(records);
+      points.push(buildMetricPoint(serviceName, aggregated.data, SERVICE_CONFIGS, bucket, aggregated.instances));
     }
 
     points.sort((a, b) => a.timestamp - b.timestamp);
 
     return points;
+  }
+
+  private async buildServiceInstances(serviceName: string, instances: any[]): Promise<any[]> {
+    const heartbeats = await this.getInstanceHeartbeats(serviceName);
+
+    return instances.map((instance) => {
+      const point = buildInstanceMetricPoint(serviceName, instance, SERVICE_CONFIGS);
+      const heartbeat = heartbeats.get(point.instance_id);
+      let status = heartbeat ? "offline" : "unknown";
+
+      if (heartbeat) {
+        const heartbeatAge = Date.now() / 1000 - heartbeat;
+        if (heartbeatAge <= HEARTBEAT_TTL) {
+          status = "online";
+        }
+      }
+
+      return {
+        ...point,
+        status,
+        last_heartbeat: heartbeat ? heartbeat * 1000 : null
+      };
+    });
+  }
+
+  private async getInstanceHeartbeats(serviceName: string): Promise<Map<string, number>> {
+    const heartbeats = new Map<string, number>();
+    let cursor = "0";
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        "MATCH",
+        `metrics:heartbeat:${serviceName}:*`,
+        "COUNT",
+        100
+      );
+      cursor = nextCursor;
+
+      for (const key of keys) {
+        const parsed = parseMetricHeartbeatKey(serviceName, key);
+        if (!parsed) {
+          continue;
+        }
+
+        const value = await this.redis.get(key);
+        const timestamp = parseMetricInt(value);
+        if (timestamp > 0) {
+          heartbeats.set(parsed.instanceId, timestamp);
+        }
+      }
+    } while (cursor !== "0");
+
+    return heartbeats;
   }
 }
