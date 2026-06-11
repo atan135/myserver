@@ -147,6 +147,14 @@ export class AuthService {
         await this.accountLockout.clearFailedAttempts(loginName);
       }
     } catch (error: any) {
+      if (error.code === "PLAYER_BLOCKED") {
+        throw forbidden("PLAYER_BLOCKED", "player is blocked");
+      }
+
+      if (error.code === "BLOCKLIST_UNAVAILABLE") {
+        throw serviceUnavailable("BLOCKLIST_UNAVAILABLE", "redis blocklist is unavailable");
+      }
+
       if (this.config.accountLockEnabled && this.accountLockout) {
         const { locked, attempts } = await this.accountLockout.recordFailedAttempt(loginName);
 
@@ -198,7 +206,20 @@ export class AuthService {
       }
     }
 
-    const session = await this.authStore.createGuestSession(normalizedGuestId, getClientIp(req, this.config));
+    let session;
+    try {
+      session = await this.authStore.createGuestSession(normalizedGuestId, getClientIp(req, this.config));
+    } catch (error: any) {
+      if (error.code === "PLAYER_BLOCKED") {
+        throw forbidden("PLAYER_BLOCKED", "player is blocked");
+      }
+
+      if (error.code === "BLOCKLIST_UNAVAILABLE") {
+        throw serviceUnavailable("BLOCKLIST_UNAVAILABLE", "redis blocklist is unavailable");
+      }
+
+      throw error;
+    }
     return this.buildLoginSuccess(session);
   }
 

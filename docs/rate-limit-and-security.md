@@ -8,7 +8,7 @@
 
 当前安全与限流相关服务的状态如下：
 
-- `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
+- `auth-http`：已经实现 IP 限流、Redis 动态 IP / 玩家黑名单、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
@@ -20,6 +20,7 @@
 ### 2.1 已实现能力
 
 - IP 限流：Redis 滑动窗口，命中后返回 `429`
+- Redis 动态黑名单：`AUTH_REDIS_BLOCKLIST_ENABLED=true` 时，登录入口早期检查 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>`，登录成功且拿到 `playerId` 后、创建 session / ticket 前检查 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；`/api/v1/game-ticket/issue` 在签发前再次检查玩家黑名单
 - 账号锁定：连续密码登录失败后锁定账号
 - ticket 签发：使用 `TICKET_SECRET` 生成 HMAC 签名 ticket，并写入 Redis
 - ticket 撤销：`/api/v1/game-ticket/revoke` 会删除 Redis 中对应 ticket
@@ -49,6 +50,10 @@ TICKET_SECRET=replace-with-a-long-random-string
 TICKET_TTL_SECONDS=86400
 TICKET_VALIDATE_ENABLED=true
 
+# Redis Dynamic Blocklist
+AUTH_REDIS_BLOCKLIST_ENABLED=false
+AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000
+
 # Security Audit
 SECURITY_AUDIT_ENABLED=true
 
@@ -68,6 +73,9 @@ AUTH_STRICT_SECURITY=false
 ### 2.4 当前实现备注
 
 - 文档旧版写“ticket 默认 5 分钟”已经不准确；当前默认值是 `TICKET_TTL_SECONDS=86400`，即 24 小时
+- `AUTH_REDIS_BLOCKLIST_ENABLED=false` 默认完全不查 Redis 动态黑名单；启用后 Redis 查询失败会按 fail-closed 返回 `503 BLOCKLIST_UNAVAILABLE`，避免登录入口在封禁状态不可用时继续放行
+- auth-http 与 game-proxy 共用 Redis 动态黑名单 key：`${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；key 存在即封禁，JSON 值可用 `{"until":<unix_ms>}` 表示封禁过期时间，已过期则视为未封禁
+- `AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000` 控制 auth-http 黑名单短缓存；当前只在登录入口 IP、登录后玩家和 game ticket issue 前查询，不对所有 HTTP 路由查询
 - `TICKET_VALIDATE_ENABLED` 和 `SECURITY_AUDIT_ENABLED` 已进入配置结构，但当前代码没有完整用它们做开关控制：
   - ticket 校验实际发生在 `game-proxy`、`game-server` 与 `chat-server`
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`
@@ -294,6 +302,7 @@ LOG_DIR=logs
   - 使用 `RATELIMIT_WINDOW_MS`、`RATELIMIT_MAX`
   - 使用 `ACCOUNT_LOCK_MAX_ATTEMPTS`、`ACCOUNT_LOCK_WINDOW_SECONDS`、`ACCOUNT_LOCK_TTL_SECONDS`
   - 使用 `TICKET_SECRET`、`TICKET_TTL_SECONDS`、`INTERNAL_API_TOKEN`、`GAME_ADMIN_TOKEN`
+  - 使用 `AUTH_REDIS_BLOCKLIST_ENABLED`、`AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS` 控制 Redis 动态黑名单；Redis 地址和 key 前缀复用 `REDIS_URL`、`REDIS_KEY_PREFIX`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN`
 - `game-proxy`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
@@ -301,7 +310,7 @@ LOG_DIR=logs
   - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`、`PROXY_MSG_RATE_WINDOW_MS`、`PROXY_MSG_RATE_MAX`
   - 使用 `PROXY_MAINTENANCE_CACHE_TTL_MS` 控制 Redis 共享维护状态读取缓存；维护状态 key 为 `${REDIS_KEY_PREFIX}maintenance:global`
   - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
-  - 当前没有 Redis 动态黑名单；消息频率限制是单连接本地状态，不是跨 proxy 全局限额
+  - 使用 `PROXY_REDIS_BLOCKLIST_ENABLED`、`PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS` 控制 Redis 动态黑名单；消息频率限制是单连接本地状态，不是跨 proxy 全局限额
 - `game-server`：
   - 使用 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`

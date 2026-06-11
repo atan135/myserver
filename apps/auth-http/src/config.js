@@ -33,6 +33,8 @@ const DEFAULT_GAME_ADMIN_TOKENS = new Set([
   "password"
 ]);
 
+const DEFAULT_AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS = 2000;
+
 function isProductionEnv() {
   return [process.env.NODE_ENV, process.env.APP_ENV].some(
     (value) => typeof value === "string" && value.trim().toLowerCase() === "production"
@@ -79,6 +81,11 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/auth-http",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    authRedisBlocklistEnabled: parseBoolean(process.env.AUTH_REDIS_BLOCKLIST_ENABLED, false),
+    authRedisBlocklistCacheTtlMs: Number.parseInt(
+      process.env.AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS || String(DEFAULT_AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS),
+      10
+    ),
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "auth-http-001",

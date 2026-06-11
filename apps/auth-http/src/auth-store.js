@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 
 import { encodeSubjectToken } from "./nats-client.js";
+import { log } from "./logger.js";
 import { normalizeLoginName, verifyPassword } from "./password-utils.js";
+import { BLOCKLIST_UNAVAILABLE_ERROR, PLAYER_BLOCKED_ERROR, RedisBlocklistChecker } from "./blocklist.js";
 
 function base64UrlEncode(value) {
   return Buffer.from(value).toString("base64url");
@@ -48,12 +50,21 @@ const noopNatsClient = {
   async publishJson() {}
 };
 
+function logSecurity(level, message, extra) {
+  try {
+    log(level, message, extra);
+  } catch {
+    // Some focused tests instantiate AuthStore without bootstrapping log4js.
+  }
+}
+
 export class AuthStore {
-  constructor(config, redis, mysqlStore = null, nats = noopNatsClient) {
+  constructor(config, redis, mysqlStore = null, nats = noopNatsClient, blocklist = RedisBlocklistChecker.disabled()) {
     this.config = config;
     this.redis = redis;
     this.mysqlStore = mysqlStore;
     this.nats = nats;
+    this.blocklist = blocklist;
   }
 
   prefixedKey(key) {
@@ -82,6 +93,8 @@ export class AuthStore {
           playerId: `player-${crypto.randomUUID()}`,
           guestId: normalizedGuestId
         };
+
+    await this.assertPlayerNotBlocked(account.playerId, clientIp, "guest_login");
 
     return this.createSessionForAccount(account, {
       clientIp,
@@ -141,12 +154,56 @@ export class AuthStore {
       throw createAuthError("INVALID_LOGIN_CREDENTIALS");
     }
 
+    await this.assertPlayerNotBlocked(account.playerId, clientIp, "password_login");
+
     await this.mysqlStore.touchPlayerLastLogin(account.playerId);
 
     return this.createSessionForAccount(account, {
       clientIp,
       eventType: "password_login"
     });
+  }
+
+  async assertPlayerNotBlocked(playerId, clientIp = null, source = null) {
+    const decision = await this.blocklist.checkPlayer(playerId);
+    if (!decision.blocked) {
+      return;
+    }
+
+    if (decision.unavailable) {
+      logSecurity("warn", "security.blocklist_unavailable", {
+        targetType: "player",
+        playerId,
+        clientIp,
+        source
+      });
+      await this.mysqlStore?.appendSecurityAudit?.({
+        eventType: "blocklist_unavailable",
+        targetType: "player",
+        targetValue: playerId,
+        clientIp,
+        severity: "critical",
+        details: { source }
+      });
+      throw createAuthError(BLOCKLIST_UNAVAILABLE_ERROR, "redis blocklist is unavailable");
+    }
+
+    if (decision.error === PLAYER_BLOCKED_ERROR) {
+      logSecurity("warn", "security.player_blocked", {
+        playerId,
+        clientIp,
+        source
+      });
+      await this.mysqlStore?.appendSecurityAudit?.({
+        eventType: "player_blocked",
+        targetType: "player",
+        targetValue: playerId,
+        clientIp,
+        severity: "critical",
+        details: { source }
+      });
+    }
+    throw createAuthError(PLAYER_BLOCKED_ERROR, "player is blocked");
   }
 
   async createSessionForAccount(account, { clientIp = null, eventType }) {

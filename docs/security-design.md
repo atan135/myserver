@@ -82,7 +82,7 @@
 
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
-| `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
+| `auth-http` | IP 限流、Redis 动态 IP / 玩家黑名单、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有跨实例全局连接数限制、账号级消息频率限制和公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
@@ -476,6 +476,9 @@ PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS=2000
 PROXY_IP_DENYLIST=
 PROXY_MAX_CONNECTIONS_PER_IP=0
 PROXY_MAX_CONNECTIONS_PER_PLAYER=0
+
+AUTH_REDIS_BLOCKLIST_ENABLED=false
+AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000
 ```
 
 说明：
@@ -486,6 +489,8 @@ PROXY_MAX_CONNECTIONS_PER_PLAYER=0
 - `PROXY_MSG_RATE_MAX=0` 表示关闭单连接入站消息频率限制；配置为正整数时，`game-proxy` 在读到完整 packet 后、进入本地鉴权 / 预鉴权白名单 / 上游转发前按 `PROXY_MSG_RATE_WINDOW_MS` 窗口计数，超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接且不计入预鉴权失败次数。
 - `PROXY_REDIS_BLOCKLIST_ENABLED=false` 表示默认关闭 Redis 动态黑名单；配置为 `true` 后，连接建立早期检查 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>`，`AuthReq` 本地 ticket 校验成功后检查 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`。key 存在即封禁；JSON 值可携带 `until` 毫秒时间戳，已过期则视为未封禁。启用后 Redis 查询失败按安全优先 fail-closed，返回 `BLOCKLIST_UNAVAILABLE` 并拒绝新连接或鉴权。
 - `PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS=2000` 控制 Redis 动态黑名单短缓存；当前只在连接建立和 `AuthReq` 阶段查询，不按每个 packet 查询。
+- `AUTH_REDIS_BLOCKLIST_ENABLED=false` 表示默认关闭 auth-http Redis 动态黑名单；配置为 `true` 后，登录入口早期检查 IP，登录成功且拿到 `playerId` 后、创建 session / ticket 前检查玩家，`/api/v1/game-ticket/issue` 在签发前再次检查玩家。auth-http 与 game-proxy 共用 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`，并采用相同 `until` 过期语义。启用后 Redis 查询失败返回 `BLOCKLIST_UNAVAILABLE` 并拒绝登录或签票。
+- `AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000` 控制 auth-http 黑名单短缓存；当前不影响健康检查、metrics 或内部接口。
 - `PROXY_IP_DENYLIST` 是逗号分隔的静态 IP 或 CIDR 列表，命中的来源会在 session 建立初期被拒绝；为空表示不启用。
 - `PROXY_MAX_CONNECTIONS_PER_IP=0` 表示不限制单来源 IP 并发连接数；配置为正整数时，超过上限的新连接会被拒绝，连接关闭时释放计数。
 - `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 表示不限制单玩家已鉴权并发连接数；配置为正整数时，`AuthReq` 本地鉴权成功后会登记玩家连接，超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放旧计数。

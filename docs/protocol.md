@@ -206,6 +206,8 @@
 
 `game-proxy` 可通过 `PROXY_REDIS_BLOCKLIST_ENABLED=true` 启用 Redis 动态黑名单。IP 命中 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 时会在连接建立早期拒绝，通常不会产生协议包；玩家命中 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>` 时会在本地 ticket 校验成功后返回 `AuthRes(ok=false,error_code=PLAYER_BLOCKED)`。启用后 Redis 查询失败按 fail-closed 处理，连接早期拒绝或在 `AuthReq` 返回 `AuthRes(ok=false,error_code=BLOCKLIST_UNAVAILABLE)`。
 
+`auth-http` 可通过 `AUTH_REDIS_BLOCKLIST_ENABLED=true` 启用同一套 Redis 动态黑名单。登录入口 IP 命中时 HTTP 返回 `IP_BLOCKED`；登录成功但玩家命中时不创建 session / ticket，返回 `PLAYER_BLOCKED`；`/api/v1/game-ticket/issue` 玩家命中时不签发新 ticket。启用后 Redis 查询失败按 fail-closed 返回 `BLOCKLIST_UNAVAILABLE`。
+
 ### 4.2 关键消息结构
 
 #### `AuthReq`

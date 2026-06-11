@@ -1,6 +1,7 @@
 import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 
 import { AuthStore } from "./auth-store.js";
+import { RedisBlocklistChecker } from "./blocklist.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
@@ -17,9 +18,11 @@ import { GameTicketController } from "./game-ticket/game-ticket.controller.js";
 import { InternalController } from "./internal/internal.controller.js";
 import { MetaController } from "./meta.controller.js";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware.js";
+import { RedisBlocklistMiddleware } from "./common/redis-blocklist.middleware.js";
 import { RequestContextMiddleware } from "./common/request-context.middleware.js";
 import {
   AUTH_ACCOUNT_LOCKOUT,
+  AUTH_BLOCKLIST,
   AUTH_CONFIG,
   AUTH_GAME_ADMIN_CLIENT,
   AUTH_MAINTENANCE_STORE,
@@ -62,10 +65,15 @@ import {
       useFactory: (mysqlPool: any) => new MySqlAuthStore(mysqlPool)
     },
     {
+      provide: AUTH_BLOCKLIST,
+      inject: [AUTH_CONFIG, AUTH_REDIS],
+      useFactory: (config: any, redis: any) => new RedisBlocklistChecker(config, redis)
+    },
+    {
       provide: AUTH_STORE,
-      inject: [AUTH_CONFIG, AUTH_REDIS, AUTH_MYSQL_STORE, AUTH_NATS],
-      useFactory: (config: any, redis: any, mysqlStore: any, nats: any) =>
-        new AuthStore(config, redis, mysqlStore, nats)
+      inject: [AUTH_CONFIG, AUTH_REDIS, AUTH_MYSQL_STORE, AUTH_NATS, AUTH_BLOCKLIST],
+      useFactory: (config: any, redis: any, mysqlStore: any, nats: any, blocklist: any) =>
+        new AuthStore(config, redis, mysqlStore, nats, blocklist)
     },
     {
       provide: AUTH_GAME_ADMIN_CLIENT,
@@ -108,6 +116,6 @@ import {
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RequestContextMiddleware, RateLimitMiddleware).forRoutes("*");
+    consumer.apply(RequestContextMiddleware, RedisBlocklistMiddleware, RateLimitMiddleware).forRoutes("*");
   }
 }
