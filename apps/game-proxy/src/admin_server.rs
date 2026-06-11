@@ -52,28 +52,49 @@ struct PlayerRoutesResponse {
     routes: Vec<PlayerRouteRecord>,
 }
 
+#[derive(Clone)]
+pub struct AdminAuthConfig {
+    write_token: String,
+    read_token: Option<String>,
+}
+
+impl AdminAuthConfig {
+    pub fn new(write_token: String, read_token: Option<String>) -> Self {
+        Self {
+            write_token,
+            read_token: read_token.filter(|token| !token.trim().is_empty()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdminPermission {
+    Read,
+    Write,
+}
+
 pub async fn run(
     bind_addr: &str,
     route_store: ProxyRouteStore,
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
-    admin_token: String,
+    auth_config: AdminAuthConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
-    let admin_token = Arc::new(admin_token);
+    let auth_config = Arc::new(auth_config);
     loop {
         let (socket, peer_addr) = listener.accept().await?;
         let route_store = route_store.clone();
         let connection_count = connection_count.clone();
         let maintenance = maintenance.clone();
-        let admin_token = admin_token.clone();
+        let auth_config = auth_config.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 socket,
                 route_store,
                 connection_count,
                 maintenance,
-                admin_token,
+                auth_config,
             )
             .await
             {
@@ -88,7 +109,7 @@ async fn handle_connection(
     route_store: ProxyRouteStore,
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
-    admin_token: Arc<String>,
+    auth_config: Arc<AdminAuthConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 4096];
     let read = socket.read(&mut buffer).await?;
@@ -102,12 +123,8 @@ async fn handle_connection(
     let path = first_line.split_whitespace().nth(1).unwrap_or_default();
     let (route_path, query) = split_path_and_query(path);
 
-    if !is_authorized(&request, admin_token.as_str()) {
-        let response = http_response(
-            401,
-            "text/plain; charset=utf-8",
-            "missing or invalid admin token".to_string(),
-        );
+    if let Err((status, body)) = authorize_method(&request, method, auth_config.as_ref()) {
+        let response = http_response(status, "text/plain; charset=utf-8", body.to_string());
         socket.write_all(response.as_bytes()).await?;
         return Ok(());
     }
@@ -898,20 +915,61 @@ fn split_path_and_query(path: &str) -> (&str, HashMap<String, String>) {
     (route_path, query)
 }
 
-fn is_authorized(request: &str, admin_token: &str) -> bool {
-    if admin_token.trim().is_empty() {
-        return false;
+fn authorize(request: &str, auth_config: &AdminAuthConfig) -> Option<AdminPermission> {
+    let write_token = auth_config.write_token.trim();
+    if write_token.is_empty() {
+        return None;
     }
 
     if request_contains_query_token(request) {
-        return false;
+        return None;
+    }
+
+    let matches_write = request
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .any(|line| header_matches_token(line, write_token));
+    if matches_write {
+        return Some(AdminPermission::Write);
+    }
+
+    let read_token = auth_config.read_token.as_deref()?.trim();
+    if read_token.is_empty() {
+        return None;
     }
 
     request
         .lines()
         .skip(1)
         .take_while(|line| !line.is_empty())
-        .any(|line| header_matches_token(line, admin_token))
+        .any(|line| header_matches_token(line, read_token))
+        .then_some(AdminPermission::Read)
+}
+
+fn authorize_method<'a>(
+    request: &str,
+    method: &str,
+    auth_config: &AdminAuthConfig,
+) -> Result<AdminPermission, (u16, &'a str)> {
+    let Some(permission) = authorize(request, auth_config) else {
+        return Err((401, "missing or invalid admin token"));
+    };
+
+    if method != "GET" && permission != AdminPermission::Write {
+        return Err((403, "admin token does not allow write operations"));
+    }
+
+    Ok(permission)
+}
+
+#[cfg(test)]
+fn is_authorized(request: &str, admin_token: &str) -> bool {
+    authorize(
+        request,
+        &AdminAuthConfig::new(admin_token.to_string(), None),
+    )
+    .is_some()
 }
 
 fn request_contains_query_token(request: &str) -> bool {
@@ -967,6 +1025,7 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
+        403 => "Forbidden",
         400 => "Bad Request",
         404 => "Not Found",
         _ => "OK",
@@ -986,8 +1045,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        handle_player_route_upsert, handle_rollout_start, handle_rollout_state,
-        handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
+        AdminAuthConfig, AdminPermission, authorize, authorize_method, handle_player_route_upsert,
+        handle_rollout_start, handle_rollout_state, handle_room_route_upsert, handle_switch,
+        is_authorized, split_path_and_query,
     };
     use crate::route_store::{
         ProxyRouteStore, RolloutSessionState, UpstreamHealthState, UpstreamOperationState,
@@ -995,6 +1055,7 @@ mod tests {
     };
 
     const TOKEN: &str = "dev-only-change-this-proxy-admin-token";
+    const READ_TOKEN: &str = "dev-only-change-this-proxy-admin-read-token";
 
     async fn route_store() -> ProxyRouteStore {
         let store = ProxyRouteStore::default();
@@ -1030,6 +1091,10 @@ mod tests {
             .unwrap()
     }
 
+    fn auth_config() -> AdminAuthConfig {
+        AdminAuthConfig::new(TOKEN.to_string(), Some(READ_TOKEN.to_string()))
+    }
+
     #[test]
     fn rejects_missing_admin_token() {
         let request = "GET /status HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n";
@@ -1052,11 +1117,60 @@ mod tests {
     }
 
     #[test]
+    fn write_token_allows_get_and_post_admin_requests() {
+        let get = format!("GET /status HTTP/1.1\r\nauthorization: Bearer {TOKEN}\r\n\r\n");
+        let post =
+            format!("POST /maintenance/on HTTP/1.1\r\nauthorization: Bearer {TOKEN}\r\n\r\n");
+
+        assert_eq!(
+            authorize_method(&get, "GET", &auth_config()),
+            Ok(AdminPermission::Write)
+        );
+        assert_eq!(
+            authorize_method(&post, "POST", &auth_config()),
+            Ok(AdminPermission::Write)
+        );
+    }
+
+    #[test]
+    fn read_token_allows_get_admin_requests() {
+        let request = format!("GET /status HTTP/1.1\r\nauthorization: Bearer {READ_TOKEN}\r\n\r\n");
+
+        assert_eq!(
+            authorize_method(&request, "GET", &auth_config()),
+            Ok(AdminPermission::Read)
+        );
+    }
+
+    #[test]
+    fn read_token_rejects_post_admin_requests_with_forbidden() {
+        let request =
+            format!("POST /maintenance/on HTTP/1.1\r\nauthorization: Bearer {READ_TOKEN}\r\n\r\n");
+
+        assert_eq!(
+            authorize_method(&request, "POST", &auth_config()),
+            Err((403, "admin token does not allow write operations"))
+        );
+    }
+
+    #[test]
+    fn read_token_rejects_non_get_admin_requests_with_forbidden() {
+        let request =
+            format!("DELETE /rollout HTTP/1.1\r\nauthorization: Bearer {READ_TOKEN}\r\n\r\n");
+
+        assert_eq!(
+            authorize_method(&request, "DELETE", &auth_config()),
+            Err((403, "admin token does not allow write operations"))
+        );
+    }
+
+    #[test]
     fn rejects_admin_token_from_query_string() {
         let request =
             format!("GET /status?admin_token={TOKEN} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n");
 
         assert!(!is_authorized(&request, TOKEN));
+        assert_eq!(authorize(&request, &auth_config()), None);
     }
 
     #[test]

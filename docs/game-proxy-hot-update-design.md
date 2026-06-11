@@ -300,12 +300,12 @@ proxy 当前只解析最小接入和路由所需消息：
 
 ## 8. Admin 接口
 
-当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。所有 admin 请求都需要 `PROXY_ADMIN_TOKEN` 鉴权，当前兼容两种 header 形式：
+当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。所有 admin 请求都需要 admin token 鉴权；`PROXY_ADMIN_TOKEN` 是读写 token，兼容 GET/POST；可选 `PROXY_ADMIN_READ_TOKEN` 是只读 token，仅允许 GET。当前兼容两种 header 形式：
 
-- `Authorization: Bearer <PROXY_ADMIN_TOKEN>`
-- `X-Admin-Token: <PROXY_ADMIN_TOKEN>`
+- `Authorization: Bearer <token>`
+- `X-Admin-Token: <token>`
 
-URL query 中不支持传 token，避免 token 进入访问日志。开发环境未设置时会使用 `dev-only-change-this-proxy-admin-token`；`NODE_ENV=production` 或 `APP_ENV=production` 时，`PROXY_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。
+URL query 中不支持传 token，避免 token 进入访问日志。开发环境未设置时会使用 `dev-only-change-this-proxy-admin-token`；`NODE_ENV=production` 或 `APP_ENV=production` 时，`PROXY_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。生产环境如果设置 `PROXY_ADMIN_READ_TOKEN`，也必须是非空、非明显默认值，且不能与 `PROXY_ADMIN_TOKEN` 相同。
 
 已实现接口：
 
@@ -329,7 +329,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 仍未完成的生产化能力：
 
-- 细粒度 RBAC / 操作者身份，不区分不同 admin token 的权限。
+- 更细操作级 RBAC / 操作者身份；当前仅支持读写 token 分离。
 - 持久审计、审计查询和统一 trace/request id。
 - 多 proxy 部署下 route store 的 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测，以及必要的锁/冲突合并策略。
 - 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
@@ -371,6 +371,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `PROXY_ADMIN_HOST` | admin 监听 host | 同 `PROXY_HOST` |
 | `PROXY_ADMIN_PORT` | admin 监听端口 | `7101` |
 | `PROXY_ADMIN_TOKEN` | admin HTTP 口鉴权 token；支持 Bearer 和 `X-Admin-Token` header；生产环境禁止空值或默认值 | 开发默认值 |
+| `PROXY_ADMIN_READ_TOKEN` | 可选 admin 只读 token；仅允许 GET；支持 Bearer 和 `X-Admin-Token` header；生产环境设置时禁止空值、默认值或与写 token 相同 | 未设置 |
 | `PROXY_TCP_FALLBACK_HOST` | TCP fallback host | 同 `PROXY_HOST` |
 | `PROXY_TCP_FALLBACK_PORT` | TCP fallback 端口 | `PROXY_PORT + 10000` |
 | `UPSTREAM_SERVER_ID` | 静态上游 server id | `game-server-1` |
@@ -397,7 +398,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 短期建议优先补：
 
-1. proxy admin 权限细化、持久审计和操作人身份。
+1. proxy admin 更细操作级权限、持久审计和操作人身份。
 2. route store 多 proxy 一致性：在已有 Redis 单 key CAS 基础上补 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
 3. 跨 proxy 全局单 IP / 单玩家连接限额、消息频率限制和 Redis 动态黑名单。
 4. 自动 rollout 结束检测。

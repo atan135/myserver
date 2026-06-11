@@ -139,7 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maintenance = Arc::new(RwLock::new(false));
 
     let admin_bind_addr = config.admin_bind_addr();
-    let admin_token = config.admin_token.clone();
+    let admin_auth_config = admin_server::AdminAuthConfig::new(
+        config.admin_token.clone(),
+        config.admin_read_token.clone(),
+    );
     let admin_route_store = route_store.clone();
     let admin_connection_count = connection_count.clone();
     let admin_maintenance = maintenance.clone();
@@ -149,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             admin_route_store,
             admin_connection_count,
             admin_maintenance,
-            admin_token,
+            admin_auth_config,
         )
         .await
         {

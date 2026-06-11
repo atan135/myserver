@@ -106,8 +106,8 @@ AUTH_STRICT_SECURITY=false
 - 动态上游发现或静态上游路由
 - 活跃前端连接数统计与监控暴露，包含尚未完成 `AuthReq` 的预鉴权连接
 - 维护模式：保留本进程 admin 开关，并在 `AuthReq` 阶段读取 `${REDIS_KEY_PREFIX}maintenance:global` 共享状态；任一开关开启都会返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`
-- admin HTTP 口 token 鉴权，支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`
-- `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空的或明显默认的 `PROXY_ADMIN_TOKEN`
+- admin HTTP 口 token 鉴权，支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`；`PROXY_ADMIN_TOKEN` 允许 GET/POST，`PROXY_ADMIN_READ_TOKEN` 可选且仅允许 GET
+- `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空的或明显默认的 `PROXY_ADMIN_TOKEN`；如果设置 `PROXY_ADMIN_READ_TOKEN`，也拒绝空值、明显默认值或与写 token 相同
 - admin 写接口基础输入校验与结构化日志审计，不记录 token
 - 固定最大包体限制：`MAX_PROXY_BODY_LEN=1MiB`，当前不是环境变量
 
@@ -121,6 +121,7 @@ PROXY_PORT=4000
 PROXY_ADMIN_HOST=127.0.0.1
 PROXY_ADMIN_PORT=7101
 PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
+# PROXY_ADMIN_READ_TOKEN=dev-only-change-this-proxy-admin-read-token
 PROXY_TCP_FALLBACK_HOST=127.0.0.1
 PROXY_TCP_FALLBACK_PORT=14000
 PROXY_LOCAL_SOCKET_NAME=myserver-game-proxy.sock
@@ -161,8 +162,8 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - Redis 动态黑名单使用短缓存，`PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS` 默认 2 秒；只在连接建立和 `AuthReq` 本地 ticket 校验成功后查询，不对每个 packet 查询 Redis
 - Redis 动态黑名单 key 为 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；值可以是任意非空字符串，也可以是 JSON `{"reason":"...","until":<unix_ms>}`，其中 `until` 小于当前时间时视为未封禁；部署侧仍推荐通过 Redis TTL 管理过期
 - 当前 `game-proxy` 的静态 denylist 和连接数限制是单 proxy 进程内本地状态，不是 Redis 分布式全局限额；Redis 动态黑名单可跨 proxy 共享封禁状态，但不是连接数限额
-- 当前 `game-proxy` admin HTTP 口已经有 token 鉴权和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
-- 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有细粒度 RBAC
+- 当前 `game-proxy` admin HTTP 口已经有 token 鉴权、读写 token 分离和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
+- 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有更细操作级 RBAC 或操作人身份
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接

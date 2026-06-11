@@ -3,6 +3,7 @@ use std::env;
 use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
 
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
+pub const DEFAULT_ADMIN_READ_TOKEN: &str = "dev-only-change-this-proxy-admin-read-token";
 const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
@@ -51,6 +52,7 @@ pub struct Config {
     pub admin_host: String,
     pub admin_port: u16,
     pub admin_token: String,
+    pub admin_read_token: Option<String>,
     pub tcp_fallback_host: String,
     pub tcp_fallback_port: u16,
     pub log_level: String,
@@ -104,7 +106,11 @@ impl Config {
             .unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string())
             .trim()
             .to_string();
-        validate_admin_token(&admin_token)?;
+        let admin_read_token = env::var("PROXY_ADMIN_READ_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string());
+        validate_admin_tokens(&admin_token, admin_read_token.as_deref())?;
+        let admin_read_token = admin_read_token.filter(|token| !token.is_empty());
         let tcp_fallback_host =
             env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
         let tcp_fallback_port = env::var("PROXY_TCP_FALLBACK_PORT")
@@ -180,6 +186,7 @@ impl Config {
             admin_host,
             admin_port,
             admin_token,
+            admin_read_token,
             tcp_fallback_host,
             tcp_fallback_port,
             log_level,
@@ -233,7 +240,7 @@ fn is_production_env() -> bool {
     })
 }
 
-fn validate_admin_token(admin_token: &str) -> Result<(), String> {
+fn validate_admin_tokens(admin_token: &str, admin_read_token: Option<&str>) -> Result<(), String> {
     if !is_production_env() {
         return Ok(());
     }
@@ -245,13 +252,34 @@ fn validate_admin_token(admin_token: &str) -> Result<(), String> {
         );
     }
 
+    if let Some(read_token) = admin_read_token {
+        let read_token = read_token.trim();
+        if read_token.is_empty() || is_default_admin_token(read_token) {
+            return Err(
+                "PROXY_ADMIN_READ_TOKEN must be set to a non-default value in production"
+                    .to_string(),
+            );
+        }
+        if read_token == trimmed {
+            return Err(
+                "PROXY_ADMIN_READ_TOKEN must be different from PROXY_ADMIN_TOKEN in production"
+                    .to_string(),
+            );
+        }
+    }
+
     Ok(())
 }
 
 fn is_default_admin_token(admin_token: &str) -> bool {
     matches!(
         admin_token,
-        DEFAULT_ADMIN_TOKEN | "change-me" | "changeme" | "default" | "password"
+        DEFAULT_ADMIN_TOKEN
+            | DEFAULT_ADMIN_READ_TOKEN
+            | "change-me"
+            | "changeme"
+            | "default"
+            | "password"
     )
 }
 
@@ -260,7 +288,7 @@ mod tests {
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
-    use super::{Config, DEFAULT_ADMIN_TOKEN, RouteStoreBackend};
+    use super::{Config, DEFAULT_ADMIN_READ_TOKEN, DEFAULT_ADMIN_TOKEN, RouteStoreBackend};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -329,6 +357,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
         ]);
 
         unsafe {
@@ -343,6 +372,7 @@ mod tests {
             env::set_var("PROXY_REDIS_BLOCKLIST_ENABLED", "true");
             env::set_var("PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS", "500");
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let config = Config::from_env();
@@ -385,6 +415,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
         ]);
 
         unsafe {
@@ -399,6 +430,7 @@ mod tests {
             env::set_var("PROXY_REDIS_BLOCKLIST_ENABLED", "not-a-bool");
             env::set_var("PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS", "not-a-number");
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let config = Config::from_env();
@@ -421,12 +453,14 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
         ]);
 
         unsafe {
             clear_production_env();
             env::set_var("PROXY_IP_DENYLIST", "192.0.2.0/33");
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let error = match Config::try_from_env() {
@@ -440,27 +474,40 @@ mod tests {
     #[test]
     fn keeps_development_default_admin_token_compatible() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
 
         unsafe {
             clear_production_env();
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let config = Config::try_from_env().unwrap();
 
         assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
+        assert_eq!(config.admin_read_token, None);
     }
 
     #[test]
     fn rejects_default_admin_token_in_production() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
 
         unsafe {
             env::set_var("APP_ENV", "production");
             env::remove_var("NODE_ENV");
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let error = match Config::try_from_env() {
@@ -474,12 +521,18 @@ mod tests {
     #[test]
     fn rejects_empty_admin_token_in_production() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
 
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("PROXY_ADMIN_TOKEN", "");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let error = match Config::try_from_env() {
@@ -493,12 +546,18 @@ mod tests {
     #[test]
     fn rejects_default_admin_token_when_app_env_is_production_even_if_node_env_is_not() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
 
         unsafe {
             env::set_var("NODE_ENV", "development");
             env::set_var("APP_ENV", "production");
             env::set_var("PROXY_ADMIN_TOKEN", DEFAULT_ADMIN_TOKEN);
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let error = match Config::try_from_env() {
@@ -512,17 +571,99 @@ mod tests {
     #[test]
     fn accepts_custom_admin_token_in_production() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
 
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let config = Config::try_from_env().unwrap();
 
         assert_eq!(config.admin_token, "prod-proxy-admin-token-123");
+        assert_eq!(config.admin_read_token, None);
+    }
+
+    #[test]
+    fn accepts_custom_admin_read_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "prod-proxy-admin-read-token-123");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(
+            config.admin_read_token.as_deref(),
+            Some("prod-proxy-admin-read-token-123")
+        );
+    }
+
+    #[test]
+    fn rejects_default_admin_read_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", DEFAULT_ADMIN_READ_TOKEN);
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("production default admin read token should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_ADMIN_READ_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_admin_read_token_equal_to_write_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "prod-proxy-admin-token-123");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("production duplicated admin read token should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_ADMIN_READ_TOKEN"));
     }
 
     #[test]
@@ -532,6 +673,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
             "PROXY_ROUTE_STORE_BACKEND",
             "PROXY_ROUTE_STORE_REDIS_URL",
             "PROXY_ROUTE_STORE_KEY_PREFIX",
@@ -544,6 +686,7 @@ mod tests {
             clear_production_env();
             clear_route_store_env();
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
         let config = Config::try_from_env().unwrap();
@@ -561,6 +704,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
             "PROXY_ROUTE_STORE_BACKEND",
             "PROXY_ROUTE_STORE_REDIS_URL",
             "PROXY_ROUTE_STORE_KEY_PREFIX",
@@ -573,6 +717,7 @@ mod tests {
             clear_production_env();
             clear_route_store_env();
             env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
             env::set_var("PROXY_ROUTE_STORE_BACKEND", "redis");
             env::set_var("REGISTRY_URL", "redis://registry:6379");
             env::set_var("REDIS_URL", "redis://redis:6379");
