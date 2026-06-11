@@ -174,6 +174,49 @@ async function fetchGameServerStatus(options) {
   return payload;
 }
 
+export async function fetchRolloutDrainStatus(options) {
+  const headers = {};
+  if (options.serviceToken) {
+    headers["x-service-token"] = options.serviceToken;
+  }
+
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/rollout-drain-status`, { headers });
+  const payload = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`fetch rollout drain status failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
+  if (!payload.ok) {
+    throw new Error(`fetch rollout drain status failed: ${payload.errorCode || JSON.stringify(payload)}`);
+  }
+
+  return payload;
+}
+
+export async function runRolloutDrainStatus(options) {
+  const status = await fetchRolloutDrainStatus(options);
+  const summary = {
+    ok: status.ok,
+    rolloutEpoch: status.rolloutEpoch,
+    ownerServerId: status.ownerServerId,
+    connectionCount: status.connectionCount,
+    ownedRoomCount: status.ownedRoomCount,
+    migratingRoomCount: status.migratingRoomCount,
+    routeSampleCount: status.routes?.length || 0,
+    routes: (status.routes || []).slice(0, 10).map((route) => ({
+      roomId: route.roomId,
+      ownerServerId: route.ownerServerId,
+      migrationState: route.migrationState,
+      memberCount: route.memberCount,
+      onlineMemberCount: route.onlineMemberCount,
+      emptySinceMs: route.emptySinceMs,
+      roomVersion: route.roomVersion
+    }))
+  };
+  console.log("rolloutDrainStatus:", JSON.stringify(summary, null, 2));
+  return status;
+}
+
 async function setDrainMode(options, enabled) {
   await updateGameServerConfig(options, "drain_mode", enabled ? "on" : "off");
   const status = await fetchGameServerStatus(options);

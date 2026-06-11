@@ -18,7 +18,19 @@ const MESSAGE_TYPE = {
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
   ADMIN_AUTH_REQ: 2099,
+  GET_ROLLOUT_DRAIN_STATUS_REQ: 1609,
+  GET_ROLLOUT_DRAIN_STATUS_RES: 1610,
   ERROR_RES: 9000
+};
+
+const ROOM_MIGRATION_STATE = {
+  0: "OwnedByOld",
+  1: "DrainingOnOld",
+  2: "FrozenForTransfer",
+  3: "ImportingToNew",
+  4: "OwnedByNew",
+  5: "TransferFailed",
+  6: "RetiredOnOld"
 };
 
 function encodePacket(messageType, seq, body) {
@@ -97,6 +109,127 @@ function createAdminError(code, message = code) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function decodeVarint(bytes, offset) {
+  let result = 0n;
+  let shift = 0n;
+  let position = offset;
+
+  while (position < bytes.length) {
+    const byte = BigInt(bytes[position]);
+    result |= (byte & 0x7fn) << shift;
+    position += 1;
+    if ((byte & 0x80n) === 0n) {
+      return { value: result, nextOffset: position };
+    }
+    shift += 7n;
+  }
+
+  throw new Error("UNEXPECTED_END_OF_VARINT");
+}
+
+function appendField(fields, fieldNumber, value) {
+  const current = fields.get(fieldNumber);
+  if (current === undefined) {
+    fields.set(fieldNumber, value);
+    return;
+  }
+  if (Array.isArray(current)) {
+    current.push(value);
+    return;
+  }
+  fields.set(fieldNumber, [current, value]);
+}
+
+function decodeFieldsWithRepeated(body) {
+  const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+  const fields = new Map();
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    const tag = decodeVarint(bytes, offset);
+    const fieldNumber = Number(tag.value >> 3n);
+    const wireType = Number(tag.value & 0x07n);
+    offset = tag.nextOffset;
+
+    if (wireType === 0) {
+      const value = decodeVarint(bytes, offset);
+      appendField(fields, fieldNumber, value.value);
+      offset = value.nextOffset;
+      continue;
+    }
+
+    if (wireType === 2) {
+      const length = decodeVarint(bytes, offset);
+      offset = length.nextOffset;
+      const end = offset + Number(length.value);
+      if (end > bytes.length) {
+        throw new Error("UNEXPECTED_END_OF_LENGTH_DELIMITED_FIELD");
+      }
+      appendField(fields, fieldNumber, Buffer.from(bytes.subarray(offset, end)));
+      offset = end;
+      continue;
+    }
+
+    throw new Error(`UNSUPPORTED_WIRE_TYPE_${wireType}`);
+  }
+
+  return fields;
+}
+
+function readString(fields, fieldNumber) {
+  const value = fields.get(fieldNumber);
+  if (!value) {
+    return "";
+  }
+  return Buffer.from(Array.isArray(value) ? value[0] : value).toString("utf8");
+}
+
+function readBool(fields, fieldNumber) {
+  return Number(fields.get(fieldNumber) || 0n) !== 0;
+}
+
+function readUInt64(fields, fieldNumber) {
+  return Number(fields.get(fieldNumber) || 0n);
+}
+
+function readRepeatedMessages(fields, fieldNumber, decoder) {
+  const value = fields.get(fieldNumber);
+  if (!value) {
+    return [];
+  }
+  return (Array.isArray(value) ? value : [value]).map(decoder);
+}
+
+function decodeRoomRouteStatus(body) {
+  const fields = decodeFieldsWithRepeated(body);
+  const migrationStateValue = readUInt64(fields, 3);
+
+  return {
+    roomId: readString(fields, 1),
+    ownerServerId: readString(fields, 2),
+    migrationState: ROOM_MIGRATION_STATE[migrationStateValue] || `Unknown(${migrationStateValue})`,
+    memberCount: readUInt64(fields, 4),
+    onlineMemberCount: readUInt64(fields, 5),
+    emptySinceMs: readUInt64(fields, 6),
+    roomVersion: readUInt64(fields, 7)
+  };
+}
+
+export function decodeRolloutDrainStatusRes(body) {
+  const fields = decodeFieldsWithRepeated(body);
+
+  return {
+    ok: readBool(fields, 1),
+    errorCode: readString(fields, 2),
+    rolloutEpoch: readString(fields, 3),
+    ownerServerId: readString(fields, 4),
+    ownedRoomCount: readUInt64(fields, 5),
+    migratingRoomCount: readUInt64(fields, 6),
+    connectionCount: readUInt64(fields, 7),
+    routes: readRepeatedMessages(fields, 8, decodeRoomRouteStatus)
+  };
 }
 
 async function sendAdminRequest(config, messageType, payload, expectedType, decodeMessage) {
@@ -299,6 +432,16 @@ export class GameAdminClient {
           errorCode: message.getErrorCode()
         };
       }
+    );
+  }
+
+  async getRolloutDrainStatus() {
+    return sendAdminRequest(
+      this.config,
+      MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_REQ,
+      { serializeBinary: () => Buffer.alloc(0) },
+      MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_RES,
+      decodeRolloutDrainStatusRes
     );
   }
 }

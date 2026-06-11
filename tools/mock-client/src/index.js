@@ -28,6 +28,7 @@ import {
   runDrainExistingRoomReconnect,
   runDrainExistingRoomObserver,
   runDrainCreateMatchedRoomRejected,
+  runRolloutDrainStatus,
   runServerRedirectListen,
   runServerRedirectReconnect,
   runCreateMatchedRoom,
@@ -199,6 +200,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.DRAIN_CREATE_MATCHED_ROOM_REJECTED) {
     await runDrainCreateMatchedRoomRejected(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ROLLOUT_DRAIN_STATUS) {
+    await runRolloutDrainStatus(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

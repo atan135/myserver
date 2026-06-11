@@ -59,6 +59,18 @@ export class InternalController {
     }
   }
 
+  @Get("rollout-drain-status")
+  @ApiOperation({ summary: "Get game-server rollout drain status" })
+  async rolloutDrainStatus(@Req() req: any) {
+    verifyInternalToken(req, this.config);
+
+    try {
+      return await this.gameAdminClient.getRolloutDrainStatus();
+    } catch (error: any) {
+      throw gameServerError(error);
+    }
+  }
+
   @Post("config")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Update game-server runtime config" })
