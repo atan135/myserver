@@ -1912,6 +1912,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_route_rejects_rollout_epoch_mismatch() {
+        let store = ProxyRouteStore::default();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let result = store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, "")
+                    .with_rollout_epoch("rollout-legacy"),
+                Some(0),
+                None,
+            )
+            .await;
+
+        assert_eq!(result.unwrap_err().code(), "ROLLOUT_EPOCH_MISMATCH");
+        assert!(store.list_room_routes().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn bind_room_owner_preserves_version_for_same_owner() {
         let store = ProxyRouteStore::default();
         store
