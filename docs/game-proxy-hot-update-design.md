@@ -44,8 +44,8 @@
 
 - proxy route store 当前是进程内内存态，尚未持久化。
 - 自动灰度结束检测尚未完整闭环。
-- `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，mock-client 已能认证进房后监听该 push；客户端断线重连到 proxy 并重新 `AuthReq + RoomReconnectReq/RoomJoinReq` 的真实端到端链路尚未完成。
-- `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口；真实多进程联调、客户端 redirect/reconnect 和自动灰度收尾仍未完成。
+- `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
+- `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口；真实 old/new/proxy 多进程联调、mybevy 适配和自动灰度收尾仍未完成。
 - proxy 不做同一连接内换 upstream。
 - proxy 不保存玩法状态，不做 room transfer payload 权威存储。
 
@@ -319,11 +319,11 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 尚未闭环的目标行为：
 
 - old server 可通过控制面主动下发 `ServerRedirectPush`，push 只发给当前 old server 上目标 room 的在线成员。
-- 客户端收到 redirect 后断线重连到 push 中的 proxy 目标地址。
+- mybevy 等真实客户端收到 redirect 后断线重连到 push 中的 proxy 目标地址。
 - 客户端重连后通过 proxy 进入 new owner 的端到端联调。
 - proxy 自动判断 rollout 结束。
 
-显式编排入口当前仍是第一阶段 redirect/reconnect 的前置控制流，不是同连接迁移。它只调用已鉴权 `game-server` admin TCP 包协议和 `game-proxy` admin HTTP；proxy 仍保持透明转发模型，不实现 L7 relay 或同连接 upstream swap。客户端收到 `ServerRedirectPush` 后仍需要主动断开当前连接，重新连接 proxy 并发送 `AuthReq` + `RoomReconnectReq` / `RoomJoinReq`。
+显式编排入口当前仍是第一阶段 redirect/reconnect 的前置控制流，不是同连接迁移。它只调用已鉴权 `game-server` admin TCP 包协议和 `game-proxy` admin HTTP；proxy 仍保持透明转发模型，不实现 L7 relay 或同连接 upstream swap。`tools/mock-client` 已有主动断线重连验证场景，但这不是 old/new/proxy 多进程自动化联调，也不代表 mybevy 已适配。
 
 ## 10. 配置项
 

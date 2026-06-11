@@ -1,7 +1,8 @@
 # Mock Client Rollout / Drain 测试帮助
 
 # 这份文档只覆盖当前已经落地、可直接执行的第一批 rollout/drain/redirect 验证。
-# 当前仓库尚未实现完整的客户端自动重连链路，因此 redirect 这里只验证 push 下发和监听。
+# mock-client 已提供 redirect push 监听和收到 push 后主动断线重连目标入口的工具场景。
+# 该工具场景不等于真实 old/new/proxy 多进程联调自动化，也不代表 mybevy 已适配。
 
 # ========== 前置说明 ==========
 
@@ -14,10 +15,12 @@
 # 6. drain 下拒绝 CreateMatchedRoomReq 创建新房
 # 7. old_server 可通过已鉴权 admin/internal 通道触发 ServerRedirectPush
 # 8. mock-client 可认证/进房后监听 ServerRedirectPush 并输出结构化结果
+# 9. mock-client 可在收到 ServerRedirectPush 后主动关闭旧连接，连接 push 中的目标入口，
+#    重新 AuthReq，并优先发送 RoomReconnectReq
 
 # 当前还不能直接用 mock-client 验证的能力:
-# 1. 客户端收到 redirect 后自动断开并重连到 proxy/new_server
-# 2. 真实多进程联调下的完整灰度接管闭环
+# 1. 真实 old/new/proxy 多进程联调下的完整灰度接管自动化
+# 2. 外部 mybevy 客户端适配
 # 3. 同连接迁移 / L7 relay
 #
 # 当前新增的控制流工具:
@@ -123,6 +126,26 @@ node tools/mock-client/src/index.js --scenario drain-create-matched-room-rejecte
 # - targetHost/targetPort 指向客户端后续应重连的 proxy
 node tools/mock-client/src/index.js --scenario server-redirect-listen --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-redirect-room --timeout-ms 30000
 
+# 7. server-redirect-reconnect
+# 说明:
+# - mock-client 登录并进入指定 room
+# - 等待旧服控制面触发 ServerRedirectPush
+# - 收到后主动关闭旧连接
+# - 使用 push.target_host / push.target_port 连接目标入口
+# - 重新发送 AuthReq
+# - 默认优先发送 RoomReconnectReq
+# 期望:
+# - reconnect 成功并输出 serverRedirectReconnectResult
+# - 输出包含 redirect 字段、reconnect 响应、join 响应(null 或 fallback 结果)、finalRoomId
+# 可选:
+# - 只有显式传 --allow-redirect-join-fallback 时，RoomReconnectReq 返回
+#   ROOM_NOT_FOUND / PLAYER_NOT_IN_ROOM / PLAYER_NOT_FOUND / PLAYER_NOT_OFFLINE
+#   才会 fallback 到 RoomJoinReq。
+node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-redirect-room --timeout-ms 30000
+
+# 允许 reconnect 找不到离线成员/房间时 fallback 到 join:
+node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-redirect-room --timeout-ms 30000 --allow-redirect-join-fallback
+
 # ========== room transfer 编排入口 ==========
 
 # 该命令用于显式执行第一阶段 room transfer 的控制面顺序:
@@ -149,7 +172,8 @@ node tools/mock-client/src/rollout-transfer-cli.js ^
 
 # 单独触发 ServerRedirectPush:
 # 这个命令只调用 old game-server admin TriggerServerRedirectReq(1611)，不会执行 freeze/export/import/retire，
-# 也不会自动断开客户端连接。客户端仍需要收到 push 后重连到 proxy，再发 AuthReq + RoomReconnectReq/RoomJoinReq。
+# 也不会自动断开旧服连接。可配合 server-redirect-listen 验证 push，或配合
+# server-redirect-reconnect 验证 mock-client 主动断线、重连 proxy、AuthReq + RoomReconnectReq/RoomJoinReq。
 node tools/mock-client/src/rollout-transfer-cli.js ^
   --trigger-redirect-only ^
   --rollout-epoch rollout-20260611-a ^
@@ -183,8 +207,10 @@ npm run test:integration
 # - new room create 会被挡住
 # - existing room join / reconnect / observer 不受影响
 # - ServerRedirectPush 可被 old_server 控制面触发并被在线 room 成员收到
+# - ServerRedirectPush 收到后，mock-client 可主动断开并连接 push 中的目标入口，重新 AuthReq，
+#   再优先 RoomReconnectReq，必要时按显式参数 fallback 到 RoomJoinReq
 
 # 还没有覆盖的 rollout 链路:
-# - 客户端收到 ServerRedirectPush 后自动断开重连
-# - 断线后通过 proxy 进入 new_server 的端到端验证
+# - old/new/proxy 多进程完整自动化联调
+# - mybevy 客户端 redirect/reconnect 适配
 # - 完整灰度收尾

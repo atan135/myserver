@@ -17,6 +17,12 @@ import {
 import { decodeByMessageType } from "../messages.js";
 import { fetchTicket, formatLoginSummary, refreshTicketIfNeeded } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
+import {
+  buildRedirectReconnectOptions,
+  shouldFallbackToJoin,
+  summarizeRedirectReconnectResult,
+  validateServerRedirectPush
+} from "../server-redirect-reconnect.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 
@@ -1298,18 +1304,103 @@ export async function runServerRedirectListen(options) {
       targetServerId: redirect.targetServerId,
       transport: redirect.transport
     };
-    if (result.roomId !== options.roomId) {
-      throw new Error(`redirect room mismatch: expected ${options.roomId}, got ${result.roomId}`);
-    }
-    if (!result.reconnectRequired) {
-      throw new Error("redirect push did not require reconnect");
-    }
-    if (!result.targetHost || !result.targetPort) {
-      throw new Error("redirect push missing target host or port");
-    }
+    validateServerRedirectPush(result, options.roomId);
     console.log("serverRedirectResult:", JSON.stringify(result, null, 2));
     return result;
   } finally {
     client.close();
+  }
+}
+
+export async function runServerRedirectReconnect(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+
+  const oldClient = new TcpProtocolClient(options, "redirectOldClient");
+  let newClient = null;
+  await oldClient.connect();
+
+  try {
+    await authenticateClient(oldClient, options, login, 1);
+    const joined = await joinRoomExpectSuccess(oldClient, options, options.roomId, 2, "redirectJoin");
+
+    console.log("redirectOldClient.waitingForServerRedirect:", JSON.stringify({
+      roomId: joined.joinRes.roomId,
+      playerId: login.playerId,
+      timeoutMs: options.timeoutMs
+    }, null, 2));
+
+    const redirect = await oldClient.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.SERVER_REDIRECT_PUSH,
+      "serverRedirectPush"
+    );
+    validateServerRedirectPush(redirect, options.roomId);
+
+    const reconnectOptions = buildRedirectReconnectOptions(options, redirect);
+    console.log("redirectOldClient.closingForRedirect:", JSON.stringify({
+      roomId: redirect.roomId,
+      targetHost: reconnectOptions.gameHost || reconnectOptions.host,
+      targetPort: reconnectOptions.port,
+      transport: redirect.transport,
+      retryAfterMs: redirect.retryAfterMs
+    }, null, 2));
+
+    oldClient.close();
+    if (redirect.retryAfterMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, redirect.retryAfterMs));
+    }
+
+    newClient = new TcpProtocolClient(reconnectOptions, "redirectNewClient");
+    await newClient.connect();
+    await authenticateClient(newClient, reconnectOptions, login, 3);
+
+    await newClient.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(login.playerId));
+    const reconnectPacket = await newClient.readNextPacket(reconnectOptions.timeoutMs);
+    const reconnectRes = printResponse("redirectNewClient.roomReconnect", reconnectPacket);
+    if (reconnectPacket.messageType !== MESSAGE_TYPE.ROOM_RECONNECT_RES) {
+      throw new Error(`redirectNewClient expected ROOM_RECONNECT_RES, got ${reconnectPacket.messageType}`);
+    }
+
+    let joinRes = null;
+    let finalMode = "reconnect";
+    if (!reconnectRes.ok) {
+      if (!shouldFallbackToJoin(reconnectRes, options)) {
+        throw new Error(`redirect reconnect failed: ${reconnectRes.errorCode}`);
+      }
+
+      finalMode = "join";
+      await newClient.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 5, encodeRoomJoinReq(redirect.roomId));
+      const joinPacket = await newClient.readNextPacket(reconnectOptions.timeoutMs);
+      joinRes = printResponse("redirectNewClient.roomJoinFallback", joinPacket);
+      if (joinPacket.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
+        throw new Error(`redirectNewClient expected ROOM_JOIN_RES, got ${joinPacket.messageType}`);
+      }
+      if (!joinRes.ok) {
+        throw new Error(`redirect join fallback failed: ${joinRes.errorCode}`);
+      }
+      await newClient.readUntil(
+        reconnectOptions.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH,
+        "roomStatePush(joinFallback)"
+      );
+    }
+
+    const result = summarizeRedirectReconnectResult({
+      login,
+      redirect,
+      reconnectRes,
+      joinRes,
+      finalMode
+    });
+    if (result.finalRoomId !== options.roomId) {
+      throw new Error(`redirect final room mismatch: expected ${options.roomId}, got ${result.finalRoomId}`);
+    }
+
+    console.log("serverRedirectReconnectResult:", JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    oldClient.close();
+    newClient?.close();
   }
 }

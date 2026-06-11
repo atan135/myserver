@@ -47,6 +47,8 @@ $env:MYSERVER_CLIENT_ROOT = "C:\project\mybevy"
 - 处理 `ServerRedirectPush`，断线后重新鉴权并执行 `RoomJoinReq` 或 `RoomReconnectReq`
 - 生产环境只依赖 `auth-http` 和 `game-proxy`；聊天、公告、邮件和匹配能力应通过服务端入口、游戏协议或后续 BFF 收敛，不作为生产客户端直连内部服务的默认模型
 
+`tools/mock-client` 已提供 `server-redirect-listen` 和 `server-redirect-reconnect` 场景，可验证工具侧收到 `ServerRedirectPush` 后主动断开旧连接、连接 push 中的目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。这只是 mock-client 验证工具能力，不代表外部 `mybevy` 已适配，也不是 old/new/proxy 多进程灰度接管自动化验收或同连接迁移。
+
 ## 5. 协议维护
 
 新增或修改协议时，应同步处理：

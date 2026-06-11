@@ -22,7 +22,7 @@
 - `M0`：已完成。规范源、接管判定、第一阶段切服方式、协议名和消息编号已经冻结。
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、proxy route upsert 和 old retire。
-- `M4`：已补齐 `ServerRedirectPush` 的可控下发入口与 mock-client 监听验证入口；客户端真实断线重连、mybevy 适配和三进程端到端联调仍未完成。
+- `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
 - `M5` ~ `M6`：完整玩法 payload、演练和自动化收尾仍未完成。
 
 ## 1. 里程碑划分
@@ -289,7 +289,8 @@
 - `ServerRedirectPush` 已扩展目标 proxy 信息，包含 `target_host`、`target_port`、`target_server_id` 和 `transport`。
 - `game-server` 已通过已鉴权 admin/internal 通道支持 `TriggerServerRedirectReq/Res`，可向目标 room 当前在线成员下发 `ServerRedirectPush`。
 - `tools/mock-client` 已有 `server-redirect-listen` 场景和 parser 单测，用于认证/进房后监听并结构化输出 push。
-- 真实多进程联调、客户端收到 push 后自动断线重连、外部 `mybevy` 适配仍未完成。
+- `tools/mock-client` 已有 `server-redirect-reconnect` 场景，用于收到 push 后主动关闭旧连接，按 `target_host` / `target_port` 连接目标入口，重新 `AuthReq`，并优先发送 `RoomReconnectReq`；可按显式参数在找不到房间/离线成员时 fallback 到 `RoomJoinReq`。
+- 真实 old/new/proxy 多进程联调自动化、外部 `mybevy` 适配和同连接迁移仍未完成。
 
 ### 6.1 协议定义
 
@@ -315,11 +316,12 @@
 ### 6.3 mybevy 客户端 / mock-client 处理
 
 - [ ] 外部 `mybevy` 客户端收到 `ServerRedirectPush` 后执行断线重连。
-- [ ] 重连后重新发起 `AuthReq`。
-- [ ] 重连后重新发起 `RoomJoinReq` 或 `RoomReconnectReq`。
+- [x] `mock-client` 收到 `ServerRedirectPush` 后执行断线重连。
+- [x] `mock-client` 重连后重新发起 `AuthReq`。
+- [x] `mock-client` 重连后优先发起 `RoomReconnectReq`，并支持显式 fallback 到 `RoomJoinReq`。
 - [x] `mock-client` 增加 redirect push 监听场景支持。
 
-当前实现说明：`TriggerServerRedirectReq/Res` 当前使用 `1611/1612`，可走 game-server admin TCP 或 internal socket 已鉴权通道。请求只触发 push，不自动 freeze/export/import/retire，不修改 room transfer 状态，也不实现同连接迁移。客户端收到 push 后仍必须主动断线，连接 push 中的 proxy 目标地址，再发送 `AuthReq` 和 `RoomReconnectReq` / `RoomJoinReq`。
+当前实现说明：`TriggerServerRedirectReq/Res` 当前使用 `1611/1612`，可走 game-server admin TCP 或 internal socket 已鉴权通道。请求只触发 push，不自动 freeze/export/import/retire，不修改 room transfer 状态，也不实现同连接迁移。`tools/mock-client` 的 `server-redirect-reconnect` 场景可验证工具侧“收到 push 后主动断线、连接目标入口、重新 `AuthReq`、优先 `RoomReconnectReq`”链路；它仍不是 old/new/proxy 多进程自动化联调，也不代表 mybevy 已适配。
 
 完成标准:
 

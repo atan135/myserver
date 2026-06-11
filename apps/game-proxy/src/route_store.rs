@@ -508,16 +508,16 @@ impl ProxyRouteStore {
     pub async fn select_upstream_for_player(&self, player_id: &str) -> Option<UpstreamRoute> {
         let state = self.state.read().await;
         if let Some(record) = state.player_routes.get(player_id) {
-            if let Some(server_id) = record.preferred_server_id.as_deref() {
-                if let Some(route) = state.find_connectable_route(server_id) {
-                    return Some(route.clone());
-                }
-            }
             if let Some(room_id) = record.current_room_id.as_deref() {
                 if let Some(room_route) = state.room_routes.get(room_id) {
                     if let Some(route) = state.find_connectable_route(&room_route.owner_server_id) {
                         return Some(route.clone());
                     }
+                }
+            }
+            if let Some(server_id) = record.preferred_server_id.as_deref() {
+                if let Some(route) = state.find_connectable_route(server_id) {
+                    return Some(route.clone());
                 }
             }
         }
@@ -972,5 +972,58 @@ mod tests {
             .find(|record| record.player_id == "player-1")
             .expect("player route should exist");
         assert_eq!(player_route.preferred_server_id.as_deref(), Some("old"));
+    }
+
+    #[tokio::test]
+    async fn player_reconnect_prefers_transferred_room_owner_route() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                UpstreamRoute {
+                    server_id: "old".to_string(),
+                    local_socket_name: "old.sock".to_string(),
+                    operation_state: UpstreamOperationState::Draining,
+                    health_state: UpstreamHealthState::Healthy,
+                },
+                UpstreamRoute {
+                    server_id: "new".to_string(),
+                    local_socket_name: "new.sock".to_string(),
+                    operation_state: UpstreamOperationState::Active,
+                    health_state: UpstreamHealthState::Healthy,
+                },
+            ])
+            .await;
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .bind_room_owner("room-1", "old", Some("player-1"), false)
+            .await;
+        store
+            .upsert_room_route(
+                room_record(
+                    "room-1",
+                    "new",
+                    RoomMigrationState::OwnedByNew,
+                    2,
+                    "checksum-1",
+                ),
+                Some(1),
+                Some(String::new()),
+            )
+            .await
+            .unwrap();
+
+        let route = store
+            .select_upstream_for_player("player-1")
+            .await
+            .expect("route should be selected");
+
+        assert_eq!(route.server_id, "new");
     }
 }

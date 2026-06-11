@@ -105,7 +105,8 @@ const DEFAULT_OPTIONS = {
   addBinded: false,
   // Internal API token
   serviceToken: "",
-  useServiceDiscovery: true
+  useServiceDiscovery: true,
+  allowRedirectJoinFallback: false
 };
 
 /**
@@ -181,6 +182,9 @@ export function parseArgs(argv) {
         break;
       case "--no-service-discovery":
         result.useServiceDiscovery = false;
+        break;
+      case "--allow-redirect-join-fallback":
+        result.allowRedirectJoinFallback = true;
         break;
       case "--timeout-ms":
         result.timeoutMs = Number.parseInt(collectOptionValue(argv, index).value, 10);

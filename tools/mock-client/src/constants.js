@@ -171,6 +171,7 @@ export const SCENARIO = {
   DRAIN_EXISTING_ROOM_OBSERVER: "drain-existing-room-observer",
   DRAIN_CREATE_MATCHED_ROOM_REJECTED: "drain-create-matched-room-rejected",
   SERVER_REDIRECT_LISTEN: "server-redirect-listen",
+  SERVER_REDIRECT_RECONNECT: "server-redirect-reconnect",
   // Match scenarios
   CREATE_MATCHED_ROOM: "create-matched-room",
   CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",
