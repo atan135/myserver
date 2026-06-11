@@ -473,6 +473,7 @@ message GetRolloutDrainStatusRes {
   repeated RoomRouteStatus transferable_empty_room_samples = 12;
   string drain_mode_reason = 13;
   string drain_mode_source = 14;
+  uint64 retired_room_count = 15;
 }
 
 message TriggerServerRedirectReq {

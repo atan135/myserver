@@ -102,6 +102,7 @@ pub struct RolloutDrainSnapshot {
     pub routes: Vec<RoomRouteStatus>,
     pub transferable_empty_room_count: u64,
     pub transferable_empty_room_samples: Vec<RoomRouteStatus>,
+    pub retired_room_count: u64,
 }
 
 #[derive(Clone)]
@@ -361,6 +362,7 @@ impl RoomManager {
         let mut transferable_empty_room_count = 0_u64;
         let mut transferable_empty_room_samples =
             Vec::with_capacity(route_limit.min(room_ids.len()));
+        let mut retired_room_count = 0_u64;
         let mut rollout_epoch: Option<&str> = None;
         let mut mixed_rollout_epoch = false;
 
@@ -386,7 +388,10 @@ impl RoomManager {
                 | RoomTransferStatus::Importing => {
                     migrating_room_count = migrating_room_count.saturating_add(1);
                 }
-                RoomTransferStatus::OwnedByNew | RoomTransferStatus::Retired => {}
+                RoomTransferStatus::Retired => {
+                    retired_room_count = retired_room_count.saturating_add(1);
+                }
+                RoomTransferStatus::OwnedByNew => {}
             }
 
             if let Some(epoch) = room.transfer_state.rollout_epoch.as_deref() {
@@ -416,6 +421,7 @@ impl RoomManager {
             routes,
             transferable_empty_room_count,
             transferable_empty_room_samples,
+            retired_room_count,
         }
     }
 
@@ -3191,6 +3197,7 @@ mod tests {
         assert!(snapshot.routes.is_empty());
         assert_eq!(snapshot.transferable_empty_room_count, 0);
         assert!(snapshot.transferable_empty_room_samples.is_empty());
+        assert_eq!(snapshot.retired_room_count, 0);
     }
 
     #[tokio::test]
@@ -3218,6 +3225,7 @@ mod tests {
         assert_eq!(snapshot.migrating_room_count, 0);
         assert_eq!(snapshot.transferable_empty_room_count, 0);
         assert!(snapshot.transferable_empty_room_samples.is_empty());
+        assert_eq!(snapshot.retired_room_count, 0);
         assert_eq!(snapshot.routes.len(), 1);
         let route = &snapshot.routes[0];
         assert_eq!(route.room_id, "room-test");
@@ -3280,6 +3288,7 @@ mod tests {
         assert_eq!(snapshot.owned_room_count, 3);
         assert_eq!(snapshot.migrating_room_count, 0);
         assert_eq!(snapshot.transferable_empty_room_count, 2);
+        assert_eq!(snapshot.retired_room_count, 0);
         assert_eq!(
             snapshot
                 .transferable_empty_room_samples
@@ -3335,6 +3344,7 @@ mod tests {
         assert_eq!(snapshot.migrating_room_count, 3);
         assert_eq!(snapshot.transferable_empty_room_count, 0);
         assert!(snapshot.transferable_empty_room_samples.is_empty());
+        assert_eq!(snapshot.retired_room_count, 0);
         assert_eq!(snapshot.routes.len(), 3);
         assert_eq!(
             snapshot
@@ -3358,7 +3368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollout_drain_snapshot_excludes_transferred_or_retired_rooms_from_blockers() {
+    async fn rollout_drain_snapshot_excludes_transferred_rooms_from_blockers_and_counts_retired() {
         let factory = RecordingRoomLogicFactory::default();
         let manager = RoomManager::with_match_client(
             crate::match_client::create_match_client_shared(),
@@ -3386,6 +3396,7 @@ mod tests {
         assert_eq!(snapshot.migrating_room_count, 0);
         assert_eq!(snapshot.transferable_empty_room_count, 0);
         assert!(snapshot.transferable_empty_room_samples.is_empty());
+        assert_eq!(snapshot.retired_room_count, 1);
         assert_eq!(snapshot.routes.len(), 2);
         assert_eq!(
             snapshot

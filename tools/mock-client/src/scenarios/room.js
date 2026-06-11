@@ -206,6 +206,7 @@ export async function runRolloutDrainStatus(options) {
     connectionCount: status.connectionCount,
     ownedRoomCount: status.ownedRoomCount,
     migratingRoomCount: status.migratingRoomCount,
+    retiredRoomCount: status.retiredRoomCount,
     transferableEmptyRoomCount: status.transferableEmptyRoomCount,
     routeSampleCount: status.routes?.length || 0,
     transferableEmptyRoomSampleCount: status.transferableEmptyRoomSamples?.length || 0,

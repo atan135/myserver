@@ -1785,6 +1785,7 @@ fn log_old_server_drain_status_blocked_completion(
         ok = ?old_server_drain_status.ok,
         owned_room_count = ?old_server_drain_status.owned_room_count,
         migrating_room_count = ?old_server_drain_status.migrating_room_count,
+        retired_room_count = ?old_server_drain_status.retired_room_count,
         connection_count = ?old_server_drain_status.connection_count,
         error = old_server_drain_status.error.as_deref().unwrap_or_default(),
         "old server drain status check blocked proxy rollout completion"

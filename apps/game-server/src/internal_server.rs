@@ -367,6 +367,7 @@ where
                         owned_room_count = snapshot.owned_room_count,
                         migrating_room_count = snapshot.migrating_room_count,
                         transferable_empty_room_count = snapshot.transferable_empty_room_count,
+                        retired_room_count = snapshot.retired_room_count,
                         rollout_epoch = %snapshot.rollout_epoch,
                         owner_server_id = %snapshot.owner_server_id,
                         "game-server rollout drain completed"
@@ -392,6 +393,7 @@ where
                         transferable_empty_room_samples: snapshot.transferable_empty_room_samples,
                         drain_mode_reason: runtime.drain_mode_reason,
                         drain_mode_source: runtime.drain_mode_source,
+                        retired_room_count: snapshot.retired_room_count,
                     },
                 )
                 .await?;

@@ -683,6 +683,8 @@ pub struct GetRolloutDrainStatusRes {
     pub drain_mode_reason: ::prost::alloc::string::String,
     #[prost(string, tag = "14")]
     pub drain_mode_source: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "15")]
+    pub retired_room_count: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TriggerServerRedirectReq {

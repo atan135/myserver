@@ -234,7 +234,8 @@ export function decodeRolloutDrainStatusRes(body) {
     transferableEmptyRoomCount: readUInt64(fields, 11),
     transferableEmptyRoomSamples: readRepeatedMessages(fields, 12, decodeRoomRouteStatus),
     drainModeReason: readString(fields, 13),
-    drainModeSource: readString(fields, 14)
+    drainModeSource: readString(fields, 14),
+    retiredRoomCount: readUInt64(fields, 15)
   };
 }
 

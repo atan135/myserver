@@ -403,12 +403,12 @@
 
 当前状态（截至 `2026-05-19`，后续补充至 `2026-06-11`）:
 
-- `GetRolloutDrainStatusReq/Res` 已在 `game-server` 已鉴权 admin/internal 通道落地处理，返回本进程真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`connection_count`、`owned_room_count`、`migrating_room_count`、`transferable_empty_room_count`、最多 50 条 `RoomRouteStatus` 样本与最多 50 条可接管空房样本。`transferable_empty_room_count` 仅统计仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room；在线 `Owned` room 仍计入 `owned_room_count`，但不计入可接管空房；`Frozen` / `Exported` / `Importing` 属于迁移中，不计入可接管空房。`drain_mode_entered_at_ms` 未进入 drain mode 时为 `0`；`owner_server_id` 使用当前 `SERVICE_INSTANCE_ID` / 派生实例 id；`rollout_epoch` 仅在本进程 room transfer 状态能归纳出单一 epoch 时返回。当前 `empty_since_ms` 表示本进程内已空置时长，不是 wall-clock 绝对时间戳。
+- `GetRolloutDrainStatusReq/Res` 已在 `game-server` 已鉴权 admin/internal 通道落地处理，返回本进程真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、`connection_count`、`owned_room_count`、`migrating_room_count`、`retired_room_count`、`transferable_empty_room_count`、最多 50 条 `RoomRouteStatus` 样本与最多 50 条可接管空房样本。`transferable_empty_room_count` 仅统计仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room；在线 `Owned` room 仍计入 `owned_room_count`，但不计入可接管空房；`Frozen` / `Exported` / `Importing` 属于迁移中，不计入可接管空房；`Retired` tombstone room 单独计入 `retired_room_count`，不计入仍持有 / 迁移中 / 可接管空房统计。`drain_mode_entered_at_ms` 未进入 drain mode 时为 `0`；`owner_server_id` 使用当前 `SERVICE_INSTANCE_ID` / 派生实例 id；`rollout_epoch` 仅在本进程 room transfer 状态能归纳出单一 epoch 时返回。当前 `empty_since_ms` 表示本进程内已空置时长，不是 wall-clock 绝对时间戳。
 - `game-server` 已为 room 进入可接管空房候选状态和旧服真实排空完成补齐关键日志：前者只在 `leave_room` / `disconnect_room_member` 让在线成员数从大于 `0` 变为 `0` 时记录；后者只在 admin/internal drain status 构造路径观测到 `connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时记录。
 - `auth-http` 已把 `GetRolloutDrainStatusReq/Res` 暴露为已鉴权内部控制接口 `GET /api/v1/internal/game-server/rollout-drain-status`，可作为 proxy 自动收尾后、停旧服前的人工或控制面校验入口。
-- `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数、可接管空房数量、route 样本和可接管空房样本。
+- `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数、已 retired room 数、可接管空房数量、route 样本和可接管空房样本。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
-- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整旧服自动停进程控制面。
+- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；`retiredRoomCount` / `retired_room_count` 作为观测字段透传，不改变 pass/fail 判定；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整旧服自动停进程控制面。
 
 ### 8.1 旧服状态查询
 
@@ -416,12 +416,13 @@
   - `connection_count`
   - `owned_room_count`
   - `migrating_room_count`
+  - `retired_room_count`
   - `transferable_empty_room_count`
   - route 样本中的 `RoomRouteStatus`
   - 可接管空房样本中的 `RoomRouteStatus`
 - [x] 通过 `auth-http` 已鉴权内部控制接口暴露旧服真实 drain 状态查询。
 - [x] 为 `tools/mock-client` 增加旧服真实 drain 状态查询场景。
-- [ ] 如停服编排需要，继续补充:
+- [x] 如停服编排需要，继续补充:
   - `retired_room_count`
   - 更明确的 `drain_mode` 字段
 - [x] `proxy` 在 `complete-if-drained` 可选校验旧服真实状态，具备停服前最小阻断闭环。

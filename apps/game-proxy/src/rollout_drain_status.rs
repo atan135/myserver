@@ -50,6 +50,7 @@ pub struct OldServerDrainStatusCheckSummary {
     pub owner_server_id: Option<String>,
     pub owned_room_count: Option<u64>,
     pub migrating_room_count: Option<u64>,
+    pub retired_room_count: Option<u64>,
     pub connection_count: Option<u64>,
     pub drain_mode_enabled: Option<bool>,
     pub drain_mode_entered_at_ms: Option<u64>,
@@ -70,6 +71,7 @@ impl OldServerDrainStatusCheckSummary {
             owner_server_id: None,
             owned_room_count: Some(0),
             migrating_room_count: Some(0),
+            retired_room_count: Some(0),
             connection_count: Some(0),
             drain_mode_enabled: Some(false),
             drain_mode_entered_at_ms: Some(0),
@@ -90,6 +92,7 @@ impl OldServerDrainStatusCheckSummary {
             owner_server_id: None,
             owned_room_count: Some(0),
             migrating_room_count: Some(0),
+            retired_room_count: Some(0),
             connection_count: Some(connection_count),
             drain_mode_enabled: Some(true),
             drain_mode_entered_at_ms: Some(1000),
@@ -114,6 +117,7 @@ impl OldServerDrainStatusCheckSummary {
             owner_server_id: None,
             owned_room_count: None,
             migrating_room_count: None,
+            retired_room_count: None,
             connection_count: None,
             drain_mode_enabled: None,
             drain_mode_entered_at_ms: None,
@@ -463,6 +467,7 @@ struct AuthHttpDrainStatusResponse {
     owner_server_id: Option<String>,
     owned_room_count: Option<u64>,
     migrating_room_count: Option<u64>,
+    retired_room_count: Option<u64>,
     connection_count: Option<u64>,
     drain_mode_enabled: Option<bool>,
     drain_mode_entered_at_ms: Option<u64>,
@@ -481,6 +486,7 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
             owner_server_id: None,
             owned_room_count: None,
             migrating_room_count: None,
+            retired_room_count: None,
             connection_count: None,
             drain_mode_enabled: None,
             drain_mode_entered_at_ms: None,
@@ -502,6 +508,7 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
                 owner_server_id: None,
                 owned_room_count: None,
                 migrating_room_count: None,
+                retired_room_count: None,
                 connection_count: None,
                 drain_mode_enabled: None,
                 drain_mode_entered_at_ms: None,
@@ -543,6 +550,7 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
         owner_server_id: payload.owner_server_id,
         owned_room_count: payload.owned_room_count,
         migrating_room_count: payload.migrating_room_count,
+        retired_room_count: payload.retired_room_count,
         connection_count: payload.connection_count,
         drain_mode_enabled: payload.drain_mode_enabled,
         drain_mode_entered_at_ms: payload.drain_mode_entered_at_ms,
@@ -573,7 +581,7 @@ mod tests {
     fn response_summary_passes_only_when_real_counts_are_zero() {
         let summary = summary_from_http_response(HttpResponse {
             status_code: 200,
-            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":0,"drainModeEnabled":false,"drainModeEnteredAtMs":0,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
+            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"retiredRoomCount":0,"connectionCount":0,"drainModeEnabled":false,"drainModeEnteredAtMs":0,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
         });
 
         assert_eq!(summary, OldServerDrainStatusCheckSummary::passed());
@@ -583,10 +591,11 @@ mod tests {
     fn response_summary_blocks_nonzero_connections() {
         let summary = summary_from_http_response(HttpResponse {
             status_code: 200,
-            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":1,"drainModeEnabled":true,"drainModeEnteredAtMs":123,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
+            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"retiredRoomCount":3,"connectionCount":1,"drainModeEnabled":true,"drainModeEnteredAtMs":123,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
         });
 
         assert!(!summary.passed);
+        assert_eq!(summary.retired_room_count, Some(3));
         assert_eq!(summary.connection_count, Some(1));
         assert_eq!(summary.error.as_deref(), Some("OLD_SERVER_NOT_DRAINED"));
     }
