@@ -3,6 +3,7 @@ use std::env;
 use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
 
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
+const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
@@ -64,6 +65,7 @@ pub struct Config {
     pub ticket_secret: String,
     pub proxy_max_connections: u64,
     pub proxy_max_preauth_failures: u32,
+    pub maintenance_cache_ttl_ms: u64,
     pub connection_limits: ConnectionLimitConfig,
     // Service Registry
     pub registry_enabled: bool,
@@ -128,6 +130,10 @@ impl Config {
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let proxy_max_connections = parse_u64("PROXY_MAX_CONNECTIONS", 0);
         let proxy_max_preauth_failures = parse_u32("PROXY_MAX_PREAUTH_FAILURES", 3);
+        let maintenance_cache_ttl_ms = parse_u64(
+            "PROXY_MAINTENANCE_CACHE_TTL_MS",
+            DEFAULT_MAINTENANCE_CACHE_TTL_MS,
+        );
         let connection_limits = ConnectionLimitConfig {
             ip_denylist: IpDenyList::parse_csv(&env::var("PROXY_IP_DENYLIST").unwrap_or_default())?,
             max_connections_per_ip: parse_u64("PROXY_MAX_CONNECTIONS_PER_IP", 0),
@@ -176,6 +182,7 @@ impl Config {
             ticket_secret,
             proxy_max_connections,
             proxy_max_preauth_failures,
+            maintenance_cache_ttl_ms,
             connection_limits,
             registry_enabled,
             registry_url,

@@ -2,6 +2,53 @@ import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 
 const SALT_ROUNDS = 10;
+const MAINTENANCE_STATE_KEY = "maintenance:global";
+
+function maintenanceStateKey(prefix = "") {
+  return `${prefix || ""}${MAINTENANCE_STATE_KEY}`;
+}
+
+function normalizeOptionalString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeMaintenanceState(state = {}) {
+  return {
+    enabled: state.enabled === true,
+    reason: normalizeOptionalString(state.reason),
+    updatedAt: normalizeOptionalString(state.updatedAt),
+    updatedBy: normalizeOptionalString(state.updatedBy)
+  };
+}
+
+function parseMaintenanceState(raw) {
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return normalizeMaintenanceState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function toIsoString(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return String(value);
+}
 
 function hashPassword(password) {
   return bcrypt.hashSync(password, SALT_ROUNDS);
@@ -29,8 +76,18 @@ function toAdmin(row) {
 }
 
 export class AdminStore {
-  constructor(pool) {
+  constructor(pool, redis = null, config = {}) {
     this.pool = pool;
+    this.redis = redis;
+    this.redisKeyPrefix = config.redisKeyPrefix || "";
+  }
+
+  prefixedKey(key) {
+    return `${this.redisKeyPrefix}${key}`;
+  }
+
+  maintenanceStateKey() {
+    return maintenanceStateKey(this.redisKeyPrefix);
   }
 
   async findAdminByUsername(username) {
@@ -348,34 +405,63 @@ export class AdminStore {
   // Maintenance Mode
   // ============================================================
 
-  async setMaintenanceMode(enabled, reason = "") {
-    await this.pool.execute(
-      `INSERT INTO admin_audit_logs (admin_id, admin_username, action, target_type, target_value, details_json, ip)
-       VALUES (NULL, 'system', ?, 'system', 'maintenance', ?, NULL)`,
-      [enabled ? "maintenance_enabled" : "maintenance_disabled", JSON.stringify({ reason })]
-    );
-    return { ok: true };
+  async setMaintenanceMode(enabled, { reason = null, updatedAt = null, updatedBy = null } = {}) {
+    if (!this.redis) {
+      throw new Error("MAINTENANCE_REDIS_UNAVAILABLE");
+    }
+
+    const state = normalizeMaintenanceState({
+      enabled,
+      reason,
+      updatedAt: updatedAt || new Date().toISOString(),
+      updatedBy
+    });
+    await this.redis.set(this.maintenanceStateKey(), JSON.stringify(state));
+    return state;
   }
 
   async getMaintenanceStatus() {
+    if (this.redis) {
+      const raw = await this.redis.get(this.maintenanceStateKey());
+      const state = parseMaintenanceState(raw);
+      if (state) {
+        return state;
+      }
+    }
+
     const [rows] = await this.pool.execute(
-      `SELECT action, details_json, created_at
+      `SELECT action, admin_username, details_json, created_at
        FROM admin_audit_logs
        WHERE action IN ('maintenance_enabled', 'maintenance_disabled')
        ORDER BY created_at DESC
        LIMIT 1`
     );
     if (rows.length === 0) {
-      return { enabled: false, reason: null, updatedAt: null };
+      return normalizeMaintenanceState();
     }
     const latest = rows[0];
-    const details = latest.details_json ? JSON.parse(latest.details_json) : {};
-    return {
+    let details = {};
+    try {
+      details = latest.details_json ? JSON.parse(latest.details_json) : {};
+    } catch {
+      details = {};
+    }
+
+    return normalizeMaintenanceState({
       enabled: latest.action === "maintenance_enabled",
       reason: details.reason || null,
-      updatedAt: latest.created_at
-    };
+      updatedAt: toIsoString(latest.created_at),
+      updatedBy: latest.admin_username || null
+    });
   }
 }
 
-export { hashPassword, verifyPassword, hashToken };
+export {
+  MAINTENANCE_STATE_KEY,
+  hashPassword,
+  maintenanceStateKey,
+  normalizeMaintenanceState,
+  parseMaintenanceState,
+  verifyPassword,
+  hashToken
+};

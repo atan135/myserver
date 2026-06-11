@@ -20,7 +20,7 @@
 - 服务监控总览、服务监控详情、metrics 归档接口
 - 维护模式状态查询与切换接口
 
-其中“维护模式”当前只在后台侧记录状态和审计日志，还没有联动到登录服或游戏服做强制拦截。
+维护模式当前已经是共享入口拦截能力：`admin-api` 写入 Redis 共享状态并保留审计，`auth-http` 会拦截普通玩家登录和新 game ticket 签发，`game-proxy` 会在新 `AuthReq` 接入时拒绝认证；已有在线连接不会被主动踢下线。
 
 ## 架构
 
@@ -33,7 +33,7 @@ apps/
 管理后台依赖的外部组件：
 
 - MySQL：读取 `myserver_auth` 中的管理员、玩家、审计和安全日志数据
-- Redis：读取各服务上报的 heartbeat 与 metrics
+- Redis：读取各服务上报的 heartbeat 与 metrics，并写入维护模式共享状态
 - `game-server` admin TCP 通道：执行 GM 指令
 
 ## 快速启动
@@ -389,7 +389,8 @@ npm run dev:admin-web
   "ok": true,
   "enabled": false,
   "reason": null,
-  "updatedAt": null
+  "updatedAt": null,
+  "updatedBy": null
 }
 ```
 
@@ -408,9 +409,12 @@ npm run dev:admin-web
 
 当前实现说明：
 
-- 该接口会写入 `admin_audit_logs`
-- `GET /api/v1/maintenance` 通过读取最近一次 `maintenance_enabled` / `maintenance_disabled` 审计记录来还原状态
-- 目前没有把维护状态下发给其他服务，也没有真的阻止玩家登录或进入游戏
+- `enabled` 必须是 boolean；`reason` 可选，传入时会 trim，最长 512 字符
+- 该接口会写入 `${REDIS_KEY_PREFIX}maintenance:global`，值为 JSON，包含 `enabled`、`reason`、`updatedAt`、`updatedBy`
+- 该接口会继续写入 `admin_audit_logs`，动作为 `maintenance_enabled` / `maintenance_disabled`
+- `GET /api/v1/maintenance` 优先读取 Redis 共享状态；Redis 没有状态时，兼容读取最近一次维护模式审计记录来还原状态
+- 维护开启后，`auth-http` 拒绝普通玩家登录和新 game ticket 签发，返回 `MAINTENANCE_MODE`；`game-proxy` 在新 `AuthReq` 阶段返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`
+- 维护模式只阻止新登录、签票和新游戏接入，不主动踢已有在线连接；登出、ticket revoke 等清理操作不被拦截
 
 ### GM 命令
 

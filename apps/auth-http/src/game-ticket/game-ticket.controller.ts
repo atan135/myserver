@@ -37,6 +37,8 @@ export class GameTicketController {
       throw unauthorized("INVALID_ACCESS_TOKEN");
     }
 
+    await this.authService.assertNotInMaintenance();
+
     const ticket = await this.authStore.issueGameTicket(session.playerId, getClientIp(req, this.config));
     const services = await this.authService.buildServicePayload();
 

@@ -63,12 +63,12 @@
 
 | 服务 | 默认端口 | 技术栈 | 主要职责 |
 |------|----------|--------|----------|
-| `auth-http` | `3000` | Node.js + NestJS | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
-| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、后端 RBAC、审计查询、玩家管理、GM HTTP 入口、监控接口；管理员 token 生命周期治理仍需补齐 |
+| `auth-http` | `3000` | Node.js + NestJS | 登录、发 access token、发 game ticket、维护模式入口拦截、部分安全审计、调用游戏服管理接口 |
+| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、后端 RBAC、审计查询、玩家管理、GM HTTP 入口、监控接口、管理员 token 批量撤销和密码重置、维护模式共享状态写入 |
 | `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端，本地 Vite 开发端口 |
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
-| `game-proxy` | `4000` | Rust + Tokio KCP / TCP fallback | 客户端游戏入口，校验 ticket 后转发到 `game-server` 本地 socket；本地调试保留 TCP fallback |
+| `game-proxy` | `4000` | Rust + Tokio KCP / TCP fallback | 客户端游戏入口，校验 ticket 与维护模式后转发到 `game-server` 本地 socket；本地调试保留 TCP fallback |
 | `game-proxy admin` | `7101` | Rust + Tokio | 查看上游、切换路由、维护模式 |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
@@ -133,14 +133,16 @@
 ### 6.1 玩家登录与进游戏
 
 1. 客户端通过 HTTP 调用 `auth-http` 登录。
-2. `auth-http` 校验账号或游客身份，签发：
+2. `auth-http` 先检查 Redis 共享维护模式状态。维护开启时，普通玩家登录和新 game ticket 签发返回 `MAINTENANCE_MODE`；登出、ticket revoke 等清理操作不被拦截。
+3. `auth-http` 校验账号或游客身份，签发：
 - `accessToken`
 - `game ticket`
 - 当前配置下发的 `gameProxyHost/gameProxyPort`
 - 统一的 `services` 对象；其中 `chat` / `mail` / `announce` 可由注册中心动态发现
-3. 客户端使用 ticket 连接 `game-proxy`，默认入口协议是 KCP；本地调试可走 proxy 的 TCP fallback。
-4. `game-proxy` 本地校验 ticket 签名与 Redis 中的 ticket 记录，向客户端返回 `AuthRes`，并在选定上游后把认证包 replay 到 `game-server` 的本地 socket。
-5. `game-server` 仍会再次校验 ticket 签名与 Redis 记录，成功后建立最终游戏会话。
+4. 客户端使用 ticket 连接 `game-proxy`，默认入口协议是 KCP；本地调试可走 proxy 的 TCP fallback。
+5. `game-proxy` 在 `AuthReq` 阶段同时检查本地维护开关和 Redis 共享维护模式状态。维护开启时返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`，不选择上游。
+6. `game-proxy` 本地校验 ticket 签名与 Redis 中的 ticket 记录，向客户端返回 `AuthRes`，并在选定上游后把认证包 replay 到 `game-server` 的本地 socket。
+7. `game-server` 仍会再次校验 ticket 签名与 Redis 记录，成功后建立最终游戏会话。
 
 当前主链路特征：
 
@@ -148,6 +150,7 @@
 - 进入游戏入口是 `game-proxy`
 - 游戏逻辑服不直接暴露给公网客户端
 - `game-proxy` 负责接入层鉴权、路由和转发，`game-server` 负责最终鉴权与游戏状态
+- 维护模式只阻止新登录、新 ticket 和新 `AuthReq` 接入，不主动踢已有在线连接
 - 正式客户端实现归属外部 `mybevy` 仓库；本仓库 `tools/mock-client` 只用于服务端联调和回归验证
 
 ### 6.2 房间与对局
@@ -178,7 +181,7 @@
 管理后台分为两层：
 
 - `admin-web`：前端页面与操作入口
-- `admin-api`：管理员认证、后端角色授权、审计、GM 指令、监控查询；管理员 token 生命周期治理仍需补齐
+- `admin-api`：管理员认证、后端角色授权、审计、GM 指令、监控查询、管理员 token 生命周期治理、维护模式控制
 
 `admin-api` 会通过 `game-server` 的 admin 通道执行内部控制命令，例如：
 
@@ -187,6 +190,8 @@
 - GM 发物品、广播、踢人和封禁
 
 注意：GM 广播当前复用玩家协议 `GameMessagePush` 推送本实例在线连接；GM 踢人只处置当前 `game-server` 实例上的已鉴权在线连接。GM 封禁由 `admin-api` 写入 `player_accounts.status=banned`，再尽力通知 `game-server` 断开在线连接；`durationSeconds` 当前只作为审计信息保留，尚未实现自动解封。
+
+维护模式由 `admin-api` 写入 Redis `${REDIS_KEY_PREFIX}maintenance:global` 并记录 `admin_audit_logs`。`auth-http` 和 `game-proxy` 读取该共享状态做入口拦截；`game-proxy` 仍保留本地 admin HTTP `/maintenance/on|off` 作为单进程开关，最终新接入判断同时考虑本地开关和 Redis 共享状态。
 
 ### 6.4 聊天与邮件
 

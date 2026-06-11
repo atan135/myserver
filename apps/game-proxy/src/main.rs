@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod connection_limits;
 mod local_socket;
+mod maintenance;
 mod metrics;
 mod proto;
 mod protocol;
@@ -18,6 +19,7 @@ use std::sync::atomic::AtomicU64;
 
 use auth::ProxyAuthService;
 use config::Config;
+use maintenance::GlobalMaintenanceChecker;
 pub use proto::myserver::game as pb;
 use route_store::{
     ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
@@ -119,6 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.redis_key_prefix.clone(),
         config.ticket_secret.clone(),
     )?);
+    let global_maintenance = Arc::new(GlobalMaintenanceChecker::new(
+        &config.redis_url,
+        config.redis_key_prefix.clone(),
+        std::time::Duration::from_millis(config.maintenance_cache_ttl_ms),
+    )?);
 
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
@@ -146,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config,
         route_store,
         auth_service,
+        global_maintenance,
         connection_count,
         maintenance,
     )

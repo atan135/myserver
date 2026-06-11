@@ -8,8 +8,8 @@
 
 当前安全与限流相关服务的状态如下：
 
-- `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
+- `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
 
@@ -23,6 +23,7 @@
 - 账号锁定：连续密码登录失败后锁定账号
 - ticket 签发：使用 `TICKET_SECRET` 生成 HMAC 签名 ticket，并写入 Redis
 - ticket 撤销：`/api/v1/game-ticket/revoke` 会删除 Redis 中对应 ticket
+- 维护模式：读取 `${REDIS_KEY_PREFIX}maintenance:global`，开启时普通玩家登录和 `/api/v1/game-ticket/issue` 返回 `MAINTENANCE_MODE`
 - 安全审计：登录失败、账号锁定、IP 限流、ticket 撤销等事件会写入 `security_audit_logs`（前提是启用了 MySQL 存储）
 - 内部接口 token：配置 `INTERNAL_API_TOKEN` 后，`/api/v1/internal/game-server/status` 与 `/api/v1/internal/game-server/config` 要求 `X-Service-Token`
 
@@ -70,6 +71,7 @@ INTERNAL_API_TOKEN=
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`
 - ticket 不是“使用后立即删除”的一次性票据；当前 `game-proxy`、`game-server` 与 `chat-server` 校验时都会检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
 - 当前同一张 ticket 会被 `game-proxy`、`game-server` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
+- 维护模式不拦截 logout、game ticket revoke 等清理操作，也不主动踢已有在线连接
 
 ---
 
@@ -89,7 +91,7 @@ INTERNAL_API_TOKEN=
 - 单玩家本地连接上限：`PROXY_MAX_CONNECTIONS_PER_PLAYER` 为正整数时，`AuthReq` 本地鉴权成功后登记已鉴权玩家连接；超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放
 - 动态上游发现或静态上游路由
 - 活跃前端连接数统计与监控暴露，包含尚未完成 `AuthReq` 的预鉴权连接
-- 维护模式开关
+- 维护模式：保留本进程 admin 开关，并在 `AuthReq` 阶段读取 `${REDIS_KEY_PREFIX}maintenance:global` 共享状态；任一开关开启都会返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`
 - admin HTTP 口 token 鉴权，支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`
 - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空的或明显默认的 `PROXY_ADMIN_TOKEN`
 - admin 写接口基础输入校验与结构化日志审计，不记录 token
@@ -114,6 +116,7 @@ REDIS_KEY_PREFIX=
 TICKET_SECRET=replace-with-a-long-random-string
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
+PROXY_MAINTENANCE_CACHE_TTL_MS=2000
 PROXY_IP_DENYLIST=
 PROXY_MAX_CONNECTIONS_PER_IP=0
 PROXY_MAX_CONNECTIONS_PER_PLAYER=0
@@ -145,6 +148,7 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接
 - `PROXY_IP_DENYLIST` 为空表示不启用；示例值如 `203.0.113.10,198.51.100.0/24`
 - `PROXY_MAX_CONNECTIONS_PER_IP=0` 和 `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 默认不限制，避免破坏本地开发联调
+- `PROXY_MAINTENANCE_CACHE_TTL_MS` 控制 proxy 读取 Redis 共享维护状态的短缓存，默认 2 秒，避免每个包都访问 Redis；维护状态只在新 `AuthReq` 阶段检查，不主动断开已认证连接
 - `game-proxy` 校验成功后不会删除 Redis ticket，避免破坏后续 `game-server` 与 `chat-server` 的接入校验
 
 ---
@@ -264,6 +268,7 @@ LOG_DIR=logs
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
   - 使用 `PROXY_ADMIN_TOKEN` 保护 admin HTTP 口，生产环境拒绝空值或开发默认值
   - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
+  - 使用 `PROXY_MAINTENANCE_CACHE_TTL_MS` 控制 Redis 共享维护状态读取缓存；维护状态 key 为 `${REDIS_KEY_PREFIX}maintenance:global`
   - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
   - 当前没有 Redis 动态黑名单或消息频率限制环境变量
 - `game-server`：

@@ -73,9 +73,9 @@ import {
     },
     {
       provide: ADMIN_STORE,
-      inject: [ADMIN_MYSQL_POOL, ADMIN_CONFIG],
-      useFactory: async (pool: any, config: any) => {
-        const adminStore = new AdminStore(pool);
+      inject: [ADMIN_MYSQL_POOL, ADMIN_REDIS, ADMIN_CONFIG],
+      useFactory: async (pool: any, redis: any, config: any) => {
+        const adminStore = new AdminStore(pool, redis, config);
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
       }

@@ -1,9 +1,9 @@
 import { Inject, Injectable } from "@nestjs/common";
 
 import { assertValidGuestId, assertValidLoginName, createPasswordSalt, hashPassword, verifyPassword } from "../password-utils.js";
-import { AUTH_ACCOUNT_LOCKOUT, AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_SERVICE_DISCOVERY, AUTH_STORE } from "../tokens.js";
+import { AUTH_ACCOUNT_LOCKOUT, AUTH_CONFIG, AUTH_MAINTENANCE_STORE, AUTH_MYSQL_STORE, AUTH_SERVICE_DISCOVERY, AUTH_STORE } from "../tokens.js";
 import { getClientIp } from "../common/client-ip.js";
-import { badRequest, forbidden, unauthorized } from "../common/http-exception.js";
+import { badRequest, forbidden, serviceUnavailable, unauthorized } from "../common/http-exception.js";
 import type { GuestLoginDto } from "./dto/guest-login.dto.js";
 import type { LoginDto } from "./dto/login.dto.js";
 
@@ -23,7 +23,8 @@ export class AuthService {
     @Inject(AUTH_STORE) private readonly authStore: any,
     @Inject(AUTH_ACCOUNT_LOCKOUT) private readonly accountLockout: any,
     @Inject(AUTH_MYSQL_STORE) private readonly mysqlStore: any,
-    @Inject(AUTH_SERVICE_DISCOVERY) private readonly serviceDiscovery: any
+    @Inject(AUTH_SERVICE_DISCOVERY) private readonly serviceDiscovery: any,
+    @Inject(AUTH_MAINTENANCE_STORE) private readonly maintenanceStore: any = null
   ) {}
 
   get gameProxyHost() {
@@ -68,6 +69,26 @@ export class AuthService {
     };
   }
 
+  async assertNotInMaintenance() {
+    if (!this.maintenanceStore) {
+      return;
+    }
+
+    let status;
+    try {
+      status = await this.maintenanceStore.getStatus();
+    } catch {
+      throw serviceUnavailable("AUTH_BACKEND_UNAVAILABLE", "maintenance state is unavailable");
+    }
+
+    if (status?.enabled) {
+      throw serviceUnavailable("MAINTENANCE_MODE", status.reason || "service is under maintenance", {
+        reason: status.reason || null,
+        updatedAt: status.updatedAt || null
+      });
+    }
+  }
+
   async login(dto: LoginDto, req: any, res: any) {
     const loginName = dto?.loginName;
     const password = dto?.password;
@@ -94,6 +115,8 @@ export class AuthService {
     if (!this.config.mysqlEnabled) {
       throw badRequest("PASSWORD_LOGIN_UNAVAILABLE", "mysql auth store is disabled");
     }
+
+    await this.assertNotInMaintenance();
 
     if (this.config.accountLockEnabled && this.accountLockout) {
       const lockStatus = await this.accountLockout.getLockStatus(loginName);
@@ -159,6 +182,8 @@ export class AuthService {
   }
 
   async guestLogin(dto: GuestLoginDto, req: any) {
+    await this.assertNotInMaintenance();
+
     const guestId = dto?.guestId;
 
     let normalizedGuestId = null;

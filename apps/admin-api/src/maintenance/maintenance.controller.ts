@@ -5,7 +5,26 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { Roles } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
+import { badRequest } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
+
+function normalizeReason(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw badRequest("INVALID_MAINTENANCE_REASON", "reason must be a string");
+  }
+
+  const reason = value.trim();
+  if (reason.length === 0) {
+    return null;
+  }
+  if (reason.length > 512) {
+    throw badRequest("INVALID_MAINTENANCE_REASON", "reason must be 512 characters or fewer");
+  }
+  return reason;
+}
 
 @ApiTags("maintenance")
 @ApiBearerAuth()
@@ -29,8 +48,18 @@ export class MaintenanceController {
   @HttpCode(HttpStatus.OK)
   async setStatus(@Body() body: any, @Req() req: any) {
     const { enabled, reason } = body || {};
+    if (typeof enabled !== "boolean") {
+      throw badRequest("INVALID_MAINTENANCE_ENABLED", "enabled must be a boolean");
+    }
 
-    await this.adminStore.setMaintenanceMode(enabled, reason || "");
+    const normalizedReason = normalizeReason(reason);
+    const updatedAt = new Date().toISOString();
+    const updatedBy = req.admin.username || String(req.admin.sub);
+    const status = await this.adminStore.setMaintenanceMode(enabled, {
+      reason: normalizedReason,
+      updatedAt,
+      updatedBy
+    });
 
     await this.adminStore.appendAuditLog({
       adminId: req.admin.sub,
@@ -38,10 +67,14 @@ export class MaintenanceController {
       action: enabled ? "maintenance_enabled" : "maintenance_disabled",
       targetType: "system",
       targetValue: "maintenance",
-      details: { reason },
+      details: { reason: normalizedReason },
       ip: getClientIp(req, this.config)
     });
 
-    return { ok: true, message: enabled ? "Maintenance mode enabled" : "Maintenance mode disabled" };
+    return {
+      ok: true,
+      message: enabled ? "Maintenance mode enabled" : "Maintenance mode disabled",
+      ...status
+    };
   }
 }

@@ -12,6 +12,9 @@ use tracing::{info, warn};
 use crate::auth::ProxyAuthService;
 use crate::config::Config;
 use crate::connection_limits::{ConnectionLimiter, PlayerConnectionTracker};
+use crate::maintenance::{
+    GlobalMaintenanceChecker, MAINTENANCE_MODE_ERROR, should_reject_new_auth,
+};
 use crate::metrics::METRICS;
 use crate::pb::{
     AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes, RoomJoinReq,
@@ -153,6 +156,7 @@ pub async fn run(
     config: &Config,
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
+    global_maintenance: Arc<GlobalMaintenanceChecker>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -200,6 +204,7 @@ pub async fn run(
                     Ok((client_stream, client_addr)) => {
                         let route_store = route_store.clone();
                         let auth_service = auth_service.clone();
+                        let global_maintenance = global_maintenance.clone();
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
@@ -218,6 +223,7 @@ pub async fn run(
                                 max_preauth_failures,
                                 route_store,
                                 auth_service,
+                                global_maintenance,
                                 connection_count,
                                 maintenance,
                                 connection_limiter,
@@ -236,6 +242,7 @@ pub async fn run(
                     Ok((client_stream, client_addr)) => {
                         let route_store = route_store.clone();
                         let auth_service = auth_service.clone();
+                        let global_maintenance = global_maintenance.clone();
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
@@ -254,6 +261,7 @@ pub async fn run(
                                 max_preauth_failures,
                                 route_store,
                                 auth_service,
+                                global_maintenance,
                                 connection_count,
                                 maintenance,
                                 connection_limiter,
@@ -321,14 +329,11 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     max_preauth_failures: u32,
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
+    global_maintenance: Arc<GlobalMaintenanceChecker>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
     connection_limiter: ConnectionLimiter,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if *maintenance.read().await {
-        return Err(Box::new(std::io::Error::other("proxy is in maintenance")));
-    }
-
     let client_ip = client_addr.ip();
     let _ip_connection_guard = match connection_limiter.try_acquire_ip(client_ip) {
         Ok(guard) => guard,
@@ -414,6 +419,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     &mut client_stream,
                     &packet,
                     &auth_service,
+                    &global_maintenance,
+                    &maintenance,
                     &mut deferred_auth,
                     &mut session,
                     &connection_limiter,
@@ -581,6 +588,8 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
     client_stream: &mut S,
     packet: &Packet,
     auth_service: &ProxyAuthService,
+    global_maintenance: &GlobalMaintenanceChecker,
+    local_maintenance: &SharedMaintenanceFlag,
     deferred_auth: &mut DeferredAuthState,
     session: &mut ProxySession,
     connection_limiter: &ConnectionLimiter,
@@ -603,6 +612,51 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             return Ok(false);
         }
     };
+
+    let local_enabled = *local_maintenance.read().await;
+    let global_enabled = if local_enabled {
+        false
+    } else {
+        match global_maintenance.is_enabled().await {
+            Ok(enabled) => enabled,
+            Err(error_code) => {
+                deferred_auth.auth_req_packet = None;
+                deferred_auth.player_id = None;
+                session.player_id = None;
+                player_connection_tracker.clear();
+                write_message(
+                    client_stream,
+                    MessageType::AuthRes,
+                    packet.header.seq,
+                    &AuthRes {
+                        ok: false,
+                        player_id: String::new(),
+                        error_code: error_code.to_string(),
+                    },
+                )
+                .await?;
+                return Ok(false);
+            }
+        }
+    };
+    if should_reject_new_auth(local_enabled, global_enabled) {
+        deferred_auth.auth_req_packet = None;
+        deferred_auth.player_id = None;
+        session.player_id = None;
+        player_connection_tracker.clear();
+        write_message(
+            client_stream,
+            MessageType::AuthRes,
+            packet.header.seq,
+            &AuthRes {
+                ok: false,
+                player_id: String::new(),
+                error_code: MAINTENANCE_MODE_ERROR.to_string(),
+            },
+        )
+        .await?;
+        return Ok(false);
+    }
 
     match auth_service.authenticate_ticket(&request.ticket).await {
         Ok(player_id) => {

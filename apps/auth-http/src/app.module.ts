@@ -5,6 +5,7 @@ import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
 import { MySqlAuthStore } from "./mysql-store.js";
+import { MaintenanceStore } from "./maintenance-store.js";
 import { AccountLockout, RateLimiter } from "./rate-limiter.js";
 import { ServiceDiscovery } from "./service-discovery.js";
 import { createMySqlPool } from "./mysql-client.js";
@@ -21,6 +22,7 @@ import {
   AUTH_ACCOUNT_LOCKOUT,
   AUTH_CONFIG,
   AUTH_GAME_ADMIN_CLIENT,
+  AUTH_MAINTENANCE_STORE,
   AUTH_METRICS,
   AUTH_MYSQL_POOL,
   AUTH_MYSQL_STORE,
@@ -84,6 +86,11 @@ import {
       provide: AUTH_SERVICE_DISCOVERY,
       inject: [AUTH_REDIS, AUTH_CONFIG],
       useFactory: (redis: any, config: any) => new ServiceDiscovery(redis, config)
+    },
+    {
+      provide: AUTH_MAINTENANCE_STORE,
+      inject: [AUTH_REDIS, AUTH_CONFIG],
+      useFactory: (redis: any, config: any) => new MaintenanceStore(redis, config)
     },
     {
       provide: AUTH_METRICS,

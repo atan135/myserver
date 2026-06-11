@@ -33,9 +33,10 @@
 - proxy 静态 IP denylist：`PROXY_IP_DENYLIST` 支持逗号分隔的精确 IP 和 CIDR，命中后在 session 建立初期拒绝。
 - proxy 单 IP 本地连接上限：`PROXY_MAX_CONNECTIONS_PER_IP` 默认 `0` 表示不限制，配置为正整数时按来源 IP 限制本实例并发连接，连接关闭时释放。
 - proxy 单玩家本地连接上限：`PROXY_MAX_CONNECTIONS_PER_PLAYER` 默认 `0` 表示不限制，配置为正整数时在 `AuthReq` 本地鉴权成功后登记已鉴权玩家连接；超限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放。
+- proxy 维护模式判断：`AuthReq` 阶段同时检查本进程 admin 开关和 Redis 共享状态 `${REDIS_KEY_PREFIX}maintenance:global`；命中后返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`，不选择上游。Redis 状态带短 TTL 缓存，默认 `PROXY_MAINTENANCE_CACHE_TTL_MS=2000`。
 - `game-server` 仍执行最终鉴权。
 - admin HTTP 口，默认 `PROXY_ADMIN_PORT=7101`。
-- 维护模式开关：`/maintenance/on`、`/maintenance/off`。
+- 本进程维护模式开关：`/maintenance/on`、`/maintenance/off`。
 - upstream 操作状态：`Active`、`Draining`、`Disabled`。
 - upstream 健康状态：`Healthy`、`Unavailable`。
 - rollout session、room route、player route 的 route store；默认内存态，本地开发无需 Redis，生产可通过 `PROXY_ROUTE_STORE_BACKEND=redis` 持久化到 Redis。
@@ -61,6 +62,7 @@
 
 - 登录。
 - session、access token、game ticket。
+- 维护模式下拦截普通玩家登录和新 game ticket 签发。
 - 账号安全、限流和审计。
 - 下发客户端连接所需的 proxy 地址、资源列表和版本信息。
 
@@ -72,6 +74,7 @@
 
 - 客户端游戏接入入口。
 - ticket 的最小接入鉴权。
+- 维护模式下拒绝新 `AuthReq` 接入。
 - 根据默认 upstream、room route 或 player route 选择 `game-server`。
 - 建立到目标 `game-server` 的本地 socket 上游连接。
 - 鉴权 replay 与后续双向转发。
@@ -112,14 +115,15 @@ mybevy client / mock-client
 1. 客户端从 `auth-http` 获得 ticket 和 proxy 地址。
 2. 客户端连接 `game-proxy`。
 3. 客户端发送 `AuthReq`。
-4. `game-proxy` 校验 ticket 签名、过期时间和 Redis ticket 记录。
-5. `game-proxy` 返回 `AuthRes`。
-6. 如果鉴权失败，连接仍保持未认证；后续非 `AuthReq` / `PingReq` 消息会被本地拒绝，不会选择 upstream。
-7. 鉴权成功后，客户端发起首个业务请求，如 `RoomJoinReq`。
-8. `game-proxy` 根据请求类型选择 upstream。
-9. `game-proxy` 建立到 `game-server` 的 local socket 连接。
-10. `game-proxy` replay 原始 `AuthReq` 到上游。
-11. `game-server` 鉴权成功后，proxy 转发首个业务请求和后续双向流量。
+4. `game-proxy` 先检查本进程维护开关和 Redis 共享维护模式状态；维护开启时返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`。
+5. `game-proxy` 校验 ticket 签名、过期时间和 Redis ticket 记录。
+6. `game-proxy` 返回 `AuthRes`。
+7. 如果鉴权失败，连接仍保持未认证；后续非 `AuthReq` / `PingReq` 消息会被本地拒绝，不会选择 upstream。
+8. 鉴权成功后，客户端发起首个业务请求，如 `RoomJoinReq`。
+9. `game-proxy` 根据请求类型选择 upstream。
+10. `game-proxy` 建立到 `game-server` 的 local socket 连接。
+11. `game-proxy` replay 原始 `AuthReq` 到上游。
+12. `game-server` 鉴权成功后，proxy 转发首个业务请求和后续双向流量。
 
 ## 5. 连接模型
 
@@ -312,7 +316,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `GET` | `/rollout` | 当前 rollout session |
 | `GET` | `/room-routes` | room route 列表 |
 | `GET` | `/player-routes` | player route 列表 |
-| `POST` | `/maintenance/on` | 开启维护模式，拒绝新 session |
+| `POST` | `/maintenance/on` | 开启本进程维护模式，拒绝新 `AuthReq` |
 | `POST` | `/maintenance/off` | 关闭维护模式 |
 | `POST` | `/rollout/start?rollout_epoch=...&old_server_id=...&new_server_id=...` | 开始 rollout |
 | `POST` | `/rollout/end` | 结束 rollout 并清理相关 route |

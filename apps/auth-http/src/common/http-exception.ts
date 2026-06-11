@@ -22,6 +22,10 @@ export function rateLimited(error = "RATE_LIMITED", message?: string): ApiHttpEx
   return new ApiHttpException(429, { ok: false, error, message });
 }
 
+export function serviceUnavailable(error = "SERVICE_UNAVAILABLE", message?: string, extra: Record<string, unknown> = {}): ApiHttpException {
+  return new ApiHttpException(503, { ok: false, error, message, ...extra });
+}
+
 export function notFound(path: string): ApiHttpException {
   return new ApiHttpException(404, { ok: false, error: "NOT_FOUND", path });
 }
