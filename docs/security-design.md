@@ -87,7 +87,7 @@
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、维护模式、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计和多 proxy route store 共享 |
-| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、连接审计、基础权威移动校正、GM 广播/踢人/封禁的本实例在线连接处置 | 没有单 IP / 单玩家频率限制、时间戳窗口、反重放和通用作弊计数；跨实例 GM 目标定位仍需补齐 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播/踢人/封禁的本实例在线连接处置 | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；跨实例 GM 目标定位仍需补齐 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和 token version 管理接口仍待补齐 |
 
 说明：
@@ -290,7 +290,7 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 ### 6.4 当前阶段应优先补的反作弊能力
 
 1. 鉴权前消息白名单已在 `game-proxy` 与 `game-server` 落地
-2. 单连接消息频率限制已在 `game-server` 落地；单玩家 / 单 IP 消息频率限制仍需补齐
+2. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地；单 IP 频率限制和跨实例全局玩家频率限制仍需补齐
 3. `frame_id` 超前 / 过期 / 重复输入处理
 4. `client_timestamp` 时间窗校验
 5. 连续非法包计数与断连
@@ -490,9 +490,20 @@ SECURITY_DENYLIST_REDIS_PREFIX=security:denylist:
 
 ### 9.3 `game-server` / 业务层
 
+当前已读取并生效的消息频率配置：
+
 ```env
 MSG_RATE_WINDOW_MS=1000
 MSG_RATE_MAX=0
+PLAYER_MSG_RATE_WINDOW_MS=1000
+PLAYER_MSG_RATE_MAX=0
+```
+
+其中 `PLAYER_MSG_RATE_MAX=0` 默认关闭；配置为正整数时，仅限制当前 `game-server` 实例内同一 `player_id` 的合计消息数，不是跨实例全局限额。由于生产链路里 `game-server` 通常通过 `game-proxy` 本地 socket 接入，单 IP 频率限制仍应放在 proxy、网关或后续透传协议层。
+
+仍属于设计目标、当前未读取的业务层配置示例：
+
+```env
 FRAME_LEAD_LIMIT=3
 FRAME_LAG_LIMIT=30
 CLIENT_TIMESTAMP_SKEW_MS=5000
@@ -528,7 +539,7 @@ TRUSTED_PROXIES=
 2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网；`game-proxy` admin HTTP 口已有 token 鉴权和生产默认 token 拒绝，仍需部署侧网络隔离
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
-5. 单连接消息频率限制已在 `game-server` 落地；单玩家 / 单 IP 消息频率限制仍需继续补齐
+5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地；单 IP 频率限制和跨实例全局玩家频率限制仍需继续补齐
 6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
 7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计，仍缺持久审计和细粒度 RBAC
 

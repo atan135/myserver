@@ -36,6 +36,8 @@ pub struct RuntimeConfig {
     pub max_body_len: usize,
     pub msg_rate_window_ms: u64,
     pub msg_rate_max: u64,
+    pub player_msg_rate_window_ms: u64,
+    pub player_msg_rate_max: u64,
     pub drain_mode_enabled: bool,
     pub drain_mode_entered_at_ms: Option<u64>,
 }
@@ -80,6 +82,76 @@ impl ConnectionRateLimiter {
 
         self.count = self.count.saturating_add(1);
         self.count <= max_messages
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PlayerMessageRateLimiter {
+    windows: HashMap<String, PlayerMessageRateWindow>,
+}
+
+#[derive(Debug)]
+struct PlayerMessageRateWindow {
+    window_started_at: Instant,
+    count: u64,
+}
+
+impl PlayerMessageRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            windows: HashMap::new(),
+        }
+    }
+
+    pub fn allow(
+        &mut self,
+        player_id: &str,
+        now: Instant,
+        window_ms: u64,
+        max_messages: u64,
+    ) -> bool {
+        if window_ms == 0 || max_messages == 0 {
+            self.windows.clear();
+            return true;
+        }
+
+        self.cleanup_expired(now, window_ms);
+
+        let window = Duration::from_millis(window_ms);
+        let entry = self
+            .windows
+            .entry(player_id.to_string())
+            .or_insert(PlayerMessageRateWindow {
+                window_started_at: now,
+                count: 0,
+            });
+
+        if now.saturating_duration_since(entry.window_started_at) >= window {
+            entry.window_started_at = now;
+            entry.count = 0;
+        }
+
+        entry.count = entry.count.saturating_add(1);
+        entry.count <= max_messages
+    }
+
+    pub fn cleanup_expired(&mut self, now: Instant, window_ms: u64) -> usize {
+        if window_ms == 0 {
+            let removed = self.windows.len();
+            self.windows.clear();
+            return removed;
+        }
+
+        let window = Duration::from_millis(window_ms);
+        let before = self.windows.len();
+        self.windows
+            .retain(|_, entry| now.saturating_duration_since(entry.window_started_at) < window);
+        before.saturating_sub(self.windows.len())
+    }
+
+    #[cfg(test)]
+    pub fn tracked_player_count(&self) -> usize {
+        self.windows.len()
     }
 }
 
@@ -137,11 +209,14 @@ pub async fn run(
             max_body_len: config.max_body_len,
             msg_rate_window_ms: config.msg_rate_window_ms,
             msg_rate_max: config.msg_rate_max,
+            player_msg_rate_window_ms: config.player_msg_rate_window_ms,
+            player_msg_rate_max: config.player_msg_rate_max,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
+        player_msg_rate_limiter: Arc::new(tokio::sync::Mutex::new(PlayerMessageRateLimiter::new())),
     };
 
     // Initialize MySqlPlayerStore for inventory persistence
@@ -158,6 +233,7 @@ pub async fn run(
         player_manager: PlayerManager::new(mysql_player_store),
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
+        player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
     };
     info!(
         addr = %config.bind_addr(),
@@ -539,6 +615,52 @@ where
             continue;
         }
 
+        if connection.session.state == SessionState::Authenticated {
+            if let Some(player_id) = connection.session.player_id.as_deref() {
+                let player_message_allowed = {
+                    let mut limiter = services.player_msg_rate_limiter.lock().await;
+                    limiter.allow(
+                        player_id,
+                        started_at,
+                        runtime.player_msg_rate_window_ms,
+                        runtime.player_msg_rate_max,
+                    )
+                };
+
+                if !player_message_allowed {
+                    if let Err(error) = connection.queue_error(
+                        packet.header.seq,
+                        "MSG_RATE_EXCEEDED",
+                        "player message rate exceeded",
+                    ) {
+                        warn!(
+                            session_id = connection.session.id,
+                            player_id = %player_id,
+                            error = %error,
+                            "failed to queue player message rate exceeded error"
+                        );
+                        break;
+                    }
+                    services
+                        .mysql_store
+                        .append_connection_event(
+                            connection.session.id,
+                            Some(player_id),
+                            Some(&connection.peer_addr),
+                            "player_msg_rate_exceeded",
+                            Some(json!({
+                                "msgType": packet.header.msg_type,
+                                "seq": packet.header.seq,
+                                "windowMs": runtime.player_msg_rate_window_ms,
+                                "max": runtime.player_msg_rate_max
+                            })),
+                        )
+                        .await;
+                    continue;
+                }
+            }
+        }
+
         let result = dispatch_packet(&services, &mut connection, &packet).await;
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
@@ -786,5 +908,71 @@ mod tests {
         assert!(limiter.allow(now, 1000, 1));
         assert!(!limiter.allow(now + Duration::from_millis(999), 1000, 1));
         assert!(limiter.allow(now + Duration::from_millis(1000), 1000, 1));
+    }
+
+    #[test]
+    fn player_rate_limiter_disabled_allows_all_messages() {
+        let mut limiter = PlayerMessageRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow("player-a", now, 1000, 0));
+        assert!(limiter.allow("player-a", now, 1000, 0));
+        assert!(limiter.allow("player-a", now, 0, 1));
+        assert_eq!(limiter.tracked_player_count(), 0);
+    }
+
+    #[test]
+    fn player_rate_limiter_rejects_same_player_across_trackers() {
+        let mut limiter = PlayerMessageRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow("player-a", now, 1000, 2));
+        assert!(limiter.allow("player-a", now + Duration::from_millis(10), 1000, 2));
+        assert!(!limiter.allow("player-a", now + Duration::from_millis(20), 1000, 2));
+        assert_eq!(limiter.tracked_player_count(), 1);
+    }
+
+    #[test]
+    fn player_rate_limiter_resets_after_window_rolls() {
+        let mut limiter = PlayerMessageRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow("player-a", now, 1000, 1));
+        assert!(!limiter.allow("player-a", now + Duration::from_millis(999), 1000, 1));
+        assert!(limiter.allow("player-a", now + Duration::from_millis(1000), 1000, 1));
+    }
+
+    #[test]
+    fn player_rate_limiter_tracks_players_independently() {
+        let mut limiter = PlayerMessageRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow("player-a", now, 1000, 1));
+        assert!(!limiter.allow("player-a", now, 1000, 1));
+        assert!(limiter.allow("player-b", now, 1000, 1));
+        assert!(!limiter.allow("player-b", now, 1000, 1));
+        assert_eq!(limiter.tracked_player_count(), 2);
+    }
+
+    #[test]
+    fn player_rate_limiter_cleanup_removes_expired_windows() {
+        let mut limiter = PlayerMessageRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow("player-a", now, 1000, 1));
+        assert!(limiter.allow("player-b", now + Duration::from_millis(200), 1000, 1));
+        assert_eq!(limiter.tracked_player_count(), 2);
+
+        assert_eq!(
+            limiter.cleanup_expired(now + Duration::from_millis(1000), 1000),
+            1
+        );
+        assert_eq!(limiter.tracked_player_count(), 1);
+
+        assert_eq!(
+            limiter.cleanup_expired(now + Duration::from_millis(1200), 1000),
+            1
+        );
+        assert_eq!(limiter.tracked_player_count(), 0);
     }
 }

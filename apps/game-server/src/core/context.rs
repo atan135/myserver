@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use redis::aio::MultiplexedConnection;
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
@@ -12,7 +12,7 @@ use crate::core::room::{OutboundMessage, OutboundSender};
 use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{MessageType, encode_body};
-use crate::server::RuntimeConfig;
+use crate::server::{PlayerMessageRateLimiter, RuntimeConfig};
 use crate::session::{Session, SessionState};
 use tracing::warn;
 
@@ -20,6 +20,7 @@ pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 /// Maps player_id -> current authenticated connection on this game-server instance.
 pub type PlayerRegistry = Arc<RwLock<HashMap<String, PlayerConnectionHandle>>>;
+pub type SharedPlayerMessageRateLimiter = Arc<Mutex<PlayerMessageRateLimiter>>;
 
 #[derive(Clone)]
 pub struct PlayerConnectionHandle {
@@ -39,6 +40,7 @@ pub struct ServiceContext {
     pub player_manager: PlayerManager,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
+    pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
 }
 
 pub struct ConnectionContext {
@@ -55,6 +57,7 @@ pub struct ServerSharedState {
     pub runtime_config: SharedRuntimeConfig,
     pub connection_count: Arc<AtomicU64>,
     pub online_player_count: Arc<AtomicU64>,
+    pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
 }
 
 impl ConnectionContext {

@@ -29,6 +29,8 @@ pub struct Config {
     pub max_body_len: usize,
     pub msg_rate_window_ms: u64,
     pub msg_rate_max: u64,
+    pub player_msg_rate_window_ms: u64,
+    pub player_msg_rate_max: u64,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -117,6 +119,8 @@ impl Config {
         let max_body_len = parse_usize("MAX_BODY_LEN", 4096);
         let msg_rate_window_ms = parse_u64("MSG_RATE_WINDOW_MS", 1000);
         let msg_rate_max = parse_u64("MSG_RATE_MAX", 0);
+        let player_msg_rate_window_ms = parse_u64("PLAYER_MSG_RATE_WINDOW_MS", 1000);
+        let player_msg_rate_max = parse_u64("PLAYER_MSG_RATE_MAX", 0);
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -156,6 +160,8 @@ impl Config {
             max_body_len,
             msg_rate_window_ms,
             msg_rate_max,
+            player_msg_rate_window_ms,
+            player_msg_rate_max,
             registry_enabled,
             registry_url,
             registry_heartbeat_interval_secs,
