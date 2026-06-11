@@ -15,6 +15,7 @@ use crate::route_store::{
 #[derive(Serialize)]
 struct StatusResponse {
     ok: bool,
+    // Active frontend sessions, including pre-auth connections.
     connection_count: u64,
     maintenance: bool,
     active_upstream: Option<String>,

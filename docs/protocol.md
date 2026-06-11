@@ -27,7 +27,7 @@
 
 ## 2. 通用 TCP 包结构
 
-`game-server`、`game-proxy` 与 `chat-server` 共享同一套包头格式。`game-proxy` 主要解析首包认证、房间路由相关请求和部分 rollout 消息，其余业务包按原始包头与 body 透传到上游 `game-server`：
+`game-server`、`game-proxy` 与 `chat-server` 共享同一套包头格式。`game-proxy` 主要解析接入认证、鉴权前心跳、房间路由相关请求和部分 rollout 消息。连接完成 `AuthReq` 且代理本地校验成功前，其余业务包不会被转发到上游 `game-server`；鉴权成功并绑定上游后，其余业务包按原始包头与 body 透传：
 
 ```text
 | magic(2) | version(1) | flags(1) | msgType(2) | seq(4) | bodyLen(4) | body(N) |
@@ -198,6 +198,8 @@
 |---------|------|
 | `9000` | `ErrorRes` |
 
+当前 `game-proxy` 在鉴权成功前收到非 `AuthReq` / `PingReq` 消息时，会返回 `ErrorRes`，`error_code=PREAUTH_MESSAGE_NOT_ALLOWED`。该错误在代理本地产生，不会触发上游选择、鉴权 replay 或 upstream 连接。
+
 ### 4.2 关键消息结构
 
 #### `AuthReq`
@@ -315,7 +317,9 @@
 
 ### 4.4 房间状态约束
 
-- 未鉴权连接仅允许 `AuthReq`、`PingReq`
+- 未鉴权连接仅允许 `AuthReq`、`PingReq`；`game-proxy` 已强制该白名单
+- `AuthReq` 失败后连接保持未认证状态，后续房间、移动、背包、GM、未知消息等仍会被代理本地拒绝
+- `game-proxy` 默认 `PROXY_MAX_PREAUTH_FAILURES=3`，同一连接在鉴权成功前非法消息或鉴权失败累计达到阈值后关闭连接；配置为 `0` 表示不按失败次数断开
 - 一个连接同一时刻只能处于一个房间上下文
 - `PlayerInputReq` / `MoveInputReq` 只应在允许的对局状态中发送
 - 重连和观战走独立消息，不复用普通 `RoomJoinReq`

@@ -86,7 +86,7 @@
 | `chat-server` | 首包强制鉴权、ticket 签名、过期与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；单张 ticket revoke 仍未通过 `ticket:<hash>` 存在性校验感知；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
-| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未强制鉴权前消息白名单 |
+| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未做单连接消息频率限制 |
 | `game-server` | ticket 签名与 Redis 归属校验、心跳超时、最大包体限制、连接审计、基础权威移动校正 | 没有统一消息频率限制、时间戳窗口、反重放和通用作弊计数 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和 token version 管理接口仍待补齐 |
 
@@ -289,7 +289,7 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 
 ### 6.4 当前阶段应优先补的反作弊能力
 
-1. 鉴权前消息白名单
+1. 鉴权前消息白名单已在 `game-proxy` 落地；`game-server` 侧仍需继续收敛认证前业务入口
 2. 单连接 / 单玩家 / 单 IP 消息频率限制
 3. `frame_id` 超前 / 过期 / 重复输入处理
 4. `client_timestamp` 时间窗校验
@@ -454,6 +454,20 @@ SECURITY_ALLOWLIST_REDIS_PREFIX=security:allowlist:
 
 ### 9.2 `game-proxy` / 接入层
 
+当前 `game-proxy` 已读取：
+
+```env
+PROXY_MAX_CONNECTIONS=0
+PROXY_MAX_PREAUTH_FAILURES=3
+```
+
+说明：
+
+- `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时，超过上限的新连接会在 session 开始时拒绝。
+- `PROXY_MAX_PREAUTH_FAILURES=3` 表示同一连接在鉴权成功前，非法消息或鉴权失败累计达到阈值后关闭连接；配置为 `0` 表示不按失败次数断开。
+
+仍属于设计目标、当前未读取的接入层配置示例：
+
 ```env
 MAX_CONNECTIONS_PER_IP=20
 MAX_CONNECTIONS_PER_PLAYER=2
@@ -504,7 +518,7 @@ TRUSTED_PROXIES=
 1. 管理员 JWT session/jti、登出撤销、禁用后失效和基础 token version 校验已落地；批量撤销、重置密码联动 bump version 和管理接口仍待补齐
 2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网
-4. `game-proxy` / `game-server` 增加鉴权前消息白名单
+4. `game-proxy` 鉴权前消息白名单已落地；`game-server` 仍需继续补齐认证前业务入口约束
 5. 单连接 / 单玩家 / 单 IP 消息频率限制
 6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
 7. 非法包计数、异常输入计数和安全审计统一
@@ -555,7 +569,7 @@ TRUSTED_PROXIES=
 - Redis、MySQL、管理端口默认不暴露到公网
 - `mail-service`、`announce-service`、`chat-server` 默认不对公网开放；临时开放时有明确的网段、鉴权或反向代理约束
 - `admin-api` 至少支持运营网段白名单
-- `game-proxy` 至少支持 IP denylist 和连接上限
+- `game-proxy` 至少支持总连接上限；IP denylist、单 IP / 单玩家连接上限仍需补齐
 - 黑白名单和封禁策略可跨实例同步
 
 ---

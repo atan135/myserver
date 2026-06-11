@@ -3,9 +3,9 @@
 //! 监控指标收集与 NATS 上报
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
@@ -77,7 +77,7 @@ pub struct MetricsCollector {
     latency_sum: AtomicU64,
     /// 延迟计数
     latency_count: AtomicU64,
-    /// 连接数
+    /// 活跃前端连接数，包含鉴权前连接
     connections: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
@@ -106,7 +106,7 @@ impl MetricsCollector {
         self.latency_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// 设置连接数
+    /// 设置活跃前端连接数
     pub fn set_connections(&self, val: u64) {
         self.connections.store(val, Ordering::Relaxed);
     }

@@ -27,6 +27,9 @@
 - 可选 Redis service registry 发现：`REGISTRY_ENABLED`、`REGISTRY_URL`、`UPSTREAM_SERVICE_NAME`。
 - proxy 本地 ticket 鉴权：校验签名、过期时间和 Redis ticket 记录。
 - proxy 鉴权成功后先返回 `AuthRes`，选定上游后再 replay 原始 `AuthReq` 到 `game-server`。
+- proxy 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`；其它消息返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会触发上游选择。
+- proxy 单连接预鉴权失败阈值：默认 `PROXY_MAX_PREAUTH_FAILURES=3`，非法预鉴权消息或鉴权失败累计达到阈值后关闭连接。
+- proxy 总前端连接上限：`PROXY_MAX_CONNECTIONS` 默认 `0` 表示不限制，配置为正整数时拒绝超限新连接。
 - `game-server` 仍执行最终鉴权。
 - admin HTTP 口，默认 `PROXY_ADMIN_PORT=7101`。
 - 维护模式开关：`/maintenance/on`、`/maintenance/off`。
@@ -107,11 +110,12 @@ mybevy client / mock-client
 3. 客户端发送 `AuthReq`。
 4. `game-proxy` 校验 ticket 签名、过期时间和 Redis ticket 记录。
 5. `game-proxy` 返回 `AuthRes`。
-6. 客户端发起首个业务请求，如 `RoomJoinReq`。
-7. `game-proxy` 根据请求类型选择 upstream。
-8. `game-proxy` 建立到 `game-server` 的 local socket 连接。
-9. `game-proxy` replay 原始 `AuthReq` 到上游。
-10. `game-server` 鉴权成功后，proxy 转发首个业务请求和后续双向流量。
+6. 如果鉴权失败，连接仍保持未认证；后续非 `AuthReq` / `PingReq` 消息会被本地拒绝，不会选择 upstream。
+7. 鉴权成功后，客户端发起首个业务请求，如 `RoomJoinReq`。
+8. `game-proxy` 根据请求类型选择 upstream。
+9. `game-proxy` 建立到 `game-server` 的 local socket 连接。
+10. `game-proxy` replay 原始 `AuthReq` 到上游。
+11. `game-server` 鉴权成功后，proxy 转发首个业务请求和后续双向流量。
 
 ## 5. 连接模型
 
@@ -255,6 +259,8 @@ proxy 当前只解析最小接入和路由所需消息：
 | `RoomReconnectReq` | 根据 `player_id` / room route 路由 |
 | `RoomJoinRes` / `RoomJoinAsObserverRes` / `RoomReconnectRes` | 成功后绑定 room owner 和 player route |
 
+鉴权前只有 `AuthReq` 和 `PingReq` 会被处理；`RoomJoinReq`、`RoomReconnectReq`、业务包、admin/GM 消息或未知 `msgType` 都会在 proxy 本地返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`。`AuthReq` 失败不会提升连接状态，不能通过后续业务包触发上游绑定。鉴权成功后，proxy 才允许进入上游选择和 auth replay 流程。
+
 绑定上游后，proxy 不继续解析玩法消息。
 
 ## 8. Admin 接口
@@ -265,7 +271,7 @@ proxy 当前只解析最小接入和路由所需消息：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/status` | 连接数、维护状态、active upstream、rollout、route 数量 |
+| `GET` | `/status` | 活跃前端连接数、维护状态、active upstream、rollout、route 数量 |
 | `GET` | `/instances` | upstream 列表 |
 | `GET` | `/rollout` | 当前 rollout session |
 | `GET` | `/room-routes` | room route 列表 |
@@ -327,17 +333,20 @@ proxy 当前只解析最小接入和路由所需消息：
 | `UPSTREAM_SERVICE_NAME` | 要发现的服务名 | `game-server` |
 | `TICKET_SECRET` | ticket HMAC secret | dev 默认值 |
 | `REDIS_KEY_PREFIX` | Redis key 前缀 | 空 |
+| `PROXY_MAX_CONNECTIONS` | 总前端连接上限，`0` 表示不限制 | `0` |
+| `PROXY_MAX_PREAUTH_FAILURES` | 同一连接鉴权成功前允许的非法消息或鉴权失败次数，`0` 表示不按次数断开 | `3` |
 | `LOG_LEVEL` / `LOG_ENABLE_CONSOLE` / `LOG_ENABLE_FILE` / `LOG_DIR` | 日志配置 | 见 `.env.example` |
 
 ## 11. 后续重点
 
 短期建议优先补：
 
-1. proxy admin 认证、权限和审计。
+1. proxy admin 权限细化和审计。
 2. route store 持久化或接入统一控制面，避免重启丢失 rollout metadata。
-3. 自动 rollout 结束检测。
-4. old server `ServerRedirectPush` 下发与客户端重连链路。
-5. room transfer 的 freeze/export/import/retire 最小闭环。
-6. 多 proxy 场景下的 route 一致性与健康判定。
+3. 单 IP / 单玩家连接上限、消息频率限制和 Redis 黑名单。
+4. 自动 rollout 结束检测。
+5. old server `ServerRedirectPush` 下发与客户端重连链路。
+6. room transfer 的 freeze/export/import/retire 最小闭环。
+7. 多 proxy 场景下的 route 一致性与健康判定。
 
 跨服状态迁移的完整一致性要求见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。

@@ -117,6 +117,8 @@ TTL:    30 秒
 | `mail-service` | `qps` `latency_ms` |
 | `admin-api` | `qps` `latency_ms` |
 
+`game-proxy` 的 `connections` 表示活跃前端连接数，包含尚未完成 `AuthReq` 的预鉴权连接；它不再仅代表已经绑定 upstream 的代理连接。
+
 `admin-api` 会把各服务的在线类字段统一映射成 `online_value` 返回给前端：
 
 - `auth-http` -> `unique_players`
@@ -148,7 +150,7 @@ TTL:    30 秒
 |------|----------------|----------------|
 | `game-server` | TCP 消息主分发路径 | 在线玩家数、房间数 |
 | `chat-server` | 聊天消息主循环 | 在线聊天会话数 |
-| `game-proxy` | 代理会话处理路径 | 连接数 |
+| `game-proxy` | 代理会话处理路径 | 活跃前端连接数 |
 | `match-service` | gRPC handler | 匹配池大小 |
 
 ## 5. admin-api 监控接口

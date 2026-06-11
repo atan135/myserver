@@ -2,6 +2,7 @@
 pub enum ProxySessionState {
     Connected,
     Authenticating,
+    Authenticated,
     SelectingUpstream,
     ReplayingAuth,
     Proxying,

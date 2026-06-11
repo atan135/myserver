@@ -7,6 +7,20 @@ fn parse_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn parse_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
@@ -25,6 +39,8 @@ pub struct Config {
     pub redis_key_prefix: String,
     pub nats_url: String,
     pub ticket_secret: String,
+    pub proxy_max_connections: u64,
+    pub proxy_max_preauth_failures: u32,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -69,6 +85,8 @@ impl Config {
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let ticket_secret = env::var("TICKET_SECRET")
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
+        let proxy_max_connections = parse_u64("PROXY_MAX_CONNECTIONS", 0);
+        let proxy_max_preauth_failures = parse_u32("PROXY_MAX_PREAUTH_FAILURES", 3);
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -107,6 +125,8 @@ impl Config {
             redis_key_prefix,
             nats_url,
             ticket_secret,
+            proxy_max_connections,
+            proxy_max_preauth_failures,
             registry_enabled,
             registry_url,
             registry_discover_interval_secs,
@@ -127,5 +147,74 @@ impl Config {
 
     pub fn tcp_fallback_addr(&self) -> String {
         format!("{}:{}", self.tcp_fallback_host, self.tcp_fallback_port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    use super::Config;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn parses_proxy_security_limits_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        let old_max_connections = env::var("PROXY_MAX_CONNECTIONS").ok();
+        let old_max_preauth_failures = env::var("PROXY_MAX_PREAUTH_FAILURES").ok();
+
+        unsafe {
+            env::set_var("PROXY_MAX_CONNECTIONS", "42");
+            env::set_var("PROXY_MAX_PREAUTH_FAILURES", "5");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.proxy_max_connections, 42);
+        assert_eq!(config.proxy_max_preauth_failures, 5);
+
+        unsafe {
+            match old_max_connections {
+                Some(value) => env::set_var("PROXY_MAX_CONNECTIONS", value),
+                None => env::remove_var("PROXY_MAX_CONNECTIONS"),
+            }
+            match old_max_preauth_failures {
+                Some(value) => env::set_var("PROXY_MAX_PREAUTH_FAILURES", value),
+                None => env::remove_var("PROXY_MAX_PREAUTH_FAILURES"),
+            }
+        }
+    }
+
+    #[test]
+    fn uses_proxy_security_limit_defaults_for_invalid_env() {
+        let _guard = env_lock().lock().unwrap();
+        let old_max_connections = env::var("PROXY_MAX_CONNECTIONS").ok();
+        let old_max_preauth_failures = env::var("PROXY_MAX_PREAUTH_FAILURES").ok();
+
+        unsafe {
+            env::set_var("PROXY_MAX_CONNECTIONS", "not-a-number");
+            env::set_var("PROXY_MAX_PREAUTH_FAILURES", "not-a-number");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.proxy_max_connections, 0);
+        assert_eq!(config.proxy_max_preauth_failures, 3);
+
+        unsafe {
+            match old_max_connections {
+                Some(value) => env::set_var("PROXY_MAX_CONNECTIONS", value),
+                None => env::remove_var("PROXY_MAX_CONNECTIONS"),
+            }
+            match old_max_preauth_failures {
+                Some(value) => env::set_var("PROXY_MAX_PREAUTH_FAILURES", value),
+                None => env::remove_var("PROXY_MAX_PREAUTH_FAILURES"),
+            }
+        }
     }
 }

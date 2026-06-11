@@ -13,8 +13,8 @@ use crate::auth::ProxyAuthService;
 use crate::config::Config;
 use crate::metrics::METRICS;
 use crate::pb::{
-    AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes,
-    RoomJoinReq, RoomJoinRes, RoomReconnectReq, RoomReconnectRes,
+    AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes, RoomJoinReq,
+    RoomJoinRes, RoomReconnectReq, RoomReconnectRes,
 };
 use crate::protocol::{MessageType, Packet, encode_body, encode_packet, read_packet};
 use crate::route_store::{
@@ -25,6 +25,7 @@ use crate::upstream::connect_upstream;
 use service_registry::RegistryClient;
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
+const PREAUTH_MESSAGE_NOT_ALLOWED: &str = "PREAUTH_MESSAGE_NOT_ALLOWED";
 
 pub type SharedConnectionCount = Arc<AtomicU64>;
 pub type SharedMaintenanceFlag = Arc<RwLock<bool>>;
@@ -33,6 +34,73 @@ pub type SharedMaintenanceFlag = Arc<RwLock<bool>>;
 struct DeferredAuthState {
     auth_req_packet: Option<Vec<u8>>,
     player_id: Option<String>,
+}
+
+struct ActiveConnectionGuard {
+    connection_count: SharedConnectionCount,
+    released: bool,
+}
+
+impl ActiveConnectionGuard {
+    fn try_acquire(
+        connection_count: SharedConnectionCount,
+        max_connections: u64,
+    ) -> Result<Self, u64> {
+        if max_connections == 0 {
+            let connections = connection_count.fetch_add(1, Ordering::Relaxed) + 1;
+            METRICS.set_connections(connections);
+            return Ok(Self {
+                connection_count,
+                released: false,
+            });
+        }
+
+        let mut current = connection_count.load(Ordering::Relaxed);
+        loop {
+            if current >= max_connections {
+                return Err(current);
+            }
+
+            match connection_count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    METRICS.set_connections(current + 1);
+                    return Ok(Self {
+                        connection_count,
+                        released: false,
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+
+        let previous = self.connection_count.fetch_sub(1, Ordering::Relaxed);
+        METRICS.set_connections(previous.saturating_sub(1));
+        self.released = true;
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreauthDecision {
+    HandleLocally,
+    AllowUpstreamSelection,
+    Reject(&'static str),
 }
 
 enum ProxyStream {
@@ -102,8 +170,13 @@ pub async fn run(
         let route_store_clone = route_store.clone();
 
         tokio::spawn(async move {
-            if let Err(error) =
-                run_upstream_discovery(registry_url, service_name, discover_interval, route_store_clone).await
+            if let Err(error) = run_upstream_discovery(
+                registry_url,
+                service_name,
+                discover_interval,
+                route_store_clone,
+            )
+            .await
             {
                 tracing::error!(error = %error, "upstream discovery stopped");
             }
@@ -128,6 +201,8 @@ pub async fn run(
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
+                        let max_connections = config.proxy_max_connections;
+                        let max_preauth_failures = config.proxy_max_preauth_failures;
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -136,6 +211,8 @@ pub async fn run(
                                 session_id,
                                 client_addr,
                                 stream,
+                                max_connections,
+                                max_preauth_failures,
                                 route_store,
                                 auth_service,
                                 connection_count,
@@ -158,6 +235,8 @@ pub async fn run(
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
+                        let max_connections = config.proxy_max_connections;
+                        let max_preauth_failures = config.proxy_max_preauth_failures;
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -166,6 +245,8 @@ pub async fn run(
                                 session_id,
                                 client_addr,
                                 stream,
+                                max_connections,
+                                max_preauth_failures,
                                 route_store,
                                 auth_service,
                                 connection_count,
@@ -193,7 +274,8 @@ async fn run_upstream_discovery(
     let client = RegistryClient::new(&registry_url, "proxy", "proxy-static").await?;
     discover_and_update_routes(&client, &service_name, &route_store).await?;
 
-    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(discover_interval_secs));
+    let mut ticker =
+        tokio::time::interval(tokio::time::Duration::from_secs(discover_interval_secs));
     loop {
         ticker.tick().await;
         if let Err(error) = discover_and_update_routes(&client, &service_name, &route_store).await {
@@ -229,6 +311,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     session_id: u64,
     client_addr: std::net::SocketAddr,
     mut client_stream: S,
+    max_connections: u64,
+    max_preauth_failures: u32,
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
     connection_count: SharedConnectionCount,
@@ -238,8 +322,25 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         return Err(Box::new(std::io::Error::other("proxy is in maintenance")));
     }
 
+    let mut connection_guard =
+        match ActiveConnectionGuard::try_acquire(connection_count, max_connections) {
+            Ok(guard) => guard,
+            Err(current) => {
+                warn!(
+                    session_id,
+                    client_addr = %client_addr,
+                    current_connections = current,
+                    max_connections,
+                    "proxy connection rejected by max connection limit"
+                );
+                return Err(Box::new(std::io::Error::other(
+                    "proxy max connections exceeded",
+                )));
+            }
+        };
     let mut session = ProxySession::new(session_id);
     let mut deferred_auth = DeferredAuthState::default();
+    let mut preauth_failures = 0u32;
 
     loop {
         let Some(packet) = read_packet(&mut client_stream, MAX_PROXY_BODY_LEN).await? else {
@@ -248,10 +349,45 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
             return Ok(());
         };
 
+        match preauth_decision(&session, &packet) {
+            PreauthDecision::Reject(error_code) => {
+                preauth_failures = preauth_failures.saturating_add(1);
+                write_proxy_error(
+                    &mut client_stream,
+                    packet.header.seq,
+                    error_code,
+                    error_code,
+                )
+                .await?;
+                warn!(
+                    session_id = session.id,
+                    client_addr = %client_addr,
+                    msg_type = packet.header.msg_type,
+                    preauth_failures,
+                    max_preauth_failures,
+                    "pre-auth message rejected"
+                );
+
+                if max_preauth_failures > 0 && preauth_failures >= max_preauth_failures {
+                    session.state = ProxySessionState::Closed;
+                    warn!(
+                        session_id = session.id,
+                        client_addr = %client_addr,
+                        preauth_failures,
+                        "proxy session closed by pre-auth failure threshold"
+                    );
+                    return Ok(());
+                }
+
+                continue;
+            }
+            PreauthDecision::HandleLocally | PreauthDecision::AllowUpstreamSelection => {}
+        }
+
         match packet.message_type() {
             Some(MessageType::AuthReq) => {
                 session.state = ProxySessionState::Authenticating;
-                handle_local_auth(
+                let auth_ok = handle_local_auth(
                     &mut client_stream,
                     &packet,
                     &auth_service,
@@ -259,6 +395,23 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     &mut session,
                 )
                 .await?;
+                if auth_ok {
+                    session.state = ProxySessionState::Authenticated;
+                    preauth_failures = 0;
+                } else {
+                    session.state = ProxySessionState::Connected;
+                    preauth_failures = preauth_failures.saturating_add(1);
+                    if max_preauth_failures > 0 && preauth_failures >= max_preauth_failures {
+                        session.state = ProxySessionState::Closed;
+                        warn!(
+                            session_id = session.id,
+                            client_addr = %client_addr,
+                            preauth_failures,
+                            "proxy session closed by auth failure threshold"
+                        );
+                        return Ok(());
+                    }
+                }
             }
             Some(MessageType::PingReq) if session.upstream_server_id.is_none() => {
                 write_message(
@@ -283,6 +436,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 {
                     Ok(route) => route,
                     Err(error_code) => {
+                        restore_authenticated_after_local_routing_error(&mut session);
                         write_proxy_error(
                             &mut client_stream,
                             packet.header.seq,
@@ -315,8 +469,6 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 }
 
                 session.state = ProxySessionState::Proxying;
-                let connections = connection_count.fetch_add(1, Ordering::Relaxed) + 1;
-                METRICS.set_connections(connections);
 
                 info!(
                     session_id = session.id,
@@ -331,7 +483,9 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     upstream.write_all(&packet.to_bytes()).await?;
                     let first_response = read_packet(&mut upstream, MAX_PROXY_BODY_LEN)
                         .await?
-                        .ok_or_else(|| std::io::Error::other("upstream closed before first response"))?;
+                        .ok_or_else(|| {
+                            std::io::Error::other("upstream closed before first response")
+                        })?;
 
                     update_routing_metadata(
                         &route_store,
@@ -350,17 +504,14 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 {
                     Ok(()) => {}
                     Err(error) => {
-                        let previous = connection_count.fetch_sub(1, Ordering::Relaxed);
-                        METRICS.set_connections(previous.saturating_sub(1));
                         session.state = ProxySessionState::Closed;
                         return Err(Box::new(error));
                     }
                 }
 
                 let result = copy_bidirectional(&mut client_stream, &mut upstream).await;
-                let previous = connection_count.fetch_sub(1, Ordering::Relaxed);
-                METRICS.set_connections(previous.saturating_sub(1));
                 session.state = ProxySessionState::Closed;
+                connection_guard.release();
 
                 return match result {
                     Ok((from_client, from_upstream)) => {
@@ -380,22 +531,48 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     }
 }
 
+fn preauth_decision(session: &ProxySession, packet: &Packet) -> PreauthDecision {
+    if is_authenticated_for_upstream(session) {
+        return PreauthDecision::AllowUpstreamSelection;
+    }
+
+    match packet.message_type() {
+        Some(MessageType::AuthReq) | Some(MessageType::PingReq) => PreauthDecision::HandleLocally,
+        _ => PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED),
+    }
+}
+
+fn is_authenticated_for_upstream(session: &ProxySession) -> bool {
+    session.state == ProxySessionState::Authenticated && session.player_id.is_some()
+}
+
+fn restore_authenticated_after_local_routing_error(session: &mut ProxySession) {
+    if session.player_id.is_some() && session.upstream_server_id.is_none() {
+        session.state = ProxySessionState::Authenticated;
+    }
+}
+
 async fn handle_local_auth<S: AsyncWrite + Unpin>(
     client_stream: &mut S,
     packet: &Packet,
     auth_service: &ProxyAuthService,
     deferred_auth: &mut DeferredAuthState,
     session: &mut ProxySession,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<AuthReq>("INVALID_AUTH_BODY") {
         Ok(request) => request,
         Err(error_code) => {
             deferred_auth.auth_req_packet = None;
             deferred_auth.player_id = None;
             session.player_id = None;
-            write_proxy_error(client_stream, packet.header.seq, error_code, "invalid auth body")
-                .await?;
-            return Ok(());
+            write_proxy_error(
+                client_stream,
+                packet.header.seq,
+                error_code,
+                "invalid auth body",
+            )
+            .await?;
+            return Ok(false);
         }
     };
 
@@ -415,6 +592,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 },
             )
             .await?;
+            Ok(true)
         }
         Err(error_code) => {
             deferred_auth.auth_req_packet = None;
@@ -431,10 +609,9 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 },
             )
             .await?;
+            Ok(false)
         }
     }
-
-    Ok(())
 }
 
 async fn replay_auth_to_upstream<U: AsyncRead + AsyncWrite + Unpin>(
@@ -482,25 +659,25 @@ async fn select_route_for_packet(
 ) -> Result<UpstreamRoute, &'static str> {
     let route = match packet.message_type() {
         Some(MessageType::RoomJoinReq) => {
-            let request = packet
-                .decode_body::<RoomJoinReq>("INVALID_ROOM_JOIN_BODY")?;
+            let request = packet.decode_body::<RoomJoinReq>("INVALID_ROOM_JOIN_BODY")?;
             let room_id = normalize_room_id(&request.room_id);
             route_store.select_upstream_for_room(&room_id).await
         }
         Some(MessageType::RoomJoinAsObserverReq) => {
-            let request = packet
-                .decode_body::<RoomJoinAsObserverReq>("INVALID_OBSERVER_JOIN_BODY")?;
+            let request =
+                packet.decode_body::<RoomJoinAsObserverReq>("INVALID_OBSERVER_JOIN_BODY")?;
             route_store.select_upstream_for_room(&request.room_id).await
         }
         Some(MessageType::RoomReconnectReq) => {
-            let request = packet
-                .decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")?;
+            let request = packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")?;
             if let Some(authenticated_player_id) = authenticated_player_id {
                 if !request.player_id.is_empty() && request.player_id != authenticated_player_id {
                     return Err("PLAYER_ID_MISMATCH");
                 }
             }
-            route_store.select_upstream_for_player(&request.player_id).await
+            route_store
+                .select_upstream_for_player(&request.player_id)
+                .await
         }
         _ => route_store.select_default_upstream().await,
     };
@@ -518,7 +695,8 @@ async fn update_routing_metadata(
 ) {
     match request.message_type() {
         Some(MessageType::RoomJoinReq) => {
-            if let Ok(join_response) = response.decode_body::<RoomJoinRes>("INVALID_ROOM_JOIN_RES") {
+            if let Ok(join_response) = response.decode_body::<RoomJoinRes>("INVALID_ROOM_JOIN_RES")
+            {
                 if join_response.ok {
                     session.room_id = Some(join_response.room_id.clone());
                     route_store
@@ -620,7 +798,9 @@ where
     M: prost::Message,
 {
     let body = encode_body(message);
-    writer.write_all(&encode_packet(message_type, seq, &body)).await
+    writer
+        .write_all(&encode_packet(message_type, seq, &body))
+        .await
 }
 
 async fn write_proxy_error<W: AsyncWrite + Unpin>(
@@ -654,4 +834,98 @@ fn current_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PREAUTH_MESSAGE_NOT_ALLOWED, PreauthDecision, preauth_decision,
+        restore_authenticated_after_local_routing_error,
+    };
+    use crate::protocol::{MessageType, Packet, PacketHeader};
+    use crate::session::{ProxySession, ProxySessionState};
+
+    fn packet(msg_type: u16) -> Packet {
+        Packet::new(
+            PacketHeader {
+                msg_type,
+                seq: 1,
+                body_len: 0,
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn rejects_room_join_before_authentication() {
+        let session = ProxySession::new(1);
+        let packet = packet(MessageType::RoomJoinReq as u16);
+
+        assert_eq!(
+            preauth_decision(&session, &packet),
+            PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_message_before_authentication() {
+        let session = ProxySession::new(1);
+        let packet = packet(65535);
+
+        assert_eq!(
+            preauth_decision(&session, &packet),
+            PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED)
+        );
+    }
+
+    #[test]
+    fn auth_failure_keeps_business_messages_in_preauth_reject_state() {
+        let mut session = ProxySession::new(1);
+        session.state = ProxySessionState::Connected;
+        session.player_id = None;
+        let packet = packet(MessageType::RoomReconnectReq as u16);
+
+        assert_eq!(
+            preauth_decision(&session, &packet),
+            PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED)
+        );
+    }
+
+    #[test]
+    fn authenticated_session_allows_business_message_to_reach_routing() {
+        let mut session = ProxySession::new(1);
+        session.state = ProxySessionState::Authenticated;
+        session.player_id = Some("player-1".to_string());
+        let packet = packet(MessageType::RoomJoinReq as u16);
+
+        assert_eq!(
+            preauth_decision(&session, &packet),
+            PreauthDecision::AllowUpstreamSelection
+        );
+    }
+
+    #[test]
+    fn preauth_allows_auth_and_ping_for_local_handling() {
+        let session = ProxySession::new(1);
+
+        assert_eq!(
+            preauth_decision(&session, &packet(MessageType::AuthReq as u16)),
+            PreauthDecision::HandleLocally
+        );
+        assert_eq!(
+            preauth_decision(&session, &packet(MessageType::PingReq as u16)),
+            PreauthDecision::HandleLocally
+        );
+    }
+
+    #[test]
+    fn routing_error_keeps_authenticated_session_authenticated() {
+        let mut session = ProxySession::new(1);
+        session.state = ProxySessionState::SelectingUpstream;
+        session.player_id = Some("player-1".to_string());
+
+        restore_authenticated_after_local_routing_error(&mut session);
+
+        assert_eq!(session.state, ProxySessionState::Authenticated);
+    }
 }

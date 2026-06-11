@@ -9,7 +9,7 @@
 当前安全与限流相关服务的状态如下：
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、接入转发、连接数观测、维护模式与上游发现；文档里旧的 KCP 限流/黑名单配置项目前并不存在
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 限流/黑名单配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、心跳超时和包体长度限制；文档里旧的消息频率限制专用配置项目前并不存在
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、心跳超时和包体长度限制；暂未做 Redis ticket 存在性校验或消息频率限制
 
@@ -81,8 +81,11 @@ INTERNAL_API_TOKEN=
 - TCP fallback 前端监听
 - `AuthReq` 本地 ticket 校验：校验 HMAC 签名，并检查 Redis 中是否存在对应 ticket
 - 鉴权通过后暂存认证包，绑定上游后向 `game-server` 重放 `AuthReq`
+- 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`，其它消息返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`，不会触发上游选择或绑定
+- 单连接预鉴权失败阈值：非法预鉴权消息或鉴权失败累计达到 `PROXY_MAX_PREAUTH_FAILURES` 后关闭连接
+- 总前端连接上限：`PROXY_MAX_CONNECTIONS` 为正整数时，超过上限的新连接会被拒绝
 - 动态上游发现或静态上游路由
-- 连接数统计与监控暴露
+- 活跃前端连接数统计与监控暴露，包含尚未完成 `AuthReq` 的预鉴权连接
 - 维护模式开关
 - 固定最大包体限制：`MAX_PROXY_BODY_LEN=1MiB`，当前不是环境变量
 
@@ -102,6 +105,8 @@ PROXY_LOCAL_SOCKET_NAME=myserver-game-proxy.sock
 REDIS_URL=redis://127.0.0.1:6379
 REDIS_KEY_PREFIX=
 TICKET_SECRET=replace-with-a-long-random-string
+PROXY_MAX_CONNECTIONS=0
+PROXY_MAX_PREAUTH_FAILURES=3
 
 REGISTRY_ENABLED=false
 REGISTRY_URL=redis://127.0.0.1:6379
@@ -122,7 +127,9 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
   - `MAX_CONNECTIONS_PER_ACCOUNT`
 - 当前 `game-proxy` 只统计总连接数，没有按 IP 或账号做连接上限控制
 - 当前代码里也没有 Redis 黑名单或封禁列表逻辑
-- 当前 `game-proxy` 只在收到 `AuthReq` 时做本地 ticket 校验；还没有严格的鉴权前消息白名单，非认证业务包仍可能被转发到 `game-server` 后由业务层拒绝
+- 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
+- `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
+- `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接
 - `game-proxy` 校验成功后不会删除 Redis ticket，避免破坏后续 `game-server` 与 `chat-server` 的接入校验
 
 ---
@@ -213,7 +220,8 @@ CHAT_PUBLIC_HOST=127.0.0.1
   - 使用 `TICKET_SECRET`、`TICKET_TTL_SECONDS`、`INTERNAL_API_TOKEN`
 - `game-proxy`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
-  - 当前没有独立的限流环境变量，只有监听、路由发现和运维相关配置
+  - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
+  - 当前没有单 IP、单玩家、Redis 黑名单或消息频率限制环境变量
 - `game-server`：
   - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
   - 当前没有 `MSG_RATE_WINDOW`、`MSG_RATE_MAX`
