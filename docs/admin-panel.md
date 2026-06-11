@@ -127,6 +127,7 @@ npm run dev:admin-web
 - 管理员 JWT 已包含 `jti` 和 `tokenVersion`，后端通过 Redis 管理员 session 校验实现登出撤销；Guard 每次仍会查库确认管理员存在且 `status=active`
 - 管理员 token 撤销和密码重置接口已通过 bump Redis token version 让目标管理员全部旧 token 失效
 - 管理员登录失败已按 username + client IP 维度计数和锁定，并写入 `security_audit_logs`
+- 管理员鉴权失败和权限拒绝会 best-effort 写入 `security_audit_logs`；审计失败只写结构化 warn 日志，不改变原本 401/403 结果
 - 审计 IP 与控制面保护已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For` 或 `X-Forwarded-Proto`
 - `admin-api` 支持请求级 HTTPS/TLS 强制和来源 IP allowlist；生产仍必须通过运营网段、堡垒机、VPN 或独立管理入口做网络隔离
 
@@ -203,7 +204,12 @@ npm run dev:admin-web
 | details_json | JSON | 详情 |
 | created_at | DATETIME(3) | 时间 |
 
-该表由 `auth-http` 等服务写入；`admin-api` 也会写入管理员登录失败和锁定事件，并提供查询能力。
+该表由 `auth-http` 等服务写入；`admin-api` 也会写入管理员登录失败、锁定、鉴权失败和权限拒绝事件，并提供查询能力。控制面鉴权/授权拒绝事件使用稳定事件类型：
+
+- `admin_auth_denied`：缺 token、过期/无效 token、缺 `jti`、管理员不存在、账号禁用、session revoked/mismatch、token version revoked 等
+- `admin_permission_denied`：已通过 JWT 鉴权但不满足 `@Permissions()` 或 legacy `@Roles()` 要求
+
+这些事件的 `details_json` 只记录 reason/errorCode、method、path、adminId、username、role、requiredPermissions/requiredRoles、handler、是否存在 `jti` 等安全字段，不记录原始 JWT、密码、token 或密钥。
 
 ### `player_accounts`
 

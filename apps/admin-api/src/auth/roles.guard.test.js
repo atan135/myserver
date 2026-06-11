@@ -19,6 +19,20 @@ const { RolesGuard } = await import("./roles.guard.ts");
 function makeContext({ role, permissions, roles, method = "POST", url = "/api/v1/gm/ban-player" }) {
   function handler() {}
 
+  const request = {
+    method,
+    url,
+    headers: {},
+    socket: {
+      remoteAddress: "198.51.100.10"
+    },
+    admin: {
+      sub: 7,
+      username: "worker",
+      role
+    }
+  };
+
   return {
     reflector: {
       getAllAndOverride(key) {
@@ -31,17 +45,10 @@ function makeContext({ role, permissions, roles, method = "POST", url = "/api/v1
       getHandler: () => handler,
       getClass: () => class TestController {},
       switchToHttp: () => ({
-        getRequest: () => ({
-          method,
-          url,
-          admin: {
-            sub: 7,
-            username: "worker",
-            role
-          }
-        })
+        getRequest: () => request
       })
-    }
+    },
+    request
   };
 }
 
@@ -75,27 +82,27 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
   assert.equal(roleHasPermission("unknown", "players.read"), false);
 });
 
-test("RolesGuard allows typical read/write operations by permission", () => {
+test("RolesGuard allows typical read/write operations by permission", async () => {
   let fixture = makeContext({ role: "viewer", permissions: ["players.read"] });
-  assert.equal(new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "operator", permissions: ["gm.kick_player"] });
-  assert.equal(new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "admin", permissions: ["admins.revoke_tokens"] });
-  assert.equal(new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "super_admin", permissions: ["gm.ban_player"] });
-  assert.equal(new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 });
 
-test("RolesGuard rejects unauthorized write operations with 403", () => {
+test("RolesGuard rejects unauthorized write operations with 403", async () => {
   const fixture = makeContext({ role: "viewer", permissions: ["gm.broadcast"] });
 
-  assert.throws(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+  await assert.rejects(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
 });
 
-test("RolesGuard requires every declared permission", () => {
+test("RolesGuard requires every declared permission", async () => {
   assert.equal(roleHasAllPermissions("operator", ["players.read", "players.status.update"]), true);
   assert.equal(roleHasAllPermissions("operator", ["players.read", "players.ban"]), false);
 
@@ -105,13 +112,50 @@ test("RolesGuard requires every declared permission", () => {
     url: "/api/v1/players/player-1/status"
   });
 
-  assert.throws(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+  await assert.rejects(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
 });
 
-test("RolesGuard keeps legacy role metadata compatible when no permission metadata is present", () => {
+test("RolesGuard keeps legacy role metadata compatible when no permission metadata is present", async () => {
   let fixture = makeContext({ role: "operator", roles: ["operator", "admin"] });
-  assert.equal(new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "viewer", roles: ["operator", "admin"] });
-  assert.throws(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+  await assert.rejects(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+});
+
+test("RolesGuard writes security audit on permission denial", async () => {
+  const fixture = makeContext({ role: "viewer", permissions: ["gm.broadcast"] });
+  const audits = [];
+  const store = {
+    async appendSecurityAuditLog(entry) {
+      audits.push(entry);
+    }
+  };
+
+  await assert.rejects(
+    () => new RolesGuard(fixture.reflector, store, {}).canActivate(fixture.context),
+    assertForbidden
+  );
+
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].eventType, "admin_permission_denied");
+  assert.equal(audits[0].targetValue, "worker");
+  assert.equal(audits[0].severity, "critical");
+  assert.equal(audits[0].clientIp, "198.51.100.10");
+  assert.deepEqual(audits[0].details.requiredPermissions, ["gm.broadcast"]);
+  assert.equal(audits[0].details.adminId, 7);
+});
+
+test("RolesGuard audit write failure does not change 403 result", async () => {
+  const fixture = makeContext({ role: "viewer", permissions: ["gm.broadcast"] });
+  const store = {
+    async appendSecurityAuditLog() {
+      throw new Error("mysql unavailable");
+    }
+  };
+
+  await assert.rejects(
+    () => new RolesGuard(fixture.reflector, store, {}).canActivate(fixture.context),
+    assertForbidden
+  );
 });

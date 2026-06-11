@@ -4,6 +4,7 @@ import { JwtService } from "@nestjs/jwt";
 import { ADMIN_CONFIG, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
 import { badRequest, forbidden, notFound, unauthorized } from "../common/http-exception.js";
 import { getClientIp } from "../common/client-ip.js";
+import { appendSecurityAuditLog } from "../common/security-audit.js";
 import type { LoginDto } from "./dto/login.dto.js";
 
 function toAdminDto(admin: any) {
@@ -15,14 +16,6 @@ function toAdminDto(admin: any) {
   };
 }
 
-async function appendSecurityAudit(adminStore: any, event: any) {
-  if (typeof adminStore.appendSecurityAuditLog !== "function") {
-    return;
-  }
-
-  await adminStore.appendSecurityAuditLog(event);
-}
-
 async function recordLoginFailure(
   adminStore: any,
   username: string,
@@ -30,7 +23,7 @@ async function recordLoginFailure(
   reason: string,
   details: Record<string, unknown> = {}
 ) {
-  await appendSecurityAudit(adminStore, {
+  await appendSecurityAuditLog(adminStore, {
     eventType: "admin_login_failed",
     targetType: "admin",
     targetValue: username,
@@ -64,7 +57,7 @@ export class AuthService {
     const clientIp = getClientIp(req, this.config);
     const lockStatus = await this.sessionStore.getLoginLock(normalizedUsername, clientIp);
     if (lockStatus.locked) {
-      await appendSecurityAudit(this.adminStore, {
+      await appendSecurityAuditLog(this.adminStore, {
         eventType: "admin_login_locked",
         targetType: "admin",
         targetValue: normalizedUsername,
@@ -80,7 +73,7 @@ export class AuthService {
       const attempts = await this.sessionStore.recordLoginFailure(normalizedUsername, clientIp, this.config);
       await recordLoginFailure(this.adminStore, normalizedUsername, clientIp, "admin_not_found", { attempts });
       if (attempts >= this.config.adminLoginMaxFailures) {
-        await appendSecurityAudit(this.adminStore, {
+        await appendSecurityAuditLog(this.adminStore, {
           eventType: "admin_login_locked",
           targetType: "admin",
           targetValue: normalizedUsername,
@@ -103,7 +96,7 @@ export class AuthService {
       const attempts = await this.sessionStore.recordLoginFailure(admin.username, clientIp, this.config);
       await recordLoginFailure(this.adminStore, admin.username, clientIp, "invalid_password", { attempts });
       if (attempts >= this.config.adminLoginMaxFailures) {
-        await appendSecurityAudit(this.adminStore, {
+        await appendSecurityAuditLog(this.adminStore, {
           eventType: "admin_login_locked",
           targetType: "admin",
           targetValue: admin.username,
