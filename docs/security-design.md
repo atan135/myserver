@@ -88,7 +88,7 @@
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、读写 token 分离、生产默认 token 拒绝、写操作基础输入校验、`X-Admin-Actor` 操作人解析、结构化日志和 JSONL 持久审计 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin 尚缺更细操作级 RBAC、审计查询、集中留存和统一 trace/request id，多 proxy route store 强一致仍未完全闭环 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接；GM 广播仍是本实例范围 |
-| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵仍待补齐 |
+| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、请求级 HTTPS/TLS 强制、来源 IP allowlist、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 代码侧 TLS/allowlist 不能替代生产网络隔离；更细粒度权限矩阵仍待补齐 |
 
 说明：
 
@@ -556,6 +556,7 @@ CHAT_MAX_CONNECTIONS_PER_IP=0
 ```env
 ADMIN_API_REQUIRE_TLS=false
 ADMIN_API_REQUIRE_IP_ALLOWLIST=false
+ADMIN_API_IP_ALLOWLIST=
 ADMIN_MONITORING_REQUIRE_AUTH=true
 ADMIN_ENFORCE_ROLE_CHECK=true
 ADMIN_SESSION_TTL_SECONDS=28800
@@ -566,7 +567,7 @@ TRUST_PROXY=false
 TRUSTED_PROXIES=
 ```
 
-当前 `admin-api` 已读取 `ADMIN_SESSION_TTL_SECONDS`、`ADMIN_LOGIN_MAX_FAILURES`、`ADMIN_LOGIN_FAILURE_WINDOW_SECONDS`、`ADMIN_LOGIN_LOCK_SECONDS`、`TRUST_PROXY` 和 `TRUSTED_PROXIES`。`ADMIN_SESSION_TTL_SECONDS` 未配置时跟随 `JWT_EXPIRES_IN` 解析出的秒数；`TRUST_PROXY=true` 仍要求直连来源显式列在 `TRUSTED_PROXIES` 后才信任 `X-Forwarded-For`。`NODE_ENV=production` 下明显默认的 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 或 `ADMIN_PASSWORD` 会导致配置加载失败。`ADMIN_API_REQUIRE_TLS`、`ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_MONITORING_REQUIRE_AUTH`、`ADMIN_ENFORCE_ROLE_CHECK` 仍是部署或设计口径，其中监控接口和角色校验代码侧已经默认启用。
+当前 `admin-api` 已读取 `ADMIN_SESSION_TTL_SECONDS`、`ADMIN_LOGIN_MAX_FAILURES`、`ADMIN_LOGIN_FAILURE_WINDOW_SECONDS`、`ADMIN_LOGIN_LOCK_SECONDS`、`TRUST_PROXY`、`TRUSTED_PROXIES`、`ADMIN_API_REQUIRE_TLS`、`ADMIN_API_REQUIRE_IP_ALLOWLIST` 和 `ADMIN_API_IP_ALLOWLIST`。`ADMIN_SESSION_TTL_SECONDS` 未配置时跟随 `JWT_EXPIRES_IN` 解析出的秒数；`ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；`ADMIN_API_REQUIRE_IP_ALLOWLIST` 默认 `false`，启用后 `ADMIN_API_IP_ALLOWLIST` 支持精确 IP 和 IPv4 CIDR。`TRUST_PROXY=true` 仍要求直连来源显式列在 `TRUSTED_PROXIES` 后才信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`。`NODE_ENV=production` 下明显默认的 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 或 `ADMIN_PASSWORD` 会导致配置加载失败。`ADMIN_MONITORING_REQUIRE_AUTH`、`ADMIN_ENFORCE_ROLE_CHECK` 仍是部署或设计口径，其中监控接口和角色校验代码侧已经默认启用。
 
 ### 9.6 `announce-service` / 公告写控制面
 

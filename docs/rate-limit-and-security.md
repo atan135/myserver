@@ -12,6 +12,7 @@
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截、上游发现，以及 admin 写操作的 actor 解析和 JSONL 持久审计；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
+- `admin-api`：当前已实现 JWT 与角色校验、登录失败锁定、安全审计、可信代理来源 IP 解析、请求级 TLS 强制和来源 IP allowlist；生产仍应通过运营网段、堡垒机、VPN、安全组或等价网络隔离限制访问
 
 ---
 
@@ -310,7 +311,31 @@ LOG_DIR=logs
 
 ---
 
-## 6. 配置项对照结论
+## 6. admin-api（管理控制面）
+
+### 6.1 已实现能力
+
+- 请求级 TLS 强制：`ADMIN_API_REQUIRE_TLS=true` 时，非 HTTPS 请求返回 `426 ADMIN_API_TLS_REQUIRED`
+- 来源 IP allowlist：`ADMIN_API_REQUIRE_IP_ALLOWLIST=true` 时，来源 IP 不在 `ADMIN_API_IP_ALLOWLIST` 返回 `403 ADMIN_API_IP_NOT_ALLOWED`
+- 可信代理解析：`TRUST_PROXY=true` 且直连来源命中 `TRUSTED_PROXIES` 后，才信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`
+- allowlist 支持精确 IP 和 IPv4 CIDR，例如 `127.0.0.1,10.0.0.0/24`
+- 拒绝事件会写入结构化安全日志；当前不写入 MySQL `security_audit_logs`
+
+### 6.2 当前实际配置项
+
+```env
+TRUST_PROXY=false
+TRUSTED_PROXIES=
+ADMIN_API_REQUIRE_TLS=false
+ADMIN_API_REQUIRE_IP_ALLOWLIST=false
+ADMIN_API_IP_ALLOWLIST=
+```
+
+`ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；经反向代理部署时，必须同时正确配置 `TRUST_PROXY` / `TRUSTED_PROXIES`，否则不可信来源伪造的 `X-Forwarded-Proto=https` 不会生效。`ADMIN_API_REQUIRE_IP_ALLOWLIST=false` 默认关闭，避免破坏本地联调；生产建议结合部署侧网络隔离启用。代码侧保护不代表 `admin-api/admin-web` 可以作为生产公网玩家入口。
+
+---
+
+## 7. 配置项对照结论
 
 为了避免继续误用旧配置名，本主题下应以代码实际读取的环境变量为准：
 
@@ -335,6 +360,10 @@ LOG_DIR=logs
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`CHAT_MSG_RATE_WINDOW_MS`、`CHAT_MSG_RATE_MAX`、`CHAT_MAX_CONNECTIONS_PER_PLAYER`、`CHAT_MAX_CONNECTIONS_PER_IP`、`CHAT_OUTBOUND_QUEUE_CAPACITY`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认、空值或明显占位的 `TICKET_SECRET`
   - 当前消息频率限制是单连接本地状态；连接数限制是单账号 / 单 IP 的本实例本地状态，不是跨实例全局限额
+- `admin-api`：
+  - 使用 `TRUST_PROXY`、`TRUSTED_PROXIES` 控制真实来源 IP 与 forwarded proto 解析
+  - 使用 `ADMIN_API_REQUIRE_TLS` 控制请求级 HTTPS/TLS 强制；生产默认开启，开发默认关闭
+  - 使用 `ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_API_IP_ALLOWLIST` 控制来源 IP allowlist；默认关闭，列表支持精确 IP 和 IPv4 CIDR
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
   - 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`，不支持 query token

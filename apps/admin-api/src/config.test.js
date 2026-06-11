@@ -1,0 +1,77 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+const CONFIG_ENV_KEYS = [
+  "NODE_ENV",
+  "JWT_SECRET",
+  "GAME_ADMIN_TOKEN",
+  "ADMIN_PASSWORD",
+  "ADMIN_API_REQUIRE_TLS",
+  "ADMIN_API_REQUIRE_IP_ALLOWLIST",
+  "ADMIN_API_IP_ALLOWLIST",
+  "TRUST_PROXY",
+  "TRUSTED_PROXIES"
+];
+
+async function withEnv(env, fn) {
+  const previous = new Map(CONFIG_ENV_KEYS.map((key) => [key, process.env[key]]));
+  const previousCwd = process.cwd();
+  const tempCwd = fs.mkdtempSync(path.join(os.tmpdir(), "admin-api-config-test-"));
+  for (const key of CONFIG_ENV_KEYS) {
+    delete process.env[key];
+  }
+  Object.assign(process.env, env);
+  process.chdir(tempCwd);
+
+  try {
+    const mod = await import(`./config.js?test=${Date.now()}-${Math.random()}`);
+    await fn(mod.getConfig());
+  } finally {
+    process.chdir(previousCwd);
+    fs.rmSync(tempCwd, { recursive: true, force: true });
+    for (const key of CONFIG_ENV_KEYS) {
+      const value = previous.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+test("admin-api control plane security defaults stay local-development friendly", async () => {
+  await withEnv({ NODE_ENV: "development" }, (config) => {
+    assert.equal(config.adminApiRequireTls, false);
+    assert.equal(config.adminApiRequireIpAllowlist, false);
+    assert.deepEqual(config.adminApiIpAllowlist, []);
+  });
+});
+
+test("admin-api requires TLS by default in production", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.adminApiRequireTls, true);
+    assert.equal(config.adminApiRequireIpAllowlist, false);
+  });
+});
+
+test("admin-api control plane security config can be explicitly enabled", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    ADMIN_API_REQUIRE_TLS: "true",
+    ADMIN_API_REQUIRE_IP_ALLOWLIST: "true",
+    ADMIN_API_IP_ALLOWLIST: "127.0.0.1,10.0.0.0/24"
+  }, (config) => {
+    assert.equal(config.adminApiRequireTls, true);
+    assert.equal(config.adminApiRequireIpAllowlist, true);
+    assert.deepEqual(config.adminApiIpAllowlist, ["127.0.0.1", "10.0.0.0/24"]);
+  });
+});

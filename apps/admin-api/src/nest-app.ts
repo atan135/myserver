@@ -6,6 +6,7 @@ import { FastifyAdapter, NestFastifyApplication } from "@nestjs/platform-fastify
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 
 import { AppModule } from "./app.module.js";
+import { registerControlPlaneSecurityHook } from "./common/control-plane-security.js";
 import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
 import {
@@ -33,6 +34,7 @@ export async function createNestApp() {
   app.useGlobalFilters(new HttpExceptionFilter());
 
   const fastify = app.getHttpAdapter().getInstance();
+  registerControlPlaneSecurityHook(fastify, config);
   fastify.addHook("onRequest", async (request: any) => {
     request.metricsStartedAt = Date.now();
   });

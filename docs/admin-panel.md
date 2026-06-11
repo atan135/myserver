@@ -110,9 +110,10 @@ npm run dev:admin-web
 - 管理员 JWT 已包含 `jti` 和 `tokenVersion`，后端通过 Redis 管理员 session 校验实现登出撤销；Guard 每次仍会查库确认管理员存在且 `status=active`
 - 管理员 token 撤销和密码重置接口已通过 bump Redis token version 让目标管理员全部旧 token 失效
 - 管理员登录失败已按 username + client IP 维度计数和锁定，并写入 `security_audit_logs`
-- 审计 IP 已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For`
+- 审计 IP 与控制面保护已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For` 或 `X-Forwarded-Proto`
+- `admin-api` 支持请求级 HTTPS/TLS 强制和来源 IP allowlist；生产仍必须通过运营网段、堡垒机、VPN 或独立管理入口做网络隔离
 
-如果后续补上管理面 IP allowlist 或更细粒度权限矩阵，本文应同步更新。
+如果后续补上更细粒度权限矩阵，本文应同步更新。
 
 ## 数据库表
 
@@ -594,6 +595,9 @@ ADMIN_LOGIN_FAILURE_WINDOW_SECONDS=900
 ADMIN_LOGIN_LOCK_SECONDS=900
 TRUST_PROXY=false
 TRUSTED_PROXIES=
+ADMIN_API_REQUIRE_TLS=false
+ADMIN_API_REQUIRE_IP_ALLOWLIST=false
+ADMIN_API_IP_ALLOWLIST=127.0.0.1,::1
 
 GAME_SERVER_ADMIN_HOST=127.0.0.1
 GAME_SERVER_ADMIN_PORT=7500
@@ -609,7 +613,9 @@ ADMIN_DISPLAY_NAME=Administrator
 - `GAME_SERVER_ADMIN_HOST` / `GAME_SERVER_ADMIN_PORT` / `GAME_ADMIN_TOKEN` 用于 GM 指令转发
 - 默认仍对接 `game-server` admin 端口 `7500`
 - 生产环境必须修改 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 和初始管理员密码；`NODE_ENV=production` 下明显默认的 `JWT_SECRET` / `GAME_ADMIN_TOKEN` / `ADMIN_PASSWORD` 会导致配置加载失败
-- `TRUST_PROXY=false` 时审计 IP 使用直连来源；只有开启 `TRUST_PROXY` 且直连来源显式列在 `TRUSTED_PROXIES` 中时才采用 `X-Forwarded-For` 首个地址
+- `ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；直连 HTTPS 通过 socket TLS 判断，经代理部署时只有可信代理来源的 `X-Forwarded-Proto=https` 才生效
+- `ADMIN_API_REQUIRE_IP_ALLOWLIST=false` 默认关闭；启用后 `ADMIN_API_IP_ALLOWLIST` 支持精确 IP 和 IPv4 CIDR，例如 `127.0.0.1,10.0.0.0/24`
+- `TRUST_PROXY=false` 时审计 IP 和 allowlist 来源 IP 使用直连来源；只有开启 `TRUST_PROXY` 且直连来源显式列在 `TRUSTED_PROXIES` 中时才采用 `X-Forwarded-For` 首个地址
 
 ## 安全说明
 
@@ -621,4 +627,5 @@ ADMIN_DISPLAY_NAME=Administrator
 6. 审计 IP 解析遵循 `TRUST_PROXY` / `TRUSTED_PROXIES`，生产如有反向代理需要显式配置可信代理地址。
 7. 安全事件通过 `security_audit_logs` 提供检索。
 8. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与角色校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
-9. 当前后端已有角色校验；管理面 IP allowlist、HTTPS/TLS 强制和更细粒度权限矩阵仍需继续推进。
+9. 当前后端已有角色校验、请求级 TLS 强制和来源 IP allowlist；这些代码侧保护不替代安全组、防火墙、VPN 或堡垒机隔离。
+10. 更细粒度权限矩阵仍需继续推进。
