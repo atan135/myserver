@@ -40,6 +40,8 @@ pub struct RuntimeConfig {
     pub player_msg_rate_max: u64,
     pub input_timestamp_required: bool,
     pub input_timestamp_max_skew_ms: u64,
+    pub input_anomaly_window_ms: u64,
+    pub input_anomaly_max: u64,
     pub drain_mode_enabled: bool,
     pub drain_mode_entered_at_ms: Option<u64>,
 }
@@ -96,6 +98,190 @@ pub struct PlayerMessageRateLimiter {
 struct PlayerMessageRateWindow {
     window_started_at: Instant,
     count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputAnomalyKind {
+    Duplicate,
+    Expired,
+    Future,
+    Timestamp,
+}
+
+impl InputAnomalyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Duplicate => "duplicate",
+            Self::Expired => "expired",
+            Self::Future => "future",
+            Self::Timestamp => "timestamp",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PlayerInputAnomalyTracker {
+    windows: HashMap<String, PlayerInputAnomalyWindow>,
+}
+
+#[derive(Debug)]
+struct PlayerInputAnomalyWindow {
+    window_started_at: Instant,
+    count: u64,
+    last_room_id: Option<String>,
+    last_frame_id: Option<u32>,
+    last_input_fingerprint: Option<String>,
+}
+
+impl PlayerInputAnomalyTracker {
+    pub fn new() -> Self {
+        Self {
+            windows: HashMap::new(),
+        }
+    }
+
+    pub fn record(
+        &mut self,
+        player_id: &str,
+        now: Instant,
+        window_ms: u64,
+        max_anomalies: u64,
+    ) -> InputAnomalyRecordOutcome {
+        if window_ms == 0 {
+            self.windows.clear();
+            return InputAnomalyRecordOutcome {
+                count: 0,
+                blocked: false,
+            };
+        }
+
+        self.cleanup_expired(now, window_ms);
+
+        let window = Duration::from_millis(window_ms);
+        let entry = self
+            .windows
+            .entry(player_id.to_string())
+            .or_insert(PlayerInputAnomalyWindow {
+                window_started_at: now,
+                count: 0,
+                last_room_id: None,
+                last_frame_id: None,
+                last_input_fingerprint: None,
+            });
+
+        if now.saturating_duration_since(entry.window_started_at) >= window {
+            entry.window_started_at = now;
+            entry.count = 0;
+        }
+
+        if entry.count == 0 {
+            entry.window_started_at = now;
+        }
+
+        entry.count = entry.count.saturating_add(1);
+        InputAnomalyRecordOutcome {
+            count: entry.count,
+            blocked: max_anomalies > 0 && entry.count >= max_anomalies,
+        }
+    }
+
+    pub fn remember_frame(
+        &mut self,
+        player_id: &str,
+        room_id: &str,
+        frame_id: u32,
+        input_fingerprint: &str,
+        now: Instant,
+        window_ms: u64,
+    ) -> bool {
+        if window_ms == 0 {
+            self.windows.clear();
+            return false;
+        }
+
+        self.cleanup_expired(now, window_ms);
+
+        let window = Duration::from_millis(window_ms);
+        let entry = self
+            .windows
+            .entry(player_id.to_string())
+            .or_insert(PlayerInputAnomalyWindow {
+                window_started_at: now,
+                count: 0,
+                last_room_id: None,
+                last_frame_id: None,
+                last_input_fingerprint: None,
+            });
+
+        if now.saturating_duration_since(entry.window_started_at) >= window {
+            entry.window_started_at = now;
+            entry.count = 0;
+            entry.last_room_id = None;
+            entry.last_frame_id = None;
+            entry.last_input_fingerprint = None;
+        }
+
+        let duplicate = entry.last_room_id.as_deref() == Some(room_id)
+            && entry.last_frame_id == Some(frame_id)
+            && entry.last_input_fingerprint.as_deref() == Some(input_fingerprint);
+        entry.last_room_id = Some(room_id.to_string());
+        entry.last_frame_id = Some(frame_id);
+        entry.last_input_fingerprint = Some(input_fingerprint.to_string());
+        duplicate
+    }
+
+    pub fn is_blocked(
+        &mut self,
+        player_id: &str,
+        now: Instant,
+        window_ms: u64,
+        max_anomalies: u64,
+    ) -> bool {
+        if window_ms == 0 || max_anomalies == 0 {
+            if window_ms == 0 {
+                self.windows.clear();
+            }
+            return false;
+        }
+
+        self.cleanup_expired(now, window_ms);
+        self.windows
+            .get(player_id)
+            .is_some_and(|entry| entry.count >= max_anomalies)
+    }
+
+    pub fn cleanup_expired(&mut self, now: Instant, window_ms: u64) -> usize {
+        if window_ms == 0 {
+            let removed = self.windows.len();
+            self.windows.clear();
+            return removed;
+        }
+
+        let window = Duration::from_millis(window_ms);
+        let before = self.windows.len();
+        self.windows
+            .retain(|_, entry| now.saturating_duration_since(entry.window_started_at) < window);
+        before.saturating_sub(self.windows.len())
+    }
+
+    #[cfg(test)]
+    pub fn tracked_player_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    #[cfg(test)]
+    pub fn anomaly_count(&self, player_id: &str) -> u64 {
+        self.windows
+            .get(player_id)
+            .map(|entry| entry.count)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct InputAnomalyRecordOutcome {
+    pub count: u64,
+    pub blocked: bool,
 }
 
 impl PlayerMessageRateLimiter {
@@ -215,12 +401,17 @@ pub async fn run(
             player_msg_rate_max: config.player_msg_rate_max,
             input_timestamp_required: config.input_timestamp_required,
             input_timestamp_max_skew_ms: config.input_timestamp_max_skew_ms,
+            input_anomaly_window_ms: config.input_anomaly_window_ms,
+            input_anomaly_max: config.input_anomaly_max,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
         player_msg_rate_limiter: Arc::new(tokio::sync::Mutex::new(PlayerMessageRateLimiter::new())),
+        player_input_anomaly_tracker: Arc::new(tokio::sync::Mutex::new(
+            PlayerInputAnomalyTracker::new(),
+        )),
     };
 
     // Initialize MySqlPlayerStore for inventory persistence
@@ -238,6 +429,7 @@ pub async fn run(
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
+        player_input_anomaly_tracker: shared_state.player_input_anomaly_tracker.clone(),
     };
     info!(
         addr = %config.bind_addr(),
@@ -978,5 +1170,125 @@ mod tests {
             1
         );
         assert_eq!(limiter.tracked_player_count(), 0);
+    }
+
+    #[test]
+    fn input_anomaly_tracker_records_until_threshold() {
+        let mut tracker = PlayerInputAnomalyTracker::new();
+        let now = Instant::now();
+
+        let first = tracker.record("player-a", now, 1000, 2);
+        assert_eq!(
+            first,
+            InputAnomalyRecordOutcome {
+                count: 1,
+                blocked: false
+            }
+        );
+        assert!(!tracker.is_blocked("player-a", now, 1000, 2));
+
+        let second = tracker.record("player-a", now + Duration::from_millis(10), 1000, 2);
+        assert_eq!(
+            second,
+            InputAnomalyRecordOutcome {
+                count: 2,
+                blocked: true
+            }
+        );
+        assert!(tracker.is_blocked("player-a", now + Duration::from_millis(20), 1000, 2));
+    }
+
+    #[test]
+    fn input_anomaly_tracker_disabled_threshold_never_blocks() {
+        let mut tracker = PlayerInputAnomalyTracker::new();
+        let now = Instant::now();
+
+        let first = tracker.record("player-a", now, 1000, 0);
+        let second = tracker.record("player-a", now + Duration::from_millis(10), 1000, 0);
+
+        assert_eq!(first.count, 1);
+        assert_eq!(second.count, 2);
+        assert!(!second.blocked);
+        assert!(!tracker.is_blocked("player-a", now + Duration::from_millis(20), 1000, 0));
+    }
+
+    #[test]
+    fn input_anomaly_tracker_resets_after_window_rolls() {
+        let mut tracker = PlayerInputAnomalyTracker::new();
+        let now = Instant::now();
+
+        assert!(tracker.record("player-a", now, 1000, 1).blocked);
+        assert!(tracker.is_blocked("player-a", now + Duration::from_millis(999), 1000, 1));
+        assert!(!tracker.is_blocked("player-a", now + Duration::from_millis(1000), 1000, 1));
+        assert_eq!(tracker.tracked_player_count(), 0);
+    }
+
+    #[test]
+    fn input_anomaly_tracker_detects_duplicate_identical_inputs_only() {
+        let mut tracker = PlayerInputAnomalyTracker::new();
+        let now = Instant::now();
+
+        assert!(!tracker.remember_frame("player-a", "room-a", 1, "move:{}", now, 1000));
+        assert_eq!(tracker.anomaly_count("player-a"), 0);
+        assert!(!tracker.remember_frame(
+            "player-a",
+            "room-a",
+            2,
+            "move:{\"x\":1}",
+            now + Duration::from_millis(10),
+            1000
+        ));
+        assert_eq!(tracker.anomaly_count("player-a"), 0);
+        assert!(!tracker.remember_frame(
+            "player-a",
+            "room-a",
+            2,
+            "move:{\"x\":2}",
+            now + Duration::from_millis(15),
+            1000
+        ));
+        assert!(tracker.remember_frame(
+            "player-a",
+            "room-a",
+            2,
+            "move:{\"x\":2}",
+            now + Duration::from_millis(20),
+            1000
+        ));
+        assert!(!tracker.remember_frame(
+            "player-a",
+            "room-b",
+            2,
+            "move:{\"x\":2}",
+            now + Duration::from_millis(30),
+            1000
+        ));
+    }
+
+    #[test]
+    fn input_anomaly_tracker_starts_window_on_first_anomaly() {
+        let mut tracker = PlayerInputAnomalyTracker::new();
+        let now = Instant::now();
+
+        assert!(!tracker.remember_frame("player-a", "room-a", 1, "move:{}", now, 1000));
+        let first_anomaly_at = now + Duration::from_millis(900);
+        assert!(
+            tracker
+                .record("player-a", first_anomaly_at, 1000, 1)
+                .blocked
+        );
+
+        assert!(tracker.is_blocked(
+            "player-a",
+            first_anomaly_at + Duration::from_millis(999),
+            1000,
+            1
+        ));
+        assert!(!tracker.is_blocked(
+            "player-a",
+            first_anomaly_at + Duration::from_millis(1000),
+            1000,
+            1
+        ));
     }
 }

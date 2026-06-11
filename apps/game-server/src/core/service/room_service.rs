@@ -1,10 +1,11 @@
 use serde_json::json;
+use std::time::Instant;
+
 use tracing::{info, warn};
 
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
 use crate::core::system::movement::player_input_from_move_req;
-use crate::server::{RuntimeConfig, current_unix_ms};
 use crate::pb::{
     CreateMatchedRoomReq, CreateMatchedRoomRes, MoveInputReq, MoveInputRes, PlayerInputReq,
     PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes,
@@ -12,6 +13,7 @@ use crate::pb::{
     RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
+use crate::server::{InputAnomalyKind, RuntimeConfig, current_unix_ms};
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR: &str = "SERVER_DRAINING_REJECT_NEW_ROOM";
 
@@ -434,9 +436,10 @@ pub async fn handle_player_input(
         }
     };
 
-    if let Err(error_code) =
-        validate_input_timestamp(&*services.runtime_config.read().await, request.client_timestamp_ms)
-    {
+    if let Err(error_code) = validate_input_timestamp(
+        &*services.runtime_config.read().await,
+        request.client_timestamp_ms,
+    ) {
         warn!(
             room_id = %room_id,
             player_id = %player_id,
@@ -445,6 +448,17 @@ pub async fn handle_player_input(
             error_code = %error_code,
             "player input timestamp rejected"
         );
+        record_input_anomaly(
+            services,
+            &room_id,
+            &player_id,
+            request.frame_id,
+            packet.header.seq,
+            "PlayerInputReq",
+            InputAnomalyKind::Timestamp,
+            error_code,
+        )
+        .await;
         connection.queue_message(
             MessageType::PlayerInputRes,
             packet.header.seq,
@@ -455,6 +469,49 @@ pub async fn handle_player_input(
             },
         )?;
         return Ok(());
+    }
+
+    if reject_if_input_anomaly_blocked(
+        services,
+        connection,
+        MessageType::PlayerInputRes,
+        packet.header.seq,
+        &room_id,
+        &player_id,
+        request.frame_id,
+        "PlayerInputReq",
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    let input_fingerprint = input_fingerprint(&request.action, &request.payload_json);
+    if remember_input_frame_and_record_duplicate(
+        services,
+        &room_id,
+        &player_id,
+        request.frame_id,
+        &input_fingerprint,
+        packet.header.seq,
+        "PlayerInputReq",
+    )
+    .await
+    {
+        if reject_if_input_anomaly_blocked(
+            services,
+            connection,
+            MessageType::PlayerInputRes,
+            packet.header.seq,
+            &room_id,
+            &player_id,
+            request.frame_id,
+            "PlayerInputReq",
+        )
+        .await?
+        {
+            return Ok(());
+        }
     }
 
     let input_result = services
@@ -498,6 +555,19 @@ pub async fn handle_player_input(
                 .await;
         }
         Err(error_code) => {
+            if let Some(kind) = input_anomaly_kind_from_error(error_code) {
+                record_input_anomaly(
+                    services,
+                    &room_id,
+                    &player_id,
+                    request.frame_id,
+                    packet.header.seq,
+                    "PlayerInputReq",
+                    kind,
+                    error_code,
+                )
+                .await;
+            }
             warn!(
                 room_id = %room_id,
                 player_id = %player_id,
@@ -550,9 +620,10 @@ pub async fn handle_move_input(
         }
     };
 
-    if let Err(error_code) =
-        validate_input_timestamp(&*services.runtime_config.read().await, request.client_timestamp_ms)
-    {
+    if let Err(error_code) = validate_input_timestamp(
+        &*services.runtime_config.read().await,
+        request.client_timestamp_ms,
+    ) {
         warn!(
             room_id = %room_id,
             player_id = %player_id,
@@ -561,6 +632,17 @@ pub async fn handle_move_input(
             error_code = %error_code,
             "move input timestamp rejected"
         );
+        record_input_anomaly(
+            services,
+            &room_id,
+            &player_id,
+            request.frame_id,
+            packet.header.seq,
+            "MoveInputReq",
+            InputAnomalyKind::Timestamp,
+            error_code,
+        )
+        .await;
         connection.queue_message(
             MessageType::MoveInputRes,
             packet.header.seq,
@@ -570,6 +652,21 @@ pub async fn handle_move_input(
                 error_code: error_code.to_string(),
             },
         )?;
+        return Ok(());
+    }
+
+    if reject_if_input_anomaly_blocked(
+        services,
+        connection,
+        MessageType::MoveInputRes,
+        packet.header.seq,
+        &room_id,
+        &player_id,
+        request.frame_id,
+        "MoveInputReq",
+    )
+    .await?
+    {
         return Ok(());
     }
 
@@ -588,6 +685,34 @@ pub async fn handle_move_input(
             return Ok(());
         }
     };
+
+    let input_fingerprint = input_fingerprint(action, &payload_json);
+    if remember_input_frame_and_record_duplicate(
+        services,
+        &room_id,
+        &player_id,
+        request.frame_id,
+        &input_fingerprint,
+        packet.header.seq,
+        "MoveInputReq",
+    )
+    .await
+    {
+        if reject_if_input_anomaly_blocked(
+            services,
+            connection,
+            MessageType::MoveInputRes,
+            packet.header.seq,
+            &room_id,
+            &player_id,
+            request.frame_id,
+            "MoveInputReq",
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
 
     let input_result = services
         .room_manager
@@ -635,6 +760,19 @@ pub async fn handle_move_input(
                 .await;
         }
         Err(error_code) => {
+            if let Some(kind) = input_anomaly_kind_from_error(error_code) {
+                record_input_anomaly(
+                    services,
+                    &room_id,
+                    &player_id,
+                    request.frame_id,
+                    packet.header.seq,
+                    "MoveInputReq",
+                    kind,
+                    error_code,
+                )
+                .await;
+            }
             connection.queue_message(
                 MessageType::MoveInputRes,
                 packet.header.seq,
@@ -672,6 +810,170 @@ pub(crate) fn validate_input_timestamp(
         Err("INPUT_TIMESTAMP_SKEW")
     } else {
         Ok(())
+    }
+}
+
+fn input_anomaly_kind_from_error(error_code: &str) -> Option<InputAnomalyKind> {
+    match error_code {
+        "INPUT_FRAME_EXPIRED" => Some(InputAnomalyKind::Expired),
+        "INPUT_FRAME_TOO_FAR" => Some(InputAnomalyKind::Future),
+        _ => None,
+    }
+}
+
+async fn remember_input_frame_and_record_duplicate(
+    services: &ServiceContext,
+    room_id: &str,
+    player_id: &str,
+    frame_id: u32,
+    input_fingerprint: &str,
+    seq: u32,
+    request_type: &'static str,
+) -> bool {
+    let runtime = *services.runtime_config.read().await;
+    let duplicate = services
+        .player_input_anomaly_tracker
+        .lock()
+        .await
+        .remember_frame(
+            player_id,
+            room_id,
+            frame_id,
+            input_fingerprint,
+            Instant::now(),
+            runtime.input_anomaly_window_ms,
+        );
+
+    if duplicate {
+        record_input_anomaly(
+            services,
+            room_id,
+            player_id,
+            frame_id,
+            seq,
+            request_type,
+            InputAnomalyKind::Duplicate,
+            "INPUT_FRAME_DUPLICATE",
+        )
+        .await;
+    }
+
+    duplicate
+}
+
+fn input_fingerprint(action: &str, payload_json: &str) -> String {
+    format!("{action}\n{payload_json}")
+}
+
+async fn reject_if_input_anomaly_blocked(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    response_type: MessageType,
+    seq: u32,
+    room_id: &str,
+    player_id: &str,
+    frame_id: u32,
+    request_type: &'static str,
+) -> Result<bool, std::io::Error> {
+    let runtime = *services.runtime_config.read().await;
+    let blocked = services
+        .player_input_anomaly_tracker
+        .lock()
+        .await
+        .is_blocked(
+            player_id,
+            Instant::now(),
+            runtime.input_anomaly_window_ms,
+            runtime.input_anomaly_max,
+        );
+
+    if !blocked {
+        return Ok(false);
+    }
+
+    warn!(
+        room_id = %room_id,
+        player_id = %player_id,
+        frame_id = frame_id,
+        seq = seq,
+        request_type = request_type,
+        anomaly_window_ms = runtime.input_anomaly_window_ms,
+        anomaly_max = runtime.input_anomaly_max,
+        error_code = "INPUT_ANOMALY_BLOCKED",
+        "player input rejected after anomaly threshold"
+    );
+
+    queue_input_rejected(
+        connection,
+        response_type,
+        seq,
+        room_id,
+        "INPUT_ANOMALY_BLOCKED",
+    )?;
+    Ok(true)
+}
+
+async fn record_input_anomaly(
+    services: &ServiceContext,
+    room_id: &str,
+    player_id: &str,
+    frame_id: u32,
+    seq: u32,
+    request_type: &'static str,
+    kind: InputAnomalyKind,
+    error_code: &str,
+) {
+    let runtime = *services.runtime_config.read().await;
+    let outcome = services.player_input_anomaly_tracker.lock().await.record(
+        player_id,
+        Instant::now(),
+        runtime.input_anomaly_window_ms,
+        runtime.input_anomaly_max,
+    );
+
+    warn!(
+        room_id = %room_id,
+        player_id = %player_id,
+        frame_id = frame_id,
+        seq = seq,
+        request_type = request_type,
+        anomaly_kind = kind.as_str(),
+        anomaly_count = outcome.count,
+        anomaly_blocked = outcome.blocked,
+        anomaly_window_ms = runtime.input_anomaly_window_ms,
+        anomaly_max = runtime.input_anomaly_max,
+        error_code = error_code,
+        "player input anomaly recorded"
+    );
+}
+
+fn queue_input_rejected(
+    connection: &ConnectionContext,
+    response_type: MessageType,
+    seq: u32,
+    room_id: &str,
+    error_code: &str,
+) -> Result<(), std::io::Error> {
+    match response_type {
+        MessageType::PlayerInputRes => connection.queue_message(
+            MessageType::PlayerInputRes,
+            seq,
+            PlayerInputRes {
+                ok: false,
+                room_id: room_id.to_string(),
+                error_code: error_code.to_string(),
+            },
+        ),
+        MessageType::MoveInputRes => connection.queue_message(
+            MessageType::MoveInputRes,
+            seq,
+            MoveInputRes {
+                ok: false,
+                room_id: room_id.to_string(),
+                error_code: error_code.to_string(),
+            },
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -1334,7 +1636,10 @@ fn log_drain_mode_room_creation_rejected(
 mod tests {
     use super::*;
 
-    fn runtime_config(input_timestamp_required: bool, input_timestamp_max_skew_ms: u64) -> RuntimeConfig {
+    fn runtime_config(
+        input_timestamp_required: bool,
+        input_timestamp_max_skew_ms: u64,
+    ) -> RuntimeConfig {
         RuntimeConfig {
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
@@ -1344,6 +1649,8 @@ mod tests {
             player_msg_rate_max: 0,
             input_timestamp_required,
             input_timestamp_max_skew_ms,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         }

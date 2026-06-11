@@ -37,6 +37,8 @@ pub struct Config {
     pub player_msg_rate_max: u64,
     pub input_timestamp_required: bool,
     pub input_timestamp_max_skew_ms: u64,
+    pub input_anomaly_window_ms: u64,
+    pub input_anomaly_max: u64,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -129,6 +131,8 @@ impl Config {
         let player_msg_rate_max = parse_u64("PLAYER_MSG_RATE_MAX", 0);
         let input_timestamp_required = parse_bool("INPUT_TIMESTAMP_REQUIRED", false);
         let input_timestamp_max_skew_ms = parse_u64("INPUT_TIMESTAMP_MAX_SKEW_MS", 5000);
+        let input_anomaly_window_ms = parse_u64("INPUT_ANOMALY_WINDOW_MS", 10_000);
+        let input_anomaly_max = parse_u64("INPUT_ANOMALY_MAX", 0);
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -172,6 +176,8 @@ impl Config {
             player_msg_rate_max,
             input_timestamp_required,
             input_timestamp_max_skew_ms,
+            input_anomaly_window_ms,
+            input_anomaly_max,
             registry_enabled,
             registry_url,
             registry_heartbeat_interval_secs,

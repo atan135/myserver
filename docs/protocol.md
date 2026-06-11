@@ -255,6 +255,7 @@
 说明：
 
 - `client_timestamp_ms` 与 `MoveInputReq` 使用同一套 `game-server` 可配置窗口校验；默认兼容旧客户端。
+- `game-server` 会对同一玩家短窗口内的重复输入、过期帧、未来帧和时间戳异常做本实例内计数与结构化日志；默认只观测不额外拒绝，配置阈值后返回 `INPUT_ANOMALY_BLOCKED`。
 
 #### `MoveInputReq`
 
@@ -275,6 +276,7 @@
 - 服务端会拒绝非有限数值或超出安全范围的方向、客户端位置字段。
 - `client_timestamp_ms` 已在 `game-server` 落地可配置窗口校验，默认兼容旧客户端；字段缺失或为 `0` 时默认跳过校验，`INPUT_TIMESTAMP_REQUIRED=true` 时拒绝并返回 `INPUT_TIMESTAMP_REQUIRED`。
 - 当 `client_timestamp_ms > 0` 且 `INPUT_TIMESTAMP_MAX_SKEW_MS > 0` 时，服务端会按当前 Unix 毫秒时间校验绝对偏差，超出窗口返回 `INPUT_TIMESTAMP_SKEW`；`INPUT_TIMESTAMP_MAX_SKEW_MS=0` 表示只要求字段存在、不做偏差窗口校验。
+- 同一玩家同一房间连续重复上报同一 `frame_id` 且输入内容完全相同时，会记录为 `INPUT_FRAME_DUPLICATE` 异常；同帧不同内容仍保留现有替换语义。`RoomManager` 对已过期帧和超前帧仍返回 `INPUT_FRAME_EXPIRED` / `INPUT_FRAME_TOO_FAR`，这些结果会进入同一异常计数窗口。
 - 连续缺少真实移动控制输入达到房间策略阈值后，服务端会强制停步，并通过 `MovementSnapshotPush.reason_code = MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT` 下发权威状态。
 
 #### `MovementSnapshotPush`

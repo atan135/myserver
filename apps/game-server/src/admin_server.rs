@@ -1044,6 +1044,22 @@ async fn apply_runtime_config(
             runtime.input_timestamp_max_skew_ms = parsed;
             Ok(())
         }
+        "input_anomaly_window_ms" => {
+            let parsed = value.parse::<u64>().map_err(|_| "INVALID_CONFIG_VALUE")?;
+            if !(1..=300_000).contains(&parsed) {
+                return Err("INVALID_CONFIG_VALUE");
+            }
+            runtime.input_anomaly_window_ms = parsed;
+            Ok(())
+        }
+        "input_anomaly_max" => {
+            let parsed = value.parse::<u64>().map_err(|_| "INVALID_CONFIG_VALUE")?;
+            if parsed > 10_000 {
+                return Err("INVALID_CONFIG_VALUE");
+            }
+            runtime.input_anomaly_max = parsed;
+            Ok(())
+        }
         "drain_mode" | "drain_mode_enabled" => {
             let parsed = parse_bool_config_value(value)?;
             let previous = runtime.drain_mode_enabled;
@@ -1190,6 +1206,8 @@ mod tests {
             player_msg_rate_max: 0,
             input_timestamp_required: false,
             input_timestamp_max_skew_ms: 5000,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         }))
@@ -1461,6 +1479,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_runtime_config_updates_input_anomaly_policy() {
+        let runtime_config = runtime_config_fixture();
+
+        apply_runtime_config(&runtime_config, "input_anomaly_window_ms", "60000")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "input_anomaly_max", "5")
+            .await
+            .unwrap();
+
+        let runtime = *runtime_config.read().await;
+        assert_eq!(runtime.input_anomaly_window_ms, 60_000);
+        assert_eq!(runtime.input_anomaly_max, 5);
+
+        apply_runtime_config(&runtime_config, "input_anomaly_max", "0")
+            .await
+            .unwrap();
+
+        let runtime = *runtime_config.read().await;
+        assert_eq!(runtime.input_anomaly_max, 0);
+    }
+
+    #[tokio::test]
     async fn apply_runtime_config_rejects_invalid_input_timestamp_window() {
         let runtime_config = runtime_config_fixture();
 
@@ -1470,6 +1511,24 @@ mod tests {
         );
         assert_eq!(
             apply_runtime_config(&runtime_config, "input_timestamp_max_skew_ms", "300001").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_rejects_invalid_input_anomaly_policy() {
+        let runtime_config = runtime_config_fixture();
+
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "input_anomaly_window_ms", "0").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "input_anomaly_window_ms", "300001").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "input_anomaly_max", "10001").await,
             Err("INVALID_CONFIG_VALUE")
         );
     }

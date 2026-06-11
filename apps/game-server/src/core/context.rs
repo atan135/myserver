@@ -12,7 +12,7 @@ use crate::core::room::{OutboundMessage, OutboundSender};
 use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{MessageType, encode_body};
-use crate::server::{PlayerMessageRateLimiter, RuntimeConfig};
+use crate::server::{PlayerInputAnomalyTracker, PlayerMessageRateLimiter, RuntimeConfig};
 use crate::session::{Session, SessionState};
 use tracing::warn;
 
@@ -21,6 +21,7 @@ pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 /// Maps player_id -> current authenticated connection on this game-server instance.
 pub type PlayerRegistry = Arc<RwLock<HashMap<String, PlayerConnectionHandle>>>;
 pub type SharedPlayerMessageRateLimiter = Arc<Mutex<PlayerMessageRateLimiter>>;
+pub type SharedPlayerInputAnomalyTracker = Arc<Mutex<PlayerInputAnomalyTracker>>;
 
 #[derive(Clone)]
 pub struct PlayerConnectionHandle {
@@ -41,6 +42,7 @@ pub struct ServiceContext {
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
+    pub player_input_anomaly_tracker: SharedPlayerInputAnomalyTracker,
 }
 
 pub struct ConnectionContext {
@@ -58,6 +60,7 @@ pub struct ServerSharedState {
     pub connection_count: Arc<AtomicU64>,
     pub online_player_count: Arc<AtomicU64>,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
+    pub player_input_anomaly_tracker: SharedPlayerInputAnomalyTracker,
 }
 
 impl ConnectionContext {
