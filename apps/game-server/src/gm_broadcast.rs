@@ -8,7 +8,7 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use crate::core::context::PlayerRegistry;
-use crate::core::room::OutboundMessage;
+use crate::core::room::{OutboundMessage, OutboundQueueLogContext};
 use crate::pb::GameMessagePush;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::current_unix_ms;
@@ -99,7 +99,10 @@ async fn run_subscriber(
     let client = async_nats::connect(nats_url).await?;
     let mut subscriber = client.subscribe(GM_BROADCAST_SUBJECT).await?;
     let mut dedupe = GmBroadcastDedupe::default();
-    info!(subject = GM_BROADCAST_SUBJECT, "subscribed to gm broadcast subject");
+    info!(
+        subject = GM_BROADCAST_SUBJECT,
+        "subscribed to gm broadcast subject"
+    );
 
     while let Some(msg) = subscriber.next().await {
         let payload = match std::str::from_utf8(msg.payload.as_ref()) {
@@ -251,11 +254,18 @@ pub async fn broadcast_gm_message_to_online_players(
 
     let mut delivered = 0;
     for (player_id, outbound) in handles {
-        match outbound.try_send(OutboundMessage {
-            message_type: MessageType::GameMessagePush,
-            seq: 0,
-            body: body.clone(),
-        }) {
+        match outbound.try_send(
+            OutboundMessage {
+                message_type: MessageType::GameMessagePush,
+                seq: 0,
+                body: body.clone(),
+            },
+            OutboundQueueLogContext {
+                player_id: Some(&player_id),
+                operation: "gm_broadcast",
+                ..OutboundQueueLogContext::default()
+            },
+        ) {
             Ok(()) => delivered += 1,
             Err(error) => {
                 warn!(
@@ -278,6 +288,7 @@ mod tests {
 
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
+    use crate::core::room::{ConnectionCloseState, OutboundChannel};
 
     fn player_registry_fixture(
         player_id: &str,
@@ -295,7 +306,7 @@ mod tests {
             PlayerConnectionHandle {
                 kick_notify: notify.clone(),
                 session_id: 42,
-                outbound: tx,
+                outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
                 kick_reason: kick_reason.clone(),
             },
         )])));

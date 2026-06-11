@@ -1,19 +1,254 @@
 use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
+use tracing::warn;
 
 use crate::core::logic::RoomLogic;
 use crate::pb::{RoomMember, RoomMigrationState, RoomSnapshot};
+use crate::protocol::MessageType;
+
+pub const OUTBOUND_QUEUE_FULL_CLOSE_REASON: &str = "outbound_queue_full";
 
 #[derive(Clone)]
 pub struct OutboundMessage {
-    pub message_type: crate::protocol::MessageType,
+    pub message_type: MessageType,
     pub seq: u32,
     pub body: Vec<u8>,
 }
 
 pub type OutboundSender = mpsc::Sender<OutboundMessage>;
+
+#[derive(Clone)]
+pub struct ConnectionCloseState {
+    inner: Arc<ConnectionCloseStateInner>,
+}
+
+struct ConnectionCloseStateInner {
+    reason: Mutex<Option<String>>,
+    notify: Notify,
+}
+
+impl ConnectionCloseState {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ConnectionCloseStateInner {
+                reason: Mutex::new(None),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    pub fn request_close(&self, reason: impl Into<String>) -> bool {
+        let mut guard = self
+            .inner
+            .reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if guard.is_some() {
+            return false;
+        }
+
+        *guard = Some(reason.into());
+        drop(guard);
+        self.inner.notify.notify_one();
+        true
+    }
+
+    pub fn reason(&self) -> Option<String> {
+        self.inner
+            .reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub async fn notified(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.reason().is_some() {
+                return;
+            }
+            notified.await;
+            if self.reason().is_some() {
+                return;
+            }
+        }
+    }
+}
+
+impl Default for ConnectionCloseState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+pub struct OutboundChannel {
+    pub sender: OutboundSender,
+    pub close_state: ConnectionCloseState,
+}
+
+impl OutboundChannel {
+    pub fn new(sender: OutboundSender, close_state: ConnectionCloseState) -> Self {
+        Self {
+            sender,
+            close_state,
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
+    pub fn try_send(
+        &self,
+        message: OutboundMessage,
+        context: OutboundQueueLogContext<'_>,
+    ) -> Result<(), OutboundQueueError> {
+        try_send_outbound(&self.sender, &self.close_state, message, context)
+    }
+}
+
+impl From<OutboundSender> for OutboundChannel {
+    fn from(sender: OutboundSender) -> Self {
+        Self::new(sender, ConnectionCloseState::new())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboundQueueErrorKind {
+    Full,
+    Closed,
+}
+
+impl OutboundQueueErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct OutboundQueueError {
+    kind: OutboundQueueErrorKind,
+}
+
+impl OutboundQueueError {
+    fn new(kind: OutboundQueueErrorKind) -> Self {
+        Self { kind }
+    }
+
+    pub fn kind(&self) -> OutboundQueueErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for OutboundQueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to queue outbound: {}",
+            self.kind.as_str()
+        )
+    }
+}
+
+impl Error for OutboundQueueError {}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OutboundQueueLogContext<'a> {
+    pub session_id: Option<u64>,
+    pub player_id: Option<&'a str>,
+    pub peer_addr: Option<&'a str>,
+    pub room_id: Option<&'a str>,
+    pub operation: &'static str,
+}
+
+impl Default for OutboundQueueLogContext<'_> {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            player_id: None,
+            peer_addr: None,
+            room_id: None,
+            operation: "outbound",
+        }
+    }
+}
+
+pub fn try_send_outbound(
+    sender: &OutboundSender,
+    close_state: &ConnectionCloseState,
+    message: OutboundMessage,
+    context: OutboundQueueLogContext<'_>,
+) -> Result<(), OutboundQueueError> {
+    let message_type = message.message_type;
+    let seq = message.seq;
+
+    match sender.try_send(message) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            close_state.request_close(OUTBOUND_QUEUE_FULL_CLOSE_REASON);
+            warn!(
+                session_id = ?context.session_id,
+                player_id = ?context.player_id,
+                peer = ?context.peer_addr,
+                room_id = ?context.room_id,
+                operation = context.operation,
+                message_type = ?message_type,
+                seq = seq,
+                reason = OutboundQueueErrorKind::Full.as_str(),
+                close_reason = OUTBOUND_QUEUE_FULL_CLOSE_REASON,
+                "failed to queue outbound message"
+            );
+            Err(OutboundQueueError::new(OutboundQueueErrorKind::Full))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!(
+                session_id = ?context.session_id,
+                player_id = ?context.player_id,
+                peer = ?context.peer_addr,
+                room_id = ?context.room_id,
+                operation = context.operation,
+                message_type = ?message_type,
+                seq = seq,
+                reason = OutboundQueueErrorKind::Closed.as_str(),
+                "failed to queue outbound message"
+            );
+            Err(OutboundQueueError::new(OutboundQueueErrorKind::Closed))
+        }
+    }
+}
+
+pub fn outbound_queue_error_kind(error: &std::io::Error) -> Option<OutboundQueueErrorKind> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<OutboundQueueError>())
+        .map(OutboundQueueError::kind)
+}
+
+pub fn outbound_queue_error_kind_from_error(
+    error: &(dyn Error + 'static),
+) -> Option<OutboundQueueErrorKind> {
+    if let Some(queue_error) = error.downcast_ref::<OutboundQueueError>() {
+        return Some(queue_error.kind());
+    }
+
+    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+        return outbound_queue_error_kind(io_error);
+    }
+
+    error
+        .source()
+        .and_then(outbound_queue_error_kind_from_error)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomPhase {
@@ -32,6 +267,7 @@ pub struct RoomMemberState {
     pub player_id: String,
     pub ready: bool,
     pub sender: OutboundSender,
+    pub close_state: ConnectionCloseState,
     pub offline: bool,
     pub offline_since: Option<Instant>,
     pub role: MemberRole,
@@ -325,20 +561,24 @@ impl Room {
         }
     }
 
-    pub fn mark_online(&mut self, player_id: &str, sender: OutboundSender) -> bool {
+    pub fn mark_online(&mut self, player_id: &str, outbound: impl Into<OutboundChannel>) -> bool {
         if let Some(member) = self.members.get_mut(player_id) {
+            let outbound = outbound.into();
             member.offline = false;
             member.offline_since = None;
-            member.sender = sender;
+            member.sender = outbound.sender;
+            member.close_state = outbound.close_state;
             member.syncing = false;
             return true;
         }
         false
     }
 
-    pub fn update_sender(&mut self, player_id: &str, sender: OutboundSender) {
+    pub fn update_sender(&mut self, player_id: &str, outbound: impl Into<OutboundChannel>) {
         if let Some(member) = self.members.get_mut(player_id) {
-            member.sender = sender;
+            let outbound = outbound.into();
+            member.sender = outbound.sender;
+            member.close_state = outbound.close_state;
         }
     }
 
@@ -500,5 +740,109 @@ impl Room {
 
     pub fn is_matched_room(&self) -> bool {
         self.match_id.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_queue_full_marks_connection_close_reason() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let close_state = ConnectionCloseState::new();
+
+        try_send_outbound(
+            &sender,
+            &close_state,
+            OutboundMessage {
+                message_type: MessageType::PingRes,
+                seq: 1,
+                body: vec![1],
+            },
+            OutboundQueueLogContext::default(),
+        )
+        .unwrap();
+
+        let error = try_send_outbound(
+            &sender,
+            &close_state,
+            OutboundMessage {
+                message_type: MessageType::PingRes,
+                seq: 2,
+                body: vec![2],
+            },
+            OutboundQueueLogContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), OutboundQueueErrorKind::Full);
+        assert_eq!(
+            close_state.reason().as_deref(),
+            Some(OUTBOUND_QUEUE_FULL_CLOSE_REASON)
+        );
+
+        let io_error = std::io::Error::other(error);
+        assert_eq!(
+            outbound_queue_error_kind(&io_error),
+            Some(OutboundQueueErrorKind::Full)
+        );
+    }
+
+    #[test]
+    fn outbound_queue_closed_is_recognizable_without_forced_close() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let close_state = ConnectionCloseState::new();
+
+        let error = try_send_outbound(
+            &sender,
+            &close_state,
+            OutboundMessage {
+                message_type: MessageType::PingRes,
+                seq: 1,
+                body: Vec::new(),
+            },
+            OutboundQueueLogContext::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), OutboundQueueErrorKind::Closed);
+        assert_eq!(close_state.reason(), None);
+    }
+
+    #[test]
+    fn outbound_channel_full_uses_shared_close_state() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let close_state = ConnectionCloseState::new();
+        let outbound = OutboundChannel::new(sender, close_state.clone());
+
+        outbound
+            .try_send(
+                OutboundMessage {
+                    message_type: MessageType::PingRes,
+                    seq: 1,
+                    body: Vec::new(),
+                },
+                OutboundQueueLogContext::default(),
+            )
+            .unwrap();
+
+        let error = outbound
+            .try_send(
+                OutboundMessage {
+                    message_type: MessageType::PingRes,
+                    seq: 2,
+                    body: Vec::new(),
+                },
+                OutboundQueueLogContext::default(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), OutboundQueueErrorKind::Full);
+        assert_eq!(
+            close_state.reason().as_deref(),
+            Some(OUTBOUND_QUEUE_FULL_CLOSE_REASON)
+        );
     }
 }

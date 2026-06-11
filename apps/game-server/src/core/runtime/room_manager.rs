@@ -14,8 +14,9 @@ use crate::core::logic::{
     SharedRoomLogicFactory, UNSUPPORTED_ROOM_TRANSFER,
 };
 use crate::core::room::{
-    MemberRole, OutboundMessage, PendingInputUpsert, PlayerInputRecord, Room, RoomMemberState,
-    RoomPhase, RoomTransferStatus,
+    ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage, OutboundQueueLogContext,
+    PendingInputUpsert, PlayerInputRecord, Room, RoomMemberState, RoomPhase, RoomTransferStatus,
+    try_send_outbound,
 };
 use crate::core::runtime::room_policy::{
     InputWaitStrategy, MissingInputStrategy, RoomRuntimePolicy, SharedRoomPolicyRegistry,
@@ -32,6 +33,12 @@ use crate::protocol::{MessageType, encode_body};
 const MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE: u32 = 3;
 const DEFAULT_ROOM_CLEANUP_INTERVAL_SECS: u64 = 10;
 pub const ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT: usize = 50;
+
+fn detach_member_outbound(member: &mut RoomMemberState) {
+    let (placeholder_sender, _placeholder_receiver) = mpsc::channel(1);
+    member.sender = placeholder_sender;
+    member.close_state = ConnectionCloseState::new();
+}
 
 #[derive(Debug)]
 pub struct RoomRuntime {
@@ -508,10 +515,11 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::Sender<OutboundMessage>,
+        outbound: impl Into<OutboundChannel>,
         role: MemberRole,
         requested_policy_id: Option<&str>,
     ) -> Result<RoomSnapshot, &'static str> {
+        let outbound = outbound.into();
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let requested_policy_id = requested_policy_id
@@ -561,7 +569,8 @@ impl RoomManager {
                 RoomMemberState {
                     player_id: player_id.to_string(),
                     ready: false,
-                    sender,
+                    sender: outbound.sender,
+                    close_state: outbound.close_state,
                     offline: false,
                     offline_since: None,
                     role,
@@ -642,6 +651,7 @@ impl RoomManager {
         if let Some(member) = room.members.get_mut(player_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
+            detach_member_outbound(member);
             room.logic.on_player_offline(room_id, player_id);
             info!(
                 room_id = room_id,
@@ -729,6 +739,7 @@ impl RoomManager {
         if let Some(member) = room.members.get_mut(player_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
+            detach_member_outbound(member);
             room.logic.on_player_offline(room_id, player_id);
             info!(
                 room_id = room_id,
@@ -796,8 +807,9 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::Sender<OutboundMessage>,
+        outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
+        let outbound = outbound.into();
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
@@ -812,7 +824,8 @@ impl RoomManager {
 
             member.offline = false;
             member.offline_since = None;
-            member.sender = sender;
+            member.sender = outbound.sender;
+            member.close_state = outbound.close_state;
             member.syncing = false;
             room.logic.on_player_online(room_id, player_id);
             room.clear_empty();
@@ -860,8 +873,9 @@ impl RoomManager {
         &self,
         room_id: &str,
         player_id: &str,
-        sender: mpsc::Sender<OutboundMessage>,
+        outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
+        let outbound = outbound.into();
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy().clone();
@@ -898,7 +912,8 @@ impl RoomManager {
                 RoomMemberState {
                     player_id: player_id.to_string(),
                     ready: false,
-                    sender,
+                    sender: outbound.sender,
+                    close_state: outbound.close_state,
                     offline: false,
                     offline_since: None,
                     role: MemberRole::Observer,
@@ -1358,6 +1373,7 @@ impl RoomManager {
                     player_id: member.player_id,
                     ready: member.ready,
                     sender,
+                    close_state: ConnectionCloseState::new(),
                     offline: true,
                     offline_since: Some(Instant::now()),
                     role: if member.role == crate::pb::MemberRole::Observer as i32 {
@@ -1483,18 +1499,34 @@ impl RoomManager {
             room.members
                 .values()
                 .filter(|member| !member.offline && !member.syncing)
-                .map(|member| (member.player_id.clone(), member.sender.clone()))
+                .map(|member| {
+                    (
+                        member.player_id.clone(),
+                        member.sender.clone(),
+                        member.close_state.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
         let mut delivered_count = 0u64;
         let mut failed_count = 0u64;
-        for (player_id, sender) in &targets {
-            match sender.try_send(OutboundMessage {
-                message_type: MessageType::ServerRedirectPush,
-                seq: 0,
-                body: body.clone(),
-            }) {
+        for (player_id, sender, close_state) in &targets {
+            match try_send_outbound(
+                sender,
+                close_state,
+                OutboundMessage {
+                    message_type: MessageType::ServerRedirectPush,
+                    seq: 0,
+                    body: body.clone(),
+                },
+                OutboundQueueLogContext {
+                    player_id: Some(player_id),
+                    room_id: Some(room_id),
+                    operation: "server_redirect_push",
+                    ..OutboundQueueLogContext::default()
+                },
+            ) {
                 Ok(()) => {
                     delivered_count = delivered_count.saturating_add(1);
                     info!(
@@ -1852,18 +1884,35 @@ impl RoomManager {
 
             online
                 .iter()
-                .map(|member| member.sender.clone())
+                .map(|member| {
+                    (
+                        member.player_id.clone(),
+                        member.sender.clone(),
+                        member.close_state.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
-        for sender in senders {
-            if let Err(error) = sender.try_send(OutboundMessage {
-                message_type,
-                seq: 0,
-                body: body.clone(),
-            }) {
+        for (player_id, sender, close_state) in senders {
+            if let Err(error) = try_send_outbound(
+                &sender,
+                &close_state,
+                OutboundMessage {
+                    message_type,
+                    seq: 0,
+                    body: body.clone(),
+                },
+                OutboundQueueLogContext {
+                    player_id: Some(&player_id),
+                    room_id: Some(room_id),
+                    operation: "room_broadcast",
+                    ..OutboundQueueLogContext::default()
+                },
+            ) {
                 warn!(
                     room_id = room_id,
+                    player_id = %player_id,
                     message_type = ?message_type,
                     error = %error,
                     "failed to queue room broadcast"
@@ -1892,7 +1941,13 @@ impl RoomManager {
                 .iter()
                 .filter_map(|player_id| room.members.get(player_id))
                 .filter(|member| !member.offline && !member.syncing)
-                .map(|member| member.sender.clone())
+                .map(|member| {
+                    (
+                        member.player_id.clone(),
+                        member.sender.clone(),
+                        member.close_state.clone(),
+                    )
+                })
                 .collect::<Vec<_>>();
 
             info!(
@@ -1905,14 +1960,25 @@ impl RoomManager {
             targets
         };
 
-        for sender in senders {
-            if let Err(error) = sender.try_send(OutboundMessage {
-                message_type,
-                seq: 0,
-                body: body.clone(),
-            }) {
+        for (player_id, sender, close_state) in senders {
+            if let Err(error) = try_send_outbound(
+                &sender,
+                &close_state,
+                OutboundMessage {
+                    message_type,
+                    seq: 0,
+                    body: body.clone(),
+                },
+                OutboundQueueLogContext {
+                    player_id: Some(&player_id),
+                    room_id: Some(room_id),
+                    operation: "targeted_room_broadcast",
+                    ..OutboundQueueLogContext::default()
+                },
+            ) {
                 warn!(
                     room_id = room_id,
+                    player_id = %player_id,
                     message_type = ?message_type,
                     error = %error,
                     "failed to queue targeted room broadcast"
@@ -1957,25 +2023,34 @@ impl RoomManager {
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        let sender = {
+        let outbound = {
             let rooms = self.rooms.lock().await;
             rooms.values().find_map(|room| {
                 room.members.get(player_id).and_then(|member| {
                     if member.offline {
                         None
                     } else {
-                        Some(member.sender.clone())
+                        Some((member.sender.clone(), member.close_state.clone()))
                     }
                 })
             })
         };
 
-        if let Some(sender) = sender {
-            if let Err(error) = sender.try_send(OutboundMessage {
-                message_type,
-                seq: 0,
-                body,
-            }) {
+        if let Some((sender, close_state)) = outbound {
+            if let Err(error) = try_send_outbound(
+                &sender,
+                &close_state,
+                OutboundMessage {
+                    message_type,
+                    seq: 0,
+                    body,
+                },
+                OutboundQueueLogContext {
+                    player_id: Some(player_id),
+                    operation: "send_to_player",
+                    ..OutboundQueueLogContext::default()
+                },
+            ) {
                 warn!(
                     player_id = player_id,
                     message_type = ?message_type,
@@ -3428,6 +3503,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_path_releases_previous_outbound_sender() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let (tx, mut rx) = mpsc::channel(1024);
+
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+
+        let closed = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("previous outbound receiver should close after disconnect");
+        assert!(closed.is_none());
+    }
+
+    #[tokio::test]
     async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
         let (manager, _factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
@@ -3548,6 +3654,7 @@ mod tests {
                 player_id: "player-a".to_string(),
                 ready: true,
                 sender,
+                close_state: ConnectionCloseState::new(),
                 offline: false,
                 offline_since: None,
                 role: MemberRole::Player,

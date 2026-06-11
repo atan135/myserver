@@ -1900,7 +1900,7 @@ mod tests {
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
-    use crate::core::room::{MemberRole, OutboundMessage};
+    use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
     use crate::core::runtime::RoomManager;
     use crate::pb::GameMessagePush;
     use crate::protocol::PacketHeader;
@@ -1982,7 +1982,7 @@ mod tests {
             PlayerConnectionHandle {
                 kick_notify: notify.clone(),
                 session_id: 42,
-                outbound: tx,
+                outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
                 kick_reason: kick_reason.clone(),
             },
         )])));

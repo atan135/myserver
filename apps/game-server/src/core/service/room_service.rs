@@ -93,7 +93,7 @@ pub async fn handle_room_join(
         .join_room(
             &room_id,
             &player_id,
-            connection.tx.clone(),
+            connection.outbound_channel(),
             MemberRole::Player,
             requested_policy_id,
         )
@@ -1178,7 +1178,11 @@ pub async fn handle_room_reconnect(
 
     let reconnect_result = services
         .room_manager
-        .reconnect_room(&room_id, &reconnect_player_id, connection.tx.clone())
+        .reconnect_room(
+            &room_id,
+            &reconnect_player_id,
+            connection.outbound_channel(),
+        )
         .await;
 
     match reconnect_result {
@@ -1314,7 +1318,7 @@ pub async fn handle_join_as_observer(
 
     let join_result = services
         .room_manager
-        .join_room_as_observer(&room_id, &player_id, connection.tx.clone())
+        .join_room_as_observer(&room_id, &player_id, connection.outbound_channel())
         .await;
 
     match join_result {

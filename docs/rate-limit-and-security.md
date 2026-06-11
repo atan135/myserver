@@ -190,7 +190,7 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`，其它业务消息在 dispatch 层返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`，不会进入房间、移动、背包等业务 handler
 - 心跳超时：读取包头时使用 `heartbeat_timeout_secs`
 - 最大包体限制：包体超过 `max_body_len` 时拒绝处理
-- 有界出站写队列：每连接出站消息队列使用 `OUTBOUND_QUEUE_CAPACITY` 限制容量，队列满时 `try_send` 返回 `failed to queue outbound: full`，调用方记录错误或返回响应错误
+- 有界出站写队列：每连接出站消息队列使用 `OUTBOUND_QUEUE_CAPACITY` 限制容量；队列满时 `try_send` 返回可识别的 `failed to queue outbound: full`，记录结构化 warning，标记关闭理由 `outbound_queue_full`，主连接循环写入 `server_close_requested` 连接审计事件并进入断线清理。接收端已关闭时返回 `failed to queue outbound: closed`，不额外触发强制关闭。
 - 单连接消息频率限制：读到完整 packet 后、业务 dispatch 前检查窗口计数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 单玩家消息频率限制：连接级限流通过后，对已鉴权连接按 `player_id` 在当前 `game-server` 实例内统计窗口消息数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 管理接口支持动态调整 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms` 与 `player_msg_rate_max`
@@ -225,7 +225,7 @@ INPUT_ANOMALY_MAX=0
 说明：
 
 - `MSG_RATE_WINDOW_MS` 默认 `1000`，表示单连接频率统计窗口。
-- `OUTBOUND_QUEUE_CAPACITY` 默认 `1024`，表示单连接出站写队列容量；未配置、解析失败或配置为 `0` 时使用默认值。
+- `OUTBOUND_QUEUE_CAPACITY` 默认 `1024`，表示单连接出站写队列容量；未配置、解析失败或配置为 `0` 时使用默认值。队列满会按慢连接处理，关闭该连接并走房间断线、玩家注册表移除和 writer shutdown 等既有清理路径。
 - `MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一连接在窗口内超过该消息数会收到 `MSG_RATE_EXCEEDED`。
 - `PLAYER_MSG_RATE_WINDOW_MS` 默认 `1000`，表示单玩家频率统计窗口。
 - `PLAYER_MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一玩家在当前 `game-server` 实例内的多连接合计消息数超过阈值会收到 `MSG_RATE_EXCEEDED`。

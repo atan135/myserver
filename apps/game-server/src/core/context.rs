@@ -3,18 +3,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use redis::aio::MultiplexedConnection;
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::player::PlayerManager;
-use crate::core::room::{OutboundMessage, OutboundSender};
+use crate::core::room::{
+    ConnectionCloseState, OutboundChannel, OutboundMessage, OutboundQueueLogContext,
+    OutboundSender, try_send_outbound,
+};
 use crate::core::runtime::RoomManager;
 use crate::mysql_store::MySqlAuditStore;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::{PlayerInputAnomalyTracker, PlayerMessageRateLimiter, RuntimeConfig};
 use crate::session::{Session, SessionState};
-use tracing::warn;
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
@@ -27,7 +29,7 @@ pub type SharedPlayerInputAnomalyTracker = Arc<Mutex<PlayerInputAnomalyTracker>>
 pub struct PlayerConnectionHandle {
     pub kick_notify: Arc<Notify>,
     pub session_id: u64,
-    pub outbound: OutboundSender,
+    pub outbound: OutboundChannel,
     pub kick_reason: Arc<RwLock<String>>,
 }
 
@@ -51,6 +53,7 @@ pub struct ConnectionContext {
     pub redis: MultiplexedConnection,
     pub session: Session,
     pub tx: OutboundSender,
+    pub close_state: ConnectionCloseState,
     pub kick_notify: Arc<Notify>,
     pub kick_reason: Arc<RwLock<String>>,
 }
@@ -65,6 +68,10 @@ pub struct ServerSharedState {
 }
 
 impl ConnectionContext {
+    pub fn outbound_channel(&self) -> OutboundChannel {
+        OutboundChannel::new(self.tx.clone(), self.close_state.clone())
+    }
+
     pub fn ensure_authenticated(&self, seq: u32) -> Result<Option<String>, std::io::Error> {
         if self.session.state != SessionState::Authenticated {
             self.queue_error(seq, "NOT_AUTHENTICATED", "authenticate first")?;
@@ -97,27 +104,22 @@ impl ConnectionContext {
         message: M,
     ) -> Result<(), std::io::Error> {
         let body = encode_body(&message);
-        self.tx
-            .try_send(OutboundMessage {
+        try_send_outbound(
+            &self.tx,
+            &self.close_state,
+            OutboundMessage {
                 message_type,
                 seq,
                 body,
-            })
-            .map_err(|error| {
-                let reason = match error {
-                    mpsc::error::TrySendError::Full(_) => "full",
-                    mpsc::error::TrySendError::Closed(_) => "closed",
-                };
-                warn!(
-                    session_id = self.session.id,
-                    player_id = ?self.session.player_id,
-                    peer = %self.peer_addr,
-                    message_type = ?message_type,
-                    seq = seq,
-                    reason = reason,
-                    "failed to queue outbound message"
-                );
-                std::io::Error::other(format!("failed to queue outbound: {reason}"))
-            })
+            },
+            OutboundQueueLogContext {
+                session_id: Some(self.session.id),
+                player_id: self.session.player_id.as_deref(),
+                peer_addr: Some(&self.peer_addr),
+                room_id: self.session.room_id.as_deref(),
+                operation: "connection_queue_message",
+            },
+        )
+        .map_err(std::io::Error::other)
     }
 }

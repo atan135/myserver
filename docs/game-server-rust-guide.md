@@ -73,8 +73,9 @@
 2. 为连接分配 `session_id`
 3. 拆分读写半边
 4. 创建容量由 `OUTBOUND_QUEUE_CAPACITY` 控制的有界 `mpsc::Sender<OutboundMessage>` 作为写队列；未配置、解析失败或配置为 `0` 时使用 `DEFAULT_OUTBOUND_QUEUE_CAPACITY=1024`
-5. 单独 spawn 一个 writer task 串行写出 socket
-6. 读循环解析包头和 body，再交给 service handler 分发
+5. 为连接创建共享关闭状态，`ConnectionContext`、玩家注册表和房间成员出站句柄共用它；当 `try_send` 因队列满返回 `Full` 时会记录 warning、标记 `outbound_queue_full`，读循环写入连接审计并进入断线清理
+6. 单独 spawn 一个 writer task 串行写出 socket
+7. 读循环解析包头和 body，再交给 service handler 分发，同时监听 kick 和服务端关闭信号
 
 ## 5. 模块分层
 

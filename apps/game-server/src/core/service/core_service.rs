@@ -4,6 +4,7 @@ use redis::AsyncCommands;
 use tracing::info;
 
 use crate::core::context::{ConnectionContext, PlayerConnectionHandle, ServiceContext};
+use crate::core::room::OutboundChannel;
 use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
 use crate::protocol::{MessageType, Packet};
@@ -136,7 +137,10 @@ pub async fn handle_auth(
                 let handle = PlayerConnectionHandle {
                     kick_notify: connection.kick_notify.clone(),
                     session_id: connection.session.id,
-                    outbound: connection.tx.clone(),
+                    outbound: OutboundChannel::new(
+                        connection.tx.clone(),
+                        connection.close_state.clone(),
+                    ),
                     kick_reason: connection.kick_reason.clone(),
                 };
                 if let Some(old_handle) = registry.insert(player_id.clone(), handle) {

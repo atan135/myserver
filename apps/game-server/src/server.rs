@@ -16,7 +16,9 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
 use crate::core::player::{MySqlPlayerStore, PlayerManager};
-use crate::core::room::OutboundMessage;
+use crate::core::room::{
+    ConnectionCloseState, OutboundMessage, outbound_queue_error_kind_from_error,
+};
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, inventory_service, room_service};
 use crate::gameroom::GameRoomLogicFactory;
@@ -598,15 +600,18 @@ where
     let redis = redis_client.get_multiplexed_async_connection().await?;
     let (mut reader, mut writer) = tokio::io::split(socket);
     let (tx, mut rx) = mpsc::channel::<OutboundMessage>(services.config.outbound_queue_capacity);
+    let close_state = ConnectionCloseState::new();
     let mut connection = ConnectionContext {
         peer_addr,
         redis,
         session: Session::new(session_id),
         tx,
+        close_state,
         kick_notify: Arc::new(Notify::new()),
         kick_reason: Arc::new(RwLock::new("session_kicked".to_string())),
     };
     let mut rate_limiter = ConnectionRateLimiter::new();
+    let mut close_event_appended = false;
 
     let writer_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -657,7 +662,32 @@ where
                         "session_kicked",
                         Some(json!({ "reason": kick_reason })),
                     )
+                .await;
+                break;
+            }
+            _ = connection.close_state.notified() => {
+                let close_reason = connection
+                    .close_state
+                    .reason()
+                    .unwrap_or_else(|| "server_close_requested".to_string());
+                warn!(
+                    session_id = connection.session.id,
+                    player_id = ?connection.session.player_id,
+                    peer = %connection.peer_addr,
+                    reason = %close_reason,
+                    "server requested connection close"
+                );
+                services
+                    .mysql_store
+                    .append_connection_event(
+                        connection.session.id,
+                        connection.session.player_id.as_deref(),
+                        Some(&connection.peer_addr),
+                        "server_close_requested",
+                        Some(json!({ "reason": close_reason })),
+                    )
                     .await;
+                close_event_appended = true;
                 break;
             }
             result = timeout(
@@ -868,11 +898,19 @@ where
             }
         }
 
-        let result = dispatch_packet(&services, &mut connection, &packet).await;
+        let dispatch_failure: Option<(String, Option<&'static str>)> =
+            match dispatch_packet(&services, &mut connection, &packet).await {
+                Ok(()) => None,
+                Err(error) => {
+                    let outbound_error_kind = outbound_queue_error_kind_from_error(error.as_ref())
+                        .map(|kind| kind.as_str());
+                    let error_message = error.to_string();
+                    Some((error_message, outbound_error_kind))
+                }
+            };
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
-        let dispatch_error = result.err().map(|error| error.to_string());
-        if let Some(error_message) = dispatch_error {
+        if let Some((error_message, outbound_error_kind)) = dispatch_failure {
             warn!(
                 session_id = connection.session.id,
                 error = %error_message,
@@ -888,11 +926,27 @@ where
                     Some(json!({
                         "msgType": packet.header.msg_type,
                         "seq": packet.header.seq,
-                        "error": error_message
+                        "error": error_message,
+                        "outboundQueueErrorKind": outbound_error_kind
                     })),
                 )
                 .await;
             break;
+        }
+    }
+
+    if !close_event_appended {
+        if let Some(close_reason) = connection.close_state.reason() {
+            services
+                .mysql_store
+                .append_connection_event(
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
+                    "server_close_requested",
+                    Some(json!({ "reason": close_reason })),
+                )
+                .await;
         }
     }
 
