@@ -355,7 +355,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/broadcast`
 
-发送全服广播。
+发送全服广播。当前 `game-server` 侧会向本实例已鉴权在线连接推送 `GameMessagePush(event="gm_broadcast", action="broadcast")`。
 
 ```json
 {
@@ -380,7 +380,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/kick-player`
 
-踢出玩家。
+踢出玩家。当前只处理目标玩家位于当前 `game-server` 实例上的在线连接；离线或不在本实例时会返回游戏服错误，不写成功审计。
 
 ```json
 {
@@ -391,7 +391,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/ban-player`
 
-封禁玩家。
+封禁玩家。`admin-api` 会先把 `player_accounts.status` 更新为 `banned`，随后尽力通知当前 `game-server` 实例对在线连接推送 `SessionKickPush` 并断开；如果玩家离线或不在该实例，账号封禁仍会成功。
 
 ```json
 {
@@ -479,7 +479,7 @@ npm run dev:admin-web
 - 踢出玩家
 - 封禁玩家
 
-其中封禁表单只在前端对 `admin` 角色显示。
+其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人当前只对目标所在 `game-server` 实例的在线连接生效；GM 封禁已持久化账号状态并尽力踢在线连接，但 `durationSeconds` 当前只进入审计详情，不会自动定时解封。
 
 ### 服务监控页
 

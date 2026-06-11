@@ -59,15 +59,20 @@ async fn run_subscriber(
             continue;
         }
 
-        let registry = player_registry.read().await;
-        if let Some((notify, session_id)) = registry.get(&event.player_id) {
+        let handle = {
+            let registry = player_registry.read().await;
+            registry.get(&event.player_id).cloned()
+        };
+        if let Some(handle) = handle {
+            let reason = event.reason.as_deref().unwrap_or("session_kicked");
             info!(
                 player_id = %event.player_id,
-                session_id = session_id,
-                reason = ?event.reason,
+                session_id = handle.session_id,
+                reason = reason,
                 "received session kick event, notifying connection"
             );
-            notify.notify_one();
+            *handle.kick_reason.write().await = reason.to_string();
+            handle.kick_notify.notify_one();
         } else {
             info!(
                 player_id = %event.player_id,

@@ -298,6 +298,8 @@
 - `reason: string`
 - `timestamp: int64`
 
+当前 `reason` 会用于并发登录踢旧连接、改密踢旧连接，以及 GM 踢人/封禁的在线连接处置。GM 操作未填写原因时，`game-server` 分别使用 `gm_kick` / `gm_ban`。
+
 ### 4.3 房间快照结构
 
 #### `RoomMember`
@@ -477,7 +479,10 @@
 - 但为了保持统一封包方式，仍使用同一套包头和独立消息号段
 - `AdminServerStatusReq/Res` 与 `AdminUpdateConfigReq/Res` 使用 `packages/proto/admin.proto`
 - `GmSendItemReq/Res` 当前复用 `GrantItemsReq/GrantItemsRes`，并保留 JSON 旧格式兼容
-- `GmBroadcast`、`GmKickPlayer`、`GmBanPlayer` 目前有消息号和后台入口占位，但 `game-server` admin handler 尚未完整实现，收到后会按不支持消息处理
+- `GmBroadcastReq`、`GmKickPlayerReq`、`GmBanPlayerReq` 当前由 `admin-api` 以 JSON body 调用；`game-server` 会返回对应 `Gm*Res` 消息号，失败时返回 `ErrorRes`
+- `GmBroadcastReq` 字段为 `{ title, content, sender }`，`game-server` 校验非空与长度后，复用玩家通道 `GameMessagePush` 推送在线连接：`event="gm_broadcast"`、`action="broadcast"`、`payload_json={ title, content, sender, timestamp }`
+- `GmKickPlayerReq` 字段为 `{ playerId, reason }`，只处理当前 `game-server` 实例上的已鉴权在线连接，触发 `SessionKickPush` 后断开；离线或不在本实例返回 `PLAYER_OFFLINE`
+- `GmBanPlayerReq` 字段为 `{ playerId, durationSeconds, reason }`，`game-server` 侧只做在线连接处置，成功语义等同“该实例在线玩家已收到封禁原因并被踢下线”；持久账号封禁状态由 `admin-api` 的 GM HTTP 入口写入 `player_accounts.status=banned`
 
 ---
 

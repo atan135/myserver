@@ -18,8 +18,16 @@ use tracing::warn;
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
-/// Maps player_id -> (kick_notify, session_id)
-pub type PlayerRegistry = Arc<RwLock<HashMap<String, (Arc<Notify>, u64)>>>;
+/// Maps player_id -> current authenticated connection on this game-server instance.
+pub type PlayerRegistry = Arc<RwLock<HashMap<String, PlayerConnectionHandle>>>;
+
+#[derive(Clone)]
+pub struct PlayerConnectionHandle {
+    pub kick_notify: Arc<Notify>,
+    pub session_id: u64,
+    pub outbound: OutboundSender,
+    pub kick_reason: Arc<RwLock<String>>,
+}
 
 #[derive(Clone)]
 pub struct ServiceContext {
@@ -39,6 +47,7 @@ pub struct ConnectionContext {
     pub session: Session,
     pub tx: OutboundSender,
     pub kick_notify: Arc<Notify>,
+    pub kick_reason: Arc<RwLock<String>>,
 }
 
 pub struct ServerSharedState {

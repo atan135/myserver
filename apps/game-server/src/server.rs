@@ -193,6 +193,7 @@ pub async fn run(
         shared_state.room_manager.clone(),
         shared_state.runtime_config.clone(),
         shared_state.connection_count.clone(),
+        services.player_registry.clone(),
         services.player_manager.clone(),
         services.config_tables.clone(),
         config.admin_token.clone(),
@@ -339,6 +340,7 @@ where
         session: Session::new(session_id),
         tx,
         kick_notify: Arc::new(Notify::new()),
+        kick_reason: Arc::new(RwLock::new("session_kicked".to_string())),
     };
     let mut rate_limiter = ConnectionRateLimiter::new();
 
@@ -361,19 +363,27 @@ where
         // select! between kick notification and normal packet read
         let read_header = tokio::select! {
             _ = connection.kick_notify.notified() => {
+                let kick_reason = connection.kick_reason.read().await.clone();
                 info!(
                     session_id = connection.session.id,
                     player_id = ?connection.session.player_id,
-                    "session kicked by new login"
+                    reason = %kick_reason,
+                    "session kicked"
                 );
-                connection.queue_message(
+                if let Err(error) = connection.queue_message(
                     MessageType::SessionKickPush,
                     0,
                     SessionKickPush {
-                        reason: "new_login".to_string(),
+                        reason: kick_reason.clone(),
                         timestamp: current_unix_ms(),
                     },
-                )?;
+                ) {
+                    warn!(
+                        session_id = connection.session.id,
+                        error = %error,
+                        "failed to queue session kick push"
+                    );
+                }
                 services
                     .mysql_store
                     .append_connection_event(
@@ -381,7 +391,7 @@ where
                         connection.session.player_id.as_deref(),
                         Some(&connection.peer_addr),
                         "session_kicked",
-                        Some(json!({ "reason": "new_login" })),
+                        Some(json!({ "reason": kick_reason })),
                     )
                     .await;
                 break;
@@ -414,7 +424,15 @@ where
                 break;
             }
             Err(_) => {
-                connection.queue_error(0, "HEARTBEAT_TIMEOUT", "connection timed out")?;
+                if let Err(error) =
+                    connection.queue_error(0, "HEARTBEAT_TIMEOUT", "connection timed out")
+                {
+                    warn!(
+                        session_id = connection.session.id,
+                        error = %error,
+                        "failed to queue heartbeat timeout error"
+                    );
+                }
                 services
                     .mysql_store
                     .append_connection_event(
@@ -432,7 +450,13 @@ where
         let header = match parse_header(header_buf) {
             Ok(value) => value,
             Err(error_code) => {
-                connection.queue_error(0, error_code, "invalid header")?;
+                if let Err(error) = connection.queue_error(0, error_code, "invalid header") {
+                    warn!(
+                        session_id = connection.session.id,
+                        error = %error,
+                        "failed to queue invalid header error"
+                    );
+                }
                 services
                     .mysql_store
                     .append_connection_event(
@@ -448,8 +472,22 @@ where
         };
 
         if header.body_len as usize > runtime.max_body_len {
-            connection.queue_error(header.seq, "BODY_TOO_LARGE", "body too large")?;
-            discard_body(&mut reader, header.body_len as usize).await?;
+            if let Err(error) =
+                connection.queue_error(header.seq, "BODY_TOO_LARGE", "body too large")
+            {
+                warn!(
+                    session_id = connection.session.id,
+                    error = %error,
+                    "failed to queue body too large error"
+                );
+            }
+            if let Err(error) = discard_body(&mut reader, header.body_len as usize).await {
+                warn!(
+                    session_id = connection.session.id,
+                    error = %error,
+                    "failed to discard oversized body"
+                );
+            }
             services
                 .mysql_store
                 .append_connection_event(
@@ -468,16 +506,40 @@ where
         }
 
         let mut body = vec![0u8; header.body_len as usize];
-        reader.read_exact(&mut body).await?;
+        if let Err(error) = reader.read_exact(&mut body).await {
+            warn!(
+                session_id = connection.session.id,
+                error = %error,
+                "connection body read error, will cleanup"
+            );
+            services
+                .mysql_store
+                .append_connection_event(
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
+                    "body_read_error",
+                    Some(json!({ "seq": header.seq, "error": error.to_string() })),
+                )
+                .await;
+            break;
+        }
         let packet = Packet::new(header, body);
         let started_at = Instant::now();
 
         if !rate_limiter.allow(started_at, runtime.msg_rate_window_ms, runtime.msg_rate_max) {
-            connection.queue_error(
+            if let Err(error) = connection.queue_error(
                 packet.header.seq,
                 "MSG_RATE_EXCEEDED",
                 "message rate exceeded",
-            )?;
+            ) {
+                warn!(
+                    session_id = connection.session.id,
+                    error = %error,
+                    "failed to queue message rate exceeded error"
+                );
+                break;
+            }
             services
                 .mysql_store
                 .append_connection_event(
@@ -499,7 +561,29 @@ where
         let result = dispatch_packet(&services, &mut connection, &packet).await;
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
-        result?;
+        let dispatch_error = result.err().map(|error| error.to_string());
+        if let Some(error_message) = dispatch_error {
+            warn!(
+                session_id = connection.session.id,
+                error = %error_message,
+                "packet dispatch failed, will cleanup"
+            );
+            services
+                .mysql_store
+                .append_connection_event(
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
+                    "dispatch_error",
+                    Some(json!({
+                        "msgType": packet.header.msg_type,
+                        "seq": packet.header.seq,
+                        "error": error_message
+                    })),
+                )
+                .await;
+            break;
+        }
     }
 
     room_service::handle_disconnect_cleanup(&services, &connection).await;
@@ -507,8 +591,8 @@ where
     // Unregister from player registry (only if our session_id still matches)
     if let Some(player_id) = &connection.session.player_id {
         let mut registry = services.player_registry.write().await;
-        if let Some((_, sid)) = registry.get(player_id) {
-            if *sid == connection.session.id {
+        if let Some(handle) = registry.get(player_id) {
+            if handle.session_id == connection.session.id {
                 registry.remove(player_id);
             }
         }

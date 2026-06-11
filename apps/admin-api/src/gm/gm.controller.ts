@@ -5,8 +5,10 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { Roles } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
-import { ApiHttpException, badRequest } from "../common/http-exception.js";
+import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_STORE } from "../tokens.js";
+
+const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
 
 function gameServerError(error: any) {
   return new ApiHttpException(502, {
@@ -14,6 +16,14 @@ function gameServerError(error: any) {
     error: "GAME_SERVER_ERROR",
     message: error.message
   });
+}
+
+function gameServerFailure(error: any) {
+  return {
+    ok: false,
+    error: error?.code || "GAME_SERVER_ERROR",
+    message: error?.message || "game-server error"
+  };
 }
 
 @ApiTags("gm")
@@ -132,30 +142,55 @@ export class GmController {
   async banPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, durationSeconds, reason } = body || {};
 
-    if (!playerId || typeof playerId !== "string") {
+    if (!playerId || typeof playerId !== "string" || playerId.trim().length === 0) {
       throw badRequest("INVALID_PLAYER_ID", "playerId is required");
     }
 
-    if (!durationSeconds || typeof durationSeconds !== "number" || durationSeconds <= 0) {
-      throw badRequest("INVALID_DURATION", "durationSeconds must be a positive number");
+    if (
+      !durationSeconds ||
+      typeof durationSeconds !== "number" ||
+      !Number.isInteger(durationSeconds) ||
+      durationSeconds <= 0 ||
+      durationSeconds > GM_BAN_DURATION_MAX_SECONDS
+    ) {
+      throw badRequest("INVALID_DURATION", "durationSeconds must be a positive integer no greater than 31536000");
     }
 
+    const normalizedPlayerId = playerId.trim();
+    const normalizedReason = typeof reason === "string" ? reason.trim() : "";
+    const player = await this.adminStore.findPlayerById(normalizedPlayerId);
+    if (!player) {
+      throw notFound("PLAYER_NOT_FOUND", "Player not found");
+    }
+
+    const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned");
+    if (!updated) {
+      throw notFound("PLAYER_NOT_FOUND", "Player not found");
+    }
+
+    let onlineKick: any = { ok: true };
     try {
-      await this.gameAdminClient.banPlayer(playerId, durationSeconds, reason || "");
-
-      await this.adminStore.appendAuditLog({
-        adminId: req.admin.sub,
-        adminUsername: req.admin.username,
-        action: "gm_ban_player",
-        targetType: "player",
-        targetValue: playerId,
-        details: { durationSeconds, reason },
-        ip: getClientIp(req, this.config)
-      });
-
-      return { ok: true, message: "Player banned" };
+      await this.gameAdminClient.banPlayer(normalizedPlayerId, durationSeconds, normalizedReason);
     } catch (error: any) {
-      throw gameServerError(error);
+      onlineKick = gameServerFailure(error);
     }
+
+    await this.adminStore.appendAuditLog({
+      adminId: req.admin.sub,
+      adminUsername: req.admin.username,
+      action: "gm_ban_player",
+      targetType: "player",
+      targetValue: normalizedPlayerId,
+      details: {
+        from: player.status,
+        to: "banned",
+        durationSeconds,
+        reason: normalizedReason,
+        onlineKick
+      },
+      ip: getClientIp(req, this.config)
+    });
+
+    return { ok: true, message: "Player banned", onlineKick };
   }
 }

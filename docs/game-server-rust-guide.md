@@ -88,12 +88,13 @@
 - `ticket.rs`：ticket 签名、过期校验和 hash
 - `mysql_store.rs`：连接与房间事件审计
 - `metrics.rs`：Core NATS metrics 上报
-- `kick_subscriber.rs`：订阅 `myserver.session.kick.*`，处理并发登录踢旧连接
+- `kick_subscriber.rs`：订阅 `myserver.session.kick.*`，处理并发登录、改密等踢旧连接通知
 
 服务入口：
 
 - `server.rs`：玩家 TCP / local socket 接入与消息分发
-- `admin_server.rs`：内部管理口，支持状态查询、运行时配置、drain mode、GM 发物品
+- `admin_server.rs`：内部管理口，支持状态查询、运行时配置、drain mode、GM 发物品、广播、踢人和在线封禁处置
+- `core/context.rs` 中的 `PlayerRegistry` 记录当前实例已鉴权连接，用于同服踢旧连接、NATS session kick 和 GM 踢人/封禁；跨实例踢人仍依赖外部路由或 NATS 事件
 - `internal_server.rs`：内部建房入口，当前服务于 `match-service`
 - `match_client.rs`：调用 `match-service` 的 gRPC 回调
 

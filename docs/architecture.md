@@ -184,9 +184,9 @@
 
 - 服务器状态查询
 - 运行时配置更新，包括 `drain_mode`
-- GM 发物品
+- GM 发物品、广播、踢人和封禁
 
-注意：`admin-web/admin-api` 当前保留了广播、踢人、封禁的页面入口、HTTP API 和消息号占位，但 `game-server` admin handler 尚未完整实现这些命令，不能视为端到端闭环能力。
+注意：GM 广播当前复用玩家协议 `GameMessagePush` 推送本实例在线连接；GM 踢人只处置当前 `game-server` 实例上的已鉴权在线连接。GM 封禁由 `admin-api` 写入 `player_accounts.status=banned`，再尽力通知 `game-server` 断开在线连接；`durationSeconds` 当前只作为审计信息保留，尚未实现自动解封。
 
 ### 6.4 聊天与邮件
 
@@ -286,7 +286,7 @@ Core NATS 当前承担以下职责：
 
 - `packages/proto/admin.proto`
 
-当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。已落地的 admin 消息包括状态查询、运行时配置更新和 GM 发物品；GM 广播、踢人、封禁目前只是消息号与后台入口预留，`game-server` 侧尚未完整处理。
+当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。已落地的 admin 消息包括状态查询、运行时配置更新、GM 发物品、GM 广播、GM 踢人和 GM 封禁的在线连接处置；广播/踢人/封禁请求体当前仍保留 JSON legacy 兼容，没有扩展 `packages/proto/admin.proto`。账号封禁持久状态由 `admin-api` 直接写 `player_accounts.status`。
 
 ### 8.3 匹配内部协议
 
@@ -353,7 +353,7 @@ Core NATS 当前承担以下职责：
 - 登录、ticket、游戏接入、游戏逻辑、后台、邮件、聊天、匹配都已有独立服务
 - `game-server` 已有较完整的房间运行时框架
 - `game-proxy` 已具备静态上游和基于注册中心的动态发现能力
-- `admin-web + admin-api` 已能支撑审计、玩家管理、监控和部分 GM 闭环能力；广播、踢人、封禁仍需补齐 `game-server` 侧处理
+- `admin-web + admin-api` 已能支撑审计、玩家管理、监控和 GM 广播、发物品、踢人、封禁等主要闭环；踢人和广播仍是当前 `game-server` 实例范围，跨实例路由需后续补齐
 - Redis 与 MySQL 都已经在多条主链路中实际使用
 
 当前仍需注意的事实：

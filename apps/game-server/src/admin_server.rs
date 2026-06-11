@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
@@ -12,21 +14,63 @@ use crate::admin_pb::{
     UpdateConfigRes,
 };
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::context::{SharedRoomManager, SharedRuntimeConfig};
+use crate::core::context::{PlayerRegistry, SharedRoomManager, SharedRuntimeConfig};
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
-use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
+use crate::core::room::OutboundMessage;
+use crate::pb::{ErrorRes, GameMessagePush, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::server::RuntimeConfig;
 
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
+const GM_BROADCAST_TITLE_MAX_LEN: usize = 128;
+const GM_BROADCAST_CONTENT_MAX_LEN: usize = 4096;
+const GM_SENDER_MAX_LEN: usize = 64;
+const GM_REASON_MAX_LEN: usize = 512;
+const GM_PLAYER_ID_MAX_LEN: usize = 128;
+const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
 static ITEM_UID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct GmCommandRes {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(string, tag = "2")]
+    error_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GmBroadcastCommand {
+    title: String,
+    content: String,
+    sender: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GmKickPlayerCommand {
+    player_id: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GmBanPlayerCommand {
+    player_id: String,
+    duration_seconds: u64,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KickOnlineOutcome {
+    player_id: String,
+    session_id: u64,
+}
 
 pub async fn run_listener(
     listener: TcpListener,
     room_manager: SharedRoomManager,
     runtime_config: SharedRuntimeConfig,
     connection_count: Arc<AtomicU64>,
+    player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
     admin_token: String,
@@ -36,6 +80,7 @@ pub async fn run_listener(
         let room_manager = room_manager.clone();
         let runtime_config = runtime_config.clone();
         let connection_count = connection_count.clone();
+        let player_registry = player_registry.clone();
         let player_manager = player_manager.clone();
         let config_tables = config_tables.clone();
         let admin_token = admin_token.clone();
@@ -46,6 +91,7 @@ pub async fn run_listener(
                 room_manager,
                 runtime_config,
                 connection_count,
+                player_registry,
                 player_manager,
                 config_tables,
                 admin_token,
@@ -63,6 +109,7 @@ async fn handle_admin_connection(
     room_manager: SharedRoomManager,
     runtime_config: SharedRuntimeConfig,
     connection_count: Arc<AtomicU64>,
+    player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
     admin_token: String,
@@ -194,6 +241,112 @@ async fn handle_admin_connection(
                     }
                 }
             }
+            Some(MessageType::GmBroadcastReq) => match decode_gm_broadcast_request(&packet) {
+                Ok(request) => {
+                    let delivered =
+                        broadcast_gm_message_to_online_players(&player_registry, &request).await;
+                    info!(
+                        delivered = delivered,
+                        sender = %request.sender,
+                        title = %request.title,
+                        "gm broadcast delivered"
+                    );
+                    write_gm_response(&mut writer, MessageType::GmBroadcastRes, packet.header.seq)
+                        .await?;
+                }
+                Err(error_code) => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        error_code,
+                        "invalid gm broadcast request",
+                    )
+                    .await?;
+                }
+            },
+            Some(MessageType::GmKickPlayerReq) => match decode_gm_kick_player_request(&packet) {
+                Ok(request) => {
+                    let kick_reason = gm_disconnect_reason("gm_kick", &request.reason);
+                    match kick_online_player(&player_registry, &request.player_id, &kick_reason)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            info!(
+                                player_id = %outcome.player_id,
+                                session_id = outcome.session_id,
+                                reason = %kick_reason,
+                                "gm kick player delivered"
+                            );
+                            write_gm_response(
+                                &mut writer,
+                                MessageType::GmKickPlayerRes,
+                                packet.header.seq,
+                            )
+                            .await?;
+                        }
+                        Err(error_code) => {
+                            write_error(
+                                &mut writer,
+                                packet.header.seq,
+                                error_code,
+                                "failed to kick player",
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(error_code) => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        error_code,
+                        "invalid gm kick player request",
+                    )
+                    .await?;
+                }
+            },
+            Some(MessageType::GmBanPlayerReq) => match decode_gm_ban_player_request(&packet) {
+                Ok(request) => {
+                    let kick_reason = gm_disconnect_reason("gm_ban", &request.reason);
+                    match kick_online_player(&player_registry, &request.player_id, &kick_reason)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            info!(
+                                player_id = %outcome.player_id,
+                                session_id = outcome.session_id,
+                                duration_seconds = request.duration_seconds,
+                                reason = %kick_reason,
+                                "gm ban online player handled"
+                            );
+                            write_gm_response(
+                                &mut writer,
+                                MessageType::GmBanPlayerRes,
+                                packet.header.seq,
+                            )
+                            .await?;
+                        }
+                        Err(error_code) => {
+                            write_error(
+                                &mut writer,
+                                packet.header.seq,
+                                error_code,
+                                "failed to ban player on this game-server",
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Err(error_code) => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        error_code,
+                        "invalid gm ban player request",
+                    )
+                    .await?;
+                }
+            },
             Some(_) => {
                 write_error(
                     &mut writer,
@@ -226,6 +379,213 @@ fn authenticate_admin_packet(packet: &Packet, admin_token: &str) -> bool {
     std::str::from_utf8(&packet.body)
         .map(|token| token == admin_token)
         .unwrap_or(false)
+}
+
+fn decode_gm_broadcast_request(packet: &Packet) -> Result<GmBroadcastCommand, &'static str> {
+    #[derive(Deserialize)]
+    struct GmBroadcastJson {
+        title: Option<String>,
+        content: Option<String>,
+        sender: Option<String>,
+    }
+
+    let request: GmBroadcastJson =
+        serde_json::from_slice(&packet.body).map_err(|_| "INVALID_GM_BROADCAST_BODY")?;
+
+    let title = normalize_required_string(
+        request.title,
+        "INVALID_TITLE",
+        GM_BROADCAST_TITLE_MAX_LEN,
+        "TITLE_TOO_LONG",
+    )?;
+    let content = normalize_required_string(
+        request.content,
+        "INVALID_CONTENT",
+        GM_BROADCAST_CONTENT_MAX_LEN,
+        "CONTENT_TOO_LONG",
+    )?;
+    let sender = normalize_optional_string(
+        request.sender,
+        "System",
+        GM_SENDER_MAX_LEN,
+        "SENDER_TOO_LONG",
+    )?;
+
+    Ok(GmBroadcastCommand {
+        title,
+        content,
+        sender,
+    })
+}
+
+fn decode_gm_kick_player_request(packet: &Packet) -> Result<GmKickPlayerCommand, &'static str> {
+    #[derive(Deserialize)]
+    struct GmKickPlayerJson {
+        #[serde(rename = "playerId")]
+        player_id: Option<String>,
+        reason: Option<String>,
+    }
+
+    let request: GmKickPlayerJson =
+        serde_json::from_slice(&packet.body).map_err(|_| "INVALID_GM_KICK_BODY")?;
+
+    let player_id = normalize_required_string(
+        request.player_id,
+        "INVALID_PLAYER_ID",
+        GM_PLAYER_ID_MAX_LEN,
+        "PLAYER_ID_TOO_LONG",
+    )?;
+    let reason =
+        normalize_optional_string(request.reason, "", GM_REASON_MAX_LEN, "REASON_TOO_LONG")?;
+
+    Ok(GmKickPlayerCommand { player_id, reason })
+}
+
+fn decode_gm_ban_player_request(packet: &Packet) -> Result<GmBanPlayerCommand, &'static str> {
+    #[derive(Deserialize)]
+    struct GmBanPlayerJson {
+        #[serde(rename = "playerId")]
+        player_id: Option<String>,
+        #[serde(rename = "durationSeconds")]
+        duration_seconds: Option<u64>,
+        reason: Option<String>,
+    }
+
+    let request: GmBanPlayerJson =
+        serde_json::from_slice(&packet.body).map_err(|_| "INVALID_GM_BAN_BODY")?;
+
+    let player_id = normalize_required_string(
+        request.player_id,
+        "INVALID_PLAYER_ID",
+        GM_PLAYER_ID_MAX_LEN,
+        "PLAYER_ID_TOO_LONG",
+    )?;
+    let duration_seconds = request.duration_seconds.ok_or("INVALID_DURATION")?;
+    if duration_seconds == 0 || duration_seconds > GM_BAN_DURATION_MAX_SECONDS {
+        return Err("INVALID_DURATION");
+    }
+    let reason =
+        normalize_optional_string(request.reason, "", GM_REASON_MAX_LEN, "REASON_TOO_LONG")?;
+
+    Ok(GmBanPlayerCommand {
+        player_id,
+        duration_seconds,
+        reason,
+    })
+}
+
+fn normalize_required_string(
+    value: Option<String>,
+    invalid_code: &'static str,
+    max_chars: usize,
+    too_long_code: &'static str,
+) -> Result<String, &'static str> {
+    let value = value.ok_or(invalid_code)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_code);
+    }
+    if value.chars().count() > max_chars {
+        return Err(too_long_code);
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_optional_string(
+    value: Option<String>,
+    default_value: &str,
+    max_chars: usize,
+    too_long_code: &'static str,
+) -> Result<String, &'static str> {
+    let value = value.unwrap_or_else(|| default_value.to_string());
+    let value = value.trim();
+    if value.chars().count() > max_chars {
+        return Err(too_long_code);
+    }
+    if value.is_empty() {
+        Ok(default_value.to_string())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn gm_disconnect_reason(default_reason: &str, request_reason: &str) -> String {
+    if request_reason.is_empty() {
+        default_reason.to_string()
+    } else {
+        request_reason.to_string()
+    }
+}
+
+async fn broadcast_gm_message_to_online_players(
+    player_registry: &PlayerRegistry,
+    request: &GmBroadcastCommand,
+) -> usize {
+    let handles = {
+        let registry = player_registry.read().await;
+        registry
+            .iter()
+            .map(|(player_id, handle)| (player_id.clone(), handle.outbound.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let body = encode_body(&GameMessagePush {
+        event: "gm_broadcast".to_string(),
+        room_id: String::new(),
+        player_id: String::new(),
+        action: "broadcast".to_string(),
+        payload_json: json!({
+            "title": request.title,
+            "content": request.content,
+            "sender": request.sender,
+            "timestamp": current_unix_ms()
+        })
+        .to_string(),
+    });
+
+    let mut delivered = 0;
+    for (player_id, outbound) in handles {
+        match outbound.try_send(OutboundMessage {
+            message_type: MessageType::GameMessagePush,
+            seq: 0,
+            body: body.clone(),
+        }) {
+            Ok(()) => delivered += 1,
+            Err(error) => {
+                warn!(
+                    player_id = %player_id,
+                    error = %error,
+                    "failed to queue gm broadcast"
+                );
+            }
+        }
+    }
+
+    delivered
+}
+
+async fn kick_online_player(
+    player_registry: &PlayerRegistry,
+    player_id: &str,
+    kick_reason: &str,
+) -> Result<KickOnlineOutcome, &'static str> {
+    let handle = {
+        let registry = player_registry.read().await;
+        registry.get(player_id).cloned()
+    }
+    .ok_or("PLAYER_OFFLINE")?;
+
+    if handle.outbound.is_closed() {
+        return Err("PLAYER_CONNECTION_UNAVAILABLE");
+    }
+
+    *handle.kick_reason.write().await = kick_reason.to_string();
+    handle.kick_notify.notify_one();
+
+    Ok(KickOnlineOutcome {
+        player_id: player_id.to_string(),
+        session_id: handle.session_id,
+    })
 }
 
 async fn validate_grant_items_request(
@@ -555,6 +915,23 @@ async fn write_message<M: prost::Message>(
     writer.write_all(&packet).await
 }
 
+async fn write_gm_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    message_type: MessageType,
+    seq: u32,
+) -> Result<(), std::io::Error> {
+    write_message(
+        writer,
+        message_type,
+        seq,
+        &GmCommandRes {
+            ok: true,
+            error_code: String::new(),
+        },
+    )
+    .await
+}
+
 async fn write_error(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     seq: u32,
@@ -577,9 +954,13 @@ async fn write_error(
 mod tests {
     use std::sync::Arc;
 
+    use tokio::sync::Notify;
     use tokio::sync::RwLock;
+    use tokio::sync::mpsc;
 
     use super::*;
+    use crate::core::context::PlayerConnectionHandle;
+    use crate::protocol::PacketHeader;
 
     fn runtime_config_fixture() -> SharedRuntimeConfig {
         Arc::new(RwLock::new(RuntimeConfig {
@@ -590,6 +971,190 @@ mod tests {
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         }))
+    }
+
+    fn json_packet(message_type: MessageType, body: &str) -> Packet {
+        Packet::new(
+            PacketHeader {
+                msg_type: message_type as u16,
+                seq: 1,
+                body_len: body.len() as u32,
+            },
+            body.as_bytes().to_vec(),
+        )
+    }
+
+    fn player_registry_fixture(
+        player_id: &str,
+    ) -> (
+        PlayerRegistry,
+        Arc<Notify>,
+        Arc<RwLock<String>>,
+        mpsc::Receiver<OutboundMessage>,
+    ) {
+        let (tx, rx) = mpsc::channel(8);
+        let notify = Arc::new(Notify::new());
+        let kick_reason = Arc::new(RwLock::new("session_kicked".to_string()));
+        let registry = Arc::new(RwLock::new(std::collections::HashMap::from([(
+            player_id.to_string(),
+            PlayerConnectionHandle {
+                kick_notify: notify.clone(),
+                session_id: 42,
+                outbound: tx,
+                kick_reason: kick_reason.clone(),
+            },
+        )])));
+
+        (registry, notify, kick_reason, rx)
+    }
+
+    #[test]
+    fn decode_gm_broadcast_trims_and_defaults_sender() {
+        let packet = json_packet(
+            MessageType::GmBroadcastReq,
+            r#"{"title":"  Notice ","content":" Hello ","sender":" "}"#,
+        );
+
+        let request = decode_gm_broadcast_request(&packet).unwrap();
+
+        assert_eq!(
+            request,
+            GmBroadcastCommand {
+                title: "Notice".to_string(),
+                content: "Hello".to_string(),
+                sender: "System".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn decode_gm_broadcast_rejects_empty_and_too_long_values() {
+        let empty_title = json_packet(
+            MessageType::GmBroadcastReq,
+            r#"{"title":" ","content":"Hello","sender":"System"}"#,
+        );
+        assert_eq!(
+            decode_gm_broadcast_request(&empty_title),
+            Err("INVALID_TITLE")
+        );
+
+        let title = "a".repeat(GM_BROADCAST_TITLE_MAX_LEN + 1);
+        let too_long_title = json_packet(
+            MessageType::GmBroadcastReq,
+            &json!({"title": title, "content": "Hello", "sender": "System"}).to_string(),
+        );
+        assert_eq!(
+            decode_gm_broadcast_request(&too_long_title),
+            Err("TITLE_TOO_LONG")
+        );
+    }
+
+    #[test]
+    fn decode_gm_kick_validates_player_id_and_reason() {
+        let packet = json_packet(
+            MessageType::GmKickPlayerReq,
+            r#"{"playerId":" player-a ","reason":" reconnect "}"#,
+        );
+
+        let request = decode_gm_kick_player_request(&packet).unwrap();
+
+        assert_eq!(
+            request,
+            GmKickPlayerCommand {
+                player_id: "player-a".to_string(),
+                reason: "reconnect".to_string(),
+            }
+        );
+
+        let missing_player = json_packet(MessageType::GmKickPlayerReq, r#"{"reason":"x"}"#);
+        assert_eq!(
+            decode_gm_kick_player_request(&missing_player),
+            Err("INVALID_PLAYER_ID")
+        );
+    }
+
+    #[test]
+    fn decode_gm_ban_validates_duration() {
+        let packet = json_packet(
+            MessageType::GmBanPlayerReq,
+            r#"{"playerId":"player-a","durationSeconds":3600,"reason":"cheat"}"#,
+        );
+
+        let request = decode_gm_ban_player_request(&packet).unwrap();
+
+        assert_eq!(
+            request,
+            GmBanPlayerCommand {
+                player_id: "player-a".to_string(),
+                duration_seconds: 3600,
+                reason: "cheat".to_string(),
+            }
+        );
+
+        let invalid_duration = json_packet(
+            MessageType::GmBanPlayerReq,
+            r#"{"playerId":"player-a","durationSeconds":0}"#,
+        );
+        assert_eq!(
+            decode_gm_ban_player_request(&invalid_duration),
+            Err("INVALID_DURATION")
+        );
+    }
+
+    #[test]
+    fn gm_disconnect_reason_uses_request_reason_when_present() {
+        assert_eq!(gm_disconnect_reason("gm_kick", ""), "gm_kick");
+        assert_eq!(gm_disconnect_reason("gm_kick", "manual"), "manual");
+    }
+
+    #[tokio::test]
+    async fn kick_online_player_sets_reason_and_notifies_connection() {
+        let (registry, notify, kick_reason, _rx) = player_registry_fixture("player-a");
+        let notified = notify.notified();
+
+        let outcome = kick_online_player(&registry, "player-a", "gm_kick")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            KickOnlineOutcome {
+                player_id: "player-a".to_string(),
+                session_id: 42,
+            }
+        );
+        assert_eq!(&*kick_reason.read().await, "gm_kick");
+        notified.await;
+    }
+
+    #[tokio::test]
+    async fn kick_offline_player_returns_player_offline() {
+        let (registry, _notify, _kick_reason, _rx) = player_registry_fixture("player-a");
+
+        let result = kick_online_player(&registry, "player-offline", "gm_kick").await;
+
+        assert_eq!(result, Err("PLAYER_OFFLINE"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_gm_message_queues_game_message_for_online_players() {
+        let (registry, _notify, _kick_reason, mut rx) = player_registry_fixture("player-a");
+        let request = GmBroadcastCommand {
+            title: "Notice".to_string(),
+            content: "Hello".to_string(),
+            sender: "System".to_string(),
+        };
+
+        let delivered = broadcast_gm_message_to_online_players(&registry, &request).await;
+
+        assert_eq!(delivered, 1);
+        let message = rx.try_recv().expect("gm broadcast queued");
+        assert_eq!(message.message_type, MessageType::GameMessagePush);
+        let push = prost::Message::decode(message.body.as_slice()).unwrap();
+        let push: GameMessagePush = push;
+        assert_eq!(push.event, "gm_broadcast");
+        assert_eq!(push.action, "broadcast");
+        assert!(push.payload_json.contains("\"title\":\"Notice\""));
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use redis::AsyncCommands;
 use tracing::info;
 
-use crate::core::context::{ConnectionContext, ServiceContext};
+use crate::core::context::{ConnectionContext, PlayerConnectionHandle, ServiceContext};
 use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
 use crate::protocol::{MessageType, Packet};
@@ -133,18 +133,22 @@ pub async fn handle_auth(
             // Register in player registry; kick old connection on same server
             {
                 let mut registry = services.player_registry.write().await;
-                if let Some((old_notify, old_sid)) = registry.insert(
-                    player_id.clone(),
-                    (connection.kick_notify.clone(), connection.session.id),
-                ) {
-                    if old_sid != connection.session.id {
+                let handle = PlayerConnectionHandle {
+                    kick_notify: connection.kick_notify.clone(),
+                    session_id: connection.session.id,
+                    outbound: connection.tx.clone(),
+                    kick_reason: connection.kick_reason.clone(),
+                };
+                if let Some(old_handle) = registry.insert(player_id.clone(), handle) {
+                    if old_handle.session_id != connection.session.id {
                         info!(
                             player_id = %player_id,
-                            old_session_id = old_sid,
+                            old_session_id = old_handle.session_id,
                             new_session_id = connection.session.id,
                             "kicking old connection on same server"
                         );
-                        old_notify.notify_one();
+                        *old_handle.kick_reason.write().await = "new_login".to_string();
+                        old_handle.kick_notify.notify_one();
                     }
                 }
             }
