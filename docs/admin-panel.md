@@ -34,8 +34,8 @@ apps/
 
 - MySQL：读取 `myserver_auth` 中的管理员、玩家、审计和安全日志数据
 - Redis：读取各服务上报的 heartbeat 与 metrics，并写入维护模式共享状态
-- Core NATS：发布 `myserver.session.kick.<player_id_token>`，用于 GM 踢人/封禁跨 `game-server` 实例断开在线连接
-- `game-server` admin TCP 通道：执行 GM 指令；其中踢人/封禁的单实例调用保留为 legacy 兼容和辅助审计
+- Core NATS：发布 `myserver.gm.broadcast` 用于 GM 广播跨 `game-server` 实例推送，发布 `myserver.session.kick.<player_id_token>` 用于 GM 踢人/封禁跨实例断开在线连接
+- `game-server` admin TCP 通道：执行 GM 发道具等指令；GM 广播仅在全局 NATS 发布失败时作为 legacy 单实例 fallback，踢人/封禁的单实例调用保留为 legacy 兼容和辅助审计
 
 ## 快速启动
 
@@ -446,11 +446,11 @@ npm run dev:admin-web
 
 ### GM 命令
 
-这些接口通过 `admin-api -> game-server admin TCP` 调用游戏服；GM 踢人/封禁还会通过 Core NATS 发布 `myserver.session.kick.<player_id_token>`，由各 `game-server` 实例订阅后断开本实例上的目标玩家连接。legacy 单实例 admin TCP 调用仍保留为兼容和辅助结果。
+GM 广播通过 Core NATS 发布 `myserver.gm.broadcast`，由各 `game-server` 实例订阅后向本实例在线玩家推送；NATS 发布成功时不再调用 legacy admin TCP，避免被直连实例重复投递。GM 踢人/封禁会通过 Core NATS 发布 `myserver.session.kick.<player_id_token>`，由各 `game-server` 实例订阅后断开本实例上的目标玩家连接。legacy 单实例 admin TCP 调用仍保留为兼容和辅助结果。
 
 #### `POST /api/v1/gm/broadcast`
 
-发送全服广播。当前 `game-server` 侧会向本实例已鉴权在线连接推送 `GameMessagePush(event="gm_broadcast", action="broadcast")`。
+发送全服广播。`admin-api` 会发布 Core NATS `myserver.gm.broadcast`，payload 包含 `broadcast_id`、`title`、`content`、`sender` 和 `created_at`；所有 `game-server` 实例订阅后向本实例已鉴权在线连接推送 `GameMessagePush(event="gm_broadcast", action="broadcast")`。NATS 发布成功时跳过 legacy 单实例 admin TCP；NATS 发布失败时 fallback 到 legacy admin TCP，并在响应和审计 details 中标明 `globalBroadcast` / `legacyBroadcast` 结果。
 
 ```json
 {
@@ -575,7 +575,7 @@ npm run dev:admin-web
 - 有 `gm.kick_player` 时可踢出玩家
 - 有 `gm.ban_player` 时可封禁玩家
 
-其中每个表单都按同名前端权限显示；后端通过对应 `gm.*` 权限校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
+其中每个表单都按同名前端权限显示；后端通过对应 `gm.*` 权限校验。GM 广播已通过 NATS `myserver.gm.broadcast` 跨 `game-server` 实例推送，legacy 单实例 admin TCP 仅作为 NATS 发布失败时的 fallback；GM 踢人/封禁已通过 NATS session kick 跨实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
 ### 服务监控页
 

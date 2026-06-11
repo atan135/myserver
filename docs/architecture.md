@@ -187,9 +187,9 @@
 
 - 服务器状态查询
 - 运行时配置更新，包括 `drain_mode`
-- GM 发物品、广播，以及踢人/封禁的 legacy 单实例辅助调用
+- GM 发物品，以及广播、踢人/封禁的 legacy 单实例辅助调用
 
-注意：GM 广播当前复用玩家协议 `GameMessagePush` 推送本实例在线连接。GM 踢人/封禁由 `admin-api` 发布 Core NATS `myserver.session.kick.<player_id_token>`，各 `game-server` 实例订阅后断开本实例上的目标玩家连接；legacy 单实例 admin TCP kick/ban 仍作为兼容和辅助结果记录。GM 封禁由 `admin-api` 先写入 `player_accounts.status=banned`，NATS 发布失败时不回滚账号状态但会在响应和审计中标明 global kick 失败；`durationSeconds` 当前只作为审计信息和未来自动解封依据保留，尚未实现自动解封。
+注意：GM 广播由 `admin-api` 发布 Core NATS `myserver.gm.broadcast`，各 `game-server` 实例订阅后复用玩家协议 `GameMessagePush(event="gm_broadcast", action="broadcast")` 推送本实例在线连接；NATS 发布成功时不调用 legacy admin TCP，避免直连实例重复投递，发布失败时才 fallback 到 legacy 单实例广播并记录结构化结果。GM 踢人/封禁由 `admin-api` 发布 Core NATS `myserver.session.kick.<player_id_token>`，各 `game-server` 实例订阅后断开本实例上的目标玩家连接；legacy 单实例 admin TCP kick/ban 仍作为兼容和辅助结果记录。GM 封禁由 `admin-api` 先写入 `player_accounts.status=banned` 和 `ban_expires_at`，NATS 发布失败时不回滚账号状态但会在响应和审计中标明 global kick 失败；限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
 维护模式由 `admin-api` 写入 Redis `${REDIS_KEY_PREFIX}maintenance:global` 并记录 `admin_audit_logs`。`auth-http` 和 `game-proxy` 读取该共享状态做入口拦截；`game-proxy` 仍保留本地 admin HTTP `/maintenance/on|off` 作为单进程开关，最终新接入判断同时考虑本地开关和 Redis 共享状态。
 
@@ -239,6 +239,7 @@ Redis 当前承担以下职责：
 Core NATS 当前承担以下职责：
 
 - `mail-service -> chat-server` 的新邮件通知：`myserver.mail.notify.<player_id_token>`
+- `admin-api -> game-server` 的 GM 全局广播通知：`myserver.gm.broadcast`
 - `auth-http` / `admin-api -> game-server` 的并发登录、改密、GM 踢人/封禁 session kick 通知：`myserver.session.kick.<player_id_token>`
 - 各服务 metrics 上报：`myserver.metrics.<service_name>.<instance_id_token>`
 - `metrics-collector` 订阅 `myserver.metrics.>`，并把最新 metrics/heartbeat 写回 Redis，兼容当前 `admin-api` 监控读取逻辑
@@ -291,7 +292,7 @@ Core NATS 当前承担以下职责：
 
 - `packages/proto/admin.proto`
 
-当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。已落地的 admin 消息包括状态查询、运行时配置更新、GM 发物品、GM 广播，以及 GM 踢人/封禁的 legacy 单实例在线连接处置；广播/踢人/封禁请求体当前仍保留 JSON legacy 兼容，没有扩展 `packages/proto/admin.proto`。账号封禁持久状态由 `admin-api` 直接写 `player_accounts.status`，跨实例在线断开通过 Core NATS session kick 完成。
+当前由 `auth-http` / `admin-api` 通过内部 TCP 管理口调用 `game-server`。已落地的 admin 消息包括状态查询、运行时配置更新、GM 发物品，以及 GM 广播/踢人/封禁的 legacy 单实例在线连接处置；广播/踢人/封禁请求体当前仍保留 JSON legacy 兼容，没有扩展 `packages/proto/admin.proto`。GM 广播的跨实例主路径通过 Core NATS `myserver.gm.broadcast` 完成，账号封禁持久状态由 `admin-api` 直接写 `player_accounts.status`，跨实例在线断开通过 Core NATS session kick 完成。
 
 ### 8.3 匹配内部协议
 
@@ -358,7 +359,7 @@ Core NATS 当前承担以下职责：
 - 登录、ticket、游戏接入、游戏逻辑、后台、邮件、聊天、匹配都已有独立服务
 - `game-server` 已有较完整的房间运行时框架
 - `game-proxy` 已具备静态上游和基于注册中心的动态发现能力
-- `admin-web + admin-api` 已能支撑审计、玩家管理、监控和 GM 广播、发物品、踢人、封禁等主要闭环；GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，广播仍是当前 `game-server` 实例范围
+- `admin-web + admin-api` 已能支撑审计、玩家管理、监控和 GM 广播、发物品、踢人、封禁等主要闭环；GM 广播已通过 NATS `myserver.gm.broadcast` 跨 `game-server` 实例推送，GM 踢人/封禁已通过 NATS session kick 跨实例断开在线连接
 - Redis 与 MySQL 都已经在多条主链路中实际使用
 
 当前仍需注意的事实：

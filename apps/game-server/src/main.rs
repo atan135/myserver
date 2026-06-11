@@ -6,6 +6,7 @@ mod core;
 mod gameconfig;
 mod gameroom;
 mod gameservice;
+mod gm_broadcast;
 mod internal_server;
 mod kick_subscriber;
 mod local_socket;

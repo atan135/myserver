@@ -467,6 +467,10 @@ pub async fn run(
 
     let kick_task = tokio::spawn(crate::kick_subscriber::subscribe_session_kicks(
         config.nats_url.clone(),
+        player_registry.clone(),
+    ));
+    let gm_broadcast_task = tokio::spawn(crate::gm_broadcast::subscribe_gm_broadcasts(
+        config.nats_url.clone(),
         player_registry,
     ));
 
@@ -507,6 +511,8 @@ pub async fn run(
     let _ = internal_socket_task.await;
     kick_task.abort();
     let _ = kick_task.await;
+    gm_broadcast_task.abort();
+    let _ = gm_broadcast_task.await;
 
     info!("game server shutdown completed");
     Ok(())

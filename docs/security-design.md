@@ -87,8 +87,8 @@
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、读写 token 分离、生产默认 token 拒绝、写操作基础输入校验、`X-Admin-Actor` 操作人解析、结构化日志和 JSONL 持久审计 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin 尚缺更细操作级 RBAC、审计查询、集中留存和统一 trace/request id，多 proxy route store 强一致仍未完全闭环 |
-| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接；GM 广播仍是本实例范围 |
-| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端第一阶段权限矩阵、监控接口鉴权、可信代理 IP 解析、请求级 HTTPS/TLS 强制、来源 IP allowlist、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 代码侧 TLS/allowlist 不能替代生产网络隔离；权限仍未数据库化，缺少按资源范围授权、权限变更审计查询和审批流 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、NATS GM 广播订阅并向本实例在线连接推送、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接 |
+| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端第一阶段权限矩阵、监控接口鉴权、可信代理 IP 解析、请求级 HTTPS/TLS 强制、来源 IP allowlist、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 广播通过 NATS 跨实例推送、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 代码侧 TLS/allowlist 不能替代生产网络隔离；权限仍未数据库化，缺少按资源范围授权、权限变更审计查询和审批流 |
 
 说明：
 
@@ -380,7 +380,7 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 3. 配置热更新与 admin TCP 操作的审计闭环
 4. 审计日志中的失败结果和原因码统一
 
-当前 GM 广播、踢人和封禁的 `game-server` 在线连接处置已接入 admin TCP handler；GM 踢人/封禁同时由 `admin-api` 发布 NATS session kick，跨实例断开在线连接，legacy 单实例 admin TCP 结果会进入审计。GM 封禁也已由 `admin-api` 写入账号持久状态和 `ban_expires_at`。限时封禁不依赖常驻定时器，`auth-http` 在登录和签票路径惰性恢复过期封禁。剩余安全缺口是更细粒度权限矩阵和失败原因标准化的持续收敛。
+当前 GM 广播、踢人和封禁的 `game-server` 在线连接处置已接入 admin TCP handler。GM 广播主路径由 `admin-api` 发布 NATS `myserver.gm.broadcast`，跨实例推送在线连接；NATS 发布成功时跳过 legacy 单实例 admin TCP，发布失败时才 fallback 并在响应和审计中记录 `globalBroadcast` / `legacyBroadcast` 结果。GM 踢人/封禁同时由 `admin-api` 发布 NATS session kick，跨实例断开在线连接，legacy 单实例 admin TCP 结果会进入审计。GM 封禁也已由 `admin-api` 写入账号持久状态和 `ban_expires_at`。限时封禁不依赖常驻定时器，`auth-http` 在登录和签票路径惰性恢复过期封禁。剩余安全缺口是更细粒度权限矩阵和失败原因标准化的持续收敛。
 
 ---
 
@@ -640,7 +640,7 @@ ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
 
 - GM、维护模式、玩家状态修改、ticket 撤销、配置更新都能查到审计记录
 - 审计可定位操作者、目标、来源 IP、结果和时间
-- GM 踢人/封禁审计会记录 NATS global kick 结果和 legacy 单实例 admin TCP 调用结果
+- GM 广播审计会记录 NATS global broadcast 结果和 legacy 单实例 fallback 结果；GM 踢人/封禁审计会记录 NATS global kick 结果和 legacy 单实例 admin TCP 调用结果
 - 日志不包含明文密码、完整 token 或完整 ticket
 
 ### 11.4 防火墙 / 黑白名单

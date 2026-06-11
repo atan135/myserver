@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
@@ -17,8 +16,12 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{PlayerRegistry, SharedRoomManager, SharedRuntimeConfig};
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
-use crate::core::room::OutboundMessage;
-use crate::pb::{ErrorRes, GameMessagePush, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
+use crate::gm_broadcast::{
+    GM_BROADCAST_CONTENT_MAX_LEN, GM_BROADCAST_TITLE_MAX_LEN, GM_SENDER_MAX_LEN,
+    GmBroadcastCommand, broadcast_gm_message_to_online_players, normalize_optional_string,
+    normalize_required_string,
+};
+use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::pb::{
     ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
     FreezeRoomForTransferRes, ImportRoomTransferReq, ImportRoomTransferRes,
@@ -29,9 +32,6 @@ use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packe
 use crate::server::RuntimeConfig;
 
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
-const GM_BROADCAST_TITLE_MAX_LEN: usize = 128;
-const GM_BROADCAST_CONTENT_MAX_LEN: usize = 4096;
-const GM_SENDER_MAX_LEN: usize = 64;
 const GM_REASON_MAX_LEN: usize = 512;
 const GM_PLAYER_ID_MAX_LEN: usize = 128;
 const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
@@ -43,13 +43,6 @@ struct GmCommandRes {
     ok: bool,
     #[prost(string, tag = "2")]
     error_code: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GmBroadcastCommand {
-    title: String,
-    content: String,
-    sender: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,94 +657,12 @@ fn decode_gm_ban_player_request(packet: &Packet) -> Result<GmBanPlayerCommand, &
     })
 }
 
-fn normalize_required_string(
-    value: Option<String>,
-    invalid_code: &'static str,
-    max_chars: usize,
-    too_long_code: &'static str,
-) -> Result<String, &'static str> {
-    let value = value.ok_or(invalid_code)?;
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(invalid_code);
-    }
-    if value.chars().count() > max_chars {
-        return Err(too_long_code);
-    }
-    Ok(value.to_string())
-}
-
-fn normalize_optional_string(
-    value: Option<String>,
-    default_value: &str,
-    max_chars: usize,
-    too_long_code: &'static str,
-) -> Result<String, &'static str> {
-    let value = value.unwrap_or_else(|| default_value.to_string());
-    let value = value.trim();
-    if value.chars().count() > max_chars {
-        return Err(too_long_code);
-    }
-    if value.is_empty() {
-        Ok(default_value.to_string())
-    } else {
-        Ok(value.to_string())
-    }
-}
-
 fn gm_disconnect_reason(default_reason: &str, request_reason: &str) -> String {
     if request_reason.is_empty() {
         default_reason.to_string()
     } else {
         request_reason.to_string()
     }
-}
-
-async fn broadcast_gm_message_to_online_players(
-    player_registry: &PlayerRegistry,
-    request: &GmBroadcastCommand,
-) -> usize {
-    let handles = {
-        let registry = player_registry.read().await;
-        registry
-            .iter()
-            .map(|(player_id, handle)| (player_id.clone(), handle.outbound.clone()))
-            .collect::<Vec<_>>()
-    };
-
-    let body = encode_body(&GameMessagePush {
-        event: "gm_broadcast".to_string(),
-        room_id: String::new(),
-        player_id: String::new(),
-        action: "broadcast".to_string(),
-        payload_json: json!({
-            "title": request.title,
-            "content": request.content,
-            "sender": request.sender,
-            "timestamp": current_unix_ms()
-        })
-        .to_string(),
-    });
-
-    let mut delivered = 0;
-    for (player_id, outbound) in handles {
-        match outbound.try_send(OutboundMessage {
-            message_type: MessageType::GameMessagePush,
-            seq: 0,
-            body: body.clone(),
-        }) {
-            Ok(()) => delivered += 1,
-            Err(error) => {
-                warn!(
-                    player_id = %player_id,
-                    error = %error,
-                    "failed to queue gm broadcast"
-                );
-            }
-        }
-    }
-
-    delivered
 }
 
 async fn kick_online_player(
@@ -1188,12 +1099,15 @@ async fn write_error(
 mod tests {
     use std::sync::Arc;
 
+    use serde_json::json;
     use tokio::sync::Notify;
     use tokio::sync::RwLock;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
+    use crate::core::room::OutboundMessage;
+    use crate::pb::GameMessagePush;
     use crate::protocol::PacketHeader;
 
     fn runtime_config_fixture() -> SharedRuntimeConfig {

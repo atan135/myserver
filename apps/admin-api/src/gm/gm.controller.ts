@@ -9,8 +9,10 @@ import { ApiHttpException, badRequest, notFound } from "../common/http-exception
 import { encodeSubjectToken } from "../nats-client.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
 import { computeBanExpiresAt } from "../ban-utils.js";
+import { randomUUID } from "node:crypto";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
+const GM_BROADCAST_SUBJECT = "myserver.gm.broadcast";
 
 function gameServerError(error: any) {
   return new ApiHttpException(502, {
@@ -35,6 +37,19 @@ function sessionKickPublishError(globalKick: any, legacyResult: any) {
     message: globalKick.message || "failed to publish global session kick",
     globalKick,
     legacyResult
+  });
+}
+
+function globalBroadcastPublishError(globalBroadcast: any, legacyBroadcast: any) {
+  return new ApiHttpException(502, {
+    ok: false,
+    error: "GM_BROADCAST_PUBLISH_FAILED",
+    message:
+      globalBroadcast.message ||
+      "failed to publish global GM broadcast; legacy single-instance fallback result is attached",
+    partialDelivered: legacyBroadcast?.ok === true,
+    globalBroadcast,
+    legacyBroadcast
   });
 }
 
@@ -86,6 +101,29 @@ export class GmController {
     }
   }
 
+  private async publishGlobalBroadcast(title: string, content: string, sender: string) {
+    const payload = {
+      broadcast_id: randomUUID(),
+      title,
+      content,
+      sender,
+      created_at: new Date().toISOString()
+    };
+
+    try {
+      await this.nats.publishJson(GM_BROADCAST_SUBJECT, payload);
+      return { ok: true, subject: GM_BROADCAST_SUBJECT, payload };
+    } catch (error: any) {
+      return {
+        ok: false,
+        error: error?.code || "NATS_PUBLISH_FAILED",
+        message: error?.message || "failed to publish global GM broadcast",
+        subject: GM_BROADCAST_SUBJECT,
+        payload
+      };
+    }
+  }
+
   @Post("broadcast")
   @Permissions("gm.broadcast")
   @HttpCode(HttpStatus.OK)
@@ -100,23 +138,56 @@ export class GmController {
       throw badRequest("INVALID_CONTENT", "content is required");
     }
 
-    try {
-      await this.gameAdminClient.broadcast(title.trim(), content.trim(), sender || "System");
+    const normalizedTitle = title.trim();
+    const normalizedContent = content.trim();
+    const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
+    const globalBroadcast = await this.publishGlobalBroadcast(
+      normalizedTitle,
+      normalizedContent,
+      normalizedSender
+    );
 
-      await this.adminStore.appendAuditLog({
-        adminId: req.admin.sub,
-        adminUsername: req.admin.username,
-        action: "gm_broadcast",
-        targetType: "system",
-        targetValue: "all",
-        details: { title, content, sender },
-        ip: getClientIp(req, this.config)
-      });
-
-      return { ok: true, message: "Broadcast sent" };
-    } catch (error: any) {
-      throw gameServerError(error);
+    let legacyBroadcast: any = {
+      ok: true,
+      skipped: true,
+      reason: "global_broadcast_published"
+    };
+    if (!globalBroadcast.ok) {
+      try {
+        await this.gameAdminClient.broadcast(normalizedTitle, normalizedContent, normalizedSender);
+        legacyBroadcast = { ok: true, fallback: true };
+      } catch (error: any) {
+        legacyBroadcast = gameServerFailure(error);
+        legacyBroadcast.fallback = true;
+      }
     }
+
+    await this.adminStore.appendAuditLog({
+      adminId: req.admin.sub,
+      adminUsername: req.admin.username,
+      action: "gm_broadcast",
+      targetType: "system",
+      targetValue: "all",
+      details: {
+        title: normalizedTitle,
+        content: normalizedContent,
+        sender: normalizedSender,
+        globalBroadcast,
+        legacyBroadcast
+      },
+      ip: getClientIp(req, this.config)
+    });
+
+    if (!globalBroadcast.ok) {
+      throw globalBroadcastPublishError(globalBroadcast, legacyBroadcast);
+    }
+
+    return {
+      ok: true,
+      message: "Broadcast sent",
+      globalBroadcast,
+      legacyBroadcast
+    };
   }
 
   @Post("send-item")

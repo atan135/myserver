@@ -97,6 +97,86 @@ test("GM kick publishes global NATS kick and ignores legacy PLAYER_OFFLINE", asy
   assert.equal(adminStore.auditLogs[0].details.legacyKick.error, "PLAYER_OFFLINE");
 });
 
+test("GM broadcast publishes global NATS broadcast and skips legacy admin TCP", async () => {
+  const adminStore = createAdminStore();
+  const nats = createNats();
+  const gameAdminClient = {
+    calls: [],
+    async broadcast(...args) {
+      this.calls.push(args);
+    }
+  };
+  const controller = new GmController(
+    { trustProxy: false, trustedProxies: [] },
+    adminStore,
+    nats,
+    gameAdminClient
+  );
+
+  const result = await controller.broadcast(
+    { title: " Notice ", content: " Hello all ", sender: " GM " },
+    createReq()
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.globalBroadcast.ok, true);
+  assert.equal(result.globalBroadcast.subject, "myserver.gm.broadcast");
+  assert.match(result.globalBroadcast.payload.broadcast_id, /^[0-9a-f-]{36}$/);
+  assert.equal(result.globalBroadcast.payload.title, "Notice");
+  assert.equal(result.globalBroadcast.payload.content, "Hello all");
+  assert.equal(result.globalBroadcast.payload.sender, "GM");
+  assert.match(result.globalBroadcast.payload.created_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(nats.publishes, [
+    {
+      subject: "myserver.gm.broadcast",
+      payload: result.globalBroadcast.payload
+    }
+  ]);
+  assert.deepEqual(gameAdminClient.calls, []);
+  assert.equal(result.legacyBroadcast.skipped, true);
+  assert.equal(adminStore.auditLogs.length, 1);
+  assert.equal(adminStore.auditLogs[0].details.title, "Notice");
+  assert.equal(adminStore.auditLogs[0].details.globalBroadcast.ok, true);
+  assert.equal(adminStore.auditLogs[0].details.legacyBroadcast.skipped, true);
+});
+
+test("GM broadcast falls back to legacy and returns structured error when NATS fails", async () => {
+  const adminStore = createAdminStore();
+  const nats = createNats({ fail: true });
+  const gameAdminClient = {
+    calls: [],
+    async broadcast(...args) {
+      this.calls.push(args);
+    }
+  };
+  const controller = new GmController(
+    { trustProxy: false, trustedProxies: [] },
+    adminStore,
+    nats,
+    gameAdminClient
+  );
+
+  await assert.rejects(
+    () => controller.broadcast({ title: " Notice ", content: " Hello " }, createReq()),
+    (error) => {
+      const response = error.getResponse?.();
+      assert.equal(error.getStatus?.(), 502);
+      assert.equal(response.error, "GM_BROADCAST_PUBLISH_FAILED");
+      assert.equal(response.ok, false);
+      assert.equal(response.partialDelivered, true);
+      assert.equal(response.globalBroadcast.error, "NATS_UNAVAILABLE");
+      assert.equal(response.legacyBroadcast.ok, true);
+      assert.equal(response.legacyBroadcast.fallback, true);
+      return true;
+    }
+  );
+
+  assert.deepEqual(gameAdminClient.calls, [["Notice", "Hello", "System"]]);
+  assert.equal(adminStore.auditLogs.length, 1);
+  assert.equal(adminStore.auditLogs[0].details.globalBroadcast.ok, false);
+  assert.equal(adminStore.auditLogs[0].details.legacyBroadcast.ok, true);
+});
+
 test("GM kick returns structured error when global NATS kick fails", async () => {
   const adminStore = createAdminStore();
   const nats = createNats({ fail: true });
