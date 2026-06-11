@@ -1,5 +1,7 @@
 use std::env;
 
+use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
+
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -62,6 +64,7 @@ pub struct Config {
     pub ticket_secret: String,
     pub proxy_max_connections: u64,
     pub proxy_max_preauth_failures: u32,
+    pub connection_limits: ConnectionLimitConfig,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -125,6 +128,11 @@ impl Config {
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let proxy_max_connections = parse_u64("PROXY_MAX_CONNECTIONS", 0);
         let proxy_max_preauth_failures = parse_u32("PROXY_MAX_PREAUTH_FAILURES", 3);
+        let connection_limits = ConnectionLimitConfig {
+            ip_denylist: IpDenyList::parse_csv(&env::var("PROXY_IP_DENYLIST").unwrap_or_default())?,
+            max_connections_per_ip: parse_u64("PROXY_MAX_CONNECTIONS_PER_IP", 0),
+            max_connections_per_player: parse_u64("PROXY_MAX_CONNECTIONS_PER_PLAYER", 0),
+        };
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -168,6 +176,7 @@ impl Config {
             ticket_secret,
             proxy_max_connections,
             proxy_max_preauth_failures,
+            connection_limits,
             registry_enabled,
             registry_url,
             registry_discover_interval_secs,
@@ -285,6 +294,9 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "PROXY_MAX_CONNECTIONS",
             "PROXY_MAX_PREAUTH_FAILURES",
+            "PROXY_IP_DENYLIST",
+            "PROXY_MAX_CONNECTIONS_PER_IP",
+            "PROXY_MAX_CONNECTIONS_PER_PLAYER",
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
@@ -294,6 +306,9 @@ mod tests {
             clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "42");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "5");
+            env::set_var("PROXY_IP_DENYLIST", "203.0.113.10,198.51.100.0/24");
+            env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "20");
+            env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "2");
             env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
@@ -301,6 +316,20 @@ mod tests {
 
         assert_eq!(config.proxy_max_connections, 42);
         assert_eq!(config.proxy_max_preauth_failures, 5);
+        assert!(
+            config
+                .connection_limits
+                .ip_denylist
+                .contains("203.0.113.10".parse().unwrap())
+        );
+        assert!(
+            config
+                .connection_limits
+                .ip_denylist
+                .contains("198.51.100.8".parse().unwrap())
+        );
+        assert_eq!(config.connection_limits.max_connections_per_ip, 20);
+        assert_eq!(config.connection_limits.max_connections_per_player, 2);
     }
 
     #[test]
@@ -309,6 +338,9 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "PROXY_MAX_CONNECTIONS",
             "PROXY_MAX_PREAUTH_FAILURES",
+            "PROXY_IP_DENYLIST",
+            "PROXY_MAX_CONNECTIONS_PER_IP",
+            "PROXY_MAX_CONNECTIONS_PER_PLAYER",
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
@@ -318,6 +350,9 @@ mod tests {
             clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "not-a-number");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "not-a-number");
+            env::remove_var("PROXY_IP_DENYLIST");
+            env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "not-a-number");
+            env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "not-a-number");
             env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
@@ -325,6 +360,32 @@ mod tests {
 
         assert_eq!(config.proxy_max_connections, 0);
         assert_eq!(config.proxy_max_preauth_failures, 3);
+        assert_eq!(config.connection_limits.max_connections_per_ip, 0);
+        assert_eq!(config.connection_limits.max_connections_per_player, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_proxy_ip_denylist() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "PROXY_IP_DENYLIST",
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("PROXY_IP_DENYLIST", "192.0.2.0/33");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("invalid proxy ip denylist should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_IP_DENYLIST"));
     }
 
     #[test]

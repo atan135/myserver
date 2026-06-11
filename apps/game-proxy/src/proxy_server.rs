@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::auth::ProxyAuthService;
 use crate::config::Config;
+use crate::connection_limits::{ConnectionLimiter, PlayerConnectionTracker};
 use crate::metrics::METRICS;
 use crate::pb::{
     AuthReq, AuthRes, ErrorRes, PingRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes, RoomJoinReq,
@@ -190,6 +191,7 @@ pub async fn run(
     }
 
     let mut next_session_id = 1u64;
+    let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());
 
     loop {
         tokio::select! {
@@ -203,6 +205,7 @@ pub async fn run(
                         let session_id = next_session_id;
                         let max_connections = config.proxy_max_connections;
                         let max_preauth_failures = config.proxy_max_preauth_failures;
+                        let connection_limiter = connection_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -217,6 +220,7 @@ pub async fn run(
                                 auth_service,
                                 connection_count,
                                 maintenance,
+                                connection_limiter,
                             )
                             .await
                             {
@@ -237,6 +241,7 @@ pub async fn run(
                         let session_id = next_session_id;
                         let max_connections = config.proxy_max_connections;
                         let max_preauth_failures = config.proxy_max_preauth_failures;
+                        let connection_limiter = connection_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
                         tokio::spawn(async move {
@@ -251,6 +256,7 @@ pub async fn run(
                                 auth_service,
                                 connection_count,
                                 maintenance,
+                                connection_limiter,
                             )
                             .await
                             {
@@ -317,10 +323,26 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     auth_service: Arc<ProxyAuthService>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
+    connection_limiter: ConnectionLimiter,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if *maintenance.read().await {
         return Err(Box::new(std::io::Error::other("proxy is in maintenance")));
     }
+
+    let client_ip = client_addr.ip();
+    let _ip_connection_guard = match connection_limiter.try_acquire_ip(client_ip) {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!(
+                session_id,
+                client_addr = %client_addr,
+                client_ip = %client_ip,
+                error_code = error.code(),
+                "proxy connection rejected by local connection governance"
+            );
+            return Err(Box::new(std::io::Error::other(error.code())));
+        }
+    };
 
     let mut connection_guard =
         match ActiveConnectionGuard::try_acquire(connection_count, max_connections) {
@@ -340,6 +362,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         };
     let mut session = ProxySession::new(session_id);
     let mut deferred_auth = DeferredAuthState::default();
+    let mut player_connection_tracker = PlayerConnectionTracker::default();
     let mut preauth_failures = 0u32;
 
     loop {
@@ -393,6 +416,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     &auth_service,
                     &mut deferred_auth,
                     &mut session,
+                    &connection_limiter,
+                    &mut player_connection_tracker,
                 )
                 .await?;
                 if auth_ok {
@@ -558,6 +583,8 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
     auth_service: &ProxyAuthService,
     deferred_auth: &mut DeferredAuthState,
     session: &mut ProxySession,
+    connection_limiter: &ConnectionLimiter,
+    player_connection_tracker: &mut PlayerConnectionTracker,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<AuthReq>("INVALID_AUTH_BODY") {
         Ok(request) => request,
@@ -565,6 +592,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             deferred_auth.auth_req_packet = None;
             deferred_auth.player_id = None;
             session.player_id = None;
+            player_connection_tracker.clear();
             write_proxy_error(
                 client_stream,
                 packet.header.seq,
@@ -578,6 +606,34 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
 
     match auth_service.authenticate_ticket(&request.ticket).await {
         Ok(player_id) => {
+            if let Err(error) = player_connection_tracker
+                .replace_authenticated_player(connection_limiter, &player_id)
+            {
+                deferred_auth.auth_req_packet = None;
+                deferred_auth.player_id = None;
+                session.player_id = None;
+                player_connection_tracker.clear();
+                let error_code = error.code();
+                warn!(
+                    session_id = session.id,
+                    player_id = %player_id,
+                    error_code,
+                    "proxy auth rejected by player connection limit"
+                );
+                write_message(
+                    client_stream,
+                    MessageType::AuthRes,
+                    packet.header.seq,
+                    &AuthRes {
+                        ok: false,
+                        player_id: String::new(),
+                        error_code: error_code.to_string(),
+                    },
+                )
+                .await?;
+                return Ok(false);
+            }
+
             deferred_auth.auth_req_packet = Some(packet.to_bytes());
             deferred_auth.player_id = Some(player_id.clone());
             session.player_id = Some(player_id.clone());
@@ -598,6 +654,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             deferred_auth.auth_req_packet = None;
             deferred_auth.player_id = None;
             session.player_id = None;
+            player_connection_tracker.clear();
             write_message(
                 client_stream,
                 MessageType::AuthRes,

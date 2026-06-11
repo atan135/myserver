@@ -9,7 +9,7 @@
 当前安全与限流相关服务的状态如下：
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 限流/黑名单配置项目前并不存在
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制和单连接消息频率限制；频率限制默认关闭，按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 启用
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
 
@@ -84,6 +84,9 @@ INTERNAL_API_TOKEN=
 - 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`，其它消息返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`，不会触发上游选择或绑定
 - 单连接预鉴权失败阈值：非法预鉴权消息或鉴权失败累计达到 `PROXY_MAX_PREAUTH_FAILURES` 后关闭连接
 - 总前端连接上限：`PROXY_MAX_CONNECTIONS` 为正整数时，超过上限的新连接会被拒绝
+- 静态 IP denylist：`PROXY_IP_DENYLIST` 命中的来源会在 session 建立初期拒绝，支持精确 IP 和 CIDR
+- 单 IP 本地连接上限：`PROXY_MAX_CONNECTIONS_PER_IP` 为正整数时限制同一来源 IP 在本 proxy 实例上的并发连接，连接关闭时释放
+- 单玩家本地连接上限：`PROXY_MAX_CONNECTIONS_PER_PLAYER` 为正整数时，`AuthReq` 本地鉴权成功后登记已鉴权玩家连接；超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放
 - 动态上游发现或静态上游路由
 - 活跃前端连接数统计与监控暴露，包含尚未完成 `AuthReq` 的预鉴权连接
 - 维护模式开关
@@ -94,7 +97,7 @@ INTERNAL_API_TOKEN=
 
 ### 3.2 当前实际配置项
 
-`game-proxy` 当前没有独立的“IP 限流 / 黑名单 / 单账号连接数限制”配置项。代码实际读取的是以下配置：
+`game-proxy` 当前代码实际读取的是以下配置：
 
 ```env
 PROXY_HOST=127.0.0.1
@@ -111,6 +114,9 @@ REDIS_KEY_PREFIX=
 TICKET_SECRET=replace-with-a-long-random-string
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
+PROXY_IP_DENYLIST=
+PROXY_MAX_CONNECTIONS_PER_IP=0
+PROXY_MAX_CONNECTIONS_PER_PLAYER=0
 
 REGISTRY_ENABLED=false
 REGISTRY_URL=redis://127.0.0.1:6379
@@ -129,13 +135,16 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
   - `RATELIMIT_IP_BURST`
   - `MAX_CONNECTIONS_PER_IP`
   - `MAX_CONNECTIONS_PER_ACCOUNT`
-- 当前 `game-proxy` 只统计总连接数，没有按 IP 或账号做连接上限控制
-- 当前代码里也没有 Redis 黑名单或封禁列表逻辑
+- 当前单 IP / 单玩家连接上限使用 `PROXY_MAX_CONNECTIONS_PER_IP` 和 `PROXY_MAX_CONNECTIONS_PER_PLAYER`，旧的无 `PROXY_` 前缀配置名不会被读取
+- 当前 `game-proxy` 的 denylist 和连接数限制是单 proxy 进程内本地状态，不是 Redis 分布式全局限额；多 proxy 部署仍需要 Redis/网关层策略
+- 当前代码里没有 Redis 动态黑名单或封禁列表逻辑
 - 当前 `game-proxy` admin HTTP 口已经有 token 鉴权和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
 - 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有细粒度 RBAC
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接
+- `PROXY_IP_DENYLIST` 为空表示不启用；示例值如 `203.0.113.10,198.51.100.0/24`
+- `PROXY_MAX_CONNECTIONS_PER_IP=0` 和 `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 默认不限制，避免破坏本地开发联调
 - `game-proxy` 校验成功后不会删除 Redis ticket，避免破坏后续 `game-server` 与 `chat-server` 的接入校验
 
 ---
@@ -249,7 +258,8 @@ LOG_DIR=logs
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
   - 使用 `PROXY_ADMIN_TOKEN` 保护 admin HTTP 口，生产环境拒绝空值或开发默认值
   - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
-  - 当前没有单 IP、单玩家、Redis 黑名单或消息频率限制环境变量
+  - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
+  - 当前没有 Redis 动态黑名单或消息频率限制环境变量
 - `game-server`：
   - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`
   - 当前没有单 IP、单玩家、Redis 黑名单、时间戳窗口或反重放环境变量

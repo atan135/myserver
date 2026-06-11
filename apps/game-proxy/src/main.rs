@@ -1,6 +1,7 @@
 mod admin_server;
 mod auth;
 mod config;
+mod connection_limits;
 mod local_socket;
 mod metrics;
 mod proto;

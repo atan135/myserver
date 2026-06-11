@@ -30,6 +30,9 @@
 - proxy 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`；其它消息返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会触发上游选择。
 - proxy 单连接预鉴权失败阈值：默认 `PROXY_MAX_PREAUTH_FAILURES=3`，非法预鉴权消息或鉴权失败累计达到阈值后关闭连接。
 - proxy 总前端连接上限：`PROXY_MAX_CONNECTIONS` 默认 `0` 表示不限制，配置为正整数时拒绝超限新连接。
+- proxy 静态 IP denylist：`PROXY_IP_DENYLIST` 支持逗号分隔的精确 IP 和 CIDR，命中后在 session 建立初期拒绝。
+- proxy 单 IP 本地连接上限：`PROXY_MAX_CONNECTIONS_PER_IP` 默认 `0` 表示不限制，配置为正整数时按来源 IP 限制本实例并发连接，连接关闭时释放。
+- proxy 单玩家本地连接上限：`PROXY_MAX_CONNECTIONS_PER_PLAYER` 默认 `0` 表示不限制，配置为正整数时在 `AuthReq` 本地鉴权成功后登记已鉴权玩家连接；超限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放。
 - `game-server` 仍执行最终鉴权。
 - admin HTTP 口，默认 `PROXY_ADMIN_PORT=7101`。
 - 维护模式开关：`/maintenance/on`、`/maintenance/off`。
@@ -379,7 +382,12 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `PROXY_ROUTE_STORE_KEY_PREFIX` | route store Redis key 前缀；未设置时复用 `REDIS_KEY_PREFIX` | 空 |
 | `PROXY_MAX_CONNECTIONS` | 总前端连接上限，`0` 表示不限制 | `0` |
 | `PROXY_MAX_PREAUTH_FAILURES` | 同一连接鉴权成功前允许的非法消息或鉴权失败次数，`0` 表示不按次数断开 | `3` |
+| `PROXY_IP_DENYLIST` | 静态来源 IP denylist，逗号分隔，支持精确 IP 和 CIDR；为空表示不启用 | 空 |
+| `PROXY_MAX_CONNECTIONS_PER_IP` | 单来源 IP 本地并发连接上限，`0` 表示不限制 | `0` |
+| `PROXY_MAX_CONNECTIONS_PER_PLAYER` | 单玩家本地已鉴权并发连接上限，`0` 表示不限制 | `0` |
 | `LOG_LEVEL` / `LOG_ENABLE_CONSOLE` / `LOG_ENABLE_FILE` / `LOG_DIR` | 日志配置 | 见 `.env.example` |
+
+当前连接治理只作用于单个 `game-proxy` 进程内，不提供跨 proxy 的全局 IP / 玩家连接限额；多 proxy 生产部署仍需要网关层策略或 Redis 分布式计数 / 动态封禁能力。
 
 ## 11. 后续重点
 
@@ -387,7 +395,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 1. proxy admin 权限细化、持久审计和操作人身份。
 2. route store 多 proxy 一致性：在已有 Redis 单 key CAS 基础上补 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
-3. 单 IP / 单玩家连接上限、消息频率限制和 Redis 黑名单。
+3. 跨 proxy 全局单 IP / 单玩家连接限额、消息频率限制和 Redis 动态黑名单。
 4. 自动 rollout 结束检测。
 5. old server `ServerRedirectPush` 下发与客户端重连链路。
 6. room transfer 编排入口的多进程联调和操作审计固化。
