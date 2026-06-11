@@ -18,12 +18,15 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
+const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+
 struct Config {
     mysql_url: String,
     mysql_pool_size: u32,
     bind_addr: String,
     heartbeat_timeout_secs: u64,
     max_body_len: usize,
+    outbound_queue_capacity: usize,
     ticket_secret: String,
     redis_url: String,
     redis_key_prefix: String,
@@ -60,6 +63,9 @@ impl Config {
                 .unwrap_or_else(|_| "4096".to_string())
                 .parse()
                 .unwrap_or(4096),
+            outbound_queue_capacity: parse_outbound_queue_capacity(
+                std::env::var("CHAT_OUTBOUND_QUEUE_CAPACITY").ok(),
+            ),
             ticket_secret: std::env::var("TICKET_SECRET")
                 .unwrap_or_else(|_| "default_secret_change_in_production".to_string()),
             redis_url: std::env::var("REDIS_URL")
@@ -99,6 +105,13 @@ impl Config {
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
         }
     }
+}
+
+fn parse_outbound_queue_capacity(value: Option<String>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OUTBOUND_QUEUE_CAPACITY)
 }
 
 fn init_logging(config: &Config) {
@@ -224,6 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redis_key_prefix: config.redis_key_prefix.clone(),
         service_instance_id: config.service_instance_id.clone(),
         online_route_ttl_secs: config.online_route_ttl_secs,
+        outbound_queue_capacity: config.outbound_queue_capacity,
     };
 
     // Create chat sessions map for mail notification pusher
@@ -265,4 +279,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn extract_port(bind_addr: &str) -> Result<u16, Box<dyn std::error::Error>> {
     let addr: SocketAddr = bind_addr.parse()?;
     Ok(addr.port())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_queue_capacity_uses_default_for_missing_zero_or_invalid_value() {
+        assert_eq!(
+            parse_outbound_queue_capacity(None),
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            parse_outbound_queue_capacity(Some("0".to_string())),
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            parse_outbound_queue_capacity(Some("invalid".to_string())),
+            DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn outbound_queue_capacity_accepts_positive_value() {
+        assert_eq!(parse_outbound_queue_capacity(Some("64".to_string())), 64);
+    }
 }

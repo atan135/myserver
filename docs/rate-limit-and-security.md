@@ -11,7 +11,7 @@
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
-- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
+- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制和有界出站写队列；暂未做消息频率限制
 
 ---
 
@@ -223,6 +223,7 @@ PLAYER_MSG_RATE_MAX=0
 - ticket version 校验：读取 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>`，用于感知 logout / 改密等玩家级失效
 - 心跳超时：首包读取和会话循环使用 `HEARTBEAT_TIMEOUT_SECS`
 - 最大包体限制：包体超过 `MAX_BODY_LEN` 时拒绝处理
+- 有界出站写队列：每连接出站消息队列使用 `CHAT_OUTBOUND_QUEUE_CAPACITY` 限制容量，队列满时当前连接响应返回错误，其它玩家推送和邮件通知记录日志后跳过
 - 在线推送与邮件通知订阅：依赖 Core NATS 与内存会话表
 
 ### 5.2 当前实际配置项
@@ -233,6 +234,7 @@ PLAYER_MSG_RATE_MAX=0
 CHAT_BIND_ADDR=0.0.0.0:9001
 HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
+CHAT_OUTBOUND_QUEUE_CAPACITY=1024
 TICKET_SECRET=replace-with-a-long-random-string
 REDIS_URL=redis://127.0.0.1:6379
 REDIS_KEY_PREFIX=
@@ -257,6 +259,7 @@ LOG_DIR=logs
 ### 5.3 当前实现备注
 
 - `chat-server` 已读取 `REDIS_KEY_PREFIX`，并同时用于 `ticket:<sha256(ticket)>` 和 `player-ticket-version:<playerId>` 两类 key
+- `CHAT_OUTBOUND_QUEUE_CAPACITY` 默认 `1024`；未配置、解析失败或配置为 `0` 时使用默认值
 - 单张 ticket revoke 删除 Redis `ticket:<sha256(ticket)>` 后，新的 `ChatAuthReq` 会返回 `TICKET_REVOKED`
 - 当前没有消息频率限制、单 IP / 单账号连接数限制、Redis 黑名单或封禁列表逻辑
 - 当前没有公网 TLS 策略，生产部署时应放在 TLS 终止层或补充直接 TLS 支持
@@ -285,7 +288,7 @@ LOG_DIR=logs
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
   - 当前没有单 IP、Redis 黑名单、时间戳窗口或反重放环境变量；单玩家消息频率限制是单 `game-server` 实例内本地状态，不是跨实例全局限额
 - `chat-server`：
-  - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
+  - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`CHAT_OUTBOUND_QUEUE_CAPACITY`
   - 当前没有消息频率限制配置
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`

@@ -157,7 +157,7 @@ async fn push_mail_to_player(
     };
 
     if let Some(sender) = sessions.read().await.get(player_id) {
-        if let Err(e) = sender.send(msg) {
+        if let Err(e) = sender.try_send(msg) {
             error!("failed to push mail notification to {}: {}", player_id, e);
         } else {
             info!("pushed mail notification to player {}", player_id);

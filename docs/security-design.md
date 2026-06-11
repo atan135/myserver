@@ -83,7 +83,7 @@
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
 | `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
-| `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
+| `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、有界出站写队列与慢连接背压、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
@@ -560,7 +560,7 @@ ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
 2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网；`game-proxy` admin HTTP 口已有 token 鉴权和生产默认 token 拒绝，仍需部署侧网络隔离
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
-5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地；单 IP 频率限制和跨实例全局玩家频率限制仍需继续补齐
+5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地，`chat-server` 已有有界出站写队列用于慢连接背压；单 IP 频率限制、`chat-server` 消息频率限制和跨实例全局玩家频率限制仍需继续补齐
 6. `announce-service` 公告写接口 token 鉴权已落地，仍需保持默认内网化；`mail-service` 和公告只读查询的玩家/网关鉴权边界后续继续收敛
 7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计，仍缺持久审计和细粒度 RBAC
 

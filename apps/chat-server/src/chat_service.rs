@@ -13,7 +13,8 @@ use crate::proto::chat::{
     GroupJoinReq, GroupJoinRes, GroupLeaveReq, GroupListRes,
 };
 
-pub type ChatSessionMap = Arc<RwLock<HashMap<String, mpsc::UnboundedSender<OutboundMessage>>>>;
+pub type ChatOutboundSender = mpsc::Sender<OutboundMessage>;
+pub type ChatSessionMap = Arc<RwLock<HashMap<String, ChatOutboundSender>>>;
 
 pub fn new_chat_session_map() -> ChatSessionMap {
     Arc::new(RwLock::new(HashMap::new()))
@@ -62,7 +63,7 @@ pub async fn handle_chat_private(
     sessions: &ChatSessionMap,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<ChatPrivateReq>() {
         Ok(value) => value,
@@ -115,7 +116,13 @@ pub async fn handle_chat_private(
     // 如果目标玩家在线，推送消息
     if let Some(sender) = sessions.read().await.get(&request.target_id) {
         let push = build_chat_push(&msg, player_id);
-        let _ = sender.send(push);
+        if let Err(e) = sender.try_send(push) {
+            tracing::warn!(
+                target_id = %request.target_id,
+                error = %e,
+                "failed to queue private chat push"
+            );
+        }
     }
 
     Ok(())
@@ -130,7 +137,7 @@ pub async fn handle_chat_group(
     sessions: &ChatSessionMap,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<ChatGroupReq>() {
         Ok(value) => value,
@@ -187,7 +194,14 @@ pub async fn handle_chat_group(
         if member_id != player_id {
             if let Some(sender) = sessions.read().await.get(&member_id) {
                 let push = build_chat_push(&msg, player_id);
-                let _ = sender.send(push);
+                if let Err(e) = sender.try_send(push) {
+                    tracing::warn!(
+                        target_id = %member_id,
+                        group_id = %request.group_id,
+                        error = %e,
+                        "failed to queue group chat push"
+                    );
+                }
             }
         }
     }
@@ -203,7 +217,7 @@ pub async fn handle_group_create(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<GroupCreateReq>() {
         Ok(value) => value,
@@ -257,7 +271,7 @@ pub async fn handle_group_join(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<GroupJoinReq>() {
         Ok(value) => value,
@@ -318,7 +332,7 @@ pub async fn handle_group_leave(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<GroupLeaveReq>() {
         Ok(value) => value,
@@ -369,7 +383,7 @@ pub async fn handle_group_dismiss(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<GroupDismissReq>() {
         Ok(value) => value,
@@ -420,7 +434,7 @@ pub async fn handle_group_list(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let groups = chat_store.get_player_groups(player_id).await?;
 
@@ -448,7 +462,7 @@ pub async fn handle_chat_history(
     chat_store: &crate::chat_store::ChatStore,
     player_id: &str,
     packet: &Packet,
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match packet.decode_body::<ChatHistoryReq>() {
         Ok(value) => value,
@@ -521,7 +535,7 @@ pub async fn handle_chat_history(
 pub async fn register_session(
     sessions: &ChatSessionMap,
     player_id: String,
-    sender: mpsc::UnboundedSender<OutboundMessage>,
+    sender: ChatOutboundSender,
 ) {
     let online_players = {
         let mut guard = sessions.write().await;
@@ -545,7 +559,7 @@ pub async fn unregister_session(sessions: &ChatSessionMap, player_id: &str) {
 // ============================================================
 
 fn queue_error(
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
     seq: u32,
     error_code: &str,
     message: &str,
@@ -558,12 +572,29 @@ fn queue_error(
 }
 
 fn queue_message<M: prost::Message>(
-    tx: &mpsc::UnboundedSender<OutboundMessage>,
+    tx: &ChatOutboundSender,
     message_type: u16,
     seq: u32,
     message: &M,
 ) -> Result<(), std::io::Error> {
     let body = encode_body(message);
-    tx.send(OutboundMessage { message_type, seq, body })
-        .map_err(|_| std::io::Error::other("failed to queue outbound"))
+    tx.try_send(OutboundMessage { message_type, seq, body })
+        .map_err(|error| std::io::Error::other(format!("failed to queue outbound: {}", error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_message_returns_error_when_bounded_channel_is_full() {
+        let (tx, _rx) = mpsc::channel(1);
+        let message = ErrorRes {
+            error_code: "TEST".to_string(),
+            message: "test".to_string(),
+        };
+
+        assert!(queue_message(&tx, MessageType::ErrorRes as u16, 1, &message).is_ok());
+        assert!(queue_message(&tx, MessageType::ErrorRes as u16, 2, &message).is_err());
+    }
 }

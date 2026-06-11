@@ -80,6 +80,7 @@ pub struct Config {
     pub redis_key_prefix: String,
     pub service_instance_id: String,
     pub online_route_ttl_secs: u64,
+    pub outbound_queue_capacity: usize,
 }
 
 pub async fn run(
@@ -188,7 +189,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(socket);
-    let (tx, mut rx) = mpsc::unbounded_channel::<OutboundMessage>();
+    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(config.outbound_queue_capacity);
 
     // === 认证阶段 ===
     let auth_started_at = Instant::now();
@@ -380,6 +381,7 @@ where
         );
     }
 
+    drop(tx);
     let _ = writer_task.await;
 
     Ok(())
