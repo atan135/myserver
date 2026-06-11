@@ -9,7 +9,7 @@
 当前安全与限流相关服务的状态如下：
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
 
@@ -120,6 +120,8 @@ TICKET_SECRET=replace-with-a-long-random-string
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
 PROXY_MAINTENANCE_CACHE_TTL_MS=2000
+PROXY_MSG_RATE_WINDOW_MS=1000
+PROXY_MSG_RATE_MAX=0
 PROXY_IP_DENYLIST=
 PROXY_MAX_CONNECTIONS_PER_IP=0
 PROXY_MAX_CONNECTIONS_PER_PLAYER=0
@@ -149,6 +151,8 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接
+- `PROXY_MSG_RATE_WINDOW_MS=1000` 表示 proxy 单连接入站消息频率统计窗口；`PROXY_MSG_RATE_MAX=0` 默认关闭，配置为正整数时同一前端连接在窗口内超过阈值会收到 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接且不累计 `PROXY_MAX_PREAUTH_FAILURES`
+- proxy 单连接入站限流发生在读到完整 packet 后、进入 `AuthReq` 本地处理 / 预鉴权白名单 / 上游选择或转发前；已绑定上游后的客户端方向也按 packet 检查，超限包不会转发到 `game-server`
 - `PROXY_IP_DENYLIST` 为空表示不启用；示例值如 `203.0.113.10,198.51.100.0/24`
 - `PROXY_MAX_CONNECTIONS_PER_IP=0` 和 `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 默认不限制，避免破坏本地开发联调
 - `PROXY_MAINTENANCE_CACHE_TTL_MS` 控制 proxy 读取 Redis 共享维护状态的短缓存，默认 2 秒，避免每个包都访问 Redis；维护状态只在新 `AuthReq` 阶段检查，不主动断开已认证连接
@@ -289,10 +293,10 @@ LOG_DIR=logs
 - `game-proxy`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
   - 使用 `PROXY_ADMIN_TOKEN` 保护 admin HTTP 口，生产环境拒绝空值或开发默认值
-  - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
+  - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`、`PROXY_MSG_RATE_WINDOW_MS`、`PROXY_MSG_RATE_MAX`
   - 使用 `PROXY_MAINTENANCE_CACHE_TTL_MS` 控制 Redis 共享维护状态读取缓存；维护状态 key 为 `${REDIS_KEY_PREFIX}maintenance:global`
   - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
-  - 当前没有 Redis 动态黑名单或消息频率限制环境变量
+  - 当前没有 Redis 动态黑名单；消息频率限制是单连接本地状态，不是跨 proxy 全局限额
 - `game-server`：
   - 使用 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`

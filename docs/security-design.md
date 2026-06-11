@@ -86,7 +86,7 @@
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有跨实例全局连接数限制、账号级消息频率限制和公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
-| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
+| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做 Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；GM 广播仍是本实例范围；限时自动解封仍未落地 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和限时自动解封仍待补齐 |
 
@@ -469,6 +469,8 @@ SECURITY_ALLOWLIST_REDIS_PREFIX=security:allowlist:
 PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
+PROXY_MSG_RATE_WINDOW_MS=1000
+PROXY_MSG_RATE_MAX=0
 PROXY_IP_DENYLIST=
 PROXY_MAX_CONNECTIONS_PER_IP=0
 PROXY_MAX_CONNECTIONS_PER_PLAYER=0
@@ -479,6 +481,7 @@ PROXY_MAX_CONNECTIONS_PER_PLAYER=0
 - `PROXY_ADMIN_TOKEN` 用于保护 `game-proxy` admin HTTP 口，当前支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`；`NODE_ENV=production` 或 `APP_ENV=production` 时为空或仍为明显默认值会导致配置加载失败。
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时，超过上限的新连接会在 session 开始时拒绝。
 - `PROXY_MAX_PREAUTH_FAILURES=3` 表示同一连接在鉴权成功前，非法消息或鉴权失败累计达到阈值后关闭连接；配置为 `0` 表示不按失败次数断开。
+- `PROXY_MSG_RATE_MAX=0` 表示关闭单连接入站消息频率限制；配置为正整数时，`game-proxy` 在读到完整 packet 后、进入本地鉴权 / 预鉴权白名单 / 上游转发前按 `PROXY_MSG_RATE_WINDOW_MS` 窗口计数，超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接且不计入预鉴权失败次数。
 - `PROXY_IP_DENYLIST` 是逗号分隔的静态 IP 或 CIDR 列表，命中的来源会在 session 建立初期被拒绝；为空表示不启用。
 - `PROXY_MAX_CONNECTIONS_PER_IP=0` 表示不限制单来源 IP 并发连接数；配置为正整数时，超过上限的新连接会被拒绝，连接关闭时释放计数。
 - `PROXY_MAX_CONNECTIONS_PER_PLAYER=0` 表示不限制单玩家已鉴权并发连接数；配置为正整数时，`AuthReq` 本地鉴权成功后会登记玩家连接，超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放旧计数。

@@ -4,6 +4,7 @@ use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
 
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
 const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
+const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
 
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
@@ -65,6 +66,8 @@ pub struct Config {
     pub ticket_secret: String,
     pub proxy_max_connections: u64,
     pub proxy_max_preauth_failures: u32,
+    pub proxy_msg_rate_window_ms: u64,
+    pub proxy_msg_rate_max: u64,
     pub maintenance_cache_ttl_ms: u64,
     pub connection_limits: ConnectionLimitConfig,
     // Service Registry
@@ -130,6 +133,9 @@ impl Config {
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
         let proxy_max_connections = parse_u64("PROXY_MAX_CONNECTIONS", 0);
         let proxy_max_preauth_failures = parse_u32("PROXY_MAX_PREAUTH_FAILURES", 3);
+        let proxy_msg_rate_window_ms =
+            parse_u64("PROXY_MSG_RATE_WINDOW_MS", DEFAULT_PROXY_MSG_RATE_WINDOW_MS);
+        let proxy_msg_rate_max = parse_u64("PROXY_MSG_RATE_MAX", 0);
         let maintenance_cache_ttl_ms = parse_u64(
             "PROXY_MAINTENANCE_CACHE_TTL_MS",
             DEFAULT_MAINTENANCE_CACHE_TTL_MS,
@@ -182,6 +188,8 @@ impl Config {
             ticket_secret,
             proxy_max_connections,
             proxy_max_preauth_failures,
+            proxy_msg_rate_window_ms,
+            proxy_msg_rate_max,
             maintenance_cache_ttl_ms,
             connection_limits,
             registry_enabled,
@@ -301,6 +309,8 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "PROXY_MAX_CONNECTIONS",
             "PROXY_MAX_PREAUTH_FAILURES",
+            "PROXY_MSG_RATE_WINDOW_MS",
+            "PROXY_MSG_RATE_MAX",
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
@@ -313,6 +323,8 @@ mod tests {
             clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "42");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "5");
+            env::set_var("PROXY_MSG_RATE_WINDOW_MS", "250");
+            env::set_var("PROXY_MSG_RATE_MAX", "30");
             env::set_var("PROXY_IP_DENYLIST", "203.0.113.10,198.51.100.0/24");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "20");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "2");
@@ -323,6 +335,8 @@ mod tests {
 
         assert_eq!(config.proxy_max_connections, 42);
         assert_eq!(config.proxy_max_preauth_failures, 5);
+        assert_eq!(config.proxy_msg_rate_window_ms, 250);
+        assert_eq!(config.proxy_msg_rate_max, 30);
         assert!(
             config
                 .connection_limits
@@ -345,6 +359,8 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "PROXY_MAX_CONNECTIONS",
             "PROXY_MAX_PREAUTH_FAILURES",
+            "PROXY_MSG_RATE_WINDOW_MS",
+            "PROXY_MSG_RATE_MAX",
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
@@ -357,6 +373,8 @@ mod tests {
             clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "not-a-number");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "not-a-number");
+            env::set_var("PROXY_MSG_RATE_WINDOW_MS", "not-a-number");
+            env::set_var("PROXY_MSG_RATE_MAX", "not-a-number");
             env::remove_var("PROXY_IP_DENYLIST");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "not-a-number");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "not-a-number");
@@ -367,6 +385,8 @@ mod tests {
 
         assert_eq!(config.proxy_max_connections, 0);
         assert_eq!(config.proxy_max_preauth_failures, 3);
+        assert_eq!(config.proxy_msg_rate_window_ms, 1000);
+        assert_eq!(config.proxy_msg_rate_max, 0);
         assert_eq!(config.connection_limits.max_connections_per_ip, 0);
         assert_eq!(config.connection_limits.max_connections_per_player, 0);
     }

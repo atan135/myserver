@@ -2,11 +2,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use interprocess::local_socket::tokio::Stream as LocalSocketStream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::TcpStream as TokioTcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use crate::auth::ProxyAuthService;
@@ -30,6 +31,7 @@ use service_registry::RegistryClient;
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
 const PREAUTH_MESSAGE_NOT_ALLOWED: &str = "PREAUTH_MESSAGE_NOT_ALLOWED";
+const MSG_RATE_EXCEEDED: &str = "MSG_RATE_EXCEEDED";
 
 pub type SharedConnectionCount = Arc<AtomicU64>;
 pub type SharedMaintenanceFlag = Arc<RwLock<bool>>;
@@ -110,6 +112,62 @@ enum PreauthDecision {
 enum ProxyStream {
     Kcp(tokio_kcp::KcpStream),
     Tcp(TokioTcpStream),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MsgRateLimitConfig {
+    window: Duration,
+    max: u64,
+}
+
+impl MsgRateLimitConfig {
+    fn new(window_ms: u64, max: u64) -> Self {
+        Self {
+            window: Duration::from_millis(window_ms.max(1)),
+            max,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MsgRateLimiter {
+    config: MsgRateLimitConfig,
+    window_started_at: Instant,
+    count: u64,
+}
+
+impl MsgRateLimiter {
+    fn new(config: MsgRateLimitConfig, now: Instant) -> Self {
+        Self {
+            config,
+            window_started_at: now,
+            count: 0,
+        }
+    }
+
+    fn check(&mut self, now: Instant) -> MsgRateDecision {
+        if self.config.max == 0 {
+            return MsgRateDecision::Allowed;
+        }
+
+        if now.duration_since(self.window_started_at) >= self.config.window {
+            self.window_started_at = now;
+            self.count = 0;
+        }
+
+        self.count = self.count.saturating_add(1);
+        if self.count > self.config.max {
+            MsgRateDecision::Exceeded
+        } else {
+            MsgRateDecision::Allowed
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MsgRateDecision {
+    Allowed,
+    Exceeded,
 }
 
 impl AsyncRead for ProxyStream {
@@ -210,6 +268,10 @@ pub async fn run(
                         let session_id = next_session_id;
                         let max_connections = config.proxy_max_connections;
                         let max_preauth_failures = config.proxy_max_preauth_failures;
+                        let msg_rate_config = MsgRateLimitConfig::new(
+                            config.proxy_msg_rate_window_ms,
+                            config.proxy_msg_rate_max,
+                        );
                         let connection_limiter = connection_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
@@ -221,6 +283,7 @@ pub async fn run(
                                 stream,
                                 max_connections,
                                 max_preauth_failures,
+                                msg_rate_config,
                                 route_store,
                                 auth_service,
                                 global_maintenance,
@@ -248,6 +311,10 @@ pub async fn run(
                         let session_id = next_session_id;
                         let max_connections = config.proxy_max_connections;
                         let max_preauth_failures = config.proxy_max_preauth_failures;
+                        let msg_rate_config = MsgRateLimitConfig::new(
+                            config.proxy_msg_rate_window_ms,
+                            config.proxy_msg_rate_max,
+                        );
                         let connection_limiter = connection_limiter.clone();
                         next_session_id = next_session_id.saturating_add(1);
 
@@ -259,6 +326,7 @@ pub async fn run(
                                 stream,
                                 max_connections,
                                 max_preauth_failures,
+                                msg_rate_config,
                                 route_store,
                                 auth_service,
                                 global_maintenance,
@@ -327,6 +395,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     mut client_stream: S,
     max_connections: u64,
     max_preauth_failures: u32,
+    msg_rate_config: MsgRateLimitConfig,
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
     global_maintenance: Arc<GlobalMaintenanceChecker>,
@@ -369,6 +438,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     let mut deferred_auth = DeferredAuthState::default();
     let mut player_connection_tracker = PlayerConnectionTracker::default();
     let mut preauth_failures = 0u32;
+    let mut msg_rate_limiter = MsgRateLimiter::new(msg_rate_config, Instant::now());
 
     loop {
         let Some(packet) = read_packet(&mut client_stream, MAX_PROXY_BODY_LEN).await? else {
@@ -376,6 +446,21 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
             info!(session_id = session.id, client_addr = %client_addr, "proxy session closed before upstream bind");
             return Ok(());
         };
+
+        if msg_rate_limiter.check(Instant::now()) == MsgRateDecision::Exceeded {
+            write_msg_rate_exceeded(&mut client_stream, packet.header.seq).await?;
+            warn!(
+                session_id = session.id,
+                client_addr = %client_addr,
+                peer = %client_addr,
+                player_id = session.player_id.as_deref().or(deferred_auth.player_id.as_deref()).unwrap_or_default(),
+                msg_type = packet.header.msg_type,
+                window_ms = msg_rate_config.window.as_millis() as u64,
+                max = msg_rate_config.max,
+                "proxy inbound message rate exceeded before preauth decision"
+            );
+            continue;
+        }
 
         match preauth_decision(&session, &packet) {
             PreauthDecision::Reject(error_code) => {
@@ -541,7 +626,20 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     }
                 }
 
-                let result = copy_bidirectional(&mut client_stream, &mut upstream).await;
+                let result = if msg_rate_config.max == 0 {
+                    copy_bidirectional(&mut client_stream, &mut upstream).await
+                } else {
+                    proxy_bound_streams(
+                        client_stream,
+                        upstream,
+                        msg_rate_limiter,
+                        msg_rate_config,
+                        session.id,
+                        client_addr,
+                        session.player_id.clone().unwrap_or_default(),
+                    )
+                    .await
+                };
                 session.state = ProxySessionState::Closed;
                 connection_guard.release();
 
@@ -914,6 +1012,121 @@ where
         .await
 }
 
+async fn proxy_bound_streams<S>(
+    client_stream: S,
+    upstream: LocalSocketStream,
+    msg_rate_limiter: MsgRateLimiter,
+    msg_rate_config: MsgRateLimitConfig,
+    session_id: u64,
+    client_addr: std::net::SocketAddr,
+    player_id: String,
+) -> Result<(u64, u64), std::io::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut client_reader, client_writer) = tokio::io::split(client_stream);
+    let client_writer = Arc::new(Mutex::new(client_writer));
+    let (mut upstream_reader, mut upstream_writer) = tokio::io::split(upstream);
+
+    let bytes_from_client = Arc::new(AtomicU64::new(0));
+    let bytes_from_upstream = Arc::new(AtomicU64::new(0));
+
+    let client_writer_for_rate_limit = Arc::clone(&client_writer);
+    let client_bytes = Arc::clone(&bytes_from_client);
+    let mut msg_rate_limiter = msg_rate_limiter;
+    let player_id_for_rate_limit = player_id.clone();
+    let mut client_to_upstream = tokio::spawn(async move {
+        loop {
+            let Some(packet) = read_packet(&mut client_reader, MAX_PROXY_BODY_LEN).await? else {
+                upstream_writer.shutdown().await?;
+                return Ok::<(), std::io::Error>(());
+            };
+
+            if msg_rate_limiter.check(Instant::now()) == MsgRateDecision::Exceeded {
+                {
+                    let mut writer = client_writer_for_rate_limit.lock().await;
+                    write_msg_rate_exceeded(&mut *writer, packet.header.seq).await?;
+                }
+                warn!(
+                    session_id,
+                    client_addr = %client_addr,
+                    peer = %client_addr,
+                    player_id = %player_id_for_rate_limit,
+                    msg_type = packet.header.msg_type,
+                    window_ms = msg_rate_config.window.as_millis() as u64,
+                    max = msg_rate_config.max,
+                    "proxy inbound message rate exceeded during upstream forwarding"
+                );
+                continue;
+            }
+
+            let bytes = packet.to_bytes();
+            upstream_writer.write_all(&bytes).await?;
+            client_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        }
+    });
+
+    let upstream_bytes = Arc::clone(&bytes_from_upstream);
+    let client_writer_for_upstream = Arc::clone(&client_writer);
+    let mut upstream_to_client = tokio::spawn(async move {
+        loop {
+            let Some(packet) = read_packet(&mut upstream_reader, MAX_PROXY_BODY_LEN).await? else {
+                return Ok::<(), std::io::Error>(());
+            };
+
+            let bytes = packet.to_bytes();
+            {
+                let mut writer = client_writer_for_upstream.lock().await;
+                writer.write_all(&bytes).await?;
+            }
+            upstream_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        }
+    });
+
+    let result = tokio::select! {
+        client_result = &mut client_to_upstream => {
+            match flatten_forward_task_result(client_result) {
+                Ok(()) => flatten_forward_task_result(upstream_to_client.await),
+                Err(error) => {
+                    upstream_to_client.abort();
+                    let _ = upstream_to_client.await;
+                    Err(error)
+                }
+            }
+        }
+        upstream_result = &mut upstream_to_client => {
+            client_to_upstream.abort();
+            let _ = client_to_upstream.await;
+            flatten_forward_task_result(upstream_result)
+        }
+    };
+
+    result?;
+    Ok((
+        bytes_from_client.load(Ordering::Relaxed),
+        bytes_from_upstream.load(Ordering::Relaxed),
+    ))
+}
+
+fn flatten_forward_task_result(
+    result: Result<Result<(), std::io::Error>, tokio::task::JoinError>,
+) -> Result<(), std::io::Error> {
+    match result {
+        Ok(inner) => inner,
+        Err(error) => Err(std::io::Error::other(format!(
+            "proxy forwarding task failed: {}",
+            error
+        ))),
+    }
+}
+
+async fn write_msg_rate_exceeded<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    seq: u32,
+) -> Result<(), std::io::Error> {
+    write_proxy_error(writer, seq, MSG_RATE_EXCEEDED, MSG_RATE_EXCEEDED).await
+}
+
 async fn write_proxy_error<W: AsyncWrite + Unpin>(
     writer: &mut W,
     seq: u32,
@@ -950,11 +1163,12 @@ fn current_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PREAUTH_MESSAGE_NOT_ALLOWED, PreauthDecision, preauth_decision,
-        restore_authenticated_after_local_routing_error,
+        MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter, PREAUTH_MESSAGE_NOT_ALLOWED,
+        PreauthDecision, preauth_decision, restore_authenticated_after_local_routing_error,
     };
     use crate::protocol::{MessageType, Packet, PacketHeader};
     use crate::session::{ProxySession, ProxySessionState};
+    use std::time::{Duration, Instant};
 
     fn packet(msg_type: u16) -> Packet {
         Packet::new(
@@ -1038,5 +1252,56 @@ mod tests {
         restore_authenticated_after_local_routing_error(&mut session);
 
         assert_eq!(session.state, ProxySessionState::Authenticated);
+    }
+
+    #[test]
+    fn msg_rate_limiter_is_disabled_when_max_is_zero() {
+        let now = Instant::now();
+        let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 0), now);
+
+        for _ in 0..10 {
+            assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        }
+    }
+
+    #[test]
+    fn msg_rate_limiter_rejects_after_window_quota() {
+        let now = Instant::now();
+        let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 2), now);
+
+        assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
+    }
+
+    #[test]
+    fn msg_rate_limiter_resets_after_window() {
+        let now = Instant::now();
+        let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 1), now);
+
+        assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
+        assert_eq!(
+            limiter.check(now + Duration::from_millis(1000)),
+            MsgRateDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn msg_rate_limit_can_reject_before_preauth_decision() {
+        let now = Instant::now();
+        let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 0), now);
+        let session = ProxySession::new(1);
+        let business_packet = packet(MessageType::RoomJoinReq as u16);
+
+        assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        assert_eq!(
+            preauth_decision(&session, &business_packet),
+            PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED)
+        );
+
+        let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 1), now);
+        assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
+        assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
     }
 }
