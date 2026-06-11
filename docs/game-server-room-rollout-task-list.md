@@ -454,11 +454,13 @@
 - [x] `RoomRouteRecord` 更新顺序与 epoch 校验测试。
 - [x] transfer 编排顺序与失败停止测试。
 - [x] route 切换失败停止测试。
-- [ ] 旧服 freeze/export 失败路径测试。
+- [x] 旧服 freeze/export 失败路径测试。
 - [x] 新服 import/checksum 校验测试。
 - [x] 新服 ownership confirm 成功与 mismatch 拒绝测试。
 
 当前实现说明：`apps/game-proxy/src/admin_server.rs` 已用 `rollout_start_rejects_unknown_or_same_upstream`、`rollout_start_and_state_accept_valid_query`、`rollout_state_rejects_invalid_or_missing_session`、`rollout_complete_if_drained_reports_blockers_without_ending`、`rollout_complete_if_drained_ends_when_routes_are_drained`、`rollout_complete_if_drained_rejects_without_active_rollout` 覆盖 rollout start、state change、no active state change、blocked、drained/end 和 no-active complete-if-drained；`apps/game-proxy/src/route_store.rs` 已用 `rollout_drain_evaluation_reports_no_active_rollout`、`rollout_drain_evaluation_blocks_old_room_routes`、`rollout_drain_evaluation_blocks_old_player_routes`、`rollout_complete_if_drained_ends_and_cleans_current_epoch_routes` 覆盖 route store 维度的排空判断、阻塞与结束清理。`RoomRouteRecord` 更新顺序和 epoch 校验由 `room_route_replay_is_idempotent`、`room_route_rejects_stale_version`、`room_route_rejects_same_version_conflict`、`room_route_rejects_version_gap`、`room_route_rejects_checksum_mismatch`、`room_route_rejects_rollout_epoch_mismatch`、`rollout_complete_if_drained_ends_and_cleans_current_epoch_routes` 覆盖，分别对应初始 create/幂等重放、版本倒退拒绝、同版本冲突、版本跳号拒绝、checksum mismatch、rollout_epoch mismatch，以及灰度结束时当前 epoch 清理、旧 epoch route 保留。
+
+当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已用 `freeze_room_for_transfer_rejects_invalid_epoch_or_missing_room` 覆盖 `freeze_room_for_transfer` 的 `INVALID_ROLLOUT_EPOCH`、`ROOM_NOT_FOUND`，用 `freeze_online_room_for_transfer_is_rejected` 覆盖 `ROOM_TRANSFER_HAS_ONLINE_MEMBERS`，用 `freeze_room_for_transfer_rejects_mismatched_epoch_after_freeze` 覆盖已冻结后 epoch mismatch 的 `ROOM_TRANSFER_EPOCH_MISMATCH`。`export_room_transfer_rejects_invalid_epoch_or_missing_room` 覆盖 `export_room_transfer` 的 `INVALID_ROLLOUT_EPOCH`、`ROOM_NOT_FOUND`，`export_room_transfer_rejects_room_that_was_not_frozen` 覆盖 `ROOM_TRANSFER_NOT_FROZEN`，`export_room_transfer_rejects_mismatched_epoch` 覆盖 `ROOM_TRANSFER_EPOCH_MISMATCH`，`export_room_transfer_rejects_logic_without_transfer_contract` 覆盖 `UNSUPPORTED_ROOM_TRANSFER`。
 
 ### 9.2 集成测试
 

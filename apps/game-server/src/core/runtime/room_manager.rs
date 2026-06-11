@@ -3127,6 +3127,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn freeze_room_for_transfer_rejects_invalid_epoch_or_missing_room() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        assert_eq!(
+            manager.freeze_room_for_transfer("", "room-test").await,
+            Err("INVALID_ROLLOUT_EPOCH")
+        );
+        assert_eq!(
+            manager
+                .freeze_room_for_transfer("epoch-1", "room-missing")
+                .await,
+            Err("ROOM_NOT_FOUND")
+        );
+    }
+
+    #[tokio::test]
+    async fn freeze_room_for_transfer_rejects_mismatched_epoch_after_freeze() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let result = manager
+            .freeze_room_for_transfer("epoch-2", "room-test")
+            .await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_EPOCH_MISMATCH"));
+    }
+
+    #[tokio::test]
     async fn rollout_drain_snapshot_empty_manager_returns_zero_counts() {
         let factory = RecordingRoomLogicFactory::default();
         let manager = RoomManager::with_match_client(
@@ -3584,6 +3626,70 @@ mod tests {
         let room = rooms.get("room-test").expect("room should remain");
         assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
         assert!(room.transfer_state.last_transfer_checksum.is_none());
+    }
+
+    #[tokio::test]
+    async fn export_room_transfer_rejects_invalid_epoch_or_missing_room() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        assert_eq!(
+            manager.export_room_transfer("", "room-test").await,
+            Err("INVALID_ROLLOUT_EPOCH")
+        );
+        assert_eq!(
+            manager
+                .export_room_transfer("epoch-1", "room-missing")
+                .await,
+            Err("ROOM_NOT_FOUND")
+        );
+    }
+
+    #[tokio::test]
+    async fn export_room_transfer_rejects_room_that_was_not_frozen() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let result = manager.export_room_transfer("epoch-1", "room-test").await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_NOT_FROZEN"));
+    }
+
+    #[tokio::test]
+    async fn export_room_transfer_rejects_mismatched_epoch() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let result = manager.export_room_transfer("epoch-2", "room-test").await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_EPOCH_MISMATCH"));
     }
 
     #[tokio::test]
