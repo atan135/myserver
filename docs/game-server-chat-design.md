@@ -19,6 +19,7 @@
 
 - `chat-server` 已作为独立 Rust TCP 服务落地
 - `chat-server` 认证阶段已复用 game ticket，并检查签名、过期时间、Redis `ticket:<sha256(ticket)>` 归属和 `player-ticket-version:<playerId>`；Redis key 均受 `REDIS_KEY_PREFIX` 影响
+- `chat-server` 的生产 `TICKET_SECRET` 必须与 `auth-http` / `game-server` 的 ticket 签发和校验侧保持一致，且不能使用默认值或 `.env.example` 占位值
 - `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
 - `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 NATS metrics 上报
 - “聊天与邮件共用同一套存储层”目前仍未实现

@@ -19,6 +19,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+const DEFAULT_TICKET_SECRET: &str = "default_secret_change_in_production";
 
 struct Config {
     mysql_url: String,
@@ -46,7 +47,7 @@ struct Config {
 
 impl Config {
     fn from_env() -> Self {
-        Self {
+        let config = Self {
             mysql_url: std::env::var("MYSQL_URL")
                 .unwrap_or_else(|_| "mysql://root:password@localhost:3306/chat".to_string()),
             mysql_pool_size: std::env::var("MYSQL_POOL_SIZE")
@@ -67,7 +68,7 @@ impl Config {
                 std::env::var("CHAT_OUTBOUND_QUEUE_CAPACITY").ok(),
             ),
             ticket_secret: std::env::var("TICKET_SECRET")
-                .unwrap_or_else(|_| "default_secret_change_in_production".to_string()),
+                .unwrap_or_else(|_| DEFAULT_TICKET_SECRET.to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
             redis_key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_default(),
@@ -103,8 +104,47 @@ impl Config {
                 .parse()
                 .unwrap_or(false),
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
-        }
+        };
+
+        validate_production_config(&config);
+
+        config
     }
+}
+
+fn is_production_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+    })
+}
+
+fn validate_production_config(config: &Config) {
+    if !is_production_env() {
+        return;
+    }
+
+    if is_default_ticket_secret(&config.ticket_secret) {
+        panic!(
+            "invalid chat-server production config: TICKET_SECRET must be set to a non-default value in production"
+        );
+    }
+}
+
+fn is_default_ticket_secret(value: &str) -> bool {
+    let normalized = value.trim();
+
+    normalized.is_empty()
+        || matches!(
+            normalized,
+            DEFAULT_TICKET_SECRET
+                | "replace-with-a-long-random-string"
+                | "change-me"
+                | "changeme"
+                | "default"
+                | "password"
+        )
 }
 
 fn parse_outbound_queue_capacity(value: Option<String>) -> usize {
@@ -283,7 +323,65 @@ fn extract_port(bind_addr: &str) -> Result<u16, Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
+
+    const TICKET_SECRET_ENV_NAMES: &[&str] = &["NODE_ENV", "APP_ENV", "TICKET_SECRET"];
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn panic_message(result: Result<Config, Box<dyn std::any::Any + Send>>) -> String {
+        match result {
+            Ok(_) => panic!("production config should be rejected"),
+            Err(payload) => {
+                if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else if let Some(message) = payload.downcast_ref::<&str>() {
+                    message.to_string()
+                } else {
+                    panic!("panic payload should be a string");
+                }
+            }
+        }
+    }
+
+    fn catch_config_from_env() -> Result<Config, Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(Config::from_env))
+    }
 
     #[test]
     fn outbound_queue_capacity_uses_default_for_missing_zero_or_invalid_value() {
@@ -304,5 +402,110 @@ mod tests {
     #[test]
     fn outbound_queue_capacity_accepts_positive_value() {
         assert_eq!(parse_outbound_queue_capacity(Some("64".to_string())), 64);
+    }
+
+    #[test]
+    fn ticket_secret_rejects_unset_default_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::remove_var("TICKET_SECRET");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("invalid chat-server production config"));
+        assert!(error.contains("TICKET_SECRET"));
+        assert!(error.contains("non-default value in production"));
+    }
+
+    #[test]
+    fn ticket_secret_rejects_env_example_placeholder_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "replace-with-a-long-random-string");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn ticket_secret_rejects_empty_value_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "   ");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn ticket_secret_rejects_common_placeholder_values() {
+        for placeholder in ["change-me", "changeme", "default", "password"] {
+            assert!(is_default_ticket_secret(placeholder));
+        }
+    }
+
+    #[test]
+    fn ticket_secret_accepts_custom_value_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "prod-chat-ticket-secret-123");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.ticket_secret, "prod-chat-ticket-secret-123");
+    }
+
+    #[test]
+    fn ticket_secret_app_env_production_triggers_validation() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+            env::set_var("APP_ENV", "production");
+            env::remove_var("TICKET_SECRET");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn ticket_secret_development_allows_default_value() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::remove_var("TICKET_SECRET");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.ticket_secret, DEFAULT_TICKET_SECRET);
     }
 }

@@ -11,7 +11,7 @@
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
-- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制和有界出站写队列；暂未做消息频率限制
+- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`；暂未做消息频率限制
 
 ---
 
@@ -260,10 +260,11 @@ LOG_DIR=logs
 
 - `chat-server` 已读取 `REDIS_KEY_PREFIX`，并同时用于 `ticket:<sha256(ticket)>` 和 `player-ticket-version:<playerId>` 两类 key
 - `CHAT_OUTBOUND_QUEUE_CAPACITY` 默认 `1024`；未配置、解析失败或配置为 `0` 时使用默认值
+- `NODE_ENV=production` 或 `APP_ENV=production` 时，`chat-server` 会在配置加载阶段拒绝空值、开发默认值或 `.env.example` 占位的 `TICKET_SECRET`；生产值必须与 `auth-http` / `game-server` 的 ticket 签发和校验侧保持一致
 - 单张 ticket revoke 删除 Redis `ticket:<sha256(ticket)>` 后，新的 `ChatAuthReq` 会返回 `TICKET_REVOKED`
 - 当前没有消息频率限制、单 IP / 单账号连接数限制、Redis 黑名单或封禁列表逻辑
 - 当前没有公网 TLS 策略，生产部署时应放在 TLS 终止层或补充直接 TLS 支持
-- `chat-server` 默认不作为生产公网入口；如果内部或测试环境直连，也应继续保持与 `game-proxy` / `game-server` 一致的 ticket 校验边界
+- `chat-server` 默认不作为生产公网入口；上述 fail-fast 只是内网服务凭证保护。如果内部或测试环境直连，也应继续保持与 `game-proxy` / `game-server` 一致的 ticket 校验边界
 
 ---
 
@@ -289,6 +290,7 @@ LOG_DIR=logs
   - 当前没有单 IP、Redis 黑名单、时间戳窗口或反重放环境变量；单玩家消息频率限制是单 `game-server` 实例内本地状态，不是跨实例全局限额
 - `chat-server`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`CHAT_OUTBOUND_QUEUE_CAPACITY`
+  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认、空值或明显占位的 `TICKET_SECRET`
   - 当前没有消息频率限制配置
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
