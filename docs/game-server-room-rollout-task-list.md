@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：完整玩法 payload、演练和自动化收尾仍未完成。
+- `M5` ~ `M6`：完整玩法 payload、真实旧服状态联动、演练和旧服自动停止仍未完成；`game-proxy` 已具备基于 route store 的自动收尾入口。
 
 ## 1. 里程碑划分
 
@@ -95,10 +95,10 @@
 - [x] 为 `proxy` 增加灰度状态查询接口。
 - [x] 为 `proxy` 增加 room route 列表接口。
 - [x] 为 `proxy` 增加玩家路由查询接口。
-- [ ] 为 `proxy` 增加灰度结束检测:
+- [x] 为 `proxy` 增加基于 route store 的灰度结束检测:
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
-  - `connection_count == 0`
+- [ ] 将旧服真实 `connection_count == 0` 纳入自动收尾/停服前校验。
 - [x] 为 `proxy` 增加关键日志:
   - room route 更新
   - player route 更新
@@ -387,7 +387,8 @@
 当前状态（截至 `2026-05-19`）:
 
 - `GetRolloutDrainStatusRes` 已在 proto 中定义，但 `game-server` 还没有对应处理。
-- `game-proxy` 已支持手动结束 rollout 并清理 route metadata，但尚未实现基于旧服状态的自动收尾。
+- `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
+- 该自动收尾尚未读取旧服真实 `connection_count` / drain status，不能替代旧服停进程前的最终校验。
 
 ### 8.1 旧服状态查询
 
@@ -400,9 +401,10 @@
 
 ### 8.2 灰度结束判定
 
-- [ ] 满足以下条件时结束灰度:
+- [x] proxy route store 维度满足以下条件时可自动结束灰度:
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
+- [ ] 满足旧服真实状态条件时才允许停旧服:
   - `connection_count == 0`
 - [x] 灰度结束后清理:
   - `rollout_epoch`
@@ -494,7 +496,8 @@
 - [ ] 旧服已支持 redirect + 断线。
 - [ ] 旧服已支持空房 freeze/export。
 - [ ] 新服已支持 import 并接管同 `room_id`。
-- [ ] `proxy` 已能根据旧服状态决定灰度结束。
+- [x] `proxy` 已能根据 route store 判定并自动结束灰度。
+- [ ] `proxy` / 控制面已能结合旧服真实状态决定停旧服。
 - [ ] 至少一个简单 room logic 已跑通完整接管链路。
 
 ## 13. 暂缓项

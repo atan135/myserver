@@ -12,7 +12,8 @@ use tracing::{info, warn};
 
 use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
 use crate::route_store::{
-    PlayerRouteRecord, ProxyRouteStore, RolloutSessionState, RoomMigrationState, RoomRouteRecord,
+    PlayerRouteRecord, ProxyRouteStore, RolloutCompleteIfDrainedResult, RolloutDrainEvaluation,
+    RolloutEndSummary, RolloutSessionState, RoomMigrationState, RoomRouteRecord,
     RouteStoreUpdateError, UpstreamOperationState,
 };
 
@@ -44,6 +45,15 @@ struct InstancesResponse {
 struct RolloutResponse {
     ok: bool,
     rollout_session: Option<crate::route_store::RolloutSession>,
+    drain_evaluation: RolloutDrainEvaluation,
+}
+
+#[derive(Serialize)]
+struct RolloutCompleteIfDrainedResponse {
+    ok: bool,
+    error: Option<&'static str>,
+    drain_evaluation: RolloutDrainEvaluation,
+    end_summary: Option<RolloutEndSummary>,
 }
 
 #[derive(Serialize)]
@@ -363,6 +373,7 @@ async fn handle_connection(
         ("GET", "/rollout") => write_json(RolloutResponse {
             ok: true,
             rollout_session: route_store.get_rollout_session().await,
+            drain_evaluation: route_store.evaluate_rollout_drain().await,
         }),
         ("GET", "/room-routes") => write_json(RoomRoutesResponse {
             ok: true,
@@ -452,6 +463,9 @@ async fn handle_connection(
         }
         ("POST", "/rollout/state") => {
             handle_rollout_state(&route_store, &query, &audit_logger, &context).await
+        }
+        ("POST", "/rollout/complete-if-drained") => {
+            handle_rollout_complete_if_drained(&route_store, &audit_logger, &context).await
         }
         ("POST", "/room-route/upsert") => {
             handle_room_route_upsert(&route_store, &query, &audit_logger, &context).await
@@ -678,6 +692,77 @@ async fn handle_rollout_state(
                 None,
                 None,
                 Some(session.rollout_epoch.as_str()),
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_rollout_complete_if_drained(
+    route_store: &ProxyRouteStore,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
+) -> String {
+    let action = "rollout_complete_if_drained";
+    match route_store.complete_rollout_if_drained().await {
+        Ok(RolloutCompleteIfDrainedResult::Completed {
+            evaluation,
+            end_summary,
+        }) => {
+            match audit_ok(
+                audit_logger,
+                context,
+                action,
+                end_summary.new_server_id.as_deref(),
+                None,
+                None,
+                end_summary.rollout_epoch.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => write_json(RolloutCompleteIfDrainedResponse {
+                    ok: true,
+                    error: None,
+                    drain_evaluation: evaluation,
+                    end_summary: Some(end_summary),
+                }),
+                Err(error) => audit_write_failed(audit_logger, action, &error),
+            }
+        }
+        Ok(RolloutCompleteIfDrainedResult::Blocked { evaluation }) => {
+            audited_rollout_complete_if_drained_rejected(
+                audit_logger,
+                context,
+                "ROLLOUT_NOT_DRAINED",
+                409,
+                evaluation,
+            )
+            .await
+        }
+        Ok(RolloutCompleteIfDrainedResult::NoActiveRollout { evaluation }) => {
+            audited_rollout_complete_if_drained_rejected(
+                audit_logger,
+                context,
+                "NO_ACTIVE_ROLLOUT",
+                400,
+                evaluation,
+            )
+            .await
+        }
+        Err(error) => {
+            let rollout_epoch = route_store
+                .get_rollout_session()
+                .await
+                .map(|session| session.rollout_epoch);
+            audited_update_error(
+                audit_logger,
+                context,
+                action,
+                &error,
+                None,
+                None,
+                None,
+                rollout_epoch.as_deref(),
             )
             .await
         }
@@ -1499,6 +1584,40 @@ async fn audited_update_error(
     }
 }
 
+async fn audited_rollout_complete_if_drained_rejected(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
+    error: &'static str,
+    status: u16,
+    evaluation: RolloutDrainEvaluation,
+) -> String {
+    match audit_error(
+        audit_logger,
+        context,
+        "rollout_complete_if_drained",
+        error,
+        evaluation.new_server_id.as_deref(),
+        None,
+        None,
+        evaluation.rollout_epoch.as_deref(),
+    )
+    .await
+    {
+        Ok(()) => write_json_status(
+            status,
+            RolloutCompleteIfDrainedResponse {
+                ok: false,
+                error: Some(error),
+                drain_evaluation: evaluation,
+                end_summary: None,
+            },
+        ),
+        Err(audit_error) => {
+            audit_write_failed(audit_logger, "rollout_complete_if_drained", &audit_error)
+        }
+    }
+}
+
 async fn audited_forbidden(
     audit_logger: &AdminAuditLogger,
     context: &AdminRequestContext,
@@ -1718,6 +1837,11 @@ fn admin_route_requirement(method: &str, route_path: &str) -> Option<AdminRouteR
             action: "rollout_state",
             is_write: true,
         }),
+        ("POST", "/rollout/complete-if-drained") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RolloutWrite,
+            action: "rollout_complete_if_drained",
+            is_write: true,
+        }),
         ("POST", "/room-route/upsert") => Some(AdminRouteRequirement {
             permission: AdminPermissionScope::RouteWrite,
             action: "room_route_upsert",
@@ -1815,8 +1939,12 @@ fn header_matches_token(line: &str, admin_token: &str) -> bool {
 }
 
 fn write_json<T: Serialize>(payload: T) -> String {
+    write_json_status(200, payload)
+}
+
+fn write_json_status<T: Serialize>(status: u16, payload: T) -> String {
     http_response(
-        200,
+        status,
         "application/json",
         serde_json::to_string(&payload).unwrap(),
     )
@@ -1843,6 +1971,7 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
         200 => "OK",
         401 => "Unauthorized",
         403 => "Forbidden",
+        409 => "Conflict",
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",
@@ -1871,13 +2000,13 @@ mod tests {
         AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
         admin_request_context, admin_route_requirement, audit_ok, audit_write_failed, authorize,
         authorize_method, authorize_route, handle_connection, handle_player_route_upsert,
-        handle_rollout_start, handle_rollout_state, handle_room_route_upsert, handle_switch,
-        is_authorized, split_path_and_query,
+        handle_rollout_complete_if_drained, handle_rollout_start, handle_rollout_state,
+        handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
     };
     use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
     use crate::route_store::{
-        ProxyRouteStore, RolloutSessionState, UpstreamHealthState, UpstreamOperationState,
-        UpstreamRoute,
+        ProxyRouteStore, RolloutDrainStatus, RolloutSessionState, RoomMigrationState,
+        RoomRouteRecord, UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
     };
 
     const TOKEN: &str = "dev-only-change-this-proxy-admin-token";
@@ -1915,6 +2044,14 @@ mod tests {
             .expect("HTTP response should include status code")
             .parse()
             .unwrap()
+    }
+
+    fn response_json(response: &str) -> serde_json::Value {
+        let body = response
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("HTTP response should include body");
+        serde_json::from_str(body).unwrap()
     }
 
     fn auth_config() -> AdminAuthConfig {
@@ -2052,10 +2189,13 @@ mod tests {
         let request = format!("POST /rollout/start HTTP/1.1\r\nx-admin-token: {token}\r\n\r\n");
         let rollout_start = admin_route_requirement("POST", "/rollout/start").unwrap();
         let rollout_end = admin_route_requirement("POST", "/rollout/end").unwrap();
+        let rollout_complete =
+            admin_route_requirement("POST", "/rollout/complete-if-drained").unwrap();
         let route = admin_route_requirement("POST", "/player-route/upsert").unwrap();
 
         assert!(authorize_route(&request, rollout_start, &config).is_ok());
         assert!(authorize_route(&request, rollout_end, &config).is_ok());
+        assert!(authorize_route(&request, rollout_complete, &config).is_ok());
         assert_eq!(
             authorize_route(&request, route, &config),
             Err((403, "insufficient admin permission"))
@@ -2191,6 +2331,127 @@ mod tests {
         assert_eq!(
             store.get_rollout_session().await.unwrap().state,
             RolloutSessionState::Ending
+        );
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_reports_blockers_without_ending() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let complete_context = test_context("/rollout/complete-if-drained");
+
+        let start = handle_rollout_start(
+            &store,
+            &query(
+                "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
+            ),
+            &audit_logger,
+            &start_context,
+        )
+        .await;
+        assert_eq!(status_code(&start), 200);
+        store
+            .upsert_room_route(
+                RoomRouteRecord {
+                    room_id: "room-1".to_string(),
+                    owner_server_id: "game-server-1".to_string(),
+                    migration_state: RoomMigrationState::OwnedByOld,
+                    member_count: 0,
+                    online_member_count: 0,
+                    empty_since_ms: Some(123),
+                    room_version: 1,
+                    rollout_epoch: "rollout-1".to_string(),
+                    last_transfer_checksum: String::new(),
+                    updated_at_ms: 0,
+                },
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response =
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 409);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "ROLLOUT_NOT_DRAINED");
+        assert_eq!(body["drain_evaluation"]["blocked_room_count"], 1);
+        assert_eq!(
+            body["drain_evaluation"]["blocked_room_samples"][0],
+            "room-1"
+        );
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_ends_when_routes_are_drained() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let complete_context = test_context("/rollout/complete-if-drained");
+
+        let start = handle_rollout_start(
+            &store,
+            &query(
+                "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
+            ),
+            &audit_logger,
+            &start_context,
+        )
+        .await;
+        assert_eq!(status_code(&start), 200);
+        store
+            .upsert_room_route(
+                RoomRouteRecord {
+                    room_id: "room-1".to_string(),
+                    owner_server_id: "game-server-2".to_string(),
+                    migration_state: RoomMigrationState::OwnedByNew,
+                    member_count: 0,
+                    online_member_count: 0,
+                    empty_since_ms: Some(123),
+                    room_version: 1,
+                    rollout_epoch: "rollout-1".to_string(),
+                    last_transfer_checksum: "checksum-1".to_string(),
+                    updated_at_ms: 0,
+                },
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response =
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["drain_evaluation"]["status"], "Drained");
+        assert_eq!(body["end_summary"]["rollout_epoch"], "rollout-1");
+        assert_eq!(body["end_summary"]["removed_room_route_count"], 1);
+        assert!(store.get_rollout_session().await.is_none());
+        assert!(store.list_room_routes().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_rejects_without_active_rollout() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let complete_context = test_context("/rollout/complete-if-drained");
+
+        let response =
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 400);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "NO_ACTIVE_ROLLOUT");
+        assert_eq!(
+            body["drain_evaluation"]["status"],
+            serde_json::json!(RolloutDrainStatus::NoActiveRollout)
         );
     }
 

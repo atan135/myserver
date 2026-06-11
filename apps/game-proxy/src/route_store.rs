@@ -156,6 +156,60 @@ pub struct RouteCounts {
     pub player_routes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RolloutDrainStatus {
+    NoActiveRollout,
+    Blocked,
+    Drained,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolloutDrainEvaluation {
+    pub status: RolloutDrainStatus,
+    pub rollout_epoch: Option<String>,
+    pub old_server_id: Option<String>,
+    pub new_server_id: Option<String>,
+    pub blocked_room_count: usize,
+    pub blocked_player_count: usize,
+    pub blocked_room_samples: Vec<String>,
+    pub blocked_player_samples: Vec<String>,
+    pub stale_room_route_count: usize,
+    pub stale_player_route_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RolloutEndSummary {
+    pub rollout_epoch: Option<String>,
+    pub old_server_id: Option<String>,
+    pub new_server_id: Option<String>,
+    pub removed_room_route_count: usize,
+    pub removed_player_route_count: usize,
+    pub remaining_room_route_count: usize,
+    pub remaining_player_route_count: usize,
+}
+
+impl RolloutEndSummary {
+    fn has_changes(&self) -> bool {
+        self.rollout_epoch.is_some()
+            || self.removed_room_route_count > 0
+            || self.removed_player_route_count > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RolloutCompleteIfDrainedResult {
+    NoActiveRollout {
+        evaluation: RolloutDrainEvaluation,
+    },
+    Blocked {
+        evaluation: RolloutDrainEvaluation,
+    },
+    Completed {
+        evaluation: RolloutDrainEvaluation,
+        end_summary: RolloutEndSummary,
+    },
+}
+
 #[derive(Clone, Default)]
 struct RouteStoreState {
     store_revision: u64,
@@ -301,6 +355,8 @@ pub struct RedisRouteStorePersistence {
 pub struct RouteStoreUpdateNotification {
     pub store_revision: u64,
 }
+
+const ROLLOUT_DRAIN_SAMPLE_LIMIT: usize = 5;
 
 const REDIS_ROUTE_STORE_CAS_SCRIPT: &str = r#"
 local current = redis.call("GET", KEYS[1])
@@ -636,6 +692,10 @@ impl ProxyRouteStore {
         self.state.read().await.rollout_session.clone()
     }
 
+    pub async fn evaluate_rollout_drain(&self) -> RolloutDrainEvaluation {
+        self.state.read().await.evaluate_rollout_drain()
+    }
+
     pub async fn begin_rollout(
         &self,
         rollout_epoch: String,
@@ -657,54 +717,65 @@ impl ProxyRouteStore {
     }
 
     pub async fn end_rollout(&self) -> Result<(), RouteStoreUpdateError> {
-        let mut log_context = None;
+        self.end_rollout_with_summary().await.map(|_| ())
+    }
+
+    pub async fn end_rollout_with_summary(
+        &self,
+    ) -> Result<RolloutEndSummary, RouteStoreUpdateError> {
+        let mut end_summary = RolloutEndSummary::default();
         let result = self
             .update_persisted_state("end_rollout", |state| {
-                let ended_session = state.rollout_session.take();
-                let removed_player_route_count = state.player_routes.len();
-                let room_route_count_before = state.room_routes.len();
-                state.player_routes.clear();
-                if let Some(ended_session) = ended_session {
-                    state
-                        .room_routes
-                        .retain(|_, record| record.rollout_epoch != ended_session.rollout_epoch);
-                    let removed_room_route_count =
-                        room_route_count_before.saturating_sub(state.room_routes.len());
-                    log_context = Some((
-                        ended_session,
-                        removed_room_route_count,
-                        removed_player_route_count,
-                        state.room_routes.len(),
-                    ));
-                    Ok(true)
-                } else {
-                    Ok(removed_player_route_count > 0)
+                end_summary = state.finish_rollout();
+                Ok(end_summary.has_changes())
+            })
+            .await;
+
+        if result.is_ok() {
+            log_rollout_end_summary("end_rollout", &end_summary);
+        }
+
+        result.map(|_| end_summary)
+    }
+
+    pub async fn complete_rollout_if_drained(
+        &self,
+    ) -> Result<RolloutCompleteIfDrainedResult, RouteStoreUpdateError> {
+        let mut outcome = None;
+        let result = self
+            .update_persisted_state("complete_rollout_if_drained", |state| {
+                let evaluation = state.evaluate_rollout_drain();
+                match evaluation.status {
+                    RolloutDrainStatus::NoActiveRollout => {
+                        outcome =
+                            Some(RolloutCompleteIfDrainedResult::NoActiveRollout { evaluation });
+                        Ok(false)
+                    }
+                    RolloutDrainStatus::Blocked => {
+                        outcome = Some(RolloutCompleteIfDrainedResult::Blocked { evaluation });
+                        Ok(false)
+                    }
+                    RolloutDrainStatus::Drained => {
+                        let end_summary = state.finish_rollout();
+                        outcome = Some(RolloutCompleteIfDrainedResult::Completed {
+                            evaluation,
+                            end_summary,
+                        });
+                        Ok(true)
+                    }
                 }
             })
             .await;
 
         if result.is_ok() {
-            if let Some((
-                ended_session,
-                removed_room_route_count,
-                removed_player_route_count,
-                remaining_room_route_count,
-            )) = log_context
+            if let Some(RolloutCompleteIfDrainedResult::Completed { end_summary, .. }) =
+                outcome.as_ref()
             {
-                info!(
-                    rollout_epoch = %ended_session.rollout_epoch,
-                    old_server_id = %ended_session.old_server_id,
-                    new_server_id = %ended_session.new_server_id,
-                    rollout_state = ?ended_session.state,
-                    removed_room_route_count,
-                    removed_player_route_count,
-                    remaining_room_route_count,
-                    "proxy rollout ended"
-                );
+                log_rollout_end_summary("complete_rollout_if_drained", end_summary);
             }
         }
 
-        result.map(|_| ())
+        result.map(|_| outcome.expect("rollout completion outcome should be set"))
     }
 
     pub async fn mark_rollout_state(
@@ -1110,6 +1181,119 @@ pub async fn run_redis_route_store_update_listener(
 }
 
 impl RouteStoreState {
+    fn evaluate_rollout_drain(&self) -> RolloutDrainEvaluation {
+        let Some(session) = self.rollout_session.as_ref() else {
+            return RolloutDrainEvaluation {
+                status: RolloutDrainStatus::NoActiveRollout,
+                rollout_epoch: None,
+                old_server_id: None,
+                new_server_id: None,
+                blocked_room_count: 0,
+                blocked_player_count: 0,
+                blocked_room_samples: Vec::new(),
+                blocked_player_samples: Vec::new(),
+                stale_room_route_count: self.room_routes.len(),
+                stale_player_route_count: self.player_routes.len(),
+            };
+        };
+
+        let mut blocked_room_ids = Vec::new();
+        let mut blocked_room_lookup = HashMap::new();
+        let mut stale_room_route_count = 0;
+        let mut room_routes: Vec<_> = self.room_routes.values().collect();
+        room_routes.sort_by(|left, right| left.room_id.cmp(&right.room_id));
+
+        for record in room_routes {
+            if !route_epoch_matches_current(&record.rollout_epoch, &session.rollout_epoch) {
+                stale_room_route_count += 1;
+                continue;
+            }
+
+            if room_route_blocks_rollout(record, session) {
+                blocked_room_lookup.insert(record.room_id.clone(), true);
+                blocked_room_ids.push(record.room_id.clone());
+            }
+        }
+
+        let mut blocked_player_ids = Vec::new();
+        let mut stale_player_route_count = 0;
+        let mut player_routes: Vec<_> = self.player_routes.values().collect();
+        player_routes.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+
+        for record in player_routes {
+            if !route_epoch_matches_current(&record.rollout_epoch, &session.rollout_epoch) {
+                stale_player_route_count += 1;
+                continue;
+            }
+
+            let preferred_old =
+                record.preferred_server_id.as_deref() == Some(session.old_server_id.as_str());
+            let current_room_blocked = record
+                .current_room_id
+                .as_ref()
+                .is_some_and(|room_id| blocked_room_lookup.contains_key(room_id));
+            if preferred_old || current_room_blocked {
+                blocked_player_ids.push(record.player_id.clone());
+            }
+        }
+
+        let status = if blocked_room_ids.is_empty() && blocked_player_ids.is_empty() {
+            RolloutDrainStatus::Drained
+        } else {
+            RolloutDrainStatus::Blocked
+        };
+
+        RolloutDrainEvaluation {
+            status,
+            rollout_epoch: Some(session.rollout_epoch.clone()),
+            old_server_id: Some(session.old_server_id.clone()),
+            new_server_id: Some(session.new_server_id.clone()),
+            blocked_room_count: blocked_room_ids.len(),
+            blocked_player_count: blocked_player_ids.len(),
+            blocked_room_samples: blocked_room_ids
+                .into_iter()
+                .take(ROLLOUT_DRAIN_SAMPLE_LIMIT)
+                .collect(),
+            blocked_player_samples: blocked_player_ids
+                .into_iter()
+                .take(ROLLOUT_DRAIN_SAMPLE_LIMIT)
+                .collect(),
+            stale_room_route_count,
+            stale_player_route_count,
+        }
+    }
+
+    fn finish_rollout(&mut self) -> RolloutEndSummary {
+        let ended_session = self.rollout_session.take();
+        let removed_player_route_count = self.player_routes.len();
+        let room_route_count_before = self.room_routes.len();
+        self.player_routes.clear();
+
+        let (rollout_epoch, old_server_id, new_server_id) = if let Some(session) = ended_session {
+            self.room_routes.retain(|_, record| {
+                !route_epoch_matches_current(&record.rollout_epoch, &session.rollout_epoch)
+            });
+            (
+                Some(session.rollout_epoch),
+                Some(session.old_server_id),
+                Some(session.new_server_id),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        RolloutEndSummary {
+            rollout_epoch,
+            old_server_id,
+            new_server_id,
+            removed_room_route_count: room_route_count_before
+                .saturating_sub(self.room_routes.len()),
+            removed_player_route_count,
+            remaining_room_route_count: self.room_routes.len(),
+            remaining_player_route_count: self.player_routes.len(),
+        }
+    }
+
     fn persisted_snapshot(&self) -> PersistedRouteStoreState {
         PersistedRouteStoreState {
             store_revision: self.store_revision,
@@ -1154,6 +1338,25 @@ impl RouteStoreState {
                     .find(|route| route.can_accept_bound_sessions())
             })
     }
+}
+
+fn route_epoch_matches_current(record_rollout_epoch: &str, current_rollout_epoch: &str) -> bool {
+    record_rollout_epoch.is_empty() || record_rollout_epoch == current_rollout_epoch
+}
+
+fn room_route_blocks_rollout(record: &RoomRouteRecord, session: &RolloutSession) -> bool {
+    if record.owner_server_id == session.old_server_id {
+        return true;
+    }
+
+    matches!(
+        record.migration_state,
+        RoomMigrationState::OwnedByOld
+            | RoomMigrationState::DrainingOnOld
+            | RoomMigrationState::FrozenForTransfer
+            | RoomMigrationState::ImportingToNew
+            | RoomMigrationState::TransferFailed
+    )
 }
 
 fn validate_rollout_epoch(
@@ -1273,6 +1476,24 @@ fn log_player_route_update(
             .unwrap_or_default(),
         previous_rollout_epoch = %previous.map(|record| record.rollout_epoch.as_str()).unwrap_or_default(),
         "player route updated"
+    );
+}
+
+fn log_rollout_end_summary(update_source: &'static str, summary: &RolloutEndSummary) {
+    let Some(rollout_epoch) = summary.rollout_epoch.as_deref() else {
+        return;
+    };
+
+    info!(
+        update_source,
+        rollout_epoch,
+        old_server_id = %summary.old_server_id.as_deref().unwrap_or_default(),
+        new_server_id = %summary.new_server_id.as_deref().unwrap_or_default(),
+        removed_room_route_count = summary.removed_room_route_count,
+        removed_player_route_count = summary.removed_player_route_count,
+        remaining_room_route_count = summary.remaining_room_route_count,
+        remaining_player_route_count = summary.remaining_player_route_count,
+        "proxy rollout ended"
     );
 }
 
@@ -1422,6 +1643,17 @@ mod tests {
             rollout_epoch: "rollout-1".to_string(),
             last_transfer_checksum: checksum.to_string(),
             updated_at_ms: 0,
+        }
+    }
+
+    trait TestRoomRecordExt {
+        fn with_rollout_epoch(self, rollout_epoch: &str) -> Self;
+    }
+
+    impl TestRoomRecordExt for RoomRouteRecord {
+        fn with_rollout_epoch(mut self, rollout_epoch: &str) -> Self {
+            self.rollout_epoch = rollout_epoch.to_string();
+            self
         }
     }
 
@@ -1684,6 +1916,167 @@ mod tests {
             .expect("route should be selected");
 
         assert_eq!(route.server_id, "new");
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_evaluation_reports_no_active_rollout() {
+        let store = ProxyRouteStore::default();
+
+        let evaluation = store.evaluate_rollout_drain().await;
+
+        assert_eq!(evaluation.status, RolloutDrainStatus::NoActiveRollout);
+        assert_eq!(evaluation.blocked_room_count, 0);
+        assert_eq!(evaluation.blocked_player_count, 0);
+
+        let result = store.complete_rollout_if_drained().await.unwrap();
+        assert!(matches!(
+            result,
+            RolloutCompleteIfDrainedResult::NoActiveRollout { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_evaluation_blocks_old_room_routes() {
+        let store = ProxyRouteStore::default();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let evaluation = store.evaluate_rollout_drain().await;
+
+        assert_eq!(evaluation.status, RolloutDrainStatus::Blocked);
+        assert_eq!(evaluation.blocked_room_count, 1);
+        assert_eq!(evaluation.blocked_room_samples, vec!["room-1"]);
+
+        let result = store.complete_rollout_if_drained().await.unwrap();
+        assert!(matches!(
+            result,
+            RolloutCompleteIfDrainedResult::Blocked { .. }
+        ));
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_evaluation_blocks_old_player_routes() {
+        let store = ProxyRouteStore::default();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_player_route(PlayerRouteRecord {
+                player_id: "player-1".to_string(),
+                current_room_id: None,
+                preferred_server_id: Some("old".to_string()),
+                rollout_epoch: "rollout-1".to_string(),
+                updated_at_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        let evaluation = store.evaluate_rollout_drain().await;
+
+        assert_eq!(evaluation.status, RolloutDrainStatus::Blocked);
+        assert_eq!(evaluation.blocked_player_count, 1);
+        assert_eq!(evaluation.blocked_player_samples, vec!["player-1"]);
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_ends_and_cleans_current_epoch_routes() {
+        let store = ProxyRouteStore::default();
+        store
+            .upsert_room_route(
+                room_record("room-stale", "old", RoomMigrationState::OwnedByOld, 1, "")
+                    .with_rollout_epoch("rollout-legacy"),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record(
+                    "room-new",
+                    "new",
+                    RoomMigrationState::OwnedByNew,
+                    1,
+                    "checksum-1",
+                ),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record(
+                    "room-unscoped",
+                    "new",
+                    RoomMigrationState::OwnedByNew,
+                    1,
+                    "checksum-2",
+                )
+                .with_rollout_epoch(""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_player_route(PlayerRouteRecord {
+                player_id: "player-new".to_string(),
+                current_room_id: Some("room-new".to_string()),
+                preferred_server_id: Some("new".to_string()),
+                rollout_epoch: "rollout-1".to_string(),
+                updated_at_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        let result = store.complete_rollout_if_drained().await.unwrap();
+
+        let RolloutCompleteIfDrainedResult::Completed {
+            evaluation,
+            end_summary,
+        } = result
+        else {
+            panic!("rollout should complete");
+        };
+        assert_eq!(evaluation.status, RolloutDrainStatus::Drained);
+        assert_eq!(evaluation.stale_room_route_count, 1);
+        assert_eq!(end_summary.rollout_epoch.as_deref(), Some("rollout-1"));
+        assert_eq!(end_summary.removed_room_route_count, 2);
+        assert_eq!(end_summary.removed_player_route_count, 1);
+        assert!(store.get_rollout_session().await.is_none());
+
+        let routes = store.list_room_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].room_id, "room-stale");
     }
 
     #[tokio::test]
