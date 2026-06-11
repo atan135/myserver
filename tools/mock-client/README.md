@@ -269,6 +269,7 @@ node tools/mock-client/src/index.js --scenario announce-list \
 # 创建公告
 node tools/mock-client/src/index.js --scenario announce-create \
   --announce-base-url http://127.0.0.1:9004 \
+  --announce-admin-token dev-only-change-this-announce-admin-token \
   --announce-title "系统公告" \
   --announce-content "今晚 20:00 维护" \
   --announce-type popup \
@@ -339,6 +340,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--announce-end-time` | 公告结束时间；支持 ISO 字符串或 Unix 时间戳 | 空 |
 | `--announce-duration-seconds` | 创建/更新时间窗口持续秒数；与 `--announce-end-time` 二选一 | 空 |
 | `--announce-active-only` | 公告列表是否仅返回激活中的公告；传 `false` 可关闭 | `true` |
+| `--announce-admin-token` | 公告写接口 token；默认读取 `ANNOUNCE_ADMIN_TOKEN` | 空 |
 | `--item-uid` | 物品UID (背包测试) | - |
 | `--equip-slot` | 装备槽位: Weapon/Armor/Helmet/Pants/Shoes/Accessory | - |
 | `--use-item-uid` | 使用物品UID | - |
@@ -399,6 +401,7 @@ node tools/mock-client/src/index.js --scenario announce-list \
 # 创建一条 1 小时有效的公告
 node tools/mock-client/src/index.js --scenario announce-create \
   --announce-base-url http://127.0.0.1:9004 \
+  --announce-admin-token dev-only-change-this-announce-admin-token \
   --announce-title "系统公告" \
   --announce-content "今晚 20:00 维护" \
   --announce-type popup \
@@ -413,6 +416,7 @@ node tools/mock-client/src/index.js --scenario announce-get \
 # 更新公告标题或时间窗口
 node tools/mock-client/src/index.js --scenario announce-update \
   --announce-base-url http://127.0.0.1:9004 \
+  --announce-admin-token dev-only-change-this-announce-admin-token \
   --announce-id <announce_id> \
   --announce-title "维护时间调整" \
   --announce-end-time 2026-04-17T20:00:00+08:00
@@ -420,6 +424,7 @@ node tools/mock-client/src/index.js --scenario announce-update \
 # 删除公告
 node tools/mock-client/src/index.js --scenario announce-delete \
   --announce-base-url http://127.0.0.1:9004 \
+  --announce-admin-token dev-only-change-this-announce-admin-token \
   --announce-id <announce_id>
 ```
 

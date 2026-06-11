@@ -91,6 +91,7 @@ const DEFAULT_OPTIONS = {
   announceEndTime: "",
   announceDurationSeconds: "",
   announceActiveOnly: true,
+  announceAdminToken: process.env.ANNOUNCE_ADMIN_TOKEN || "",
   // Inventory parameters
   itemUid: 0,
   equipSlot: "",
@@ -340,6 +341,9 @@ export function parseArgs(argv) {
           collectOptionValue(argv, index).value !== "false" &&
           collectOptionValue(argv, index).value !== "0";
         index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--announce-admin-token":
+        ({ value: result.announceAdminToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
       // Inventory arguments
       case "--item-uid":

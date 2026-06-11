@@ -54,6 +54,7 @@
 # --announce-end-time <time>     公告结束时间，支持 ISO 字符串或 Unix 时间戳
 # --announce-duration-seconds <sec> 从 start_time 开始的持续秒数；与 end_time 二选一
 # --announce-active-only <bool>  是否仅查询激活中的公告（默认 true；传 false 关闭）
+# --announce-admin-token <token> 公告写接口 token；默认读取 ANNOUNCE_ADMIN_TOKEN
 
 # ========== 场景列表 ==========
 
@@ -262,17 +263,17 @@ node tools/mock-client/src/index.js --scenario announce-list --announce-base-url
 
 # 创建公告 (ANNOUNCE_CREATE)
 # 创建时必须提供标题、正文，以及 end_time 或 duration_seconds
-node tools/mock-client/src/index.js --scenario announce-create --announce-base-url http://127.0.0.1:9004 --announce-title "系统公告" --announce-content "今晚 20:00 维护" --announce-type popup --announce-priority 20 --announce-duration-seconds 3600
+node tools/mock-client/src/index.js --scenario announce-create --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-title "系统公告" --announce-content "今晚 20:00 维护" --announce-type popup --announce-priority 20 --announce-duration-seconds 3600
 
 # 查询公告详情 (ANNOUNCE_GET)
 node tools/mock-client/src/index.js --scenario announce-get --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id>
 
 # 更新公告 (ANNOUNCE_UPDATE)
 # 至少传一个更新字段，例如标题、正文、优先级、时间窗口
-node tools/mock-client/src/index.js --scenario announce-update --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id> --announce-title "维护时间调整" --announce-end-time 2026-04-17T20:00:00+08:00
+node tools/mock-client/src/index.js --scenario announce-update --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <announce_id> --announce-title "维护时间调整" --announce-end-time 2026-04-17T20:00:00+08:00
 
 # 删除公告 (ANNOUNCE_DELETE)
-node tools/mock-client/src/index.js --scenario announce-delete --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id>
+node tools/mock-client/src/index.js --scenario announce-delete --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <announce_id>
 
 # ========== 移动同步交互测试 ==========
 

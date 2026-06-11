@@ -277,5 +277,10 @@ LOG_DIR=logs
 - `chat-server`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
   - 当前没有消息频率限制配置
+- `announce-service`：
+  - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
+  - 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`，不支持 query token
+  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空值或开发默认值
+  - `GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 当前仍是无 token 只读查询；如果临时公网暴露，必须通过网关/TLS/更高层鉴权和限流兜底
 
 如果后续要真正落地 `game-proxy` / `game-server` / `chat-server` 的风控策略，建议先补代码，再在文档中新增配置项；不要先在文档里约定一组尚未读取的环境变量。

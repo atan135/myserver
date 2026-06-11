@@ -264,11 +264,13 @@ client
 - 已落地独立 `announce-service`
 - 当前对外使用 HTTP 接口，而不是独立 TCP / protobuf 公告协议
 - 当前支持：
-  - `GET /api/v1/announcements`
-  - `GET /api/v1/announcements/:announceId`
-  - `POST /api/v1/announcements`
-  - `PUT /api/v1/announcements/:announceId`
-  - `DELETE /api/v1/announcements/:announceId`
+  - `GET /api/v1/announcements`，只读查询当前不要求公告写 token
+  - `GET /api/v1/announcements/:announceId`，只读查询当前不要求公告写 token
+  - `POST /api/v1/announcements`，要求 `ANNOUNCE_ADMIN_TOKEN`
+  - `PUT /api/v1/announcements/:announceId`，要求 `ANNOUNCE_ADMIN_TOKEN`
+  - `DELETE /api/v1/announcements/:announceId`，要求 `ANNOUNCE_ADMIN_TOKEN`
+- `ANNOUNCE_ADMIN_TOKEN` 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>` header，不支持 query token；生产环境禁止空值或开发默认值
+- `announce-service` 默认仍是内网能力服务，不是生产公网入口；只读查询如果临时公网暴露，也需要网关、TLS 和更高层鉴权或限流兜底
 - 当前存储支持：
   - `MYSQL_ENABLED=true` 时使用 MySQL 持久化
   - `MYSQL_ENABLED=false` 时回退到内存存储
@@ -279,7 +281,7 @@ client
 
 **方案A**：独立 `announce-service`
 - 完全独立，职责单一
-- 可以被 `game-proxy` 或直接被客户端 HTTP 调用
+- 本地/测试可被客户端 HTTP 直连；生产不作为公网默认入口，应经 API/BFF、网关或服务端入口收敛
 
 **方案B**：放在 `game-proxy` 内
 - 与 `game-proxy` 部署在一起

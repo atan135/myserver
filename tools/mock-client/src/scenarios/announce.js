@@ -61,6 +61,16 @@ function assertAnnounceOk(label, response) {
   return response.payload;
 }
 
+function buildAnnounceAdminHeaders(options) {
+  if (!options.announceAdminToken) {
+    return {};
+  }
+
+  return {
+    "X-Admin-Token": options.announceAdminToken
+  };
+}
+
 function requireAnnounceId(options) {
   if (!options.announceId) {
     throw new Error("--announce-id is required");
@@ -220,6 +230,7 @@ export async function runAnnounceCreate(options) {
 
   const response = await requestAnnounceJson(announceUrl, options, {
     method: "POST",
+    headers: buildAnnounceAdminHeaders(options),
     body: JSON.stringify(body)
   });
   printAnnounceResponse("announce.create", response);
@@ -240,6 +251,7 @@ export async function runAnnounceUpdate(options) {
 
   const response = await requestAnnounceJson(announceUrl, options, {
     method: "PUT",
+    headers: buildAnnounceAdminHeaders(options),
     body: JSON.stringify(body)
   });
   printAnnounceResponse("announce.update", response);
@@ -257,7 +269,8 @@ export async function runAnnounceDelete(options) {
   console.log(`announce_id: ${announceId}`);
 
   const response = await requestAnnounceJson(announceUrl, options, {
-    method: "DELETE"
+    method: "DELETE",
+    headers: buildAnnounceAdminHeaders(options)
   });
   printAnnounceResponse("announce.delete", response);
   const payload = assertAnnounceOk("announce.delete", response);

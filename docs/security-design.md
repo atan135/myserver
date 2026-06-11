@@ -85,7 +85,7 @@
 | `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库 | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
-| `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
+| `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接 | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；GM 广播仍是本实例范围；限时自动解封仍未落地 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和限时自动解封仍待补齐 |
@@ -160,7 +160,7 @@
 |------|----------|----------|
 | 客户端 -> `auth-http` | 开发期可明文 HTTP | 生产必须 HTTPS |
 | 客户端 -> `mail-service` | 本地/测试可直连明文 HTTP | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS 并补齐玩家鉴权或可信入口鉴权 |
-| 客户端 -> `announce-service` | 本地/测试可直连明文 HTTP | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS，且只读查询与后台 CRUD 需要分离鉴权策略 |
+| 客户端 -> `announce-service` | 本地/测试可直连明文 HTTP；写接口要求 `ANNOUNCE_ADMIN_TOKEN` header | 生产不作为客户端直连默认入口；若临时暴露，只读查询也必须经过网关/TLS/更高层鉴权，后台 CRUD 继续与玩家读取路径隔离 |
 | 浏览器 -> `admin-web` / `admin-api` | 当前未强制 HTTPS | 生产必须 HTTPS，Bearer token 只允许在 TLS 下使用，并限制在运营网段、堡垒机、VPN 或独立管理入口 |
 | 客户端 -> `chat-server` TCP | 本地/测试可直连明文 TCP | 生产不作为客户端直连默认入口；若临时暴露，必须在入口层做 TLS 终止或由 `chat-server` 直接支持 TLS |
 | 客户端 -> `game-proxy` TCP fallback | 当前明文 TCP | 生产建议在入口层做 TLS 终止，或由 `game-proxy` 直接支持 TLS |
@@ -532,6 +532,22 @@ TRUSTED_PROXIES=
 
 当前 `admin-api` 已读取 `ADMIN_SESSION_TTL_SECONDS`、`ADMIN_LOGIN_MAX_FAILURES`、`ADMIN_LOGIN_FAILURE_WINDOW_SECONDS`、`ADMIN_LOGIN_LOCK_SECONDS`、`TRUST_PROXY` 和 `TRUSTED_PROXIES`。`ADMIN_SESSION_TTL_SECONDS` 未配置时跟随 `JWT_EXPIRES_IN` 解析出的秒数；`TRUST_PROXY=true` 仍要求直连来源显式列在 `TRUSTED_PROXIES` 后才信任 `X-Forwarded-For`。`NODE_ENV=production` 下明显默认的 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 或 `ADMIN_PASSWORD` 会导致配置加载失败。`ADMIN_API_REQUIRE_TLS`、`ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_MONITORING_REQUIRE_AUTH`、`ADMIN_ENFORCE_ROLE_CHECK` 仍是部署或设计口径，其中监控接口和角色校验代码侧已经默认启用。
 
+### 9.5 `announce-service` / 公告写控制面
+
+当前 `announce-service` 已读取：
+
+```env
+ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
+```
+
+说明：
+
+- `ANNOUNCE_ADMIN_TOKEN` 用于保护 `POST /api/v1/announcements`、`PUT /api/v1/announcements/:announceId` 和 `DELETE /api/v1/announcements/:announceId`。
+- 当前支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>` 两种 header；不支持 query token，避免 token 进入访问日志。
+- 缺 token 返回 `ANNOUNCE_ADMIN_TOKEN_REQUIRED`，token 错误返回 `ANNOUNCE_ADMIN_TOKEN_INVALID`。
+- `GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 保持无公告写 token 要求，方便内网和测试读取；如果临时对公网暴露，仍需要网关、TLS 和更高层鉴权或限流策略。
+- `announce-service` 默认仍是内网能力服务，不是生产公网入口；生产公网入口仍只应是 `auth-http` 和 `game-proxy`。`NODE_ENV=production` 或 `APP_ENV=production` 时，`ANNOUNCE_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。
+
 ---
 
 ## 10. 分阶段落地建议
@@ -543,7 +559,7 @@ TRUSTED_PROXIES=
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网；`game-proxy` admin HTTP 口已有 token 鉴权和生产默认 token 拒绝，仍需部署侧网络隔离
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
 5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地；单 IP 频率限制和跨实例全局玩家频率限制仍需继续补齐
-6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
+6. `announce-service` 公告写接口 token 鉴权已落地，仍需保持默认内网化；`mail-service` 和公告只读查询的玩家/网关鉴权边界后续继续收敛
 7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计，仍缺持久审计和细粒度 RBAC
 
 ### M1：当前阶段最值得做的安全增强
