@@ -289,7 +289,7 @@
 当前状态（截至 `2026-06-11`）:
 
 - `ServerRedirectPush` 已扩展目标 proxy 信息，包含 `target_host`、`target_port`、`target_server_id` 和 `transport`。
-- `game-server` 已通过已鉴权 admin/internal 通道支持 `TriggerServerRedirectReq/Res`，可向目标 room 当前在线成员下发 `ServerRedirectPush`。
+- `game-server` 已通过已鉴权 admin/internal 通道支持 `TriggerServerRedirectReq/Res`，可向目标 room 当前在线成员下发 `ServerRedirectPush`；push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接。
 - `tools/mock-client` 已有 `server-redirect-listen` 场景和 parser 单测，用于认证/进房后监听并结构化输出 push。
 - `tools/mock-client` 已有 `server-redirect-reconnect` 场景，用于收到 push 后主动关闭旧连接，按 `target_host` / `target_port` 连接目标入口，重新 `AuthReq`，并优先发送 `RoomReconnectReq`；可按显式参数在找不到房间/离线成员时 fallback 到 `RoomJoinReq`。
 - 真实 old/new/proxy 多进程联调自动化、外部 `mybevy` 适配和同连接迁移仍未完成。
@@ -312,7 +312,7 @@
 
 - [x] 在旧服已鉴权 admin/internal 控制面增加触发 redirect 的入口。
 - [x] 只向当前 game-server 上仍在线、且属于目标 room 的连接推送。
-- [ ] 旧服下发 `ServerRedirectPush` 后主动断开连接。
+- [x] 旧服下发 `ServerRedirectPush` 后主动断开连接。
 - [x] 记录 room_id、player_id、rollout_epoch、目标地址和推送结果日志。
 
 ### 6.3 mybevy 客户端 / mock-client 处理
@@ -323,7 +323,7 @@
 - [x] `mock-client` 重连后优先发起 `RoomReconnectReq`，并支持显式 fallback 到 `RoomJoinReq`。
 - [x] `mock-client` 增加 redirect push 监听场景支持。
 
-当前实现说明：`TriggerServerRedirectReq/Res` 当前使用 `1611/1612`，可走 game-server admin TCP 或 internal socket 已鉴权通道。请求只触发 push，不自动 freeze/export/import/retire，不修改 room transfer 状态，也不实现同连接迁移。`tools/mock-client` 的 `server-redirect-reconnect` 场景可验证工具侧“收到 push 后主动断线、连接目标入口、重新 `AuthReq`、优先 `RoomReconnectReq`”链路；它仍不是 old/new/proxy 多进程自动化联调，也不代表 mybevy 已适配。
+当前实现说明：`TriggerServerRedirectReq/Res` 当前使用 `1611/1612`，可走 game-server admin TCP 或 internal socket 已鉴权通道。请求只触发 push，不自动 freeze/export/import/retire，不修改 room transfer 状态，也不实现同连接迁移。旧服只会在 `ServerRedirectPush` 成功进入目标连接出站队列后请求关闭该旧连接；排队失败的连接计入失败数，不额外覆盖关闭原因。`tools/mock-client` 的 `server-redirect-reconnect` 场景可验证工具侧“收到 push 后主动断线、连接目标入口、重新 `AuthReq`、优先 `RoomReconnectReq`”链路；它仍不是 old/new/proxy 多进程自动化联调，也不代表 mybevy 已适配。
 
 完成标准:
 

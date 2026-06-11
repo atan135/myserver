@@ -32,6 +32,7 @@ use crate::protocol::{MessageType, encode_body};
 
 const MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE: u32 = 3;
 const DEFAULT_ROOM_CLEANUP_INTERVAL_SECS: u64 = 10;
+pub const SERVER_REDIRECT_CLOSE_REASON: &str = "server_redirect_reconnect_required";
 pub const ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT: usize = 50;
 
 fn detach_member_outbound(member: &mut RoomMemberState) {
@@ -1529,6 +1530,7 @@ impl RoomManager {
             ) {
                 Ok(()) => {
                     delivered_count = delivered_count.saturating_add(1);
+                    let close_requested = close_state.request_close(SERVER_REDIRECT_CLOSE_REASON);
                     info!(
                         room_id = room_id,
                         player_id = %player_id,
@@ -1536,7 +1538,9 @@ impl RoomManager {
                         target_host = %push.target_host,
                         target_port = push.target_port,
                         target_server_id = %push.target_server_id,
-                        "server redirect push queued"
+                        close_reason = SERVER_REDIRECT_CLOSE_REASON,
+                        close_requested = close_requested,
+                        "server redirect push queued and connection close requested"
                     );
                 }
                 Err(error) => {
@@ -2734,6 +2738,13 @@ mod tests {
             .disconnect_room_member("room-test", "player-b")
             .await;
 
+        {
+            let rooms = manager.rooms.lock().await;
+            let room = rooms.get("room-test").unwrap();
+            assert_eq!(room.members["player-a"].close_state.reason(), None);
+            assert_eq!(room.members["player-b"].close_state.reason(), None);
+        }
+
         let delivery = manager
             .trigger_server_redirect(
                 "room-test",
@@ -2773,6 +2784,78 @@ mod tests {
         assert!(push.reconnect_required);
         assert!(
             drain_messages_of_type(&mut receivers[1], MessageType::ServerRedirectPush).is_empty()
+        );
+
+        {
+            let rooms = manager.rooms.lock().await;
+            let room = rooms.get("room-test").unwrap();
+            assert_eq!(
+                room.members["player-a"].close_state.reason().as_deref(),
+                Some(SERVER_REDIRECT_CLOSE_REASON)
+            );
+            assert_eq!(room.members["player-b"].close_state.reason(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_tx
+            .try_send(OutboundMessage {
+                message_type: MessageType::RoomStatePush,
+                seq: 0,
+                body: Vec::new(),
+            })
+            .unwrap();
+        let close_state = ConnectionCloseState::new();
+        assert!(close_state.request_close("existing_reason"));
+
+        {
+            let mut rooms = manager.rooms.lock().await;
+            let room = rooms.get_mut("room-test").unwrap();
+            let member = room.members.get_mut("player-a").unwrap();
+            member.sender = full_tx;
+            member.close_state = close_state;
+        }
+
+        let delivery = manager
+            .trigger_server_redirect(
+                "room-test",
+                ServerRedirectPush {
+                    reason: "rollout".to_string(),
+                    room_id: "room-test".to_string(),
+                    rollout_epoch: "epoch-1".to_string(),
+                    reconnect_required: true,
+                    retry_after_ms: 250,
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 4000,
+                    target_server_id: "game-server-new".to_string(),
+                    transport: "kcp".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delivery,
+            ServerRedirectDelivery {
+                delivered_count: 1,
+                failed_count: 1,
+                online_member_count: 2,
+            }
+        );
+
+        let rooms = manager.rooms.lock().await;
+        let room = rooms.get("room-test").unwrap();
+        assert_eq!(
+            room.members["player-a"].close_state.reason().as_deref(),
+            Some("existing_reason")
+        );
+        assert_eq!(
+            room.members["player-b"].close_state.reason().as_deref(),
+            Some(SERVER_REDIRECT_CLOSE_REASON)
         );
     }
 
