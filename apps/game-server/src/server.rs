@@ -28,7 +28,7 @@ use crate::metrics::METRICS;
 use crate::mysql_store::MySqlAuditStore;
 use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
-use crate::session::Session;
+use crate::session::{Session, SessionState};
 
 pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 
@@ -36,6 +36,8 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 pub struct RuntimeConfig {
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    pub msg_rate_window_ms: u64,
+    pub msg_rate_max: u64,
     pub drain_mode_enabled: bool,
     pub drain_mode_entered_at_ms: Option<u64>,
 }
@@ -48,6 +50,50 @@ impl RuntimeConfig {
             "ok"
         }
     }
+}
+
+#[derive(Debug)]
+pub struct ConnectionRateLimiter {
+    window_started_at: Option<Instant>,
+    count: u64,
+}
+
+impl ConnectionRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            window_started_at: None,
+            count: 0,
+        }
+    }
+
+    pub fn allow(&mut self, now: Instant, window_ms: u64, max_messages: u64) -> bool {
+        if window_ms == 0 || max_messages == 0 {
+            return true;
+        }
+
+        let window = Duration::from_millis(window_ms);
+        if self
+            .window_started_at
+            .is_none_or(|started_at| now.duration_since(started_at) >= window)
+        {
+            self.window_started_at = Some(now);
+            self.count = 0;
+        }
+
+        self.count = self.count.saturating_add(1);
+        self.count <= max_messages
+    }
+}
+
+pub fn preauth_message_allowed(
+    session_state: SessionState,
+    message_type: Option<MessageType>,
+) -> bool {
+    session_state == SessionState::Authenticated
+        || matches!(
+            message_type,
+            Some(MessageType::AuthReq) | Some(MessageType::PingReq)
+        )
 }
 
 struct ConnectionCountGuard {
@@ -108,6 +154,8 @@ pub async fn run(
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: config.heartbeat_timeout_secs,
             max_body_len: config.max_body_len,
+            msg_rate_window_ms: config.msg_rate_window_ms,
+            msg_rate_max: config.msg_rate_max,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         })),
@@ -292,6 +340,7 @@ where
         tx,
         kick_notify: Arc::new(Notify::new()),
     };
+    let mut rate_limiter = ConnectionRateLimiter::new();
 
     let writer_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -422,6 +471,31 @@ where
         reader.read_exact(&mut body).await?;
         let packet = Packet::new(header, body);
         let started_at = Instant::now();
+
+        if !rate_limiter.allow(started_at, runtime.msg_rate_window_ms, runtime.msg_rate_max) {
+            connection.queue_error(
+                packet.header.seq,
+                "MSG_RATE_EXCEEDED",
+                "message rate exceeded",
+            )?;
+            services
+                .mysql_store
+                .append_connection_event(
+                    connection.session.id,
+                    connection.session.player_id.as_deref(),
+                    Some(&connection.peer_addr),
+                    "msg_rate_exceeded",
+                    Some(json!({
+                        "msgType": packet.header.msg_type,
+                        "seq": packet.header.seq,
+                        "windowMs": runtime.msg_rate_window_ms,
+                        "max": runtime.msg_rate_max
+                    })),
+                )
+                .await;
+            continue;
+        }
+
         let result = dispatch_packet(&services, &mut connection, &packet).await;
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
@@ -469,6 +543,28 @@ async fn dispatch_packet(
     connection: &mut ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !preauth_message_allowed(connection.session.state, packet.message_type()) {
+        connection.queue_error(
+            packet.header.seq,
+            "PREAUTH_MESSAGE_NOT_ALLOWED",
+            "authenticate before sending business messages",
+        )?;
+        services
+            .mysql_store
+            .append_connection_event(
+                connection.session.id,
+                connection.session.player_id.as_deref(),
+                Some(&connection.peer_addr),
+                "preauth_message_rejected",
+                Some(json!({
+                    "msgType": packet.header.msg_type,
+                    "seq": packet.header.seq
+                })),
+            )
+            .await;
+        return Ok(());
+    }
+
     match packet.message_type() {
         Some(MessageType::AuthReq) => core_service::handle_auth(services, connection, packet).await,
         Some(MessageType::PingReq) => core_service::handle_ping(connection, packet)
@@ -562,4 +658,68 @@ pub fn current_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preauth_allows_auth_and_ping_before_authentication() {
+        assert!(preauth_message_allowed(
+            SessionState::Connected,
+            Some(MessageType::AuthReq)
+        ));
+        assert!(preauth_message_allowed(
+            SessionState::Connected,
+            Some(MessageType::PingReq)
+        ));
+    }
+
+    #[test]
+    fn preauth_rejects_business_and_unknown_messages_before_authentication() {
+        assert!(!preauth_message_allowed(
+            SessionState::Connected,
+            Some(MessageType::RoomJoinReq)
+        ));
+        assert!(!preauth_message_allowed(SessionState::Connected, None));
+    }
+
+    #[test]
+    fn preauth_allows_business_messages_after_authentication() {
+        assert!(preauth_message_allowed(
+            SessionState::Authenticated,
+            Some(MessageType::RoomJoinReq)
+        ));
+        assert!(preauth_message_allowed(SessionState::Authenticated, None));
+    }
+
+    #[test]
+    fn rate_limiter_disabled_allows_all_messages() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 0));
+        assert!(limiter.allow(now, 0, 1));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_after_window_limit() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 2));
+        assert!(limiter.allow(now, 1000, 2));
+        assert!(!limiter.allow(now, 1000, 2));
+    }
+
+    #[test]
+    fn rate_limiter_resets_after_window_rolls() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 1));
+        assert!(!limiter.allow(now + Duration::from_millis(999), 1000, 1));
+        assert!(limiter.allow(now + Duration::from_millis(1000), 1000, 1));
+    }
 }

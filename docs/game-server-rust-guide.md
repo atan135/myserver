@@ -129,6 +129,8 @@
 - `MessageType::from_u16` 把外部整数转换为受控枚举，未知值返回 `None`
 - `Packet::decode_body::<T>()` 用 `prost` 解 Protobuf
 - 当前 `game-proxy` 和 `game-server` 都会校验 ticket，`game-server` 是最终会话建立点
+- `game-server` 在 `dispatch_packet` 层强制鉴权前白名单：未认证连接只允许 `AuthReq` 和 `PingReq`，其它业务消息直接返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会进入房间或背包 handler
+- 玩家连接读到完整 packet 后、业务 dispatch 前会做单连接消息频率检查；`MSG_RATE_MAX=0` 默认关闭，启用后超频返回 `MSG_RATE_EXCEEDED` 并继续保持连接
 - `chat-server` 复用 ticket 签名校验，并已检查 Redis `ticket:<sha256(ticket)>` 归属与 `player-ticket-version:<playerId>`
 
 鉴权主流程：
@@ -138,6 +140,17 @@
 3. `game-proxy` 校验签名、过期时间和 Redis ticket 记录，先向客户端返回 `AuthRes`
 4. `game-proxy` 选定上游后，把认证包 replay 到 `game-server`
 5. `game-server` 再次校验签名、过期时间和 Redis ticket 记录，成功后进入 `Authenticated`
+
+相关配置位于 `apps/game-server/src/config.rs` 与 `.env.example`：
+
+```env
+HEARTBEAT_TIMEOUT_SECS=30
+MAX_BODY_LEN=4096
+MSG_RATE_WINDOW_MS=1000
+MSG_RATE_MAX=0
+```
+
+其中 `MSG_RATE_MAX=0` 表示不限制。admin TCP 的 `AdminUpdateConfigReq` 可动态更新 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms`、`msg_rate_max` 和 `drain_mode`；当前 `ServerStatusRes` 协议仍只返回 `max_body_len` 与 `heartbeat_timeout_secs` 等既有字段，尚未回显消息频率限制配置。
 
 ## 7. 房间运行时怎么读
 

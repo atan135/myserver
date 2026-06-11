@@ -10,7 +10,7 @@
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 限流/黑名单配置项目前并不存在
-- `game-server`：当前已实现 ticket 校验、心跳超时和包体长度限制；文档里旧的消息频率限制专用配置项目前并不存在
+- `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制和单连接消息频率限制；频率限制默认关闭，按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 启用
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
 
 ---
@@ -139,9 +139,11 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 ### 4.1 当前已实现能力
 
 - ticket 校验：校验 HMAC 签名，并检查 Redis 中是否存在对应 ticket
+- 鉴权前消息白名单：未认证连接只允许 `AuthReq` 与 `PingReq`，其它业务消息在 dispatch 层返回 `ErrorRes(PREAUTH_MESSAGE_NOT_ALLOWED)`，不会进入房间、移动、背包等业务 handler
 - 心跳超时：读取包头时使用 `heartbeat_timeout_secs`
 - 最大包体限制：包体超过 `max_body_len` 时拒绝处理
-- 管理接口支持动态调整 `heartbeat_timeout_secs` 与 `max_body_len`
+- 单连接消息频率限制：读到完整 packet 后、业务 dispatch 前检查窗口计数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
+- 管理接口支持动态调整 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms` 与 `msg_rate_max`
 
 ### 4.2 当前实际配置项
 
@@ -152,12 +154,21 @@ TICKET_SECRET=replace-with-a-long-random-string
 REDIS_KEY_PREFIX=
 HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
+MSG_RATE_WINDOW_MS=1000
+MSG_RATE_MAX=0
 ```
+
+说明：
+
+- `MSG_RATE_WINDOW_MS` 默认 `1000`，表示单连接频率统计窗口。
+- `MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一连接在窗口内超过该消息数会收到 `MSG_RATE_EXCEEDED`。
+- admin TCP 的 `AdminUpdateConfigReq` 可通过 key/value 动态更新 `msg_rate_window_ms` 与 `msg_rate_max`。
+- 当前 `ServerStatusRes` 协议仍只回显 `max_body_len`、`heartbeat_timeout_secs` 等既有字段，尚未暴露 `msg_rate_window_ms` 与 `msg_rate_max`。
 
 ### 4.3 与旧文档的关键差异
 
 - 旧文档中的 `HEARTBEAT_TIMEOUT` 并不存在，实际配置名是 `HEARTBEAT_TIMEOUT_SECS`
-- 旧文档中的 `MSG_RATE_WINDOW` / `MSG_RATE_MAX` 当前并不存在
+- 旧文档中的 `MSG_RATE_WINDOW` 并不存在，实际配置名是 `MSG_RATE_WINDOW_MS`；`MSG_RATE_MAX` 当前已读取，默认 `0` 关闭
 - 当前“操作冷却”不是通过独立的通用风控配置实现的；代码里没有这一组统一环境变量
 
 ### 4.4 当前实现备注
@@ -166,7 +177,7 @@ MAX_BODY_LEN=4096
 - `game-server` 校验 ticket 时依赖 `TICKET_SECRET` 和 `REDIS_KEY_PREFIX`；这两个值需要与 `auth-http` 的签发侧保持一致
 - ticket 校验成功后当前不会自动删除 Redis 中的 ticket，因此并非严格的一次性消费模型
 - 这种设计和当前“同一 ticket 供 `game-proxy` / `game-server` / `chat-server` 复用”的接入方式是一致的；如果后续要降低重放风险，更适合考虑缩短 TTL、增加用途隔离或引入换票流程
-- 心跳和包体长度限制属于当前已经生效的安全边界；消息频率限制、异常解析失败率阈值等仍属于设计目标，尚未看到对应配置入口
+- 心跳、包体长度、鉴权前白名单和单连接消息频率限制属于当前已经生效的安全边界；单 IP / 单玩家频率限制、异常解析失败率阈值、时间戳窗口和反重放仍属于设计目标
 
 ---
 
@@ -233,8 +244,8 @@ LOG_DIR=logs
   - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
   - 当前没有单 IP、单玩家、Redis 黑名单或消息频率限制环境变量
 - `game-server`：
-  - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
-  - 当前没有 `MSG_RATE_WINDOW`、`MSG_RATE_MAX`
+  - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`
+  - 当前没有单 IP、单玩家、Redis 黑名单、时间戳窗口或反重放环境变量
 - `chat-server`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
   - 当前没有消息频率限制配置

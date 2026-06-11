@@ -450,6 +450,22 @@ async fn apply_runtime_config(
             runtime.heartbeat_timeout_secs = parsed;
             Ok(())
         }
+        "msg_rate_window_ms" => {
+            let parsed = value.parse::<u64>().map_err(|_| "INVALID_CONFIG_VALUE")?;
+            if !(1..=60_000).contains(&parsed) {
+                return Err("INVALID_CONFIG_VALUE");
+            }
+            runtime.msg_rate_window_ms = parsed;
+            Ok(())
+        }
+        "msg_rate_max" => {
+            let parsed = value.parse::<u64>().map_err(|_| "INVALID_CONFIG_VALUE")?;
+            if parsed > 10_000 {
+                return Err("INVALID_CONFIG_VALUE");
+            }
+            runtime.msg_rate_max = parsed;
+            Ok(())
+        }
         "drain_mode" | "drain_mode_enabled" => {
             let parsed = parse_bool_config_value(value)?;
             let previous = runtime.drain_mode_enabled;
@@ -569,6 +585,8 @@ mod tests {
         Arc::new(RwLock::new(RuntimeConfig {
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         }))
@@ -602,5 +620,35 @@ mod tests {
         let result = apply_runtime_config(&runtime_config, "drain_mode", "maybe").await;
 
         assert_eq!(result, Err("INVALID_CONFIG_VALUE"));
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_updates_message_rate_limit() {
+        let runtime_config = runtime_config_fixture();
+
+        apply_runtime_config(&runtime_config, "msg_rate_window_ms", "500")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "msg_rate_max", "20")
+            .await
+            .unwrap();
+
+        let runtime = *runtime_config.read().await;
+        assert_eq!(runtime.msg_rate_window_ms, 500);
+        assert_eq!(runtime.msg_rate_max, 20);
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_rejects_invalid_message_rate_limit() {
+        let runtime_config = runtime_config_fixture();
+
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "msg_rate_window_ms", "0").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "msg_rate_max", "10001").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
     }
 }

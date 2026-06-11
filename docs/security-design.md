@@ -87,7 +87,7 @@
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未做单连接消息频率限制 |
-| `game-server` | ticket 签名与 Redis 归属校验、心跳超时、最大包体限制、连接审计、基础权威移动校正 | 没有统一消息频率限制、时间戳窗口、反重放和通用作弊计数 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、连接审计、基础权威移动校正 | 没有单 IP / 单玩家频率限制、时间戳窗口、反重放和通用作弊计数 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和 token version 管理接口仍待补齐 |
 
 说明：
@@ -289,8 +289,8 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 
 ### 6.4 当前阶段应优先补的反作弊能力
 
-1. 鉴权前消息白名单已在 `game-proxy` 落地；`game-server` 侧仍需继续收敛认证前业务入口
-2. 单连接 / 单玩家 / 单 IP 消息频率限制
+1. 鉴权前消息白名单已在 `game-proxy` 与 `game-server` 落地
+2. 单连接消息频率限制已在 `game-server` 落地；单玩家 / 单 IP 消息频率限制仍需补齐
 3. `frame_id` 超前 / 过期 / 重复输入处理
 4. `client_timestamp` 时间窗校验
 5. 连续非法包计数与断连
@@ -482,8 +482,8 @@ IP_ALLOWLIST_ENABLED=false
 ### 9.3 `game-server` / 业务层
 
 ```env
-PLAYER_MSG_RATE_WINDOW_MS=1000
-PLAYER_MSG_RATE_MAX=20
+MSG_RATE_WINDOW_MS=1000
+MSG_RATE_MAX=0
 FRAME_LEAD_LIMIT=3
 FRAME_LAG_LIMIT=30
 CLIENT_TIMESTAMP_SKEW_MS=5000
@@ -518,8 +518,8 @@ TRUSTED_PROXIES=
 1. 管理员 JWT session/jti、登出撤销、禁用后失效和基础 token version 校验已落地；批量撤销、重置密码联动 bump version 和管理接口仍待补齐
 2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网
-4. `game-proxy` 鉴权前消息白名单已落地；`game-server` 仍需继续补齐认证前业务入口约束
-5. 单连接 / 单玩家 / 单 IP 消息频率限制
+4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
+5. 单连接消息频率限制已在 `game-server` 落地；单玩家 / 单 IP 消息频率限制仍需继续补齐
 6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
 7. 非法包计数、异常输入计数和安全审计统一
 

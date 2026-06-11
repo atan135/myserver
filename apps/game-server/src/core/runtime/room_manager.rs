@@ -1550,7 +1550,7 @@ mod tests {
     ) -> (
         RoomManager,
         RecordingRoomLogicFactory,
-        Vec<mpsc::UnboundedReceiver<OutboundMessage>>,
+        Vec<mpsc::Receiver<OutboundMessage>>,
     ) {
         let factory = RecordingRoomLogicFactory::default();
         let manager = RoomManager::with_match_client(

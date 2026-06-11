@@ -198,7 +198,9 @@
 |---------|------|
 | `9000` | `ErrorRes` |
 
-当前 `game-proxy` 在鉴权成功前收到非 `AuthReq` / `PingReq` 消息时，会返回 `ErrorRes`，`error_code=PREAUTH_MESSAGE_NOT_ALLOWED`。该错误在代理本地产生，不会触发上游选择、鉴权 replay 或 upstream 连接。
+当前 `game-proxy` 和 `game-server` 都会在鉴权成功前拒绝非 `AuthReq` / `PingReq` 消息，并返回 `ErrorRes`，`error_code=PREAUTH_MESSAGE_NOT_ALLOWED`。代理侧错误在本地产生，不会触发上游选择、鉴权 replay 或 upstream 连接；游戏服侧错误在 dispatch 层产生，不会进入房间、移动、背包等业务 handler。
+
+`game-server` 还支持单连接消息频率限制。`MSG_RATE_MAX=0` 时关闭；启用后，如果同一连接在 `MSG_RATE_WINDOW_MS` 窗口内超过配置值，会返回 `ErrorRes`，`error_code=MSG_RATE_EXCEEDED`，并继续保持连接。
 
 ### 4.2 关键消息结构
 
@@ -317,9 +319,10 @@
 
 ### 4.4 房间状态约束
 
-- 未鉴权连接仅允许 `AuthReq`、`PingReq`；`game-proxy` 已强制该白名单
-- `AuthReq` 失败后连接保持未认证状态，后续房间、移动、背包、GM、未知消息等仍会被代理本地拒绝
+- 未鉴权连接仅允许 `AuthReq`、`PingReq`；`game-proxy` 与 `game-server` 都已强制该白名单
+- `AuthReq` 失败后连接保持未认证状态，后续房间、移动、背包、GM、未知消息等会被鉴权前白名单拒绝
 - `game-proxy` 默认 `PROXY_MAX_PREAUTH_FAILURES=3`，同一连接在鉴权成功前非法消息或鉴权失败累计达到阈值后关闭连接；配置为 `0` 表示不按失败次数断开
+- `game-server` 默认 `MSG_RATE_MAX=0` 不启用单连接消息频率限制；配置为正整数后，超频消息会收到 `MSG_RATE_EXCEEDED`，当前不断开连接
 - 一个连接同一时刻只能处于一个房间上下文
 - `PlayerInputReq` / `MoveInputReq` 只应在允许的对局状态中发送
 - 重连和观战走独立消息，不复用普通 `RoomJoinReq`

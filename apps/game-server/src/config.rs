@@ -27,6 +27,8 @@ pub struct Config {
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    pub msg_rate_window_ms: u64,
+    pub msg_rate_max: u64,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -43,9 +45,19 @@ fn parse_bool(name: &str, default: bool) -> bool {
 }
 
 fn parse_u64(name: &str, default: u64) -> u64 {
+    parse_u64_value(env::var(name).ok(), default)
+}
+
+fn parse_u64_value(value: Option<String>, default: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_usize(name: &str, default: usize) -> usize {
     env::var(name)
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
 }
 
@@ -102,10 +114,9 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30);
-        let max_body_len = env::var("MAX_BODY_LEN")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(4096);
+        let max_body_len = parse_usize("MAX_BODY_LEN", 4096);
+        let msg_rate_window_ms = parse_u64("MSG_RATE_WINDOW_MS", 1000);
+        let msg_rate_max = parse_u64("MSG_RATE_MAX", 0);
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -143,6 +154,8 @@ impl Config {
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,
+            msg_rate_window_ms,
+            msg_rate_max,
             registry_enabled,
             registry_url,
             registry_heartbeat_interval_secs,
@@ -166,4 +179,20 @@ fn derive_internal_socket_name(local_socket_name: &str) -> String {
     }
 
     format!("{local_socket_name}-internal")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_u64_value_uses_default_for_missing_or_invalid_value() {
+        assert_eq!(parse_u64_value(None, 1000), 1000);
+        assert_eq!(parse_u64_value(Some("invalid".to_string()), 1000), 1000);
+    }
+
+    #[test]
+    fn parse_u64_value_accepts_valid_value() {
+        assert_eq!(parse_u64_value(Some("250".to_string()), 1000), 250);
+    }
 }
