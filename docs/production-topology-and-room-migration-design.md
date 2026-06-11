@@ -99,22 +99,23 @@
 
 ### 6.1 当前单实例边界
 
-当前 `game-proxy` 可以作为单一公网游戏入口，选择一个或多个内部 `game-server` upstream。它已经具备 room route、player route 和 rollout session 元数据；默认仍是进程内内存态，启用 `PROXY_ROUTE_STORE_BACKEND=redis` 后可在 Redis 中保存 route store 快照并在 proxy 重启后恢复。
+当前 `game-proxy` 可以作为单一公网游戏入口，选择一个或多个内部 `game-server` upstream。它已经具备 room route、player route 和 rollout session 元数据；默认仍是进程内内存态，启用 `PROXY_ROUTE_STORE_BACKEND=redis` 后可在 Redis 中保存带 `store_revision` 的 route store 快照，并在 proxy 重启后恢复。
 
 单 proxy 生产化前至少需要：
 
 - admin 接口认证、权限和审计。
 - 生产启用 Redis route store 持久化，或接入统一控制面。
-- route 更新的 CAS 校验。
+- route 更新的 CAS 校验；Redis backend 当前已具备单 key 快照级 Lua CAS。
 - 上游健康状态与运维状态分离。
 - 重启后恢复 `rollout_epoch`、room route、player route；当前 Redis backend 已覆盖这三类数据的单 proxy 最小闭环。
 
 当前 Redis route store 的边界：
 
 - 保存内容是 rollout session、room route、player route 的 serde JSON 快照。
+- 快照包含 `store_revision`；旧快照缺字段时按 revision `0` 兼容加载。Redis 写入使用 Lua compare-and-set，只有 expected revision 命中时才写入并递增 revision。
 - 配置为 `PROXY_ROUTE_STORE_BACKEND=redis` 时，启动加载失败会让 proxy 启动失败，避免静默丢失生产路由状态。
 - Redis URL 优先使用 `PROXY_ROUTE_STORE_REDIS_URL`，未设置时依次复用 `REGISTRY_URL`、`REDIS_URL`；key prefix 优先使用 `PROXY_ROUTE_STORE_KEY_PREFIX`，未设置时复用 `REDIS_KEY_PREFIX`。
-- 它解决单 proxy 重启丢 route 的最低风险，但不保存 upstream health/operation state，也不代表多 proxy 并发写入已经强一致。
+- 它解决单 proxy 重启丢 route 的最低风险，并降低多 proxy 最后写覆盖风险；但不保存 upstream health/operation state，也不代表多 proxy 并发写入已经强一致。冲突时 admin 写入会返回错误，玩家 join/reconnect/observer 触发的绑定元数据更新只告警并重新加载最新快照。
 
 ### 6.2 多 proxy 目标边界
 
@@ -128,7 +129,7 @@
 
 即使使用 sticky，也不能把 proxy 内存视为权威状态。room route、player route、rollout session 必须能从 Redis、数据库或控制面恢复。
 
-当前 Redis route store 可以作为 shared route store 的起点，但多 proxy 生产可用还需要补齐跨 proxy 的原子 CAS、锁、pub/sub 失效同步或统一控制面 owner。否则多个 proxy 同时写同一 `room_id` 时仍可能出现最后写入覆盖或本地缓存短暂不一致。
+当前 Redis route store 可以作为 shared route store 的起点，已经具备单 key 快照级 revision/CAS，能避免无条件最后写覆盖。但多 proxy 生产可用还需要补齐 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测，以及必要时更细粒度的锁或冲突合并。否则多个 proxy 同时写不同 route 时仍可能因为整快照 CAS 冲突而需要重试，本地缓存也可能短暂不一致。
 
 多 proxy 场景下，route store 至少要支持：
 
@@ -323,7 +324,7 @@ client session
 - 每个服务实例有稳定 `instance_id` 或 `server_id`。
 - `game-proxy` 可从注册中心发现多个 `game-server`。
 - route store 重启后可恢复；当前 Redis backend 覆盖单 proxy 重启恢复。
-- 多 proxy 场景下，同一 `room_id` 的 owner 判断一致；当前仍需 CAS/锁/同步或控制面 owner 才能验收。
+- 多 proxy 场景下，同一 `room_id` 的 owner 判断一致；当前已有单 key CAS，但仍需 pub/sub 缓存失效、锁/同步策略或控制面 owner 才能验收。
 - route 更新有 CAS 和审计记录。
 
 ### 11.3 Room Ownership 验收
@@ -357,7 +358,7 @@ client session
 
 1. 生产网络边界：部署文档和配置只暴露 `auth-http`、`game-proxy` 玩家入口。
 2. route store 持久化：已具备 Redis backend 最小闭环，生产启用 `PROXY_ROUTE_STORE_BACKEND=redis`。
-3. 多 proxy 一致性：在 Redis backend 上补 CAS/锁/同步，或明确 sticky/shared route store/control plane owner 策略。
+3. 多 proxy 一致性：在 Redis backend 单 key CAS 上补 pub/sub 缓存失效、控制面 owner、真实 Redis 压测和必要的锁/同步策略，或明确 sticky/shared route store/control plane owner 策略。
 4. redirect/reconnect 闭环：补齐 `ServerRedirectPush`、客户端重连、proxy 重新路由和错误 owner 处理。
 5. room transfer 最小闭环：实现 freeze/export/import/retire，并先选择简单 room policy 验证。
 6. transfer payload trait：按玩法补齐可序列化、版本化、checksum 和兼容性检查。

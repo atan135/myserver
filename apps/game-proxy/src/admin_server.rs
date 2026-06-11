@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::route_store::{
     PlayerRouteRecord, ProxyRouteStore, RolloutSessionState, RoomMigrationState, RoomRouteRecord,
-    UpstreamOperationState,
+    RouteStoreUpdateError, UpstreamOperationState,
 };
 
 const MAX_ID_LEN: usize = 128;
@@ -157,9 +157,20 @@ async fn handle_connection(
                 .get_rollout_session()
                 .await
                 .map(|session| session.rollout_epoch);
-            route_store.end_rollout().await;
-            audit_ok("rollout_end", None, None, None, rollout_epoch.as_deref());
-            write_plain("ok")
+            match route_store.end_rollout().await {
+                Ok(()) => {
+                    audit_ok("rollout_end", None, None, None, rollout_epoch.as_deref());
+                    write_plain("ok")
+                }
+                Err(error) => audited_update_error(
+                    "rollout_end",
+                    &error,
+                    None,
+                    None,
+                    None,
+                    rollout_epoch.as_deref(),
+                ),
+            }
         }
         ("POST", "/rollout/state") => handle_rollout_state(&route_store, &query).await,
         ("POST", "/room-route/upsert") => handle_room_route_upsert(&route_store, &query).await,
@@ -231,15 +242,27 @@ async fn handle_rollout_start(
         }
     }
 
-    route_store
+    match route_store
         .begin_rollout(
             rollout_epoch.to_string(),
             old_server_id.to_string(),
             new_server_id.to_string(),
         )
-        .await;
-    audit_ok(action, Some(new_server_id), None, None, Some(rollout_epoch));
-    write_plain("ok")
+        .await
+    {
+        Ok(()) => {
+            audit_ok(action, Some(new_server_id), None, None, Some(rollout_epoch));
+            write_plain("ok")
+        }
+        Err(error) => audited_update_error(
+            action,
+            &error,
+            Some(new_server_id),
+            None,
+            None,
+            Some(rollout_epoch),
+        ),
+    }
 }
 
 async fn handle_rollout_state(
@@ -260,15 +283,26 @@ async fn handle_rollout_state(
     let Some(session) = route_store.get_rollout_session().await else {
         return audited_bad_request(action, "no active rollout", None, None, None, None);
     };
-    route_store.mark_rollout_state(rollout_state).await;
-    audit_ok(
-        action,
-        None,
-        None,
-        None,
-        Some(session.rollout_epoch.as_str()),
-    );
-    write_plain("ok")
+    match route_store.mark_rollout_state(rollout_state).await {
+        Ok(()) => {
+            audit_ok(
+                action,
+                None,
+                None,
+                None,
+                Some(session.rollout_epoch.as_str()),
+            );
+            write_plain("ok")
+        }
+        Err(error) => audited_update_error(
+            action,
+            &error,
+            None,
+            None,
+            None,
+            Some(session.rollout_epoch.as_str()),
+        ),
+    }
 }
 
 async fn handle_switch(route_store: &ProxyRouteStore, server_id: &str) -> String {
@@ -507,9 +541,9 @@ async fn handle_room_route_upsert(
             );
             write_plain("ok")
         }
-        Err(error_code) => audited_bad_request(
+        Err(error) => audited_update_error(
             action,
-            error_code,
+            &error,
             Some(owner_server_id),
             Some(room_id),
             None,
@@ -582,9 +616,9 @@ async fn handle_player_route_upsert(
             );
             write_plain("ok")
         }
-        Err(error_code) => audited_bad_request(
+        Err(error) => audited_update_error(
             action,
-            error_code,
+            &error,
             preferred_server_id.as_deref(),
             current_room_id.as_deref(),
             Some(player_id),
@@ -823,6 +857,26 @@ fn audited_bad_request(
 ) -> String {
     audit_error(action, error, server_id, room_id, player_id, rollout_epoch);
     bad_request(error)
+}
+
+fn audited_update_error(
+    action: &'static str,
+    error: &RouteStoreUpdateError,
+    server_id: Option<&str>,
+    room_id: Option<&str>,
+    player_id: Option<&str>,
+    rollout_epoch: Option<&str>,
+) -> String {
+    let error_code = error.code();
+    audit_error(
+        action,
+        error_code,
+        server_id,
+        room_id,
+        player_id,
+        rollout_epoch,
+    );
+    bad_request(error_code)
 }
 
 fn split_path_and_query(path: &str) -> (&str, HashMap<String, String>) {
