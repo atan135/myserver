@@ -17,19 +17,19 @@
             <el-menu-item index="/">
               <span>概览</span>
             </el-menu-item>
-            <el-menu-item index="/audit-logs">
+            <el-menu-item v-if="authStore.hasPermission(P.AUDIT_READ)" index="/audit-logs">
               <span>审计日志</span>
             </el-menu-item>
-            <el-menu-item index="/security-logs">
+            <el-menu-item v-if="authStore.hasPermission(P.SECURITY_READ)" index="/security-logs">
               <span>安全日志</span>
             </el-menu-item>
-            <el-menu-item index="/players">
+            <el-menu-item v-if="authStore.hasPermission(P.PLAYERS_READ)" index="/players">
               <span>玩家管理</span>
             </el-menu-item>
-            <el-menu-item v-if="authStore.isOperator" index="/gm">
+            <el-menu-item v-if="authStore.hasAnyPermission(GM_MENU_PERMISSIONS)" index="/gm">
               <span>GM 命令</span>
             </el-menu-item>
-            <el-menu-item index="/monitoring">
+            <el-menu-item v-if="authStore.hasPermission(P.MONITORING_READ)" index="/monitoring">
               <span>服务监控</span>
             </el-menu-item>
           </el-menu>
@@ -48,10 +48,17 @@ import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
+import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
 
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
+const GM_MENU_PERMISSIONS = [
+  P.GM_BROADCAST,
+  P.GM_SEND_ITEM,
+  P.GM_KICK_PLAYER,
+  P.GM_BAN_PLAYER
+];
 
 const activeMenu = computed(() => {
   if (route.path.startsWith("/monitoring")) {

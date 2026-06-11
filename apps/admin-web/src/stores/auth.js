@@ -1,5 +1,11 @@
 import { defineStore } from "pinia";
 import { authApi } from "../api";
+import {
+  ADMIN_PERMISSIONS as P,
+  hasAnyPermission,
+  hasPermission,
+  permissionsForRole
+} from "../auth/permissions";
 
 export const useAuthStore = defineStore("auth", {
   state: () => ({
@@ -13,8 +19,16 @@ export const useAuthStore = defineStore("auth", {
     role: (state) => state.user?.role || null,
     username: (state) => state.user?.username || null,
     displayName: (state) => state.user?.displayName || null,
-    isAdmin: (state) => state.user?.role === "admin",
-    isOperator: (state) => ["admin", "operator"].includes(state.user?.role)
+    permissions: (state) => permissionsForRole(state.user?.role),
+    isAdmin: (state) => ["admin", "super_admin"].includes(state.user?.role),
+    isOperator: (state) => hasAnyPermission(state.user, [
+      P.PLAYERS_STATUS_UPDATE,
+      P.GM_BROADCAST,
+      P.GM_SEND_ITEM,
+      P.GM_KICK_PLAYER
+    ]),
+    hasPermission: (state) => (permission) => hasPermission(state.user, permission),
+    hasAnyPermission: (state) => (permissions) => hasAnyPermission(state.user, permissions)
   },
 
   actions: {

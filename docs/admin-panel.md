@@ -67,24 +67,24 @@ npm run dev:admin-web
 
 ### Web 前端已有页面
 
-| 路由 | 页面 | 前端可见角色 | 说明 |
+| 路由 | 页面 | 前端入口权限 | 说明 |
 |------|------|--------------|------|
 | `/login` | 登录页 | 全部 | 管理员登录 |
 | `/` | 概览页 | 已登录用户 | 当前账号信息展示 |
-| `/audit-logs` | 审计日志 | `admin` / `operator` / `viewer` | 查看管理操作日志 |
-| `/security-logs` | 安全日志 | `admin` / `operator` / `viewer` | 查看安全事件日志 |
-| `/players` | 玩家管理 | `admin` / `operator` / `viewer` | 查询玩家，`operator` 以上可改状态 |
-| `/gm` | GM 命令 | `admin` / `operator` | 广播、发道具、踢人，`admin` 额外可封禁 |
-| `/monitoring` | 服务监控总览 | `admin` / `operator` / `viewer` | 查看服务在线状态和实时指标 |
-| `/monitoring/:service` | 服务监控详情 | `admin` / `operator` / `viewer` | 查看单服务 QPS / 延迟曲线 |
+| `/audit-logs` | 审计日志 | `audit.read` | 查看管理操作日志 |
+| `/security-logs` | 安全日志 | `security.read` | 查看安全事件日志 |
+| `/players` | 玩家管理 | `players.read` | 查询玩家；状态按钮按 `players.status.update` / `players.ban` 显示 |
+| `/gm` | GM 命令 | 任一 `gm.*` 操作权限 | 广播、发道具、踢人、封禁表单分别按同名权限显示 |
+| `/monitoring` | 服务监控总览 | `monitoring.read` | 查看服务在线状态和实时指标；手动归档按钮要求 `monitoring.archive` |
+| `/monitoring/:service` | 服务监控详情 | `monitoring.read` | 查看单服务 QPS / 延迟曲线 |
 
-### 当前只有 API、尚未接入前端页面的能力
+### 控制面写操作入口
 
-- 维护模式查询：`GET /api/v1/maintenance`
-- 维护模式切换：`POST /api/v1/maintenance`
-- 撤销指定管理员全部 token：`POST /api/v1/admins/:adminId/revoke-tokens`
-- 重置指定管理员密码并撤销旧 token：`POST /api/v1/admins/:adminId/reset-password`
-- 手动触发 metrics 归档：`POST /api/admin/monitoring/archive`
+- 概览页显示维护模式状态，要求 `maintenance.read`
+- 概览页可切换维护模式，要求 `maintenance.write`
+- 撤销指定管理员全部 token：后端接口已按 `admins.revoke_tokens` 校验，前端当前未提供专用账号管理入口
+- 重置指定管理员密码并撤销旧 token：后端接口已按 `admins.reset_password` 校验，前端当前未提供专用账号管理入口
+- 服务监控总览页可手动触发 metrics 归档，要求 `monitoring.archive`
 
 ## 权限说明
 
@@ -99,8 +99,8 @@ npm run dev:admin-web
 
 ### 当前实现现状
 
-- `admin-web` 的菜单和前端路由按角色做了显示与跳转限制
-- `GM.vue` 页面中“封禁玩家”表单只对 `admin` 显示
+- `admin-web` 在 `apps/admin-web/src/auth/permissions.js` 集中定义前端权限矩阵，菜单、路由和按钮按同名权限做显示与跳转限制；当前仍从登录用户 `role` 推导权限，兼容只有 role 的 token/user 信息
+- `admin-web` 的前端权限只用于减少误操作入口，不是安全边界；后端 `admin-api` 的 `@Permissions()` 校验仍是权威
 - `admin-api` 当前所有 `/api/v1/*` 接口都通过 NestJS Guard 做 JWT 校验
 - `admin-api` 已通过 `RolesGuard` 和 `@Permissions()` 对审计、玩家、GM、维护模式、监控和管理员 token 生命周期接口做后端权限校验
 
@@ -130,7 +130,7 @@ npm run dev:admin-web
 - 审计 IP 与控制面保护已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For` 或 `X-Forwarded-Proto`
 - `admin-api` 支持请求级 HTTPS/TLS 强制和来源 IP allowlist；生产仍必须通过运营网段、堡垒机、VPN 或独立管理入口做网络隔离
 
-当前仍未做数据库化权限、按资源范围授权、前端与后端共用权限枚举、权限变更审计查询和审批流。
+当前仍未做数据库化权限、按资源范围授权、前端与后端共用权限枚举、权限变更审计查询和审批流。后续应把权限枚举从前后端重复定义收敛为共享包或生成产物，避免矩阵漂移。
 
 ## 数据库表
 
@@ -543,6 +543,7 @@ npm run dev:admin-web
 - 当前登录用户名
 - 显示名称
 - 角色
+- 维护模式状态；有 `maintenance.write` 时可切换维护模式
 
 还没有聚合统计卡片、待办告警或快捷操作面板。
 
@@ -554,8 +555,8 @@ npm run dev:admin-web
 - 按 Guest ID 筛选
 - 按状态筛选
 - 分页浏览
-- 禁用玩家
-- 解禁玩家
+- 有 `players.status.update` 时可禁用玩家、恢复 active 状态
+- 有 `players.ban` 时可将玩家状态设为 banned
 
 当前前端没有单独的玩家详情页弹窗或跳转页，只有列表操作。
 
@@ -563,12 +564,12 @@ npm run dev:admin-web
 
 已支持：
 
-- 发送广播
-- 发放道具
-- 踢出玩家
-- 封禁玩家
+- 有 `gm.broadcast` 时可发送广播
+- 有 `gm.send_item` 时可发放道具
+- 有 `gm.kick_player` 时可踢出玩家
+- 有 `gm.ban_player` 时可封禁玩家
 
-其中封禁表单只在前端对 `admin` 角色显示；后端通过 `gm.ban_player` 权限校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
+其中每个表单都按同名前端权限显示；后端通过对应 `gm.*` 权限校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
 ### 服务监控页
 
@@ -577,6 +578,7 @@ npm run dev:admin-web
 - 轮询刷新，当前周期 5 秒
 - 查看在线 / 离线状态
 - 查看 QPS、延迟、在线人数 / 连接数 / 匹配池大小
+- 有 `monitoring.archive` 时可手动触发 metrics 归档
 
 详情页已支持：
 

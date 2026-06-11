@@ -47,10 +47,10 @@
             {{ formatTime(row.last_login_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" v-if="authStore.isOperator">
+        <el-table-column label="操作" width="220" v-if="canManagePlayers">
           <template #default="{ row }">
             <el-button
-              v-if="row.status === 'active'"
+              v-if="row.status === 'active' && authStore.hasPermission(P.PLAYERS_STATUS_UPDATE)"
               type="warning"
               size="small"
               link
@@ -59,13 +59,22 @@
               禁用
             </el-button>
             <el-button
-              v-if="row.status === 'disabled' || row.status === 'banned'"
+              v-if="(row.status === 'disabled' || row.status === 'banned') && authStore.hasPermission(P.PLAYERS_STATUS_UPDATE)"
               type="success"
               size="small"
               link
               @click="handleEnable(row)"
             >
               解禁
+            </el-button>
+            <el-button
+              v-if="row.status !== 'banned' && authStore.hasPermission(P.PLAYERS_BAN)"
+              type="danger"
+              size="small"
+              link
+              @click="handleBan(row)"
+            >
+              封禁
             </el-button>
           </template>
         </el-table-column>
@@ -86,11 +95,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from "vue";
+import { ref, reactive, onMounted, computed } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
 import { playerApi } from "../api";
+import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
 
 const authStore = useAuthStore();
 
@@ -106,6 +116,10 @@ const pagination = ref({
   limit: 50,
   total: 0
 });
+const canManagePlayers = computed(() => authStore.hasAnyPermission([
+  P.PLAYERS_STATUS_UPDATE,
+  P.PLAYERS_BAN
+]));
 
 function formatTime(time) {
   if (!time) return "-";
@@ -192,6 +206,24 @@ async function handleEnable(row) {
 
     await playerApi.updatePlayerStatus(row.player_id, "active");
     ElMessage.success("已解禁");
+    fetchPlayers();
+  } catch (err) {
+    if (err !== "cancel") {
+      ElMessage.error("操作失败");
+    }
+  }
+}
+
+async function handleBan(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定封禁玩家 ${row.login_name || row.guest_id || row.player_id} 吗？`,
+      "封禁玩家",
+      { type: "warning" }
+    );
+
+    await playerApi.updatePlayerStatus(row.player_id, "banned");
+    ElMessage.success("已封禁");
     fetchPlayers();
   } catch (err) {
     if (err !== "cancel") {

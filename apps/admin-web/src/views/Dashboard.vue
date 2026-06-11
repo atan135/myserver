@@ -27,18 +27,76 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <el-row v-if="authStore.hasPermission(P.MAINTENANCE_READ)" :gutter="20" style="margin-top: 20px">
+      <el-col :span="12">
+        <el-card v-loading="maintenance.loading">
+          <template #header>
+            <span>维护模式</span>
+          </template>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item label="当前状态">
+              <el-tag :type="maintenance.enabled ? 'danger' : 'success'">
+                {{ maintenance.enabled ? "维护中" : "正常开放" }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="原因">
+              {{ maintenance.reason || "-" }}
+            </el-descriptions-item>
+            <el-descriptions-item label="更新人">
+              {{ maintenance.updatedBy || "-" }}
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <el-form
+            v-if="authStore.hasPermission(P.MAINTENANCE_WRITE)"
+            :model="maintenanceForm"
+            label-width="80px"
+            style="margin-top: 16px"
+          >
+            <el-form-item label="原因">
+              <el-input v-model="maintenanceForm.reason" placeholder="维护原因（可选）" />
+            </el-form-item>
+            <el-form-item>
+              <el-button
+                :type="maintenance.enabled ? 'success' : 'danger'"
+                :loading="maintenance.updating"
+                @click="handleMaintenanceToggle"
+              >
+                {{ maintenance.enabled ? "关闭维护" : "开启维护" }}
+              </el-button>
+            </el-form-item>
+          </el-form>
+        </el-card>
+      </el-col>
+    </el-row>
   </AdminLayout>
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, onMounted, reactive } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
 import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
+import { maintenanceApi } from "../api";
+import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
 
 const authStore = useAuthStore();
+const maintenance = reactive({
+  loading: false,
+  updating: false,
+  enabled: false,
+  reason: "",
+  updatedBy: "",
+  updatedAt: ""
+});
+const maintenanceForm = reactive({
+  reason: ""
+});
 
 const roleTagType = computed(() => {
   switch (authStore.role) {
+    case "super_admin":
     case "admin":
       return "danger";
     case "operator":
@@ -46,5 +104,58 @@ const roleTagType = computed(() => {
     default:
       return "info";
   }
+});
+
+function applyMaintenanceStatus(data) {
+  maintenance.enabled = !!data.enabled;
+  maintenance.reason = data.reason || "";
+  maintenance.updatedBy = data.updatedBy || "";
+  maintenance.updatedAt = data.updatedAt || "";
+}
+
+async function fetchMaintenance() {
+  if (!authStore.hasPermission(P.MAINTENANCE_READ)) {
+    return;
+  }
+
+  maintenance.loading = true;
+  try {
+    const { data } = await maintenanceApi.getStatus();
+    applyMaintenanceStatus(data);
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || "获取维护状态失败");
+  } finally {
+    maintenance.loading = false;
+  }
+}
+
+async function handleMaintenanceToggle() {
+  const enabled = !maintenance.enabled;
+  const title = enabled ? "开启维护模式" : "关闭维护模式";
+  try {
+    await ElMessageBox.confirm(
+      `确定${enabled ? "开启" : "关闭"}维护模式吗？`,
+      title,
+      { type: enabled ? "warning" : "info" }
+    );
+  } catch {
+    return;
+  }
+
+  maintenance.updating = true;
+  try {
+    const { data } = await maintenanceApi.setStatus(enabled, maintenanceForm.reason);
+    applyMaintenanceStatus(data);
+    maintenanceForm.reason = "";
+    ElMessage.success(enabled ? "维护模式已开启" : "维护模式已关闭");
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || "维护模式更新失败");
+  } finally {
+    maintenance.updating = false;
+  }
+}
+
+onMounted(() => {
+  fetchMaintenance();
 });
 </script>

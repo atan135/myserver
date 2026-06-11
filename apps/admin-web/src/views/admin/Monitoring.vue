@@ -4,6 +4,15 @@
       <div class="header">
         <div class="header-left">
           <h2>服务监控</h2>
+          <el-button
+            v-if="authStore.hasPermission(P.MONITORING_ARCHIVE)"
+            type="primary"
+            size="small"
+            :loading="archiveLoading"
+            @click="handleArchive"
+          >
+            手动归档
+          </el-button>
         </div>
         <div class="window-selector">
           <el-radio-group v-model="currentWindow" size="small">
@@ -64,12 +73,17 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 import AdminLayout from "../../components/AdminLayout.vue";
 import { monitoringApi } from "../../api";
+import { useAuthStore } from "../../stores/auth";
+import { ADMIN_PERMISSIONS as P } from "../../auth/permissions";
 
 const router = useRouter();
+const authStore = useAuthStore();
 const services = ref([]);
 const currentWindow = ref("5m");
+const archiveLoading = ref(false);
 let pollTimer = null;
 
 const SERVICE_ONLINE_LABELS = {
@@ -111,6 +125,19 @@ async function fetchServices() {
 
 function goToDetail(serviceName) {
   router.push(`/monitoring/${serviceName}?window=${currentWindow.value}`);
+}
+
+async function handleArchive() {
+  archiveLoading.value = true;
+  try {
+    const response = await monitoringApi.triggerArchive();
+    const archived = response.data?.archived ?? 0;
+    ElMessage.success(`归档完成，写入 ${archived} 条`);
+  } catch (error) {
+    ElMessage.error(error.response?.data?.message || "归档失败");
+  } finally {
+    archiveLoading.value = false;
+  }
 }
 
 onMounted(() => {

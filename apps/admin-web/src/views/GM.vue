@@ -4,7 +4,7 @@
 
     <el-row :gutter="20">
       <!-- 广播 -->
-      <el-col :span="12">
+      <el-col :span="12" v-if="authStore.hasPermission(P.GM_BROADCAST)">
         <el-card style="margin-top: 20px">
           <template #header>
             <span>广播消息</span>
@@ -34,7 +34,7 @@
       </el-col>
 
       <!-- 发放道具 -->
-      <el-col :span="12">
+      <el-col :span="12" v-if="authStore.hasPermission(P.GM_SEND_ITEM)">
         <el-card style="margin-top: 20px">
           <template #header>
             <span>发放道具</span>
@@ -64,7 +64,7 @@
 
     <el-row :gutter="20">
       <!-- 踢出玩家 -->
-      <el-col :span="12">
+      <el-col :span="12" v-if="authStore.hasPermission(P.GM_KICK_PLAYER)">
         <el-card style="margin-top: 20px">
           <template #header>
             <span>踢出玩家</span>
@@ -86,7 +86,7 @@
       </el-col>
 
       <!-- 封禁玩家 -->
-      <el-col :span="12" v-if="authStore.isAdmin">
+      <el-col :span="12" v-if="authStore.hasPermission(P.GM_BAN_PLAYER)">
         <el-card style="margin-top: 20px">
           <template #header>
             <span>封禁玩家</span>
@@ -120,6 +120,7 @@ import { ElMessage } from "element-plus";
 import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
 import { gmApi } from "../api";
+import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
 
 const authStore = useAuthStore();
 
