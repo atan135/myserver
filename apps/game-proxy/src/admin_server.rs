@@ -454,17 +454,41 @@ async fn handle_connection(
                     }
                 }
                 Err(error) => {
-                    audited_update_error(
-                        &audit_logger,
-                        &context,
-                        "rollout_end",
-                        &error,
-                        None,
-                        None,
-                        None,
-                        rollout_epoch.as_deref(),
-                    )
-                    .await
+                    if error.code() == "ROLLOUT_NOT_DRAINED" {
+                        match audit_error(
+                            &audit_logger,
+                            &context,
+                            "rollout_end",
+                            error.code(),
+                            None,
+                            None,
+                            None,
+                            rollout_epoch.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(()) => http_response(
+                                409,
+                                "text/plain; charset=utf-8",
+                                error.code().to_string(),
+                            ),
+                            Err(audit_error) => {
+                                audit_write_failed(&audit_logger, "rollout_end", &audit_error)
+                            }
+                        }
+                    } else {
+                        audited_update_error(
+                            &audit_logger,
+                            &context,
+                            "rollout_end",
+                            &error,
+                            None,
+                            None,
+                            None,
+                            rollout_epoch.as_deref(),
+                        )
+                        .await
+                    }
                 }
             }
         }
@@ -2617,6 +2641,82 @@ mod tests {
             "room-1"
         );
         assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rollout_end_reports_conflict_when_routes_are_not_drained() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let route_store = route_store().await;
+        let store_for_assert = route_store.clone();
+        let connection_count = Arc::new(AtomicU64::new(0));
+        let maintenance = Arc::new(tokio::sync::RwLock::new(false));
+        let auth_config = Arc::new(auth_config());
+        let audit_logger = Arc::new(test_audit_logger());
+
+        route_store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "game-server-1".to_string(),
+                "game-server-2".to_string(),
+            )
+            .await
+            .unwrap();
+        route_store
+            .upsert_room_route(
+                RoomRouteRecord {
+                    room_id: "room-1".to_string(),
+                    owner_server_id: "game-server-1".to_string(),
+                    migration_state: RoomMigrationState::OwnedByOld,
+                    member_count: 0,
+                    online_member_count: 0,
+                    empty_since_ms: Some(123),
+                    room_version: 1,
+                    rollout_epoch: "rollout-1".to_string(),
+                    last_transfer_checksum: String::new(),
+                    updated_at_ms: 0,
+                },
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_connection(
+                socket,
+                route_store,
+                connection_count,
+                maintenance,
+                auth_config,
+                audit_logger,
+                None,
+            )
+            .await
+            .unwrap();
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "POST /rollout/end HTTP/1.1\r\nx-admin-token: {TOKEN}\r\nX-Admin-Actor: ops@example.com\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+
+        let (_, response) = tokio::join!(server, client);
+
+        assert_eq!(status_code(&response), 409);
+        assert!(response.ends_with("ROLLOUT_NOT_DRAINED"));
+        assert!(store_for_assert.get_rollout_session().await.is_some());
     }
 
     #[tokio::test]

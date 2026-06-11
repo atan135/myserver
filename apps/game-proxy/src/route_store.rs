@@ -755,12 +755,19 @@ impl ProxyRouteStore {
         let mut end_summary = RolloutEndSummary::default();
         let result = self
             .update_persisted_state("end_rollout", |state| {
+                match state.evaluate_rollout_drain().status {
+                    RolloutDrainStatus::NoActiveRollout => return Err("NO_ACTIVE_ROLLOUT".into()),
+                    RolloutDrainStatus::Blocked => return Err("ROLLOUT_NOT_DRAINED".into()),
+                    RolloutDrainStatus::Drained => {}
+                }
                 end_summary = state.finish_rollout();
                 Ok(end_summary.has_changes())
             })
             .await;
 
         if result.is_ok() {
+            self.apply_rollout_finished_upstream_mode(&end_summary)
+                .await;
             log_rollout_end_summary("end_rollout", &end_summary);
         }
 
@@ -802,6 +809,7 @@ impl ProxyRouteStore {
                     evaluation,
                     end_summary,
                 }) => {
+                    self.apply_rollout_finished_upstream_mode(end_summary).await;
                     log_rollout_completion_evaluation(
                         "complete_rollout_if_drained",
                         "completed",
@@ -828,6 +836,24 @@ impl ProxyRouteStore {
         }
 
         result.map(|_| outcome.expect("rollout completion outcome should be set"))
+    }
+
+    async fn apply_rollout_finished_upstream_mode(&self, summary: &RolloutEndSummary) {
+        let (Some(old_server_id), Some(new_server_id)) = (
+            summary.old_server_id.as_deref(),
+            summary.new_server_id.as_deref(),
+        ) else {
+            return;
+        };
+
+        let mut state = self.state.write().await;
+        if state.apply_rollout_finished_upstream_mode(old_server_id, new_server_id) {
+            info!(
+                old_server_id,
+                new_server_id,
+                "proxy rollout finished; upstream routing returned to single active new server mode"
+            );
+        }
     }
 
     pub async fn mark_rollout_state(
@@ -1255,8 +1281,12 @@ impl RouteStoreState {
             };
         };
 
-        let mut blocked_room_ids = Vec::new();
-        let mut blocked_room_lookup = HashMap::new();
+        let mut blocked_room_ids = self.current_epoch_old_owner_room_route_ids(session);
+        let mut blocked_room_lookup: HashMap<_, _> = blocked_room_ids
+            .iter()
+            .cloned()
+            .map(|room_id| (room_id, true))
+            .collect();
         let mut stale_room_route_count = 0;
         let mut room_routes: Vec<_> = self.room_routes.values().collect();
         room_routes.sort_by(|left, right| left.room_id.cmp(&right.room_id));
@@ -1268,10 +1298,14 @@ impl RouteStoreState {
             }
 
             if room_route_blocks_rollout(record, session) {
-                blocked_room_lookup.insert(record.room_id.clone(), true);
-                blocked_room_ids.push(record.room_id.clone());
+                if !blocked_room_lookup.contains_key(&record.room_id) {
+                    blocked_room_lookup.insert(record.room_id.clone(), true);
+                    blocked_room_ids.push(record.room_id.clone());
+                }
             }
         }
+        blocked_room_ids.sort();
+        blocked_room_ids.dedup();
 
         let mut blocked_player_ids = Vec::new();
         let mut stale_player_route_count = 0;
@@ -1321,6 +1355,20 @@ impl RouteStoreState {
         }
     }
 
+    fn current_epoch_old_owner_room_route_ids(&self, session: &RolloutSession) -> Vec<String> {
+        let mut room_ids: Vec<_> = self
+            .room_routes
+            .values()
+            .filter(|record| {
+                route_epoch_matches_current(&record.rollout_epoch, &session.rollout_epoch)
+                    && record.owner_server_id == session.old_server_id
+            })
+            .map(|record| record.room_id.clone())
+            .collect();
+        room_ids.sort();
+        room_ids
+    }
+
     fn finish_rollout(&mut self) -> RolloutEndSummary {
         let ended_session = self.rollout_session.take();
         let removed_player_route_count = self.player_routes.len();
@@ -1362,10 +1410,21 @@ impl RouteStoreState {
     }
 
     fn apply_persisted(&mut self, persisted: PersistedRouteStoreState) {
+        let finished_session = self
+            .rollout_session
+            .as_ref()
+            .filter(|_| persisted.rollout_session.is_none())
+            .cloned();
         self.store_revision = persisted.store_revision;
         self.rollout_session = persisted.rollout_session;
         self.room_routes = persisted.room_routes;
         self.player_routes = persisted.player_routes;
+        if let Some(session) = finished_session {
+            self.apply_rollout_finished_upstream_mode(
+                &session.old_server_id,
+                &session.new_server_id,
+            );
+        }
     }
 
     fn find_connectable_route(&self, server_id: &str) -> Option<&UpstreamRoute> {
@@ -1395,6 +1454,29 @@ impl RouteStoreState {
                     .copied()
                     .find(|route| route.can_accept_bound_sessions())
             })
+    }
+
+    fn apply_rollout_finished_upstream_mode(
+        &mut self,
+        old_server_id: &str,
+        new_server_id: &str,
+    ) -> bool {
+        let mut changed = false;
+        if let Some(route) = self.routes.get_mut(new_server_id) {
+            if route.operation_state != UpstreamOperationState::Active {
+                route.operation_state = UpstreamOperationState::Active;
+                changed = true;
+            }
+        }
+        if old_server_id != new_server_id {
+            if let Some(route) = self.routes.get_mut(old_server_id) {
+                if route.operation_state != UpstreamOperationState::Draining {
+                    route.operation_state = UpstreamOperationState::Draining;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -2108,6 +2190,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollout_complete_if_drained_blocks_stop_gate_when_current_epoch_old_owner_room_exists()
+    {
+        let store = ProxyRouteStore::default();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record(
+                    "room-failed",
+                    "new",
+                    RoomMigrationState::TransferFailed,
+                    1,
+                    "checksum-failed",
+                ),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record(
+                    "room-old",
+                    "old",
+                    RoomMigrationState::RetiredOnOld,
+                    1,
+                    "checksum-old",
+                ),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let evaluation = store.evaluate_rollout_drain().await;
+
+        assert_eq!(evaluation.status, RolloutDrainStatus::Blocked);
+        assert_eq!(evaluation.blocked_room_count, 2);
+        assert_eq!(
+            evaluation.blocked_room_samples,
+            vec!["room-failed", "room-old"]
+        );
+
+        let result = store.complete_rollout_if_drained().await.unwrap();
+        assert!(matches!(
+            result,
+            RolloutCompleteIfDrainedResult::Blocked { .. }
+        ));
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn end_rollout_rejects_when_current_epoch_old_owner_room_exists() {
+        let store = ProxyRouteStore::default();
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_record("room-old", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result = store.end_rollout().await;
+
+        assert_eq!(result.unwrap_err().code(), "ROLLOUT_NOT_DRAINED");
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
     async fn rollout_drain_evaluation_blocks_old_player_routes() {
         let store = ProxyRouteStore::default();
         store
@@ -2215,6 +2381,130 @@ mod tests {
         let routes = store.list_room_routes().await;
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].room_id, "room-stale");
+    }
+
+    #[tokio::test]
+    async fn rollout_completion_returns_default_routing_to_new_server() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                UpstreamRoute {
+                    server_id: "old".to_string(),
+                    local_socket_name: "old.sock".to_string(),
+                    operation_state: UpstreamOperationState::Active,
+                    health_state: UpstreamHealthState::Healthy,
+                },
+                UpstreamRoute {
+                    server_id: "new".to_string(),
+                    local_socket_name: "new.sock".to_string(),
+                    operation_state: UpstreamOperationState::Active,
+                    health_state: UpstreamHealthState::Healthy,
+                },
+            ])
+            .await;
+        store
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.active_upstream_server_id().await.as_deref(),
+            Some("new")
+        );
+
+        let result = store.complete_rollout_if_drained().await.unwrap();
+        assert!(matches!(
+            result,
+            RolloutCompleteIfDrainedResult::Completed { .. }
+        ));
+        assert!(store.get_rollout_session().await.is_none());
+        assert_eq!(
+            store.active_upstream_server_id().await.as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            store
+                .select_default_upstream()
+                .await
+                .expect("default route should exist")
+                .server_id,
+            "new"
+        );
+
+        let routes = store.list_routes().await;
+        let old = routes
+            .iter()
+            .find(|route| route.server_id == "old")
+            .expect("old route should exist");
+        let new = routes
+            .iter()
+            .find(|route| route.server_id == "new")
+            .expect("new route should exist");
+        assert_eq!(old.operation_state, UpstreamOperationState::Draining);
+        assert_eq!(new.operation_state, UpstreamOperationState::Active);
+    }
+
+    #[tokio::test]
+    async fn rollout_completion_reload_returns_default_routing_to_new_server() {
+        let persistence = Arc::new(MemoryRouteStorePersistence::default());
+        let writer = ProxyRouteStore::with_persistence(persistence.clone());
+        let reader = ProxyRouteStore::with_persistence(persistence.clone());
+
+        for store in [&writer, &reader] {
+            store
+                .set_static_routes(vec![
+                    UpstreamRoute {
+                        server_id: "old".to_string(),
+                        local_socket_name: "old.sock".to_string(),
+                        operation_state: UpstreamOperationState::Active,
+                        health_state: UpstreamHealthState::Healthy,
+                    },
+                    UpstreamRoute {
+                        server_id: "new".to_string(),
+                        local_socket_name: "new.sock".to_string(),
+                        operation_state: UpstreamOperationState::Active,
+                        health_state: UpstreamHealthState::Healthy,
+                    },
+                ])
+                .await;
+        }
+
+        writer
+            .begin_rollout(
+                "rollout-1".to_string(),
+                "old".to_string(),
+                "new".to_string(),
+            )
+            .await
+            .unwrap();
+        reader.load_persisted_state().await.unwrap();
+        assert_eq!(
+            reader.active_upstream_server_id().await.as_deref(),
+            Some("new")
+        );
+
+        writer.complete_rollout_if_drained().await.unwrap();
+        reader.reload_if_newer_revision(2).await.unwrap();
+
+        assert!(reader.get_rollout_session().await.is_none());
+        assert_eq!(
+            reader.active_upstream_server_id().await.as_deref(),
+            Some("new")
+        );
+        let routes = reader.list_routes().await;
+        let old = routes
+            .iter()
+            .find(|route| route.server_id == "old")
+            .expect("old route should exist");
+        let new = routes
+            .iter()
+            .find(|route| route.server_id == "new")
+            .expect("new route should exist");
+        assert_eq!(old.operation_state, UpstreamOperationState::Draining);
+        assert_eq!(new.operation_state, UpstreamOperationState::Active);
     }
 
     #[tokio::test]
