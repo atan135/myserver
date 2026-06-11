@@ -722,6 +722,11 @@ async fn handle_rollout_complete_if_drained(
         let evaluation = route_store.evaluate_rollout_drain().await;
         match evaluation.status {
             RolloutDrainStatus::NoActiveRollout => {
+                log_rollout_complete_if_drained_rejected(
+                    "no_active",
+                    "NO_ACTIVE_ROLLOUT",
+                    &evaluation,
+                );
                 return audited_rollout_complete_if_drained_rejected(
                     audit_logger,
                     context,
@@ -733,6 +738,11 @@ async fn handle_rollout_complete_if_drained(
                 .await;
             }
             RolloutDrainStatus::Blocked => {
+                log_rollout_complete_if_drained_rejected(
+                    "blocked",
+                    "ROLLOUT_NOT_DRAINED",
+                    &evaluation,
+                );
                 return audited_rollout_complete_if_drained_rejected(
                     audit_logger,
                     context,
@@ -746,16 +756,9 @@ async fn handle_rollout_complete_if_drained(
             RolloutDrainStatus::Drained => {
                 let old_server_drain_status = old_server_drain_status_checker.check().await;
                 if !old_server_drain_status.passed {
-                    warn!(
-                        rollout_epoch = evaluation.rollout_epoch.as_deref().unwrap_or_default(),
-                        old_server_id = evaluation.old_server_id.as_deref().unwrap_or_default(),
-                        status_code = ?old_server_drain_status.status_code,
-                        ok = ?old_server_drain_status.ok,
-                        owned_room_count = ?old_server_drain_status.owned_room_count,
-                        migrating_room_count = ?old_server_drain_status.migrating_room_count,
-                        connection_count = ?old_server_drain_status.connection_count,
-                        error = old_server_drain_status.error.as_deref().unwrap_or_default(),
-                        "old server drain status check blocked proxy rollout completion"
+                    log_old_server_drain_status_blocked_completion(
+                        &evaluation,
+                        &old_server_drain_status,
                     );
                     return audited_rollout_complete_if_drained_rejected(
                         audit_logger,
@@ -1757,6 +1760,60 @@ async fn audited_rollout_complete_if_drained_rejected(
             audit_write_failed(audit_logger, "rollout_complete_if_drained", &audit_error)
         }
     }
+}
+
+fn log_old_server_drain_status_blocked_completion(
+    evaluation: &RolloutDrainEvaluation,
+    old_server_drain_status: &OldServerDrainStatusCheckSummary,
+) {
+    warn!(
+        update_source = "complete_rollout_if_drained",
+        event = "blocked_by_old_server_drain_status",
+        rollout_epoch = evaluation.rollout_epoch.as_deref().unwrap_or_default(),
+        old_server_id = evaluation.old_server_id.as_deref().unwrap_or_default(),
+        new_server_id = evaluation.new_server_id.as_deref().unwrap_or_default(),
+        drain_status = evaluation.status.as_str(),
+        blocked_room_count = evaluation.blocked_room_count,
+        blocked_player_count = evaluation.blocked_player_count,
+        stale_room_route_count = evaluation.stale_room_route_count,
+        stale_player_route_count = evaluation.stale_player_route_count,
+        removed_room_route_count = 0,
+        removed_player_route_count = 0,
+        remaining_room_route_count = 0,
+        remaining_player_route_count = 0,
+        status_code = ?old_server_drain_status.status_code,
+        ok = ?old_server_drain_status.ok,
+        owned_room_count = ?old_server_drain_status.owned_room_count,
+        migrating_room_count = ?old_server_drain_status.migrating_room_count,
+        connection_count = ?old_server_drain_status.connection_count,
+        error = old_server_drain_status.error.as_deref().unwrap_or_default(),
+        "old server drain status check blocked proxy rollout completion"
+    );
+}
+
+fn log_rollout_complete_if_drained_rejected(
+    event: &'static str,
+    error_code: &'static str,
+    evaluation: &RolloutDrainEvaluation,
+) {
+    warn!(
+        update_source = "complete_rollout_if_drained",
+        event,
+        error_code,
+        rollout_epoch = evaluation.rollout_epoch.as_deref().unwrap_or_default(),
+        old_server_id = evaluation.old_server_id.as_deref().unwrap_or_default(),
+        new_server_id = evaluation.new_server_id.as_deref().unwrap_or_default(),
+        drain_status = evaluation.status.as_str(),
+        blocked_room_count = evaluation.blocked_room_count,
+        blocked_player_count = evaluation.blocked_player_count,
+        stale_room_route_count = evaluation.stale_room_route_count,
+        stale_player_route_count = evaluation.stale_player_route_count,
+        removed_room_route_count = 0,
+        removed_player_route_count = 0,
+        remaining_room_route_count = 0,
+        remaining_player_route_count = 0,
+        "proxy rollout complete-if-drained rejected"
+    );
 }
 
 async fn audited_forbidden(

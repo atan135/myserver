@@ -80,6 +80,16 @@ pub enum RolloutSessionState {
     Interrupted,
 }
 
+impl RolloutSessionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Ending => "Ending",
+            Self::Interrupted => "Interrupted",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutSession {
     pub rollout_epoch: String,
@@ -161,6 +171,16 @@ pub enum RolloutDrainStatus {
     NoActiveRollout,
     Blocked,
     Drained,
+}
+
+impl RolloutDrainStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoActiveRollout => "NoActiveRollout",
+            Self::Blocked => "Blocked",
+            Self::Drained => "Drained",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -702,6 +722,13 @@ impl ProxyRouteStore {
         old_server_id: String,
         new_server_id: String,
     ) -> Result<(), RouteStoreUpdateError> {
+        let log_session = RolloutSession {
+            rollout_epoch: rollout_epoch.clone(),
+            old_server_id: old_server_id.clone(),
+            new_server_id: new_server_id.clone(),
+            state: RolloutSessionState::Active,
+            started_at_ms: 0,
+        };
         self.update_persisted_state("begin_rollout", move |state| {
             state.rollout_session = Some(RolloutSession {
                 rollout_epoch,
@@ -713,7 +740,9 @@ impl ProxyRouteStore {
             Ok(true)
         })
         .await
-        .map(|_| ())
+        .map(|_| {
+            log_rollout_session_lifecycle("begin_rollout", "started", &log_session);
+        })
     }
 
     pub async fn end_rollout(&self) -> Result<(), RouteStoreUpdateError> {
@@ -768,10 +797,33 @@ impl ProxyRouteStore {
             .await;
 
         if result.is_ok() {
-            if let Some(RolloutCompleteIfDrainedResult::Completed { end_summary, .. }) =
-                outcome.as_ref()
-            {
-                log_rollout_end_summary("complete_rollout_if_drained", end_summary);
+            match outcome.as_ref() {
+                Some(RolloutCompleteIfDrainedResult::Completed {
+                    evaluation,
+                    end_summary,
+                }) => {
+                    log_rollout_completion_evaluation(
+                        "complete_rollout_if_drained",
+                        "completed",
+                        evaluation,
+                    );
+                    log_rollout_end_summary("complete_rollout_if_drained", end_summary);
+                }
+                Some(RolloutCompleteIfDrainedResult::Blocked { evaluation }) => {
+                    log_rollout_completion_evaluation(
+                        "complete_rollout_if_drained",
+                        "blocked",
+                        evaluation,
+                    );
+                }
+                Some(RolloutCompleteIfDrainedResult::NoActiveRollout { evaluation }) => {
+                    log_rollout_completion_evaluation(
+                        "complete_rollout_if_drained",
+                        "no_active",
+                        evaluation,
+                    );
+                }
+                None => {}
             }
         }
 
@@ -782,16 +834,22 @@ impl ProxyRouteStore {
         &self,
         rollout_state: RolloutSessionState,
     ) -> Result<(), RouteStoreUpdateError> {
-        self.update_persisted_state("mark_rollout_state", move |state| {
+        let mut updated_session = None;
+        self.update_persisted_state("mark_rollout_state", |state| {
             if let Some(session) = state.rollout_session.as_mut() {
                 session.state = rollout_state;
+                updated_session = Some(session.clone());
                 Ok(true)
             } else {
                 Ok(false)
             }
         })
         .await
-        .map(|_| ())
+        .map(|_| {
+            if let Some(session) = updated_session.as_ref() {
+                log_rollout_session_lifecycle("mark_rollout_state", "state_changed", session);
+            }
+        })
     }
 
     pub async fn list_room_routes(&self) -> Vec<RoomRouteRecord> {
@@ -1479,6 +1537,55 @@ fn log_player_route_update(
     );
 }
 
+fn log_rollout_session_lifecycle(
+    update_source: &'static str,
+    event: &'static str,
+    session: &RolloutSession,
+) {
+    info!(
+        update_source,
+        event,
+        rollout_epoch = %session.rollout_epoch,
+        old_server_id = %session.old_server_id,
+        new_server_id = %session.new_server_id,
+        rollout_state = session.state.as_str(),
+        drain_status = "not_evaluated",
+        blocked_room_count = 0,
+        blocked_player_count = 0,
+        stale_room_route_count = 0,
+        stale_player_route_count = 0,
+        removed_room_route_count = 0,
+        removed_player_route_count = 0,
+        remaining_room_route_count = 0,
+        remaining_player_route_count = 0,
+        "proxy rollout lifecycle updated"
+    );
+}
+
+fn log_rollout_completion_evaluation(
+    update_source: &'static str,
+    event: &'static str,
+    evaluation: &RolloutDrainEvaluation,
+) {
+    info!(
+        update_source,
+        event,
+        rollout_epoch = %evaluation.rollout_epoch.as_deref().unwrap_or_default(),
+        old_server_id = %evaluation.old_server_id.as_deref().unwrap_or_default(),
+        new_server_id = %evaluation.new_server_id.as_deref().unwrap_or_default(),
+        drain_status = evaluation.status.as_str(),
+        blocked_room_count = evaluation.blocked_room_count,
+        blocked_player_count = evaluation.blocked_player_count,
+        stale_room_route_count = evaluation.stale_room_route_count,
+        stale_player_route_count = evaluation.stale_player_route_count,
+        removed_room_route_count = 0,
+        removed_player_route_count = 0,
+        remaining_room_route_count = 0,
+        remaining_player_route_count = 0,
+        "proxy rollout complete-if-drained evaluated"
+    );
+}
+
 fn log_rollout_end_summary(update_source: &'static str, summary: &RolloutEndSummary) {
     let Some(rollout_epoch) = summary.rollout_epoch.as_deref() else {
         return;
@@ -1486,9 +1593,15 @@ fn log_rollout_end_summary(update_source: &'static str, summary: &RolloutEndSumm
 
     info!(
         update_source,
+        event = "ended",
         rollout_epoch,
         old_server_id = %summary.old_server_id.as_deref().unwrap_or_default(),
         new_server_id = %summary.new_server_id.as_deref().unwrap_or_default(),
+        drain_status = "completed",
+        blocked_room_count = 0,
+        blocked_player_count = 0,
+        stale_room_route_count = 0,
+        stale_player_route_count = 0,
         removed_room_route_count = summary.removed_room_route_count,
         removed_player_route_count = summary.removed_player_route_count,
         remaining_room_route_count = summary.remaining_room_route_count,

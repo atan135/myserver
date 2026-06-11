@@ -482,16 +482,17 @@
 
 ## 10. 日志、监控与审计任务
 
-- [ ] 为 `proxy` 增加灰度会话日志字段:
+- [x] 为 `proxy` 增加灰度会话日志字段:
   - `rollout_epoch`
   - `old_server_id`
   - `new_server_id`
   - `room_id`
   - `player_id`
+  - route update 日志已覆盖 `room_id` / `player_id` 与 `rollout_epoch`，rollout lifecycle 日志已覆盖 `rollout_epoch` / `old_server_id` / `new_server_id`。
 - [x] 为 `game-server` 增加 room freeze/export/import/confirm/retire 日志；成功、拒绝原因、checksum/version mismatch 和幂等 replay 路径都带 `room_id`、`rollout_epoch`、`error_code`、状态与版本上下文。
 - [x] 为 transfer payload 增加 checksum 和版本日志。
 - [ ] 为 redirect 增加审计日志。
-- [ ] 为灰度结束增加最终汇总日志。
+- [x] 为灰度结束增加最终汇总日志，包含 removed / remaining room route 与 player route 计数。
 
 完成标准:
 
