@@ -32,7 +32,7 @@ pub async fn handle_get_room_data(
         return Ok(());
     }
 
-    let tables = services.config_tables.snapshot().await;
+    let tables = services.config_tables.tables_snapshot().await;
     let table = &tables.testtable_100;
     let mut field_0_list = Vec::new();
 

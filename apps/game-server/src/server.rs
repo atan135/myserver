@@ -19,8 +19,6 @@ use crate::core::player::{MySqlPlayerStore, PlayerManager};
 use crate::core::room::OutboundMessage;
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, inventory_service, room_service};
-use crate::core::system::combat::{CsvCombatCatalog, SharedCombatCatalog};
-use crate::core::system::scene::SceneCatalog;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
 use crate::match_client::{MatchClientConfig, init_match_client};
@@ -125,30 +123,13 @@ pub async fn run(
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }
 
-    let tables_snapshot = config_tables.snapshot().await;
-    let scene_dir = std::path::Path::new(&config.csv_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("scene");
-    let scene_catalog = Arc::new(SceneCatalog::load_from_dir(
-        &scene_dir,
-        tables_snapshot.as_ref(),
-    )?);
-    let combat_catalog: SharedCombatCatalog =
-        Arc::new(CsvCombatCatalog::from_tables(tables_snapshot.as_ref())?);
-    let movement_demo_scene_id = scene_catalog
-        .scene_id_by_code("grassland_01")
-        .or_else(|| scene_catalog.scenes.keys().min().copied())
-        .ok_or("scene catalog is empty")?;
-    let room_logic_factory: SharedRoomLogicFactory = Arc::new(GameRoomLogicFactory::new(
-        scene_catalog,
-        movement_demo_scene_id,
-        combat_catalog,
-    ));
+    let room_logic_factory: SharedRoomLogicFactory =
+        Arc::new(GameRoomLogicFactory::new(config_tables.clone()));
     let shared_state = ServerSharedState {
-        room_manager: Arc::new(RoomManager::with_match_client_and_cleanup_interval(
+        room_manager: Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
             match_client,
             room_logic_factory,
+            config_tables.room_policy_registry(),
             config.room_cleanup_interval_secs,
         )),
         runtime_config: Arc::new(RwLock::new(RuntimeConfig {

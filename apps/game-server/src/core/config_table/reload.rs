@@ -54,24 +54,35 @@ pub fn spawn_hot_reload_task(runtime: ConfigTableRuntime, interval: Duration) ->
                 .collect::<Vec<_>>();
 
             match runtime.reload_changed(&changed_files).await {
-                Ok(tables) => {
-                    let counts = tables.row_counts();
+                Ok(reloaded) => {
+                    let counts = reloaded.snapshot.tables.row_counts();
                     info!(
                         csv_dir = %runtime.csv_dir().display(),
-                        changed_files = changed_labels.join(","),
+                        scene_dir = %runtime.scene_dir().display(),
+                        changed_files = reloaded.changed_file_names.join(","),
+                        config_version = reloaded.snapshot.version,
+                        scenetable_rows = counts.scenetable,
+                        scenespawnpoint_rows = counts.scenespawnpoint,
+                        sceneportal_rows = counts.sceneportal,
+                        sceneregion_rows = counts.sceneregion,
+                        scenemonsterspawn_rows = counts.scenemonsterspawn,
                         testtable_100_rows = counts.testtable_100,
                         testtable_110_rows = counts.testtable_110,
+                        itemtable_rows = counts.itemtable,
                         skillbase_rows = counts.skillbase,
                         bufferbase_rows = counts.bufferbase,
-                        "csv config hot reload succeeded"
+                        "csv runtime config hot reload succeeded; derived catalogs replaced"
                     );
                 }
                 Err(error) => {
+                    let current_version = runtime.snapshot().await.version;
                     error!(
                         csv_dir = %runtime.csv_dir().display(),
+                        scene_dir = %runtime.scene_dir().display(),
                         changed_files = changed_labels.join(","),
                         error = %error,
-                        "csv config hot reload failed; keeping previous tables"
+                        current_config_version = current_version,
+                        "csv runtime config hot reload failed; keeping previous config version"
                     );
                 }
             }

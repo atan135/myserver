@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
 use serde::Serialize;
 use tracing::{info, warn};
 
+use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicBroadcast};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
     snapshot_broadcasts, tick_movement,
 };
-use crate::core::system::scene::{SceneCatalog, SceneQuery};
+use crate::core::system::scene::SceneQuery;
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
 const DEFAULT_MOVE_SPEED: f32 = 4.0;
@@ -19,7 +18,7 @@ pub struct MovementDemoLogic {
     pub room_id: String,
     pub tick_count: u64,
     pub default_scene_id: i32,
-    pub scene_catalog: Option<Arc<SceneCatalog>>,
+    pub config_tables: Option<ConfigTableRuntime>,
     pub movement_state: Option<RoomMovementState>,
     pub pending_broadcasts: Vec<RoomLogicBroadcast>,
     pub recipients: Vec<String>,
@@ -27,7 +26,7 @@ pub struct MovementDemoLogic {
 
 impl MovementDemoLogic {
     pub fn new(
-        scene_catalog: Arc<SceneCatalog>,
+        config_tables: ConfigTableRuntime,
         default_scene_id: i32,
         correction_interval_frames: u32,
         correction_threshold: f32,
@@ -48,7 +47,7 @@ impl MovementDemoLogic {
             room_id: String::new(),
             tick_count: 0,
             default_scene_id,
-            scene_catalog: Some(scene_catalog),
+            config_tables: Some(config_tables),
             movement_state: Some(movement_state),
             pending_broadcasts: Vec::new(),
             recipients: Vec::new(),
@@ -56,9 +55,12 @@ impl MovementDemoLogic {
     }
 
     fn spawn_player_if_needed(&mut self, player_id: &str) {
-        let (Some(scene_catalog), Some(movement_state)) =
-            (self.scene_catalog.as_ref(), self.movement_state.as_mut())
-        else {
+        let Some(config_tables) = self.config_tables.as_ref() else {
+            return;
+        };
+        let config = config_tables.current_snapshot();
+        let scene_catalog = config.scene_catalog.as_ref();
+        let Some(movement_state) = self.movement_state.as_mut() else {
             return;
         };
 
@@ -153,19 +155,16 @@ impl RoomLogic for MovementDemoLogic {
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
         self.tick_count += 1;
-        let (Some(scene_catalog), Some(movement_state)) =
-            (self.scene_catalog.as_ref(), self.movement_state.as_mut())
-        else {
+        let Some(config_tables) = self.config_tables.as_ref() else {
+            return;
+        };
+        let config = config_tables.current_snapshot();
+        let scene_catalog = config.scene_catalog.as_ref();
+        let Some(movement_state) = self.movement_state.as_mut() else {
             return;
         };
 
-        let result = tick_movement(
-            movement_state,
-            frame_id,
-            fps,
-            inputs,
-            scene_catalog.as_ref(),
-        );
+        let result = tick_movement(movement_state, frame_id, fps, inputs, scene_catalog);
         for reject in &result.rejects {
             info!(
                 room_id = self.room_id,

@@ -273,6 +273,16 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 5. 如果需要专属消息入口，在 `core/service/` 或 `gameservice/` 中按领域新增 handler。
 6. 如果需要新 CSV 表，在 `gameconfig/registry.rs` 装配，不要把表装配写回框架层。
 
+房间运行默认值当前由 `RoomRuntimePolicy` 承载，新增玩法至少应明确这些字段：
+
+- 人数: `max_members`、`min_start_players`
+- tick: `silent_room_fps`、`idle_room_fps`、`active_room_fps`、`busy_room_fps`
+- 输入: `input_delay_frames`、`wait_timeout_ms`、`wait_strategy`、`missing_input_strategy`
+- 同步: `snapshot_interval_frames`
+- 生命周期: `destroy_enabled`、`destroy_when_empty`、`empty_ttl_secs`、`offline_ttl_secs`
+
+`RoomManager` 通过共享 `RoomPolicyRegistry` 读取这些默认值。后续如果把房间类型默认值迁到 `RoomType.csv` 或同类玩法表，应在 `RuntimeGameConfig::build(...)` 中构建新的 `RoomPolicyRegistry`，并沿用 CSV reload 的原子替换和失败保留旧版本语义。
+
 约束：
 
 - `core` 不直接 import `gameroom`、`gameservice` 或 `gameconfig`。

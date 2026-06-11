@@ -103,9 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let config_table_runtime = ConfigTableRuntime::load(Path::new(&config.csv_dir))?;
-    let initial_tables = config_table_runtime.snapshot().await;
+    let initial_config = config_table_runtime.snapshot().await;
+    let initial_tables = initial_config.tables.clone();
     let row_counts = initial_tables.row_counts();
     tracing::info!(
+        config_version = initial_config.version,
         scenetable_rows = row_counts.scenetable,
         scenespawnpoint_rows = row_counts.scenespawnpoint,
         sceneportal_rows = row_counts.sceneportal,

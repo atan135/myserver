@@ -37,7 +37,7 @@ pub async fn handle_item_equip(
     );
 
     // 获取玩家数据
-    let config_tables = services.config_tables.snapshot().await;
+    let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
         .get_or_create_player(&player_id)
@@ -132,7 +132,7 @@ pub async fn handle_item_use(
     );
 
     // 获取玩家数据
-    let config_tables = services.config_tables.snapshot().await;
+    let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
         .get_or_create_player(&player_id)
@@ -355,7 +355,7 @@ pub async fn handle_item_add(
     );
 
     // 获取玩家数据
-    let config_tables = services.config_tables.snapshot().await;
+    let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
         .get_or_create_player(&player_id)

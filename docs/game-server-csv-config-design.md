@@ -475,26 +475,61 @@ pub struct ConfigTables {
 
 每次某个 csv 文件变化时：
 
-1. 读取该文件的前两行
+1. 读取变更文件的前两行
 2. 计算 schema signature
 3. 与编译期生成的 signature 常量比较
 4. 如果一致，则继续解析数据区
-5. 重新构建整张表实例
-6. 原子替换旧表（包含字符串池和索引）
-7. 如果失败，则保留旧表
+5. 基于旧 `ConfigTables` 和变更文件构建候选 `ConfigTables`
+6. 基于候选 `ConfigTables` 重建派生配置
+   - `SceneCatalog`
+   - `CsvCombatCatalog`
+   - `RoomPolicyRegistry`
+7. 全部构建成功后生成新的 `RuntimeGameConfig` 版本
+8. 原子替换当前 `RuntimeGameConfig`
+9. 如果任一阶段失败，则保留旧版本
 
 ### 13.2 原子替换原则
 
-热更新必须整张表替换，不允许边解析边覆盖旧数据。
+热更新必须按版本替换，不允许边解析边覆盖旧数据，也不允许只替换 raw table 后让派生 catalog 停留在旧版本。
 
 正确流程是：
 
 ```text
-旧表继续服务
-新表后台构建
+旧 RuntimeGameConfig 继续服务
+候选 ConfigTables 构建
+候选派生 catalog 构建
 成功后原子替换
-失败则丢弃新表
+失败则丢弃候选版本
 ```
+
+当前 `ConfigTableRuntime` 持有版本化快照：
+
+```rust
+pub struct RuntimeGameConfig {
+    pub version: u64,
+    pub tables: Arc<ConfigTables>,
+    pub scene_catalog: Arc<SceneCatalog>,
+    pub combat_catalog: SharedCombatCatalog,
+    pub room_policies: Arc<RoomPolicyRegistry>,
+}
+```
+
+运行中系统应按使用边界读取当前快照：
+
+- 请求处理只需要 raw table 时，使用 `tables_snapshot()`
+- 房间逻辑需要场景或战斗派生配置时，使用 `current_snapshot()`
+- 需要跨多次操作保持同一版本时，先取一次 `Arc<RuntimeGameConfig>` 并在本次操作内复用
+
+### 13.3 运行中房间生效边界
+
+当前已落地的边界是：
+
+- 新建房间通过 `GameRoomLogicFactory` 读取当前配置
+- `movement_demo` 在玩家出生和每帧移动校验时读取当前 `SceneCatalog`
+- `combat_demo` 在命令执行、tick 和快照生成时读取当前 `CsvCombatCatalog`
+- `RoomManager` 通过共享 `RoomPolicyRegistry` 读取房间 tick、输入和人数默认值
+
+这不是“强制重建运行中房间状态”。已经存在的实体、Buff 实例、房间帧号和成员状态不会因为 reload 自动重置。后续玩法如果需要在 reload 后迁移状态，应在各自 `RoomLogic` 内显式实现版本检测和迁移逻辑。
 
 ## 14. Schema Signature
 
@@ -523,8 +558,8 @@ pub const TEST_TABLE_100_SCHEMA_SIGNATURE: &str =
 
 运行时热更失败时：
 
-- 保留旧版本
-- 打日志
+- 保留旧 `RuntimeGameConfig` 版本
+- 打日志，包含变更文件、失败阶段、错误原因和当前版本号
 - 不影响当前在线逻辑
 
 ### 15.3 结构不匹配
@@ -635,7 +670,9 @@ pub trait CsvTableLoader: Sized {
 - 生成 Rust 结构代码
 - 支持 `id` 查询
 - 支持指定列索引查询
-- 支持单表数据热更新
+- 支持 raw table 数据热更新
+- 支持 `SceneCatalog` / `CsvCombatCatalog` 派生配置随 reload 重建并原子替换
+- 支持房间默认策略通过共享 `RoomPolicyRegistry` 暴露可替换入口
 - 支持 schema signature 校验
 - 支持单表字符串池
 

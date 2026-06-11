@@ -12,7 +12,7 @@ use crate::core::room::{
     RoomPhase,
 };
 use crate::core::runtime::room_policy::{
-    InputWaitStrategy, MissingInputStrategy, RoomPolicyRegistry, RoomRuntimePolicy,
+    InputWaitStrategy, MissingInputStrategy, RoomRuntimePolicy, SharedRoomPolicyRegistry,
 };
 use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
@@ -63,7 +63,7 @@ pub struct RoomRecoveryState {
 pub struct RoomManager {
     rooms: std::sync::Arc<Mutex<HashMap<String, Room>>>,
     runtimes: std::sync::Arc<Mutex<HashMap<String, RoomRuntime>>>,
-    policies: RoomPolicyRegistry,
+    policies: SharedRoomPolicyRegistry,
     logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
 }
@@ -93,10 +93,24 @@ impl RoomManager {
         logic_factory: SharedRoomLogicFactory,
         cleanup_interval_secs: u64,
     ) -> Self {
+        Self::with_policy_registry_and_cleanup_interval(
+            match_client,
+            logic_factory,
+            SharedRoomPolicyRegistry::default(),
+            cleanup_interval_secs,
+        )
+    }
+
+    pub fn with_policy_registry_and_cleanup_interval(
+        match_client: SharedMatchClient,
+        logic_factory: SharedRoomLogicFactory,
+        policies: SharedRoomPolicyRegistry,
+        cleanup_interval_secs: u64,
+    ) -> Self {
         let this = Self {
             rooms: std::sync::Arc::new(Mutex::new(HashMap::new())),
             runtimes: std::sync::Arc::new(Mutex::new(HashMap::new())),
-            policies: RoomPolicyRegistry::default(),
+            policies,
             logic_factory,
             match_client,
         };
@@ -259,7 +273,7 @@ impl RoomManager {
     ) -> Result<RoomSnapshot, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let mut runtimes = self.runtimes.lock().await;
-        let default_policy = self.policies.default_policy().clone();
+        let default_policy = self.policies.default_policy();
         {
             let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
                 let mut logic = self.logic_factory.create(&default_policy.policy_id);
@@ -398,8 +412,9 @@ impl RoomManager {
         let mut runtimes = self.runtimes.lock().await;
         let requested_policy_id = requested_policy_id
             .filter(|value| !value.is_empty())
-            .unwrap_or(self.policies.default_policy().policy_id.as_str());
-        let selected_policy = self.policies.resolve(requested_policy_id);
+            .map(str::to_string)
+            .unwrap_or_else(|| self.policies.default_policy().policy_id);
+        let selected_policy = self.policies.resolve(&requested_policy_id);
         let (snapshot, match_id) = {
             let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
                 let mut logic = self.logic_factory.create(&selected_policy.policy_id);

@@ -600,7 +600,7 @@ async fn validate_grant_items_request(
         return Err(Box::new(std::io::Error::other("EMPTY_ITEMS")));
     }
 
-    let tables = config_tables.snapshot().await;
+    let tables = config_tables.tables_snapshot().await;
     for item in &request.items {
         if item.count == 0 {
             return Err(Box::new(std::io::Error::other("INVALID_ITEM_COUNT")));

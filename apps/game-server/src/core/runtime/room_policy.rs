@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 pub const DEFAULT_ROOM_POLICY_ID: &str = "default_match";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,5 +302,87 @@ impl RoomPolicyRegistry {
 
     pub fn default_policy(&self) -> &RoomRuntimePolicy {
         &self.default_policy
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedRoomPolicyRegistry {
+    inner: Arc<RwLock<Arc<RoomPolicyRegistry>>>,
+}
+
+impl SharedRoomPolicyRegistry {
+    pub fn new(registry: Arc<RoomPolicyRegistry>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(registry)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<RoomPolicyRegistry> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn replace(&self, registry: Arc<RoomPolicyRegistry>) {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = registry;
+    }
+
+    pub fn resolve(&self, policy_id: &str) -> RoomRuntimePolicy {
+        self.snapshot().resolve(policy_id)
+    }
+
+    pub fn default_policy(&self) -> RoomRuntimePolicy {
+        self.snapshot().default_policy().clone()
+    }
+}
+
+impl Default for SharedRoomPolicyRegistry {
+    fn default() -> Self {
+        Self::new(Arc::new(RoomPolicyRegistry::default()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_room_policy_defaults_cover_tick_input_and_capacity() {
+        let registry = RoomPolicyRegistry::default();
+        let movement = registry.resolve("movement_demo");
+        assert_eq!(movement.max_members, 32);
+        assert_eq!(movement.min_start_players, 1);
+        assert_eq!(movement.active_room_fps, 20);
+        assert_eq!(movement.input_delay_frames, 2);
+        assert_eq!(movement.wait_strategy, InputWaitStrategy::Optimistic);
+        assert_eq!(movement.missing_input_strategy, MissingInputStrategy::Empty);
+
+        let combat = registry.resolve("combat_demo");
+        assert_eq!(combat.busy_room_fps, 30);
+        assert_eq!(combat.snapshot_interval_frames, 10);
+        assert_eq!(combat.wait_timeout_ms, 100);
+    }
+
+    #[test]
+    fn shared_room_policy_registry_can_replace_defaults_atomically() {
+        let shared = SharedRoomPolicyRegistry::default();
+        assert_eq!(shared.resolve("default_match").active_room_fps, 10);
+
+        let custom = RoomPolicyRegistry {
+            default_policy: RoomRuntimePolicy {
+                active_room_fps: 24,
+                ..RoomRuntimePolicy::default_match()
+            },
+            policies: std::collections::HashMap::new(),
+        };
+        shared.replace(Arc::new(custom));
+
+        assert_eq!(shared.default_policy().active_room_fps, 24);
+        assert_eq!(shared.resolve("unknown").active_room_fps, 24);
     }
 }

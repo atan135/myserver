@@ -1,11 +1,12 @@
 use serde::Serialize;
 use tracing::info;
 
+use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicBroadcast};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::combat::{
     CombatCommandResult, CombatEntityBlueprint, CombatEvent, CombatEventKind, CombatSnapshot,
-    NoopCombatHooks, Position, RoomCombatEcs, SharedCombatCatalog, parse_player_input,
+    NoopCombatHooks, Position, RoomCombatEcs, parse_player_input,
 };
 use crate::pb::GameMessagePush;
 use crate::protocol::{MessageType, encode_body};
@@ -18,18 +19,18 @@ pub struct CombatDemoLogic {
     tick_count: u64,
     roster: Vec<String>,
     combat: RoomCombatEcs,
-    catalog: SharedCombatCatalog,
+    config_tables: ConfigTableRuntime,
     pending_broadcasts: Vec<RoomLogicBroadcast>,
 }
 
 impl CombatDemoLogic {
-    pub fn new(catalog: SharedCombatCatalog) -> Self {
+    pub fn new(config_tables: ConfigTableRuntime) -> Self {
         Self {
             room_id: String::new(),
             tick_count: 0,
             roster: Vec::new(),
             combat: RoomCombatEcs::new(),
-            catalog,
+            config_tables,
             pending_broadcasts: Vec::new(),
         }
     }
@@ -115,7 +116,10 @@ impl CombatDemoLogic {
             snapshot: CombatSnapshot,
         }
 
-        let snapshot = self.combat.snapshot(frame_id, self.catalog.as_ref());
+        let config = self.config_tables.current_snapshot();
+        let snapshot = self
+            .combat
+            .snapshot(frame_id, config.combat_catalog.as_ref());
         self.queue_game_push(
             "combat",
             "snapshot",
@@ -194,15 +198,14 @@ impl RoomLogic for CombatDemoLogic {
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
         self.tick_count = self.tick_count.saturating_add(1);
+        let config = self.config_tables.current_snapshot();
+        let catalog = config.combat_catalog.as_ref();
 
         let mut hooks = NoopCombatHooks;
         for input in inputs {
             match parse_player_input(input, &self.combat) {
                 Ok(Some(command)) => {
-                    match self
-                        .combat
-                        .execute_command(command, self.catalog.as_ref(), &mut hooks)
-                    {
+                    match self.combat.execute_command(command, catalog, &mut hooks) {
                         CombatCommandResult::Accepted | CombatCommandResult::Ignored => {}
                         CombatCommandResult::Rejected { reason } => {
                             self.queue_input_reject_push(frame_id, &input.player_id, &reason);
@@ -216,8 +219,7 @@ impl RoomLogic for CombatDemoLogic {
             }
         }
 
-        self.combat
-            .tick(frame_id, fps, self.catalog.as_ref(), &mut hooks);
+        self.combat.tick(frame_id, fps, catalog, &mut hooks);
         let events = self.combat.drain_events();
         let force_snapshot = events.iter().any(|event| {
             matches!(
@@ -256,9 +258,13 @@ impl RoomLogic for CombatDemoLogic {
             room_id: &self.room_id,
             tick_count: self.tick_count,
             roster: &self.roster,
-            snapshot: self
-                .combat
-                .snapshot(self.combat.last_tick_frame(), self.catalog.as_ref()),
+            snapshot: self.combat.snapshot(
+                self.combat.last_tick_frame(),
+                self.config_tables
+                    .current_snapshot()
+                    .combat_catalog
+                    .as_ref(),
+            ),
         })
         .unwrap_or_default()
     }

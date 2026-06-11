@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
+use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicFactory};
-use crate::core::runtime::room_policy::RoomRuntimePolicy;
-use crate::core::system::{combat::SharedCombatCatalog, scene::SceneCatalog};
 
 use super::{
     CombatDemoLogic, DisposableMatchLogic, MovementDemoLogic, PersistentWorldLogic, SandboxLogic,
@@ -11,22 +8,12 @@ use super::{
 
 #[derive(Clone)]
 pub struct GameRoomLogicFactory {
-    scene_catalog: Arc<SceneCatalog>,
-    movement_demo_scene_id: i32,
-    combat_catalog: SharedCombatCatalog,
+    config_tables: ConfigTableRuntime,
 }
 
 impl GameRoomLogicFactory {
-    pub fn new(
-        scene_catalog: Arc<SceneCatalog>,
-        movement_demo_scene_id: i32,
-        combat_catalog: SharedCombatCatalog,
-    ) -> Self {
-        Self {
-            scene_catalog,
-            movement_demo_scene_id,
-            combat_catalog,
-        }
+    pub fn new(config_tables: ConfigTableRuntime) -> Self {
+        Self { config_tables }
     }
 }
 
@@ -34,12 +21,19 @@ impl RoomLogicFactory for GameRoomLogicFactory {
     fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
         match policy_id {
             "ui_touch_room" | "UITouchRoom" => Box::new(UITouchRoomLogic::default()),
-            "combat_demo" => Box::new(CombatDemoLogic::new(self.combat_catalog.clone())),
+            "combat_demo" => Box::new(CombatDemoLogic::new(self.config_tables.clone())),
             "movement_demo" => {
-                let policy = RoomRuntimePolicy::movement_demo();
+                let config_tables = self.config_tables.clone();
+                let current = config_tables.current_snapshot();
+                let movement_demo_scene_id = current
+                    .scene_catalog
+                    .scene_id_by_code("grassland_01")
+                    .or_else(|| current.scene_catalog.scenes.keys().min().copied())
+                    .unwrap_or_default();
+                let policy = current.room_policies.resolve("movement_demo");
                 Box::new(MovementDemoLogic::new(
-                    self.scene_catalog.clone(),
-                    self.movement_demo_scene_id,
+                    config_tables,
+                    movement_demo_scene_id,
                     policy.movement_correction_interval_frames,
                     policy.movement_correction_threshold,
                     policy.movement_aoi_radius,
