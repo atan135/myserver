@@ -1,6 +1,6 @@
 use tracing::info;
 
-use crate::core::logic::RoomLogic;
+use crate::core::logic::{RoomLogic, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 
 #[derive(Default)]
@@ -56,3 +56,5 @@ impl RoomLogic for TestRoomLogic {
         false
     }
 }
+
+impl RoomLogicTransfer for TestRoomLogic {}

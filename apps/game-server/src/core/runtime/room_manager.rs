@@ -9,7 +9,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::{debug, info, warn};
 
-use crate::core::logic::{RoomLogicBroadcast, SharedRoomLogicFactory};
+use crate::core::logic::{
+    ROOM_TRANSFER_SCHEMA_VERSION, RoomLogicBroadcast, RoomLogicTransferState,
+    SharedRoomLogicFactory, UNSUPPORTED_ROOM_TRANSFER,
+};
 use crate::core::room::{
     MemberRole, OutboundMessage, PendingInputUpsert, PlayerInputRecord, Room, RoomMemberState,
     RoomPhase, RoomTransferStatus,
@@ -1230,18 +1233,7 @@ impl RoomManager {
                 .map(|input| input.frame_id)
                 .max()
                 .unwrap_or(current_frame_id);
-            let movement_state_json = room
-                .logic
-                .movement_recovery_state(None, MovementCorrectionReason::ControlTimeout)
-                .map(|state| {
-                    json!({
-                        "reason": "control_timeout",
-                        "frameId": state.frame_id,
-                        "entities": state.entities.len()
-                    })
-                    .to_string()
-                })
-                .unwrap_or_default();
+            let transfer_state = room.logic.export_transfer_state()?;
 
             let room_version = if room.transfer_state.status == RoomTransferStatus::Exported {
                 room.transfer_state.room_version
@@ -1265,16 +1257,17 @@ impl RoomManager {
                     room,
                     room.current_waiting_frame_id(),
                 ),
-                movement_state_json,
-                logic_state_json: room.logic.get_serialized_state(),
-                runtime_timers_json: json!({
-                    "schema": "room-runtime-timers.v1",
-                    "hasEmptySince": room.empty_since.is_some(),
-                    "hasWaitStarted": room.wait_started_at.is_some(),
-                    "inputDelayFrames": policy.input_delay_frames,
-                    "snapshotIntervalFrames": policy.snapshot_interval_frames
-                })
-                .to_string(),
+                movement_state_json: room_transfer_movement_state_json(&transfer_state),
+                logic_state_json: room_transfer_logic_state_json(&transfer_state),
+                runtime_timers_json: room_transfer_timer_state_json(
+                    &transfer_state,
+                    json!({
+                        "hasEmptySince": room.empty_since.is_some(),
+                        "hasWaitStarted": room.wait_started_at.is_some(),
+                        "inputDelayFrames": policy.input_delay_frames,
+                        "snapshotIntervalFrames": policy.snapshot_interval_frames
+                    }),
+                ),
                 match_id: room.match_id.clone().unwrap_or_default(),
                 checksum: String::new(),
             }
@@ -1331,6 +1324,7 @@ impl RoomManager {
             .snapshot
             .clone()
             .ok_or("ROOM_TRANSFER_MISSING_SNAPSHOT")?;
+        let transfer_state = room_transfer_state_from_payload(&payload)?;
 
         let mut rooms = self.rooms.lock().await;
         if rooms.contains_key(&room_id) {
@@ -1339,7 +1333,7 @@ impl RoomManager {
 
         let mut logic = self.logic_factory.create(&payload.policy_id);
         logic.on_room_created(&room_id);
-        logic.restore_from_serialized_state(&payload.logic_state_json);
+        logic.import_transfer_state(&transfer_state)?;
 
         let mut room = Room::new(
             room_id.clone(),
@@ -2057,6 +2051,112 @@ fn room_transfer_checksum(payload: &RoomTransferPayload) -> String {
     format!("{:x}", Sha256::digest(&encoded))
 }
 
+fn room_transfer_logic_state_json(state: &RoomLogicTransferState) -> String {
+    json!({
+        "schema": "room-transfer.logic.v1",
+        "schemaVersion": state.schema_version,
+        "logicStateJson": state.logic_state_json,
+        "combatStateJson": state.combat_state_json,
+        "npcStateJson": state.npc_state_json,
+    })
+    .to_string()
+}
+
+fn room_transfer_movement_state_json(state: &RoomLogicTransferState) -> String {
+    json!({
+        "schema": "room-transfer.movement.v1",
+        "schemaVersion": state.schema_version,
+        "movementStateJson": state.movement_state_json,
+    })
+    .to_string()
+}
+
+fn room_transfer_timer_state_json(
+    state: &RoomLogicTransferState,
+    runtime_summary: serde_json::Value,
+) -> String {
+    json!({
+        "schema": "room-transfer.runtime-timers.v1",
+        "schemaVersion": state.schema_version,
+        "timerStateJson": state.timer_state_json,
+        "runtimeSummary": runtime_summary,
+    })
+    .to_string()
+}
+
+fn room_transfer_state_from_payload(
+    payload: &RoomTransferPayload,
+) -> Result<RoomLogicTransferState, &'static str> {
+    let logic =
+        serde_json::from_str::<serde_json::Value>(&payload.logic_state_json).map_err(|_| {
+            if payload.logic_state_json.trim().is_empty() {
+                UNSUPPORTED_ROOM_TRANSFER
+            } else {
+                "ROOM_TRANSFER_INVALID_LOGIC_STATE"
+            }
+        })?;
+    let movement = serde_json::from_str::<serde_json::Value>(&payload.movement_state_json)
+        .map_err(|_| "ROOM_TRANSFER_INVALID_MOVEMENT_STATE")?;
+    let timers = serde_json::from_str::<serde_json::Value>(&payload.runtime_timers_json)
+        .map_err(|_| "ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+
+    if logic.get("schema").and_then(|value| value.as_str()) != Some("room-transfer.logic.v1") {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+    if movement.get("schema").and_then(|value| value.as_str()) != Some("room-transfer.movement.v1")
+    {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+    if timers.get("schema").and_then(|value| value.as_str())
+        != Some("room-transfer.runtime-timers.v1")
+    {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+
+    let schema_version = logic
+        .get("schemaVersion")
+        .and_then(|value| value.as_u64())
+        .ok_or("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")?;
+    if schema_version != ROOM_TRANSFER_SCHEMA_VERSION as u64
+        || movement
+            .get("schemaVersion")
+            .and_then(|value| value.as_u64())
+            != Some(schema_version)
+        || timers.get("schemaVersion").and_then(|value| value.as_u64()) != Some(schema_version)
+    {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+
+    Ok(RoomLogicTransferState {
+        schema_version: schema_version as u32,
+        logic_state_json: logic
+            .get("logicStateJson")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        movement_state_json: movement
+            .get("movementStateJson")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        combat_state_json: logic
+            .get("combatStateJson")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        npc_state_json: logic
+            .get("npcStateJson")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        timer_state_json: timers
+            .get("timerStateJson")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 fn validate_room_transfer_payload(payload: &RoomTransferPayload) -> Result<(), &'static str> {
     if payload.rollout_epoch.trim().is_empty() {
         return Err("INVALID_ROLLOUT_EPOCH");
@@ -2162,7 +2262,10 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use crate::core::logic::{RoomLogic, RoomLogicFactory};
+    use crate::core::logic::{
+        ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicFactory, RoomLogicTransfer,
+        RoomLogicTransferState,
+    };
     use crate::core::room::PlayerInputRecord;
 
     use super::*;
@@ -2171,7 +2274,7 @@ mod tests {
     struct RecordingRoomLogicFactory {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
         inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
-        restored_states: Arc<StdMutex<Vec<String>>>,
+        imported_transfer_states: Arc<StdMutex<Vec<RoomLogicTransferState>>>,
     }
 
     impl RecordingRoomLogicFactory {
@@ -2183,15 +2286,15 @@ mod tests {
             self.inputs.lock().unwrap().clone()
         }
 
-        fn restored_states(&self) -> Vec<String> {
-            self.restored_states.lock().unwrap().clone()
+        fn imported_transfer_states(&self) -> Vec<RoomLogicTransferState> {
+            self.imported_transfer_states.lock().unwrap().clone()
         }
     }
 
     struct RecordingRoomLogic {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
         inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
-        restored_states: Arc<StdMutex<Vec<String>>>,
+        imported_transfer_states: Arc<StdMutex<Vec<RoomLogicTransferState>>>,
         state: String,
     }
 
@@ -2211,10 +2314,34 @@ mod tests {
         fn get_serialized_state(&self) -> String {
             self.state.clone()
         }
+    }
 
-        fn restore_from_serialized_state(&mut self, state: &str) {
-            self.state = state.to_string();
-            self.restored_states.lock().unwrap().push(state.to_string());
+    impl RoomLogicTransfer for RecordingRoomLogic {
+        fn export_transfer_state(&self) -> Result<RoomLogicTransferState, &'static str> {
+            Ok(RoomLogicTransferState {
+                schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+                logic_state_json: self.state.clone(),
+                movement_state_json: r#"{"movement":"recording-v1"}"#.to_string(),
+                combat_state_json: r#"{"combat":"recording-v1"}"#.to_string(),
+                npc_state_json: r#"{"npc":"recording-v1"}"#.to_string(),
+                timer_state_json: r#"{"timer":"recording-v1"}"#.to_string(),
+            })
+        }
+
+        fn import_transfer_state(
+            &mut self,
+            state: &RoomLogicTransferState,
+        ) -> Result<(), &'static str> {
+            if state.schema_version != ROOM_TRANSFER_SCHEMA_VERSION {
+                return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+            }
+
+            self.state = state.logic_state_json.clone();
+            self.imported_transfer_states
+                .lock()
+                .unwrap()
+                .push(state.clone());
+            Ok(())
         }
     }
 
@@ -2223,9 +2350,23 @@ mod tests {
             Box::new(RecordingRoomLogic {
                 ticks: Arc::clone(&self.ticks),
                 inputs: Arc::clone(&self.inputs),
-                restored_states: Arc::clone(&self.restored_states),
+                imported_transfer_states: Arc::clone(&self.imported_transfer_states),
                 state: "recording-state-v1".to_string(),
             })
+        }
+    }
+
+    struct UnsupportedTransferRoomLogic;
+
+    impl RoomLogicTransfer for UnsupportedTransferRoomLogic {}
+
+    impl RoomLogic for UnsupportedTransferRoomLogic {}
+
+    struct UnsupportedTransferRoomLogicFactory;
+
+    impl RoomLogicFactory for UnsupportedTransferRoomLogicFactory {
+        fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
+            Box::new(UnsupportedTransferRoomLogic)
         }
     }
 
@@ -2632,6 +2773,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_room_transfer_rejects_logic_without_transfer_contract() {
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(UnsupportedTransferRoomLogicFactory),
+        );
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let result = manager.export_room_transfer("epoch-1", "room-test").await;
+
+        assert_eq!(result, Err("UNSUPPORTED_ROOM_TRANSFER"));
+        let rooms = manager.rooms.lock().await;
+        let room = rooms.get("room-test").expect("room should remain");
+        assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
+        assert!(room.transfer_state.last_transfer_checksum.is_none());
+    }
+
+    #[tokio::test]
     async fn export_room_transfer_checksum_is_deterministic() {
         let (manager, _factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
@@ -2653,7 +2828,22 @@ mod tests {
 
         assert!(!payload.checksum.is_empty());
         assert_eq!(payload.checksum, room_transfer_checksum(&payload));
-        assert_eq!(payload.logic_state_json, "recording-state-v1");
+        let transfer_state = room_transfer_state_from_payload(&payload).unwrap();
+        assert_eq!(transfer_state.schema_version, ROOM_TRANSFER_SCHEMA_VERSION);
+        assert_eq!(transfer_state.logic_state_json, "recording-state-v1");
+        assert_eq!(
+            transfer_state.movement_state_json,
+            r#"{"movement":"recording-v1"}"#
+        );
+        assert_eq!(
+            transfer_state.combat_state_json,
+            r#"{"combat":"recording-v1"}"#
+        );
+        assert_eq!(transfer_state.npc_state_json, r#"{"npc":"recording-v1"}"#);
+        assert_eq!(
+            transfer_state.timer_state_json,
+            r#"{"timer":"recording-v1"}"#
+        );
         assert_eq!(payload.snapshot.as_ref().unwrap().room_id, "room-test");
     }
 
@@ -2715,6 +2905,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_room_transfer_rejects_logic_without_transfer_contract() {
+        let (source, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(UnsupportedTransferRoomLogicFactory),
+        );
+
+        let result = target.import_room_transfer(payload).await;
+
+        assert_eq!(result, Err("UNSUPPORTED_ROOM_TRANSFER"));
+        assert!(!target.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn import_room_transfer_rejects_unsupported_schema_without_creating_room() {
+        let (source, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let mut payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let mut logic_state =
+            serde_json::from_str::<serde_json::Value>(&payload.logic_state_json).unwrap();
+        logic_state["schemaVersion"] = serde_json::json!(ROOM_TRANSFER_SCHEMA_VERSION + 1);
+        payload.logic_state_json = logic_state.to_string();
+        payload.checksum = room_transfer_checksum(&payload);
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory),
+        );
+
+        let result = target.import_room_transfer(payload).await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA"));
+        assert!(!target.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
     async fn import_room_transfer_restores_basic_room_state() {
         let (source, _source_factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
@@ -2741,8 +2989,15 @@ mod tests {
         assert_eq!(imported.0, checksum);
         assert!(target.room_exists("room-test").await);
         assert_eq!(
-            target_factory.restored_states(),
-            vec!["recording-state-v1".to_string()]
+            target_factory.imported_transfer_states(),
+            vec![RoomLogicTransferState {
+                schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+                logic_state_json: "recording-state-v1".to_string(),
+                movement_state_json: r#"{"movement":"recording-v1"}"#.to_string(),
+                combat_state_json: r#"{"combat":"recording-v1"}"#.to_string(),
+                npc_state_json: r#"{"npc":"recording-v1"}"#.to_string(),
+                timer_state_json: r#"{"timer":"recording-v1"}"#.to_string(),
+            }]
         );
 
         let (tx, _rx) = mpsc::channel(1024);
@@ -3283,7 +3538,7 @@ mod tests {
             Box::new(RecordingRoomLogic {
                 ticks,
                 inputs,
-                restored_states: Arc::new(StdMutex::new(Vec::new())),
+                imported_transfer_states: Arc::new(StdMutex::new(Vec::new())),
                 state: "recording-state-v1".to_string(),
             }),
         );

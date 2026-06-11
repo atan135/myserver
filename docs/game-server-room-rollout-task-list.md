@@ -225,13 +225,13 @@
 - [x] 导出结果包含当前可取得的:
   - room 基础信息
   - frame 与输入窗口
-  - `RoomLogic::get_serialized_state()` 轻量 logic state
-  - runtime timer 摘要 JSON
-  - movement recovery 摘要 JSON
+  - `RoomLogicTransfer::export_transfer_state()` 返回的独立 transfer 契约状态
+  - runtime timer 契约 JSON 和框架摘要
+  - movement transfer 契约 JSON
   - checksum
 - [x] 导出失败时返回明确错误码。
 
-限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。movement/combat/NPC 等完整玩法状态尚未进入独立 transfer trait。
+限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement/combat/NPC/timer 的完整数据填充仍是后续任务。
 
 ### 4.4 旧服退役接口
 
@@ -251,7 +251,7 @@
 当前状态（截至 `2026-06-11`）:
 
 - `ImportRoomTransferReq/Res` 已接入 `game-server` internal/admin 通道，能校验 checksum、拒绝 room_id 冲突，并创建同 room_id 的最小可运行 room；导入过程中短暂处于 `Importing`，完成后进入 `OwnedByNew`。
-- 当前导入只恢复 policy、room snapshot、frame、recent/waiting inputs 和 `RoomLogic::restore_from_serialized_state()` 轻量状态；导入成员统一标记为 offline，不宣称支持有人房无感迁移。
+- 当前导入恢复 policy、room snapshot、frame、recent/waiting inputs，并通过 `RoomLogicTransfer::import_transfer_state()` 导入玩法迁移契约状态；导入成员统一标记为 offline，不宣称支持有人房无感迁移。
 - `ConfirmRoomOwnershipReq/Res` 还未进入 `packages/proto`。
 
 ### 5.1 room 导入接口
@@ -263,7 +263,8 @@
   - `rollout_epoch`
   - `checksum`
 - [x] 导入时校验 `room_id` 不冲突、snapshot/policy/owner/phase 等必要字段可用。
-- [ ] 后续补齐 schema/version 兼容判断和完整玩法 transfer trait。
+- [x] 已接入 transfer 契约 schema/version 骨架和导入侧校验。
+- [ ] 后续补齐 movement/combat/NPC/timer 的完整玩法状态字段和兼容策略。
 
 ### 5.2 owner 切换确认
 
@@ -332,9 +333,11 @@
 
 当前状态（截至 `2026-06-11`）:
 
-- 只完成了 `RoomTransferPayload` 的协议结构定义。
+- 已完成 `RoomTransferPayload` 的协议结构定义和独立 transfer 契约骨架。
 - `game-server` 已完成 room freeze/export/import/retire 的最小闭环，并有 `RoomManager` 单元测试覆盖。
-- 尚未完成独立 transfer trait、完整 movement/combat/NPC/timer 状态迁移，也没有 proxy route 仲裁或同连接迁移。
+- 已新增独立 transfer 契约骨架，`RoomLogic` 通过 `RoomLogicTransfer` 导出/导入迁移状态。
+- 默认未实现迁移契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会再把轻量 `get_serialized_state()` 当完整迁移能力。
+- 尚未完成 movement/combat/NPC/timer 完整状态填充，也没有 proxy route 仲裁或同连接迁移。
 
 ### 7.1 通用 payload 结构
 
@@ -352,11 +355,11 @@
 
 ### 7.2 RoomLogic 迁移能力
 
-- [ ] 新增独立 trait，避免直接复用轻量 `get_serialized_state()`:
+- [x] 新增独立 trait，避免直接复用轻量 `get_serialized_state()`:
   - `export_transfer_state()`
   - `import_transfer_state()`
-  - `checksum_transfer_state()`
-- [ ] 对未实现该 trait 的玩法统一返回 `UNSUPPORTED_ROOM_TRANSFER`。
+  - checksum 仍由 `RoomTransferPayload` protobuf canonical encoding 统一计算
+- [x] 对未实现该 trait 的玩法统一返回 `UNSUPPORTED_ROOM_TRANSFER`。
 
 ### 7.3 movement / combat 迁移
 

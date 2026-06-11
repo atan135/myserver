@@ -2,7 +2,7 @@ use serde::Serialize;
 use tracing::info;
 
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::logic::{RoomLogic, RoomLogicBroadcast};
+use crate::core::logic::{RoomLogic, RoomLogicBroadcast, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::combat::{
     CombatCommandResult, CombatEntityBlueprint, CombatEvent, CombatEventKind, CombatSnapshot,
@@ -273,3 +273,5 @@ impl RoomLogic for CombatDemoLogic {
         std::mem::take(&mut self.pending_broadcasts)
     }
 }
+
+impl RoomLogicTransfer for CombatDemoLogic {}

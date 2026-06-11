@@ -2,7 +2,7 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::logic::{RoomLogic, RoomLogicBroadcast};
+use crate::core::logic::{RoomLogic, RoomLogicBroadcast, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
@@ -263,3 +263,5 @@ impl RoomLogic for MovementDemoLogic {
         std::mem::take(&mut self.pending_broadcasts)
     }
 }
+
+impl RoomLogicTransfer for MovementDemoLogic {}

@@ -1,6 +1,9 @@
 use crate::core::room::PlayerInputRecord;
 use crate::protocol::MessageType;
 
+pub const ROOM_TRANSFER_SCHEMA_VERSION: u32 = 1;
+pub const UNSUPPORTED_ROOM_TRANSFER: &str = "UNSUPPORTED_ROOM_TRANSFER";
+
 #[derive(Debug, Clone)]
 pub struct RoomLogicBroadcast {
     pub message_type: MessageType,
@@ -30,7 +33,49 @@ impl RoomLogicBroadcast {
     }
 }
 
-pub trait RoomLogic: Send {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomLogicTransferState {
+    pub schema_version: u32,
+    pub logic_state_json: String,
+    pub movement_state_json: String,
+    pub combat_state_json: String,
+    pub npc_state_json: String,
+    pub timer_state_json: String,
+}
+
+impl RoomLogicTransferState {
+    pub fn new(schema_version: u32) -> Self {
+        Self {
+            schema_version,
+            logic_state_json: String::new(),
+            movement_state_json: String::new(),
+            combat_state_json: String::new(),
+            npc_state_json: String::new(),
+            timer_state_json: String::new(),
+        }
+    }
+}
+
+impl Default for RoomLogicTransferState {
+    fn default() -> Self {
+        Self::new(ROOM_TRANSFER_SCHEMA_VERSION)
+    }
+}
+
+pub trait RoomLogicTransfer {
+    fn export_transfer_state(&self) -> Result<RoomLogicTransferState, &'static str> {
+        Err(UNSUPPORTED_ROOM_TRANSFER)
+    }
+
+    fn import_transfer_state(
+        &mut self,
+        _state: &RoomLogicTransferState,
+    ) -> Result<(), &'static str> {
+        Err(UNSUPPORTED_ROOM_TRANSFER)
+    }
+}
+
+pub trait RoomLogic: Send + RoomLogicTransfer {
     fn on_room_created(&mut self, _room_id: &str) {}
 
     fn on_player_join(&mut self, _player_id: &str) {}

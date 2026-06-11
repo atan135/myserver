@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::core::logic::RoomLogic;
+use crate::core::logic::{RoomLogic, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 
 pub const UI_TOUCH_ACTION: &str = "ui_touch";
@@ -144,6 +144,8 @@ impl RoomLogic for UITouchRoomLogic {
         .unwrap_or_default()
     }
 }
+
+impl RoomLogicTransfer for UITouchRoomLogic {}
 
 fn validate_touch_payload(payload_json: &str) -> Result<(), &'static str> {
     if payload_json.len() > UI_TOUCH_PAYLOAD_MAX_BYTES {

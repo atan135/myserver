@@ -1154,7 +1154,7 @@ mod tests {
 
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
-    use crate::core::logic::{RoomLogic, RoomLogicFactory};
+    use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
     use crate::core::room::{MemberRole, OutboundMessage};
     use crate::core::runtime::RoomManager;
     use crate::pb::GameMessagePush;
@@ -1163,6 +1163,8 @@ mod tests {
     struct NoopRoomLogic;
 
     impl RoomLogic for NoopRoomLogic {}
+
+    impl RoomLogicTransfer for NoopRoomLogic {}
 
     struct NoopRoomLogicFactory;
 

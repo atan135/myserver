@@ -327,8 +327,8 @@ room 只有满足以下条件时，才允许从旧服切到新服:
 
 - `game-server` 已在已鉴权 internal/admin 通道接入 `FreezeRoomForTransfer`、`ExportRoomTransfer`、`ImportRoomTransfer`、`RetireTransferredRoom`。
 - `freeze` 只允许没有在线成员的 room；有人在线时返回 `ROOM_TRANSFER_HAS_ONLINE_MEMBERS`。这用于空房或全员离线的低风险基础 transfer，不是有人房无感迁移。
-- `export` 会生成包含 room 基础信息、snapshot、recent inputs、waiting inputs、policy、owner、phase、match_id、轻量 `logic_state_json`、runtime timer 摘要和 checksum 的 `RoomTransferPayload`。
-- `import` 会校验 checksum、`room_id` 冲突和必要字段，并创建同 `room_id` 的最小可运行 room；导入成员统一标记为 offline，等待后续 route/reconnect 控制流接入。
+- `export` 会调用 `RoomLogicTransfer::export_transfer_state()`，将返回的玩法迁移契约状态写入现有 `logic_state_json`、`movement_state_json`、`runtime_timers_json` 字段；未实现契约的玩法返回 `UNSUPPORTED_ROOM_TRANSFER`，不会产出 payload 或进入 Exported 状态。
+- `import` 会校验 checksum、`room_id` 冲突、必要字段和 transfer 契约 schema/version，并调用 `RoomLogicTransfer::import_transfer_state()`；失败时不会插入半成品 room。导入成员统一标记为 offline，等待后续 route/reconnect 控制流接入。
 - `retire` 当前选择保留 tombstone，而不是物理删除 room：旧房清空成员和 pending input，进入 retired 状态，并拒绝 join/reconnect/input/start/end。这样可以保留最近 checksum 与状态，便于幂等和排错。
 - 当前实现没有改 `game-proxy` route 仲裁，没有实现 L7 relay 或同连接 upstream swap，也没有宣称完整恢复 movement/combat/NPC/AI/timer 状态。
 
@@ -350,7 +350,13 @@ room 只有满足以下条件时，才允许从旧服切到新服:
 
 `RoomTransferPayload` 必须是“可恢复出同一 room 运行态”的完整数据，而不是展示用快照。
 
-当前最小实现仍使用 `RoomLogic::get_serialized_state()` / `restore_from_serialized_state()` 承载轻量玩法状态。这只是为控制面闭环打基础，不能等同于完整玩法迁移。后续支持真实玩法迁移时，仍应补独立的 transfer trait，并对未实现完整迁移能力的 room logic 返回 `UNSUPPORTED_ROOM_TRANSFER` 或等价错误。
+当前实现已提供独立的 `RoomLogicTransfer` 契约骨架，`RoomLogic::get_serialized_state()` / `restore_from_serialized_state()` 保留为轻量 snapshot / recovery 用途，不再作为 room transfer 的完整迁移能力。未实现完整迁移契约的 room logic 必须返回 `UNSUPPORTED_ROOM_TRANSFER` 或等价错误。
+
+由于当前 proto 尚未为 combat/NPC/timer 提供独立字段，`game-server` 会把 transfer 契约序列化进现有 JSON 字段：
+
+- `logic_state_json`：`room-transfer.logic.v1`，包含 `schemaVersion`、`logicStateJson`、`combatStateJson`、`npcStateJson`
+- `movement_state_json`：`room-transfer.movement.v1`，包含 `schemaVersion`、`movementStateJson`
+- `runtime_timers_json`：`room-transfer.runtime-timers.v1`，包含 `schemaVersion`、`timerStateJson` 和框架 runtime 摘要
 
 ### 11.2 最小字段
 
