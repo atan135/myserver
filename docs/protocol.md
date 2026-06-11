@@ -204,6 +204,8 @@
 
 `game-proxy` 与 `game-server` 都支持单连接消息频率限制。proxy 侧使用 `PROXY_MSG_RATE_WINDOW_MS` / `PROXY_MSG_RATE_MAX`，在读到完整 packet 后、进入本地鉴权 / 预鉴权白名单 / 上游转发前检查；game-server 侧使用 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX`，在业务 dispatch 前检查。对应最大值为 `0` 时关闭；启用后超限返回 `ErrorRes`，`error_code=MSG_RATE_EXCEEDED`，并继续保持连接。
 
+`game-proxy` 可通过 `PROXY_REDIS_BLOCKLIST_ENABLED=true` 启用 Redis 动态黑名单。IP 命中 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 时会在连接建立早期拒绝，通常不会产生协议包；玩家命中 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>` 时会在本地 ticket 校验成功后返回 `AuthRes(ok=false,error_code=PLAYER_BLOCKED)`。启用后 Redis 查询失败按 fail-closed 处理，连接早期拒绝或在 `AuthReq` 返回 `AuthRes(ok=false,error_code=BLOCKLIST_UNAVAILABLE)`。
+
 ### 4.2 关键消息结构
 
 #### `AuthReq`

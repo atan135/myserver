@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use crate::auth::ProxyAuthService;
+use crate::blocklist::{BlocklistDecision, RedisBlocklistChecker};
 use crate::config::Config;
 use crate::connection_limits::{ConnectionLimiter, PlayerConnectionTracker};
 use crate::maintenance::{
@@ -215,6 +216,7 @@ pub async fn run(
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
     global_maintenance: Arc<GlobalMaintenanceChecker>,
+    blocklist_checker: Arc<RedisBlocklistChecker>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -263,6 +265,7 @@ pub async fn run(
                         let route_store = route_store.clone();
                         let auth_service = auth_service.clone();
                         let global_maintenance = global_maintenance.clone();
+                        let blocklist_checker = blocklist_checker.clone();
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
@@ -287,6 +290,7 @@ pub async fn run(
                                 route_store,
                                 auth_service,
                                 global_maintenance,
+                                blocklist_checker,
                                 connection_count,
                                 maintenance,
                                 connection_limiter,
@@ -306,6 +310,7 @@ pub async fn run(
                         let route_store = route_store.clone();
                         let auth_service = auth_service.clone();
                         let global_maintenance = global_maintenance.clone();
+                        let blocklist_checker = blocklist_checker.clone();
                         let connection_count = connection_count.clone();
                         let maintenance = maintenance.clone();
                         let session_id = next_session_id;
@@ -330,6 +335,7 @@ pub async fn run(
                                 route_store,
                                 auth_service,
                                 global_maintenance,
+                                blocklist_checker,
                                 connection_count,
                                 maintenance,
                                 connection_limiter,
@@ -399,11 +405,47 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     route_store: ProxyRouteStore,
     auth_service: Arc<ProxyAuthService>,
     global_maintenance: Arc<GlobalMaintenanceChecker>,
+    blocklist_checker: Arc<RedisBlocklistChecker>,
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
     connection_limiter: ConnectionLimiter,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client_ip = client_addr.ip();
+    if let Err(error) = connection_limiter.check_ip_denied(client_ip) {
+        warn!(
+            session_id,
+            client_addr = %client_addr,
+            client_ip = %client_ip,
+            error_code = error.code(),
+            "proxy connection rejected by local connection governance"
+        );
+        return Err(Box::new(std::io::Error::other(error.code())));
+    }
+
+    match blocklist_checker.check_ip(client_ip).await {
+        Ok(BlocklistDecision::Allowed) => {}
+        Ok(BlocklistDecision::Blocked(error_code)) => {
+            warn!(
+                session_id,
+                client_addr = %client_addr,
+                client_ip = %client_ip,
+                error_code,
+                "proxy connection rejected by redis ip blocklist"
+            );
+            return Err(Box::new(std::io::Error::other(error_code)));
+        }
+        Err(error_code) => {
+            warn!(
+                session_id,
+                client_addr = %client_addr,
+                client_ip = %client_ip,
+                error_code,
+                "proxy connection rejected because redis blocklist is unavailable"
+            );
+            return Err(Box::new(std::io::Error::other(error_code)));
+        }
+    }
+
     let _ip_connection_guard = match connection_limiter.try_acquire_ip(client_ip) {
         Ok(guard) => guard,
         Err(error) => {
@@ -505,9 +547,11 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     &packet,
                     &auth_service,
                     &global_maintenance,
+                    &blocklist_checker,
                     &maintenance,
                     &mut deferred_auth,
                     &mut session,
+                    client_ip,
                     &connection_limiter,
                     &mut player_connection_tracker,
                 )
@@ -687,9 +731,11 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
     packet: &Packet,
     auth_service: &ProxyAuthService,
     global_maintenance: &GlobalMaintenanceChecker,
+    blocklist_checker: &RedisBlocklistChecker,
     local_maintenance: &SharedMaintenanceFlag,
     deferred_auth: &mut DeferredAuthState,
     session: &mut ProxySession,
+    client_ip: std::net::IpAddr,
     connection_limiter: &ConnectionLimiter,
     player_connection_tracker: &mut PlayerConnectionTracker,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -758,6 +804,60 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
 
     match auth_service.authenticate_ticket(&request.ticket).await {
         Ok(player_id) => {
+            match blocklist_checker.check_player(&player_id).await {
+                Ok(BlocklistDecision::Allowed) => {}
+                Ok(BlocklistDecision::Blocked(error_code)) => {
+                    deferred_auth.auth_req_packet = None;
+                    deferred_auth.player_id = None;
+                    session.player_id = None;
+                    player_connection_tracker.clear();
+                    warn!(
+                        session_id = session.id,
+                        client_ip = %client_ip,
+                        player_id = %player_id,
+                        error_code,
+                        "proxy auth rejected by redis player blocklist"
+                    );
+                    write_message(
+                        client_stream,
+                        MessageType::AuthRes,
+                        packet.header.seq,
+                        &AuthRes {
+                            ok: false,
+                            player_id: String::new(),
+                            error_code: error_code.to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                Err(error_code) => {
+                    deferred_auth.auth_req_packet = None;
+                    deferred_auth.player_id = None;
+                    session.player_id = None;
+                    player_connection_tracker.clear();
+                    warn!(
+                        session_id = session.id,
+                        client_ip = %client_ip,
+                        player_id = %player_id,
+                        error_code,
+                        "proxy auth rejected because redis blocklist is unavailable"
+                    );
+                    write_message(
+                        client_stream,
+                        MessageType::AuthRes,
+                        packet.header.seq,
+                        &AuthRes {
+                            ok: false,
+                            player_id: String::new(),
+                            error_code: error_code.to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+            }
+
             if let Err(error) = player_connection_tracker
                 .replace_authenticated_player(connection_limiter, &player_id)
             {
@@ -768,6 +868,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 let error_code = error.code();
                 warn!(
                     session_id = session.id,
+                    client_ip = %client_ip,
                     player_id = %player_id,
                     error_code,
                     "proxy auth rejected by player connection limit"

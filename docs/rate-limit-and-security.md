@@ -9,7 +9,7 @@
 当前安全与限流相关服务的状态如下：
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
-- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
+- `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总前端连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时、包体长度限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列，以及生产环境拒绝默认或空的 `TICKET_SECRET`
 
@@ -90,6 +90,7 @@ AUTH_STRICT_SECURITY=false
 - 单连接预鉴权失败阈值：非法预鉴权消息或鉴权失败累计达到 `PROXY_MAX_PREAUTH_FAILURES` 后关闭连接
 - 总前端连接上限：`PROXY_MAX_CONNECTIONS` 为正整数时，超过上限的新连接会被拒绝
 - 静态 IP denylist：`PROXY_IP_DENYLIST` 命中的来源会在 session 建立初期拒绝，支持精确 IP 和 CIDR
+- Redis 动态黑名单：`PROXY_REDIS_BLOCKLIST_ENABLED=true` 时，session 建立早期检查 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>`，本地 ticket 校验成功后检查 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；key 存在即封禁，JSON 值可用 `until` 表示过期时间
 - 单 IP 本地连接上限：`PROXY_MAX_CONNECTIONS_PER_IP` 为正整数时限制同一来源 IP 在本 proxy 实例上的并发连接，连接关闭时释放
 - 单玩家本地连接上限：`PROXY_MAX_CONNECTIONS_PER_PLAYER` 为正整数时，`AuthReq` 本地鉴权成功后登记已鉴权玩家连接；超过上限返回 `AuthRes(ok=false, error_code=PLAYER_CONNECTION_LIMIT_EXCEEDED)`，连接关闭或重复鉴权切换玩家时释放
 - 动态上游发现或静态上游路由
@@ -120,6 +121,8 @@ TICKET_SECRET=replace-with-a-long-random-string
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
 PROXY_MAINTENANCE_CACHE_TTL_MS=2000
+PROXY_REDIS_BLOCKLIST_ENABLED=false
+PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS=2000
 PROXY_MSG_RATE_WINDOW_MS=1000
 PROXY_MSG_RATE_MAX=0
 PROXY_IP_DENYLIST=
@@ -144,8 +147,10 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
   - `MAX_CONNECTIONS_PER_IP`
   - `MAX_CONNECTIONS_PER_ACCOUNT`
 - 当前单 IP / 单玩家连接上限使用 `PROXY_MAX_CONNECTIONS_PER_IP` 和 `PROXY_MAX_CONNECTIONS_PER_PLAYER`，旧的无 `PROXY_` 前缀配置名不会被读取
-- 当前 `game-proxy` 的 denylist 和连接数限制是单 proxy 进程内本地状态，不是 Redis 分布式全局限额；多 proxy 部署仍需要 Redis/网关层策略
-- 当前代码里没有 Redis 动态黑名单或封禁列表逻辑
+- `PROXY_REDIS_BLOCKLIST_ENABLED=false` 默认完全不查 Redis 动态黑名单；启用后 Redis 查询失败会按 fail-closed 返回 `BLOCKLIST_UNAVAILABLE` 并拒绝新连接或 `AuthReq`
+- Redis 动态黑名单使用短缓存，`PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS` 默认 2 秒；只在连接建立和 `AuthReq` 本地 ticket 校验成功后查询，不对每个 packet 查询 Redis
+- Redis 动态黑名单 key 为 `${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；值可以是任意非空字符串，也可以是 JSON `{"reason":"...","until":<unix_ms>}`，其中 `until` 小于当前时间时视为未封禁；部署侧仍推荐通过 Redis TTL 管理过期
+- 当前 `game-proxy` 的静态 denylist 和连接数限制是单 proxy 进程内本地状态，不是 Redis 分布式全局限额；Redis 动态黑名单可跨 proxy 共享封禁状态，但不是连接数限额
 - 当前 `game-proxy` admin HTTP 口已经有 token 鉴权和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
 - 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有细粒度 RBAC
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`

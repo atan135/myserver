@@ -4,6 +4,7 @@ use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
 
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
 const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
+const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -69,6 +70,8 @@ pub struct Config {
     pub proxy_msg_rate_window_ms: u64,
     pub proxy_msg_rate_max: u64,
     pub maintenance_cache_ttl_ms: u64,
+    pub redis_blocklist_enabled: bool,
+    pub redis_blocklist_cache_ttl_ms: u64,
     pub connection_limits: ConnectionLimitConfig,
     // Service Registry
     pub registry_enabled: bool,
@@ -140,6 +143,11 @@ impl Config {
             "PROXY_MAINTENANCE_CACHE_TTL_MS",
             DEFAULT_MAINTENANCE_CACHE_TTL_MS,
         );
+        let redis_blocklist_enabled = parse_bool("PROXY_REDIS_BLOCKLIST_ENABLED", false);
+        let redis_blocklist_cache_ttl_ms = parse_u64(
+            "PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS",
+            DEFAULT_BLOCKLIST_CACHE_TTL_MS,
+        );
         let connection_limits = ConnectionLimitConfig {
             ip_denylist: IpDenyList::parse_csv(&env::var("PROXY_IP_DENYLIST").unwrap_or_default())?,
             max_connections_per_ip: parse_u64("PROXY_MAX_CONNECTIONS_PER_IP", 0),
@@ -191,6 +199,8 @@ impl Config {
             proxy_msg_rate_window_ms,
             proxy_msg_rate_max,
             maintenance_cache_ttl_ms,
+            redis_blocklist_enabled,
+            redis_blocklist_cache_ttl_ms,
             connection_limits,
             registry_enabled,
             registry_url,
@@ -314,6 +324,8 @@ mod tests {
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
+            "PROXY_REDIS_BLOCKLIST_ENABLED",
+            "PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS",
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
@@ -328,6 +340,8 @@ mod tests {
             env::set_var("PROXY_IP_DENYLIST", "203.0.113.10,198.51.100.0/24");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "20");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "2");
+            env::set_var("PROXY_REDIS_BLOCKLIST_ENABLED", "true");
+            env::set_var("PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS", "500");
             env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
@@ -351,6 +365,8 @@ mod tests {
         );
         assert_eq!(config.connection_limits.max_connections_per_ip, 20);
         assert_eq!(config.connection_limits.max_connections_per_player, 2);
+        assert!(config.redis_blocklist_enabled);
+        assert_eq!(config.redis_blocklist_cache_ttl_ms, 500);
     }
 
     #[test]
@@ -364,6 +380,8 @@ mod tests {
             "PROXY_IP_DENYLIST",
             "PROXY_MAX_CONNECTIONS_PER_IP",
             "PROXY_MAX_CONNECTIONS_PER_PLAYER",
+            "PROXY_REDIS_BLOCKLIST_ENABLED",
+            "PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS",
             "NODE_ENV",
             "APP_ENV",
             "PROXY_ADMIN_TOKEN",
@@ -378,6 +396,8 @@ mod tests {
             env::remove_var("PROXY_IP_DENYLIST");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_IP", "not-a-number");
             env::set_var("PROXY_MAX_CONNECTIONS_PER_PLAYER", "not-a-number");
+            env::set_var("PROXY_REDIS_BLOCKLIST_ENABLED", "not-a-bool");
+            env::set_var("PROXY_REDIS_BLOCKLIST_CACHE_TTL_MS", "not-a-number");
             env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
@@ -389,6 +409,8 @@ mod tests {
         assert_eq!(config.proxy_msg_rate_max, 0);
         assert_eq!(config.connection_limits.max_connections_per_ip, 0);
         assert_eq!(config.connection_limits.max_connections_per_player, 0);
+        assert!(!config.redis_blocklist_enabled);
+        assert_eq!(config.redis_blocklist_cache_ttl_ms, 2000);
     }
 
     #[test]

@@ -158,10 +158,15 @@ impl ConnectionLimiter {
         }
     }
 
-    pub fn try_acquire_ip(&self, ip: IpAddr) -> Result<IpConnectionGuard, ConnectionLimitError> {
+    pub fn check_ip_denied(&self, ip: IpAddr) -> Result<(), ConnectionLimitError> {
         if self.inner.config.ip_denylist.contains(ip) {
             return Err(ConnectionLimitError::IpDenied);
         }
+        Ok(())
+    }
+
+    pub fn try_acquire_ip(&self, ip: IpAddr) -> Result<IpConnectionGuard, ConnectionLimitError> {
+        self.check_ip_denied(ip)?;
 
         let max = self.inner.config.max_connections_per_ip;
         if max == 0 {
@@ -489,6 +494,22 @@ mod tests {
             Ok(_) => panic!("denylisted ip should be rejected"),
             Err(error) => assert_eq!(error, ConnectionLimitError::IpDenied),
         }
+        assert_eq!(limiter.ip_connection_count(denied_ip), 0);
+    }
+
+    #[test]
+    fn static_ip_denylist_can_be_checked_without_counting() {
+        let denied_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let limiter = ConnectionLimiter::new(ConnectionLimitConfig {
+            ip_denylist: IpDenyList::parse_csv("203.0.113.10").unwrap(),
+            max_connections_per_ip: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            limiter.check_ip_denied(denied_ip),
+            Err(ConnectionLimitError::IpDenied)
+        );
         assert_eq!(limiter.ip_connection_count(denied_ip), 0);
     }
 }

@@ -1,5 +1,6 @@
 mod admin_server;
 mod auth;
+mod blocklist;
 mod config;
 mod connection_limits;
 mod local_socket;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use auth::ProxyAuthService;
+use blocklist::RedisBlocklistChecker;
 use config::Config;
 use maintenance::GlobalMaintenanceChecker;
 pub use proto::myserver::game as pb;
@@ -126,6 +128,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.redis_key_prefix.clone(),
         std::time::Duration::from_millis(config.maintenance_cache_ttl_ms),
     )?);
+    let blocklist_checker = Arc::new(RedisBlocklistChecker::new(
+        config.redis_blocklist_enabled,
+        &config.redis_url,
+        config.redis_key_prefix.clone(),
+        std::time::Duration::from_millis(config.redis_blocklist_cache_ttl_ms),
+    )?);
 
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
@@ -154,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         route_store,
         auth_service,
         global_maintenance,
+        blocklist_checker,
         connection_count,
         maintenance,
     )
