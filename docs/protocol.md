@@ -517,6 +517,7 @@ base64url(payload_json).base64url(hmac_sha256_signature)
 - `game-server` 还会继续检查 Redis 中是否存在对应 ticket 记录
 - `game-proxy`、`game-server`、`chat-server` 都会检查 Redis 中的 `player-ticket-version:<playerId>`，从而感知 logout / 改密等玩家级 ticket version 失效
 - `game-proxy`、`game-server`、`chat-server` 都会检查 Redis 中的 `ticket:<sha256(ticket)>`，从而感知单张 ticket revoke；其中 `chat-server` 对不存在或归属不匹配统一返回 `TICKET_REVOKED`
+- `auth-http` 当前默认 `TICKET_TTL_SECONDS=900`。logout 和改密通过递增 `player-ticket-version:<playerId>` 统一失效该玩家未过期旧 ticket，不枚举删除所有 ticket key；logout body 中可选的 `ticket` 仍会走单张 revoke 路径并校验归属
 - 这些 Redis key 都受 `REDIS_KEY_PREFIX` 影响
 
 Redis 相关键：

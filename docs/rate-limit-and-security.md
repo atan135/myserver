@@ -47,7 +47,7 @@ ACCOUNT_LOCK_TTL_SECONDS=900
 
 # Ticket
 TICKET_SECRET=replace-with-a-long-random-string
-TICKET_TTL_SECONDS=86400
+TICKET_TTL_SECONDS=900
 TICKET_VALIDATE_ENABLED=true
 
 # Redis Dynamic Blocklist
@@ -72,7 +72,7 @@ AUTH_STRICT_SECURITY=false
 
 ### 2.4 当前实现备注
 
-- 文档旧版写“ticket 默认 5 分钟”已经不准确；当前默认值是 `TICKET_TTL_SECONDS=86400`，即 24 小时
+- 当前默认值是 `TICKET_TTL_SECONDS=900`，即 15 分钟；过期后 `game-proxy`、`game-server` 与 `chat-server` 都会拒绝
 - `AUTH_REDIS_BLOCKLIST_ENABLED=false` 默认完全不查 Redis 动态黑名单；启用后 Redis 查询失败会按 fail-closed 返回 `503 BLOCKLIST_UNAVAILABLE`，避免登录入口在封禁状态不可用时继续放行
 - auth-http 与 game-proxy 共用 Redis 动态黑名单 key：`${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；key 存在即封禁，JSON 值可用 `{"until":<unix_ms>}` 表示封禁过期时间，已过期则视为未封禁
 - `AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000` 控制 auth-http 黑名单短缓存；当前只在登录入口 IP、登录后玩家和 game ticket issue 前查询，不对所有 HTTP 路由查询
@@ -82,6 +82,7 @@ AUTH_STRICT_SECURITY=false
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`
 - ticket 不是“使用后立即删除”的一次性票据；当前 `game-proxy`、`game-server` 与 `chat-server` 校验时都会检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
 - 当前同一张 ticket 会被 `game-proxy`、`game-server` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
+- logout 和改密会递增 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>`，使该玩家已签发但未过期的旧 ticket 在后续鉴权时因版本不匹配失效；单张 ticket revoke 仍用于删除精确 `ticket:<sha256(ticket)>` 并保留审计路径
 - 维护模式不拦截 logout、game ticket revoke 等清理操作，也不主动踢已有在线连接
 - `AUTH_STRICT_SECURITY` 仍控制内部接口请求期缺少 `INTERNAL_API_TOKEN` 时是否返回 `INTERNAL_API_TOKEN_REQUIRED`；生产环境现在会提前在配置加载阶段拒绝空 `INTERNAL_API_TOKEN`
 

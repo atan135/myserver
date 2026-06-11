@@ -255,6 +255,8 @@ export class AuthService {
       throw unauthorized("INVALID_ACCESS_TOKEN");
     }
 
+    await this.authStore.invalidatePlayerTickets(result.playerId);
+
     const { ticket } = body || {};
     if (ticket && typeof ticket === "string") {
       await this.authStore.revokeTicket(ticket, clientIp, { expectedPlayerId: result.playerId });
