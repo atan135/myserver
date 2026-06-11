@@ -241,6 +241,8 @@ POST /api/v1/mails/:mailId/claim
 - 返回体包含 `claimed`、`already_claimed`、`status`、`read_at`、`claimed_at`
 - 重复领取是幂等的，不会重复发放道具
 
+创建邮件时，`mail-service` 会把邮件记录和新邮件通知 outbox 写入同一个 MySQL 事务；通知发布失败时保留 outbox 待后台重试。
+
 当前附件领取链路：
 
 ```text

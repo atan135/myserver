@@ -96,6 +96,44 @@ test("mail creation writes notification outbox in memory store", async () => {
   assert.equal(outbox.payload.mail.mail_id, "mail_001");
 });
 
+test("mail insert uses provided executor instead of pool", async () => {
+  const pool = {
+    async execute() {
+      throw new Error("pool.execute should not be used by insertMail");
+    }
+  };
+  const executor = {
+    calls: [],
+    async execute(sql, params) {
+      this.calls.push({ sql, params });
+      return [{ insertId: 123 }];
+    }
+  };
+  const store = new MySqlMailStore(pool);
+
+  const mailId = await store.insertMail(executor, {
+    mail_id: "mail_executor_001",
+    sender_type: "system",
+    sender_id: "system",
+    sender_name: "系统",
+    from_player_id: "system",
+    to_player_id: "player_001",
+    title: "Reward",
+    content: "",
+    attachments: [{ type: "item", id: 1001, count: 2 }],
+    mail_type: "system",
+    created_by_type: "system",
+    created_by_id: "system",
+    created_by_name: "系统",
+    expires_at: null
+  });
+
+  assert.equal(mailId, 123);
+  assert.equal(executor.calls.length, 1);
+  assert.match(executor.calls[0].sql, /INSERT INTO mails/);
+  assert.equal(executor.calls[0].params[0], "mail_executor_001");
+});
+
 test("mail notification outbox can be reserved, failed, retried, and marked sent", async () => {
   const store = new MySqlMailStore(null);
   await createMail(store);

@@ -164,7 +164,7 @@ export class MySqlMailStore {
       ? JSON.stringify(mail.attachments)
       : null;
 
-    const [result] = await this.pool.execute(sql, [
+    const [result] = await executor.execute(sql, [
       mail.mail_id,
       mail.sender_type,
       mail.sender_id,
