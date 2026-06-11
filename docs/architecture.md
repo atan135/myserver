@@ -197,7 +197,7 @@
 
 - `chat-server` 负责聊天会话、聊天历史和在线推送
 - `announce-service` 负责公告 CRUD 和当前有效公告查询
-- `mail-service` 负责邮件 CRUD
+- `mail-service` 负责邮件 CRUD；玩家读邮件、邮件详情、标记已读和领取附件复用 game ticket + Redis ticket 归属/version 校验，内部发信入口使用 `MAIL_SERVICE_TOKEN`
 - `mail-service` 通过 Core NATS 通知 `chat-server`
 - `chat-server` 再把邮件通知推送给在线玩家
 

@@ -15,10 +15,75 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+const DEFAULT_TICKET_SECRETS = new Set([
+  "dev-only-change-this-ticket-secret",
+  "replace-with-a-long-random-string",
+  "change-me",
+  "changeme",
+  "default",
+  "password"
+]);
+
+const DEFAULT_MAIL_SERVICE_TOKENS = new Set([
+  "dev-only-change-this-mail-service-token",
+  "change-me",
+  "changeme",
+  "default",
+  "password"
+]);
+
+function isProductionEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && value.trim().toLowerCase() === "production"
+  );
+}
+
+function validateProductionConfig(config) {
+  if (!isProductionEnv()) {
+    return;
+  }
+
+  const errors = [];
+  const ticketSecret = String(config.ticketSecret || "").trim();
+  const mailServiceToken = String(config.mailServiceToken || "").trim();
+
+  if (!config.mailPlayerAuthRequired) {
+    errors.push("MAIL_PLAYER_AUTH_REQUIRED must be true in production");
+  }
+
+  if (!ticketSecret || DEFAULT_TICKET_SECRETS.has(ticketSecret) || isWeakSecret(ticketSecret)) {
+    errors.push("TICKET_SECRET must be set to a non-default value in production");
+  }
+
+  if (
+    !mailServiceToken ||
+    DEFAULT_MAIL_SERVICE_TOKENS.has(mailServiceToken) ||
+    isWeakSecret(mailServiceToken)
+  ) {
+    errors.push("MAIL_SERVICE_TOKEN must be set to a non-default value in production");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid mail-service production config: ${errors.join("; ")}`);
+  }
+}
+
+function isWeakSecret(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized.length < 16) {
+    return true;
+  }
+  if (["admin", "root", "test", "token", "secret"].includes(normalized)) {
+    return true;
+  }
+  return normalized.length > 0 && normalized.split("").every((ch) => ch === normalized[0]);
+}
+
 export function getConfig() {
-  return {
+  const env = process.env.NODE_ENV || "development";
+  const config = {
     appName: "mail-service",
-    env: process.env.NODE_ENV || "development",
+    env,
     host: process.env.HOST || "127.0.0.1",
     port: Number.parseInt(process.env.MAIL_PORT || "9003", 10),
     logLevel: process.env.LOG_LEVEL || "info",
@@ -36,8 +101,14 @@ export function getConfig() {
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
+    ticketSecret: process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
+    mailPlayerAuthRequired: parseBoolean(process.env.MAIL_PLAYER_AUTH_REQUIRED, true),
+    mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "mail-001"
   };
+
+  validateProductionConfig(config);
+  return config;
 }

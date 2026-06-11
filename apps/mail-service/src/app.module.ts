@@ -4,6 +4,7 @@ import { getConfig } from "./config.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import { GameAdminClient } from "./game-admin-client.js";
 import { HealthController } from "./health.controller.js";
+import { MailPlayerAuthService } from "./mail-auth.js";
 import { MailsController } from "./mails/mails.controller.js";
 import { MailsService } from "./mails/mails.service.js";
 import { createMetricsCollector } from "./metrics.js";
@@ -19,6 +20,7 @@ import {
   MAIL_METRICS,
   MAIL_MYSQL_POOL,
   MAIL_NATS,
+  MAIL_PLAYER_AUTH,
   MAIL_PUBSUB_CLIENT,
   MAIL_REDIS,
   MAIL_REGISTRY,
@@ -76,6 +78,11 @@ import {
       provide: MAIL_REGISTRY,
       inject: [MAIL_REDIS, MAIL_CONFIG],
       useFactory: (redis: any, config: any) => new RegistryClient(redis, config)
+    },
+    {
+      provide: MAIL_PLAYER_AUTH,
+      inject: [MAIL_CONFIG, MAIL_REDIS],
+      useFactory: (config: any, redis: any) => new MailPlayerAuthService(config, redis)
     },
     {
       provide: MAIL_METRICS,

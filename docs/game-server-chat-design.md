@@ -24,6 +24,8 @@
 - `chat-server` 已支持 ticket 校验通过后的单账号 / 单 IP 本实例连接数限制，`CHAT_MAX_CONNECTIONS_PER_PLAYER=0` 与 `CHAT_MAX_CONNECTIONS_PER_IP=0` 默认关闭；超限时在注册 session 和 online route 前返回失败 `ChatAuthRes` 并关闭新连接
 - 当前在线聊天推送和邮件通知仍使用 `player_id -> sender` 内存 session map；同一账号多连接时推送路由沿用现有覆盖行为，连接数限制计数单独维护
 - `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
+- `mail-service` 玩家读邮件、邮件详情、标记已读和领取附件已复用 game ticket 做第一阶段 HTTP 鉴权，并检查 ticket 签名、过期时间、Redis `ticket:<sha256(ticket)>` 归属和 `player-ticket-version:<playerId>`；Redis key 均受 `REDIS_KEY_PREFIX` 影响
+- `mail-service` 系统发信入口 `POST /api/v1/mails` 已通过 `MAIL_SERVICE_TOKEN` 做内部 service token 鉴权
 - `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 NATS metrics 上报
 - “聊天与邮件共用同一套存储层”目前仍未实现
 - 离线聊天当前更接近“历史可查询”，未实现“登录后自动补发离线消息”的完整闭环
@@ -225,16 +227,18 @@ CREATE TABLE mail_messages (
 当前邮件能力对外通过 HTTP 暴露，核心接口如下：
 
 ```http
-POST /api/v1/mails
-GET  /api/v1/mails?player_id=<player_id>&status=<status>&limit=<n>&offset=<n>
+POST /api/v1/mails                         # 内部发信，要求 MAIL_SERVICE_TOKEN
+GET  /api/v1/mails?status=<status>&limit=<n>&offset=<n>
 GET  /api/v1/mails/:mailId
 PUT  /api/v1/mails/:mailId/read
 POST /api/v1/mails/:mailId/claim
 ```
 
+玩家接口默认要求 `Authorization: Bearer <game_ticket>` 或 `X-Game-Ticket`。服务端以 ticket 中认证出的 `playerId` 作为唯一玩家身份；query/body 中的 `player_id` 可以省略，若传入则只能与认证身份一致，否则返回拒绝。`MAIL_PLAYER_AUTH_REQUIRED=false` 仅用于本地兼容调试，生产环境必须为 `true`。
+
 其中附件领取接口的当前行为为：
-- 请求体需要带 `player_id`
-- 只能领取属于自己的邮件
+- 玩家身份来自 game ticket；请求体 `player_id` 可省略，只允许与认证身份一致
+- 只能读取或领取属于自己的邮件，邮件详情也会校验 `to_player_id`
 - 已过期邮件不可领取
 - 当前真实发奖只支持 `attachments[].type = "item"`
 - `mail-service` 会先调用 `game-server admin` 发奖，成功后才把邮件状态更新为 `claimed`
@@ -242,6 +246,8 @@ POST /api/v1/mails/:mailId/claim
 - 重复领取是幂等的，不会重复发放道具
 
 创建邮件时，`mail-service` 会把邮件记录和新邮件通知 outbox 写入同一个 MySQL 事务；通知发布失败时保留 outbox 待后台重试。
+
+发信入口支持 `Authorization: Bearer <MAIL_SERVICE_TOKEN>`、`X-Service-Token` 或 `X-Admin-Token`，不接受 query/body token。`MAIL_SERVICE_TOKEN` 是 `mail-service` 的上游调用凭证，不复用下游 `GAME_ADMIN_TOKEN`。
 
 当前附件领取链路：
 

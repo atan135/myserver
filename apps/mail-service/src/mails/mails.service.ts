@@ -54,6 +54,23 @@ function isExpired(expiresAt: any) {
   return Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now();
 }
 
+function assertAuthenticatedPlayer(playerId: any) {
+  if (!playerId) {
+    throw badRequest("MISSING_PLAYER_ID", "player_id is required");
+  }
+}
+
+function assertPlayerIdMatches(authenticatedPlayerId: string, requestedPlayerId: any) {
+  if (
+    requestedPlayerId !== undefined &&
+    requestedPlayerId !== null &&
+    requestedPlayerId !== "" &&
+    requestedPlayerId !== authenticatedPlayerId
+  ) {
+    throw forbidden("PLAYER_ID_MISMATCH", "player_id does not match authenticated player");
+  }
+}
+
 function normalizeMailAttachmentItems(attachments: any) {
   const list = Array.isArray(attachments) ? attachments : [attachments];
 
@@ -162,21 +179,19 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async list(query: any) {
+  async list(authenticatedPlayerId: string, query: any = {}) {
     try {
       const { player_id, status, limit, offset } = query;
+      assertAuthenticatedPlayer(authenticatedPlayerId);
+      assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
-      if (!player_id) {
-        throw badRequest("MISSING_PLAYER_ID", "player_id is required");
-      }
-
-      const mails = await this.mailStore.getMailsByPlayerId(player_id, {
+      const mails = await this.mailStore.getMailsByPlayerId(authenticatedPlayerId, {
         status,
         limit: limit ? parseInt(limit, 10) : 50,
         offset: offset ? parseInt(offset, 10) : 0
       });
 
-      const unreadCount = await this.mailStore.countUnread(player_id);
+      const unreadCount = await this.mailStore.countUnread(authenticatedPlayerId);
 
       return {
         ok: true,
@@ -192,12 +207,19 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async get(mailId: string) {
+  async get(mailId: string, authenticatedPlayerId?: string, query: any = {}) {
     try {
+      assertAuthenticatedPlayer(authenticatedPlayerId);
+      assertPlayerIdMatches(authenticatedPlayerId as string, query?.player_id);
+
       const mail = await this.mailStore.getMailById(mailId);
 
       if (!mail) {
         throw notFound("MAIL_NOT_FOUND", "Mail not found");
+      }
+
+      if (mail.to_player_id !== authenticatedPlayerId) {
+        throw forbidden("FORBIDDEN", "You can only read your own mail");
       }
 
       return {
@@ -281,20 +303,18 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async markRead(mailId: string, body: any) {
+  async markRead(mailId: string, authenticatedPlayerId: string, body: any = {}) {
     try {
       const { player_id } = body || {};
-
-      if (!player_id) {
-        throw badRequest("MISSING_PLAYER_ID", "player_id is required");
-      }
+      assertAuthenticatedPlayer(authenticatedPlayerId);
+      assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
       const mail = await this.mailStore.getMailById(mailId);
       if (!mail) {
         throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
 
-      if (mail.to_player_id !== player_id) {
+      if (mail.to_player_id !== authenticatedPlayerId) {
         throw forbidden("FORBIDDEN", "You can only read your own mail");
       }
 
@@ -313,20 +333,18 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async claim(mailId: string, body: any) {
+  async claim(mailId: string, authenticatedPlayerId: string, body: any = {}) {
     try {
       const { player_id } = body || {};
-
-      if (!player_id) {
-        throw badRequest("MISSING_PLAYER_ID", "player_id is required");
-      }
+      assertAuthenticatedPlayer(authenticatedPlayerId);
+      assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
       const mail = await this.mailStore.getMailById(mailId);
       if (!mail) {
         throw notFound("MAIL_NOT_FOUND", "Mail not found");
       }
 
-      if (mail.to_player_id !== player_id) {
+      if (mail.to_player_id !== authenticatedPlayerId) {
         throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
       }
 
@@ -371,7 +389,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       let result;
       try {
         await this.gameAdminClient.grantMailAttachments(
-          player_id,
+          authenticatedPlayerId,
           `mail_claim:${mail.mail_id}`,
           normalizedAttachments,
           `claim mail ${mail.mail_id}`
@@ -380,7 +398,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         await this.mailStore.releaseClaimAttachments(mailId);
         log("error", "mail.claim_grant_failed", {
           mailId,
-          playerId: player_id,
+          playerId: authenticatedPlayerId,
           error: error.message,
           code: error.code || null
         });
@@ -393,7 +411,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
 
       log("info", result.claimed ? "mail.claimed" : "mail.claimed_idempotent", {
         mailId,
-        playerId: player_id,
+        playerId: authenticatedPlayerId,
         attachmentCount: Array.isArray(currentMail.attachments) ? currentMail.attachments.length : 1
       });
 

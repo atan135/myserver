@@ -110,8 +110,8 @@ test("MailsService claim grants once with stable requestId and repeats idempoten
   const { service, mailStore, gameAdminClient } = createService();
   await createMail(mailStore);
 
-  const first = await service.claim("mail_001", { player_id: "player_001" });
-  const second = await service.claim("mail_001", { player_id: "player_001" });
+  const first = await service.claim("mail_001", "player_001", { player_id: "player_001" });
+  const second = await service.claim("mail_001", "player_001", { player_id: "player_001" });
 
   assert.equal(first.ok, true);
   assert.equal(first.claimed, true);
