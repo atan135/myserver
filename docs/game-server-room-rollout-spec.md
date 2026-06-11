@@ -5,6 +5,7 @@
 配套任务拆分见:
 
 - [game-server-room-rollout-task-list.md](./game-server-room-rollout-task-list.md)
+- 生产拓扑、多实例与同连接迁移目标态见 [production-topology-and-room-migration-design.md](./production-topology-and-room-migration-design.md)
 
 规范源声明:
 
@@ -16,7 +17,7 @@
 
 - room 接管判定在第一阶段固定使用“成员为空”，不使用“在线人数为 0”。
 - 第一阶段客户端切服固定经过“旧服通知 -> 旧服断开 -> 客户端显式重连 -> `proxy` 重新路由”的链路。
-- 第一阶段明确不做“同一连接内换 upstream”。
+- 第一阶段明确不做“同一连接内换 upstream”；同连接迁移属于后续目标态，需要 proxy 演进为 L7 session relay 后另行实现。
 
 本文讨论的不是运行时 CSV 热更新，也不是在线有人房间的无感迁移，而是:
 
@@ -101,6 +102,8 @@
 - 必须经过客户端显式重连
 - 不做同一连接内换 upstream
 - 不要求 `proxy` 在既有业务连接内接力切服
+
+后续同连接迁移可以作为目标态继续设计，但它不属于第一阶段交付范围。该能力要求 proxy 能暂停 old upstream、冻结 room、导出/导入并校验 payload、保持客户端连接不变、重放 Auth/RoomReconnect 或 resume、缓冲并排序/去重输入，并在失败时回滚或显式断开要求重连。
 
 ### 4.3 一致性原则
 

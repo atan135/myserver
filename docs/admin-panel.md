@@ -97,14 +97,15 @@ npm run dev:admin-web
 - `admin-web` 的菜单和前端路由按角色做了显示与跳转限制
 - `GM.vue` 页面中“封禁玩家”表单只对 `admin` 显示
 - `admin-api` 当前所有 `/api/v1/*` 接口都通过 NestJS Guard 做 JWT 校验
-- 后端接口级角色校验目前仍未真正按角色拦截
+- `admin-api` 已通过 `RolesGuard` 和 `@Roles()` 对审计、玩家、GM、维护模式和监控接口做后端角色校验
 
 因此当前权限控制现状应理解为：
 
 - 前端页面级权限限制已生效
-- 后端接口级权限校验目前只有“是否登录”，没有真正按角色拦截
+- 后端接口级角色校验已生效
+- 管理员 JWT 仍缺少 session/version/blacklist，登出主要是审计记录；登录失败限流和锁定仍需补齐
 
-如果后续补上后端角色校验，本文应同步更新。
+如果后续补上管理员 token 生命周期治理、登录失败限流或更细粒度权限矩阵，本文应同步更新。
 
 ## 数据库表
 
@@ -438,8 +439,9 @@ npm run dev:admin-web
 
 当前实现备注：
 
-- 这组监控接口当前未挂 JWT 鉴权
-- `admin-web` 监控页也直接调用未带 token 的 `/api/admin/monitoring/*`
+- 这组监控接口已挂 `JwtAuthGuard` 和 `RolesGuard`
+- `GET` 监控查询允许 `viewer` / `operator` / `admin`
+- `POST /api/admin/monitoring/archive` 仅允许 `admin`
 
 ## 前端页面说明
 
@@ -534,5 +536,5 @@ ADMIN_DISPLAY_NAME=Administrator
 2. 管理员密码当前使用 `bcrypt` 哈希存储。
 3. 关键后台操作会写入 `admin_audit_logs`。
 4. 安全事件通过 `security_audit_logs` 提供检索。
-5. 监控接口 `/api/admin/monitoring/*` 当前没有鉴权，不应直接暴露到公网。
-6. 当前后端尚未真正执行基于角色的接口授权，生产使用前应补齐服务端角色校验。
+5. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与角色校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
+6. 当前后端已有角色校验；管理员 JWT session/version/blacklist、登录失败限流和锁定仍需补齐。

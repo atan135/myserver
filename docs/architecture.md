@@ -64,7 +64,7 @@
 | 服务 | 默认端口 | 技术栈 | 主要职责 |
 |------|----------|--------|----------|
 | `auth-http` | `3000` | Node.js + NestJS | 登录、发 access token、发 game ticket、部分安全审计、调用游戏服管理接口 |
-| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、审计查询、玩家管理、GM HTTP 入口、监控接口；后端 RBAC 尚未完整闭环 |
+| `admin-api` | `3001` | Node.js + NestJS | 管理员认证、后端 RBAC、审计查询、玩家管理、GM HTTP 入口、监控接口；管理员 token 生命周期治理仍需补齐 |
 | `admin-web` | `3002` | Vue 3 + Vite | 管理后台前端，本地 Vite 开发端口 |
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
@@ -178,7 +178,7 @@
 管理后台分为两层：
 
 - `admin-web`：前端页面与操作入口
-- `admin-api`：管理员认证、审计、GM 指令、监控查询；后端基于角色的接口授权尚未完整闭环
+- `admin-api`：管理员认证、后端角色授权、审计、GM 指令、监控查询；管理员 token 生命周期治理仍需补齐
 
 `admin-api` 会通过 `game-server` 的 admin 通道执行内部控制命令，例如：
 
@@ -386,6 +386,7 @@ Core NATS 当前承担以下职责：
 - `README.md`
 - `CLAUDE.md`
 - `docs/client-integration.md`
+- `docs/production-topology-and-room-migration-design.md`
 - `docs/protocol.md`
 - `docs/game-server-frame-sync-design.md`
 - `docs/service-registry-design.md`

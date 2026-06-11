@@ -7,6 +7,7 @@
 统一口径：
 
 - 本文讨论服务端滚动重启、灰度发布、连接接入和上游路由。
+- 生产公网暴露边界、多实例路线、room ownership 和同连接迁移目标态见 [生产拓扑与 Room 迁移设计](./production-topology-and-room-migration-design.md)。
 - room 内 CSV 或运行时配置更新属于 [game-server 更新策略拆分](./game-server-update-strategy.md)。
 - 空房接管式灰度的完整目标规范见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。
 - 任务状态见 [空房接管式灰度任务清单](./game-server-room-rollout-task-list.md)。
@@ -133,6 +134,8 @@ client KCP/TCP session <-> proxy session <-> upstream game-server local socket s
 - 多路复用。
 - 连接池复用业务连接。
 - 深度玩法协议解析。
+
+后续目标态允许设计同连接 upstream swap，但前提是 proxy 从透明 `copy_bidirectional` 演进为 L7 session relay，具备暂停 old upstream、冻结 room、重放鉴权/重连或 resume、输入缓冲/排序/去重以及失败回滚能力。该目标态不改变当前实现事实，也不改变第一阶段先走 redirect/reconnect 的结论。
 
 ## 6. 路由模型
 

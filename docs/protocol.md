@@ -485,16 +485,18 @@ base64url(payload_json).base64url(hmac_sha256_signature)
 
 - `game-server` 使用同一 `TICKET_SECRET` 校验签名
 - `game-proxy` 会先校验签名并检查 Redis ticket 记录，随后把认证包 replay 到 `game-server`
-- `chat-server` 也复用同一套签名校验逻辑
+- `chat-server` 也复用同一套签名校验逻辑，并检查 ticket payload 中的版本号
 - `exp` 过期则拒绝
 - `game-server` 还会继续检查 Redis 中是否存在对应 ticket 记录
-- `chat-server` 当前只校验 ticket 签名和过期时间，不查询 Redis ticket 记录
+- `game-proxy`、`game-server`、`chat-server` 都会检查 Redis 中的 `player-ticket-version:<playerId>`，从而感知 logout / 改密等玩家级 ticket version 失效
+- `chat-server` 当前仍不查询单张 `ticket:<sha256(ticket)>` 记录，因此单张 ticket revoke 对 chat 的精确撤销感知仍需后续补齐
 
 Redis 相关键：
 
 - `session:<accessToken>`
 - `ticket:<sha256(ticket)>`
 - `player-session:<playerId>`
+- `player-ticket-version:<playerId>`
 
 并发登录/改密踢旧连接通知已迁移为 Core NATS subject：
 

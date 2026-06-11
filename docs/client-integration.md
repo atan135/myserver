@@ -45,7 +45,7 @@ $env:MYSERVER_CLIENT_ROOT = "C:\project\mybevy"
 - 房间加入、离开、准备、开始、断线重连和观战
 - 持续发送移动/帧输入，只提交意图，不提交权威结果
 - 处理 `ServerRedirectPush`，断线后重新鉴权并执行 `RoomJoinReq` 或 `RoomReconnectReq`
-- 按当前服务边界接入聊天、公告、邮件和匹配能力
+- 生产环境只依赖 `auth-http` 和 `game-proxy`；聊天、公告、邮件和匹配能力应通过服务端入口、游戏协议或后续 BFF 收敛，不作为生产客户端直连内部服务的默认模型
 
 ## 5. 协议维护
 

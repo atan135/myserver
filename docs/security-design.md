@@ -12,6 +12,7 @@
 - [帧同步与房间生命周期设计](./game-server-frame-sync-design.md)
 - [场景地图格式设计](./game-server-scene-map-format-design.md)
 - [底层框架路线图](./game-server-framework-roadmap.md)
+- [生产拓扑与 Room 迁移设计](./production-topology-and-room-migration-design.md)
 
 说明：
 
@@ -44,12 +45,15 @@
 
 ### 2.1 安全边界
 
-本项目至少包含四层边界：
+本项目至少包含五层边界：
 
-1. 公网 HTTP 边界：`auth-http`、`mail-service`、`announce-service`、`admin-web`、`admin-api`
-2. 玩家长连接边界：`game-proxy`、`game-server`、`chat-server`
-3. 内部控制面边界：管理接口、GM 通道、gRPC、服务注册与监控
-4. 数据与凭证边界：Redis、MariaDB、`.env` 密钥、日志与审计库
+1. 玩家公网 HTTP 边界：生产默认只暴露 `auth-http`
+2. 玩家公网长连接边界：生产默认只暴露 `game-proxy`
+3. 受控运营入口：`admin-web`、`admin-api`，应通过运营网段、堡垒机、VPN 或独立管理入口访问，不属于玩家公网主入口
+4. 内网能力服务边界：`game-server`、`chat-server`、`match-service`、`mail-service`、`announce-service`
+5. 数据与凭证边界：Redis、NATS、MariaDB / MySQL、`.env` 密钥、日志与审计库
+
+生产公网暴露总口径以 [生产拓扑与 Room 迁移设计](./production-topology-and-room-migration-design.md) 为准：正式玩家客户端只应依赖 `auth-http` 和 `game-proxy`，其它业务服务默认内网化。本地开发或测试环境可以临时直连内部服务定位问题，但不能作为生产客户端默认模型。
 
 ### 2.2 设计原则
 
@@ -79,17 +83,17 @@
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
 | `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、内部接口可选 service token、安全审计写库 | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
-| `chat-server` | 首包强制鉴权、ticket 签名与过期校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制、没有 Redis ticket 存在性二次校验、没有公网 TLS 策略 |
+| `chat-server` | 首包强制鉴权、ticket 签名、过期与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；单张 ticket revoke 仍未通过 `ticket:<hash>` 存在性校验感知；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未强制鉴权前消息白名单 |
 | `game-server` | ticket 签名与 Redis 归属校验、心跳超时、最大包体限制、连接审计、基础权威移动校正 | 没有统一消息频率限制、时间戳窗口、反重放和通用作弊计数 |
-| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、管理审计日志、安全日志查询 | 监控接口仍匿名可访问；后端角色授权未真正生效 |
+| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、管理审计日志、安全日志查询、后端角色授权、监控接口鉴权 | 管理员 JWT 缺少 session/version/blacklist；登录失败限流和锁定仍需补齐；生产网络隔离仍需部署侧保证 |
 
 说明：
 
 - 当前同一张 ticket 会被 `game-proxy`、`game-server`、`chat-server` 复用
-- 当前 `game-proxy` 与 `game-server` 会检查 Redis ticket 记录；`chat-server` 只检查签名和过期时间，尚未感知 ticket 撤销
+- 当前 `game-proxy` 与 `game-server` 会检查 Redis ticket 记录；`chat-server` 已感知 ticket version 变化，但仍不检查单张 `ticket:<hash>` 是否存在
 - 因此不能简单采用“任一服务首次校验成功后立即删除 Redis ticket 记录”的全局单次消费模型
 - 如果后续要进一步降低重放风险，更合理的方向是短 TTL、用途隔离、分服务换票，或显式的重放窗口控制
 
@@ -122,7 +126,7 @@
 
 1. 明文传输导致 token / ticket / 管理凭证泄露
 2. 未鉴权连接或非法包频繁打入，压垮登录服、代理或游戏服
-3. `mail-service` / `announce-service` 这类客户端直连 HTTP 服务缺少统一玩家鉴权、后台鉴权或角色约束，导致越权读取、越权写入或误开放风险
+3. `mail-service` / `announce-service` 这类内网能力服务如果被误作为客户端直连 HTTP 入口，缺少统一玩家鉴权、后台鉴权或角色约束，可能导致越权读取、越权写入或误开放风险
 4. 客户端伪造位置、帧号、时间戳、房间状态或业务结果
 5. 敏感后台操作缺少完整审计，出现误操作后无法追踪
 6. 管理口、监控口、Redis、MySQL 等控制面被误暴露到公网
@@ -140,7 +144,7 @@
 
 1. 对外 HTTP 统一走 HTTPS
 2. 管理控制面与内部服务调用优先走 TLS 或私网 + service token
-3. 玩家公网长连接入口优先在 `game-proxy`、`chat-server` 或反向代理层做安全传输封装
+3. 玩家公网长连接入口优先在 `game-proxy` 或反向代理层做安全传输封装
 4. 不在第一版里发明自定义包头加密位、会话密钥协商和包体对称加密
 
 原因：
@@ -154,10 +158,10 @@
 | 链路 | 当前现状 | 目标策略 |
 |------|----------|----------|
 | 客户端 -> `auth-http` | 开发期可明文 HTTP | 生产必须 HTTPS |
-| 客户端 -> `mail-service` | 当前可直连明文 HTTP | 生产必须 HTTPS，并补齐玩家鉴权或可信入口鉴权 |
-| 客户端 -> `announce-service` | 当前可直连明文 HTTP | 生产必须 HTTPS；只读查询与后台 CRUD 需要分离鉴权策略 |
-| 浏览器 -> `admin-web` / `admin-api` | 当前未强制 HTTPS | 生产必须 HTTPS，Bearer token 只允许在 TLS 下使用 |
-| 客户端 -> `chat-server` TCP | 当前明文 TCP | 生产建议在入口层做 TLS 终止，或由 `chat-server` 直接支持 TLS |
+| 客户端 -> `mail-service` | 本地/测试可直连明文 HTTP | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS 并补齐玩家鉴权或可信入口鉴权 |
+| 客户端 -> `announce-service` | 本地/测试可直连明文 HTTP | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS，且只读查询与后台 CRUD 需要分离鉴权策略 |
+| 浏览器 -> `admin-web` / `admin-api` | 当前未强制 HTTPS | 生产必须 HTTPS，Bearer token 只允许在 TLS 下使用，并限制在运营网段、堡垒机、VPN 或独立管理入口 |
+| 客户端 -> `chat-server` TCP | 本地/测试可直连明文 TCP | 生产不作为客户端直连默认入口；若临时暴露，必须在入口层做 TLS 终止或由 `chat-server` 直接支持 TLS |
 | 客户端 -> `game-proxy` TCP fallback | 当前明文 TCP | 生产建议在入口层做 TLS 终止，或由 `game-proxy` 直接支持 TLS |
 | 客户端 -> `game-proxy` KCP | 当前无正式加密策略 | 生产不建议裸奔公网；保留为后续专项，优先用安全隧道或替换为具备成熟加密方案的入口 |
 | `game-proxy` -> `game-server` | 同机可走 UDS / 本地 TCP | 同机可维持本地链路；跨机部署时转为 TLS 或严格私网 |
@@ -390,13 +394,13 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 - Redis、MySQL 不直接暴露到公网
 - `game-server` admin 端口不对公网开放
 - `game-proxy` admin 端口不对公网开放
-- `mail-service`、`announce-service`、`chat-server` 如果对公网开放，必须明确区分玩家入口与后台/运维入口
+- `mail-service`、`announce-service`、`chat-server` 默认不作为生产公网入口；如果临时对公网开放，必须明确区分玩家入口与后台/运维入口，并补齐鉴权和 TLS
 - `admin-api` 生产环境仅允许运营网段或堡垒机访问
 - 本地开发环境默认绑定 `127.0.0.1` 或私有地址
 
 ### 8.3 接入层要求
 
-`auth-http`、`game-proxy`、`chat-server`、`mail-service`、`announce-service`、`admin-api` 都应支持：
+`auth-http`、`game-proxy`、`chat-server`、`mail-service`、`announce-service`、`admin-api` 都应支持相应边界内的访问控制；其中玩家公网入口优先覆盖 `auth-http` 和 `game-proxy`，内网服务和控制面优先覆盖 allowlist、service token 与网络隔离：
 
 - IP denylist：紧急封禁可疑来源
 - IP allowlist：管理面和内部控制面优先使用
@@ -489,12 +493,12 @@ ADMIN_ENFORCE_ROLE_CHECK=true
 
 ### M0：立即补齐的高优先级项
 
-1. 监控接口挂鉴权
-2. 后端角色授权真正生效
+1. 管理员 JWT session/version/blacklist、登出撤销和禁用后失效
+2. 管理员登录失败限流、锁定和安全审计
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网
 4. `game-proxy` / `game-server` 增加鉴权前消息白名单
 5. 单连接 / 单玩家 / 单 IP 消息频率限制
-6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界
+6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
 7. 非法包计数、异常输入计数和安全审计统一
 
 ### M1：当前阶段最值得做的安全增强
@@ -505,7 +509,7 @@ ADMIN_ENFORCE_ROLE_CHECK=true
 4. 管理面 IP allowlist
 5. 配置热更新、回滚、GM 操作审计补齐
 6. 公网 HTTP 入口统一 HTTPS
-7. `chat-server` 公网 TCP 入口补 TLS 或安全隧道封装
+7. 如果后续重新允许 `chat-server` 公网直连，再补 TLS 或安全隧道封装；默认生产模型应先走内网能力服务收敛
 
 ### M2：部署复杂度允许后推进
 
@@ -521,7 +525,7 @@ ADMIN_ENFORCE_ROLE_CHECK=true
 ### 11.1 数据加密
 
 - 生产环境对外 HTTP 接口不再允许明文
-- `chat-server`、`game-proxy` 等公网长连接入口不再裸奔明文
+- `game-proxy` 公网长连接入口不再裸奔明文；`chat-server` 默认不作为生产公网长连接入口
 - Bearer token / ticket 不在明文公网链路上传输
 - 控制面和内部服务调用有明确的鉴权与网络隔离策略
 
@@ -541,7 +545,7 @@ ADMIN_ENFORCE_ROLE_CHECK=true
 ### 11.4 防火墙 / 黑白名单
 
 - Redis、MySQL、管理端口默认不暴露到公网
-- `mail-service`、`announce-service`、`chat-server` 对公网开放时有明确的网段、鉴权或反向代理约束
+- `mail-service`、`announce-service`、`chat-server` 默认不对公网开放；临时开放时有明确的网段、鉴权或反向代理约束
 - `admin-api` 至少支持运营网段白名单
 - `game-proxy` 至少支持 IP denylist 和连接上限
 - 黑白名单和封禁策略可跨实例同步

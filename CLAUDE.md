@@ -93,6 +93,7 @@ docs/                 # 当前正式设计文档
 - [整体架构](./docs/architecture.md)
 - [协议设计](./docs/protocol.md)
 - [外部客户端接入说明](./docs/client-integration.md)
+- [生产拓扑与 Room 迁移设计](./docs/production-topology-and-room-migration-design.md)
 
 游戏服与接入层：
 

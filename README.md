@@ -32,11 +32,10 @@ announce-service / mail-service / game-server / game-proxy -> service registry
 
 仍需注意的当前缺口：
 
-- `admin-api` 后端接口尚未真正执行基于角色的接口授权。
-- `/api/admin/monitoring/*` 当前没有鉴权，不应直接暴露到公网。
+- `admin-api` 已有后端角色守卫和监控接口鉴权，但管理员 JWT 仍缺少 session/version/blacklist，登录失败限流和锁定也还需补齐。
 - `game-server` admin 侧 GM 广播、踢人、封禁仍未形成完整端到端闭环。
 - `game-proxy` 还没有 IP 黑名单、单 IP / 单账号连接上限和成熟公网加密方案。
-- `chat-server` 当前只校验 ticket 签名和过期时间，不查询 Redis ticket 记录。
+- `chat-server` 已校验 ticket 签名、过期和 ticket version，但仍不查询单张 Redis ticket 记录。
 - 部分专题文档描述目标设计，不等于代码已经全部落地。
 
 ## 仓库结构
@@ -95,6 +94,7 @@ docs/                 # 当前正式设计文档
 - [整体架构](./docs/architecture.md)
 - [协议设计](./docs/protocol.md)
 - [外部客户端接入说明](./docs/client-integration.md)
+- [生产拓扑与 Room 迁移设计](./docs/production-topology-and-room-migration-design.md)
 - [文档校准状态汇总](./summary.md)
 
 游戏服与接入层：
