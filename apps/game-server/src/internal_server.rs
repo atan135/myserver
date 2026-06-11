@@ -3,7 +3,7 @@ use interprocess::local_socket::traits::tokio::Listener as _;
 use std::sync::atomic::Ordering;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::context::ServiceContext;
 use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
@@ -96,6 +96,10 @@ where
                 let request = packet
                     .decode_body::<FreezeRoomForTransferReq>("INVALID_FREEZE_ROOM_TRANSFER_BODY")
                     .map_err(std::io::Error::other)?;
+                let target = InternalAuditTarget::for_room_transfer(
+                    &request.room_id,
+                    &request.rollout_epoch,
+                );
 
                 let result = services
                     .room_manager
@@ -108,6 +112,14 @@ where
                     }
                     Err(error_code) => (false, error_code.to_string(), 0, 0),
                 };
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "freeze_room_for_transfer",
+                    ok,
+                    &error_code,
+                    &target,
+                );
 
                 write_message(
                     &mut writer,
@@ -127,6 +139,10 @@ where
                 let request = packet
                     .decode_body::<ExportRoomTransferReq>("INVALID_EXPORT_ROOM_TRANSFER_BODY")
                     .map_err(std::io::Error::other)?;
+                let mut target = InternalAuditTarget::for_room_transfer(
+                    &request.room_id,
+                    &request.rollout_epoch,
+                );
 
                 let result = services
                     .room_manager
@@ -134,13 +150,16 @@ where
                     .await;
 
                 let response = match result {
-                    Ok(payload) => ExportRoomTransferRes {
-                        ok: true,
-                        room_id: request.room_id,
-                        error_code: String::new(),
-                        checksum: payload.checksum.clone(),
-                        payload: Some(payload),
-                    },
+                    Ok(payload) => {
+                        target.checksum = payload.checksum.clone();
+                        ExportRoomTransferRes {
+                            ok: true,
+                            room_id: request.room_id,
+                            error_code: String::new(),
+                            checksum: payload.checksum.clone(),
+                            payload: Some(payload),
+                        }
+                    }
                     Err(error_code) => ExportRoomTransferRes {
                         ok: false,
                         room_id: request.room_id,
@@ -149,6 +168,14 @@ where
                         payload: None,
                     },
                 };
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "export_room_transfer",
+                    response.ok,
+                    &response.error_code,
+                    &target,
+                );
 
                 write_message(
                     &mut writer,
@@ -162,6 +189,7 @@ where
                 let request = packet
                     .decode_body::<ImportRoomTransferReq>("INVALID_IMPORT_ROOM_TRANSFER_BODY")
                     .map_err(std::io::Error::other)?;
+                let mut target = InternalAuditTarget::for_import_transfer(&request);
 
                 let result = match request.payload {
                     Some(payload) => {
@@ -176,13 +204,17 @@ where
                 };
 
                 let response = match result {
-                    Ok((room_id, checksum, room_version)) => ImportRoomTransferRes {
-                        ok: true,
-                        room_id,
-                        error_code: String::new(),
-                        checksum,
-                        room_version,
-                    },
+                    Ok((room_id, checksum, room_version)) => {
+                        target.room_id = room_id.clone();
+                        target.checksum = checksum.clone();
+                        ImportRoomTransferRes {
+                            ok: true,
+                            room_id,
+                            error_code: String::new(),
+                            checksum,
+                            room_version,
+                        }
+                    }
                     Err(error_code) => ImportRoomTransferRes {
                         ok: false,
                         room_id: String::new(),
@@ -191,6 +223,14 @@ where
                         room_version: 0,
                     },
                 };
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "import_room_transfer",
+                    response.ok,
+                    &response.error_code,
+                    &target,
+                );
 
                 write_message(
                     &mut writer,
@@ -204,6 +244,12 @@ where
                 let request = packet
                     .decode_body::<RetireTransferredRoomReq>("INVALID_RETIRE_ROOM_TRANSFER_BODY")
                     .map_err(std::io::Error::other)?;
+                let target = InternalAuditTarget {
+                    room_id: request.room_id.clone(),
+                    rollout_epoch: request.rollout_epoch.clone(),
+                    checksum: request.checksum.clone(),
+                    target_server_id: String::new(),
+                };
 
                 let result = services
                     .room_manager
@@ -213,15 +259,25 @@ where
                         &request.checksum,
                     )
                     .await;
+                let ok = result.is_ok();
+                let error_code = result.err().unwrap_or_default().to_string();
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "retire_transferred_room",
+                    ok,
+                    &error_code,
+                    &target,
+                );
 
                 write_message(
                     &mut writer,
                     MessageType::RetireTransferredRoomRes,
                     packet.header.seq,
                     &RetireTransferredRoomRes {
-                        ok: result.is_ok(),
+                        ok,
                         room_id: request.room_id,
-                        error_code: result.err().unwrap_or_default().to_string(),
+                        error_code,
                     },
                 )
                 .await?;
@@ -262,6 +318,12 @@ where
                 let request = packet
                     .decode_body::<TriggerServerRedirectReq>("INVALID_TRIGGER_REDIRECT_BODY")
                     .map_err(std::io::Error::other)?;
+                let target = InternalAuditTarget {
+                    room_id: request.room_id.clone(),
+                    rollout_epoch: request.rollout_epoch.clone(),
+                    checksum: String::new(),
+                    target_server_id: request.target_server_id.clone(),
+                };
 
                 let room_id = request.room_id.clone();
                 let result = services
@@ -304,6 +366,14 @@ where
                         online_member_count: 0,
                     },
                 };
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "trigger_server_redirect",
+                    response.ok,
+                    &response.error_code,
+                    &target,
+                );
 
                 write_message(
                     &mut writer,
@@ -345,6 +415,78 @@ fn authenticate_internal_packet(packet: &Packet, internal_token: &str) -> bool {
     std::str::from_utf8(&packet.body)
         .map(|token| token == internal_token)
         .unwrap_or(false)
+}
+
+#[derive(Default)]
+struct InternalAuditTarget {
+    room_id: String,
+    rollout_epoch: String,
+    checksum: String,
+    target_server_id: String,
+}
+
+impl InternalAuditTarget {
+    fn for_room_transfer(room_id: &str, rollout_epoch: &str) -> Self {
+        Self {
+            room_id: room_id.to_string(),
+            rollout_epoch: rollout_epoch.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn for_import_transfer(request: &ImportRoomTransferReq) -> Self {
+        let Some(payload) = request.payload.as_ref() else {
+            return Self::default();
+        };
+
+        Self {
+            room_id: payload.room_id.clone(),
+            rollout_epoch: payload.rollout_epoch.clone(),
+            checksum: payload.checksum.clone(),
+            target_server_id: String::new(),
+        }
+    }
+}
+
+fn audit_internal_control_action(
+    seq: u32,
+    message_type: u16,
+    action: &'static str,
+    ok: bool,
+    error_code: &str,
+    target: &InternalAuditTarget,
+) {
+    if ok {
+        info!(
+            channel = "internal_socket",
+            actor = "internal_service",
+            action,
+            ok,
+            error_code,
+            room_id = %target.room_id,
+            rollout_epoch = %target.rollout_epoch,
+            checksum = %target.checksum,
+            target_server_id = %target.target_server_id,
+            seq,
+            message_type,
+            "game-server internal control action"
+        );
+    } else {
+        warn!(
+            channel = "internal_socket",
+            actor = "internal_service",
+            action,
+            ok,
+            error_code,
+            room_id = %target.room_id,
+            rollout_epoch = %target.rollout_epoch,
+            checksum = %target.checksum,
+            target_server_id = %target.target_server_id,
+            seq,
+            message_type,
+            "game-server internal control action failed"
+        );
+    }
 }
 
 async fn read_packet<R>(reader: &mut R) -> Result<Option<Packet>, Box<dyn std::error::Error>>

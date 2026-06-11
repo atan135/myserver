@@ -15,6 +15,9 @@ pub struct Config {
     pub admin_host: String,
     pub admin_port: u16,
     pub admin_token: String,
+    pub admin_audit_enabled: bool,
+    pub admin_audit_path: String,
+    pub admin_audit_require_actor: bool,
     pub internal_token: String,
     pub local_socket_name: String,
     pub internal_socket_name: String,
@@ -97,6 +100,10 @@ impl Config {
             .unwrap_or(7500);
         let admin_token =
             env::var("GAME_ADMIN_TOKEN").unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string());
+        let admin_audit_enabled = parse_bool("GAME_ADMIN_AUDIT_ENABLED", true);
+        let admin_audit_path = env::var("GAME_ADMIN_AUDIT_PATH")
+            .unwrap_or_else(|_| "logs/game-server/admin-audit.jsonl".to_string());
+        let admin_audit_require_actor = parse_bool("GAME_ADMIN_AUDIT_REQUIRE_ACTOR", false);
         let internal_token =
             env::var("GAME_INTERNAL_TOKEN").unwrap_or_else(|_| DEFAULT_INTERNAL_TOKEN.to_string());
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
@@ -154,6 +161,9 @@ impl Config {
             admin_host,
             admin_port,
             admin_token,
+            admin_audit_enabled,
+            admin_audit_path,
+            admin_audit_require_actor,
             internal_token,
             local_socket_name,
             internal_socket_name,
@@ -230,6 +240,10 @@ fn validate_production_config(config: &Config) {
         errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
     }
 
+    if !config.admin_audit_enabled {
+        errors.push("GAME_ADMIN_AUDIT_ENABLED=false is not allowed in production");
+    }
+
     if is_default_secret(&config.internal_token, DEFAULT_INTERNAL_TOKEN) {
         errors.push("GAME_INTERNAL_TOKEN must be set to a non-default value in production");
     }
@@ -298,6 +312,9 @@ mod tests {
         "APP_ENV",
         "TICKET_SECRET",
         "GAME_ADMIN_TOKEN",
+        "GAME_ADMIN_AUDIT_ENABLED",
+        "GAME_ADMIN_AUDIT_PATH",
+        "GAME_ADMIN_AUDIT_REQUIRE_ACTOR",
         "GAME_INTERNAL_TOKEN",
     ];
 
@@ -465,6 +482,9 @@ mod tests {
             env::remove_var("APP_ENV");
         }
         set_custom_production_tokens();
+        unsafe {
+            env::set_var("GAME_ADMIN_AUDIT_ENABLED", "true");
+        }
 
         let config = Config::from_env();
 
@@ -508,5 +528,63 @@ mod tests {
         assert_eq!(config.ticket_secret, DEFAULT_TICKET_SECRET);
         assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
         assert_eq!(config.internal_token, DEFAULT_INTERNAL_TOKEN);
+    }
+
+    #[test]
+    fn admin_audit_defaults_are_enabled_and_optional_actor() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("GAME_ADMIN_AUDIT_ENABLED");
+            env::remove_var("GAME_ADMIN_AUDIT_PATH");
+            env::remove_var("GAME_ADMIN_AUDIT_REQUIRE_ACTOR");
+        }
+
+        let config = Config::from_env();
+
+        assert!(config.admin_audit_enabled);
+        assert_eq!(
+            config.admin_audit_path,
+            "logs/game-server/admin-audit.jsonl"
+        );
+        assert!(!config.admin_audit_require_actor);
+    }
+
+    #[test]
+    fn admin_audit_env_overrides_are_parsed() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("GAME_ADMIN_AUDIT_ENABLED", "false");
+            env::set_var("GAME_ADMIN_AUDIT_PATH", "tmp/admin-audit.jsonl");
+            env::set_var("GAME_ADMIN_AUDIT_REQUIRE_ACTOR", "true");
+        }
+
+        let config = Config::from_env();
+
+        assert!(!config.admin_audit_enabled);
+        assert_eq!(config.admin_audit_path, "tmp/admin-audit.jsonl");
+        assert!(config.admin_audit_require_actor);
+    }
+
+    #[test]
+    fn rejects_disabled_admin_audit_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("GAME_ADMIN_AUDIT_ENABLED", "false");
+        }
+        set_custom_production_tokens();
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GAME_ADMIN_AUDIT_ENABLED"));
     }
 }

@@ -452,6 +452,11 @@ pub async fn run(
         services.config_tables.clone(),
         config.service_instance_id.clone(),
         config.admin_token.clone(),
+        crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
+            config.admin_audit_enabled,
+            config.admin_audit_path.clone(),
+            config.admin_audit_require_actor,
+        )),
     ));
 
     let local_socket_task = tokio::spawn(run_local_socket_listener(

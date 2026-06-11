@@ -193,7 +193,8 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - 单连接消息频率限制：读到完整 packet 后、业务 dispatch 前检查窗口计数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 单玩家消息频率限制：连接级限流通过后，对已鉴权连接按 `player_id` 在当前 `game-server` 实例内统计窗口消息数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 管理接口支持动态调整 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms` 与 `player_msg_rate_max`
-- 生产配置保护：`NODE_ENV=production` 或 `APP_ENV=production` 时，配置加载阶段拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
+- admin TCP 敏感写操作写入 JSONL 审计，默认路径 `logs/game-server/admin-audit.jsonl`；写操作前会检查审计文件可写，不可写时按安全优先拒绝，业务处理后的审计追加失败会返回 `ADMIN_AUDIT_WRITE_FAILED`
+- 生产配置保护：`NODE_ENV=production` 或 `APP_ENV=production` 时，配置加载阶段拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`，并拒绝 `GAME_ADMIN_AUDIT_ENABLED=false`
 
 ### 4.2 当前实际配置项
 
@@ -202,6 +203,9 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 ```env
 TICKET_SECRET=replace-with-a-long-random-string
 GAME_ADMIN_TOKEN=dev-only-change-this-game-admin-token
+GAME_ADMIN_AUDIT_ENABLED=true
+GAME_ADMIN_AUDIT_PATH=logs/game-server/admin-audit.jsonl
+GAME_ADMIN_AUDIT_REQUIRE_ACTOR=false
 GAME_INTERNAL_TOKEN=dev-only-change-this-game-internal-token
 REDIS_KEY_PREFIX=
 HEARTBEAT_TIMEOUT_SECS=30
@@ -227,8 +231,10 @@ INPUT_ANOMALY_MAX=0
 - `INPUT_ANOMALY_WINDOW_MS` 默认 `10000`，表示玩家输入异常的本实例短窗口。窗口内会统计 `PlayerInputReq` / `MoveInputReq` 的重复输入、过期帧、未来帧和时间戳异常；重复输入要求同一玩家同一房间连续上报同一 `frame_id` 且输入内容完全相同。
 - `INPUT_ANOMALY_MAX` 默认 `0`，表示只记录结构化日志和计数、不因计数额外拒绝；配置为正整数时，同一玩家在窗口内达到阈值后，后续输入返回 `INPUT_ANOMALY_BLOCKED`，当前不断开连接。
 - admin TCP 的 `AdminUpdateConfigReq` 可通过 key/value 动态更新 `msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms`、`player_msg_rate_max`、`input_timestamp_required`、`input_timestamp_max_skew_ms`、`input_anomaly_window_ms` 与 `input_anomaly_max`。
+- `GAME_ADMIN_AUDIT_ENABLED` 默认 `true`；生产环境不允许关闭。`GAME_ADMIN_AUDIT_PATH` 默认 `logs/game-server/admin-audit.jsonl`。`GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时，admin TCP 写操作必须在 `AdminAuthReq` 中使用 JSON envelope，例如 `{"token":"...","actor":"ops@example.com"}`；旧纯 token 格式继续兼容，但 actor 记为 `unknown` 且 `actor_missing=true`。`AdminServerStatusReq` / `GetRolloutDrainStatusReq` 等只读状态查询不因缺 actor 被拒绝。
+- 第一阶段 JSONL 审计覆盖 `AdminUpdateConfigReq`、GM 发奖/广播/踢人/封禁、房间迁移 freeze/export/import/retire 和 redirect。记录字段包含时间戳、`channel=admin_tcp`、action、actor、actor_missing、ok、error_code、room/player/rollout/checksum/target_server_id/config_key 等摘要以及 seq/message_type；不会记录 token、ticket、密码、完整请求体或 room transfer payload。
 - 当前 `ServerStatusRes` 协议仍只回显 `max_body_len`、`heartbeat_timeout_secs` 等既有字段，尚未暴露消息频率限制配置。
-- `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 的示例值只用于开发；生产环境必须替换为非默认值。该 fail-fast 保护的是 `game-server` 内网服务凭证边界，不表示 `game-server` 要作为生产公网入口暴露。
+- `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 的示例值只用于开发；生产环境必须替换为非默认值，且不能关闭 admin 审计。该 fail-fast 保护的是 `game-server` 内网服务凭证和审计基线，不表示 `game-server` 要作为生产公网入口暴露。
 
 ### 4.3 与旧文档的关键差异
 
@@ -240,7 +246,8 @@ INPUT_ANOMALY_MAX=0
 
 - `game-server` 在认证阶段会验证 ticket 签名和 Redis 中的 ticket 所有权；这是 ticket 校验的核心落点之一，`auth-http` 只负责签发、存储与撤销
 - `game-server` 校验 ticket 时依赖 `TICKET_SECRET` 和 `REDIS_KEY_PREFIX`；这两个值需要与 `auth-http` 的签发侧保持一致
-- `game-server` 的 `GAME_ADMIN_TOKEN` 与 `GAME_INTERNAL_TOKEN` 用于内部管理/服务通道；生产拒绝默认值或空值，但仍应依赖私网、allowlist、TLS/mTLS 或同机 socket 等部署侧隔离
+- `game-server` 的 `GAME_ADMIN_TOKEN` 与 `GAME_INTERNAL_TOKEN` 用于内部管理/服务通道；生产拒绝默认值或空值，并要求 admin TCP JSONL 审计保持启用，但仍应依赖私网、allowlist、TLS/mTLS 或同机 socket 等部署侧隔离
+- internal socket 不是人操作入口，不要求 actor；房间迁移和 redirect 等敏感服务间控制动作会输出 `channel=internal_socket`、`actor=internal_service` 的结构化 tracing 审计日志。
 - ticket 校验成功后当前不会自动删除 Redis 中的 ticket，因此并非严格的一次性消费模型
 - 这种设计和当前“同一 ticket 供 `game-proxy` / `game-server` / `chat-server` 复用”的接入方式是一致的；如果后续要降低重放风险，更适合考虑缩短 TTL、增加用途隔离或引入换票流程
 - 心跳、包体长度、鉴权前白名单、单连接消息频率限制、本实例单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验，以及玩家输入异常短窗口计数属于当前已经生效的安全边界；单 IP 频率限制、跨实例全局玩家频率限制、异常解析失败率阈值和跨实例反重放仍属于设计目标

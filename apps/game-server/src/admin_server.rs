@@ -1,8 +1,10 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
@@ -37,6 +39,8 @@ const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
 const GM_REASON_MAX_LEN: usize = 512;
 const GM_PLAYER_ID_MAX_LEN: usize = 128;
 const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
+const MAX_ADMIN_ACTOR_LEN: usize = 128;
+const DEFAULT_ADMIN_ACTOR: &str = "unknown";
 static ITEM_UID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -66,6 +70,148 @@ struct KickOnlineOutcome {
     session_id: u64,
 }
 
+#[derive(Clone)]
+pub struct AdminAuditConfig {
+    enabled: bool,
+    path: PathBuf,
+    require_actor: bool,
+}
+
+impl AdminAuditConfig {
+    pub fn new(enabled: bool, path: impl Into<PathBuf>, require_actor: bool) -> Self {
+        Self {
+            enabled,
+            path: path.into(),
+            require_actor,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AdminAuditLogger {
+    config: AdminAuditConfig,
+}
+
+impl AdminAuditLogger {
+    pub fn new(config: AdminAuditConfig) -> Self {
+        Self { config }
+    }
+
+    async fn ensure_ready(&self) -> Result<(), AdminAuditError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        ensure_parent_dir(&self.config.path).await?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.config.path)
+            .await
+            .map_err(AdminAuditError::Io)?;
+        Ok(())
+    }
+
+    async fn append(&self, event: &AdminAuditEvent<'_>) -> Result<(), AdminAuditError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        ensure_parent_dir(&self.config.path).await?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.config.path)
+            .await
+            .map_err(AdminAuditError::Io)?;
+        let mut line = serde_json::to_string(event).map_err(AdminAuditError::Serialize)?;
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .await
+            .map_err(AdminAuditError::Io)
+    }
+}
+
+#[derive(Debug)]
+enum AdminAuditError {
+    Io(std::io::Error),
+    Serialize(serde_json::Error),
+}
+
+impl std::fmt::Display for AdminAuditError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{}", error),
+            Self::Serialize(error) => write!(formatter, "{}", error),
+        }
+    }
+}
+
+impl std::error::Error for AdminAuditError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdminAuthContext {
+    actor: String,
+    actor_missing: bool,
+}
+
+#[derive(Deserialize)]
+struct AdminAuthEnvelope {
+    token: String,
+    actor: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AdminAuditTarget {
+    room_id: String,
+    player_id: String,
+    rollout_epoch: String,
+    checksum: String,
+    target_server_id: String,
+    config_key: String,
+}
+
+#[derive(Serialize)]
+struct AdminAuditEvent<'a> {
+    timestamp_ms: u64,
+    channel: &'static str,
+    action: &'a str,
+    actor: &'a str,
+    actor_missing: bool,
+    ok: bool,
+    error_code: &'a str,
+    room_id: &'a str,
+    player_id: &'a str,
+    rollout_epoch: &'a str,
+    checksum: &'a str,
+    target_server_id: &'a str,
+    config_key: &'a str,
+    seq: u32,
+    message_type: u16,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AdminWritePreflightError {
+    ActorRequired,
+    AuditUnavailable,
+}
+
+impl AdminWritePreflightError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            Self::ActorRequired => "ADMIN_ACTOR_REQUIRED",
+            Self::AuditUnavailable => "ADMIN_AUDIT_WRITE_FAILED",
+        }
+    }
+
+    fn message(&self) -> &'static str {
+        match self {
+            Self::ActorRequired => "admin actor is required for write operations",
+            Self::AuditUnavailable => "admin audit log is not writable",
+        }
+    }
+}
+
 pub async fn run_listener(
     listener: TcpListener,
     room_manager: SharedRoomManager,
@@ -76,6 +222,7 @@ pub async fn run_listener(
     config_tables: ConfigTableRuntime,
     owner_server_id: String,
     admin_token: String,
+    audit_logger: AdminAuditLogger,
 ) -> Result<(), std::io::Error> {
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -87,6 +234,7 @@ pub async fn run_listener(
         let config_tables = config_tables.clone();
         let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
+        let audit_logger = audit_logger.clone();
 
         tokio::spawn(async move {
             if let Err(error) = handle_admin_connection(
@@ -99,6 +247,7 @@ pub async fn run_listener(
                 config_tables,
                 owner_server_id,
                 admin_token,
+                audit_logger,
             )
             .await
             {
@@ -118,13 +267,14 @@ async fn handle_admin_connection(
     config_tables: ConfigTableRuntime,
     owner_server_id: String,
     admin_token: String,
+    audit_logger: AdminAuditLogger,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut reader, mut writer) = socket.into_split();
 
     let Some(auth_packet) = read_packet(&mut reader).await? else {
         return Ok(());
     };
-    if !authenticate_admin_packet(&auth_packet, &admin_token) {
+    let Some(auth_context) = authenticate_admin_packet(&auth_packet, &admin_token) else {
         write_error(
             &mut writer,
             auth_packet.header.seq,
@@ -133,12 +283,27 @@ async fn handle_admin_connection(
         )
         .await?;
         return Ok(());
-    }
+    };
 
     loop {
         let Some(packet) = read_packet(&mut reader).await? else {
             break;
         };
+
+        if let Some(action) = packet.message_type().and_then(admin_write_action) {
+            if let Err(error) =
+                ensure_admin_write_allowed(&audit_logger, &auth_context, &packet, action).await
+            {
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    error.error_code(),
+                    error.message(),
+                )
+                .await?;
+                continue;
+            }
+        }
 
         match packet.message_type() {
             Some(MessageType::AdminServerStatusReq) => {
@@ -169,26 +334,87 @@ async fn handle_admin_connection(
                 .await?;
             }
             Some(MessageType::AdminUpdateConfigReq) => {
-                let request = packet
+                let action = "admin_update_config";
+                let request = match packet
                     .decode_body::<UpdateConfigReq>("INVALID_ADMIN_UPDATE_CONFIG_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid admin update config request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = update_config_target(&request);
                 let result =
                     apply_runtime_config(&runtime_config, &request.key, &request.value).await;
+                let ok = result.is_ok();
+                let error_code = result.err().unwrap_or_default().to_string();
 
-                write_message(
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::AdminUpdateConfigRes,
-                    packet.header.seq,
                     &UpdateConfigRes {
-                        ok: result.is_ok(),
-                        error_code: result.err().unwrap_or_default().to_string(),
+                        ok,
+                        error_code: error_code.clone(),
                     },
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
             Some(MessageType::GmSendItemReq) => {
-                let request = decode_grant_items_request(&packet)?;
-                validate_grant_items_request(&request, &config_tables).await?;
+                let action = "gm_send_item";
+                let request =
+                    match decode_grant_items_request(&packet).map_err(|error| error.to_string()) {
+                        Ok(request) => request,
+                        Err(error_code) => {
+                            audit_then_write_error(
+                                &mut writer,
+                                &audit_logger,
+                                &auth_context,
+                                &packet,
+                                action,
+                                &error_code,
+                                "invalid grant items request",
+                                &AdminAuditTarget::default(),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                let target = player_target(request.player_id.clone());
+                if let Err(error_code) = validate_grant_items_request(&request, &config_tables)
+                    .await
+                    .map_err(|error| error.to_string())
+                {
+                    audit_then_write_error(
+                        &mut writer,
+                        &audit_logger,
+                        &auth_context,
+                        &packet,
+                        action,
+                        &error_code,
+                        "invalid grant items request",
+                        &target,
+                    )
+                    .await?;
+                    continue;
+                }
                 let items = request
                     .items
                     .iter()
@@ -223,139 +449,234 @@ async fn handle_admin_connection(
                             .await;
                         }
 
-                        write_message(
+                        audit_then_write_message(
                             &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
                             MessageType::GmSendItemRes,
-                            packet.header.seq,
                             &GrantItemsRes {
                                 ok: true,
                                 error_code: String::new(),
                                 applied: outcome.applied,
                             },
+                            true,
+                            "",
+                            &target,
                         )
                         .await?;
                     }
                     Err(error_code) => {
-                        write_error(
+                        audit_then_write_error(
                             &mut writer,
-                            packet.header.seq,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
                             &error_code,
                             "failed to grant items",
+                            &target,
                         )
                         .await?;
                     }
                 }
             }
-            Some(MessageType::GmBroadcastReq) => match decode_gm_broadcast_request(&packet) {
-                Ok(request) => {
-                    let delivered =
-                        broadcast_gm_message_to_online_players(&player_registry, &request).await;
-                    info!(
-                        delivered = delivered,
-                        sender = %request.sender,
-                        title = %request.title,
-                        "gm broadcast delivered"
-                    );
-                    write_gm_response(&mut writer, MessageType::GmBroadcastRes, packet.header.seq)
+            Some(MessageType::GmBroadcastReq) => {
+                let action = "gm_broadcast";
+                match decode_gm_broadcast_request(&packet) {
+                    Ok(request) => {
+                        let delivered =
+                            broadcast_gm_message_to_online_players(&player_registry, &request)
+                                .await;
+                        info!(
+                            delivered = delivered,
+                            sender = %request.sender,
+                            title = %request.title,
+                            "gm broadcast delivered"
+                        );
+                        audit_then_write_message(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            MessageType::GmBroadcastRes,
+                            &GmCommandRes {
+                                ok: true,
+                                error_code: String::new(),
+                            },
+                            true,
+                            "",
+                            &AdminAuditTarget::default(),
+                        )
                         .await?;
-                }
-                Err(error_code) => {
-                    write_error(
-                        &mut writer,
-                        packet.header.seq,
-                        error_code,
-                        "invalid gm broadcast request",
-                    )
-                    .await?;
-                }
-            },
-            Some(MessageType::GmKickPlayerReq) => match decode_gm_kick_player_request(&packet) {
-                Ok(request) => {
-                    let kick_reason = gm_disconnect_reason("gm_kick", &request.reason);
-                    match kick_online_player(&player_registry, &request.player_id, &kick_reason)
-                        .await
-                    {
-                        Ok(outcome) => {
-                            info!(
-                                player_id = %outcome.player_id,
-                                session_id = outcome.session_id,
-                                reason = %kick_reason,
-                                "gm kick player delivered"
-                            );
-                            write_gm_response(
-                                &mut writer,
-                                MessageType::GmKickPlayerRes,
-                                packet.header.seq,
-                            )
-                            .await?;
-                        }
-                        Err(error_code) => {
-                            write_error(
-                                &mut writer,
-                                packet.header.seq,
-                                error_code,
-                                "failed to kick player",
-                            )
-                            .await?;
-                        }
+                    }
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid gm broadcast request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
                     }
                 }
-                Err(error_code) => {
-                    write_error(
-                        &mut writer,
-                        packet.header.seq,
-                        error_code,
-                        "invalid gm kick player request",
-                    )
-                    .await?;
-                }
-            },
-            Some(MessageType::GmBanPlayerReq) => match decode_gm_ban_player_request(&packet) {
-                Ok(request) => {
-                    let kick_reason = gm_disconnect_reason("gm_ban", &request.reason);
-                    match kick_online_player(&player_registry, &request.player_id, &kick_reason)
-                        .await
-                    {
-                        Ok(outcome) => {
-                            info!(
-                                player_id = %outcome.player_id,
-                                session_id = outcome.session_id,
-                                duration_seconds = request.duration_seconds,
-                                reason = %kick_reason,
-                                "gm ban online player handled"
-                            );
-                            write_gm_response(
-                                &mut writer,
-                                MessageType::GmBanPlayerRes,
-                                packet.header.seq,
-                            )
-                            .await?;
-                        }
-                        Err(error_code) => {
-                            write_error(
-                                &mut writer,
-                                packet.header.seq,
-                                error_code,
-                                "failed to ban player on this game-server",
-                            )
-                            .await?;
+            }
+            Some(MessageType::GmKickPlayerReq) => {
+                let action = "gm_kick_player";
+                match decode_gm_kick_player_request(&packet) {
+                    Ok(request) => {
+                        let target = player_target(request.player_id.clone());
+                        let kick_reason = gm_disconnect_reason("gm_kick", &request.reason);
+                        match kick_online_player(&player_registry, &request.player_id, &kick_reason)
+                            .await
+                        {
+                            Ok(outcome) => {
+                                info!(
+                                    player_id = %outcome.player_id,
+                                    session_id = outcome.session_id,
+                                    reason = %kick_reason,
+                                    "gm kick player delivered"
+                                );
+                                audit_then_write_message(
+                                    &mut writer,
+                                    &audit_logger,
+                                    &auth_context,
+                                    &packet,
+                                    action,
+                                    MessageType::GmKickPlayerRes,
+                                    &GmCommandRes {
+                                        ok: true,
+                                        error_code: String::new(),
+                                    },
+                                    true,
+                                    "",
+                                    &target,
+                                )
+                                .await?;
+                            }
+                            Err(error_code) => {
+                                audit_then_write_error(
+                                    &mut writer,
+                                    &audit_logger,
+                                    &auth_context,
+                                    &packet,
+                                    action,
+                                    error_code,
+                                    "failed to kick player",
+                                    &target,
+                                )
+                                .await?;
+                            }
                         }
                     }
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid gm kick player request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                    }
                 }
-                Err(error_code) => {
-                    write_error(
-                        &mut writer,
-                        packet.header.seq,
-                        error_code,
-                        "invalid gm ban player request",
-                    )
-                    .await?;
+            }
+            Some(MessageType::GmBanPlayerReq) => {
+                let action = "gm_ban_player";
+                match decode_gm_ban_player_request(&packet) {
+                    Ok(request) => {
+                        let target = player_target(request.player_id.clone());
+                        let kick_reason = gm_disconnect_reason("gm_ban", &request.reason);
+                        match kick_online_player(&player_registry, &request.player_id, &kick_reason)
+                            .await
+                        {
+                            Ok(outcome) => {
+                                info!(
+                                    player_id = %outcome.player_id,
+                                    session_id = outcome.session_id,
+                                    duration_seconds = request.duration_seconds,
+                                    reason = %kick_reason,
+                                    "gm ban online player handled"
+                                );
+                                audit_then_write_message(
+                                    &mut writer,
+                                    &audit_logger,
+                                    &auth_context,
+                                    &packet,
+                                    action,
+                                    MessageType::GmBanPlayerRes,
+                                    &GmCommandRes {
+                                        ok: true,
+                                        error_code: String::new(),
+                                    },
+                                    true,
+                                    "",
+                                    &target,
+                                )
+                                .await?;
+                            }
+                            Err(error_code) => {
+                                audit_then_write_error(
+                                    &mut writer,
+                                    &audit_logger,
+                                    &auth_context,
+                                    &packet,
+                                    action,
+                                    error_code,
+                                    "failed to ban player on this game-server",
+                                    &target,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid gm ban player request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                    }
                 }
-            },
+            }
             Some(MessageType::FreezeRoomForTransferReq) => {
-                let request = packet
+                let action = "freeze_room_for_transfer";
+                let request = match packet
                     .decode_body::<FreezeRoomForTransferReq>("INVALID_FREEZE_ROOM_TRANSFER_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid freeze room transfer request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target =
+                    room_transfer_target(request.room_id.clone(), request.rollout_epoch.clone());
 
                 let result = room_manager
                     .freeze_room_for_transfer(&request.rollout_epoch, &request.room_id)
@@ -368,37 +689,65 @@ async fn handle_admin_connection(
                     Err(error_code) => (false, error_code.to_string(), 0, 0),
                 };
 
-                write_message(
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::FreezeRoomForTransferRes,
-                    packet.header.seq,
                     &FreezeRoomForTransferRes {
                         ok,
                         room_id: request.room_id,
-                        error_code,
+                        error_code: error_code.clone(),
                         migration_state,
                         room_version,
                     },
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
             Some(MessageType::ExportRoomTransferReq) => {
-                let request = packet
+                let action = "export_room_transfer";
+                let request = match packet
                     .decode_body::<ExportRoomTransferReq>("INVALID_EXPORT_ROOM_TRANSFER_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid export room transfer request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let mut target =
+                    room_transfer_target(request.room_id.clone(), request.rollout_epoch.clone());
 
                 let result = room_manager
                     .export_room_transfer(&request.rollout_epoch, &request.room_id)
                     .await;
 
                 let response = match result {
-                    Ok(payload) => ExportRoomTransferRes {
-                        ok: true,
-                        room_id: request.room_id,
-                        error_code: String::new(),
-                        checksum: payload.checksum.clone(),
-                        payload: Some(payload),
-                    },
+                    Ok(payload) => {
+                        target.checksum = payload.checksum.clone();
+                        ExportRoomTransferRes {
+                            ok: true,
+                            room_id: request.room_id,
+                            error_code: String::new(),
+                            checksum: payload.checksum.clone(),
+                            payload: Some(payload),
+                        }
+                    }
                     Err(error_code) => ExportRoomTransferRes {
                         ok: false,
                         room_id: request.room_id,
@@ -408,18 +757,44 @@ async fn handle_admin_connection(
                     },
                 };
 
-                write_message(
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::ExportRoomTransferRes,
-                    packet.header.seq,
                     &response,
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
             Some(MessageType::ImportRoomTransferReq) => {
-                let request = packet
+                let action = "import_room_transfer";
+                let request = match packet
                     .decode_body::<ImportRoomTransferReq>("INVALID_IMPORT_ROOM_TRANSFER_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid import room transfer request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let mut target = import_room_transfer_target(&request);
 
                 let result = match request.payload {
                     Some(payload) => {
@@ -433,13 +808,17 @@ async fn handle_admin_connection(
                 };
 
                 let response = match result {
-                    Ok((room_id, checksum, room_version)) => ImportRoomTransferRes {
-                        ok: true,
-                        room_id,
-                        error_code: String::new(),
-                        checksum,
-                        room_version,
-                    },
+                    Ok((room_id, checksum, room_version)) => {
+                        target.room_id = room_id.clone();
+                        target.checksum = checksum.clone();
+                        ImportRoomTransferRes {
+                            ok: true,
+                            room_id,
+                            error_code: String::new(),
+                            checksum,
+                            room_version,
+                        }
+                    }
                     Err(error_code) => ImportRoomTransferRes {
                         ok: false,
                         room_id: String::new(),
@@ -449,18 +828,44 @@ async fn handle_admin_connection(
                     },
                 };
 
-                write_message(
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::ImportRoomTransferRes,
-                    packet.header.seq,
                     &response,
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
             Some(MessageType::RetireTransferredRoomReq) => {
-                let request = packet
+                let action = "retire_transferred_room";
+                let request = match packet
                     .decode_body::<RetireTransferredRoomReq>("INVALID_RETIRE_ROOM_TRANSFER_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid retire room transfer request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = retire_room_transfer_target(&request);
 
                 let result = room_manager
                     .retire_transferred_room(
@@ -469,16 +874,24 @@ async fn handle_admin_connection(
                         &request.checksum,
                     )
                     .await;
+                let ok = result.is_ok();
+                let error_code = result.err().unwrap_or_default().to_string();
 
-                write_message(
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::RetireTransferredRoomRes,
-                    packet.header.seq,
                     &RetireTransferredRoomRes {
-                        ok: result.is_ok(),
+                        ok,
                         room_id: request.room_id,
-                        error_code: result.err().unwrap_or_default().to_string(),
+                        error_code: error_code.clone(),
                     },
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
@@ -503,9 +916,27 @@ async fn handle_admin_connection(
                 .await?;
             }
             Some(MessageType::TriggerServerRedirectReq) => {
-                let request = packet
+                let action = "trigger_server_redirect";
+                let request = match packet
                     .decode_body::<TriggerServerRedirectReq>("INVALID_TRIGGER_REDIRECT_BODY")
-                    .map_err(std::io::Error::other)?;
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid trigger redirect request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = redirect_target(&request);
 
                 let room_id = request.room_id.clone();
                 let result = room_manager
@@ -548,11 +979,19 @@ async fn handle_admin_connection(
                     },
                 };
 
-                write_message(
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_then_write_message(
                     &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
                     MessageType::TriggerServerRedirectRes,
-                    packet.header.seq,
                     &response,
+                    ok,
+                    &error_code,
+                    &target,
                 )
                 .await?;
             }
@@ -580,14 +1019,335 @@ async fn handle_admin_connection(
     Ok(())
 }
 
-fn authenticate_admin_packet(packet: &Packet, admin_token: &str) -> bool {
+fn authenticate_admin_packet(packet: &Packet, admin_token: &str) -> Option<AdminAuthContext> {
     if packet.message_type() != Some(MessageType::AdminAuthReq) {
-        return false;
+        return None;
     }
 
-    std::str::from_utf8(&packet.body)
-        .map(|token| token == admin_token)
-        .unwrap_or(false)
+    let body = std::str::from_utf8(&packet.body).ok()?;
+    if body == admin_token {
+        return Some(AdminAuthContext {
+            actor: DEFAULT_ADMIN_ACTOR.to_string(),
+            actor_missing: true,
+        });
+    }
+
+    let envelope: AdminAuthEnvelope = serde_json::from_str(body).ok()?;
+    if envelope.token != admin_token {
+        return None;
+    }
+
+    Some(normalize_admin_auth_context(envelope.actor))
+}
+
+fn normalize_admin_auth_context(actor: Option<String>) -> AdminAuthContext {
+    let Some(actor) = actor
+        .as_deref()
+        .map(str::trim)
+        .and_then(normalize_admin_actor)
+    else {
+        return AdminAuthContext {
+            actor: DEFAULT_ADMIN_ACTOR.to_string(),
+            actor_missing: true,
+        };
+    };
+
+    AdminAuthContext {
+        actor,
+        actor_missing: false,
+    }
+}
+
+fn normalize_admin_actor(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > MAX_ADMIN_ACTOR_LEN {
+        return None;
+    }
+
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
+        .then(|| value.to_string())
+}
+
+async fn ensure_admin_write_allowed(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminAuthContext,
+    packet: &Packet,
+    action: &'static str,
+) -> Result<(), AdminWritePreflightError> {
+    if let Err(error) = audit_logger.ensure_ready().await {
+        warn!(
+            action,
+            seq = packet.header.seq,
+            message_type = packet.header.msg_type,
+            error = %error,
+            audit_path = %audit_logger.config.path.display(),
+            "game-server admin audit log is not writable"
+        );
+        return Err(AdminWritePreflightError::AuditUnavailable);
+    }
+
+    if audit_logger.config.require_actor && context.actor_missing {
+        match audit_admin_write_result(
+            audit_logger,
+            context,
+            packet,
+            action,
+            false,
+            "ADMIN_ACTOR_REQUIRED",
+            &AdminAuditTarget::default(),
+        )
+        .await
+        {
+            Ok(()) => Err(AdminWritePreflightError::ActorRequired),
+            Err(error) => {
+                warn!(
+                    action,
+                    seq = packet.header.seq,
+                    message_type = packet.header.msg_type,
+                    error = %error,
+                    audit_path = %audit_logger.config.path.display(),
+                    "game-server admin actor rejection audit write failed"
+                );
+                Err(AdminWritePreflightError::AuditUnavailable)
+            }
+        }
+    } else {
+        Ok(())
+    }
+}
+
+fn admin_write_action(message_type: MessageType) -> Option<&'static str> {
+    match message_type {
+        MessageType::AdminUpdateConfigReq => Some("admin_update_config"),
+        MessageType::GmSendItemReq => Some("gm_send_item"),
+        MessageType::GmBroadcastReq => Some("gm_broadcast"),
+        MessageType::GmKickPlayerReq => Some("gm_kick_player"),
+        MessageType::GmBanPlayerReq => Some("gm_ban_player"),
+        MessageType::FreezeRoomForTransferReq => Some("freeze_room_for_transfer"),
+        MessageType::ExportRoomTransferReq => Some("export_room_transfer"),
+        MessageType::ImportRoomTransferReq => Some("import_room_transfer"),
+        MessageType::RetireTransferredRoomReq => Some("retire_transferred_room"),
+        MessageType::TriggerServerRedirectReq => Some("trigger_server_redirect"),
+        _ => None,
+    }
+}
+
+async fn audit_admin_write_result(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminAuthContext,
+    packet: &Packet,
+    action: &'static str,
+    ok: bool,
+    error_code: &str,
+    target: &AdminAuditTarget,
+) -> Result<(), AdminAuditError> {
+    if ok {
+        info!(
+            channel = "admin_tcp",
+            action,
+            actor = %context.actor,
+            actor_missing = context.actor_missing,
+            ok,
+            error_code,
+            room_id = %target.room_id,
+            player_id = %target.player_id,
+            rollout_epoch = %target.rollout_epoch,
+            checksum = %target.checksum,
+            target_server_id = %target.target_server_id,
+            config_key = %target.config_key,
+            seq = packet.header.seq,
+            message_type = packet.header.msg_type,
+            "game-server admin write operation"
+        );
+    } else {
+        warn!(
+            channel = "admin_tcp",
+            action,
+            actor = %context.actor,
+            actor_missing = context.actor_missing,
+            ok,
+            error_code,
+            room_id = %target.room_id,
+            player_id = %target.player_id,
+            rollout_epoch = %target.rollout_epoch,
+            checksum = %target.checksum,
+            target_server_id = %target.target_server_id,
+            config_key = %target.config_key,
+            seq = packet.header.seq,
+            message_type = packet.header.msg_type,
+            "game-server admin write operation failed"
+        );
+    }
+
+    audit_logger
+        .append(&AdminAuditEvent {
+            timestamp_ms: current_unix_ms_u64(),
+            channel: "admin_tcp",
+            action,
+            actor: &context.actor,
+            actor_missing: context.actor_missing,
+            ok,
+            error_code,
+            room_id: &target.room_id,
+            player_id: &target.player_id,
+            rollout_epoch: &target.rollout_epoch,
+            checksum: &target.checksum,
+            target_server_id: &target.target_server_id,
+            config_key: &target.config_key,
+            seq: packet.header.seq,
+            message_type: packet.header.msg_type,
+        })
+        .await
+}
+
+async fn write_admin_audit_failure(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    seq: u32,
+    audit_logger: &AdminAuditLogger,
+    action: &'static str,
+    error: &AdminAuditError,
+) -> Result<(), std::io::Error> {
+    warn!(
+        action,
+        error = %error,
+        audit_path = %audit_logger.config.path.display(),
+        "game-server admin audit write failed"
+    );
+    write_error(
+        writer,
+        seq,
+        "ADMIN_AUDIT_WRITE_FAILED",
+        "admin audit write failed",
+    )
+    .await
+}
+
+async fn audit_then_write_error(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminAuthContext,
+    packet: &Packet,
+    action: &'static str,
+    error_code: &str,
+    message: &str,
+    target: &AdminAuditTarget,
+) -> Result<(), std::io::Error> {
+    match audit_admin_write_result(
+        audit_logger,
+        context,
+        packet,
+        action,
+        false,
+        error_code,
+        target,
+    )
+    .await
+    {
+        Ok(()) => write_error(writer, packet.header.seq, error_code, message).await,
+        Err(error) => {
+            write_admin_audit_failure(writer, packet.header.seq, audit_logger, action, &error).await
+        }
+    }
+}
+
+async fn audit_then_write_message<M: prost::Message>(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    audit_logger: &AdminAuditLogger,
+    context: &AdminAuthContext,
+    packet: &Packet,
+    action: &'static str,
+    message_type: MessageType,
+    message: &M,
+    ok: bool,
+    error_code: &str,
+    target: &AdminAuditTarget,
+) -> Result<(), std::io::Error> {
+    match audit_admin_write_result(
+        audit_logger,
+        context,
+        packet,
+        action,
+        ok,
+        error_code,
+        target,
+    )
+    .await
+    {
+        Ok(()) => write_message(writer, message_type, packet.header.seq, message).await,
+        Err(error) => {
+            write_admin_audit_failure(writer, packet.header.seq, audit_logger, action, &error).await
+        }
+    }
+}
+
+fn update_config_target(request: &UpdateConfigReq) -> AdminAuditTarget {
+    AdminAuditTarget {
+        config_key: request.key.clone(),
+        ..Default::default()
+    }
+}
+
+fn player_target(player_id: impl Into<String>) -> AdminAuditTarget {
+    AdminAuditTarget {
+        player_id: player_id.into(),
+        ..Default::default()
+    }
+}
+
+fn room_transfer_target(
+    room_id: impl Into<String>,
+    rollout_epoch: impl Into<String>,
+) -> AdminAuditTarget {
+    AdminAuditTarget {
+        room_id: room_id.into(),
+        rollout_epoch: rollout_epoch.into(),
+        ..Default::default()
+    }
+}
+
+fn retire_room_transfer_target(request: &RetireTransferredRoomReq) -> AdminAuditTarget {
+    AdminAuditTarget {
+        room_id: request.room_id.clone(),
+        rollout_epoch: request.rollout_epoch.clone(),
+        checksum: request.checksum.clone(),
+        ..Default::default()
+    }
+}
+
+fn import_room_transfer_target(request: &ImportRoomTransferReq) -> AdminAuditTarget {
+    let Some(payload) = request.payload.as_ref() else {
+        return AdminAuditTarget::default();
+    };
+
+    AdminAuditTarget {
+        room_id: payload.room_id.clone(),
+        rollout_epoch: payload.rollout_epoch.clone(),
+        checksum: payload.checksum.clone(),
+        ..Default::default()
+    }
+}
+
+fn redirect_target(request: &TriggerServerRedirectReq) -> AdminAuditTarget {
+    AdminAuditTarget {
+        room_id: request.room_id.clone(),
+        rollout_epoch: request.rollout_epoch.clone(),
+        target_server_id: request.target_server_id.clone(),
+        ..Default::default()
+    }
+}
+
+async fn ensure_parent_dir(path: &Path) -> Result<(), AdminAuditError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(AdminAuditError::Io)?;
+    }
+
+    Ok(())
 }
 
 async fn build_rollout_drain_status_response(
@@ -1107,23 +1867,6 @@ async fn write_message<M: prost::Message>(
     writer.write_all(&packet).await
 }
 
-async fn write_gm_response(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    message_type: MessageType,
-    seq: u32,
-) -> Result<(), std::io::Error> {
-    write_message(
-        writer,
-        message_type,
-        seq,
-        &GmCommandRes {
-            ok: true,
-            error_code: String::new(),
-        },
-    )
-    .await
-}
-
 async fn write_error(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     seq: u32,
@@ -1144,8 +1887,10 @@ async fn write_error(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use serde_json::json;
     use tokio::sync::Notify;
@@ -1202,6 +1947,25 @@ mod tests {
         )
     }
 
+    fn bytes_packet(message_type: MessageType, seq: u32, body: Vec<u8>) -> Packet {
+        Packet::new(
+            PacketHeader {
+                msg_type: message_type as u16,
+                seq,
+                body_len: body.len() as u32,
+            },
+            body,
+        )
+    }
+
+    fn temp_audit_path(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("myserver-{name}-{unique}.jsonl"))
+    }
+
     fn player_registry_fixture(
         player_id: &str,
     ) -> (
@@ -1224,6 +1988,159 @@ mod tests {
         )])));
 
         (registry, notify, kick_reason, rx)
+    }
+
+    #[test]
+    fn admin_auth_accepts_legacy_token_without_actor() {
+        let packet = bytes_packet(MessageType::AdminAuthReq, 0, b"secret-admin-token".to_vec());
+
+        let context = authenticate_admin_packet(&packet, "secret-admin-token").unwrap();
+
+        assert_eq!(context.actor, DEFAULT_ADMIN_ACTOR);
+        assert!(context.actor_missing);
+    }
+
+    #[test]
+    fn admin_auth_accepts_json_envelope_actor() {
+        let packet = bytes_packet(
+            MessageType::AdminAuthReq,
+            0,
+            br#"{"token":"secret-admin-token","actor":"ops@example.com"}"#.to_vec(),
+        );
+
+        let context = authenticate_admin_packet(&packet, "secret-admin-token").unwrap();
+
+        assert_eq!(context.actor, "ops@example.com");
+        assert!(!context.actor_missing);
+    }
+
+    #[test]
+    fn admin_auth_normalizes_invalid_actor_to_missing() {
+        let packet = bytes_packet(
+            MessageType::AdminAuthReq,
+            0,
+            br#"{"token":"secret-admin-token","actor":"bad actor"}"#.to_vec(),
+        );
+
+        let context = authenticate_admin_packet(&packet, "secret-admin-token").unwrap();
+
+        assert_eq!(context.actor, DEFAULT_ADMIN_ACTOR);
+        assert!(context.actor_missing);
+    }
+
+    #[test]
+    fn admin_auth_rejects_wrong_json_envelope_token() {
+        let packet = bytes_packet(
+            MessageType::AdminAuthReq,
+            0,
+            br#"{"token":"wrong-token","actor":"ops@example.com"}"#.to_vec(),
+        );
+
+        assert!(authenticate_admin_packet(&packet, "secret-admin-token").is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_audit_unwritable_path_rejects_write_before_state_change() {
+        let audit_path = std::env::temp_dir();
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), false));
+        let context = AdminAuthContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+        };
+        let runtime_config = runtime_config_fixture();
+        let packet = bytes_packet(
+            MessageType::AdminUpdateConfigReq,
+            100,
+            encode_body(&UpdateConfigReq {
+                key: "max_body_len".to_string(),
+                value: "8192".to_string(),
+            }),
+        );
+
+        let result =
+            ensure_admin_write_allowed(&audit_logger, &context, &packet, "admin_update_config")
+                .await;
+
+        assert_eq!(result, Err(AdminWritePreflightError::AuditUnavailable));
+        assert_eq!(runtime_config.read().await.max_body_len, 4096);
+    }
+
+    #[tokio::test]
+    async fn admin_audit_require_actor_rejects_write_before_state_change() {
+        let audit_path = temp_audit_path("require-actor");
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), true));
+        let context = AdminAuthContext {
+            actor: DEFAULT_ADMIN_ACTOR.to_string(),
+            actor_missing: true,
+        };
+        let runtime_config = runtime_config_fixture();
+        let packet = bytes_packet(
+            MessageType::AdminUpdateConfigReq,
+            99,
+            encode_body(&UpdateConfigReq {
+                key: "max_body_len".to_string(),
+                value: "8192".to_string(),
+            }),
+        );
+
+        let result =
+            ensure_admin_write_allowed(&audit_logger, &context, &packet, "admin_update_config")
+                .await;
+
+        assert_eq!(result, Err(AdminWritePreflightError::ActorRequired));
+        assert_eq!(runtime_config.read().await.max_body_len, 4096);
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"action\":\"admin_update_config\""));
+        assert!(audit.contains("\"actor\":\"unknown\""));
+        assert!(audit.contains("\"actor_missing\":true"));
+        assert!(audit.contains("\"error_code\":\"ADMIN_ACTOR_REQUIRED\""));
+        let _ = fs::remove_file(audit_path);
+    }
+
+    #[tokio::test]
+    async fn admin_audit_event_does_not_leak_token_or_payload() {
+        let audit_path = temp_audit_path("no-secret");
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), false));
+        let context = AdminAuthContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+        };
+        let packet = bytes_packet(
+            MessageType::AdminUpdateConfigReq,
+            7,
+            encode_body(&UpdateConfigReq {
+                key: "max_body_len".to_string(),
+                value: "8192-secret-value".to_string(),
+            }),
+        );
+        let target = AdminAuditTarget {
+            config_key: "max_body_len".to_string(),
+            ..Default::default()
+        };
+
+        audit_admin_write_result(
+            &audit_logger,
+            &context,
+            &packet,
+            "admin_update_config",
+            true,
+            "",
+            &target,
+        )
+        .await
+        .unwrap();
+
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"channel\":\"admin_tcp\""));
+        assert!(audit.contains("\"actor\":\"ops@example.com\""));
+        assert!(audit.contains("\"config_key\":\"max_body_len\""));
+        assert!(!audit.contains("secret-admin-token"));
+        assert!(!audit.contains("8192-secret-value"));
+        assert!(!audit.contains("\"token\""));
+        let _ = fs::remove_file(audit_path);
     }
 
     #[test]

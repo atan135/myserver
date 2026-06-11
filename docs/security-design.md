@@ -87,7 +87,7 @@
 | `mail-service` | HTTP 路由参数校验、玩家读邮件/详情/标记已读/领取附件复用 game ticket，校验签名、过期、Redis ticket 归属和 ticket version，query/body `player_id` 只能与认证身份一致，邮件详情和领取均校验邮件归属；系统发信入口要求 `MAIL_SERVICE_TOKEN`；过期校验、附件格式校验、领取幂等、基础 HTTP 指标；production 下拒绝默认 `TICKET_SECRET`、默认 `MAIL_SERVICE_TOKEN` 或关闭 `MAIL_PLAYER_AUTH_REQUIRED` | 仍未网关化；共享 ticket 尚未做 mail 专用用途隔离/换票；缺少发信 RBAC、审批流、发信审计查询和公网 HTTPS/TLS 策略 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验；只读 `GET /api/v1/announcements...` 默认要求 `ANNOUNCE_READ_TOKEN` 或 game ticket，game ticket 校验签名、过期、Redis ticket 归属和 ticket version；写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权；基础 HTTP 指标；production 下拒绝关闭 `ANNOUNCE_READ_AUTH_REQUIRED`、默认/弱 `ANNOUNCE_ADMIN_TOKEN`、默认/弱 `TICKET_SECRET`，并拒绝默认/弱或与 admin token 相同的 `ANNOUNCE_READ_TOKEN` | 仍未网关化；共享 ticket 尚未做 announce 专用用途隔离/换票；缺少公告读写 RBAC、审计查询和公网 HTTPS/TLS 策略 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、全权限写 token、只读 token、第一阶段 scoped token 操作级 RBAC、生产默认/弱 token 拒绝、写操作基础输入校验、权限拒绝审计、`X-Admin-Actor` 操作人解析、结构化日志和 JSONL 持久审计 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin scoped token RBAC 尚未数据库化或集中策略化，仍缺审批流、审计查询、集中留存、按资源范围授权和统一 trace/request id，多 proxy route store 强一致仍未完全闭环 |
-| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、NATS GM 广播订阅并向本实例在线连接推送、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、NATS GM 广播订阅并向本实例在线连接推送、NATS session kick 订阅并断开本实例目标玩家连接；admin TCP 敏感写操作 JSONL 审计、可选 actor 强制、写操作前审计文件可写性门禁；internal socket 敏感控制动作结构化 tracing 审计；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 并拒绝关闭 admin 审计 | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端第一阶段权限矩阵、监控接口鉴权、可信代理 IP 解析、请求级 HTTPS/TLS 强制、来源 IP allowlist、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 广播通过 NATS 跨实例推送、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 代码侧 TLS/allowlist 不能替代生产网络隔离；权限仍未数据库化，缺少按资源范围授权、权限变更审计查询和审批流 |
 
 说明：
@@ -179,7 +179,7 @@
 - 日志中不打印完整 token / ticket / secret
 - 生产环境必须替换默认示例密钥
 - `auth-http` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN` 都会拒绝启动。`AUTH_STRICT_SECURITY` 仍控制内部接口请求期缺 token 时的拒绝行为，但生产环境不再等到请求阶段才暴露空 token 配置错误。
-- `game-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时也会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 都会拒绝启动。该保护是内网服务的凭证基线，不表示 `game-server` 应作为生产公网入口暴露。
+- `game-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时也会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 都会拒绝启动，`GAME_ADMIN_AUDIT_ENABLED=false` 也会拒绝启动。该保护是内网服务的凭证和审计基线，不表示 `game-server` 应作为生产公网入口暴露。
 - `chat-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `TICKET_SECRET` 会拒绝启动。该保护要求聊天服与 ticket 签发侧使用一致的真实密钥，但不改变 `chat-server` 默认内网化的部署边界。
 - `mail-service` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `TICKET_SECRET` / `MAIL_SERVICE_TOKEN` 会拒绝启动，且 `MAIL_PLAYER_AUTH_REQUIRED` 必须为 `true`。`GAME_ADMIN_TOKEN` 仍只用于 mail-service 调用下游 `game-server admin`，不能作为 mail 发信入口 token 复用。
 - `announce-service` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `ANNOUNCE_ADMIN_TOKEN` / `TICKET_SECRET` 会拒绝启动，`ANNOUNCE_READ_AUTH_REQUIRED` 必须为 `true`；如果配置了 `ANNOUNCE_READ_TOKEN`，也必须是非默认强值，且不能与 `ANNOUNCE_ADMIN_TOKEN` 相同。
@@ -526,7 +526,17 @@ PLAYER_MSG_RATE_WINDOW_MS=1000
 PLAYER_MSG_RATE_MAX=0
 ```
 
-其中 `PLAYER_MSG_RATE_MAX=0` 默认关闭；配置为正整数时，仅限制当前 `game-server` 实例内同一 `player_id` 的合计消息数，不是跨实例全局限额。`NODE_ENV=production` 或 `APP_ENV=production` 时，`game-server` 会拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`，要求它们替换为高强度生产值。由于生产链路里 `game-server` 通常通过 `game-proxy` 本地 socket 接入，单 IP 频率限制仍应放在 proxy、网关或后续透传协议层；上述 fail-fast 只是内网服务凭证保护，不改变 `game-server` 默认内网化的部署边界。
+其中 `PLAYER_MSG_RATE_MAX=0` 默认关闭；配置为正整数时，仅限制当前 `game-server` 实例内同一 `player_id` 的合计消息数，不是跨实例全局限额。`NODE_ENV=production` 或 `APP_ENV=production` 时，`game-server` 会拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`，要求它们替换为高强度生产值；同时拒绝 `GAME_ADMIN_AUDIT_ENABLED=false`。由于生产链路里 `game-server` 通常通过 `game-proxy` 本地 socket 接入，单 IP 频率限制仍应放在 proxy、网关或后续透传协议层；上述 fail-fast 只是内网服务凭证与审计基线保护，不改变 `game-server` 默认内网化的部署边界。
+
+`game-server` admin TCP 第一阶段审计配置：
+
+```env
+GAME_ADMIN_AUDIT_ENABLED=true
+GAME_ADMIN_AUDIT_PATH=logs/game-server/admin-audit.jsonl
+GAME_ADMIN_AUDIT_REQUIRE_ACTOR=false
+```
+
+`AdminAuthReq` 继续兼容旧的纯 token body。需要追踪具体操作人时，可以改为 JSON envelope：`{"token":"...","actor":"ops@example.com"}`。旧格式或空 actor 会在审计中记录为 `actor=unknown`、`actor_missing=true`。当 `GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时，`AdminUpdateConfigReq`、GM 写操作、房间迁移 freeze/export/import/retire 和 redirect 等写操作缺 actor 会在状态变更前被拒绝；`AdminServerStatusReq`、`GetRolloutDrainStatusReq` 等只读状态查询不因缺 actor 被拒绝。JSONL 审计只记录目标摘要、seq/message_type、结果和错误码，不记录 token、ticket、密码、完整 payload 或 room transfer payload。internal socket 不要求人类 actor，但 transfer/redirect 等服务间控制动作会输出 `channel=internal_socket`、`actor=internal_service` 的结构化 tracing 审计日志。
 
 仍属于设计目标、当前未读取的业务层配置示例：
 
