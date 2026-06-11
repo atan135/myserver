@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -266,6 +267,18 @@ pub enum RouteStoreSaveResult {
     RevisionConflict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteStoreReloadResult {
+    Reloaded {
+        previous_revision: u64,
+        new_revision: u64,
+    },
+    IgnoredStale {
+        current_revision: u64,
+        notified_revision: u64,
+    },
+}
+
 pub trait RouteStorePersistence: Send + Sync {
     fn load<'a>(&'a self) -> PersistenceFuture<'a, PersistedRouteStoreState>;
     fn save<'a>(
@@ -273,11 +286,20 @@ pub trait RouteStorePersistence: Send + Sync {
         expected_revision: u64,
         state: PersistedRouteStoreState,
     ) -> PersistenceFuture<'a, RouteStoreSaveResult>;
+    fn publish_update<'a>(&'a self, _store_revision: u64) -> PersistenceFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub struct RedisRouteStorePersistence {
     client: redis::Client,
     state_key: String,
+    update_channel: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteStoreUpdateNotification {
+    pub store_revision: u64,
 }
 
 const REDIS_ROUTE_STORE_CAS_SCRIPT: &str = r#"
@@ -300,10 +322,24 @@ return 1
 
 impl RedisRouteStorePersistence {
     pub fn new(redis_url: &str, key_prefix: impl Into<String>) -> Result<Self, redis::RedisError> {
+        let key_prefix = key_prefix.into();
         Ok(Self {
             client: redis::Client::open(redis_url)?,
-            state_key: format!("{}proxy:route-store:state", key_prefix.into()),
+            state_key: format!("{key_prefix}proxy:route-store:state"),
+            update_channel: route_store_update_channel(&key_prefix),
         })
+    }
+
+    pub fn update_channel(&self) -> &str {
+        &self.update_channel
+    }
+
+    pub async fn subscribe_updates(
+        &self,
+    ) -> Result<redis::aio::PubSub, RouteStorePersistenceError> {
+        let mut pubsub = self.client.get_async_pubsub().await?;
+        pubsub.subscribe(&self.update_channel).await?;
+        Ok(pubsub)
     }
 }
 
@@ -338,6 +374,16 @@ impl RouteStorePersistence for RedisRouteStorePersistence {
             } else {
                 Ok(RouteStoreSaveResult::RevisionConflict)
             }
+        })
+    }
+
+    fn publish_update<'a>(&'a self, store_revision: u64) -> PersistenceFuture<'a, ()> {
+        Box::pin(async move {
+            let notification = RouteStoreUpdateNotification { store_revision };
+            let payload = serde_json::to_string(&notification)?;
+            let mut conn = self.client.get_multiplexed_async_connection().await?;
+            let _: usize = conn.publish(&self.update_channel, payload).await?;
+            Ok(())
         })
     }
 }
@@ -424,6 +470,19 @@ impl ProxyRouteStore {
             RouteStoreSaveResult::Saved => {
                 let mut state = self.state.write().await;
                 state.apply_persisted(next_snapshot);
+                drop(state);
+                drop(_guard);
+                if let Err(error) = persistence
+                    .publish_update(expected_revision.saturating_add(1))
+                    .await
+                {
+                    warn!(
+                        update_source,
+                        store_revision = expected_revision.saturating_add(1),
+                        error = %error,
+                        "failed to publish proxy route store update notification"
+                    );
+                }
                 Ok(true)
             }
             RouteStoreSaveResult::RevisionConflict => {
@@ -460,6 +519,47 @@ impl ProxyRouteStore {
             "proxy route store revision conflict; reloaded persisted state"
         );
         Ok(actual_revision)
+    }
+
+    pub async fn reload_if_newer_revision(
+        &self,
+        notified_revision: u64,
+    ) -> Result<RouteStoreReloadResult, RouteStorePersistenceError> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Ok(RouteStoreReloadResult::IgnoredStale {
+                current_revision: 0,
+                notified_revision,
+            });
+        };
+
+        let _guard = self.persist_lock.lock().await;
+        let current_revision = self.state.read().await.store_revision;
+        if notified_revision <= current_revision {
+            return Ok(RouteStoreReloadResult::IgnoredStale {
+                current_revision,
+                notified_revision,
+            });
+        }
+
+        let persisted = persistence.load().await?;
+        let new_revision = persisted.store_revision;
+        if new_revision <= current_revision {
+            return Ok(RouteStoreReloadResult::IgnoredStale {
+                current_revision,
+                notified_revision,
+            });
+        }
+
+        let mut state = self.state.write().await;
+        state.apply_persisted(persisted);
+        info!(
+            previous_revision = current_revision,
+            new_revision, notified_revision, "proxy route store reloaded after update notification"
+        );
+        Ok(RouteStoreReloadResult::Reloaded {
+            previous_revision: current_revision,
+            new_revision,
+        })
     }
 
     async fn update_bind_metadata<F>(&self, update_source: &'static str, update: F) -> bool
@@ -919,6 +1019,96 @@ impl ProxyRouteStore {
     }
 }
 
+pub fn route_store_update_channel(redis_key_prefix: &str) -> String {
+    format!("{redis_key_prefix}proxy:route-store:updates")
+}
+
+pub fn parse_route_store_update_notification(
+    payload: &str,
+) -> Option<RouteStoreUpdateNotification> {
+    serde_json::from_str::<RouteStoreUpdateNotification>(payload)
+        .ok()
+        .or_else(|| {
+            payload
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(|store_revision| RouteStoreUpdateNotification { store_revision })
+        })
+}
+
+pub async fn run_redis_route_store_update_listener(
+    route_store: ProxyRouteStore,
+    channel: String,
+    mut pubsub: redis::aio::PubSub,
+) -> Result<(), RouteStorePersistenceError> {
+    info!(
+        redis_channel = %channel,
+        "proxy route store update listener started"
+    );
+    let mut messages = pubsub.on_message();
+
+    while let Some(message) = messages.next().await {
+        let payload = match message.get_payload::<String>() {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "ignored invalid proxy route store update notification payload"
+                );
+                continue;
+            }
+        };
+        let Some(notification) = parse_route_store_update_notification(&payload) else {
+            warn!(
+                payload = %payload,
+                "ignored malformed proxy route store update notification"
+            );
+            continue;
+        };
+
+        match route_store
+            .reload_if_newer_revision(notification.store_revision)
+            .await
+        {
+            Ok(RouteStoreReloadResult::Reloaded {
+                previous_revision,
+                new_revision,
+            }) => {
+                info!(
+                    previous_revision,
+                    new_revision,
+                    notified_revision = notification.store_revision,
+                    "proxy route store update notification applied"
+                );
+            }
+            Ok(RouteStoreReloadResult::IgnoredStale {
+                current_revision,
+                notified_revision,
+            }) => {
+                tracing::debug!(
+                    current_revision,
+                    notified_revision,
+                    "ignored stale proxy route store update notification"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    notified_revision = notification.store_revision,
+                    error = %error,
+                    "failed to reload proxy route store after update notification"
+                );
+            }
+        }
+    }
+
+    warn!(
+        redis_channel = %channel,
+        "proxy route store update listener stopped"
+    );
+    Ok(())
+}
+
 impl RouteStoreState {
     fn persisted_snapshot(&self) -> PersistedRouteStoreState {
         PersistedRouteStoreState {
@@ -1151,6 +1341,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryRouteStorePersistence {
         state: Mutex<PersistedRouteStoreState>,
+        published_revisions: Mutex<Vec<u64>>,
     }
 
     impl MemoryRouteStorePersistence {
@@ -1160,6 +1351,10 @@ mod tests {
 
         async fn overwrite_state(&self, state: PersistedRouteStoreState) {
             *self.state.lock().await = state;
+        }
+
+        async fn published_revisions(&self) -> Vec<u64> {
+            self.published_revisions.lock().await.clone()
         }
     }
 
@@ -1180,6 +1375,13 @@ mod tests {
                 }
                 *current = state;
                 Ok(RouteStoreSaveResult::Saved)
+            })
+        }
+
+        fn publish_update<'a>(&'a self, store_revision: u64) -> PersistenceFuture<'a, ()> {
+            Box::pin(async move {
+                self.published_revisions.lock().await.push(store_revision);
+                Ok(())
             })
         }
     }
@@ -1569,6 +1771,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_state_save_publishes_update_revision() {
+        let persistence = Arc::new(MemoryRouteStorePersistence::default());
+        let store = ProxyRouteStore::with_persistence(persistence.clone());
+
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(persistence.published_revisions().await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn stale_update_notification_does_not_reload() {
+        let persistence = Arc::new(MemoryRouteStorePersistence::default());
+        let store = ProxyRouteStore::with_persistence(persistence.clone());
+
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut newer_state = PersistedRouteStoreState::default();
+        newer_state.store_revision = 2;
+        newer_state.room_routes.insert(
+            "room-2".to_string(),
+            room_record(
+                "room-2",
+                "new",
+                RoomMigrationState::OwnedByNew,
+                1,
+                "checksum-2",
+            ),
+        );
+        persistence.overwrite_state(newer_state).await;
+
+        let result = store.reload_if_newer_revision(1).await.unwrap();
+
+        assert_eq!(
+            result,
+            RouteStoreReloadResult::IgnoredStale {
+                current_revision: 1,
+                notified_revision: 1,
+            }
+        );
+        assert_eq!(
+            get_room_route(&store, "room-1").await.owner_server_id,
+            "old"
+        );
+        assert!(
+            store
+                .list_room_routes()
+                .await
+                .iter()
+                .all(|record| record.room_id != "room-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_update_notification_reloads_persisted_state() {
+        let persistence = Arc::new(MemoryRouteStorePersistence::default());
+        let store = ProxyRouteStore::with_persistence(persistence.clone());
+
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut newer_state = PersistedRouteStoreState::default();
+        newer_state.store_revision = 2;
+        newer_state.room_routes.insert(
+            "room-2".to_string(),
+            room_record(
+                "room-2",
+                "new",
+                RoomMigrationState::OwnedByNew,
+                1,
+                "checksum-2",
+            ),
+        );
+        persistence.overwrite_state(newer_state).await;
+
+        let result = store.reload_if_newer_revision(2).await.unwrap();
+
+        assert_eq!(
+            result,
+            RouteStoreReloadResult::Reloaded {
+                previous_revision: 1,
+                new_revision: 2,
+            }
+        );
+        assert_eq!(
+            get_room_route(&store, "room-2").await.owner_server_id,
+            "new"
+        );
+        assert!(
+            store
+                .list_room_routes()
+                .await
+                .iter()
+                .all(|record| record.room_id != "room-1")
+        );
+    }
+
+    #[tokio::test]
     async fn cas_conflict_does_not_overwrite_and_reloads_latest_state() {
         let persistence = Arc::new(MemoryRouteStorePersistence::default());
         let stale_store = ProxyRouteStore::with_persistence(persistence.clone());
@@ -1630,6 +1949,28 @@ mod tests {
                 .room_routes
                 .contains_key("room-stale")
         );
+        assert_eq!(persistence.published_revisions().await, vec![1]);
+    }
+
+    #[test]
+    fn route_store_update_notification_accepts_json_and_revision_string() {
+        assert_eq!(
+            route_store_update_channel("prod:"),
+            "prod:proxy:route-store:updates"
+        );
+        assert_eq!(
+            parse_route_store_update_notification(r#"{"store_revision":42}"#)
+                .unwrap()
+                .store_revision,
+            42
+        );
+        assert_eq!(
+            parse_route_store_update_notification("43")
+                .unwrap()
+                .store_revision,
+            43
+        );
+        assert!(parse_route_store_update_notification("not-a-revision").is_none());
     }
 
     #[tokio::test]

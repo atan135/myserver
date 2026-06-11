@@ -17,6 +17,7 @@ mod upstream;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use auth::ProxyAuthService;
 use blocklist::RedisBlocklistChecker;
@@ -25,7 +26,7 @@ use maintenance::GlobalMaintenanceChecker;
 pub use proto::myserver::game as pb;
 use route_store::{
     ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
-    UpstreamRoute,
+    UpstreamRoute, run_redis_route_store_update_listener,
 };
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
@@ -92,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
+    let mut route_store_update_task = None;
     let route_store = match &config.route_store_backend {
         config::RouteStoreBackend::Memory => {
             tracing::info!("using in-memory proxy route store");
@@ -103,10 +105,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 key_prefix = %config.route_store_key_prefix,
                 "using redis proxy route store"
             );
-            ProxyRouteStore::with_persistence(Arc::new(RedisRouteStorePersistence::new(
+            let persistence = Arc::new(RedisRouteStorePersistence::new(
                 &config.route_store_redis_url,
                 config.route_store_key_prefix.clone(),
-            )?))
+            )?);
+            let update_channel = persistence.update_channel().to_string();
+            let update_pubsub = persistence.subscribe_updates().await.map_err(|error| {
+                tracing::warn!(
+                    redis_channel = %update_channel,
+                    error = %error,
+                    "failed to subscribe proxy route store update channel"
+                );
+                error
+            })?;
+            let route_store = ProxyRouteStore::with_persistence(persistence.clone());
+            let listener_route_store = route_store.clone();
+            let listener_persistence = persistence.clone();
+            route_store_update_task = Some(tokio::spawn(async move {
+                let mut next_pubsub = Some(update_pubsub);
+                loop {
+                    let pubsub = match next_pubsub.take() {
+                        Some(pubsub) => pubsub,
+                        None => match listener_persistence.subscribe_updates().await {
+                            Ok(pubsub) => pubsub,
+                            Err(error) => {
+                                tracing::warn!(
+                                    redis_channel = %update_channel,
+                                    error = %error,
+                                    "failed to resubscribe proxy route store update channel"
+                                );
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        },
+                    };
+
+                    if let Err(error) = run_redis_route_store_update_listener(
+                        listener_route_store.clone(),
+                        update_channel.clone(),
+                        pubsub,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            redis_channel = %update_channel,
+                            error = %error,
+                            "proxy route store update listener stopped with error"
+                        );
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }));
+            route_store
         }
     };
     route_store.load_persisted_state().await?;
@@ -180,5 +231,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     admin_task.abort();
     let _ = admin_task.await;
+    if let Some(route_store_update_task) = route_store_update_task {
+        route_store_update_task.abort();
+        let _ = route_store_update_task.await;
+    }
     result
 }

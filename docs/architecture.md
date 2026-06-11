@@ -233,6 +233,7 @@ Redis 当前承担以下职责：
 - 限流与账号锁定相关数据
 - 服务注册中心
 - metrics/heartbeat 快照（由 `metrics-collector` 写入）
+- `game-proxy` Redis route store 快照与更新通知：`proxy:route-store:state`、`proxy:route-store:updates`，用于 Redis backend 下多 proxy route cache reload，不属于服务注册 schema
 
 ### 7.2 NATS
 
@@ -358,7 +359,7 @@ Core NATS 当前承担以下职责：
 - 多服务 monorepo 基本形态已完成
 - 登录、ticket、游戏接入、游戏逻辑、后台、邮件、聊天、匹配都已有独立服务
 - `game-server` 已有较完整的房间运行时框架
-- `game-proxy` 已具备静态上游和基于注册中心的动态发现能力
+- `game-proxy` 已具备静态上游、基于注册中心的动态发现能力，以及 Redis route store 单 key CAS + pub/sub reload 的第一阶段多实例同步能力
 - `admin-web + admin-api` 已能支撑审计、玩家管理、监控和 GM 广播、发物品、踢人、封禁等主要闭环；GM 广播已通过 NATS `myserver.gm.broadcast` 跨 `game-server` 实例推送，GM 踢人/封禁已通过 NATS session kick 跨实例断开在线连接
 - Redis 与 MySQL 都已经在多条主链路中实际使用
 

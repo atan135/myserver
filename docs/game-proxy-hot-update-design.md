@@ -47,13 +47,13 @@
 
 仍未完整落地：
 
-- Redis route store 持久化已形成最小闭环：启用后启动加载已有 rollout session、room route、player route，变更后以单 key 快照级 CAS 写回 Redis，解决单 proxy 重启丢 route，并降低多 proxy 并发写覆盖的风险。
+- Redis route store 持久化已形成第一阶段多 proxy 闭环：启用后启动加载已有 rollout session、room route、player route，变更后以单 key 快照级 CAS 写回 Redis，并在 CAS 成功后通过 Redis pub/sub 发布最新 `store_revision`；其它 proxy 收到比本地更新的 revision 后会 reload Redis 快照，解决单 proxy 重启丢 route，并缩短多 proxy 本地缓存陈旧窗口。
 - 自动灰度结束检测尚未完整闭环。
 - `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
 - `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口；真实 old/new/proxy 多进程联调、mybevy 适配和自动灰度收尾仍未完成。
 - proxy 不做同一连接内换 upstream。
 - proxy 不保存玩法状态，不做 room transfer payload 权威存储。
-- 当前 Redis route store 仍不是完整多 proxy 强一致方案；它只有单 key 快照级 revision/CAS，仍缺 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测和更细粒度冲突合并。
+- 当前 Redis route store 仍不是完整多 proxy 强一致方案；它已有单 key 快照级 revision/CAS 和 pub/sub 本地缓存失效第一阶段能力，但仍缺统一控制面 owner、真实 Redis 多 proxy 压测和更细粒度冲突合并。
 
 ## 3. 职责边界
 
@@ -270,7 +270,13 @@ Redis backend 使用结构化 serde JSON 保存一个快照 key，当前 key 为
 {PROXY_ROUTE_STORE_KEY_PREFIX}proxy:route-store:state
 ```
 
-快照字段包含 `store_revision`、`rollout_session`、`room_routes`、`player_routes`。旧 JSON 没有 `store_revision` 时按 `0` 兼容加载。Redis backend 保存时使用 Lua compare-and-set：只有 Redis 当前快照 revision 等于本地 expected revision 时才写入，成功后 `store_revision + 1`；冲突时会重新加载 Redis 最新快照。admin 写入路径会返回明确错误码（如 `ROUTE_STORE_REVISION_CONFLICT`），玩家 join/reconnect/observer 触发的 `bind_room_owner` 元数据更新只记录 warning 并 reload，不中断玩家链路。
+Redis backend 还使用一个 pub/sub 更新频道：
+
+```text
+{PROXY_ROUTE_STORE_KEY_PREFIX}proxy:route-store:updates
+```
+
+快照字段包含 `store_revision`、`rollout_session`、`room_routes`、`player_routes`。旧 JSON 没有 `store_revision` 时按 `0` 兼容加载。Redis backend 保存时使用 Lua compare-and-set：只有 Redis 当前快照 revision 等于本地 expected revision 时才写入，成功后 `store_revision + 1` 并发布包含 `store_revision` 的 JSON 通知；其它 proxy 订阅更新频道，只有收到的 revision 比本地更新时才 reload Redis 快照，旧消息或自身发布导致的同 revision 消息会被忽略。冲突时会重新加载 Redis 最新快照。admin 写入路径会返回明确错误码（如 `ROUTE_STORE_REVISION_CONFLICT`），玩家 join/reconnect/observer 触发的 `bind_room_owner` 元数据更新只记录 warning 并 reload，不中断玩家链路。
 
 配置优先级：
 
@@ -280,7 +286,7 @@ Redis backend 使用结构化 serde JSON 保存一个快照 key，当前 key 为
 
 生产建议启用 `PROXY_ROUTE_STORE_BACKEND=redis`，并为不同环境配置独立 key prefix。显式选择 Redis 后，启动加载失败会让 `game-proxy` 启动失败，避免生产静默退回内存态。
 
-当前持久化解决的是单 proxy 重启恢复 rollout session、room route、player route 的最低风险，并提供单 key 快照级 CAS 来避免直接最后写覆盖。它不持久化 upstream health/operation state，也不提供跨 proxy 本地缓存失效、统一控制面 owner 或冲突合并；多 proxy 生产场景仍需要补 pub/sub 同步、控制面仲裁、锁/owner 策略和真实 Redis 集成压测。
+当前持久化解决的是单 proxy 重启恢复 rollout session、room route、player route 的最低风险，并提供单 key 快照级 CAS 和 pub/sub reload 来避免直接最后写覆盖、缩短跨 proxy 缓存失效窗口。它不持久化 upstream health/operation state，也不提供统一控制面 owner 或冲突合并；多 proxy 生产场景仍需要补控制面仲裁、锁/owner 策略和真实 Redis 集成压测。
 
 ## 7. 当前 proxy 协议感知范围
 
@@ -340,7 +346,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 - 更细操作级 RBAC；当前仅支持读写 token 分离。
 - 审计查询、集中留存和统一 trace/request id。
-- 多 proxy 部署下 route store 的 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测，以及必要的锁/冲突合并策略。
+- 多 proxy 部署下 route store 已有 Redis pub/sub 本地缓存失效第一阶段能力；仍缺统一控制面 owner、真实 Redis 集成压测，以及必要的锁/冲突合并策略。
 - 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
 
 ## 9. 与 drain / rollout 的关系
@@ -411,7 +417,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 短期建议优先补：
 
 1. proxy admin 更细操作级权限、审计查询、集中留存和统一 trace/request id。
-2. route store 多 proxy 一致性：在已有 Redis 单 key CAS 基础上补 pub/sub 本地缓存失效、统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
+2. route store 多 proxy 一致性：在已有 Redis 单 key CAS + pub/sub reload 基础上补统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
 3. 跨 proxy 全局单 IP / 单玩家连接限额、消息频率限制和 Redis 动态黑名单。
 4. 自动 rollout 结束检测。
 5. old server `ServerRedirectPush` 下发与客户端重连链路。
