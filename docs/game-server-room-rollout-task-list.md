@@ -488,8 +488,8 @@
   - `new_server_id`
   - `room_id`
   - `player_id`
-- [ ] 为 `game-server` 增加 room freeze/export/import/retire 日志。
-- [ ] 为 transfer payload 增加 checksum 和版本日志。
+- [x] 为 `game-server` 增加 room freeze/export/import/confirm/retire 日志；成功、拒绝原因、checksum/version mismatch 和幂等 replay 路径都带 `room_id`、`rollout_epoch`、`error_code`、状态与版本上下文。
+- [x] 为 transfer payload 增加 checksum 和版本日志。
 - [ ] 为 redirect 增加审计日志。
 - [ ] 为灰度结束增加最终汇总日志。
 

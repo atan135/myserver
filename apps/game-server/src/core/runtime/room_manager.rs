@@ -35,6 +35,17 @@ const DEFAULT_ROOM_CLEANUP_INTERVAL_SECS: u64 = 10;
 pub const SERVER_REDIRECT_CLOSE_REASON: &str = "server_redirect_reconnect_required";
 pub const ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT: usize = 50;
 
+fn transfer_status_label(status: RoomTransferStatus) -> &'static str {
+    match status {
+        RoomTransferStatus::Owned => "Owned",
+        RoomTransferStatus::Frozen => "Frozen",
+        RoomTransferStatus::Exported => "Exported",
+        RoomTransferStatus::Importing => "Importing",
+        RoomTransferStatus::OwnedByNew => "OwnedByNew",
+        RoomTransferStatus::Retired => "Retired",
+    }
+}
+
 fn detach_member_outbound(member: &mut RoomMemberState) {
     let (placeholder_sender, _placeholder_receiver) = mpsc::channel(1);
     member.sender = placeholder_sender;
@@ -1172,28 +1183,93 @@ impl RoomManager {
     ) -> Result<(RoomMigrationState, u64), &'static str> {
         let rollout_epoch = rollout_epoch.trim();
         if rollout_epoch.is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "INVALID_ROLLOUT_EPOCH",
+                "room transfer freeze rejected"
+            );
             return Err("INVALID_ROLLOUT_EPOCH");
         }
 
         let (state, version) = {
             let mut rooms = self.rooms.lock().await;
-            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+            let room = match rooms.get_mut(room_id) {
+                Some(room) => room,
+                None => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_NOT_FOUND",
+                        "room transfer freeze rejected"
+                    );
+                    return Err("ROOM_NOT_FOUND");
+                }
+            };
 
             match room.transfer_state.status {
-                RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
+                RoomTransferStatus::Retired => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_RETIRED",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer freeze rejected"
+                    );
+                    return Err("ROOM_TRANSFER_RETIRED");
+                }
                 RoomTransferStatus::Frozen | RoomTransferStatus::Exported
                     if room.transfer_state.rollout_epoch.as_deref() == Some(rollout_epoch) =>
                 {
+                    info!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "IDEMPOTENT_ROOM_TRANSFER_FREEZE",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer freeze idempotent replay"
+                    );
                     return Ok((
                         room.transfer_state.status.migration_state(),
                         room.transfer_state.room_version,
                     ));
                 }
                 RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        expected = ?room.transfer_state.rollout_epoch,
+                        actual = rollout_epoch,
+                        room_version = room.transfer_state.room_version,
+                        "room transfer freeze rejected"
+                    );
                     return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
                 }
-                RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
-                RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
+                RoomTransferStatus::Importing => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_IMPORTING",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer freeze rejected"
+                    );
+                    return Err("ROOM_TRANSFER_IMPORTING");
+                }
+                RoomTransferStatus::OwnedByNew => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_OWNED_BY_NEW",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer freeze rejected"
+                    );
+                    return Err("ROOM_TRANSFER_OWNED_BY_NEW");
+                }
                 RoomTransferStatus::Owned => {}
             }
 
@@ -1201,6 +1277,9 @@ impl RoomManager {
                 warn!(
                     room_id = room_id,
                     rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_HAS_ONLINE_MEMBERS",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    room_version = room.transfer_state.room_version,
                     online_member_count = room
                         .members
                         .values()
@@ -1220,6 +1299,7 @@ impl RoomManager {
             info!(
                 room_id = room_id,
                 rollout_epoch = rollout_epoch,
+                error_code = "OK",
                 room_version = room.transfer_state.room_version,
                 "room frozen for transfer"
             );
@@ -1241,22 +1321,89 @@ impl RoomManager {
     ) -> Result<RoomTransferPayload, &'static str> {
         let rollout_epoch = rollout_epoch.trim();
         if rollout_epoch.is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "INVALID_ROLLOUT_EPOCH",
+                "room transfer export rejected"
+            );
             return Err("INVALID_ROLLOUT_EPOCH");
         }
 
         let mut payload = {
             let mut rooms = self.rooms.lock().await;
-            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+            let room = match rooms.get_mut(room_id) {
+                Some(room) => room,
+                None => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_NOT_FOUND",
+                        "room transfer export rejected"
+                    );
+                    return Err("ROOM_NOT_FOUND");
+                }
+            };
 
             match room.transfer_state.status {
                 RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {}
-                RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
-                RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
-                RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
-                _ => return Err("ROOM_TRANSFER_NOT_FROZEN"),
+                RoomTransferStatus::Retired => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_RETIRED",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
+                    return Err("ROOM_TRANSFER_RETIRED");
+                }
+                RoomTransferStatus::Importing => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_IMPORTING",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
+                    return Err("ROOM_TRANSFER_IMPORTING");
+                }
+                RoomTransferStatus::OwnedByNew => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_OWNED_BY_NEW",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
+                    return Err("ROOM_TRANSFER_OWNED_BY_NEW");
+                }
+                _ => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_NOT_FROZEN",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
+                    return Err("ROOM_TRANSFER_NOT_FROZEN");
+                }
             }
 
             if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    expected = ?room.transfer_state.rollout_epoch,
+                    actual = rollout_epoch,
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
                 return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
             }
 
@@ -1311,7 +1458,21 @@ impl RoomManager {
         payload.checksum = room_transfer_checksum(&payload);
 
         let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room = match rooms.get_mut(room_id) {
+            Some(room) => room,
+            None => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_NOT_FOUND",
+                    checksum = %payload.checksum,
+                    room_version = payload.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_NOT_FOUND");
+            }
+        };
+        let was_exported = room.transfer_state.status == RoomTransferStatus::Exported;
         match room.transfer_state.status {
             RoomTransferStatus::Frozen => {
                 room.transfer_state.status = RoomTransferStatus::Exported;
@@ -1320,27 +1481,100 @@ impl RoomManager {
             }
             RoomTransferStatus::Exported => {
                 if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        expected = ?room.transfer_state.rollout_epoch,
+                        actual = rollout_epoch,
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
                     return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
                 }
                 if room.transfer_state.last_transfer_checksum.as_deref()
                     != Some(payload.checksum.as_str())
                 {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                        current_status = transfer_status_label(room.transfer_state.status),
+                        expected = ?room.transfer_state.last_transfer_checksum,
+                        actual = %payload.checksum,
+                        room_version = room.transfer_state.room_version,
+                        "room transfer export rejected"
+                    );
                     return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
                 }
             }
-            RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
-            RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
-            RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
-            RoomTransferStatus::Owned => return Err("ROOM_TRANSFER_NOT_FROZEN"),
+            RoomTransferStatus::Retired => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_RETIRED",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_TRANSFER_RETIRED");
+            }
+            RoomTransferStatus::Importing => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_IMPORTING",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_TRANSFER_IMPORTING");
+            }
+            RoomTransferStatus::OwnedByNew => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_OWNED_BY_NEW",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_TRANSFER_OWNED_BY_NEW");
+            }
+            RoomTransferStatus::Owned => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_NOT_FROZEN",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_TRANSFER_NOT_FROZEN");
+            }
         }
 
-        info!(
-            room_id = room_id,
-            rollout_epoch = rollout_epoch,
-            checksum = %payload.checksum,
-            room_version = payload.room_version,
-            "room transfer payload exported"
-        );
+        if was_exported {
+            info!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "IDEMPOTENT_ROOM_TRANSFER_EXPORT",
+                checksum = %payload.checksum,
+                room_version = payload.room_version,
+                current_status = transfer_status_label(room.transfer_state.status),
+                "room transfer export idempotent replay"
+            );
+        } else {
+            info!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "OK",
+                checksum = %payload.checksum,
+                room_version = payload.room_version,
+                "room transfer payload exported"
+            );
+        }
 
         Ok(payload)
     }
@@ -1349,26 +1583,91 @@ impl RoomManager {
         &self,
         payload: RoomTransferPayload,
     ) -> Result<(String, u64), &'static str> {
-        validate_room_transfer_payload(&payload)?;
         let room_id = payload.room_id.clone();
         let checksum = payload.checksum.clone();
         let rollout_epoch = payload.rollout_epoch.clone();
         let source_room_version = payload.room_version;
-        let phase = parse_room_phase(&payload.room_phase)?;
-        let snapshot = payload
-            .snapshot
-            .clone()
-            .ok_or("ROOM_TRANSFER_MISSING_SNAPSHOT")?;
-        let transfer_state = room_transfer_state_from_payload(&payload)?;
+        if let Err(error_code) = validate_room_transfer_payload(&payload) {
+            warn!(
+                room_id = %room_id,
+                rollout_epoch = %rollout_epoch,
+                error_code = error_code,
+                checksum = %checksum,
+                room_version = source_room_version,
+                "room transfer import rejected during payload validation"
+            );
+            return Err(error_code);
+        }
+        let phase = match parse_room_phase(&payload.room_phase) {
+            Ok(phase) => phase,
+            Err(error_code) => {
+                warn!(
+                    room_id = %room_id,
+                    rollout_epoch = %rollout_epoch,
+                    error_code = error_code,
+                    checksum = %checksum,
+                    room_version = source_room_version,
+                    actual = %payload.room_phase,
+                    "room transfer import rejected due to invalid room phase"
+                );
+                return Err(error_code);
+            }
+        };
+        let snapshot = match payload.snapshot.clone() {
+            Some(snapshot) => snapshot,
+            None => {
+                warn!(
+                    room_id = %room_id,
+                    rollout_epoch = %rollout_epoch,
+                    error_code = "ROOM_TRANSFER_MISSING_SNAPSHOT",
+                    checksum = %checksum,
+                    room_version = source_room_version,
+                    "room transfer import rejected"
+                );
+                return Err("ROOM_TRANSFER_MISSING_SNAPSHOT");
+            }
+        };
+        let transfer_state = match room_transfer_state_from_payload(&payload) {
+            Ok(transfer_state) => transfer_state,
+            Err(error_code) => {
+                warn!(
+                    room_id = %room_id,
+                    rollout_epoch = %rollout_epoch,
+                    error_code = error_code,
+                    checksum = %checksum,
+                    room_version = source_room_version,
+                    "room transfer import rejected while decoding transfer state"
+                );
+                return Err(error_code);
+            }
+        };
 
         let mut rooms = self.rooms.lock().await;
         if rooms.contains_key(&room_id) {
+            warn!(
+                room_id = %room_id,
+                rollout_epoch = %rollout_epoch,
+                error_code = "ROOM_TRANSFER_ROOM_CONFLICT",
+                checksum = %checksum,
+                room_version = source_room_version,
+                "room transfer import rejected because room already exists"
+            );
             return Err("ROOM_TRANSFER_ROOM_CONFLICT");
         }
 
         let mut logic = self.logic_factory.create(&payload.policy_id);
         logic.on_room_created(&room_id);
-        logic.import_transfer_state(&transfer_state)?;
+        if let Err(error_code) = logic.import_transfer_state(&transfer_state) {
+            warn!(
+                room_id = %room_id,
+                rollout_epoch = %rollout_epoch,
+                error_code = error_code,
+                checksum = %checksum,
+                room_version = source_room_version,
+                "room transfer import rejected by room logic"
+            );
+            return Err(error_code);
+        }
 
         let mut room = Room::new(
             room_id.clone(),
@@ -1431,7 +1730,10 @@ impl RoomManager {
         info!(
             room_id = %room_id,
             rollout_epoch = %rollout_epoch,
+            error_code = "OK",
             checksum = %checksum,
+            room_version = source_room_version.saturating_add(1),
+            source_room_version = source_room_version,
             "room transfer payload imported"
         );
 
@@ -1447,28 +1749,77 @@ impl RoomManager {
     ) -> Result<(String, u64), &'static str> {
         let rollout_epoch = rollout_epoch.trim();
         if rollout_epoch.is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "INVALID_ROLLOUT_EPOCH",
+                checksum = checksum,
+                room_version = room_version,
+                "room ownership confirm rejected"
+            );
             return Err("INVALID_ROLLOUT_EPOCH");
         }
         let checksum = checksum.trim();
         if checksum.is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                room_version = room_version,
+                "room ownership confirm rejected"
+            );
             return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
         }
 
         let rooms = self.rooms.lock().await;
-        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room = match rooms.get(room_id) {
+            Some(room) => room,
+            None => {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_NOT_FOUND",
+                    checksum = checksum,
+                    room_version = room_version,
+                    "room ownership confirm rejected"
+                );
+                return Err("ROOM_NOT_FOUND");
+            }
+        };
 
         if room.transfer_state.status != RoomTransferStatus::OwnedByNew {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_NOT_OWNED_BY_NEW",
+                current_status = transfer_status_label(room.transfer_state.status),
+                room_version = room.transfer_state.room_version,
+                "room ownership confirm rejected"
+            );
             return Err("ROOM_TRANSFER_NOT_OWNED_BY_NEW");
         }
         if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                current_status = transfer_status_label(room.transfer_state.status),
+                expected = ?room.transfer_state.rollout_epoch,
+                actual = rollout_epoch,
+                room_version = room.transfer_state.room_version,
+                "room ownership confirm rejected"
+            );
             return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
         }
         if room.transfer_state.last_transfer_checksum.as_deref() != Some(checksum) {
             warn!(
                 room_id = room_id,
                 rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                current_status = transfer_status_label(room.transfer_state.status),
                 expected = ?room.transfer_state.last_transfer_checksum,
                 actual = checksum,
+                room_version = room.transfer_state.room_version,
                 "room ownership confirm rejected due to checksum mismatch"
             );
             return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
@@ -1477,6 +1828,8 @@ impl RoomManager {
             warn!(
                 room_id = room_id,
                 rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_VERSION_MISMATCH",
+                current_status = transfer_status_label(room.transfer_state.status),
                 expected = room.transfer_state.room_version,
                 actual = room_version,
                 "room ownership confirm rejected due to room version mismatch"
@@ -1487,8 +1840,10 @@ impl RoomManager {
         info!(
             room_id = room_id,
             rollout_epoch = rollout_epoch,
+            error_code = "OK",
             checksum = checksum,
             room_version = room.transfer_state.room_version,
+            current_status = transfer_status_label(room.transfer_state.status),
             "room ownership confirmed on new owner"
         );
 
@@ -1503,34 +1858,91 @@ impl RoomManager {
     ) -> Result<(), &'static str> {
         let rollout_epoch = rollout_epoch.trim();
         if rollout_epoch.is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "INVALID_ROLLOUT_EPOCH",
+                checksum = checksum,
+                "room transfer retire rejected"
+            );
             return Err("INVALID_ROLLOUT_EPOCH");
         }
         if checksum.trim().is_empty() {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                "room transfer retire rejected"
+            );
             return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
         }
 
         {
             let mut rooms = self.rooms.lock().await;
-            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+            let room = match rooms.get_mut(room_id) {
+                Some(room) => room,
+                None => {
+                    warn!(
+                        room_id = room_id,
+                        rollout_epoch = rollout_epoch,
+                        error_code = "ROOM_NOT_FOUND",
+                        checksum = checksum,
+                        "room transfer retire rejected"
+                    );
+                    return Err("ROOM_NOT_FOUND");
+                }
+            };
 
             if room.transfer_state.status == RoomTransferStatus::Retired {
+                info!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "IDEMPOTENT_ROOM_TRANSFER_RETIRE",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    checksum = checksum,
+                    room_version = room.transfer_state.room_version,
+                    "room transfer retire idempotent replay"
+                );
                 return Ok(());
             }
             if !matches!(
                 room.transfer_state.status,
                 RoomTransferStatus::Frozen | RoomTransferStatus::Exported
             ) {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_NOT_EXPORTED",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    checksum = checksum,
+                    room_version = room.transfer_state.room_version,
+                    "room transfer retire rejected"
+                );
                 return Err("ROOM_TRANSFER_NOT_EXPORTED");
             }
             if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    expected = ?room.transfer_state.rollout_epoch,
+                    actual = rollout_epoch,
+                    checksum = checksum,
+                    room_version = room.transfer_state.room_version,
+                    "room transfer retire rejected"
+                );
                 return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
             }
             if room.transfer_state.last_transfer_checksum.as_deref() != Some(checksum) {
                 warn!(
                     room_id = room_id,
                     rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                    current_status = transfer_status_label(room.transfer_state.status),
                     expected = ?room.transfer_state.last_transfer_checksum,
                     actual = checksum,
+                    room_version = room.transfer_state.room_version,
                     "room transfer retire rejected due to checksum mismatch"
                 );
                 return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
@@ -1545,7 +1957,10 @@ impl RoomManager {
             info!(
                 room_id = room_id,
                 rollout_epoch = rollout_epoch,
+                error_code = "OK",
                 checksum = checksum,
+                room_version = room.transfer_state.room_version,
+                current_status = transfer_status_label(room.transfer_state.status),
                 "room retired after transfer"
             );
         }
