@@ -30,7 +30,10 @@ use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::{Session, SessionState};
 
-#[derive(Clone, Copy, Debug)]
+pub const DEFAULT_DRAIN_MODE_REASON: &str = "rollout";
+pub const DEFAULT_DRAIN_MODE_SOURCE: &str = "admin";
+
+#[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
@@ -44,6 +47,8 @@ pub struct RuntimeConfig {
     pub input_anomaly_max: u64,
     pub drain_mode_enabled: bool,
     pub drain_mode_entered_at_ms: Option<u64>,
+    pub drain_mode_reason: String,
+    pub drain_mode_source: String,
 }
 
 impl RuntimeConfig {
@@ -405,6 +410,8 @@ pub async fn run(
             input_anomaly_max: config.input_anomaly_max,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
+            drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
+            drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
         })),
         connection_count: Arc::new(AtomicU64::new(0)),
         online_player_count: Arc::new(AtomicU64::new(0)),
@@ -626,7 +633,7 @@ where
     });
 
     loop {
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         let mut header_buf = [0u8; HEADER_LEN];
 
         // select! between kick notification and normal packet read

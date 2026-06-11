@@ -201,6 +201,8 @@ export async function runRolloutDrainStatus(options) {
     ownerServerId: status.ownerServerId,
     drainModeEnabled: status.drainModeEnabled,
     drainModeEnteredAtMs: status.drainModeEnteredAtMs,
+    drainModeReason: status.drainModeReason,
+    drainModeSource: status.drainModeSource,
     connectionCount: status.connectionCount,
     ownedRoomCount: status.ownedRoomCount,
     migratingRoomCount: status.migratingRoomCount,

@@ -85,6 +85,8 @@ pub struct PlayerInputReq {
     pub action: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub payload_json: ::prost::alloc::string::String,
+    #[prost(int64, tag = "4")]
+    pub client_timestamp_ms: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlayerInputRes {
@@ -113,6 +115,8 @@ pub struct MoveInputReq {
     pub client_y: f32,
     #[prost(uint32, tag = "8")]
     pub client_frame_id: u32,
+    #[prost(int64, tag = "9")]
+    pub client_timestamp_ms: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MoveInputRes {
@@ -589,6 +593,30 @@ pub struct ImportRoomTransferRes {
     pub room_version: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmRoomOwnershipReq {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub checksum: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmRoomOwnershipRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub checksum: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetireTransferredRoomReq {
     #[prost(string, tag = "1")]
     pub rollout_epoch: ::prost::alloc::string::String,
@@ -643,6 +671,18 @@ pub struct GetRolloutDrainStatusRes {
     pub connection_count: u64,
     #[prost(message, repeated, tag = "8")]
     pub routes: ::prost::alloc::vec::Vec<RoomRouteStatus>,
+    #[prost(bool, tag = "9")]
+    pub drain_mode_enabled: bool,
+    #[prost(uint64, tag = "10")]
+    pub drain_mode_entered_at_ms: u64,
+    #[prost(uint64, tag = "11")]
+    pub transferable_empty_room_count: u64,
+    #[prost(message, repeated, tag = "12")]
+    pub transferable_empty_room_samples: ::prost::alloc::vec::Vec<RoomRouteStatus>,
+    #[prost(string, tag = "13")]
+    pub drain_mode_reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub drain_mode_source: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TriggerServerRedirectReq {

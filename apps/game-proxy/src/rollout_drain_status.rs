@@ -53,6 +53,8 @@ pub struct OldServerDrainStatusCheckSummary {
     pub connection_count: Option<u64>,
     pub drain_mode_enabled: Option<bool>,
     pub drain_mode_entered_at_ms: Option<u64>,
+    pub drain_mode_reason: Option<String>,
+    pub drain_mode_source: Option<String>,
     pub error: Option<String>,
 }
 
@@ -71,6 +73,8 @@ impl OldServerDrainStatusCheckSummary {
             connection_count: Some(0),
             drain_mode_enabled: Some(false),
             drain_mode_entered_at_ms: Some(0),
+            drain_mode_reason: Some("rollout".to_string()),
+            drain_mode_source: Some("admin".to_string()),
             error: None,
         }
     }
@@ -89,6 +93,8 @@ impl OldServerDrainStatusCheckSummary {
             connection_count: Some(connection_count),
             drain_mode_enabled: Some(true),
             drain_mode_entered_at_ms: Some(1000),
+            drain_mode_reason: Some("rollout".to_string()),
+            drain_mode_source: Some("admin".to_string()),
             error: Some("OLD_SERVER_NOT_DRAINED".to_string()),
         }
     }
@@ -111,6 +117,8 @@ impl OldServerDrainStatusCheckSummary {
             connection_count: None,
             drain_mode_enabled: None,
             drain_mode_entered_at_ms: None,
+            drain_mode_reason: None,
+            drain_mode_source: None,
             error: Some(error.into()),
         }
     }
@@ -458,6 +466,8 @@ struct AuthHttpDrainStatusResponse {
     connection_count: Option<u64>,
     drain_mode_enabled: Option<bool>,
     drain_mode_entered_at_ms: Option<u64>,
+    drain_mode_reason: Option<String>,
+    drain_mode_source: Option<String>,
 }
 
 fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusCheckSummary {
@@ -474,6 +484,8 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
             connection_count: None,
             drain_mode_enabled: None,
             drain_mode_entered_at_ms: None,
+            drain_mode_reason: None,
+            drain_mode_source: None,
             error: Some(format!("HTTP_STATUS_{}", response.status_code)),
         };
     }
@@ -493,6 +505,8 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
                 connection_count: None,
                 drain_mode_enabled: None,
                 drain_mode_entered_at_ms: None,
+                drain_mode_reason: None,
+                drain_mode_source: None,
                 error: Some(format!("INVALID_JSON: {error}")),
             };
         }
@@ -532,6 +546,8 @@ fn summary_from_http_response(response: HttpResponse) -> OldServerDrainStatusChe
         connection_count: payload.connection_count,
         drain_mode_enabled: payload.drain_mode_enabled,
         drain_mode_entered_at_ms: payload.drain_mode_entered_at_ms,
+        drain_mode_reason: payload.drain_mode_reason,
+        drain_mode_source: payload.drain_mode_source,
         error,
     }
 }
@@ -557,7 +573,7 @@ mod tests {
     fn response_summary_passes_only_when_real_counts_are_zero() {
         let summary = summary_from_http_response(HttpResponse {
             status_code: 200,
-            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":0,"drainModeEnabled":false,"drainModeEnteredAtMs":0}"#.to_vec(),
+            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":0,"drainModeEnabled":false,"drainModeEnteredAtMs":0,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
         });
 
         assert_eq!(summary, OldServerDrainStatusCheckSummary::passed());
@@ -567,7 +583,7 @@ mod tests {
     fn response_summary_blocks_nonzero_connections() {
         let summary = summary_from_http_response(HttpResponse {
             status_code: 200,
-            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":1,"drainModeEnabled":true,"drainModeEnteredAtMs":123}"#.to_vec(),
+            body: br#"{"ok":true,"ownedRoomCount":0,"migratingRoomCount":0,"connectionCount":1,"drainModeEnabled":true,"drainModeEnteredAtMs":123,"drainModeReason":"rollout","drainModeSource":"admin"}"#.to_vec(),
         });
 
         assert!(!summary.passed);

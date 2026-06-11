@@ -33,7 +33,7 @@ use crate::pb::{
 };
 use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
-use crate::server::RuntimeConfig;
+use crate::server::{DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, RuntimeConfig};
 
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
 const GM_REASON_MAX_LEN: usize = 512;
@@ -312,7 +312,7 @@ async fn handle_admin_connection(
                     .map_err(std::io::Error::other)?;
 
                 let room_count = room_manager.room_count().await as u64;
-                let runtime = *runtime_config.read().await;
+                let runtime = runtime_config.read().await.clone();
                 let RuntimeConfig {
                     heartbeat_timeout_secs,
                     max_body_len,
@@ -1435,7 +1435,7 @@ async fn build_rollout_drain_status_response(
     let snapshot = room_manager
         .rollout_drain_snapshot(owner_server_id, ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT)
         .await;
-    let runtime = *runtime_config.read().await;
+    let runtime = runtime_config.read().await.clone();
     let connection_count = connection_count.load(Ordering::Relaxed);
 
     if connection_count == 0 && snapshot.owned_room_count == 0 && snapshot.migrating_room_count == 0
@@ -1443,6 +1443,8 @@ async fn build_rollout_drain_status_response(
         info!(
             channel = "admin_tcp",
             drain_mode_enabled = runtime.drain_mode_enabled,
+            drain_mode_reason = %runtime.drain_mode_reason,
+            drain_mode_source = %runtime.drain_mode_source,
             connection_count = connection_count,
             owned_room_count = snapshot.owned_room_count,
             migrating_room_count = snapshot.migrating_room_count,
@@ -1466,6 +1468,8 @@ async fn build_rollout_drain_status_response(
         drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
         transferable_empty_room_count: snapshot.transferable_empty_room_count,
         transferable_empty_room_samples: snapshot.transferable_empty_room_samples,
+        drain_mode_reason: runtime.drain_mode_reason,
+        drain_mode_source: runtime.drain_mode_source,
     }
 }
 
@@ -1887,17 +1891,69 @@ async fn apply_runtime_config(
             } else {
                 None
             };
+            runtime.drain_mode_reason = if parsed {
+                normalized_drain_metadata(
+                    &runtime.drain_mode_reason,
+                    DEFAULT_DRAIN_MODE_REASON,
+                    "INVALID_DRAIN_MODE_REASON",
+                )?
+            } else {
+                DEFAULT_DRAIN_MODE_REASON.to_string()
+            };
+            runtime.drain_mode_source = if parsed {
+                normalized_drain_metadata(
+                    &runtime.drain_mode_source,
+                    DEFAULT_DRAIN_MODE_SOURCE,
+                    "INVALID_DRAIN_MODE_SOURCE",
+                )?
+            } else {
+                DEFAULT_DRAIN_MODE_SOURCE.to_string()
+            };
 
             if previous != parsed {
                 info!(
                     drain_mode_enabled = parsed,
                     drain_mode_entered_at_ms = ?runtime.drain_mode_entered_at_ms,
+                    drain_mode_reason = %runtime.drain_mode_reason,
+                    drain_mode_source = %runtime.drain_mode_source,
                     "game-server drain mode updated"
                 );
             }
             Ok(())
         }
+        "drain_mode_reason" => {
+            runtime.drain_mode_reason = normalized_drain_metadata(
+                value,
+                DEFAULT_DRAIN_MODE_REASON,
+                "INVALID_DRAIN_MODE_REASON",
+            )?;
+            Ok(())
+        }
+        "drain_mode_source" => {
+            runtime.drain_mode_source = normalized_drain_metadata(
+                value,
+                DEFAULT_DRAIN_MODE_SOURCE,
+                "INVALID_DRAIN_MODE_SOURCE",
+            )?;
+            Ok(())
+        }
         _ => Err("UNSUPPORTED_CONFIG_KEY"),
+    }
+}
+
+fn normalized_drain_metadata(
+    value: &str,
+    default_value: &str,
+    too_long_error: &'static str,
+) -> Result<String, &'static str> {
+    let normalized = value.trim();
+    if normalized.len() > 128 {
+        return Err(too_long_error);
+    }
+    if normalized.is_empty() {
+        Ok(default_value.to_string())
+    } else {
+        Ok(normalized.to_string())
     }
 }
 
@@ -2031,6 +2087,8 @@ mod tests {
             input_anomaly_max: 0,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
+            drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
+            drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
         }))
     }
 
@@ -2398,7 +2456,7 @@ mod tests {
             .await
             .unwrap();
 
-        let enabled = *runtime_config.read().await;
+        let enabled = runtime_config.read().await.clone();
         assert!(enabled.drain_mode_enabled);
         assert!(enabled.drain_mode_entered_at_ms.is_some());
 
@@ -2406,9 +2464,38 @@ mod tests {
             .await
             .unwrap();
 
-        let disabled = *runtime_config.read().await;
+        let disabled = runtime_config.read().await.clone();
         assert!(!disabled.drain_mode_enabled);
         assert_eq!(disabled.drain_mode_entered_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_updates_drain_mode_reason_and_source() {
+        let runtime_config = runtime_config_fixture();
+
+        apply_runtime_config(&runtime_config, "drain_mode_reason", "  hotfix rollout  ")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "drain_mode_source", "  ops-admin  ")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "drain_mode", "on")
+            .await
+            .unwrap();
+
+        let enabled = runtime_config.read().await.clone();
+        assert!(enabled.drain_mode_enabled);
+        assert_eq!(enabled.drain_mode_reason, "hotfix rollout");
+        assert_eq!(enabled.drain_mode_source, "ops-admin");
+
+        apply_runtime_config(&runtime_config, "drain_mode", "off")
+            .await
+            .unwrap();
+
+        let disabled = runtime_config.read().await.clone();
+        assert!(!disabled.drain_mode_enabled);
+        assert_eq!(disabled.drain_mode_reason, DEFAULT_DRAIN_MODE_REASON);
+        assert_eq!(disabled.drain_mode_source, DEFAULT_DRAIN_MODE_SOURCE);
     }
 
     #[tokio::test]
@@ -2488,7 +2575,7 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         assert_eq!(runtime.msg_rate_window_ms, 500);
         assert_eq!(runtime.msg_rate_max, 20);
         assert_eq!(runtime.player_msg_rate_window_ms, 750);
@@ -2506,7 +2593,7 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         assert!(runtime.input_timestamp_required);
         assert_eq!(runtime.input_timestamp_max_skew_ms, 300_000);
 
@@ -2517,7 +2604,7 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         assert!(!runtime.input_timestamp_required);
         assert_eq!(runtime.input_timestamp_max_skew_ms, 0);
     }
@@ -2533,7 +2620,7 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         assert_eq!(runtime.input_anomaly_window_ms, 60_000);
         assert_eq!(runtime.input_anomaly_max, 5);
 
@@ -2541,7 +2628,7 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = *runtime_config.read().await;
+        let runtime = runtime_config.read().await.clone();
         assert_eq!(runtime.input_anomaly_max, 0);
     }
 

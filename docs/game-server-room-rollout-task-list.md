@@ -121,18 +121,19 @@
 
 ### 4.1 旧服排空与 drain 模式
 
-当前状态（截至 `2026-05-19`）:
+当前状态（截至 `2026-06-11`）:
 
 - `game-server` 已有 server 级 `drain mode` 状态，`ServerStatusRes.status` 会返回 `ok` 或 `draining`。
-- `admin_server` 已支持通过 `UpdateConfigReq(key=drain_mode|drain_mode_enabled)` 开启 / 关闭 drain，并可经 `auth-http` 内部接口转发。
-- `RoomJoinReq`、`RoomJoinAsObserverReq`、`RoomReconnectReq` 与 `CreateMatchedRoomReq` 已接入“仅阻止新 room 创建，不影响已有 room”的最小 drain 判定。
+- `admin_server` 已支持通过 `UpdateConfigReq(key=drain_mode|drain_mode_enabled|drain_mode_reason|drain_mode_source)` 开启 / 关闭 drain 和设置观测元信息，并可经 `auth-http` 内部接口转发。
+- `RoomJoinReq`、`RoomJoinAsObserverReq` 与 `CreateMatchedRoomReq` 已接入 shared drain 新房判定；`RoomReconnectReq` 只回到已存在的离线 room，不触发新建。client TCP / 本地 socket 与 internal socket 的 matched-room 创建都走同一套 `create_matched_room_impl` 策略。admin TCP 当前没有独立建房入口。
 
 - [x] 增加 server 级 `drain mode` 状态存储。
-- [ ] 明确 `drain mode` 的最小状态字段:
+- [x] 明确 `drain mode` 的最小状态字段:
   - `enabled`
   - `entered_at_ms`
   - `reason`
   - `source`
+- 当前实现说明：`RuntimeConfig` 保存 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`。`reason/source` 可通过 admin `UpdateConfigReq` 设置，默认分别为 `rollout` / `admin`；开启 / 关闭 drain、新房创建被拒和 drain completed 日志都会带这些字段。`GetRolloutDrainStatusRes` 同步返回 `drain_mode_reason` 与 `drain_mode_source`，便于控制面和工具直接观测。
 - [x] 在 admin 通道增加开启 / 关闭 / 查询 `drain mode` 的入口。
 - [x] `AdminServerStatusRes` 或等价状态接口返回 `drain_mode` 状态。
 - [x] 在日志中记录 `drain mode` 开启 / 关闭事件。
@@ -144,16 +145,19 @@
 - [x] 在 `drain mode` 下允许 `RoomReconnectReq` 进入已有 room。
 - [x] 在 `drain mode` 下允许 `RoomJoinAsObserverReq` 进入已有 room。
 - [x] 在 `drain mode` 下拒绝新的 `CreateMatchedRoomReq`，避免 MatchService 继续把新房落到旧服。
-- [ ] 在 internal / admin / 本地 socket 三条建房路径上统一使用同一套 drain 判定，避免只挡住一条入口。
-- [ ] 明确“新 room”判定规则:
+- [x] 在 internal / admin / 本地 socket 三条建房路径上统一使用同一套 drain 判定，避免只挡住一条入口。
+- 当前实现说明：本地 socket 属于主客户端消息分发，`CreateMatchedRoomReq` 与 TCP client 入口共用 `handle_create_matched_room`；internal socket 入口共用 `handle_create_matched_room_internal`，最终都调用 `create_matched_room_impl` 和 `evaluate_drain_new_room_creation`。admin TCP 目前没有独立建房入口，因此没有第三套可绕过的建房实现。
+- [x] 明确“新 room”判定规则:
   - 指定 `room_id` 但本地不存在时是否允许创建
   - 空 `room_id` 默认房是否一律禁止新建
   - `match_id` 房间是否一律禁止新建
+- 当前实现规则：drain 开启时，只要目标 `room_id` 在本地 `RoomManager` 不存在，即判定为新 room 并拒绝创建；`RoomJoinReq` / observer 的空 `room_id` 会归一到 `room-default`，若本地不存在则拒绝；`CreateMatchedRoomReq` 一律按目标 `room_id` 创建 matched room，若本地不存在则拒绝，避免继续把 match 新房落到旧服。已存在 room 不因 drain 被拒，仍交给正常 room policy / transfer 状态校验。
 - [x] 为 `RoomManager` 增加“是否已存在 room / 是否允许新建”的查询接口，避免在业务层复制房间存在性判断。
-- [ ] 在 `drain mode` 下不影响已有 room 的正常运行:
+- [x] 在 `drain mode` 下不影响已有 room 的正常运行:
   - ready / start / input / tick 继续工作
   - 离房 / 断线重连 / observer 进入继续工作
   - offline TTL / 空房清理继续工作
+- 当前实现说明：drain 判定只放在可能触发新建 room 的 handler 前置路径，不进入 `RoomManager` 的 ready/start/input/tick/leave/reconnect/cleanup 逻辑；单元测试覆盖 waiting room ready/start、in-game input/tick/reconnect、waiting room observer、cleanup 仍按原 room policy 工作。注意当前 `default_match` policy 本身不允许 in-game 新增 observer，这不是 drain 行为。
 - [x] 为 room 增加排空观测指标，至少能区分:
   - `owned_room_count`
   - `connection_count`
@@ -177,12 +181,13 @@
   - 仅在 `leave_room` / `disconnect_room_member` 导致 room 从有在线成员变为 `online_member_count == 0` 时记录，避免重复离线或重复断连刷日志。
 - [x] 为“新房创建被 drain 拒绝”增加关键日志。
 - [x] 为“旧服排空完成”增加关键日志:
-  - `GetRolloutDrainStatusReq/Res` 的 admin/internal 构造路径在 `connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时记录关键字段，保留 `drain_mode_enabled` 作为观测字段。
-- [ ] 增加单元测试覆盖:
+  - `GetRolloutDrainStatusReq/Res` 的 admin/internal 构造路径在 `connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时记录关键字段，保留 `drain_mode_enabled` / `drain_mode_reason` / `drain_mode_source` 作为观测字段。
+- [x] 增加单元测试覆盖:
   - drain 开启 / 关闭状态切换
   - drain 下默认 room 创建被拒
   - drain 下已有 room join / reconnect 仍可成功
   - drain 下 matched room 创建被拒
+- 当前测试覆盖：`admin_server::tests::apply_runtime_config_updates_drain_mode*` 覆盖开关和 reason/source；`room_service::tests::drain_new_room_policy_*` 覆盖 drain off/on、默认 room / matched room 新建拒绝和已有 room 放行；`room_service::tests::create_matched_room_impl_rejects_internal_create_during_drain` 覆盖 internal matched-room 创建拒绝；`room_manager::tests::existing_room_runtime_paths_continue_for_drain_mode_contract` 覆盖已有 room 的 ready/start/input/tick/reconnect/observer/cleanup 运行契约。
 - [ ] 增加集成测试覆盖:
   - drain 开启后旧房仍能自然结束并排空
   - drain 开启后 `proxy` 不再把新房流量导入旧服

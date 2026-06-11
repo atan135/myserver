@@ -4332,6 +4332,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn existing_room_runtime_paths_continue_for_drain_mode_contract() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory.clone()),
+        );
+
+        for player_id in ["player-a", "player-b"] {
+            let (tx, _rx) = mpsc::channel(1024);
+            manager
+                .join_room(
+                    "room-test",
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+        }
+
+        manager
+            .set_ready_state("room-test", "player-a", false)
+            .await
+            .unwrap();
+        manager
+            .set_ready_state("room-test", "player-a", true)
+            .await
+            .unwrap();
+        manager
+            .set_ready_state("room-test", "player-b", true)
+            .await
+            .unwrap();
+        manager.start_game("room-test", "player-a").await.unwrap();
+        {
+            let mut runtimes = manager.runtimes.lock().await;
+            if let Some(runtime) = runtimes.get_mut("room-test") {
+                if let Some(handle) = runtime.tick_handle.take() {
+                    handle.abort();
+                }
+                runtime.tick_running = false;
+            }
+        }
+
+        manager
+            .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
+            .await
+            .unwrap();
+        manager
+            .accept_player_input("room-test", "player-b", 1, "move", "{\"x\":2}")
+            .await
+            .unwrap();
+        let progressed = manager.process_room_tick("room-test", 10).await;
+        assert!(progressed.is_some());
+        assert_eq!(factory.recorded_ticks().len(), 1);
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+        let recovery = manager
+            .reconnect_room("room-test", "player-a", reconnect_tx)
+            .await
+            .unwrap();
+        assert_eq!(recovery.snapshot.state, "in_game");
+
+        manager.cleanup_expired_offline_players().await;
+        assert!(manager.room_exists("room-test").await);
+
+        let (waiting_tx, _waiting_rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-observer",
+                "player-host",
+                waiting_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        let (observer_tx, _observer_rx) = mpsc::channel(1024);
+        let observer = manager
+            .join_room_as_observer("room-observer", "observer-1", observer_tx)
+            .await
+            .unwrap();
+        assert_eq!(observer.snapshot.room_id, "room-observer");
+    }
+
+    #[tokio::test]
     async fn strict_wait_timeout_repeats_last_input() {
         let (manager, factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;

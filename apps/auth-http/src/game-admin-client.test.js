@@ -47,7 +47,9 @@ test("decodeRolloutDrainStatusRes exposes drain mode and transferable fields", (
     fieldVarint(9, 1),
     fieldVarint(10, 1_717_000_000_123n),
     fieldVarint(11, 1),
-    fieldMessage(12, transferableSample)
+    fieldMessage(12, transferableSample),
+    fieldString(13, "rollout"),
+    fieldString(14, "admin")
   ]);
 
   assert.deepEqual(decodeRolloutDrainStatusRes(body), {
@@ -62,6 +64,8 @@ test("decodeRolloutDrainStatusRes exposes drain mode and transferable fields", (
     drainModeEnabled: true,
     drainModeEnteredAtMs: 1_717_000_000_123,
     transferableEmptyRoomCount: 1,
+    drainModeReason: "rollout",
+    drainModeSource: "admin",
     transferableEmptyRoomSamples: [
       {
         roomId: "room-empty",

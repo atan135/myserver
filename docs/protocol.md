@@ -191,7 +191,7 @@
 说明：
 
 - 这些消息结构已在 `packages/proto/game.proto` 定义；`game-server` 消息号枚举包含完整控制面消息，`game-proxy` 仅包含自身转发和路由判定需要识别的子集。
-- `GetRolloutDrainStatusRes` 返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`connection_count`、`owned_room_count`、`migrating_room_count`、`transferable_empty_room_count`、`RoomRouteStatus` 样本与 `transferable_empty_room_samples`；未进入 drain mode 时 `drain_mode_entered_at_ms=0`。可接管空房样本仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，`empty_since_ms` 表示已空置时长，不是绝对时间戳。
+- `GetRolloutDrainStatusRes` 返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、`connection_count`、`owned_room_count`、`migrating_room_count`、`transferable_empty_room_count`、`RoomRouteStatus` 样本与 `transferable_empty_room_samples`；未进入 drain mode 时 `drain_mode_entered_at_ms=0`。可接管空房样本仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，`empty_since_ms` 表示已空置时长，不是绝对时间戳。
 - 当前代码已落地 `drain_mode` 对新建房的拦截、`game-proxy` 侧 rollout 路由状态、`game-server` 房间 freeze/export/import/confirm/retire 最小闭环，以及 `TriggerServerRedirectReq/Res` 可控 redirect push 下发入口；真实多进程联调和自动灰度收尾仍以 `docs/game-server-room-rollout-spec.md`、任务清单和实际代码为准。
 - `ServerRedirectPush` 已作为第一阶段显式重连协议使用。服务端可下发 push，push 成功入队后旧服会以 `server_redirect_reconnect_required` 请求关闭旧连接；`tools/mock-client` 已有收到 push 后主动重连目标入口并优先 `RoomReconnectReq` 的验证场景。
 

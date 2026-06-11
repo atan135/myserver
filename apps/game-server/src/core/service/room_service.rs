@@ -13,7 +13,10 @@ use crate::pb::{
     RoomReconnectRes, RoomStartRes,
 };
 use crate::protocol::{MessageType, Packet};
-use crate::server::{InputAnomalyKind, RuntimeConfig, current_unix_ms};
+use crate::server::{
+    DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, InputAnomalyKind, RuntimeConfig,
+    current_unix_ms,
+};
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR: &str = "SERVER_DRAINING_REJECT_NEW_ROOM";
 
@@ -74,8 +77,16 @@ pub async fn handle_room_join(
         return Ok(());
     }
 
-    if drain_mode_blocks_new_room_creation(services, &room_id).await {
-        log_drain_mode_room_creation_rejected("room_join", Some(&player_id), &room_id, None);
+    if let DrainNewRoomDecision::RejectNewRoom(state) =
+        evaluate_drain_new_room_creation(services, DrainRoomCreateKind::DefaultRoom, &room_id).await
+    {
+        log_drain_mode_room_creation_rejected(
+            "room_join",
+            Some(&player_id),
+            &room_id,
+            None,
+            &state,
+        );
         connection.queue_message(
             MessageType::RoomJoinRes,
             packet.header.seq,
@@ -830,7 +841,7 @@ async fn remember_input_frame_and_record_duplicate(
     seq: u32,
     request_type: &'static str,
 ) -> bool {
-    let runtime = *services.runtime_config.read().await;
+    let runtime = services.runtime_config.read().await.clone();
     let duplicate = services
         .player_input_anomaly_tracker
         .lock()
@@ -875,7 +886,7 @@ async fn reject_if_input_anomaly_blocked(
     frame_id: u32,
     request_type: &'static str,
 ) -> Result<bool, std::io::Error> {
-    let runtime = *services.runtime_config.read().await;
+    let runtime = services.runtime_config.read().await.clone();
     let blocked = services
         .player_input_anomaly_tracker
         .lock()
@@ -923,7 +934,7 @@ async fn record_input_anomaly(
     kind: InputAnomalyKind,
     error_code: &str,
 ) {
-    let runtime = *services.runtime_config.read().await;
+    let runtime = services.runtime_config.read().await.clone();
     let outcome = services.player_input_anomaly_tracker.lock().await.record(
         player_id,
         Instant::now(),
@@ -1295,8 +1306,16 @@ pub async fn handle_join_as_observer(
         return Ok(());
     }
 
-    if drain_mode_blocks_new_room_creation(services, &room_id).await {
-        log_drain_mode_room_creation_rejected("observer_join", Some(&player_id), &room_id, None);
+    if let DrainNewRoomDecision::RejectNewRoom(state) =
+        evaluate_drain_new_room_creation(services, DrainRoomCreateKind::DefaultRoom, &room_id).await
+    {
+        log_drain_mode_room_creation_rejected(
+            "observer_join",
+            Some(&player_id),
+            &room_id,
+            None,
+            &state,
+        );
         connection.queue_message(
             MessageType::RoomJoinAsObserverRes,
             packet.header.seq,
@@ -1522,12 +1541,15 @@ async fn create_matched_room_impl(
 
     let owner_player_id = player_ids.first().cloned().unwrap_or_default();
 
-    if drain_mode_blocks_new_room_creation(services, room_id).await {
+    if let DrainNewRoomDecision::RejectNewRoom(state) =
+        evaluate_drain_new_room_creation(services, DrainRoomCreateKind::MatchedRoom, room_id).await
+    {
         log_drain_mode_room_creation_rejected(
             "create_matched_room",
             actor_player_id,
             room_id,
             Some(match_id),
+            &state,
         );
         return CreateMatchedRoomRes {
             ok: false,
@@ -1611,13 +1633,83 @@ async fn create_matched_room_impl(
     }
 }
 
-async fn drain_mode_blocks_new_room_creation(services: &ServiceContext, room_id: &str) -> bool {
-    let drain_mode_enabled = services.runtime_config.read().await.drain_mode_enabled;
-    if !drain_mode_enabled {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainRoomCreateKind {
+    DefaultRoom,
+    MatchedRoom,
+}
+
+impl DrainRoomCreateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DefaultRoom => "default_room",
+            Self::MatchedRoom => "matched_room",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DrainModeState {
+    entered_at_ms: u64,
+    reason: String,
+    source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DrainNewRoomDecision {
+    AllowDrainOff,
+    AllowExistingRoom,
+    RejectNewRoom(DrainModeState),
+}
+
+async fn evaluate_drain_new_room_creation(
+    services: &ServiceContext,
+    create_kind: DrainRoomCreateKind,
+    room_id: &str,
+) -> DrainNewRoomDecision {
+    let state = {
+        let runtime = services.runtime_config.read().await;
+        drain_mode_state_from_runtime(&runtime)
+    };
+    let Some(state) = state else {
+        return DrainNewRoomDecision::AllowDrainOff;
+    };
+
+    if services.room_manager.room_exists(room_id).await {
+        return DrainNewRoomDecision::AllowExistingRoom;
     }
 
-    !services.room_manager.room_exists(room_id).await
+    info!(
+        room_id = %room_id,
+        create_kind = create_kind.as_str(),
+        drain_mode_entered_at_ms = state.entered_at_ms,
+        drain_mode_reason = %state.reason,
+        drain_mode_source = %state.source,
+        "new room classified for drain-mode rejection"
+    );
+
+    DrainNewRoomDecision::RejectNewRoom(state)
+}
+
+fn drain_mode_state_from_runtime(runtime: &RuntimeConfig) -> Option<DrainModeState> {
+    if !runtime.drain_mode_enabled {
+        return None;
+    }
+
+    Some(DrainModeState {
+        entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or_default(),
+        reason: default_if_blank(&runtime.drain_mode_reason, DEFAULT_DRAIN_MODE_REASON),
+        source: default_if_blank(&runtime.drain_mode_source, DEFAULT_DRAIN_MODE_SOURCE),
+    })
+}
+
+fn default_if_blank(value: &str, default_value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default_value.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn log_drain_mode_room_creation_rejected(
@@ -1625,12 +1717,16 @@ fn log_drain_mode_room_creation_rejected(
     player_id: Option<&str>,
     room_id: &str,
     match_id: Option<&str>,
+    state: &DrainModeState,
 ) {
     info!(
         request_kind,
         player_id = %player_id.unwrap_or_default(),
         room_id = %room_id,
         match_id = %match_id.unwrap_or_default(),
+        drain_mode_entered_at_ms = state.entered_at_ms,
+        drain_mode_reason = %state.reason,
+        drain_mode_source = %state.source,
         error_code = DRAIN_MODE_REJECT_NEW_ROOM_ERROR,
         "room creation rejected because server is in drain mode"
     );
@@ -1638,7 +1734,36 @@ fn log_drain_mode_room_creation_rejected(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use tokio::sync::{Mutex, RwLock};
+
     use super::*;
+    use crate::config::{
+        DEFAULT_ADMIN_TOKEN, DEFAULT_INTERNAL_TOKEN, DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+        DEFAULT_TICKET_SECRET,
+    };
+    use crate::core::config_table::ConfigTableRuntime;
+    use crate::core::context::PlayerRegistry;
+    use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
+    use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::runtime::RoomManager;
+    use crate::mysql_store::MySqlAuditStore;
+
+    struct NoopRoomLogic;
+
+    impl RoomLogic for NoopRoomLogic {}
+
+    impl RoomLogicTransfer for NoopRoomLogic {}
+
+    struct NoopRoomLogicFactory;
+
+    impl RoomLogicFactory for NoopRoomLogicFactory {
+        fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
+            Box::new(NoopRoomLogic)
+        }
+    }
 
     fn runtime_config(
         input_timestamp_required: bool,
@@ -1657,7 +1782,187 @@ mod tests {
             input_anomaly_max: 0,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
+            drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
+            drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
         }
+    }
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+            csv_dir: "csv".to_string(),
+            csv_reload_enabled: false,
+            csv_reload_interval_secs: 3,
+            room_cleanup_interval_secs: 10,
+            admin_host: "127.0.0.1".to_string(),
+            admin_port: 7500,
+            admin_token: DEFAULT_ADMIN_TOKEN.to_string(),
+            admin_audit_enabled: false,
+            admin_audit_path: "logs/game-server/admin-audit.jsonl".to_string(),
+            admin_audit_require_actor: false,
+            internal_token: DEFAULT_INTERNAL_TOKEN.to_string(),
+            local_socket_name: "test-game-server.sock".to_string(),
+            internal_socket_name: "test-game-server-internal.sock".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: false,
+            log_enable_file: false,
+            log_dir: "logs/game-server".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            mysql_enabled: false,
+            mysql_url: "mysql://root:password@127.0.0.1:3306/myserver_game".to_string(),
+            mysql_pool_size: 1,
+            ticket_secret: DEFAULT_TICKET_SECRET.to_string(),
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            player_msg_rate_window_ms: 1000,
+            player_msg_rate_max: 0,
+            input_timestamp_required: false,
+            input_timestamp_max_skew_ms: 5000,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
+            registry_enabled: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "game-server".to_string(),
+            service_instance_id: "game-server-test".to_string(),
+        }
+    }
+
+    async fn service_context_fixture(drain_enabled: bool) -> ServiceContext {
+        let config = test_config();
+        let config_tables = ConfigTableRuntime::load(std::path::Path::new(&config.csv_dir))
+            .expect("test config tables should load");
+        let room_manager = Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(NoopRoomLogicFactory),
+            config_tables.room_policy_registry(),
+            3600,
+        ));
+        let mut runtime = runtime_config(false, 5000);
+        runtime.drain_mode_enabled = drain_enabled;
+        runtime.drain_mode_entered_at_ms = drain_enabled.then_some(1234);
+        runtime.drain_mode_reason = "rollout-test".to_string();
+        runtime.drain_mode_source = "unit-test".to_string();
+
+        ServiceContext {
+            config,
+            mysql_store: MySqlAuditStore::new(&test_config())
+                .await
+                .expect("disabled mysql audit store"),
+            room_manager,
+            runtime_config: Arc::new(RwLock::new(runtime)),
+            connection_count: Arc::new(AtomicU64::new(0)),
+            config_tables,
+            player_manager: PlayerManager::new(MySqlPlayerStore::new_disabled()),
+            online_player_count: Arc::new(AtomicU64::new(0)),
+            player_registry: PlayerRegistry::default(),
+            player_msg_rate_limiter: Arc::new(Mutex::new(
+                crate::server::PlayerMessageRateLimiter::new(),
+            )),
+            player_input_anomaly_tracker: Arc::new(Mutex::new(
+                crate::server::PlayerInputAnomalyTracker::new(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_new_room_policy_allows_when_drain_off() {
+        let services = service_context_fixture(false).await;
+
+        let decision = evaluate_drain_new_room_creation(
+            &services,
+            DrainRoomCreateKind::DefaultRoom,
+            "room-new",
+        )
+        .await;
+
+        assert_eq!(decision, DrainNewRoomDecision::AllowDrainOff);
+    }
+
+    #[tokio::test]
+    async fn drain_new_room_policy_rejects_missing_default_room_when_drain_on() {
+        let services = service_context_fixture(true).await;
+
+        let decision = evaluate_drain_new_room_creation(
+            &services,
+            DrainRoomCreateKind::DefaultRoom,
+            "room-default",
+        )
+        .await;
+
+        assert_eq!(
+            decision,
+            DrainNewRoomDecision::RejectNewRoom(DrainModeState {
+                entered_at_ms: 1234,
+                reason: "rollout-test".to_string(),
+                source: "unit-test".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_new_room_policy_allows_existing_room_when_drain_on() {
+        let services = service_context_fixture(true).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        services
+            .room_manager
+            .join_room(
+                "room-existing",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let decision = evaluate_drain_new_room_creation(
+            &services,
+            DrainRoomCreateKind::DefaultRoom,
+            "room-existing",
+        )
+        .await;
+
+        assert_eq!(decision, DrainNewRoomDecision::AllowExistingRoom);
+    }
+
+    #[tokio::test]
+    async fn drain_new_room_policy_rejects_missing_matched_room_when_drain_on() {
+        let services = service_context_fixture(true).await;
+
+        let decision = evaluate_drain_new_room_creation(
+            &services,
+            DrainRoomCreateKind::MatchedRoom,
+            "room-match-new",
+        )
+        .await;
+
+        assert!(matches!(decision, DrainNewRoomDecision::RejectNewRoom(_)));
+    }
+
+    #[tokio::test]
+    async fn create_matched_room_impl_rejects_internal_create_during_drain() {
+        let services = service_context_fixture(true).await;
+        let response = create_matched_room_impl(
+            &services,
+            None,
+            "match-1",
+            "room-match-new",
+            &["player-a".to_string(), "player-b".to_string()],
+            "1v1",
+            "internal",
+        )
+        .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, DRAIN_MODE_REJECT_NEW_ROOM_ERROR);
+        assert!(!services.room_manager.room_exists("room-match-new").await);
     }
 
     #[test]
