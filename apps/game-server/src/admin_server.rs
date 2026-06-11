@@ -16,6 +16,7 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{PlayerRegistry, SharedRoomManager, SharedRuntimeConfig};
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
+use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
 use crate::gm_broadcast::{
     GM_BROADCAST_CONTENT_MAX_LEN, GM_BROADCAST_TITLE_MAX_LEN, GM_SENDER_MAX_LEN,
     GmBroadcastCommand, broadcast_gm_message_to_online_players, normalize_optional_string,
@@ -24,9 +25,10 @@ use crate::gm_broadcast::{
 use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::pb::{
     ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
-    FreezeRoomForTransferRes, ImportRoomTransferReq, ImportRoomTransferRes,
-    RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
-    TriggerServerRedirectReq, TriggerServerRedirectRes,
+    FreezeRoomForTransferRes, GetRolloutDrainStatusReq, GetRolloutDrainStatusRes,
+    ImportRoomTransferReq, ImportRoomTransferRes, RetireTransferredRoomReq,
+    RetireTransferredRoomRes, ServerRedirectPush, TriggerServerRedirectReq,
+    TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::server::RuntimeConfig;
@@ -72,6 +74,7 @@ pub async fn run_listener(
     player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    owner_server_id: String,
     admin_token: String,
 ) -> Result<(), std::io::Error> {
     loop {
@@ -82,6 +85,7 @@ pub async fn run_listener(
         let player_registry = player_registry.clone();
         let player_manager = player_manager.clone();
         let config_tables = config_tables.clone();
+        let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
 
         tokio::spawn(async move {
@@ -93,6 +97,7 @@ pub async fn run_listener(
                 player_registry,
                 player_manager,
                 config_tables,
+                owner_server_id,
                 admin_token,
             )
             .await
@@ -111,6 +116,7 @@ async fn handle_admin_connection(
     player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    owner_server_id: String,
     admin_token: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut reader, mut writer) = socket.into_split();
@@ -476,6 +482,26 @@ async fn handle_admin_connection(
                 )
                 .await?;
             }
+            Some(MessageType::GetRolloutDrainStatusReq) => {
+                packet
+                    .decode_body::<GetRolloutDrainStatusReq>(
+                        "INVALID_GET_ROLLOUT_DRAIN_STATUS_BODY",
+                    )
+                    .map_err(std::io::Error::other)?;
+
+                write_message(
+                    &mut writer,
+                    MessageType::GetRolloutDrainStatusRes,
+                    packet.header.seq,
+                    &build_rollout_drain_status_response(
+                        &room_manager,
+                        &owner_server_id,
+                        &connection_count,
+                    )
+                    .await,
+                )
+                .await?;
+            }
             Some(MessageType::TriggerServerRedirectReq) => {
                 let request = packet
                     .decode_body::<TriggerServerRedirectReq>("INVALID_TRIGGER_REDIRECT_BODY")
@@ -562,6 +588,27 @@ fn authenticate_admin_packet(packet: &Packet, admin_token: &str) -> bool {
     std::str::from_utf8(&packet.body)
         .map(|token| token == admin_token)
         .unwrap_or(false)
+}
+
+async fn build_rollout_drain_status_response(
+    room_manager: &SharedRoomManager,
+    owner_server_id: &str,
+    connection_count: &Arc<AtomicU64>,
+) -> GetRolloutDrainStatusRes {
+    let snapshot = room_manager
+        .rollout_drain_snapshot(owner_server_id, ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT)
+        .await;
+
+    GetRolloutDrainStatusRes {
+        ok: true,
+        error_code: String::new(),
+        rollout_epoch: snapshot.rollout_epoch,
+        owner_server_id: snapshot.owner_server_id,
+        owned_room_count: snapshot.owned_room_count,
+        migrating_room_count: snapshot.migrating_room_count,
+        connection_count: connection_count.load(Ordering::Relaxed),
+        routes: snapshot.routes,
+    }
 }
 
 fn decode_gm_broadcast_request(packet: &Packet) -> Result<GmBroadcastCommand, &'static str> {
@@ -1098,6 +1145,7 @@ async fn write_error(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     use serde_json::json;
     use tokio::sync::Notify;
@@ -1106,9 +1154,23 @@ mod tests {
 
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
-    use crate::core::room::OutboundMessage;
+    use crate::core::logic::{RoomLogic, RoomLogicFactory};
+    use crate::core::room::{MemberRole, OutboundMessage};
+    use crate::core::runtime::RoomManager;
     use crate::pb::GameMessagePush;
     use crate::protocol::PacketHeader;
+
+    struct NoopRoomLogic;
+
+    impl RoomLogic for NoopRoomLogic {}
+
+    struct NoopRoomLogicFactory;
+
+    impl RoomLogicFactory for NoopRoomLogicFactory {
+        fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
+            Box::new(NoopRoomLogic)
+        }
+    }
 
     fn runtime_config_fixture() -> SharedRuntimeConfig {
         Arc::new(RwLock::new(RuntimeConfig {
@@ -1330,6 +1392,43 @@ mod tests {
         let disabled = *runtime_config.read().await;
         assert!(!disabled.drain_mode_enabled);
         assert_eq!(disabled.drain_mode_entered_at_ms, None);
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_status_response_includes_connection_count_and_routes() {
+        let room_manager = Arc::new(RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(NoopRoomLogicFactory),
+        ));
+        let connection_count = Arc::new(AtomicU64::new(7));
+        let (tx, _rx) = mpsc::channel(1024);
+        room_manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let response = build_rollout_drain_status_response(
+            &room_manager,
+            "game-server-old",
+            &connection_count,
+        )
+        .await;
+
+        assert!(response.ok);
+        assert!(response.error_code.is_empty());
+        assert_eq!(response.owner_server_id, "game-server-old");
+        assert_eq!(response.connection_count, 7);
+        assert_eq!(response.owned_room_count, 1);
+        assert_eq!(response.migrating_room_count, 0);
+        assert_eq!(response.routes.len(), 1);
+        assert_eq!(response.routes[0].room_id, "room-test");
+        assert_eq!(response.routes[0].owner_server_id, "game-server-old");
     }
 
     #[tokio::test]

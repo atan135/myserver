@@ -424,6 +424,7 @@ pub async fn run(
         mysql_store: mysql_store.clone(),
         room_manager: shared_state.room_manager.clone(),
         runtime_config: shared_state.runtime_config.clone(),
+        connection_count: shared_state.connection_count.clone(),
         config_tables,
         player_manager: PlayerManager::new(mysql_player_store),
         online_player_count: shared_state.online_player_count.clone(),
@@ -449,6 +450,7 @@ pub async fn run(
         services.player_registry.clone(),
         services.player_manager.clone(),
         services.config_tables.clone(),
+        config.service_instance_id.clone(),
         config.admin_token.clone(),
     ));
 

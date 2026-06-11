@@ -1,15 +1,18 @@
 use interprocess::local_socket::tokio::Listener;
 use interprocess::local_socket::traits::tokio::Listener as _;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use crate::core::context::ServiceContext;
+use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
 use crate::core::service::room_service;
 use crate::pb::{
     CreateMatchedRoomReq, ErrorRes, ExportRoomTransferReq, ExportRoomTransferRes,
-    FreezeRoomForTransferReq, FreezeRoomForTransferRes, ImportRoomTransferReq,
-    ImportRoomTransferRes, RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
+    FreezeRoomForTransferReq, FreezeRoomForTransferRes, GetRolloutDrainStatusReq,
+    GetRolloutDrainStatusRes, ImportRoomTransferReq, ImportRoomTransferRes,
+    RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
     TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
@@ -219,6 +222,38 @@ where
                         ok: result.is_ok(),
                         room_id: request.room_id,
                         error_code: result.err().unwrap_or_default().to_string(),
+                    },
+                )
+                .await?;
+            }
+            Some(MessageType::GetRolloutDrainStatusReq) => {
+                packet
+                    .decode_body::<GetRolloutDrainStatusReq>(
+                        "INVALID_GET_ROLLOUT_DRAIN_STATUS_BODY",
+                    )
+                    .map_err(std::io::Error::other)?;
+
+                let snapshot = services
+                    .room_manager
+                    .rollout_drain_snapshot(
+                        &services.config.service_instance_id,
+                        ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT,
+                    )
+                    .await;
+
+                write_message(
+                    &mut writer,
+                    MessageType::GetRolloutDrainStatusRes,
+                    packet.header.seq,
+                    &GetRolloutDrainStatusRes {
+                        ok: true,
+                        error_code: String::new(),
+                        rollout_epoch: snapshot.rollout_epoch,
+                        owner_server_id: snapshot.owner_server_id,
+                        owned_room_count: snapshot.owned_room_count,
+                        migrating_room_count: snapshot.migrating_room_count,
+                        connection_count: services.connection_count.load(Ordering::Relaxed),
+                        routes: snapshot.routes,
                     },
                 )
                 .await?;

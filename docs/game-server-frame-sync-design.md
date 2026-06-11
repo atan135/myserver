@@ -236,7 +236,7 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 | `RoomFrameRatePush` | 协议已定义，尚未在 fps 变化时主动广播 |
 | `ServerRedirectPush` | 协议已定义并可通过已鉴权 admin/internal 控制入口触发；客户端自动断线重连与端到端 route 切换仍未闭环 |
 | `FreezeRoomForTransfer*` / `ExportRoomTransfer*` / `ImportRoomTransfer*` / `RetireTransferredRoom*` | 已接入 `game-server` 已鉴权 internal/admin 通道，完成空房/全员离线 room 的 freeze/export/import/retire 最小闭环；不包含 proxy route 切换、同连接迁移或完整玩法 payload |
-| `GetRolloutDrainStatus*` | 协议已定义，game-server 侧完整查询处理尚未落地 |
+| `GetRolloutDrainStatus*` | 已接入 `game-server` 已鉴权 internal/admin 通道，返回本进程 room drain 快照、有限 route 样本和当前连接数；`empty_since_ms` 在当前实现中表示本进程内已空置时长，不是绝对时间戳；proxy / 控制面结合该真实状态自动停旧服仍未闭环 |
 
 ## 8. 位移同步
 

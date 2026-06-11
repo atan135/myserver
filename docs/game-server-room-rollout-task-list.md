@@ -153,16 +153,17 @@
   - ready / start / input / tick 继续工作
   - 离房 / 断线重连 / observer 进入继续工作
   - offline TTL / 空房清理继续工作
-- [ ] 为 room 增加排空观测指标，至少能区分:
+- [x] 为 room 增加排空观测指标，至少能区分:
   - `owned_room_count`
-  - `draining_candidate_room_count`
-  - `empty_room_count`
   - `connection_count`
-- [ ] 为 `GetRolloutDrainStatusReq/Res` 预留或落地以下统计:
-  - 当前 `drain_mode`
+  - `migrating_room_count`
+  - 有限 `RoomRouteStatus` 样本
+- [x] 为 `GetRolloutDrainStatusReq/Res` 落地以下统计:
   - 当前 `owner_server_id`
-  - 旧 room 数量
-  - 可接管空房数量
+  - 旧服仍持有 / 阻止停服的 room 数量
+  - 迁移中或未完成 room 数量
+  - 当前连接数
+- [ ] 在 `GetRolloutDrainStatusReq/Res` 或等价状态接口中继续补充更完整的 drain_mode 表达与可接管空房分类。
 - [ ] 为运营 / 玩法层预留“诱导玩家离房”的触发点:
   - 广播提示
   - 禁止新开局
@@ -384,19 +385,22 @@
 
 ## 8. M6 旧服停服与灰度收尾任务
 
-当前状态（截至 `2026-05-19`）:
+当前状态（截至 `2026-05-19`，后续补充至 `2026-06-12`）:
 
-- `GetRolloutDrainStatusRes` 已在 proto 中定义，但 `game-server` 还没有对应处理。
+- `GetRolloutDrainStatusReq/Res` 已在 `game-server` 已鉴权 admin/internal 通道落地处理，返回本进程真实 `connection_count`、`owned_room_count`、`migrating_room_count` 与最多 50 条 `RoomRouteStatus` 样本。`owner_server_id` 使用当前 `SERVICE_INSTANCE_ID` / 派生实例 id；`rollout_epoch` 仅在本进程 room transfer 状态能归纳出单一 epoch 时返回。当前 `empty_since_ms` 表示本进程内已空置时长，不是 wall-clock 绝对时间戳。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
-- 该自动收尾尚未读取旧服真实 `connection_count` / drain status，不能替代旧服停进程前的最终校验。
+- 该自动收尾尚未结合旧服真实 `connection_count` / drain status 执行自动停服，不能替代旧服停进程前的最终校验。
 
 ### 8.1 旧服状态查询
 
-- [ ] 扩展旧服状态接口，返回:
+- [x] 扩展旧服状态接口，返回:
   - `connection_count`
   - `owned_room_count`
   - `migrating_room_count`
+  - route 样本中的 `RoomRouteStatus`
+- [ ] 如停服编排需要，继续补充:
   - `retired_room_count`
+  - 更明确的 `drain_mode` 字段
 - [ ] `proxy` 或控制面能定期轮询这些状态。
 
 ### 8.2 灰度结束判定
@@ -406,6 +410,8 @@
   - `migrating_room_count == 0`
 - [ ] 满足旧服真实状态条件时才允许停旧服:
   - `connection_count == 0`
+  - `owned_room_count == 0`
+  - `migrating_room_count == 0`
 - [x] 灰度结束后清理:
   - `rollout_epoch`
   - `old_server` 的 room route metadata
