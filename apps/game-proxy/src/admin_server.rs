@@ -11,10 +11,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
 use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
+use crate::rollout_drain_status::{OldServerDrainStatusCheckSummary, OldServerDrainStatusChecker};
 use crate::route_store::{
     PlayerRouteRecord, ProxyRouteStore, RolloutCompleteIfDrainedResult, RolloutDrainEvaluation,
-    RolloutEndSummary, RolloutSessionState, RoomMigrationState, RoomRouteRecord,
-    RouteStoreUpdateError, UpstreamOperationState,
+    RolloutDrainStatus, RolloutEndSummary, RolloutSessionState, RoomMigrationState,
+    RoomRouteRecord, RouteStoreUpdateError, UpstreamOperationState,
 };
 
 const MAX_ID_LEN: usize = 128;
@@ -53,6 +54,8 @@ struct RolloutCompleteIfDrainedResponse {
     ok: bool,
     error: Option<&'static str>,
     drain_evaluation: RolloutDrainEvaluation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_server_drain_status: Option<OldServerDrainStatusCheckSummary>,
     end_summary: Option<RolloutEndSummary>,
 }
 
@@ -241,6 +244,7 @@ pub async fn run(
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: AdminAuthConfig,
     audit_logger: AdminAuditLogger,
+    old_server_drain_status_checker: Option<Arc<dyn OldServerDrainStatusChecker>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     let auth_config = Arc::new(auth_config);
@@ -252,6 +256,7 @@ pub async fn run(
         let maintenance = maintenance.clone();
         let auth_config = auth_config.clone();
         let audit_logger = audit_logger.clone();
+        let old_server_drain_status_checker = old_server_drain_status_checker.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_connection(
                 socket,
@@ -260,6 +265,7 @@ pub async fn run(
                 maintenance,
                 auth_config,
                 audit_logger,
+                old_server_drain_status_checker,
             )
             .await
             {
@@ -276,6 +282,7 @@ async fn handle_connection(
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: Arc<AdminAuthConfig>,
     audit_logger: Arc<AdminAuditLogger>,
+    old_server_drain_status_checker: Option<Arc<dyn OldServerDrainStatusChecker>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0u8; 4096];
     let read = socket.read(&mut buffer).await?;
@@ -465,7 +472,13 @@ async fn handle_connection(
             handle_rollout_state(&route_store, &query, &audit_logger, &context).await
         }
         ("POST", "/rollout/complete-if-drained") => {
-            handle_rollout_complete_if_drained(&route_store, &audit_logger, &context).await
+            handle_rollout_complete_if_drained(
+                &route_store,
+                &audit_logger,
+                &context,
+                old_server_drain_status_checker.as_deref(),
+            )
+            .await
         }
         ("POST", "/room-route/upsert") => {
             handle_room_route_upsert(&route_store, &query, &audit_logger, &context).await
@@ -702,8 +715,131 @@ async fn handle_rollout_complete_if_drained(
     route_store: &ProxyRouteStore,
     audit_logger: &AdminAuditLogger,
     context: &AdminRequestContext,
+    old_server_drain_status_checker: Option<&dyn OldServerDrainStatusChecker>,
 ) -> String {
     let action = "rollout_complete_if_drained";
+    if let Some(old_server_drain_status_checker) = old_server_drain_status_checker {
+        let evaluation = route_store.evaluate_rollout_drain().await;
+        match evaluation.status {
+            RolloutDrainStatus::NoActiveRollout => {
+                return audited_rollout_complete_if_drained_rejected(
+                    audit_logger,
+                    context,
+                    "NO_ACTIVE_ROLLOUT",
+                    400,
+                    evaluation,
+                    None,
+                )
+                .await;
+            }
+            RolloutDrainStatus::Blocked => {
+                return audited_rollout_complete_if_drained_rejected(
+                    audit_logger,
+                    context,
+                    "ROLLOUT_NOT_DRAINED",
+                    409,
+                    evaluation,
+                    None,
+                )
+                .await;
+            }
+            RolloutDrainStatus::Drained => {
+                let old_server_drain_status = old_server_drain_status_checker.check().await;
+                if !old_server_drain_status.passed {
+                    warn!(
+                        rollout_epoch = evaluation.rollout_epoch.as_deref().unwrap_or_default(),
+                        old_server_id = evaluation.old_server_id.as_deref().unwrap_or_default(),
+                        status_code = ?old_server_drain_status.status_code,
+                        ok = ?old_server_drain_status.ok,
+                        owned_room_count = ?old_server_drain_status.owned_room_count,
+                        migrating_room_count = ?old_server_drain_status.migrating_room_count,
+                        connection_count = ?old_server_drain_status.connection_count,
+                        error = old_server_drain_status.error.as_deref().unwrap_or_default(),
+                        "old server drain status check blocked proxy rollout completion"
+                    );
+                    return audited_rollout_complete_if_drained_rejected(
+                        audit_logger,
+                        context,
+                        old_server_drain_status.response_error_code(),
+                        409,
+                        evaluation,
+                        Some(old_server_drain_status),
+                    )
+                    .await;
+                }
+
+                match route_store.complete_rollout_if_drained().await {
+                    Ok(RolloutCompleteIfDrainedResult::Completed {
+                        evaluation,
+                        end_summary,
+                    }) => {
+                        match audit_ok(
+                            audit_logger,
+                            context,
+                            action,
+                            end_summary.new_server_id.as_deref(),
+                            None,
+                            None,
+                            end_summary.rollout_epoch.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                return write_json(RolloutCompleteIfDrainedResponse {
+                                    ok: true,
+                                    error: None,
+                                    drain_evaluation: evaluation,
+                                    old_server_drain_status: Some(old_server_drain_status),
+                                    end_summary: Some(end_summary),
+                                });
+                            }
+                            Err(error) => return audit_write_failed(audit_logger, action, &error),
+                        }
+                    }
+                    Ok(RolloutCompleteIfDrainedResult::Blocked { evaluation }) => {
+                        return audited_rollout_complete_if_drained_rejected(
+                            audit_logger,
+                            context,
+                            "ROLLOUT_NOT_DRAINED",
+                            409,
+                            evaluation,
+                            Some(old_server_drain_status),
+                        )
+                        .await;
+                    }
+                    Ok(RolloutCompleteIfDrainedResult::NoActiveRollout { evaluation }) => {
+                        return audited_rollout_complete_if_drained_rejected(
+                            audit_logger,
+                            context,
+                            "NO_ACTIVE_ROLLOUT",
+                            400,
+                            evaluation,
+                            Some(old_server_drain_status),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let rollout_epoch = route_store
+                            .get_rollout_session()
+                            .await
+                            .map(|session| session.rollout_epoch);
+                        return audited_update_error(
+                            audit_logger,
+                            context,
+                            action,
+                            &error,
+                            None,
+                            None,
+                            None,
+                            rollout_epoch.as_deref(),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
     match route_store.complete_rollout_if_drained().await {
         Ok(RolloutCompleteIfDrainedResult::Completed {
             evaluation,
@@ -724,6 +860,7 @@ async fn handle_rollout_complete_if_drained(
                     ok: true,
                     error: None,
                     drain_evaluation: evaluation,
+                    old_server_drain_status: None,
                     end_summary: Some(end_summary),
                 }),
                 Err(error) => audit_write_failed(audit_logger, action, &error),
@@ -736,6 +873,7 @@ async fn handle_rollout_complete_if_drained(
                 "ROLLOUT_NOT_DRAINED",
                 409,
                 evaluation,
+                None,
             )
             .await
         }
@@ -746,6 +884,7 @@ async fn handle_rollout_complete_if_drained(
                 "NO_ACTIVE_ROLLOUT",
                 400,
                 evaluation,
+                None,
             )
             .await
         }
@@ -1590,6 +1729,7 @@ async fn audited_rollout_complete_if_drained_rejected(
     error: &'static str,
     status: u16,
     evaluation: RolloutDrainEvaluation,
+    old_server_drain_status: Option<OldServerDrainStatusCheckSummary>,
 ) -> String {
     match audit_error(
         audit_logger,
@@ -1609,6 +1749,7 @@ async fn audited_rollout_complete_if_drained_rejected(
                 ok: false,
                 error: Some(error),
                 drain_evaluation: evaluation,
+                old_server_drain_status,
                 end_summary: None,
             },
         ),
@@ -1990,11 +2131,14 @@ fn http_response(status: u16, content_type: &str, body: String) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
 
     use super::{
         AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
@@ -2004,6 +2148,9 @@ mod tests {
         handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
     };
     use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
+    use crate::rollout_drain_status::{
+        OldServerDrainStatusCheckSummary, OldServerDrainStatusChecker,
+    };
     use crate::route_store::{
         ProxyRouteStore, RolloutDrainStatus, RolloutSessionState, RoomMigrationState,
         RoomRouteRecord, UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
@@ -2067,6 +2214,33 @@ mod tests {
                 permissions,
             }],
         )
+    }
+
+    #[derive(Default)]
+    struct MockOldServerDrainStatusChecker {
+        results: Mutex<Vec<OldServerDrainStatusCheckSummary>>,
+    }
+
+    impl MockOldServerDrainStatusChecker {
+        fn with_result(result: OldServerDrainStatusCheckSummary) -> Self {
+            Self {
+                results: Mutex::new(vec![result]),
+            }
+        }
+    }
+
+    impl OldServerDrainStatusChecker for MockOldServerDrainStatusChecker {
+        fn check<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = OldServerDrainStatusCheckSummary> + Send + 'a>> {
+            Box::pin(async move {
+                self.results
+                    .lock()
+                    .await
+                    .pop()
+                    .expect("mock drain status result should be configured")
+            })
+        }
     }
 
     fn test_audit_logger() -> AdminAuditLogger {
@@ -2372,7 +2546,8 @@ mod tests {
             .unwrap();
 
         let response =
-            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context, None)
+                .await;
         let body = response_json(&response);
 
         assert_eq!(status_code(&response), 409);
@@ -2424,7 +2599,8 @@ mod tests {
             .unwrap();
 
         let response =
-            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context, None)
+                .await;
         let body = response_json(&response);
 
         assert_eq!(status_code(&response), 200);
@@ -2437,13 +2613,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollout_complete_if_drained_with_old_server_check_allows_drained_status() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let complete_context = test_context("/rollout/complete-if-drained");
+        let checker = MockOldServerDrainStatusChecker::with_result(
+            OldServerDrainStatusCheckSummary::passed(),
+        );
+
+        let start = handle_rollout_start(
+            &store,
+            &query(
+                "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
+            ),
+            &audit_logger,
+            &start_context,
+        )
+        .await;
+        assert_eq!(status_code(&start), 200);
+        store
+            .upsert_room_route(
+                RoomRouteRecord {
+                    room_id: "room-1".to_string(),
+                    owner_server_id: "game-server-2".to_string(),
+                    migration_state: RoomMigrationState::OwnedByNew,
+                    member_count: 0,
+                    online_member_count: 0,
+                    empty_since_ms: Some(123),
+                    room_version: 1,
+                    rollout_epoch: "rollout-1".to_string(),
+                    last_transfer_checksum: "checksum-1".to_string(),
+                    updated_at_ms: 0,
+                },
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let response = handle_rollout_complete_if_drained(
+            &store,
+            &audit_logger,
+            &complete_context,
+            Some(&checker),
+        )
+        .await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["drain_evaluation"]["status"], "Drained");
+        assert_eq!(body["old_server_drain_status"]["passed"], true);
+        assert_eq!(body["old_server_drain_status"]["connection_count"], 0);
+        assert!(store.get_rollout_session().await.is_none());
+        assert!(store.list_room_routes().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_with_old_server_check_blocks_nonzero_connections() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let complete_context = test_context("/rollout/complete-if-drained");
+        let checker = MockOldServerDrainStatusChecker::with_result(
+            OldServerDrainStatusCheckSummary::not_drained(2),
+        );
+
+        let start = handle_rollout_start(
+            &store,
+            &query(
+                "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
+            ),
+            &audit_logger,
+            &start_context,
+        )
+        .await;
+        assert_eq!(status_code(&start), 200);
+
+        let response = handle_rollout_complete_if_drained(
+            &store,
+            &audit_logger,
+            &complete_context,
+            Some(&checker),
+        )
+        .await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 409);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "OLD_SERVER_DRAIN_STATUS_NOT_DRAINED");
+        assert_eq!(body["drain_evaluation"]["status"], "Drained");
+        assert_eq!(body["old_server_drain_status"]["passed"], false);
+        assert_eq!(body["old_server_drain_status"]["connection_count"], 2);
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rollout_complete_if_drained_with_old_server_check_blocks_request_failure() {
+        let store = route_store().await;
+        let audit_logger = test_audit_logger();
+        let start_context = test_context("/rollout/start");
+        let complete_context = test_context("/rollout/complete-if-drained");
+        let checker = MockOldServerDrainStatusChecker::with_result(
+            OldServerDrainStatusCheckSummary::request_failed("CONNECT_TIMEOUT"),
+        );
+
+        let start = handle_rollout_start(
+            &store,
+            &query(
+                "/rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2",
+            ),
+            &audit_logger,
+            &start_context,
+        )
+        .await;
+        assert_eq!(status_code(&start), 200);
+
+        let response = handle_rollout_complete_if_drained(
+            &store,
+            &audit_logger,
+            &complete_context,
+            Some(&checker),
+        )
+        .await;
+        let body = response_json(&response);
+
+        assert_eq!(status_code(&response), 409);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "OLD_SERVER_DRAIN_STATUS_CHECK_FAILED");
+        assert_eq!(body["drain_evaluation"]["status"], "Drained");
+        assert_eq!(body["old_server_drain_status"]["passed"], false);
+        assert_eq!(body["old_server_drain_status"]["error"], "CONNECT_TIMEOUT");
+        assert!(store.get_rollout_session().await.is_some());
+    }
+
+    #[tokio::test]
     async fn rollout_complete_if_drained_rejects_without_active_rollout() {
         let store = route_store().await;
         let audit_logger = test_audit_logger();
         let complete_context = test_context("/rollout/complete-if-drained");
 
         let response =
-            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context).await;
+            handle_rollout_complete_if_drained(&store, &audit_logger, &complete_context, None)
+                .await;
         let body = response_json(&response);
 
         assert_eq!(status_code(&response), 400);
@@ -2755,6 +3068,7 @@ mod tests {
                 maintenance.clone(),
                 auth_config,
                 audit_logger,
+                None,
             )
             .await
             .unwrap();
@@ -2823,6 +3137,7 @@ mod tests {
                 maintenance,
                 auth_config,
                 audit_logger,
+                None,
             )
             .await
             .unwrap();

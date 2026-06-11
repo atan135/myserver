@@ -9,6 +9,7 @@ mod metrics;
 mod proto;
 mod protocol;
 mod proxy_server;
+mod rollout_drain_status;
 mod route_store;
 mod session;
 mod transport;
@@ -24,6 +25,7 @@ use blocklist::RedisBlocklistChecker;
 use config::Config;
 use maintenance::GlobalMaintenanceChecker;
 pub use proto::myserver::game as pb;
+use rollout_drain_status::{HttpOldServerDrainStatusChecker, OldServerDrainStatusChecker};
 use route_store::{
     ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
     UpstreamRoute, run_redis_route_store_update_listener,
@@ -201,6 +203,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.admin_audit_path.clone(),
             config.admin_audit_require_actor,
         ));
+    let rollout_drain_status_checker: Option<Arc<dyn OldServerDrainStatusChecker>> =
+        if config.rollout_drain_status_check.enabled {
+            Some(Arc::new(HttpOldServerDrainStatusChecker::new(
+                config.rollout_drain_status_check.clone(),
+            )))
+        } else {
+            None
+        };
     let admin_route_store = route_store.clone();
     let admin_connection_count = connection_count.clone();
     let admin_maintenance = maintenance.clone();
@@ -212,6 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             admin_maintenance,
             admin_auth_config,
             admin_audit_logger,
+            rollout_drain_status_checker,
         )
         .await
         {

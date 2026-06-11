@@ -82,7 +82,7 @@
 | 服务 | 当前实现 | 生产目标 | 主要缺口 |
 |------|----------|----------|----------|
 | `auth-http` | 单实例可运行；使用 Redis/MySQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/MySQL | 网关层限流、统一配置、灰度和完整安全审计 |
-| `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验 | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay |
+| `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验；`complete-if-drained` 可选经 `auth-http` 校验旧服真实 drain status 后再结束 rollout | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay、完整旧服停进程控制面 |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime 和 drain 基础 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
 | `chat-server` | 独立服务；当前可作为内部聊天能力 | 内网多实例服务；由服务端入口或聚合层调用，不作为生产客户端直连默认 | 协议收敛、会话路由、服务发现和横向扩展策略 |
 | `match-service` | gRPC 匹配服务；可与 `game-server` 协作建房 | 内网多实例服务；匹配池状态可分片或共享，建房目标可路由 | 匹配池分片、跨实例一致性、目标 game-server 选择策略 |
@@ -205,7 +205,7 @@ RoomRouteRecord {
 
 payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
-当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、连接数、room 统计和 route 样本，供 `auth-http` 内部接口与 `tools/mock-client` 查询。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景。它不包含真实 old/new/proxy 多进程联调自动化、mybevy 适配、L7 relay、同连接 upstream swap，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
+当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、连接数、room 统计和 route 样本，供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景。它不包含真实 old/new/proxy 多进程联调自动化、mybevy 适配、L7 relay、同连接 upstream swap 或完整旧服停进程控制面，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 
 补充实现状态（截至 `2026-06-11`）：`tools/mock-client` 已增加第一阶段显式编排入口，按 old `freeze/export`、new `import`、proxy room route `upsert`、old `retire` 的保守顺序调用现有控制面。编排会校验 export/import checksum 一致，并在 proxy upsert 成功后才 retire 旧 room；任一步失败都会返回失败阶段并停止后续步骤。该入口仍是控制流骨架，不是自动 rollout 控制面，也不包含真实多服务联调或同连接迁移。redirect/reconnect 目前已有 mock-client 工具场景，但还没有 old/new/proxy 多进程自动化验收。
 
@@ -359,10 +359,11 @@ client session
 1. 生产网络边界：部署文档和配置只暴露 `auth-http`、`game-proxy` 玩家入口。
 2. route store 持久化：已具备 Redis backend 最小闭环，生产启用 `PROXY_ROUTE_STORE_BACKEND=redis`。
 3. 多 proxy 一致性：在 Redis backend 单 key CAS 上补 pub/sub 缓存失效、控制面 owner、真实 Redis 压测和必要的锁/同步策略，或明确 sticky/shared route store/control plane owner 策略。
-4. redirect/reconnect 闭环：补齐 `ServerRedirectPush`、客户端重连、proxy 重新路由和错误 owner 处理。
-5. room transfer 最小闭环：实现 freeze/export/import/retire，并先选择简单 room policy 验证。
-6. transfer payload trait：按玩法补齐可序列化、版本化、checksum 和兼容性检查。
-7. owner 仲裁与审计：补 CAS、route version、rollout epoch、owner tombstone 和迁移审计。
-8. 客户端能力收敛：chat/mail/announce/match 经服务端入口或 BFF 收敛，不再要求生产客户端直连内部服务。
-9. L7 session relay：设计并实现同连接 upstream swap 所需的 proxy 协议解析、输入缓冲和 resume。
-10. 故障演练：覆盖 proxy 重启、game-server 崩溃、导入失败、route 切换失败和客户端中断。
+4. 旧服真实状态联动：`game-proxy` 已可选在 `complete-if-drained` 中校验旧服真实 drain status，后续补控制面轮询、展示/告警和旧服自动停进程编排。
+5. redirect/reconnect 闭环：补齐 `ServerRedirectPush`、客户端重连、proxy 重新路由和错误 owner 处理。
+6. room transfer 最小闭环：实现 freeze/export/import/retire，并先选择简单 room policy 验证。
+7. transfer payload trait：按玩法补齐可序列化、版本化、checksum 和兼容性检查。
+8. owner 仲裁与审计：补 CAS、route version、rollout epoch、owner tombstone 和迁移审计。
+9. 客户端能力收敛：chat/mail/announce/match 经服务端入口或 BFF 收敛，不再要求生产客户端直连内部服务。
+10. L7 session relay：设计并实现同连接 upstream swap 所需的 proxy 协议解析、输入缓冲和 resume。
+11. 故障演练：覆盖 proxy 重启、game-server 崩溃、导入失败、route 切换失败和客户端中断。

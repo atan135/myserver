@@ -2,6 +2,10 @@ use std::collections::HashSet;
 use std::env;
 
 use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
+use crate::rollout_drain_status::{
+    DEFAULT_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES, DEFAULT_ROLLOUT_DRAIN_STATUS_TIMEOUT_MS,
+    DEFAULT_ROLLOUT_DRAIN_STATUS_URL, RolloutDrainStatusCheckConfig,
+};
 
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
 pub const DEFAULT_ADMIN_READ_TOKEN: &str = "dev-only-change-this-proxy-admin-read-token";
@@ -61,6 +65,13 @@ fn parse_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn parse_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
 #[derive(Clone)]
 pub enum RouteStoreBackend {
     Memory,
@@ -111,6 +122,7 @@ pub struct Config {
     pub redis_blocklist_enabled: bool,
     pub redis_blocklist_cache_ttl_ms: u64,
     pub connection_limits: ConnectionLimitConfig,
+    pub rollout_drain_status_check: RolloutDrainStatusCheckConfig,
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -207,6 +219,34 @@ impl Config {
             max_connections_per_ip: parse_u64("PROXY_MAX_CONNECTIONS_PER_IP", 0),
             max_connections_per_player: parse_u64("PROXY_MAX_CONNECTIONS_PER_PLAYER", 0),
         };
+        let rollout_drain_status_check = RolloutDrainStatusCheckConfig {
+            enabled: parse_bool("PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED", false),
+            url: env::var("PROXY_ROLLOUT_DRAIN_STATUS_URL")
+                .map(|value| value.trim().to_string())
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_ROLLOUT_DRAIN_STATUS_URL.to_string()),
+            token: env::var("PROXY_ROLLOUT_DRAIN_STATUS_TOKEN")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            connect_timeout_ms: parse_u64(
+                "PROXY_ROLLOUT_DRAIN_STATUS_CONNECT_TIMEOUT_MS",
+                DEFAULT_ROLLOUT_DRAIN_STATUS_TIMEOUT_MS,
+            ),
+            read_timeout_ms: parse_u64(
+                "PROXY_ROLLOUT_DRAIN_STATUS_READ_TIMEOUT_MS",
+                DEFAULT_ROLLOUT_DRAIN_STATUS_TIMEOUT_MS,
+            ),
+            overall_timeout_ms: parse_u64(
+                "PROXY_ROLLOUT_DRAIN_STATUS_OVERALL_TIMEOUT_MS",
+                DEFAULT_ROLLOUT_DRAIN_STATUS_TIMEOUT_MS,
+            ),
+            max_body_bytes: parse_usize(
+                "PROXY_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES",
+                DEFAULT_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES,
+            ),
+        };
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -261,6 +301,7 @@ impl Config {
             redis_blocklist_enabled,
             redis_blocklist_cache_ttl_ms,
             connection_limits,
+            rollout_drain_status_check,
             registry_enabled,
             registry_url,
             registry_discover_interval_secs,
@@ -452,6 +493,19 @@ mod tests {
             if !names.contains(&"PROXY_ADMIN_SCOPED_TOKENS") {
                 names.push("PROXY_ADMIN_SCOPED_TOKENS");
             }
+            for name in [
+                "PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED",
+                "PROXY_ROLLOUT_DRAIN_STATUS_URL",
+                "PROXY_ROLLOUT_DRAIN_STATUS_TOKEN",
+                "PROXY_ROLLOUT_DRAIN_STATUS_CONNECT_TIMEOUT_MS",
+                "PROXY_ROLLOUT_DRAIN_STATUS_READ_TIMEOUT_MS",
+                "PROXY_ROLLOUT_DRAIN_STATUS_OVERALL_TIMEOUT_MS",
+                "PROXY_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES",
+            ] {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
             Self {
                 saved: names
                     .iter()
@@ -464,6 +518,13 @@ mod tests {
         fn without_ambient_scoped_tokens(self) -> Self {
             unsafe {
                 env::remove_var("PROXY_ADMIN_SCOPED_TOKENS");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_URL");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_TOKEN");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_CONNECT_TIMEOUT_MS");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_READ_TIMEOUT_MS");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_OVERALL_TIMEOUT_MS");
+                env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES");
             }
             self
         }
@@ -608,6 +669,56 @@ mod tests {
         assert_eq!(config.connection_limits.max_connections_per_player, 0);
         assert!(!config.redis_blocklist_enabled);
         assert_eq!(config.redis_blocklist_cache_ttl_ms, 2000);
+    }
+
+    #[test]
+    fn parses_rollout_drain_status_check_config_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED",
+            "PROXY_ROLLOUT_DRAIN_STATUS_URL",
+            "PROXY_ROLLOUT_DRAIN_STATUS_TOKEN",
+            "PROXY_ROLLOUT_DRAIN_STATUS_CONNECT_TIMEOUT_MS",
+            "PROXY_ROLLOUT_DRAIN_STATUS_READ_TIMEOUT_MS",
+            "PROXY_ROLLOUT_DRAIN_STATUS_OVERALL_TIMEOUT_MS",
+            "PROXY_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED", "true");
+            env::set_var(
+                "PROXY_ROLLOUT_DRAIN_STATUS_URL",
+                "http://127.0.0.1:3000/api/v1/internal/game-server/rollout-drain-status",
+            );
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_TOKEN", "internal-token");
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_CONNECT_TIMEOUT_MS", "500");
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_READ_TIMEOUT_MS", "600");
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_OVERALL_TIMEOUT_MS", "700");
+            env::set_var("PROXY_ROLLOUT_DRAIN_STATUS_MAX_BODY_BYTES", "2048");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.rollout_drain_status_check.enabled);
+        assert_eq!(
+            config.rollout_drain_status_check.url,
+            "http://127.0.0.1:3000/api/v1/internal/game-server/rollout-drain-status"
+        );
+        assert_eq!(
+            config.rollout_drain_status_check.token.as_deref(),
+            Some("internal-token")
+        );
+        assert_eq!(config.rollout_drain_status_check.connect_timeout_ms, 500);
+        assert_eq!(config.rollout_drain_status_check.read_timeout_ms, 600);
+        assert_eq!(config.rollout_drain_status_check.overall_timeout_ms, 700);
+        assert_eq!(config.rollout_drain_status_check.max_body_bytes, 2048);
     }
 
     #[test]

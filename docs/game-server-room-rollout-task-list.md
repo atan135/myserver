@@ -389,13 +389,13 @@
 
 ## 8. M6 旧服停服与灰度收尾任务
 
-当前状态（截至 `2026-05-19`，后续补充至 `2026-06-12`）:
+当前状态（截至 `2026-05-19`，后续补充至 `2026-06-11`）:
 
 - `GetRolloutDrainStatusReq/Res` 已在 `game-server` 已鉴权 admin/internal 通道落地处理，返回本进程真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`connection_count`、`owned_room_count`、`migrating_room_count` 与最多 50 条 `RoomRouteStatus` 样本。`drain_mode_entered_at_ms` 未进入 drain mode 时为 `0`；`owner_server_id` 使用当前 `SERVICE_INSTANCE_ID` / 派生实例 id；`rollout_epoch` 仅在本进程 room transfer 状态能归纳出单一 epoch 时返回。当前 `empty_since_ms` 表示本进程内已空置时长，不是 wall-clock 绝对时间戳。
 - `auth-http` 已把 `GetRolloutDrainStatusReq/Res` 暴露为已鉴权内部控制接口 `GET /api/v1/internal/game-server/rollout-drain-status`，可作为 proxy 自动收尾后、停旧服前的人工或控制面校验入口。
 - `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数和 route 样本。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
-- 该自动收尾尚未结合旧服真实 `connection_count` / drain status 执行自动停服，不能替代旧服停进程前的最终校验。
+- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整旧服自动停进程控制面。
 
 ### 8.1 旧服状态查询
 
@@ -409,14 +409,15 @@
 - [ ] 如停服编排需要，继续补充:
   - `retired_room_count`
   - 更明确的 `drain_mode` 字段
-- [ ] `proxy` 或控制面能定期轮询这些状态。
+- [x] `proxy` 在 `complete-if-drained` 可选校验旧服真实状态，具备停服前最小阻断闭环。
+- [ ] 控制面定期轮询、展示和告警这些状态。
 
 ### 8.2 灰度结束判定
 
 - [x] proxy route store 维度满足以下条件时可自动结束灰度:
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
-- [ ] 满足旧服真实状态条件时才允许停旧服:
+- [x] `complete-if-drained` 启用旧服校验时，满足旧服真实状态条件才允许结束 rollout:
   - `connection_count == 0`
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
