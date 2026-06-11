@@ -87,8 +87,8 @@
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
-| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播/踢人/封禁的本实例在线连接处置 | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；跨实例 GM 目标定位仍需补齐 |
-| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵仍待补齐 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接 | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；GM 广播仍是本实例范围；限时自动解封仍未落地 |
+| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和限时自动解封仍待补齐 |
 
 说明：
 
@@ -375,7 +375,7 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 3. 配置热更新与 admin TCP 操作的审计闭环
 4. 审计日志中的失败结果和原因码统一
 
-当前 GM 广播、踢人和封禁的 `game-server` 在线连接处置已接入 admin TCP handler；GM 封禁也已由 `admin-api` 写入账号持久状态。剩余安全缺口是跨实例目标定位、限时自动解封，以及失败原因在 `admin-api` 审计中的标准化表达。
+当前 GM 广播、踢人和封禁的 `game-server` 在线连接处置已接入 admin TCP handler；GM 踢人/封禁同时由 `admin-api` 发布 NATS session kick，跨实例断开在线连接，legacy 单实例 admin TCP 结果会进入审计。GM 封禁也已由 `admin-api` 写入账号持久状态。剩余安全缺口是限时自动解封，以及更细粒度权限矩阵和失败原因标准化的持续收敛。
 
 ---
 
@@ -585,6 +585,7 @@ TRUSTED_PROXIES=
 
 - GM、维护模式、玩家状态修改、ticket 撤销、配置更新都能查到审计记录
 - 审计可定位操作者、目标、来源 IP、结果和时间
+- GM 踢人/封禁审计会记录 NATS global kick 结果和 legacy 单实例 admin TCP 调用结果
 - 日志不包含明文密码、完整 token 或完整 ticket
 
 ### 11.4 防火墙 / 黑白名单

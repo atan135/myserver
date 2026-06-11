@@ -34,7 +34,8 @@ apps/
 
 - MySQL：读取 `myserver_auth` 中的管理员、玩家、审计和安全日志数据
 - Redis：读取各服务上报的 heartbeat 与 metrics，并写入维护模式共享状态
-- `game-server` admin TCP 通道：执行 GM 指令
+- Core NATS：发布 `myserver.session.kick.<player_id_token>`，用于 GM 踢人/封禁跨 `game-server` 实例断开在线连接
+- `game-server` admin TCP 通道：执行 GM 指令；其中踢人/封禁的单实例调用保留为 legacy 兼容和辅助审计
 
 ## 快速启动
 
@@ -418,7 +419,7 @@ npm run dev:admin-web
 
 ### GM 命令
 
-这些接口通过 `admin-api -> game-server admin TCP` 调用游戏服。
+这些接口通过 `admin-api -> game-server admin TCP` 调用游戏服；GM 踢人/封禁还会通过 Core NATS 发布 `myserver.session.kick.<player_id_token>`，由各 `game-server` 实例订阅后断开本实例上的目标玩家连接。legacy 单实例 admin TCP 调用仍保留为兼容和辅助结果。
 
 #### `POST /api/v1/gm/broadcast`
 
@@ -447,7 +448,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/kick-player`
 
-踢出玩家。当前只处理目标玩家位于当前 `game-server` 实例上的在线连接；离线或不在本实例时会返回游戏服错误，不写成功审计。
+踢出玩家。`admin-api` 会校验并 trim `playerId` / `reason`，发布 NATS session kick 事件，实现跨 `game-server` 实例断开在线连接；如果 legacy 单实例 admin TCP 返回 `PLAYER_OFFLINE`，不会导致全局踢人失败。NATS 发布失败时接口返回结构化失败，因为跨实例断开无法保证；审计 details 会记录 global kick 与 legacy 调用结果。
 
 ```json
 {
@@ -458,7 +459,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/ban-player`
 
-封禁玩家。`admin-api` 会先把 `player_accounts.status` 更新为 `banned`，随后尽力通知当前 `game-server` 实例对在线连接推送 `SessionKickPush` 并断开；如果玩家离线或不在该实例，账号封禁仍会成功。
+封禁玩家。`admin-api` 会先把 `player_accounts.status` 更新为 `banned`，随后发布 NATS session kick 事件，确保目标玩家在任意 `game-server` 实例上的在线连接被断开；legacy 单实例 admin TCP ban 调用仍作为 best-effort 结果进入审计。如果 NATS 发布失败，不回滚已写入的 banned 状态，响应和审计会标明 global kick 失败。`durationSeconds` 当前只进入审计详情和未来自动解封依据，不会自动定时解封。
 
 ```json
 {
@@ -546,7 +547,7 @@ npm run dev:admin-web
 - 踢出玩家
 - 封禁玩家
 
-其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人当前只对目标所在 `game-server` 实例的在线连接生效；GM 封禁已持久化账号状态并尽力踢在线连接，但 `durationSeconds` 当前只进入审计详情，不会自动定时解封。
+其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态，但 `durationSeconds` 当前只进入审计详情，不会自动定时解封。
 
 ### 服务监控页
 
