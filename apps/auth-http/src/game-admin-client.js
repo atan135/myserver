@@ -228,7 +228,9 @@ export function decodeRolloutDrainStatusRes(body) {
     ownedRoomCount: readUInt64(fields, 5),
     migratingRoomCount: readUInt64(fields, 6),
     connectionCount: readUInt64(fields, 7),
-    routes: readRepeatedMessages(fields, 8, decodeRoomRouteStatus)
+    routes: readRepeatedMessages(fields, 8, decodeRoomRouteStatus),
+    drainModeEnabled: readBool(fields, 9),
+    drainModeEnteredAtMs: readUInt64(fields, 10)
   };
 }
 

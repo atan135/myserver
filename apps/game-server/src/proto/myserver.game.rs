@@ -647,6 +647,10 @@ pub struct GetRolloutDrainStatusRes {
     pub connection_count: u64,
     #[prost(message, repeated, tag = "8")]
     pub routes: ::prost::alloc::vec::Vec<RoomRouteStatus>,
+    #[prost(bool, tag = "9")]
+    pub drain_mode_enabled: bool,
+    #[prost(uint64, tag = "10")]
+    pub drain_mode_entered_at_ms: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TriggerServerRedirectReq {

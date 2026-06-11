@@ -296,6 +296,7 @@ where
                         ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT,
                     )
                     .await;
+                let runtime = *services.runtime_config.read().await;
 
                 write_message(
                     &mut writer,
@@ -310,6 +311,8 @@ where
                         migrating_room_count: snapshot.migrating_room_count,
                         connection_count: services.connection_count.load(Ordering::Relaxed),
                         routes: snapshot.routes,
+                        drain_mode_enabled: runtime.drain_mode_enabled,
+                        drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
                     },
                 )
                 .await?;

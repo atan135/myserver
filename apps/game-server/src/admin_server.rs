@@ -908,6 +908,7 @@ async fn handle_admin_connection(
                     packet.header.seq,
                     &build_rollout_drain_status_response(
                         &room_manager,
+                        &runtime_config,
                         &owner_server_id,
                         &connection_count,
                     )
@@ -1352,12 +1353,14 @@ async fn ensure_parent_dir(path: &Path) -> Result<(), AdminAuditError> {
 
 async fn build_rollout_drain_status_response(
     room_manager: &SharedRoomManager,
+    runtime_config: &SharedRuntimeConfig,
     owner_server_id: &str,
     connection_count: &Arc<AtomicU64>,
 ) -> GetRolloutDrainStatusRes {
     let snapshot = room_manager
         .rollout_drain_snapshot(owner_server_id, ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT)
         .await;
+    let runtime = *runtime_config.read().await;
 
     GetRolloutDrainStatusRes {
         ok: true,
@@ -1368,6 +1371,8 @@ async fn build_rollout_drain_status_response(
         migrating_room_count: snapshot.migrating_room_count,
         connection_count: connection_count.load(Ordering::Relaxed),
         routes: snapshot.routes,
+        drain_mode_enabled: runtime.drain_mode_enabled,
+        drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
     }
 }
 
@@ -2319,6 +2324,15 @@ mod tests {
             crate::match_client::create_match_client_shared(),
             Arc::new(NoopRoomLogicFactory),
         ));
+        let runtime_config = runtime_config_fixture();
+        apply_runtime_config(&runtime_config, "drain_mode", "on")
+            .await
+            .unwrap();
+        let drain_mode_entered_at_ms = runtime_config
+            .read()
+            .await
+            .drain_mode_entered_at_ms
+            .unwrap();
         let connection_count = Arc::new(AtomicU64::new(7));
         let (tx, _rx) = mpsc::channel(1024);
         room_manager
@@ -2334,6 +2348,7 @@ mod tests {
 
         let response = build_rollout_drain_status_response(
             &room_manager,
+            &runtime_config,
             "game-server-old",
             &connection_count,
         )
@@ -2343,6 +2358,8 @@ mod tests {
         assert!(response.error_code.is_empty());
         assert_eq!(response.owner_server_id, "game-server-old");
         assert_eq!(response.connection_count, 7);
+        assert!(response.drain_mode_enabled);
+        assert_eq!(response.drain_mode_entered_at_ms, drain_mode_entered_at_ms);
         assert_eq!(response.owned_room_count, 1);
         assert_eq!(response.migrating_room_count, 0);
         assert_eq!(response.routes.len(), 1);

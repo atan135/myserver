@@ -199,6 +199,8 @@ export async function runRolloutDrainStatus(options) {
     ok: status.ok,
     rolloutEpoch: status.rolloutEpoch,
     ownerServerId: status.ownerServerId,
+    drainModeEnabled: status.drainModeEnabled,
+    drainModeEnteredAtMs: status.drainModeEnteredAtMs,
     connectionCount: status.connectionCount,
     ownedRoomCount: status.ownedRoomCount,
     migratingRoomCount: status.migratingRoomCount,

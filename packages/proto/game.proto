@@ -452,6 +452,8 @@ message GetRolloutDrainStatusRes {
   uint64 migrating_room_count = 6;
   uint64 connection_count = 7;
   repeated RoomRouteStatus routes = 8;
+  bool drain_mode_enabled = 9;
+  uint64 drain_mode_entered_at_ms = 10;
 }
 
 message TriggerServerRedirectReq {

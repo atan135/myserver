@@ -50,7 +50,7 @@
 
 - Redis route store 持久化已形成第一阶段多 proxy 闭环：启用后启动加载已有 rollout session、room route、player route，变更后以单 key 快照级 CAS 写回 Redis，并在 CAS 成功后通过 Redis pub/sub 发布最新 `store_revision`；其它 proxy 收到比本地更新的 revision 后会 reload Redis 快照，解决单 proxy 重启丢 route，并缩短多 proxy 本地缓存陈旧窗口。
 - `game-proxy` 已支持基于当前 rollout route store 的自动收尾：控制面可检查当前 epoch 内是否仍有 old owner / 迁移中 room route 或指向 old 的 player route，排空后自动结束 rollout 并清理当前 epoch 和空 epoch route metadata。
-- `auth-http` 内部控制接口已可查询旧服 `game-server` 真实 rollout drain 状态：`GET /api/v1/internal/game-server/rollout-drain-status` 会转发 `GetRolloutDrainStatusReq/Res`，返回 `connection_count`、`owned_room_count`、`migrating_room_count` 与 `RoomRouteStatus` 样本；`tools/mock-client` 可用 `rollout-drain-status` 场景打印这些字段。
+- `auth-http` 内部控制接口已可查询旧服 `game-server` 真实 rollout drain 状态：`GET /api/v1/internal/game-server/rollout-drain-status` 会转发 `GetRolloutDrainStatusReq/Res`，返回 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`connection_count`、`owned_room_count`、`migrating_room_count` 与 `RoomRouteStatus` 样本；`tools/mock-client` 可用 `rollout-drain-status` 场景打印这些字段。
 - `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`；push 成功进入目标连接出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接。mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
 - `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口。
 
