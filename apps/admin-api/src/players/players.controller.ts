@@ -91,10 +91,15 @@ export class PlayersController {
       action: "player_status_change",
       targetType: "player",
       targetValue: playerId,
-      details: { from: player.status, to: status },
+      details: {
+        from: player.status,
+        to: status,
+        previousBanExpiresAt: player.banExpiresAt || null,
+        banExpiresAt: null
+      },
       ip: getClientIp(req, this.config)
     });
 
-    return { ok: true, message: "Player status updated" };
+    return { ok: true, message: "Player status updated", banExpiresAt: null };
   }
 }

@@ -76,6 +76,7 @@ AUTH_STRICT_SECURITY=false
 - `AUTH_REDIS_BLOCKLIST_ENABLED=false` 默认完全不查 Redis 动态黑名单；启用后 Redis 查询失败会按 fail-closed 返回 `503 BLOCKLIST_UNAVAILABLE`，避免登录入口在封禁状态不可用时继续放行
 - auth-http 与 game-proxy 共用 Redis 动态黑名单 key：`${REDIS_KEY_PREFIX}security:blocklist:ip:<ip>` 和 `${REDIS_KEY_PREFIX}security:blocklist:player:<player_id>`；key 存在即封禁，JSON 值可用 `{"until":<unix_ms>}` 表示封禁过期时间，已过期则视为未封禁
 - `AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS=2000` 控制 auth-http 黑名单短缓存；当前只在登录入口 IP、登录后玩家和 game ticket issue 前查询，不对所有 HTTP 路由查询
+- GM 限时封禁写入 `player_accounts.ban_expires_at`；`auth-http` 会在游客登录、密码登录和 game ticket issue 路径检查账号状态，过期封禁会惰性恢复为 `active`，未到期或永久封禁继续按 `ACCOUNT_DISABLED` 拒绝
 - `TICKET_VALIDATE_ENABLED` 和 `SECURITY_AUDIT_ENABLED` 已进入配置结构，但当前代码没有完整用它们做开关控制：
   - ticket 校验实际发生在 `game-proxy`、`game-server` 与 `chat-server`
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`

@@ -51,6 +51,15 @@ export class GameTicketController {
     await this.authService.assertNotInMaintenance();
 
     const clientIp = getClientIp(req, this.config);
+    try {
+      await this.authStore.assertPlayerCanIssueTicket(session.playerId, clientIp);
+    } catch (error: any) {
+      if (error.code === "ACCOUNT_DISABLED") {
+        throw forbidden("ACCOUNT_DISABLED", "Account is disabled");
+      }
+      throw error;
+    }
+
     const decision = await this.blocklist.checkPlayer(session.playerId);
     if (decision.unavailable) {
       logSecurity("warn", "security.blocklist_unavailable", {

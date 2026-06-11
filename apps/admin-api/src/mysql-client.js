@@ -12,5 +12,6 @@ export async function createMySqlPool(config) {
   });
 
   await pool.query("SELECT 1");
+  await pool.query("ALTER TABLE player_accounts ADD COLUMN IF NOT EXISTS ban_expires_at DATETIME(3) NULL AFTER status");
   return pool;
 }

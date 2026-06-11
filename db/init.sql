@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS player_accounts (
   display_name VARCHAR(64) NULL,
   account_type VARCHAR(32) NOT NULL DEFAULT 'guest',
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  ban_expires_at DATETIME(3) NULL,
   password_algo VARCHAR(32) NULL,
   password_salt VARCHAR(128) NULL,
   password_hash CHAR(128) NULL,
@@ -21,6 +22,8 @@ CREATE TABLE IF NOT EXISTS player_accounts (
   UNIQUE KEY uk_player_accounts_login_name (login_name),
   KEY idx_player_accounts_last_login_at (last_login_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE player_accounts ADD COLUMN IF NOT EXISTS ban_expires_at DATETIME(3) NULL AFTER status;
 
 CREATE TABLE IF NOT EXISTS auth_audit_logs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

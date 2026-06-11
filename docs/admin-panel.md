@@ -199,6 +199,7 @@ npm run dev:admin-web
 | display_name | VARCHAR(64) | 显示名 |
 | account_type | VARCHAR(32) | 账号类型 |
 | status | VARCHAR(32) | `active` / `disabled` / `banned` |
+| ban_expires_at | DATETIME(3) | 限时封禁到期时间，`NULL` 表示非封禁或永久封禁 |
 | created_at | DATETIME(3) | 创建时间 |
 | last_login_at | DATETIME(3) | 最后登录时间 |
 
@@ -377,6 +378,8 @@ npm run dev:admin-web
 - `disabled`
 - `banned`
 
+设置为 `active` 或 `disabled` 时会清空 `ban_expires_at`；手动设置为 `banned` 且不提供时长时，`ban_expires_at=NULL` 表示永久封禁。
+
 ### 维护模式
 
 #### `GET /api/v1/maintenance`
@@ -459,7 +462,7 @@ npm run dev:admin-web
 
 #### `POST /api/v1/gm/ban-player`
 
-封禁玩家。`admin-api` 会先把 `player_accounts.status` 更新为 `banned`，随后发布 NATS session kick 事件，确保目标玩家在任意 `game-server` 实例上的在线连接被断开；legacy 单实例 admin TCP ban 调用仍作为 best-effort 结果进入审计。如果 NATS 发布失败，不回滚已写入的 banned 状态，响应和审计会标明 global kick 失败。`durationSeconds` 当前只进入审计详情和未来自动解封依据，不会自动定时解封。
+封禁玩家。`admin-api` 会先把 `player_accounts.status` 更新为 `banned`，并按 `durationSeconds` 写入 `ban_expires_at`，随后发布 NATS session kick 事件，确保目标玩家在任意 `game-server` 实例上的在线连接被断开；legacy 单实例 admin TCP ban 调用仍作为 best-effort 结果进入审计。如果 NATS 发布失败，不回滚已写入的 banned 状态，响应和审计会标明 global kick 失败。限时封禁不依赖常驻定时器，`auth-http` 会在玩家登录或申请 game ticket 时惰性检查 `ban_expires_at`，过期后自动恢复为 `active`；未到期或永久封禁仍按现有 `ACCOUNT_DISABLED` 错误拒绝。
 
 ```json
 {
@@ -547,7 +550,7 @@ npm run dev:admin-web
 - 踢出玩家
 - 封禁玩家
 
-其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态，但 `durationSeconds` 当前只进入审计详情，不会自动定时解封。
+其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
 ### 服务监控页
 

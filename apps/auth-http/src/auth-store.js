@@ -94,7 +94,12 @@ export class AuthStore {
           guestId: normalizedGuestId
         };
 
+    await this.assertAccountLoginAllowed(account, clientIp, {
+      eventType: "guest_login_failed",
+      details: { guestId: normalizedGuestId }
+    });
     await this.assertPlayerNotBlocked(account.playerId, clientIp, "guest_login");
+    await this.mysqlStore?.touchPlayerLastLogin?.(account.playerId);
 
     return this.createSessionForAccount(account, {
       clientIp,
@@ -123,6 +128,11 @@ export class AuthStore {
       });
       throw createAuthError("INVALID_LOGIN_CREDENTIALS");
     }
+
+    await this.assertAccountLoginAllowed(account, clientIp, {
+      eventType: "password_login_failed",
+      details: { loginName: account.loginName }
+    });
 
     if (account.status !== "active") {
       await this.mysqlStore.appendAuthAudit({
@@ -161,6 +171,53 @@ export class AuthStore {
     return this.createSessionForAccount(account, {
       clientIp,
       eventType: "password_login"
+    });
+  }
+
+  async assertAccountLoginAllowed(account, clientIp = null, audit = {}) {
+    if (!account || !account.status || account.status === "active") {
+      return;
+    }
+
+    if (account.status === "banned" && account.banExpiresAt) {
+      const expiresAt = new Date(account.banExpiresAt);
+      if (!Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= Date.now()) {
+        const restored = await this.mysqlStore?.restoreExpiredBan?.(account.playerId);
+        if (restored) {
+          account.status = "active";
+          account.banExpiresAt = null;
+          await this.mysqlStore?.appendAuthAudit?.({
+            playerId: account.playerId,
+            eventType: "account_ban_expired",
+            clientIp,
+            details: { banExpiresAt: expiresAt.toISOString() }
+          });
+          return;
+        }
+      }
+    }
+
+    await this.mysqlStore?.appendAuthAudit?.({
+      playerId: account.playerId,
+      eventType: audit.eventType || "login_failed",
+      clientIp,
+      details: {
+        ...(audit.details || {}),
+        reason: `status:${account.status}`,
+        banExpiresAt: account.banExpiresAt || null
+      }
+    });
+    throw createAuthError("ACCOUNT_DISABLED");
+  }
+
+  async assertPlayerCanIssueTicket(playerId, clientIp = null) {
+    const account = await this.mysqlStore?.findPlayerAuthStateByPlayerId?.(playerId);
+    if (!account) {
+      return;
+    }
+    await this.assertAccountLoginAllowed(account, clientIp, {
+      eventType: "ticket_issue_failed",
+      details: { reason: "account_status" }
     });
   }
 

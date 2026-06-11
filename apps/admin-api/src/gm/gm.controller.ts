@@ -8,6 +8,7 @@ import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
 import { encodeSubjectToken } from "../nats-client.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
+import { computeBanExpiresAt } from "../ban-utils.js";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
 
@@ -216,7 +217,8 @@ export class GmController {
       throw notFound("PLAYER_NOT_FOUND", "Player not found");
     }
 
-    const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned");
+    const banExpiresAt = computeBanExpiresAt(durationSeconds);
+    const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned", { banExpiresAt });
     if (!updated) {
       throw notFound("PLAYER_NOT_FOUND", "Player not found");
     }
@@ -240,6 +242,7 @@ export class GmController {
         from: player.status,
         to: "banned",
         durationSeconds,
+        banExpiresAt,
         reason: normalizedReason,
         globalKick,
         legacyBan
@@ -253,11 +256,12 @@ export class GmController {
         error: "SESSION_KICK_PUBLISH_FAILED",
         message: globalKick.message || "Player banned, but global session kick failed",
         banStatus: "banned",
+        banExpiresAt,
         globalKick,
         legacyBan
       };
     }
 
-    return { ok: true, message: "Player banned", globalKick, legacyBan };
+    return { ok: true, message: "Player banned", banExpiresAt, globalKick, legacyBan };
   }
 }

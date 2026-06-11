@@ -75,6 +75,21 @@ function toAdmin(row) {
   };
 }
 
+function toPlayer(row) {
+  return {
+    player_id: row.player_id,
+    guest_id: row.guest_id,
+    login_name: row.login_name,
+    display_name: row.display_name,
+    account_type: row.account_type,
+    status: row.status,
+    ban_expires_at: toIsoString(row.ban_expires_at),
+    banExpiresAt: toIsoString(row.ban_expires_at),
+    created_at: toIsoString(row.created_at),
+    last_login_at: toIsoString(row.last_login_at)
+  };
+}
+
 export class AdminStore {
   constructor(pool, redis = null, config = {}) {
     this.pool = pool;
@@ -333,17 +348,17 @@ export class AdminStore {
 
   async findPlayerById(playerId) {
     const [rows] = await this.pool.execute(
-      `SELECT player_id, guest_id, login_name, display_name, account_type, status, created_at, last_login_at
+      `SELECT player_id, guest_id, login_name, display_name, account_type, status, ban_expires_at, created_at, last_login_at
        FROM player_accounts
        WHERE player_id = ?
        LIMIT 1`,
       [playerId]
     );
-    return rows.length > 0 ? rows[0] : null;
+    return rows.length > 0 ? toPlayer(rows[0]) : null;
   }
 
   async findPlayers({ loginName, guestId, status, limit = 50, offset = 0 } = {}) {
-    let query = `SELECT player_id, guest_id, login_name, display_name, account_type, status, created_at, last_login_at
+    let query = `SELECT player_id, guest_id, login_name, display_name, account_type, status, ban_expires_at, created_at, last_login_at
        FROM player_accounts
        WHERE 1=1`;
     const params = [];
@@ -367,7 +382,7 @@ export class AdminStore {
     params.push(limit, offset);
 
     const [rows] = await this.pool.execute(query, params);
-    return rows;
+    return rows.map(toPlayer);
   }
 
   async countPlayers({ loginName, guestId, status } = {}) {
@@ -393,10 +408,11 @@ export class AdminStore {
     return rows[0].total;
   }
 
-  async updatePlayerStatus(playerId, status) {
+  async updatePlayerStatus(playerId, status, { banExpiresAt = undefined } = {}) {
+    const nextBanExpiresAt = status === "banned" ? banExpiresAt ?? null : null;
     const [result] = await this.pool.execute(
-      `UPDATE player_accounts SET status = ? WHERE player_id = ?`,
-      [status, playerId]
+      `UPDATE player_accounts SET status = ?, ban_expires_at = ? WHERE player_id = ?`,
+      [status, nextBanExpiresAt, playerId]
     );
     return result.affectedRows > 0;
   }

@@ -4,6 +4,33 @@ function sha256Hex(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function toIsoString(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return String(value);
+}
+
+function toAuthAccount(row) {
+  return {
+    playerId: row.player_id,
+    guestId: row.guest_id || null,
+    loginName: row.login_name || null,
+    displayName: row.display_name || null,
+    accountType: row.account_type,
+    status: row.status,
+    banExpiresAt: toIsoString(row.ban_expires_at),
+    passwordAlgo: row.password_algo,
+    passwordSalt: row.password_salt,
+    passwordHash: row.password_hash
+  };
+}
+
 export class MySqlAuthStore {
   constructor(pool) {
     this.pool = pool;
@@ -22,7 +49,16 @@ export class MySqlAuthStore {
     }
 
     const [rows] = await this.pool.execute(
-      `SELECT player_id, guest_id
+      `SELECT player_id,
+              guest_id,
+              login_name,
+              display_name,
+              account_type,
+              status,
+              ban_expires_at,
+              password_algo,
+              password_salt,
+              password_hash
        FROM player_accounts
        WHERE guest_id = ?
        LIMIT 1`,
@@ -30,14 +66,7 @@ export class MySqlAuthStore {
     );
 
     if (rows.length > 0) {
-      const existing = rows[0];
-
-      await this.touchPlayerLastLogin(existing.player_id);
-
-      return {
-        playerId: existing.player_id,
-        guestId: existing.guest_id
-      };
+      return toAuthAccount(rows[0]);
     }
 
     const playerId = `player-${crypto.randomUUID()}`;
@@ -58,12 +87,23 @@ export class MySqlAuthStore {
       if (err.code === "ER_DUP_ENTRY" || err.code === "ER_NO_REFERENCED_ROW_2") {
         // Concurrent insert: another request already created this guest account
         const [rows] = await this.pool.execute(
-          `SELECT player_id, guest_id FROM player_accounts WHERE guest_id = ? LIMIT 1`,
+          `SELECT player_id,
+                  guest_id,
+                  login_name,
+                  display_name,
+                  account_type,
+                  status,
+                  ban_expires_at,
+                  password_algo,
+                  password_salt,
+                  password_hash
+           FROM player_accounts
+           WHERE guest_id = ?
+           LIMIT 1`,
           [guestId]
         );
         if (rows.length > 0) {
-          await this.touchPlayerLastLogin(rows[0].player_id);
-          return { playerId: rows[0].player_id, guestId: rows[0].guest_id };
+          return toAuthAccount(rows[0]);
         }
       }
       throw err;
@@ -71,7 +111,9 @@ export class MySqlAuthStore {
 
     return {
       playerId,
-      guestId
+      guestId,
+      status: "active",
+      banExpiresAt: null
     };
   }
 
@@ -86,6 +128,7 @@ export class MySqlAuthStore {
               display_name,
               account_type,
               status,
+              ban_expires_at,
               password_algo,
               password_salt,
               password_hash
@@ -101,16 +144,50 @@ export class MySqlAuthStore {
     }
 
     const account = rows[0];
-    return {
-      playerId: account.player_id,
-      loginName: account.login_name,
-      displayName: account.display_name,
-      accountType: account.account_type,
-      status: account.status,
-      passwordAlgo: account.password_algo,
-      passwordSalt: account.password_salt,
-      passwordHash: account.password_hash
-    };
+    return toAuthAccount(account);
+  }
+
+  async findPlayerAuthStateByPlayerId(playerId) {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const [rows] = await this.pool.execute(
+      `SELECT player_id,
+              guest_id,
+              login_name,
+              display_name,
+              account_type,
+              status,
+              ban_expires_at,
+              password_algo,
+              password_salt,
+              password_hash
+       FROM player_accounts
+       WHERE player_id = ?
+       LIMIT 1`,
+      [playerId]
+    );
+
+    return rows.length > 0 ? toAuthAccount(rows[0]) : null;
+  }
+
+  async restoreExpiredBan(playerId) {
+    if (!this.enabled) {
+      return false;
+    }
+
+    const [result] = await this.pool.execute(
+      `UPDATE player_accounts
+       SET status = 'active',
+           ban_expires_at = NULL
+       WHERE player_id = ?
+         AND status = 'banned'
+         AND ban_expires_at IS NOT NULL
+         AND ban_expires_at <= CURRENT_TIMESTAMP(3)`,
+      [playerId]
+    );
+    return result.affectedRows > 0;
   }
 
   async touchPlayerLastLogin(playerId) {
@@ -237,6 +314,7 @@ export class MySqlAuthStore {
               display_name,
               account_type,
               status,
+              ban_expires_at,
               password_algo,
               password_salt,
               password_hash
@@ -252,16 +330,7 @@ export class MySqlAuthStore {
     }
 
     const account = rows[0];
-    return {
-      playerId: account.player_id,
-      loginName: account.login_name,
-      displayName: account.display_name,
-      accountType: account.account_type,
-      status: account.status,
-      passwordAlgo: account.password_algo,
-      passwordSalt: account.password_salt,
-      passwordHash: account.password_hash
-    };
+    return toAuthAccount(account);
   }
 
   async appendAuthAudit({
