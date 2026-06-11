@@ -82,7 +82,7 @@
 | 服务 | 当前实现 | 生产目标 | 主要缺口 |
 |------|----------|----------|----------|
 | `auth-http` | 单实例可运行；使用 Redis/MySQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/MySQL | 网关层限流、统一配置、灰度和完整安全审计 |
-| `game-proxy` | 多 upstream 发现和切换基础能力；route store 进程内内存态；admin HTTP 口已有 token 鉴权和基础输入校验 | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 路由持久化、多 proxy 一致性、admin RBAC/持久审计、L7 session relay |
+| `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验 | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime 和 drain 基础 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
 | `chat-server` | 独立服务；当前可作为内部聊天能力 | 内网多实例服务；由服务端入口或聚合层调用，不作为生产客户端直连默认 | 协议收敛、会话路由、服务发现和横向扩展策略 |
 | `match-service` | gRPC 匹配服务；可与 `game-server` 协作建房 | 内网多实例服务；匹配池状态可分片或共享，建房目标可路由 | 匹配池分片、跨实例一致性、目标 game-server 选择策略 |
@@ -99,15 +99,22 @@
 
 ### 6.1 当前单实例边界
 
-当前 `game-proxy` 可以作为单一公网游戏入口，选择一个或多个内部 `game-server` upstream。它已经具备 room route、player route 和 rollout session 的进程内元数据，但这些数据随 proxy 进程消失。
+当前 `game-proxy` 可以作为单一公网游戏入口，选择一个或多个内部 `game-server` upstream。它已经具备 room route、player route 和 rollout session 元数据；默认仍是进程内内存态，启用 `PROXY_ROUTE_STORE_BACKEND=redis` 后可在 Redis 中保存 route store 快照并在 proxy 重启后恢复。
 
 单 proxy 生产化前至少需要：
 
 - admin 接口认证、权限和审计。
-- route store 的持久化或接入统一控制面。
+- 生产启用 Redis route store 持久化，或接入统一控制面。
 - route 更新的 CAS 校验。
 - 上游健康状态与运维状态分离。
-- 重启后恢复 `rollout_epoch`、room route、player route。
+- 重启后恢复 `rollout_epoch`、room route、player route；当前 Redis backend 已覆盖这三类数据的单 proxy 最小闭环。
+
+当前 Redis route store 的边界：
+
+- 保存内容是 rollout session、room route、player route 的 serde JSON 快照。
+- 配置为 `PROXY_ROUTE_STORE_BACKEND=redis` 时，启动加载失败会让 proxy 启动失败，避免静默丢失生产路由状态。
+- Redis URL 优先使用 `PROXY_ROUTE_STORE_REDIS_URL`，未设置时依次复用 `REGISTRY_URL`、`REDIS_URL`；key prefix 优先使用 `PROXY_ROUTE_STORE_KEY_PREFIX`，未设置时复用 `REDIS_KEY_PREFIX`。
+- 它解决单 proxy 重启丢 route 的最低风险，但不保存 upstream health/operation state，也不代表多 proxy 并发写入已经强一致。
 
 ### 6.2 多 proxy 目标边界
 
@@ -120,6 +127,8 @@
 | control plane owner | 控制面统一仲裁 route 更新，proxy 只缓存只读副本 | 适合更强一致性的发布和迁移流程 |
 
 即使使用 sticky，也不能把 proxy 内存视为权威状态。room route、player route、rollout session 必须能从 Redis、数据库或控制面恢复。
+
+当前 Redis route store 可以作为 shared route store 的起点，但多 proxy 生产可用还需要补齐跨 proxy 的原子 CAS、锁、pub/sub 失效同步或统一控制面 owner。否则多个 proxy 同时写同一 `room_id` 时仍可能出现最后写入覆盖或本地缓存短暂不一致。
 
 多 proxy 场景下，route store 至少要支持：
 
@@ -313,8 +322,8 @@ client session
 
 - 每个服务实例有稳定 `instance_id` 或 `server_id`。
 - `game-proxy` 可从注册中心发现多个 `game-server`。
-- route store 重启后可恢复。
-- 多 proxy 场景下，同一 `room_id` 的 owner 判断一致。
+- route store 重启后可恢复；当前 Redis backend 覆盖单 proxy 重启恢复。
+- 多 proxy 场景下，同一 `room_id` 的 owner 判断一致；当前仍需 CAS/锁/同步或控制面 owner 才能验收。
 - route 更新有 CAS 和审计记录。
 
 ### 11.3 Room Ownership 验收
@@ -347,8 +356,8 @@ client session
 建议按以下顺序推进：
 
 1. 生产网络边界：部署文档和配置只暴露 `auth-http`、`game-proxy` 玩家入口。
-2. route store 持久化：将 rollout session、room route、player route 从 proxy 内存迁出。
-3. 多 proxy 一致性：明确 sticky、shared route store 或 control plane owner 策略。
+2. route store 持久化：已具备 Redis backend 最小闭环，生产启用 `PROXY_ROUTE_STORE_BACKEND=redis`。
+3. 多 proxy 一致性：在 Redis backend 上补 CAS/锁/同步，或明确 sticky/shared route store/control plane owner 策略。
 4. redirect/reconnect 闭环：补齐 `ServerRedirectPush`、客户端重连、proxy 重新路由和错误 owner 处理。
 5. room transfer 最小闭环：实现 freeze/export/import/retire，并先选择简单 room policy 验证。
 6. transfer payload trait：按玩法补齐可序列化、版本化、checksum 和兼容性检查。

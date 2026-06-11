@@ -24,6 +24,22 @@ fn parse_u64(name: &str, default: u64) -> u64 {
 }
 
 #[derive(Clone)]
+pub enum RouteStoreBackend {
+    Memory,
+    Redis,
+}
+
+impl RouteStoreBackend {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "memory" => Ok(Self::Memory),
+            "redis" => Ok(Self::Redis),
+            _ => Err("PROXY_ROUTE_STORE_BACKEND must be memory or redis".to_string()),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -39,6 +55,9 @@ pub struct Config {
     pub local_socket_name: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub route_store_backend: RouteStoreBackend,
+    pub route_store_redis_url: String,
+    pub route_store_key_prefix: String,
     pub nats_url: String,
     pub ticket_secret: String,
     pub proxy_max_connections: u64,
@@ -91,6 +110,16 @@ impl Config {
             .or_else(|_| env::var("REGISTRY_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let route_store_backend = RouteStoreBackend::parse(
+            &env::var("PROXY_ROUTE_STORE_BACKEND").unwrap_or_else(|_| "memory".to_string()),
+        )?;
+        let route_store_redis_url = env::var("PROXY_ROUTE_STORE_REDIS_URL")
+            .or_else(|_| env::var("REGISTRY_URL"))
+            .or_else(|_| env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let route_store_key_prefix = env::var("PROXY_ROUTE_STORE_KEY_PREFIX")
+            .or_else(|_| env::var("REDIS_KEY_PREFIX"))
+            .unwrap_or_default();
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let ticket_secret = env::var("TICKET_SECRET")
             .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
@@ -132,6 +161,9 @@ impl Config {
             local_socket_name,
             redis_url,
             redis_key_prefix,
+            route_store_backend,
+            route_store_redis_url,
+            route_store_key_prefix,
             nats_url,
             ticket_secret,
             proxy_max_connections,
@@ -194,7 +226,7 @@ mod tests {
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
-    use super::{Config, DEFAULT_ADMIN_TOKEN};
+    use super::{Config, DEFAULT_ADMIN_TOKEN, RouteStoreBackend};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -233,6 +265,17 @@ mod tests {
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("APP_ENV");
+        }
+    }
+
+    fn clear_route_store_env() {
+        unsafe {
+            env::remove_var("PROXY_ROUTE_STORE_BACKEND");
+            env::remove_var("PROXY_ROUTE_STORE_REDIS_URL");
+            env::remove_var("PROXY_ROUTE_STORE_KEY_PREFIX");
+            env::remove_var("REGISTRY_URL");
+            env::remove_var("REDIS_URL");
+            env::remove_var("REDIS_KEY_PREFIX");
         }
     }
 
@@ -370,5 +413,69 @@ mod tests {
         let config = Config::try_from_env().unwrap();
 
         assert_eq!(config.admin_token, "prod-proxy-admin-token-123");
+    }
+
+    #[test]
+    fn uses_memory_route_store_by_default() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ROUTE_STORE_BACKEND",
+            "PROXY_ROUTE_STORE_REDIS_URL",
+            "PROXY_ROUTE_STORE_KEY_PREFIX",
+            "REGISTRY_URL",
+            "REDIS_URL",
+            "REDIS_KEY_PREFIX",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_route_store_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(matches!(
+            config.route_store_backend,
+            RouteStoreBackend::Memory
+        ));
+    }
+
+    #[test]
+    fn parses_redis_route_store_config_with_fallbacks() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ROUTE_STORE_BACKEND",
+            "PROXY_ROUTE_STORE_REDIS_URL",
+            "PROXY_ROUTE_STORE_KEY_PREFIX",
+            "REGISTRY_URL",
+            "REDIS_URL",
+            "REDIS_KEY_PREFIX",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_route_store_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::set_var("PROXY_ROUTE_STORE_BACKEND", "redis");
+            env::set_var("REGISTRY_URL", "redis://registry:6379");
+            env::set_var("REDIS_URL", "redis://redis:6379");
+            env::set_var("REDIS_KEY_PREFIX", "dev:");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(matches!(
+            config.route_store_backend,
+            RouteStoreBackend::Redis
+        ));
+        assert_eq!(config.route_store_redis_url, "redis://registry:6379");
+        assert_eq!(config.route_store_key_prefix, "dev:");
     }
 }

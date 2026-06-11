@@ -31,6 +31,7 @@
 - Rust 侧通用实现位于 `packages/service-registry/`，直接读写 Redis，不提供独立 HTTP Registry API。
 - `game-server`、`chat-server`、`match-service` 使用 `packages/service-registry` 注册自身并维持实例级心跳。
 - `game-proxy` 消费注册中心发现 `game-server`，自身当前不注册到注册中心。
+- `game-proxy` 可选 Redis route store 持久化会复用 Redis 连接配置，但它保存的是 `proxy:route-store:state` JSON 快照，不属于服务注册中心的 `service:*:instances:*` 或 `heartbeat:*` schema。
 - `match-service` 同时注册自身，并在创建 matched room 时优先从注册中心发现 `game-server` 的内部 socket。
 - `mail-service`、`announce-service` 是 Node.js 服务，当前各自实现了独立 Redis 注册客户端，未复用 Rust 包。
 - `auth-http` 只做消费者：`REGISTRY_ENABLED=true` 时发现 `chat-server` / `mail-service` / `announce-service` 并写入登录响应的 `services` 对象；`game` 地址仍来自静态 `gameProxyHost/gameProxyPort`。

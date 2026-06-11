@@ -18,7 +18,10 @@ use std::sync::atomic::AtomicU64;
 use auth::ProxyAuthService;
 use config::Config;
 pub use proto::myserver::game as pb;
-use route_store::{ProxyRouteStore, UpstreamHealthState, UpstreamOperationState, UpstreamRoute};
+use route_store::{
+    ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
+    UpstreamRoute,
+};
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -84,7 +87,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    let route_store = ProxyRouteStore::default();
+    let route_store = match &config.route_store_backend {
+        config::RouteStoreBackend::Memory => {
+            tracing::info!("using in-memory proxy route store");
+            ProxyRouteStore::default()
+        }
+        config::RouteStoreBackend::Redis => {
+            tracing::info!(
+                redis_url = %config.route_store_redis_url,
+                key_prefix = %config.route_store_key_prefix,
+                "using redis proxy route store"
+            );
+            ProxyRouteStore::with_persistence(Arc::new(RedisRouteStorePersistence::new(
+                &config.route_store_redis_url,
+                config.route_store_key_prefix.clone(),
+            )?))
+        }
+    };
+    route_store.load_persisted_state().await?;
     route_store
         .set_static_routes(vec![UpstreamRoute {
             server_id: config.upstream_server_id.clone(),

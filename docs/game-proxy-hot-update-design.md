@@ -35,19 +35,20 @@
 - 维护模式开关：`/maintenance/on`、`/maintenance/off`。
 - upstream 操作状态：`Active`、`Draining`、`Disabled`。
 - upstream 健康状态：`Healthy`、`Unavailable`。
-- rollout session、room route、player route 的内存态存储。
+- rollout session、room route、player route 的 route store；默认内存态，本地开发无需 Redis，生产可通过 `PROXY_ROUTE_STORE_BACKEND=redis` 持久化到 Redis。
 - 根据 `RoomJoinReq`、`RoomJoinAsObserverReq`、`RoomReconnectReq` 做最小协议感知路由。
 - 成功加入 / 重连 / 观战后绑定 room owner 和 player route。
 - room route 的版本、epoch、checksum 校验。
 
 仍未完整落地：
 
-- proxy route store 当前是进程内内存态，尚未持久化。
+- Redis route store 持久化已形成最小闭环：启用后启动加载已有 rollout session、room route、player route，变更后写回 Redis，解决单 proxy 重启丢 route 的最低风险。
 - 自动灰度结束检测尚未完整闭环。
 - `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
 - `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口；真实 old/new/proxy 多进程联调、mybevy 适配和自动灰度收尾仍未完成。
 - proxy 不做同一连接内换 upstream。
 - proxy 不保存玩法状态，不做 room transfer payload 权威存储。
+- 当前 Redis route store 仍是单 proxy 最小闭环；多 proxy 同时写同一份 route 时还缺少分布式 CAS、锁、订阅同步或统一控制面仲裁，不能视为完整多 proxy 强一致。
 
 ## 3. 职责边界
 
@@ -202,6 +203,8 @@ RolloutSession {
 
 rollout session 启动后，新 room 默认优先进入 `new_server_id` 对应 upstream。
 
+启用 Redis route store 时，rollout session 会随 route store 快照一起以 serde JSON 保存，proxy 重启后先恢复该 session，再继续同步静态或注册中心 upstream。
+
 ### 6.3 RoomRouteRecord
 
 当前 room route 包含：
@@ -245,6 +248,29 @@ PlayerRouteRecord {
 ```
 
 `RoomReconnectReq` 会优先根据 player route 和 room route 选择 upstream。
+
+### 6.5 Route Store 持久化
+
+`ProxyRouteStore` 当前支持两种 backend：
+
+- `memory`：默认值，所有 rollout session、room route、player route 仅保存在 proxy 进程内，适合本地开发和不启 Redis 的单机调试。
+- `redis`：启动时从 Redis 加载已有 route store 快照，后续在 begin/end rollout、rollout state 更新、room route/player route upsert、成功 join/reconnect/observer 后的 `bind_room_owner` 中写回快照。
+
+Redis backend 使用结构化 serde JSON 保存一个快照 key，当前 key 为：
+
+```text
+{PROXY_ROUTE_STORE_KEY_PREFIX}proxy:route-store:state
+```
+
+配置优先级：
+
+- `PROXY_ROUTE_STORE_BACKEND=memory|redis`，默认 `memory`。
+- `PROXY_ROUTE_STORE_REDIS_URL` 优先；未设置时依次复用 `REGISTRY_URL`、`REDIS_URL`，最后默认 `redis://127.0.0.1:6379`。
+- `PROXY_ROUTE_STORE_KEY_PREFIX` 优先；未设置时复用 `REDIS_KEY_PREFIX`，最后为空。
+
+生产建议启用 `PROXY_ROUTE_STORE_BACKEND=redis`，并为不同环境配置独立 key prefix。显式选择 Redis 后，启动加载失败会让 `game-proxy` 启动失败，避免生产静默退回内存态。
+
+当前持久化解决的是单 proxy 重启恢复 rollout session、room route、player route 的最低风险。它不持久化 upstream health/operation state，也不提供多 proxy 写入仲裁；多 proxy 场景仍需要 Redis 原子 CAS/Lua、分布式锁、pub/sub 同步或统一控制面 owner。
 
 ## 7. 当前 proxy 协议感知范围
 
@@ -290,13 +316,13 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `POST` | `/player-route/upsert?...` | 手动 upsert player route；校验 player/room/server id、upstream 存在性和 rollout epoch |
 | `POST` | `/switch/<server_id>` | 将目标 upstream 置为 active，其余置为 draining |
 
-当前 admin 修改接口会记录结构化日志审计，包含 `action`、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。审计目前仅落在日志中，尚未接入 MySQL 等持久审计库。
+当前 admin 修改接口会记录结构化日志审计，包含 `action`、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。启用 Redis route store 时，admin 写入会同步更新 route store 快照；审计目前仍仅落在日志中，尚未接入 MySQL 等持久审计库。
 
 仍未完成的生产化能力：
 
 - 细粒度 RBAC / 操作者身份，不区分不同 admin token 的权限。
 - 持久审计、审计查询和统一 trace/request id。
-- 多 proxy 部署下 route store 共享或一致性复制。
+- 多 proxy 部署下 route store 的 CAS/锁/订阅同步或统一控制面仲裁。
 - 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
 
 ## 9. 与 drain / rollout 的关系
@@ -341,11 +367,14 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `UPSTREAM_SERVER_ID` | 静态上游 server id | `game-server-1` |
 | `UPSTREAM_LOCAL_SOCKET_NAME` | 静态上游 local socket | `myserver-game-server.sock` |
 | `REGISTRY_ENABLED` | 是否启用服务发现 | `false` |
-| `REGISTRY_URL` / `REDIS_URL` | 服务发现 Redis 地址 | `redis://127.0.0.1:6379` |
+| `REGISTRY_URL` / `REDIS_URL` | 服务发现 Redis 地址；route store 未单独配置 URL 时也会按此顺序复用 | `redis://127.0.0.1:6379` |
 | `REGISTRY_DISCOVER_INTERVAL_SECS` | 服务发现刷新间隔 | `5` |
 | `UPSTREAM_SERVICE_NAME` | 要发现的服务名 | `game-server` |
 | `TICKET_SECRET` | ticket HMAC secret | dev 默认值 |
 | `REDIS_KEY_PREFIX` | Redis key 前缀 | 空 |
+| `PROXY_ROUTE_STORE_BACKEND` | route store backend，`memory` 为本地默认，生产建议 `redis` | `memory` |
+| `PROXY_ROUTE_STORE_REDIS_URL` | route store Redis 地址；未设置时依次复用 `REGISTRY_URL`、`REDIS_URL` | `redis://127.0.0.1:6379` |
+| `PROXY_ROUTE_STORE_KEY_PREFIX` | route store Redis key 前缀；未设置时复用 `REDIS_KEY_PREFIX` | 空 |
 | `PROXY_MAX_CONNECTIONS` | 总前端连接上限，`0` 表示不限制 | `0` |
 | `PROXY_MAX_PREAUTH_FAILURES` | 同一连接鉴权成功前允许的非法消息或鉴权失败次数，`0` 表示不按次数断开 | `3` |
 | `LOG_LEVEL` / `LOG_ENABLE_CONSOLE` / `LOG_ENABLE_FILE` / `LOG_DIR` | 日志配置 | 见 `.env.example` |
@@ -355,11 +384,11 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 短期建议优先补：
 
 1. proxy admin 权限细化、持久审计和操作人身份。
-2. route store 持久化或接入统一控制面，避免重启丢失 rollout metadata。
+2. route store 多 proxy 一致性：在 Redis 持久化基础上补 CAS/锁/订阅同步或统一控制面，避免并发 proxy 写入覆盖。
 3. 单 IP / 单玩家连接上限、消息频率限制和 Redis 黑名单。
 4. 自动 rollout 结束检测。
 5. old server `ServerRedirectPush` 下发与客户端重连链路。
 6. room transfer 编排入口的多进程联调和操作审计固化。
-7. 多 proxy 场景下的 route 一致性与健康判定。
+7. 多 proxy 场景下的 route 一致性、健康判定和自动收尾。
 
 跨服状态迁移的完整一致性要求见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。
