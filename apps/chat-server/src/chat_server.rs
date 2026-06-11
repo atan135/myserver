@@ -12,9 +12,9 @@ use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
 use crate::metrics::METRICS;
 use crate::online_route;
-use crate::protocol::{encode_packet, parse_header, OutboundMessage, Packet, HEADER_LEN};
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
-use crate::ticket::verify_ticket;
+use crate::protocol::{HEADER_LEN, OutboundMessage, Packet, encode_packet, parse_header};
+use crate::ticket::{hash_ticket, verify_ticket};
 
 #[derive(Debug, Clone, Copy)]
 pub enum MessageType {
@@ -110,12 +110,70 @@ pub async fn run(
         let config = config.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, peer_addr.to_string(), chat_store, chat_sessions, config).await {
+            if let Err(e) = handle_connection(
+                socket,
+                peer_addr.to_string(),
+                chat_store,
+                chat_sessions,
+                config,
+            )
+            .await
+            {
                 warn!(peer = %peer_addr, error = %e, "connection handler error");
             }
         });
     }
 
+    Ok(())
+}
+
+pub fn ticket_key(prefix: &str, ticket: &str) -> String {
+    format!("{}ticket:{}", prefix, hash_ticket(ticket))
+}
+
+pub fn ticket_version_key(prefix: &str, player_id: &str) -> String {
+    format!("{}player-ticket-version:{}", prefix, player_id)
+}
+
+pub fn validate_ticket_owner(
+    stored_owner: Option<&str>,
+    player_id: &str,
+) -> Result<(), &'static str> {
+    if stored_owner == Some(player_id) {
+        Ok(())
+    } else {
+        Err("TICKET_REVOKED")
+    }
+}
+
+pub fn validate_ticket_version(
+    ticket_version: Option<u64>,
+    current_ticket_version: Option<u64>,
+) -> Result<(), &'static str> {
+    if ticket_version.unwrap_or(1) == current_ticket_version.unwrap_or(1) {
+        Ok(())
+    } else {
+        Err("TICKET_REVOKED")
+    }
+}
+
+async fn write_auth_response<W>(
+    writer: &mut W,
+    seq: u32,
+    ok: bool,
+    error_code: &str,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    W: AsyncWrite + Unpin,
+{
+    let res = ChatAuthRes {
+        ok,
+        error_code: error_code.to_string(),
+    };
+    let mut buf = Vec::new();
+    res.encode(&mut buf)?;
+    let packet = encode_packet(MessageType::ChatAuthRes as u16, seq, &buf);
+    writer.write_all(&packet).await?;
     Ok(())
 }
 
@@ -230,7 +288,11 @@ where
         match msg_type {
             MessageType::ChatPrivateReq => {
                 if let Err(e) = chat_service::handle_chat_private(
-                    &chat_store, &chat_sessions, &player_id, &packet, &tx,
+                    &chat_store,
+                    &chat_sessions,
+                    &player_id,
+                    &packet,
+                    &tx,
                 )
                 .await
                 {
@@ -239,7 +301,11 @@ where
             }
             MessageType::ChatGroupReq => {
                 if let Err(e) = chat_service::handle_chat_group(
-                    &chat_store, &chat_sessions, &player_id, &packet, &tx,
+                    &chat_store,
+                    &chat_sessions,
+                    &player_id,
+                    &packet,
+                    &tx,
                 )
                 .await
                 {
@@ -247,55 +313,43 @@ where
                 }
             }
             MessageType::GroupCreateReq => {
-                if let Err(e) = chat_service::handle_group_create(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_group_create(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_group_create failed");
                 }
             }
             MessageType::GroupJoinReq => {
-                if let Err(e) = chat_service::handle_group_join(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_group_join(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_group_join failed");
                 }
             }
             MessageType::GroupLeaveReq => {
-                if let Err(e) = chat_service::handle_group_leave(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_group_leave(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_group_leave failed");
                 }
             }
             MessageType::GroupDismissReq => {
-                if let Err(e) = chat_service::handle_group_dismiss(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_group_dismiss(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_group_dismiss failed");
                 }
             }
             MessageType::GroupListReq => {
-                if let Err(e) = chat_service::handle_group_list(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_group_list(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_group_list failed");
                 }
             }
             MessageType::ChatHistoryReq => {
-                if let Err(e) = chat_service::handle_chat_history(
-                    &chat_store, &player_id, &packet, &tx,
-                )
-                .await
+                if let Err(e) =
+                    chat_service::handle_chat_history(&chat_store, &player_id, &packet, &tx).await
                 {
                     warn!(peer = %peer_addr, error = %e, "handle_chat_history failed");
                 }
@@ -375,34 +429,86 @@ where
             let player_id = ticket_payload.player_id;
             let redis_client = redis::Client::open(config.redis_url.as_str())?;
             let mut redis = redis_client.get_multiplexed_async_connection().await?;
-            let ticket_version_key = format!(
-                "{}player-ticket-version:{}",
-                config.redis_key_prefix, player_id
-            );
-            let current_ticket_version: Option<u64> = redis.get(ticket_version_key).await?;
-            if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
-                let res = ChatAuthRes { ok: false, error_code: "TICKET_REVOKED".to_string() };
-                let mut buf = Vec::new();
-                res.encode(&mut buf)?;
-                let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
-                writer.write_all(&packet).await?;
-                return Err("auth failed: TICKET_REVOKED".into());
+            let ticket_key = ticket_key(&config.redis_key_prefix, &auth_req.token);
+            let ticket_version_key = ticket_version_key(&config.redis_key_prefix, &player_id);
+            let ticket_owner: Option<String> = redis.get(ticket_key).await?;
+            if let Err(error_code) = validate_ticket_owner(ticket_owner.as_deref(), &player_id) {
+                write_auth_response(writer, header.seq, false, error_code).await?;
+                return Err(format!("auth failed: {}", error_code).into());
             }
 
-            let res = ChatAuthRes { ok: true, error_code: String::new() };
-            let mut buf = Vec::new();
-            res.encode(&mut buf)?;
-            let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
-            writer.write_all(&packet).await?;
+            let current_ticket_version: Option<u64> = redis.get(ticket_version_key).await?;
+            if let Err(error_code) =
+                validate_ticket_version(ticket_payload.ver, current_ticket_version)
+            {
+                write_auth_response(writer, header.seq, false, error_code).await?;
+                return Err(format!("auth failed: {}", error_code).into());
+            }
+
+            write_auth_response(writer, header.seq, true, "").await?;
             Ok(player_id)
         }
         Err(e) => {
-            let res = ChatAuthRes { ok: false, error_code: e.to_string() };
-            let mut buf = Vec::new();
-            res.encode(&mut buf)?;
-            let packet = encode_packet(MessageType::ChatAuthRes as u16, header.seq, &buf);
-            writer.write_all(&packet).await?;
+            write_auth_response(writer, header.seq, false, e).await?;
             Err(format!("auth failed: {}", e).into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ticket::hash_ticket;
+
+    #[test]
+    fn ticket_key_uses_prefix_and_sha256_hash() {
+        let ticket = "payload.signature";
+        assert_eq!(
+            ticket_key("dev:", ticket),
+            format!("dev:ticket:{}", hash_ticket(ticket))
+        );
+    }
+
+    #[test]
+    fn ticket_version_key_uses_prefix_and_player_id() {
+        assert_eq!(
+            ticket_version_key("dev:", "player-1"),
+            "dev:player-ticket-version:player-1"
+        );
+    }
+
+    #[test]
+    fn validate_ticket_owner_accepts_matching_owner() {
+        assert_eq!(validate_ticket_owner(Some("player-1"), "player-1"), Ok(()));
+    }
+
+    #[test]
+    fn validate_ticket_owner_rejects_missing_owner_as_revoked() {
+        assert_eq!(
+            validate_ticket_owner(None, "player-1"),
+            Err("TICKET_REVOKED")
+        );
+    }
+
+    #[test]
+    fn validate_ticket_owner_rejects_mismatch_as_revoked() {
+        assert_eq!(
+            validate_ticket_owner(Some("player-2"), "player-1"),
+            Err("TICKET_REVOKED")
+        );
+    }
+
+    #[test]
+    fn validate_ticket_version_accepts_matching_or_missing_versions() {
+        assert_eq!(validate_ticket_version(Some(2), Some(2)), Ok(()));
+        assert_eq!(validate_ticket_version(None, None), Ok(()));
+    }
+
+    #[test]
+    fn validate_ticket_version_rejects_mismatch_as_revoked() {
+        assert_eq!(
+            validate_ticket_version(Some(2), Some(3)),
+            Err("TICKET_REVOKED")
+        );
     }
 }

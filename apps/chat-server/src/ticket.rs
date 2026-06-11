@@ -3,7 +3,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -13,6 +13,11 @@ pub struct TicketPayload {
     pub player_id: String,
     pub ver: Option<u64>,
     pub exp: String,
+}
+
+pub fn hash_ticket(ticket: &str) -> String {
+    let digest = Sha256::digest(ticket.as_bytes());
+    format!("{:x}", digest)
 }
 
 /// 验证票据，返回 player_id

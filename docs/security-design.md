@@ -83,7 +83,7 @@
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
 | `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、内部接口可选 service token、安全审计写库 | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
-| `chat-server` | 首包强制鉴权、ticket 签名、过期与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；单张 ticket revoke 仍未通过 `ticket:<hash>` 存在性校验感知；生产不作为客户端直连默认入口 |
+| `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未做单连接消息频率限制 |
@@ -93,7 +93,7 @@
 说明：
 
 - 当前同一张 ticket 会被 `game-proxy`、`game-server`、`chat-server` 复用
-- 当前 `game-proxy` 与 `game-server` 会检查 Redis ticket 记录；`chat-server` 已感知 ticket version 变化，但仍不检查单张 `ticket:<hash>` 是否存在
+- 当前 `game-proxy`、`game-server` 与 `chat-server` 都会检查 Redis ticket 记录和 `player-ticket-version:<playerId>`；`chat-server` 对单张 ticket revoke 已具备精确感知
 - 因此不能简单采用“任一服务首次校验成功后立即删除 Redis ticket 记录”的全局单次消费模型
 - 如果后续要进一步降低重放风险，更合理的方向是短 TTL、用途隔离、分服务换票，或显式的重放窗口控制
 

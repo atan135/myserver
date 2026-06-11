@@ -18,6 +18,7 @@
 当前仓库实现状态说明：
 
 - `chat-server` 已作为独立 Rust TCP 服务落地
+- `chat-server` 认证阶段已复用 game ticket，并检查签名、过期时间、Redis `ticket:<sha256(ticket)>` 归属和 `player-ticket-version:<playerId>`；Redis key 均受 `REDIS_KEY_PREFIX` 影响
 - `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
 - `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 NATS metrics 上报
 - “聊天与邮件共用同一套存储层”目前仍未实现
@@ -55,6 +56,7 @@ announce-service -> MySQL announcements 或内存存储
 - **聊天与房间解耦**：聊天不依赖游戏房间
 - **历史查询**：支持私聊 / 群聊历史消息分页查询
 - **邮件通知**：订阅 `myserver.mail.notify.*` 并向在线聊天连接推送 `MailNotifyPush`
+- **认证边界**：首包必须是 `ChatAuthReq`，ticket 被单张 revoke 或 owner 不匹配时拒绝认证
 
 ### 3.2 群组管理
 

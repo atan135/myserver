@@ -11,7 +11,7 @@
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、接入转发、活跃前端连接数观测、维护模式与上游发现；文档里旧的 KCP 限流/黑名单配置项目前并不存在
 - `game-server`：当前已实现 ticket 校验、心跳超时和包体长度限制；文档里旧的消息频率限制专用配置项目前并不存在
-- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、心跳超时和包体长度限制；暂未做 Redis ticket 存在性校验或消息频率限制
+- `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
 
 ---
 
@@ -66,10 +66,10 @@ INTERNAL_API_TOKEN=
 
 - 文档旧版写“ticket 默认 5 分钟”已经不准确；当前默认值是 `TICKET_TTL_SECONDS=86400`，即 24 小时
 - `TICKET_VALIDATE_ENABLED` 和 `SECURITY_AUDIT_ENABLED` 已进入配置结构，但当前代码没有完整用它们做开关控制：
-  - ticket 校验实际发生在 `game-proxy` 与 `game-server`，`chat-server` 当前只校验签名与过期时间
+  - ticket 校验实际发生在 `game-proxy`、`game-server` 与 `chat-server`
   - 安全审计当前由 `mysqlStore?.appendSecurityAudit?.(...)` 直接写库，未额外判断 `SECURITY_AUDIT_ENABLED`
-- ticket 不是“使用后立即删除”的一次性票据；当前 `game-proxy` 与 `game-server` 校验时只检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
-- 当前同一张 ticket 还会被 `game-proxy` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
+- ticket 不是“使用后立即删除”的一次性票据；当前 `game-proxy`、`game-server` 与 `chat-server` 校验时都会检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
+- 当前同一张 ticket 会被 `game-proxy`、`game-server` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
 
 ---
 
@@ -175,14 +175,15 @@ MAX_BODY_LEN=4096
 ### 5.1 当前已实现能力
 
 - 首包强制鉴权：连接建立后第一包必须是 `ChatAuthReq`
-- ticket 校验：校验 HMAC 签名与过期时间
+- ticket 校验：校验 HMAC 签名与过期时间，读取 `${REDIS_KEY_PREFIX}ticket:<sha256(ticket)>` 并要求 value 等于 ticket payload 中的 `playerId`
+- ticket version 校验：读取 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>`，用于感知 logout / 改密等玩家级失效
 - 心跳超时：首包读取和会话循环使用 `HEARTBEAT_TIMEOUT_SECS`
 - 最大包体限制：包体超过 `MAX_BODY_LEN` 时拒绝处理
 - 在线推送与邮件通知订阅：依赖 Core NATS 与内存会话表
 
 ### 5.2 当前实际配置项
 
-以下配置名来自 `apps/chat-server/src/main.rs`：
+以下配置名来自 `apps/chat-server/src/main.rs` 与 `apps/chat-server/.env.example`：
 
 ```env
 CHAT_BIND_ADDR=0.0.0.0:9001
@@ -190,8 +191,10 @@ HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
 TICKET_SECRET=replace-with-a-long-random-string
 REDIS_URL=redis://127.0.0.1:6379
+REDIS_KEY_PREFIX=
 MYSQL_URL=mysql://root:password@localhost:3306/chat
 MYSQL_POOL_SIZE=5
+NATS_URL=nats://127.0.0.1:4222
 
 REGISTRY_ENABLED=false
 REGISTRY_URL=redis://127.0.0.1:6379
@@ -199,14 +202,21 @@ REGISTRY_HEARTBEAT_INTERVAL=10
 SERVICE_NAME=chat-server
 SERVICE_INSTANCE_ID=chat-server-001
 CHAT_PUBLIC_HOST=127.0.0.1
+CHAT_ONLINE_ROUTE_TTL_SECS=60
+
+LOG_LEVEL=info
+LOG_ENABLE_CONSOLE=true
+LOG_ENABLE_FILE=false
+LOG_DIR=logs
 ```
 
 ### 5.3 当前实现备注
 
-- `chat-server` 当前不读取 `REDIS_KEY_PREFIX`，也不会查询 Redis 中的 `ticket:{hash}` 记录，因此只证明 ticket 是由同一 `TICKET_SECRET` 签发且未过期
+- `chat-server` 已读取 `REDIS_KEY_PREFIX`，并同时用于 `ticket:<sha256(ticket)>` 和 `player-ticket-version:<playerId>` 两类 key
+- 单张 ticket revoke 删除 Redis `ticket:<sha256(ticket)>` 后，新的 `ChatAuthReq` 会返回 `TICKET_REVOKED`
 - 当前没有消息频率限制、单 IP / 单账号连接数限制、Redis 黑名单或封禁列表逻辑
 - 当前没有公网 TLS 策略，生产部署时应放在 TLS 终止层或补充直接 TLS 支持
-- 如果后续要求聊天 ticket 与游戏 ticket 一致具备撤销感知，需要补 Redis ticket 存在性与归属校验，或改为分服务换票
+- `chat-server` 默认不作为生产公网入口；如果内部或测试环境直连，也应继续保持与 `game-proxy` / `game-server` 一致的 ticket 校验边界
 
 ---
 
@@ -226,7 +236,7 @@ CHAT_PUBLIC_HOST=127.0.0.1
   - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
   - 当前没有 `MSG_RATE_WINDOW`、`MSG_RATE_MAX`
 - `chat-server`：
-  - 使用 `TICKET_SECRET`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
-  - 当前没有 Redis ticket 存在性校验配置，也没有消息频率限制配置
+  - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`
+  - 当前没有消息频率限制配置
 
 如果后续要真正落地 `game-proxy` / `game-server` / `chat-server` 的风控策略，建议先补代码，再在文档中新增配置项；不要先在文档里约定一组尚未读取的环境变量。

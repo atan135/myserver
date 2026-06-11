@@ -388,6 +388,7 @@
 - 当前实现主要使用 `token`
 - `token` 复用 `auth-http` 签发的 game ticket 校验逻辑
 - `chat-server` 现在要求首包 `msgType` 必须是 `20001`
+- `chat-server` 会检查 ticket 签名、过期时间、`${REDIS_KEY_PREFIX}ticket:<sha256(ticket)>` 归属和 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>`
 
 #### `ChatAuthRes`
 
@@ -489,11 +490,12 @@ base64url(payload_json).base64url(hmac_sha256_signature)
 
 - `game-server` 使用同一 `TICKET_SECRET` 校验签名
 - `game-proxy` 会先校验签名并检查 Redis ticket 记录，随后把认证包 replay 到 `game-server`
-- `chat-server` 也复用同一套签名校验逻辑，并检查 ticket payload 中的版本号
+- `chat-server` 也复用同一套签名校验逻辑，并检查 Redis ticket 记录和 ticket payload 中的版本号
 - `exp` 过期则拒绝
 - `game-server` 还会继续检查 Redis 中是否存在对应 ticket 记录
 - `game-proxy`、`game-server`、`chat-server` 都会检查 Redis 中的 `player-ticket-version:<playerId>`，从而感知 logout / 改密等玩家级 ticket version 失效
-- `chat-server` 当前仍不查询单张 `ticket:<sha256(ticket)>` 记录，因此单张 ticket revoke 对 chat 的精确撤销感知仍需后续补齐
+- `game-proxy`、`game-server`、`chat-server` 都会检查 Redis 中的 `ticket:<sha256(ticket)>`，从而感知单张 ticket revoke；其中 `chat-server` 对不存在或归属不匹配统一返回 `TICKET_REVOKED`
+- 这些 Redis key 都受 `REDIS_KEY_PREFIX` 影响
 
 Redis 相关键：
 

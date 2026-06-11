@@ -129,7 +129,7 @@
 - `MessageType::from_u16` 把外部整数转换为受控枚举，未知值返回 `None`
 - `Packet::decode_body::<T>()` 用 `prost` 解 Protobuf
 - 当前 `game-proxy` 和 `game-server` 都会校验 ticket，`game-server` 是最终会话建立点
-- `chat-server` 复用 ticket 签名校验，但当前不查 Redis ticket 记录
+- `chat-server` 复用 ticket 签名校验，并已检查 Redis `ticket:<sha256(ticket)>` 归属与 `player-ticket-version:<playerId>`
 
 鉴权主流程：
 
