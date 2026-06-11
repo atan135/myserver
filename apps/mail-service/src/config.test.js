@@ -6,6 +6,10 @@ const CONFIG_ENV_NAMES = [
   "APP_ENV",
   "GAME_ADMIN_ACTOR",
   "GAME_ADMIN_TOKEN",
+  "GAME_ADMIN_CONNECT_TIMEOUT_MS",
+  "GAME_ADMIN_WRITE_TIMEOUT_MS",
+  "GAME_ADMIN_READ_TIMEOUT_MS",
+  "GAME_ADMIN_MAX_RESPONSE_BYTES",
   "MAIL_PLAYER_AUTH_REQUIRED",
   "MAIL_SERVICE_TOKEN",
   "TICKET_SECRET"
@@ -38,5 +42,37 @@ test("mail-service config reads optional game admin actor", async () => {
     const config = getConfig();
 
     assert.equal(config.gameAdminActor, "mail-ops");
+  });
+});
+
+test("mail-service game admin network limits fall back on invalid values", async () => {
+  await withEnv({
+    GAME_ADMIN_CONNECT_TIMEOUT_MS: "invalid",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "0",
+    GAME_ADMIN_READ_TIMEOUT_MS: "-10",
+    GAME_ADMIN_MAX_RESPONSE_BYTES: ""
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.gameAdminConnectTimeoutMs, 3000);
+    assert.equal(config.gameAdminWriteTimeoutMs, 3000);
+    assert.equal(config.gameAdminReadTimeoutMs, 3000);
+    assert.equal(config.gameAdminMaxResponseBytes, 1048576);
+  });
+});
+
+test("mail-service game admin network limits read positive values", async () => {
+  await withEnv({
+    GAME_ADMIN_CONNECT_TIMEOUT_MS: "101",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "202",
+    GAME_ADMIN_READ_TIMEOUT_MS: "303",
+    GAME_ADMIN_MAX_RESPONSE_BYTES: "4097"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.gameAdminConnectTimeoutMs, 101);
+    assert.equal(config.gameAdminWriteTimeoutMs, 202);
+    assert.equal(config.gameAdminReadTimeoutMs, 303);
+    assert.equal(config.gameAdminMaxResponseBytes, 4097);
   });
 });

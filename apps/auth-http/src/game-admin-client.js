@@ -316,7 +316,22 @@ function onceWritten(socket, data, timeoutMs = 3000) {
 
     const cleanup = () => {
       clearTimeout(timer);
+      socket.off("error", onError);
+      socket.off("close", onClose);
     };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(createAdminError("GAME_ADMIN_CONNECTION_CLOSED", "game-server admin connection closed"));
+    };
+
+    socket.once("error", onError);
+    socket.once("close", onClose);
 
     socket.write(data, (error) => {
       cleanup();

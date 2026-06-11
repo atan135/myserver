@@ -166,8 +166,8 @@
 | 客户端 -> `game-proxy` TCP fallback | 当前明文 TCP | 生产建议在入口层做 TLS 终止，或由 `game-proxy` 直接支持 TLS |
 | 客户端 -> `game-proxy` KCP | 当前无正式加密策略 | 生产不建议裸奔公网；保留为后续专项，优先用安全隧道或替换为具备成熟加密方案的入口 |
 | `game-proxy` -> `game-server` | 同机可走 UDS / 本地 TCP | 同机可维持本地链路；跨机部署时转为 TLS 或严格私网 |
-| `mail-service` -> `game-server` admin 通道 | 当前依赖网络隔离和 `GAME_ADMIN_TOKEN`，发奖写操作会在 `AdminAuthReq` 中携带合法 service actor 供 game-server admin 审计使用 | 后续可升级 mTLS / 更细 service identity |
-| `admin-api` -> `game-server` admin 通道 | 当前依赖网络隔离 | 先补 service token，后续可升级 mTLS |
+| `mail-service` -> `game-server` admin 通道 | 当前依赖网络隔离和 `GAME_ADMIN_TOKEN`，发奖写操作会在 `AdminAuthReq` 中携带合法 service actor 供 game-server admin 审计使用；Node client 已限制连接/写入/读取超时和最大响应字节数 | 后续可升级 mTLS / 更细 service identity |
+| `admin-api` -> `game-server` admin 通道 | 当前依赖网络隔离和 `GAME_ADMIN_TOKEN`，写操作会透传当前管理员 actor；Node client 已限制连接/写入/读取超时和最大响应字节数 | 后续可升级 mTLS / 更细 service identity |
 | 内部 gRPC / HTTP 调用 | 当前默认内网互信 | 开发期 service token，正式环境逐步升级 mTLS |
 
 ### 5.3 密钥管理
@@ -618,6 +618,10 @@ TICKET_SECRET=dev-only-change-this-ticket-secret
 MAIL_PLAYER_AUTH_REQUIRED=true
 MAIL_SERVICE_TOKEN=dev-only-change-this-mail-service-token
 GAME_ADMIN_ACTOR=mail-service
+GAME_ADMIN_CONNECT_TIMEOUT_MS=3000
+GAME_ADMIN_WRITE_TIMEOUT_MS=3000
+GAME_ADMIN_READ_TIMEOUT_MS=3000
+GAME_ADMIN_MAX_RESPONSE_BYTES=1048576
 ```
 
 说明：
@@ -628,6 +632,7 @@ GAME_ADMIN_ACTOR=mail-service
 - `POST /api/v1/mails` 是内部/后台发系统邮件入口，要求 `MAIL_SERVICE_TOKEN`，支持 `Authorization: Bearer <token>`、`X-Service-Token` 和 `X-Admin-Token`，不接受 query/body token。
 - `MAIL_SERVICE_TOKEN` 是 mail-service 上游调用凭证；`GAME_ADMIN_TOKEN` 仅用于 mail-service 调用下游 `game-server admin` 发奖，两个 token 不复用。
 - 邮件领取发奖会先把邮件抢占为 `claiming`，再通过内网 `game-server admin TCP` 发奖；发奖请求使用稳定 `requestId = mail_claim:<mail_id>`，并在 `AdminAuthReq` 中携带合法 service actor（可用 `GAME_ADMIN_ACTOR` 指定，默认使用服务实例标识规范化结果或 `mail-service`），以兼容 `GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true`。缺省或非法 actor 不会把非法字符发送给下游。
+- `GAME_ADMIN_CONNECT_TIMEOUT_MS`、`GAME_ADMIN_WRITE_TIMEOUT_MS`、`GAME_ADMIN_READ_TIMEOUT_MS` 和 `GAME_ADMIN_MAX_RESPONSE_BYTES` 控制 mail-service 调用下游 admin TCP 的连接、auth envelope 写入、请求包写入、响应读取和响应大小上限；缺失、非法、0 或负数会回退默认值 `3000/3000/3000/1048576`。
 - `MAIL_PLAYER_AUTH_REQUIRED=false` 只允许本地兼容调试；生产环境会拒绝该配置，并要求 `TICKET_SECRET` 与 `MAIL_SERVICE_TOKEN` 都替换为非默认强值。
 - 该阶段仍复用全局 game ticket，后续仍需网关化、用途隔离/换票、发信 RBAC、发信审计查询和更完整的公网 TLS 策略。
 

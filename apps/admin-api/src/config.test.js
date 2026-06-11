@@ -13,7 +13,11 @@ const CONFIG_ENV_KEYS = [
   "ADMIN_API_REQUIRE_IP_ALLOWLIST",
   "ADMIN_API_IP_ALLOWLIST",
   "TRUST_PROXY",
-  "TRUSTED_PROXIES"
+  "TRUSTED_PROXIES",
+  "GAME_ADMIN_CONNECT_TIMEOUT_MS",
+  "GAME_ADMIN_WRITE_TIMEOUT_MS",
+  "GAME_ADMIN_READ_TIMEOUT_MS",
+  "GAME_ADMIN_MAX_RESPONSE_BYTES"
 ];
 
 async function withEnv(env, fn) {
@@ -73,5 +77,33 @@ test("admin-api control plane security config can be explicitly enabled", async 
     assert.equal(config.adminApiRequireTls, true);
     assert.equal(config.adminApiRequireIpAllowlist, true);
     assert.deepEqual(config.adminApiIpAllowlist, ["127.0.0.1", "10.0.0.0/24"]);
+  });
+});
+
+test("admin-api game admin network limits fall back on invalid values", async () => {
+  await withEnv({
+    GAME_ADMIN_CONNECT_TIMEOUT_MS: "invalid",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "0",
+    GAME_ADMIN_READ_TIMEOUT_MS: "-1",
+    GAME_ADMIN_MAX_RESPONSE_BYTES: ""
+  }, (config) => {
+    assert.equal(config.gameAdminConnectTimeoutMs, 3000);
+    assert.equal(config.gameAdminWriteTimeoutMs, 3000);
+    assert.equal(config.gameAdminReadTimeoutMs, 3000);
+    assert.equal(config.gameAdminMaxResponseBytes, 1048576);
+  });
+});
+
+test("admin-api game admin network limits read positive values", async () => {
+  await withEnv({
+    GAME_ADMIN_CONNECT_TIMEOUT_MS: "100",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "200",
+    GAME_ADMIN_READ_TIMEOUT_MS: "300",
+    GAME_ADMIN_MAX_RESPONSE_BYTES: "4096"
+  }, (config) => {
+    assert.equal(config.gameAdminConnectTimeoutMs, 100);
+    assert.equal(config.gameAdminWriteTimeoutMs, 200);
+    assert.equal(config.gameAdminReadTimeoutMs, 300);
+    assert.equal(config.gameAdminMaxResponseBytes, 4096);
   });
 });

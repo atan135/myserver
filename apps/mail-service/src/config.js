@@ -15,6 +15,11 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function parsePositiveIntegerWithFallback(value, fallback) {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const DEFAULT_TICKET_SECRETS = new Set([
   "dev-only-change-this-ticket-secret",
   "replace-with-a-long-random-string",
@@ -102,6 +107,10 @@ export function getConfig() {
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
+    gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
+    gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
+    gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
+    gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
     ticketSecret: process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     mailPlayerAuthRequired: parseBoolean(process.env.MAIL_PLAYER_AUTH_REQUIRED, true),
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",

@@ -329,6 +329,7 @@ LOG_DIR=logs
 - 来源 IP allowlist：`ADMIN_API_REQUIRE_IP_ALLOWLIST=true` 时，来源 IP 不在 `ADMIN_API_IP_ALLOWLIST` 返回 `403 ADMIN_API_IP_NOT_ALLOWED`
 - 可信代理解析：`TRUST_PROXY=true` 且直连来源命中 `TRUSTED_PROXIES` 后，才信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`
 - allowlist 支持精确 IP 和 IPv4 CIDR，例如 `127.0.0.1,10.0.0.0/24`
+- 调用 `game-server` admin TCP 时分别限制连接、auth envelope 写入、请求包写入和响应读取超时，并用 `GAME_ADMIN_MAX_RESPONSE_BYTES` 在读取包体前按包头长度拒绝过大响应
 - 拒绝事件会写入结构化安全日志；当前不写入 MySQL `security_audit_logs`
 
 ### 6.2 当前实际配置项
@@ -339,9 +340,13 @@ TRUSTED_PROXIES=
 ADMIN_API_REQUIRE_TLS=false
 ADMIN_API_REQUIRE_IP_ALLOWLIST=false
 ADMIN_API_IP_ALLOWLIST=
+GAME_ADMIN_CONNECT_TIMEOUT_MS=3000
+GAME_ADMIN_WRITE_TIMEOUT_MS=3000
+GAME_ADMIN_READ_TIMEOUT_MS=3000
+GAME_ADMIN_MAX_RESPONSE_BYTES=1048576
 ```
 
-`ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；经反向代理部署时，必须同时正确配置 `TRUST_PROXY` / `TRUSTED_PROXIES`，否则不可信来源伪造的 `X-Forwarded-Proto=https` 不会生效。`ADMIN_API_REQUIRE_IP_ALLOWLIST=false` 默认关闭，避免破坏本地联调；生产建议结合部署侧网络隔离启用。代码侧保护不代表 `admin-api/admin-web` 可以作为生产公网玩家入口。
+`ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；经反向代理部署时，必须同时正确配置 `TRUST_PROXY` / `TRUSTED_PROXIES`，否则不可信来源伪造的 `X-Forwarded-Proto=https` 不会生效。`ADMIN_API_REQUIRE_IP_ALLOWLIST=false` 默认关闭，避免破坏本地联调；生产建议结合部署侧网络隔离启用。`GAME_ADMIN_CONNECT_TIMEOUT_MS`、`GAME_ADMIN_WRITE_TIMEOUT_MS`、`GAME_ADMIN_READ_TIMEOUT_MS` 和 `GAME_ADMIN_MAX_RESPONSE_BYTES` 缺失、非法、0 或负数时回退到默认值。代码侧保护不代表 `admin-api/admin-web` 可以作为生产公网玩家入口。
 
 ---
 
@@ -374,6 +379,7 @@ ADMIN_API_IP_ALLOWLIST=
   - 使用 `TRUST_PROXY`、`TRUSTED_PROXIES` 控制真实来源 IP 与 forwarded proto 解析
   - 使用 `ADMIN_API_REQUIRE_TLS` 控制请求级 HTTPS/TLS 强制；生产默认开启，开发默认关闭
   - 使用 `ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_API_IP_ALLOWLIST` 控制来源 IP allowlist；默认关闭，列表支持精确 IP 和 IPv4 CIDR
+  - 使用 `GAME_ADMIN_CONNECT_TIMEOUT_MS`、`GAME_ADMIN_WRITE_TIMEOUT_MS`、`GAME_ADMIN_READ_TIMEOUT_MS`、`GAME_ADMIN_MAX_RESPONSE_BYTES` 限制下游 `game-server` admin TCP 调用
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
   - 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`，不支持 query token

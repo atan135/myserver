@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import net from "node:net";
 import test from "node:test";
 
 import {
+  MESSAGE_TYPE,
   buildAdminAuthBody,
   buildGrantMailAttachmentsPayload,
   getDefaultGameAdminActor,
   normalizeGameAdminActor,
-  normalizeServiceActorCandidate
+  normalizeServiceActorCandidate,
+  sendRequest
 } from "./game-admin-client.js";
 
 const config = {
@@ -65,4 +68,44 @@ test("grant mail attachments payload keeps stable idempotency fields", () => {
     source: "mail-claim",
     reason: "claim mail mail-1"
   });
+});
+
+test("mail admin client rejects response larger than configured limit", async () => {
+  const server = net.createServer((socket) => {
+    socket.once("data", () => {
+      const header = Buffer.alloc(14);
+      header.writeUInt16BE(0xcafe, 0);
+      header.writeUInt8(1, 2);
+      header.writeUInt8(0, 3);
+      header.writeUInt16BE(MESSAGE_TYPE.GM_SEND_ITEM_RES, 4);
+      header.writeUInt32BE(1, 6);
+      header.writeUInt32BE(64, 10);
+      socket.write(header);
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+
+  try {
+    await assert.rejects(
+      sendRequest(
+        {
+          gameServerAdminHost: "127.0.0.1",
+          gameServerAdminPort: port,
+          gameAdminToken: "secret-admin-token",
+          gameAdminConnectTimeoutMs: 1000,
+          gameAdminWriteTimeoutMs: 1000,
+          gameAdminReadTimeoutMs: 1000,
+          gameAdminMaxResponseBytes: 32
+        },
+        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        Buffer.from("{}"),
+        MESSAGE_TYPE.GM_SEND_ITEM_RES
+      ),
+      { code: "GAME_ADMIN_RESPONSE_TOO_LARGE" }
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

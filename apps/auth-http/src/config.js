@@ -16,6 +16,11 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function parsePositiveIntegerWithFallback(value, fallback) {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const DEFAULT_TICKET_SECRETS = new Set([
   "dev-only-change-this-ticket-secret",
   "replace-with-a-long-random-string",
@@ -110,22 +115,10 @@ export function getConfig() {
       10
     ),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
-    gameAdminConnectTimeoutMs: Number.parseInt(
-      process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS || "3000",
-      10
-    ),
-    gameAdminReadTimeoutMs: Number.parseInt(
-      process.env.GAME_ADMIN_READ_TIMEOUT_MS || "3000",
-      10
-    ),
-    gameAdminWriteTimeoutMs: Number.parseInt(
-      process.env.GAME_ADMIN_WRITE_TIMEOUT_MS || "3000",
-      10
-    ),
-    gameAdminMaxResponseBytes: Number.parseInt(
-      process.env.GAME_ADMIN_MAX_RESPONSE_BYTES || "1048576",
-      10
-    ),
+    gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
+    gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
+    gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
+    gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),

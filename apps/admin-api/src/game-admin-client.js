@@ -103,80 +103,180 @@ function buildAdminAuthBody(config, actor) {
   return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
 }
 
+function createAdminError(code, message = code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 async function sendRequest(config, messageType, payload, expectedType, options = {}) {
+  const socket = net.createConnection({
+    host: config.gameServerAdminHost,
+    port: config.gameServerAdminPort
+  });
+
+  try {
+    await onceConnected(socket, config.gameAdminConnectTimeoutMs);
+    await onceWritten(
+      socket,
+      encodePacket(MESSAGE_TYPE.ADMIN_AUTH_REQ, 0, buildAdminAuthBody(config, options.actor)),
+      config.gameAdminWriteTimeoutMs
+    );
+    await onceWritten(socket, encodePacket(messageType, nextSeq(), payload), config.gameAdminWriteTimeoutMs);
+
+    const responseBuffer = await readSinglePacket(
+      socket,
+      config.gameAdminReadTimeoutMs,
+      config.gameAdminMaxResponseBytes
+    );
+    const response = decodePacket(responseBuffer);
+
+    if (response.messageType === MESSAGE_TYPE.ERROR_RES) {
+      const error = decodeError(response.body);
+      const err = new Error(error.message || error.errorCode || "game-server error");
+      err.code = error.errorCode || "GAME_SERVER_ERROR";
+      throw err;
+    }
+
+    if (response.messageType !== expectedType) {
+      const err = new Error(`unexpected response type ${response.messageType}`);
+      err.code = "UNEXPECTED_RESPONSE";
+      throw err;
+    }
+
+    return response.body;
+  } finally {
+    socket.end();
+    socket.destroy();
+  }
+}
+
+function onceConnected(socket, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({
-      host: config.gameServerAdminHost,
-      port: config.gameServerAdminPort
-    });
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_CONNECT_TIMEOUT", "game-server admin connect timeout"));
+    }, timeoutMs);
 
     const cleanup = () => {
-      socket.removeAllListeners();
-      socket.end();
-      socket.destroy();
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("error", onError);
     };
 
-    socket.on("connect", () => {
-      const authPacket = encodePacket(
-        MESSAGE_TYPE.ADMIN_AUTH_REQ,
-        0,
-        buildAdminAuthBody(config, options.actor)
-      );
-      const packet = encodePacket(messageType, nextSeq(), payload);
-      socket.write(Buffer.concat([authPacket, packet]), (err) => {
-        if (err) {
-          cleanup();
-          reject(err);
-        }
-      });
-    });
-
-    socket.on("error", (err) => {
+    const onConnect = () => {
       cleanup();
-      reject(err);
-    });
+      resolve();
+    };
 
-    socket.on("close", () => {
+    const onError = (error) => {
       cleanup();
-    });
+      reject(error);
+    };
 
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
+  });
+}
+
+function onceWritten(socket, data, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_WRITE_TIMEOUT", "game-server admin write timeout"));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(createAdminError("GAME_ADMIN_CONNECTION_CLOSED", "game-server admin connection closed"));
+    };
+
+    socket.once("error", onError);
+    socket.once("close", onClose);
+
+    socket.write(data, (error) => {
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(createAdminError("GAME_ADMIN_READ_TIMEOUT", "game-server admin read timeout"));
+    }, timeoutMs);
 
-    socket.on("data", (chunk) => {
+    const onData = (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length > maxResponseBytes) {
+        cleanup();
+        socket.destroy();
+        reject(createAdminError("GAME_ADMIN_RESPONSE_TOO_LARGE", "game-server admin response too large"));
+        return;
+      }
 
-      if (buffer.length < HEADER_LEN) return;
+      if (buffer.length < HEADER_LEN) {
+        return;
+      }
 
       const bodyLen = buffer.readUInt32BE(10);
       const packetLen = HEADER_LEN + bodyLen;
+      if (packetLen > maxResponseBytes) {
+        cleanup();
+        socket.destroy();
+        reject(createAdminError("GAME_ADMIN_RESPONSE_TOO_LARGE", "game-server admin response too large"));
+        return;
+      }
 
-      if (buffer.length < packetLen) return;
-
-      try {
-        const response = decodePacket(buffer.subarray(0, packetLen));
-
-        if (response.messageType === MESSAGE_TYPE.ERROR_RES) {
-          const error = decodeError(response.body);
-          const err = new Error(error.message || error.errorCode || "game-server error");
-          err.code = error.errorCode || "GAME_SERVER_ERROR";
-          reject(err);
-          return;
-        }
-
-        if (response.messageType !== expectedType) {
-          const err = new Error(`unexpected response type ${response.messageType}`);
-          err.code = "UNEXPECTED_RESPONSE";
-          reject(err);
-          return;
-        }
-
-        resolve(response.body);
-      } catch (err) {
-        reject(err);
+      if (buffer.length < packetLen) {
+        return;
       }
 
       cleanup();
-    });
+      resolve(buffer.subarray(0, packetLen));
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error("admin connection closed before response"));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    socket.on("data", onData);
+    socket.once("error", onError);
+    socket.once("close", onClose);
   });
 }
 
@@ -259,4 +359,4 @@ export class GameAdminClient {
   }
 }
 
-export { MESSAGE_TYPE, buildAdminAuthBody, normalizeGameAdminActor };
+export { MESSAGE_TYPE, buildAdminAuthBody, normalizeGameAdminActor, sendRequest };

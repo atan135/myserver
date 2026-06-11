@@ -149,3 +149,23 @@ test("auth-http development config allows defaults and empty internal token", ()
     }
   );
 });
+
+test("auth-http game admin network limits fall back on invalid values", () => {
+  withEnv(
+    {
+      NODE_ENV: "development",
+      APP_ENV: undefined,
+      GAME_ADMIN_CONNECT_TIMEOUT_MS: "invalid",
+      GAME_ADMIN_READ_TIMEOUT_MS: "0",
+      GAME_ADMIN_WRITE_TIMEOUT_MS: "-1",
+      GAME_ADMIN_MAX_RESPONSE_BYTES: ""
+    },
+    () => {
+      const config = getConfig();
+      assert.equal(config.gameAdminConnectTimeoutMs, 3000);
+      assert.equal(config.gameAdminReadTimeoutMs, 3000);
+      assert.equal(config.gameAdminWriteTimeoutMs, 3000);
+      assert.equal(config.gameAdminMaxResponseBytes, 1048576);
+    }
+  );
+});

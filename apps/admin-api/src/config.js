@@ -42,6 +42,11 @@ function parsePositiveInteger(name, value, fallback) {
   return parsed;
 }
 
+function parsePositiveIntegerWithFallback(value, fallback) {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function parseDurationSeconds(value, fallbackSeconds) {
   if (value === undefined || value === null || value === "") {
     return fallbackSeconds;
@@ -132,6 +137,10 @@ export function getConfig() {
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
+    gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
+    gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
+    gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
+    gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
     initialAdminUsername: process.env.ADMIN_USERNAME || "admin",
     initialAdminPassword: process.env.ADMIN_PASSWORD || "AdminPass123!",
     initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator"
