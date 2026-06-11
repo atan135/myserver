@@ -82,7 +82,7 @@
 
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
-| `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库 | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
+| `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
@@ -178,6 +178,7 @@
 - 不把明文 token、ticket、密码写入数据库
 - 日志中不打印完整 token / ticket / secret
 - 生产环境必须替换默认示例密钥
+- `auth-http` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN` 都会拒绝启动。`AUTH_STRICT_SECURITY` 仍控制内部接口请求期缺 token 时的拒绝行为，但生产环境不再等到请求阶段才暴露空 token 配置错误。
 
 建议后续补充：
 

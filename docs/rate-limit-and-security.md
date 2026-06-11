@@ -26,6 +26,7 @@
 - 维护模式：读取 `${REDIS_KEY_PREFIX}maintenance:global`，开启时普通玩家登录和 `/api/v1/game-ticket/issue` 返回 `MAINTENANCE_MODE`
 - 安全审计：登录失败、账号锁定、IP 限流、ticket 撤销等事件会写入 `security_audit_logs`（前提是启用了 MySQL 存储）
 - 内部接口 token：配置 `INTERNAL_API_TOKEN` 后，`/api/v1/internal/game-server/status` 与 `/api/v1/internal/game-server/config` 要求 `X-Service-Token`
+- 生产配置保护：`NODE_ENV=production` 或 `APP_ENV=production` 时，配置加载阶段拒绝默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN`
 
 ### 2.2 当前实际配置项
 
@@ -53,6 +54,7 @@ SECURITY_AUDIT_ENABLED=true
 
 # Internal API
 INTERNAL_API_TOKEN=
+AUTH_STRICT_SECURITY=false
 ```
 
 ### 2.3 与旧文档的关键差异
@@ -72,6 +74,7 @@ INTERNAL_API_TOKEN=
 - ticket 不是“使用后立即删除”的一次性票据；当前 `game-proxy`、`game-server` 与 `chat-server` 校验时都会检查签名和 Redis 中是否存在对应 ticket，成功认证后不会自动删除
 - 当前同一张 ticket 会被 `game-proxy`、`game-server` 与 `chat-server` 复用；因此不能简单在首次校验成功后就删除 Redis 记录，否则会破坏多服务接入链路
 - 维护模式不拦截 logout、game ticket revoke 等清理操作，也不主动踢已有在线连接
+- `AUTH_STRICT_SECURITY` 仍控制内部接口请求期缺少 `INTERNAL_API_TOKEN` 时是否返回 `INTERNAL_API_TOKEN_REQUIRED`；生产环境现在会提前在配置加载阶段拒绝空 `INTERNAL_API_TOKEN`
 
 ---
 
@@ -263,7 +266,8 @@ LOG_DIR=logs
 - `auth-http`：
   - 使用 `RATELIMIT_WINDOW_MS`、`RATELIMIT_MAX`
   - 使用 `ACCOUNT_LOCK_MAX_ATTEMPTS`、`ACCOUNT_LOCK_WINDOW_SECONDS`、`ACCOUNT_LOCK_TTL_SECONDS`
-  - 使用 `TICKET_SECRET`、`TICKET_TTL_SECONDS`、`INTERNAL_API_TOKEN`
+  - 使用 `TICKET_SECRET`、`TICKET_TTL_SECONDS`、`INTERNAL_API_TOKEN`、`GAME_ADMIN_TOKEN`
+  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN`
 - `game-proxy`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
   - 使用 `PROXY_ADMIN_TOKEN` 保护 admin HTTP 口，生产环境拒绝空值或开发默认值

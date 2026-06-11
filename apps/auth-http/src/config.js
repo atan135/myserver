@@ -16,9 +16,59 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+const DEFAULT_TICKET_SECRETS = new Set([
+  "dev-only-change-this-ticket-secret",
+  "replace-with-a-long-random-string",
+  "change-me",
+  "changeme",
+  "default",
+  "password"
+]);
+
+const DEFAULT_GAME_ADMIN_TOKENS = new Set([
+  "dev-only-change-this-game-admin-token",
+  "change-me",
+  "changeme",
+  "default",
+  "password"
+]);
+
+function isProductionEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && value.trim().toLowerCase() === "production"
+  );
+}
+
+function validateProductionConfig(config) {
+  if (!isProductionEnv()) {
+    return;
+  }
+
+  const errors = [];
+  const ticketSecret = String(config.ticketSecret || "").trim();
+  const gameAdminToken = String(config.gameAdminToken || "").trim();
+  const internalApiToken = String(config.internalApiToken || "").trim();
+
+  if (!ticketSecret || DEFAULT_TICKET_SECRETS.has(ticketSecret)) {
+    errors.push("TICKET_SECRET must be set to a non-default value in production");
+  }
+
+  if (!gameAdminToken || DEFAULT_GAME_ADMIN_TOKENS.has(gameAdminToken)) {
+    errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
+  }
+
+  if (!internalApiToken) {
+    errors.push("INTERNAL_API_TOKEN must be set in production");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid auth-http production config: ${errors.join("; ")}`);
+  }
+}
+
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
-  return {
+  const config = {
     appName: "auth-http",
     env,
     host: process.env.HOST || "127.0.0.1",
@@ -102,4 +152,7 @@ export function getConfig() {
       env === "production"
     )
   };
+
+  validateProductionConfig(config);
+  return config;
 }
