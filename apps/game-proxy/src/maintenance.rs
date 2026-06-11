@@ -111,8 +111,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        MaintenanceCache, maintenance_state_key, parse_maintenance_enabled,
-        should_reject_new_auth,
+        MaintenanceCache, maintenance_state_key, parse_maintenance_enabled, should_reject_new_auth,
     };
 
     #[test]
