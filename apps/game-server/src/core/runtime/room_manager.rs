@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use prost::Message;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
@@ -9,7 +12,7 @@ use tracing::{debug, info, warn};
 use crate::core::logic::{RoomLogicBroadcast, SharedRoomLogicFactory};
 use crate::core::room::{
     MemberRole, OutboundMessage, PendingInputUpsert, PlayerInputRecord, Room, RoomMemberState,
-    RoomPhase,
+    RoomPhase, RoomTransferStatus,
 };
 use crate::core::runtime::room_policy::{
     InputWaitStrategy, MissingInputStrategy, RoomRuntimePolicy, SharedRoomPolicyRegistry,
@@ -18,7 +21,8 @@ use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
 use crate::pb::{
     FrameBundlePush, FrameInput, MovementCorrectionReason,
-    MovementRecoveryState as PbMovementRecoveryState, RoomSnapshot, RoomStatePush,
+    MovementRecoveryState as PbMovementRecoveryState, RoomMigrationState, RoomSnapshot,
+    RoomStatePush, RoomTransferPayload,
 };
 use crate::protocol::{MessageType, encode_body};
 
@@ -143,6 +147,9 @@ impl RoomManager {
 
                     for (room_id, room) in rooms_guard.iter_mut() {
                         if room.marked_for_destruction {
+                            continue;
+                        }
+                        if room.transfer_state.status.rejects_room_mutation() {
                             continue;
                         }
 
@@ -294,7 +301,9 @@ impl RoomManager {
                 room
             });
 
-            let _ = room;
+            if room.transfer_state.status.rejects_room_mutation() {
+                return Err(room.transfer_state.mutation_error_code());
+            }
             runtimes
                 .entry(room_id.to_string())
                 .or_insert_with(RoomRuntime::default);
@@ -432,6 +441,10 @@ impl RoomManager {
                     logic,
                 )
             });
+
+            if room.transfer_state.status.rejects_room_mutation() {
+                return Err(room.transfer_state.mutation_error_code());
+            }
 
             let policy = self.policies.resolve(&room.policy_id);
             if room.phase == RoomPhase::InGame
@@ -690,6 +703,10 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
+        if room.transfer_state.status.rejects_room_mutation() {
+            return Err(room.transfer_state.mutation_error_code());
+        }
+
         if let Some(member) = room.members.get_mut(player_id) {
             if !member.offline {
                 return Err("PLAYER_ALREADY_ONLINE");
@@ -767,6 +784,10 @@ impl RoomManager {
                 )
             });
 
+            if room.transfer_state.status.rejects_room_mutation() {
+                return Err(room.transfer_state.mutation_error_code());
+            }
+
             let policy = self.policies.resolve(&room.policy_id);
             if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
                 return Err("ROOM_FULL");
@@ -833,6 +854,10 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
 
         for (room_id, room) in rooms.iter_mut() {
+            if room.transfer_state.status.rejects_room_mutation() {
+                continue;
+            }
+
             let policy = self.policies.resolve(&room.policy_id);
             let expired = room.collect_expired_offline_players(policy.offline_ttl_secs);
 
@@ -867,6 +892,10 @@ impl RoomManager {
     ) -> Result<RoomSnapshot, &'static str> {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+        if room.transfer_state.status.rejects_room_mutation() {
+            return Err(room.transfer_state.mutation_error_code());
+        }
         if room.phase == RoomPhase::InGame {
             return Err("ROOM_ALREADY_IN_GAME");
         }
@@ -888,6 +917,9 @@ impl RoomManager {
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
         let policy = self.policies.resolve(&room.policy_id);
 
+        if room.transfer_state.status.rejects_room_mutation() {
+            return Err(room.transfer_state.mutation_error_code());
+        }
         room.can_start_game(player_id, policy.min_start_players)?;
         room.phase = RoomPhase::InGame;
         room.clear_runtime_inputs();
@@ -920,6 +952,9 @@ impl RoomManager {
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
         let policy = self.policies.resolve(&room.policy_id);
 
+        if room.transfer_state.status.rejects_room_mutation() {
+            return Err(room.transfer_state.mutation_error_code());
+        }
         room.can_send_input(player_id)?;
         room.logic
             .validate_player_input(player_id, action, payload_json)?;
@@ -965,6 +1000,9 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
 
+        if room.transfer_state.status.rejects_room_mutation() {
+            return Err(room.transfer_state.mutation_error_code());
+        }
         room.can_end_game(player_id)?;
         room.logic.on_game_ended(room_id);
         room.reset_to_waiting();
@@ -987,6 +1025,346 @@ impl RoomManager {
         let rooms = self.rooms.lock().await;
         let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
         Ok(room.snapshot())
+    }
+
+    pub async fn freeze_room_for_transfer(
+        &self,
+        rollout_epoch: &str,
+        room_id: &str,
+    ) -> Result<(RoomMigrationState, u64), &'static str> {
+        let rollout_epoch = rollout_epoch.trim();
+        if rollout_epoch.is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+
+        let (state, version) = {
+            let mut rooms = self.rooms.lock().await;
+            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+            match room.transfer_state.status {
+                RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
+                RoomTransferStatus::Frozen | RoomTransferStatus::Exported
+                    if room.transfer_state.rollout_epoch.as_deref() == Some(rollout_epoch) =>
+                {
+                    return Ok((
+                        room.transfer_state.status.migration_state(),
+                        room.transfer_state.room_version,
+                    ));
+                }
+                RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {
+                    return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+                }
+                RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
+                RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
+                RoomTransferStatus::Owned => {}
+            }
+
+            if room.has_online_members() {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    online_member_count = room
+                        .members
+                        .values()
+                        .filter(|member| !member.offline)
+                        .count(),
+                    "room transfer freeze rejected because room has online members"
+                );
+                return Err("ROOM_TRANSFER_HAS_ONLINE_MEMBERS");
+            }
+
+            room.transfer_state.status = RoomTransferStatus::Frozen;
+            room.transfer_state.rollout_epoch = Some(rollout_epoch.to_string());
+            room.transfer_state.last_transfer_checksum = None;
+            room.transfer_state.bump_version();
+            room.wait_started_at = None;
+
+            info!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                room_version = room.transfer_state.room_version,
+                "room frozen for transfer"
+            );
+
+            (
+                room.transfer_state.status.migration_state(),
+                room.transfer_state.room_version,
+            )
+        };
+
+        self.stop_room_tick(room_id).await;
+        Ok((state, version))
+    }
+
+    pub async fn export_room_transfer(
+        &self,
+        rollout_epoch: &str,
+        room_id: &str,
+    ) -> Result<RoomTransferPayload, &'static str> {
+        let rollout_epoch = rollout_epoch.trim();
+        if rollout_epoch.is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+
+        let mut payload = {
+            let mut rooms = self.rooms.lock().await;
+            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+            match room.transfer_state.status {
+                RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {}
+                RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
+                RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
+                RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
+                _ => return Err("ROOM_TRANSFER_NOT_FROZEN"),
+            }
+
+            if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+            }
+
+            let policy = self.policies.resolve(&room.policy_id);
+            let current_frame_id = room.current_frame;
+            let last_applied_frame_id = room
+                .last_applied_inputs
+                .values()
+                .map(|input| input.frame_id)
+                .max()
+                .unwrap_or(current_frame_id);
+            let movement_state_json = room
+                .logic
+                .movement_recovery_state(None, MovementCorrectionReason::ControlTimeout)
+                .map(|state| {
+                    json!({
+                        "reason": "control_timeout",
+                        "frameId": state.frame_id,
+                        "entities": state.entities.len()
+                    })
+                    .to_string()
+                })
+                .unwrap_or_default();
+
+            let room_version = if room.transfer_state.status == RoomTransferStatus::Exported {
+                room.transfer_state.room_version
+            } else {
+                room.transfer_state.room_version.saturating_add(1)
+            };
+
+            RoomTransferPayload {
+                rollout_epoch: rollout_epoch.to_string(),
+                room_id: room.room_id.clone(),
+                room_version,
+                policy_id: room.policy_id.clone(),
+                owner_player_id: room.owner_player_id.clone(),
+                room_phase: room_phase_name(room.phase).to_string(),
+                current_frame_id,
+                last_applied_frame_id,
+                snapshot: Some(room.snapshot()),
+                recent_inputs: room_frame_inputs_from_history(room, current_frame_id),
+                waiting_frame_id: room.current_waiting_frame_id(),
+                waiting_inputs: room_frame_inputs_from_pending(
+                    room,
+                    room.current_waiting_frame_id(),
+                ),
+                movement_state_json,
+                logic_state_json: room.logic.get_serialized_state(),
+                runtime_timers_json: json!({
+                    "schema": "room-runtime-timers.v1",
+                    "hasEmptySince": room.empty_since.is_some(),
+                    "hasWaitStarted": room.wait_started_at.is_some(),
+                    "inputDelayFrames": policy.input_delay_frames,
+                    "snapshotIntervalFrames": policy.snapshot_interval_frames
+                })
+                .to_string(),
+                match_id: room.match_id.clone().unwrap_or_default(),
+                checksum: String::new(),
+            }
+        };
+
+        payload.checksum = room_transfer_checksum(&payload);
+
+        let mut rooms = self.rooms.lock().await;
+        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        match room.transfer_state.status {
+            RoomTransferStatus::Frozen => {
+                room.transfer_state.status = RoomTransferStatus::Exported;
+                room.transfer_state.room_version = payload.room_version;
+                room.transfer_state.last_transfer_checksum = Some(payload.checksum.clone());
+            }
+            RoomTransferStatus::Exported => {
+                if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                    return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+                }
+                if room.transfer_state.last_transfer_checksum.as_deref()
+                    != Some(payload.checksum.as_str())
+                {
+                    return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+                }
+            }
+            RoomTransferStatus::Retired => return Err("ROOM_TRANSFER_RETIRED"),
+            RoomTransferStatus::Importing => return Err("ROOM_TRANSFER_IMPORTING"),
+            RoomTransferStatus::OwnedByNew => return Err("ROOM_TRANSFER_OWNED_BY_NEW"),
+            RoomTransferStatus::Owned => return Err("ROOM_TRANSFER_NOT_FROZEN"),
+        }
+
+        info!(
+            room_id = room_id,
+            rollout_epoch = rollout_epoch,
+            checksum = %payload.checksum,
+            room_version = payload.room_version,
+            "room transfer payload exported"
+        );
+
+        Ok(payload)
+    }
+
+    pub async fn import_room_transfer(
+        &self,
+        payload: RoomTransferPayload,
+    ) -> Result<(String, u64), &'static str> {
+        validate_room_transfer_payload(&payload)?;
+        let room_id = payload.room_id.clone();
+        let checksum = payload.checksum.clone();
+        let rollout_epoch = payload.rollout_epoch.clone();
+        let source_room_version = payload.room_version;
+        let phase = parse_room_phase(&payload.room_phase)?;
+        let snapshot = payload
+            .snapshot
+            .clone()
+            .ok_or("ROOM_TRANSFER_MISSING_SNAPSHOT")?;
+
+        let mut rooms = self.rooms.lock().await;
+        if rooms.contains_key(&room_id) {
+            return Err("ROOM_TRANSFER_ROOM_CONFLICT");
+        }
+
+        let mut logic = self.logic_factory.create(&payload.policy_id);
+        logic.on_room_created(&room_id);
+        logic.restore_from_serialized_state(&payload.logic_state_json);
+
+        let mut room = Room::new(
+            room_id.clone(),
+            payload.owner_player_id.clone(),
+            payload.policy_id.clone(),
+            logic,
+        );
+        room.match_id = (!payload.match_id.is_empty()).then_some(payload.match_id.clone());
+        room.phase = phase;
+        room.current_frame = payload.current_frame_id;
+        room.last_snapshot_frame = payload.current_frame_id;
+        room.transfer_state.status = RoomTransferStatus::Importing;
+        room.transfer_state.rollout_epoch = Some(rollout_epoch.clone());
+        room.transfer_state.room_version = source_room_version.saturating_add(1);
+        room.transfer_state.last_transfer_checksum = Some(checksum.clone());
+
+        for member in snapshot.members {
+            let (sender, _receiver) = mpsc::channel(1);
+            room.members.insert(
+                member.player_id.clone(),
+                RoomMemberState {
+                    player_id: member.player_id,
+                    ready: member.ready,
+                    sender,
+                    offline: true,
+                    offline_since: Some(Instant::now()),
+                    role: if member.role == crate::pb::MemberRole::Observer as i32 {
+                        MemberRole::Observer
+                    } else {
+                        MemberRole::Player
+                    },
+                    syncing: false,
+                },
+            );
+        }
+
+        for input in payload.recent_inputs {
+            room.push_input_history(player_input_record_from_frame_input(input, true));
+        }
+        for input in payload.waiting_inputs {
+            room.upsert_pending_input(player_input_record_from_frame_input(input, true));
+        }
+        if !room.has_online_members() {
+            room.mark_empty();
+        }
+        room.transfer_state.status = RoomTransferStatus::OwnedByNew;
+
+        rooms.insert(room_id.clone(), room);
+        let room_count = rooms.len() as u64;
+        METRICS.set_room_count(room_count);
+        drop(rooms);
+
+        self.runtimes
+            .lock()
+            .await
+            .entry(room_id.clone())
+            .or_insert_with(RoomRuntime::default);
+
+        info!(
+            room_id = %room_id,
+            rollout_epoch = %rollout_epoch,
+            checksum = %checksum,
+            "room transfer payload imported"
+        );
+
+        Ok((checksum, source_room_version.saturating_add(1)))
+    }
+
+    pub async fn retire_transferred_room(
+        &self,
+        rollout_epoch: &str,
+        room_id: &str,
+        checksum: &str,
+    ) -> Result<(), &'static str> {
+        let rollout_epoch = rollout_epoch.trim();
+        if rollout_epoch.is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+        if checksum.trim().is_empty() {
+            return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+        }
+
+        {
+            let mut rooms = self.rooms.lock().await;
+            let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+            if room.transfer_state.status == RoomTransferStatus::Retired {
+                return Ok(());
+            }
+            if !matches!(
+                room.transfer_state.status,
+                RoomTransferStatus::Frozen | RoomTransferStatus::Exported
+            ) {
+                return Err("ROOM_TRANSFER_NOT_EXPORTED");
+            }
+            if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+                return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+            }
+            if room.transfer_state.last_transfer_checksum.as_deref() != Some(checksum) {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    expected = ?room.transfer_state.last_transfer_checksum,
+                    actual = checksum,
+                    "room transfer retire rejected due to checksum mismatch"
+                );
+                return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+            }
+
+            room.members.clear();
+            room.pending_inputs.clear();
+            room.wait_started_at = None;
+            room.transfer_state.status = RoomTransferStatus::Retired;
+            room.transfer_state.bump_version();
+
+            info!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                checksum = checksum,
+                "room retired after transfer"
+            );
+        }
+
+        self.stop_room_tick(room_id).await;
+        Ok(())
     }
 
     pub async fn broadcast_snapshot(
@@ -1032,6 +1410,16 @@ impl RoomManager {
         let mut runtimes = self.runtimes.lock().await;
         if let Some(runtime) = runtimes.get_mut(room_id) {
             runtime.tick_handle = Some(handle);
+        }
+    }
+
+    async fn stop_room_tick(&self, room_id: &str) {
+        let mut runtimes = self.runtimes.lock().await;
+        if let Some(runtime) = runtimes.get_mut(room_id) {
+            if let Some(handle) = runtime.tick_handle.take() {
+                handle.abort();
+            }
+            runtime.tick_running = false;
         }
     }
 
@@ -1088,6 +1476,10 @@ impl RoomManager {
         let room = rooms.get_mut(room_id)?;
 
         room.update_activity();
+
+        if room.transfer_state.status.rejects_room_mutation() {
+            return None;
+        }
 
         if room.phase != RoomPhase::InGame {
             return None;
@@ -1432,6 +1824,72 @@ fn room_frame_inputs_from_pending(room: &Room, frame_id: u32) -> Vec<FrameInput>
         .collect()
 }
 
+fn player_input_record_from_frame_input(
+    input: FrameInput,
+    is_synthetic: bool,
+) -> PlayerInputRecord {
+    PlayerInputRecord {
+        frame_id: input.frame_id,
+        player_id: input.player_id,
+        action: input.action,
+        payload_json: input.payload_json,
+        received_at: Instant::now(),
+        is_synthetic,
+    }
+}
+
+fn room_phase_name(phase: RoomPhase) -> &'static str {
+    match phase {
+        RoomPhase::Waiting => "waiting",
+        RoomPhase::InGame => "in_game",
+    }
+}
+
+fn parse_room_phase(value: &str) -> Result<RoomPhase, &'static str> {
+    match value {
+        "waiting" | "empty" | "ready" => Ok(RoomPhase::Waiting),
+        "in_game" => Ok(RoomPhase::InGame),
+        _ => Err("ROOM_TRANSFER_INVALID_PHASE"),
+    }
+}
+
+fn room_transfer_checksum(payload: &RoomTransferPayload) -> String {
+    let mut canonical = payload.clone();
+    canonical.checksum.clear();
+    let mut encoded = Vec::new();
+    canonical
+        .encode(&mut encoded)
+        .expect("room transfer payload encode failed");
+    format!("{:x}", Sha256::digest(&encoded))
+}
+
+fn validate_room_transfer_payload(payload: &RoomTransferPayload) -> Result<(), &'static str> {
+    if payload.rollout_epoch.trim().is_empty() {
+        return Err("INVALID_ROLLOUT_EPOCH");
+    }
+    if payload.room_id.trim().is_empty() {
+        return Err("ROOM_TRANSFER_INVALID_ROOM_ID");
+    }
+    if payload.policy_id.trim().is_empty() {
+        return Err("ROOM_TRANSFER_INVALID_POLICY");
+    }
+    if payload.owner_player_id.trim().is_empty() {
+        return Err("ROOM_TRANSFER_INVALID_OWNER");
+    }
+    if payload.snapshot.is_none() {
+        return Err("ROOM_TRANSFER_MISSING_SNAPSHOT");
+    }
+    if payload.checksum.trim().is_empty() {
+        return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+    }
+    let expected = room_transfer_checksum(payload);
+    if expected != payload.checksum {
+        return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+    }
+    parse_room_phase(&payload.room_phase)?;
+    Ok(())
+}
+
 fn synthetic_empty_input(frame_id: u32, player_id: &str) -> PlayerInputRecord {
     PlayerInputRecord {
         frame_id,
@@ -1519,6 +1977,7 @@ mod tests {
     struct RecordingRoomLogicFactory {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
         inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
+        restored_states: Arc<StdMutex<Vec<String>>>,
     }
 
     impl RecordingRoomLogicFactory {
@@ -1529,11 +1988,17 @@ mod tests {
         fn recorded_inputs(&self) -> Vec<(String, String, String)> {
             self.inputs.lock().unwrap().clone()
         }
+
+        fn restored_states(&self) -> Vec<String> {
+            self.restored_states.lock().unwrap().clone()
+        }
     }
 
     struct RecordingRoomLogic {
         ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
         inputs: Arc<StdMutex<Vec<(String, String, String)>>>,
+        restored_states: Arc<StdMutex<Vec<String>>>,
+        state: String,
     }
 
     impl RoomLogic for RecordingRoomLogic {
@@ -1548,6 +2013,15 @@ mod tests {
         fn on_tick(&mut self, frame_id: u32, _fps: u16, inputs: &[PlayerInputRecord]) {
             self.ticks.lock().unwrap().push((frame_id, inputs.to_vec()));
         }
+
+        fn get_serialized_state(&self) -> String {
+            self.state.clone()
+        }
+
+        fn restore_from_serialized_state(&mut self, state: &str) {
+            self.state = state.to_string();
+            self.restored_states.lock().unwrap().push(state.to_string());
+        }
     }
 
     impl RoomLogicFactory for RecordingRoomLogicFactory {
@@ -1555,6 +2029,8 @@ mod tests {
             Box::new(RecordingRoomLogic {
                 ticks: Arc::clone(&self.ticks),
                 inputs: Arc::clone(&self.inputs),
+                restored_states: Arc::clone(&self.restored_states),
+                state: "recording-state-v1".to_string(),
             })
         }
     }
@@ -1629,6 +2105,260 @@ mod tests {
             .unwrap();
 
         assert!(manager.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn freeze_empty_or_offline_room_for_transfer_succeeds() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+
+        let result = manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        assert_eq!(result.0, RoomMigrationState::FrozenForTransfer);
+        assert!(result.1 > 1);
+        assert_eq!(
+            manager
+                .accept_player_input("room-test", "player-a", 1, "move", "{}")
+                .await,
+            Err("ROOM_TRANSFER_FROZEN")
+        );
+    }
+
+    #[tokio::test]
+    async fn freeze_online_room_for_transfer_is_rejected() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let result = manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_HAS_ONLINE_MEMBERS"));
+    }
+
+    #[tokio::test]
+    async fn export_room_transfer_checksum_is_deterministic() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let payload = manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        assert!(!payload.checksum.is_empty());
+        assert_eq!(payload.checksum, room_transfer_checksum(&payload));
+        assert_eq!(payload.logic_state_json, "recording-state-v1");
+        assert_eq!(payload.snapshot.as_ref().unwrap().room_id, "room-test");
+    }
+
+    #[tokio::test]
+    async fn repeated_export_room_transfer_is_idempotent() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let first = manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let second = manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        assert_eq!(second.room_version, first.room_version);
+        assert_eq!(second.checksum, first.checksum);
+        assert_eq!(second.checksum, room_transfer_checksum(&second));
+    }
+
+    #[tokio::test]
+    async fn import_room_transfer_rejects_bad_checksum() {
+        let (source, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let mut payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        payload.checksum = "bad-checksum".to_string();
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory),
+        );
+
+        let result = target.import_room_transfer(payload).await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_CHECKSUM_MISMATCH"));
+        assert!(!target.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn import_room_transfer_restores_basic_room_state() {
+        let (source, _source_factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let checksum = payload.checksum.clone();
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory.clone()),
+        );
+
+        let imported = target.import_room_transfer(payload).await.unwrap();
+
+        assert_eq!(imported.0, checksum);
+        assert!(target.room_exists("room-test").await);
+        assert_eq!(
+            target_factory.restored_states(),
+            vec!["recording-state-v1".to_string()]
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        let snapshot = target
+            .reconnect_room("room-test", "player-a", tx)
+            .await
+            .unwrap()
+            .snapshot;
+        assert_eq!(snapshot.room_id, "room-test");
+    }
+
+    #[tokio::test]
+    async fn retire_transfer_rejects_checksum_mismatch() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let result = manager
+            .retire_transferred_room("epoch-1", "room-test", "wrong")
+            .await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_CHECKSUM_MISMATCH"));
+        assert!(manager.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn retired_room_rejects_later_mutations() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        manager
+            .retire_transferred_room("epoch-1", "room-test", &payload.checksum)
+            .await
+            .unwrap();
+
+        let (tx, _rx) = mpsc::channel(1024);
+        let join_result = manager
+            .join_room(
+                "room-test",
+                "player-b",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await;
+        assert_eq!(join_result.unwrap_err(), "ROOM_TRANSFER_RETIRED");
+
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+        assert_eq!(
+            manager
+                .reconnect_room("room-test", "player-a", reconnect_tx)
+                .await
+                .unwrap_err(),
+            "ROOM_TRANSFER_RETIRED"
+        );
+
+        assert_eq!(
+            manager
+                .accept_player_input("room-test", "player-a", 1, "move", "{}")
+                .await,
+            Err("ROOM_TRANSFER_RETIRED")
+        );
     }
 
     #[tokio::test]
@@ -2078,7 +2808,12 @@ mod tests {
             "room-test".to_string(),
             "player-a".to_string(),
             "default_match".to_string(),
-            Box::new(RecordingRoomLogic { ticks, inputs }),
+            Box::new(RecordingRoomLogic {
+                ticks,
+                inputs,
+                restored_states: Arc::new(StdMutex::new(Vec::new())),
+                state: "recording-state-v1".to_string(),
+            }),
         );
         room.members.insert(
             "player-a".to_string(),

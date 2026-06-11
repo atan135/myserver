@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::core::logic::RoomLogic;
-use crate::pb::{RoomMember, RoomSnapshot};
+use crate::pb::{RoomMember, RoomMigrationState, RoomSnapshot};
 
 #[derive(Clone)]
 pub struct OutboundMessage {
@@ -56,6 +56,74 @@ pub enum PendingInputUpsert {
 
 pub type PendingFrameInputs = BTreeMap<u32, BTreeMap<String, PlayerInputRecord>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomTransferStatus {
+    Owned,
+    Frozen,
+    Exported,
+    Importing,
+    OwnedByNew,
+    Retired,
+}
+
+impl RoomTransferStatus {
+    pub fn migration_state(self) -> RoomMigrationState {
+        match self {
+            RoomTransferStatus::Owned => RoomMigrationState::OwnedByOld,
+            RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {
+                RoomMigrationState::FrozenForTransfer
+            }
+            RoomTransferStatus::Importing => RoomMigrationState::ImportingToNew,
+            RoomTransferStatus::OwnedByNew => RoomMigrationState::OwnedByNew,
+            RoomTransferStatus::Retired => RoomMigrationState::RetiredOnOld,
+        }
+    }
+
+    pub fn rejects_room_mutation(self) -> bool {
+        matches!(
+            self,
+            RoomTransferStatus::Frozen
+                | RoomTransferStatus::Exported
+                | RoomTransferStatus::Importing
+                | RoomTransferStatus::Retired
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RoomTransferState {
+    pub status: RoomTransferStatus,
+    pub rollout_epoch: Option<String>,
+    pub room_version: u64,
+    pub last_transfer_checksum: Option<String>,
+}
+
+impl Default for RoomTransferState {
+    fn default() -> Self {
+        Self {
+            status: RoomTransferStatus::Owned,
+            rollout_epoch: None,
+            room_version: 1,
+            last_transfer_checksum: None,
+        }
+    }
+}
+
+impl RoomTransferState {
+    pub fn bump_version(&mut self) {
+        self.room_version = self.room_version.saturating_add(1);
+    }
+
+    pub fn mutation_error_code(&self) -> &'static str {
+        match self.status {
+            RoomTransferStatus::Retired => "ROOM_TRANSFER_RETIRED",
+            RoomTransferStatus::Frozen | RoomTransferStatus::Exported => "ROOM_TRANSFER_FROZEN",
+            RoomTransferStatus::Importing => "ROOM_TRANSFER_IMPORTING",
+            _ => "ROOM_TRANSFER_UNAVAILABLE",
+        }
+    }
+}
+
 pub struct Room {
     pub room_id: String,
     pub match_id: Option<String>,
@@ -75,6 +143,7 @@ pub struct Room {
     pub missing_input_streaks: HashMap<String, u32>,
     pub wait_started_at: Option<Instant>,
     pub last_snapshot_frame: u32,
+    pub transfer_state: RoomTransferState,
 }
 
 impl Room {
@@ -104,13 +173,14 @@ impl Room {
             missing_input_streaks: HashMap::new(),
             wait_started_at: None,
             last_snapshot_frame: 0,
+            transfer_state: RoomTransferState::default(),
         }
     }
 
     pub fn snapshot(&self) -> RoomSnapshot {
         use crate::pb::MemberRole as PbMemberRole;
 
-        let members = self
+        let mut members = self
             .members
             .values()
             .map(|member| {
@@ -126,7 +196,8 @@ impl Room {
                     role,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        members.sort_by(|left, right| left.player_id.cmp(&right.player_id));
 
         RoomSnapshot {
             room_id: self.room_id.clone(),

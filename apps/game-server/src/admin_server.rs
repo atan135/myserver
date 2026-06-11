@@ -19,6 +19,11 @@ use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
 use crate::core::room::OutboundMessage;
 use crate::pb::{ErrorRes, GameMessagePush, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
+use crate::pb::{
+    ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
+    FreezeRoomForTransferRes, ImportRoomTransferReq, ImportRoomTransferRes,
+    RetireTransferredRoomReq, RetireTransferredRoomRes,
+};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::server::RuntimeConfig;
 
@@ -347,6 +352,136 @@ async fn handle_admin_connection(
                     .await?;
                 }
             },
+            Some(MessageType::FreezeRoomForTransferReq) => {
+                let request = packet
+                    .decode_body::<FreezeRoomForTransferReq>("INVALID_FREEZE_ROOM_TRANSFER_BODY")
+                    .map_err(std::io::Error::other)?;
+
+                let result = room_manager
+                    .freeze_room_for_transfer(&request.rollout_epoch, &request.room_id)
+                    .await;
+
+                let (ok, error_code, migration_state, room_version) = match result {
+                    Ok((migration_state, room_version)) => {
+                        (true, String::new(), migration_state as i32, room_version)
+                    }
+                    Err(error_code) => (false, error_code.to_string(), 0, 0),
+                };
+
+                write_message(
+                    &mut writer,
+                    MessageType::FreezeRoomForTransferRes,
+                    packet.header.seq,
+                    &FreezeRoomForTransferRes {
+                        ok,
+                        room_id: request.room_id,
+                        error_code,
+                        migration_state,
+                        room_version,
+                    },
+                )
+                .await?;
+            }
+            Some(MessageType::ExportRoomTransferReq) => {
+                let request = packet
+                    .decode_body::<ExportRoomTransferReq>("INVALID_EXPORT_ROOM_TRANSFER_BODY")
+                    .map_err(std::io::Error::other)?;
+
+                let result = room_manager
+                    .export_room_transfer(&request.rollout_epoch, &request.room_id)
+                    .await;
+
+                let response = match result {
+                    Ok(payload) => ExportRoomTransferRes {
+                        ok: true,
+                        room_id: request.room_id,
+                        error_code: String::new(),
+                        checksum: payload.checksum.clone(),
+                        payload: Some(payload),
+                    },
+                    Err(error_code) => ExportRoomTransferRes {
+                        ok: false,
+                        room_id: request.room_id,
+                        error_code: error_code.to_string(),
+                        checksum: String::new(),
+                        payload: None,
+                    },
+                };
+
+                write_message(
+                    &mut writer,
+                    MessageType::ExportRoomTransferRes,
+                    packet.header.seq,
+                    &response,
+                )
+                .await?;
+            }
+            Some(MessageType::ImportRoomTransferReq) => {
+                let request = packet
+                    .decode_body::<ImportRoomTransferReq>("INVALID_IMPORT_ROOM_TRANSFER_BODY")
+                    .map_err(std::io::Error::other)?;
+
+                let result = match request.payload {
+                    Some(payload) => {
+                        let room_id = payload.room_id.clone();
+                        room_manager
+                            .import_room_transfer(payload)
+                            .await
+                            .map(|(checksum, room_version)| (room_id, checksum, room_version))
+                    }
+                    None => Err("ROOM_TRANSFER_MISSING_PAYLOAD"),
+                };
+
+                let response = match result {
+                    Ok((room_id, checksum, room_version)) => ImportRoomTransferRes {
+                        ok: true,
+                        room_id,
+                        error_code: String::new(),
+                        checksum,
+                        room_version,
+                    },
+                    Err(error_code) => ImportRoomTransferRes {
+                        ok: false,
+                        room_id: String::new(),
+                        error_code: error_code.to_string(),
+                        checksum: String::new(),
+                        room_version: 0,
+                    },
+                };
+
+                write_message(
+                    &mut writer,
+                    MessageType::ImportRoomTransferRes,
+                    packet.header.seq,
+                    &response,
+                )
+                .await?;
+            }
+            Some(MessageType::RetireTransferredRoomReq) => {
+                let request = packet
+                    .decode_body::<RetireTransferredRoomReq>("INVALID_RETIRE_ROOM_TRANSFER_BODY")
+                    .map_err(std::io::Error::other)?;
+
+                let result = room_manager
+                    .retire_transferred_room(
+                        &request.rollout_epoch,
+                        &request.room_id,
+                        &request.checksum,
+                    )
+                    .await;
+
+                write_message(
+                    &mut writer,
+                    MessageType::RetireTransferredRoomRes,
+                    packet.header.seq,
+                    &RetireTransferredRoomRes {
+                        ok: result.is_ok(),
+                        room_id: request.room_id,
+                        error_code: result.err().unwrap_or_default().to_string(),
+                    },
+                )
+                .await?;
+            }
             Some(_) => {
                 write_error(
                     &mut writer,

@@ -203,34 +203,39 @@
 
 ### 4.2 room 冻结
 
-- [ ] 为 room 增加 `DrainingOnOld`、`FrozenForTransfer` 等内部状态。
-- [ ] 实现 room 冻结入口。
-- [ ] 冻结时必须同时做到:
+- [x] 为 room 增加最小 transfer 状态：`Owned`、`Frozen`、`Exported`、`Importing`、`OwnedByNew`、`Retired`。
+- [x] 实现 room 冻结入口。
+- [x] 冻结时最小实现已做到:
   - 拒绝新加入
   - 拒绝新输入
   - 停止 tick
-  - 停止 NPC/怪物/行为树推进
-  - 停止新的定时器推进
-- [ ] 冻结后产出只读的导出快照上下文。
+  - 拒绝开始/结束游戏等会改变 room 状态的操作
+- [ ] 后续玩法系统补齐后，继续确认 NPC/怪物/行为树和独立 timer/scheduler 在冻结点停止推进。
+- [x] 冻结后产出只读的导出快照上下文。
+
+当前实现说明：`freeze` 只允许没有在线成员的 room。有人在线房会返回 `ROOM_TRANSFER_HAS_ONLINE_MEMBERS`。这代表当前只支持空房/全员离线的低风险基础 transfer，不支持有人房无感迁移。
 
 ### 4.3 旧服导出接口
 
-- [ ] 在 internal/admin 通道中增加 `FreezeRoomForTransferReq/Res`。（仅协议预留）
-- [ ] 在 internal/admin 通道中增加 `ExportRoomTransferReq/Res`。（仅协议预留）
-- [ ] 导出结果包含:
+- [x] 在 internal/admin 通道中增加 `FreezeRoomForTransferReq/Res`。
+- [x] 在 internal/admin 通道中增加 `ExportRoomTransferReq/Res`。
+- [x] 导出结果包含当前可取得的:
   - room 基础信息
   - frame 与输入窗口
-  - logic state
-  - runtime timer
-  - movement/combat state
+  - `RoomLogic::get_serialized_state()` 轻量 logic state
+  - runtime timer 摘要 JSON
+  - movement recovery 摘要 JSON
   - checksum
-- [ ] 导出失败时返回明确错误码。
+- [x] 导出失败时返回明确错误码。
+
+限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。movement/combat/NPC 等完整玩法状态尚未进入独立 transfer trait。
 
 ### 4.4 旧服退役接口
 
-- [ ] 增加 `RetireTransferredRoomReq/Res`。（仅协议预留）
-- [ ] 只有在新服导入成功并确认 route 切换后，旧服才能真正 retire room。
-- [ ] retire 后从旧服内存中删除 room，或标记为不可再恢复的 retired 状态。
+- [x] 增加 `RetireTransferredRoomReq/Res`。
+- [x] retire 要求 room 已 frozen/exported，且请求 checksum 与最近 export checksum 一致。
+- [x] retire 后保留本地 tombstone 状态，清空成员和 pending input，并拒绝后续 join/reconnect/input/start/end。
+- [ ] 后续 proxy route 切换确认落地后，再由控制面保证“新服导入成功并确认 route 切换后才 retire”。
 
 完成标准:
 
@@ -238,20 +243,22 @@
 
 ## 5. M3 new_server 任务
 
-当前状态（截至 `2026-05-19`）:
+当前状态（截至 `2026-06-11`）:
 
-- `ImportRoomTransferReq/Res` 只在 proto 和消息枚举中出现，未看到 `game-server` 侧导入处理。
+- `ImportRoomTransferReq/Res` 已接入 `game-server` internal/admin 通道，能校验 checksum、拒绝 room_id 冲突，并创建同 room_id 的最小可运行 room；导入过程中短暂处于 `Importing`，完成后进入 `OwnedByNew`。
+- 当前导入只恢复 policy、room snapshot、frame、recent/waiting inputs 和 `RoomLogic::restore_from_serialized_state()` 轻量状态；导入成员统一标记为 offline，不宣称支持有人房无感迁移。
 - `ConfirmRoomOwnershipReq/Res` 还未进入 `packages/proto`。
 
 ### 5.1 room 导入接口
 
-- [ ] 在 internal/admin 通道中增加 `ImportRoomTransferReq/Res`。（仅协议预留）
-- [ ] 新服收到导入请求时，使用相同 `room_id` 创建 room。
-- [ ] 导入后校验:
+- [x] 在 internal/admin 通道中增加 `ImportRoomTransferReq/Res`。
+- [x] 新服收到导入请求时，使用相同 `room_id` 创建 room。
+- [x] 导入时校验:
   - `room_id`
   - `rollout_epoch`
-  - `frame_id`
   - `checksum`
+- [x] 导入时校验 `room_id` 不冲突、snapshot/policy/owner/phase 等必要字段可用。
+- [ ] 后续补齐 schema/version 兼容判断和完整玩法 transfer trait。
 
 ### 5.2 owner 切换确认
 
@@ -305,10 +312,11 @@
 
 ## 7. M5 RoomTransferPayload 与玩法运行态迁移任务
 
-当前状态（截至 `2026-05-19`）:
+当前状态（截至 `2026-06-11`）:
 
 - 只完成了 `RoomTransferPayload` 的协议结构定义。
-- 尚未看到 export/import 运行态的 trait、旧服导出、新服导入和玩法恢复逻辑。
+- `game-server` 已完成 room freeze/export/import/retire 的最小闭环，并有 `RoomManager` 单元测试覆盖。
+- 尚未完成独立 transfer trait、完整 movement/combat/NPC/timer 状态迁移，也没有 proxy route 仲裁或同连接迁移。
 
 ### 7.1 通用 payload 结构
 

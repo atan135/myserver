@@ -195,6 +195,8 @@ RoomRouteRecord {
 
 payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
+当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证。它不包含 `game-proxy` route 仲裁、redirect/reconnect 闭环、L7 relay、同连接 upstream swap，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
+
 ## 9. 两阶段迁移路线
 
 ### 9.1 阶段一：redirect/reconnect 闭环

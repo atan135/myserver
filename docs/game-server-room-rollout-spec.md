@@ -314,6 +314,15 @@ room 只有满足以下条件时，才允许从旧服切到新服:
 9. old_server 将 room 标记为 RetiredOnOld 并删除本地实例
 ```
 
+当前实现边界（截至 `2026-06-11`）：
+
+- `game-server` 已在已鉴权 internal/admin 通道接入 `FreezeRoomForTransfer`、`ExportRoomTransfer`、`ImportRoomTransfer`、`RetireTransferredRoom`。
+- `freeze` 只允许没有在线成员的 room；有人在线时返回 `ROOM_TRANSFER_HAS_ONLINE_MEMBERS`。这用于空房或全员离线的低风险基础 transfer，不是有人房无感迁移。
+- `export` 会生成包含 room 基础信息、snapshot、recent inputs、waiting inputs、policy、owner、phase、match_id、轻量 `logic_state_json`、runtime timer 摘要和 checksum 的 `RoomTransferPayload`。
+- `import` 会校验 checksum、`room_id` 冲突和必要字段，并创建同 `room_id` 的最小可运行 room；导入成员统一标记为 offline，等待后续 route/reconnect 控制流接入。
+- `retire` 当前选择保留 tombstone，而不是物理删除 room：旧房清空成员和 pending input，进入 retired 状态，并拒绝 join/reconnect/input/start/end。这样可以保留最近 checksum 与状态，便于幂等和排错。
+- 当前实现没有改 `game-proxy` route 仲裁，没有实现 L7 relay 或同连接 upstream swap，也没有宣称完整恢复 movement/combat/NPC/AI/timer 状态。
+
 ### 10.2 冻结必须做到的事
 
 冻结 room 时，`old_server` 必须同时做到:
@@ -331,6 +340,8 @@ room 只有满足以下条件时，才允许从旧服切到新服:
 ### 11.1 设计原则
 
 `RoomTransferPayload` 必须是“可恢复出同一 room 运行态”的完整数据，而不是展示用快照。
+
+当前最小实现仍使用 `RoomLogic::get_serialized_state()` / `restore_from_serialized_state()` 承载轻量玩法状态。这只是为控制面闭环打基础，不能等同于完整玩法迁移。后续支持真实玩法迁移时，仍应补独立的 transfer trait，并对未实现完整迁移能力的 room logic 返回 `UNSUPPORTED_ROOM_TRANSFER` 或等价错误。
 
 ### 11.2 最小字段
 
@@ -357,6 +368,8 @@ RoomTransferPayload {
   checksum,
 }
 ```
+
+当前 checksum 规则：导出端清空 `checksum` 字段后，对 `RoomTransferPayload` 的 protobuf 编码计算 SHA-256 hex；导入端按同样规则复算并比较。为减少非确定性，`RoomSnapshot.members` 在生成时按 `player_id` 排序。
 
 ### 11.3 必须包含的运行态
 
@@ -435,7 +448,7 @@ RoomTransferPayload {
 
 ### 13.2 old_server 需要新增的内部接口
 
-建议新增内部协议:
+已在 `game-server` 已鉴权 internal/admin 通道接入:
 
 - `FreezeRoomForTransferReq`
 - `FreezeRoomForTransferRes`
@@ -446,10 +459,13 @@ RoomTransferPayload {
 
 ### 13.3 new_server 需要新增的内部接口
 
-建议新增内部协议:
+已在 `game-server` 已鉴权 internal/admin 通道接入:
 
 - `ImportRoomTransferReq`
 - `ImportRoomTransferRes`
+
+仍待新增或确认:
+
 - `ConfirmRoomOwnershipReq`
 - `ConfirmRoomOwnershipRes`
 
