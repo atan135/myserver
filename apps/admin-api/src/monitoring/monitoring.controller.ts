@@ -2,7 +2,7 @@ import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Roles } from "../auth/roles.decorator.js";
+import { Permissions } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { MonitoringService } from "./monitoring.service.js";
 
@@ -14,19 +14,19 @@ export class MonitoringController {
   constructor(private readonly monitoringService: MonitoringService) {}
 
   @Get("services")
-  @Roles("viewer", "operator", "admin")
+  @Permissions("monitoring.read")
   services() {
     return this.monitoringService.services();
   }
 
   @Get("services/:name/metrics")
-  @Roles("viewer", "operator", "admin")
+  @Permissions("monitoring.read")
   metrics(@Param("name") name: string, @Query("window") window = "5m") {
     return this.monitoringService.metrics(name, window);
   }
 
   @Post("archive")
-  @Roles("admin")
+  @Permissions("monitoring.archive")
   @HttpCode(HttpStatus.OK)
   archive() {
     return this.monitoringService.archive();

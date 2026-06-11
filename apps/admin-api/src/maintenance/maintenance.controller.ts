@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Post, Req, UseGuar
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Roles } from "../auth/roles.decorator.js";
+import { Permissions } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest } from "../common/http-exception.js";
@@ -37,14 +37,14 @@ export class MaintenanceController {
   ) {}
 
   @Get()
-  @Roles("viewer", "operator", "admin")
+  @Permissions("maintenance.read")
   async getStatus() {
     const status = await this.adminStore.getMaintenanceStatus();
     return { ok: true, ...status };
   }
 
   @Post()
-  @Roles("admin")
+  @Permissions("maintenance.write")
   @HttpCode(HttpStatus.OK)
   async setStatus(@Body() body: any, @Req() req: any) {
     const { enabled, reason } = body || {};

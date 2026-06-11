@@ -2,7 +2,7 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req, UseGuards } 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Roles } from "../auth/roles.decorator.js";
+import { Permissions } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
@@ -87,7 +87,7 @@ export class GmController {
   }
 
   @Post("broadcast")
-  @Roles("operator", "admin")
+  @Permissions("gm.broadcast")
   @HttpCode(HttpStatus.OK)
   async broadcast(@Body() body: any, @Req() req: any) {
     const { title, content, sender } = body || {};
@@ -120,7 +120,7 @@ export class GmController {
   }
 
   @Post("send-item")
-  @Roles("operator", "admin")
+  @Permissions("gm.send_item")
   @HttpCode(HttpStatus.OK)
   async sendItem(@Body() body: any, @Req() req: any) {
     const { playerId, itemId, itemCount, reason } = body || {};
@@ -157,7 +157,7 @@ export class GmController {
   }
 
   @Post("kick-player")
-  @Roles("operator", "admin")
+  @Permissions("gm.kick_player")
   @HttpCode(HttpStatus.OK)
   async kickPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, reason } = body || {};
@@ -195,7 +195,7 @@ export class GmController {
   }
 
   @Post("ban-player")
-  @Roles("admin")
+  @Permissions("gm.ban_player")
   @HttpCode(HttpStatus.OK)
   async banPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, durationSeconds, reason } = body || {};

@@ -2,7 +2,7 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGu
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Roles } from "../auth/roles.decorator.js";
+import { Permissions } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest, notFound } from "../common/http-exception.js";
@@ -94,7 +94,7 @@ export class AdminsController {
   ) {}
 
   @Post(":adminId/revoke-tokens")
-  @Roles("admin")
+  @Permissions("admins.revoke_tokens")
   @HttpCode(HttpStatus.OK)
   async revokeTokens(@Param("adminId") adminIdParam: string, @Body() body: any, @Req() req: any) {
     let adminId: string;
@@ -164,7 +164,7 @@ export class AdminsController {
   }
 
   @Post(":adminId/reset-password")
-  @Roles("admin")
+  @Permissions("admins.reset_password")
   @HttpCode(HttpStatus.OK)
   async resetPassword(@Param("adminId") adminIdParam: string, @Body() body: any, @Req() req: any) {
     let adminId: string;

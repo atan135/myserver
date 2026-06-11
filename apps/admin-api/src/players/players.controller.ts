@@ -2,7 +2,7 @@ import { Body, Controller, Get, Inject, Param, Put, Query, Req, UseGuards } from
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Roles } from "../auth/roles.decorator.js";
+import { Permissions, roleHasPermission } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest, forbidden, notFound } from "../common/http-exception.js";
@@ -27,7 +27,7 @@ export class PlayersController {
   ) {}
 
   @Get()
-  @Roles("viewer", "operator", "admin")
+  @Permissions("players.read")
   async list(@Query() query: any) {
     const { login_name, guest_id, status, limit = 50, offset = 0 } = query;
 
@@ -55,7 +55,7 @@ export class PlayersController {
   }
 
   @Get(":playerId")
-  @Roles("viewer", "operator", "admin")
+  @Permissions("players.read")
   async detail(@Param("playerId") playerId: string) {
     const player = await this.adminStore.findPlayerById(playerId);
     if (!player) {
@@ -66,7 +66,7 @@ export class PlayersController {
   }
 
   @Put(":playerId/status")
-  @Roles("operator", "admin")
+  @Permissions("players.status.update")
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
     const { status } = body || {};
 
@@ -74,8 +74,8 @@ export class PlayersController {
       throw badRequest("INVALID_STATUS", "status must be active, disabled, or banned");
     }
 
-    if (status === "banned" && req.admin.role !== "admin") {
-      throw forbidden("INSUFFICIENT_ROLE", "Only admin can ban players");
+    if (status === "banned" && !roleHasPermission(req.admin.role, "players.ban")) {
+      throw forbidden("INSUFFICIENT_PERMISSION", "Insufficient permission");
     }
 
     const player = await this.adminStore.findPlayerById(playerId);

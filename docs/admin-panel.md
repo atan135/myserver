@@ -95,25 +95,42 @@ npm run dev:admin-web
 | viewer | 查看概览、日志、玩家信息、监控 |
 | operator | viewer + 玩家状态调整 + GM 广播/发道具/踢人 |
 | admin | operator + 封禁玩家 + 维护模式切换 + 管理员 token 生命周期操作 |
+| super_admin | 代码兼容的超级管理员角色，拥有全部权限；当前默认初始化管理员仍是 `admin` |
 
 ### 当前实现现状
 
 - `admin-web` 的菜单和前端路由按角色做了显示与跳转限制
 - `GM.vue` 页面中“封禁玩家”表单只对 `admin` 显示
 - `admin-api` 当前所有 `/api/v1/*` 接口都通过 NestJS Guard 做 JWT 校验
-- `admin-api` 已通过 `RolesGuard` 和 `@Roles()` 对审计、玩家、GM、维护模式和监控接口做后端角色校验
+- `admin-api` 已通过 `RolesGuard` 和 `@Permissions()` 对审计、玩家、GM、维护模式、监控和管理员 token 生命周期接口做后端权限校验
+
+第一阶段后端权限矩阵集中定义在 `apps/admin-api/src/auth/roles.decorator.ts`，仍基于 `admin_accounts.role` 字段，不引入新的权限表或迁移：
+
+| 权限类别 | 权限 | viewer | operator | admin / super_admin |
+|----------|------|--------|----------|---------------------|
+| 只读审计 | `audit.read`、`security.read` | 是 | 是 | 是 |
+| 玩家只读 | `players.read` | 是 | 是 | 是 |
+| 玩家管理 | `players.status.update` | 否 | 是 | 是 |
+| 玩家封禁 | `players.ban` | 否 | 否 | 是 |
+| GM 操作 | `gm.broadcast`、`gm.send_item`、`gm.kick_player` | 否 | 是 | 是 |
+| GM 封禁 | `gm.ban_player` | 否 | 否 | 是 |
+| 维护模式 | `maintenance.read` | 是 | 是 | 是 |
+| 维护写操作 | `maintenance.write` | 否 | 否 | 是 |
+| 监控 | `monitoring.read` | 是 | 是 | 是 |
+| 监控归档 | `monitoring.archive` | 否 | 否 | 是 |
+| 管理员管理 | `admins.revoke_tokens`、`admins.reset_password` | 否 | 否 | 是 |
 
 因此当前权限控制现状应理解为：
 
 - 前端页面级权限限制已生效
-- 后端接口级角色校验已生效
+- 后端接口级权限矩阵已生效；声明了 `@Permissions()` 的接口按权限判定，未迁移的旧 `@Roles()` 元数据仍由 Guard 兼容
 - 管理员 JWT 已包含 `jti` 和 `tokenVersion`，后端通过 Redis 管理员 session 校验实现登出撤销；Guard 每次仍会查库确认管理员存在且 `status=active`
 - 管理员 token 撤销和密码重置接口已通过 bump Redis token version 让目标管理员全部旧 token 失效
 - 管理员登录失败已按 username + client IP 维度计数和锁定，并写入 `security_audit_logs`
 - 审计 IP 与控制面保护已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For` 或 `X-Forwarded-Proto`
 - `admin-api` 支持请求级 HTTPS/TLS 强制和来源 IP allowlist；生产仍必须通过运营网段、堡垒机、VPN 或独立管理入口做网络隔离
 
-如果后续补上更细粒度权限矩阵，本文应同步更新。
+当前仍未做数据库化权限、按资源范围授权、前端与后端共用权限枚举、权限变更审计查询和审批流。
 
 ## 数据库表
 
@@ -514,8 +531,8 @@ npm run dev:admin-web
 当前实现备注：
 
 - 这组监控接口已挂 `JwtAuthGuard` 和 `RolesGuard`
-- `GET` 监控查询允许 `viewer` / `operator` / `admin`
-- `POST /api/admin/monitoring/archive` 仅允许 `admin`
+- `GET` 监控查询要求 `monitoring.read`
+- `POST /api/admin/monitoring/archive` 要求 `monitoring.archive`
 
 ## 前端页面说明
 
@@ -551,7 +568,7 @@ npm run dev:admin-web
 - 踢出玩家
 - 封禁玩家
 
-其中封禁表单只在前端对 `admin` 角色显示；后端也通过 `@Roles("admin")` 校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
+其中封禁表单只在前端对 `admin` 角色显示；后端通过 `gm.ban_player` 权限校验。GM 踢人/封禁已通过 NATS session kick 跨 `game-server` 实例断开在线连接，legacy 单实例 admin TCP 调用仍保留为兼容辅助；GM 封禁会持久化账号状态和 `ban_expires_at`，限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
 ### 服务监控页
 
@@ -626,6 +643,6 @@ ADMIN_DISPLAY_NAME=Administrator
 5. 登录失败、账号锁定等安全事件会写入 `security_audit_logs`，关键后台操作会写入 `admin_audit_logs`。
 6. 审计 IP 解析遵循 `TRUST_PROXY` / `TRUSTED_PROXIES`，生产如有反向代理需要显式配置可信代理地址。
 7. 安全事件通过 `security_audit_logs` 提供检索。
-8. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与角色校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
-9. 当前后端已有角色校验、请求级 TLS 强制和来源 IP allowlist；这些代码侧保护不替代安全组、防火墙、VPN 或堡垒机隔离。
-10. 更细粒度权限矩阵仍需继续推进。
+8. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与权限校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
+9. 当前后端已有第一阶段权限矩阵、请求级 TLS 强制和来源 IP allowlist；这些代码侧保护不替代安全组、防火墙、VPN 或堡垒机隔离。
+10. 权限系统仍需继续推进到数据库化权限、按资源范围授权和权限变更审计。
