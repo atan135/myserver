@@ -85,6 +85,8 @@ pub struct PlayerInputReq {
     pub action: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub payload_json: ::prost::alloc::string::String,
+    #[prost(int64, tag = "4")]
+    pub client_timestamp_ms: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlayerInputRes {
@@ -113,6 +115,8 @@ pub struct MoveInputReq {
     pub client_y: f32,
     #[prost(uint32, tag = "8")]
     pub client_frame_id: u32,
+    #[prost(int64, tag = "9")]
+    pub client_timestamp_ms: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MoveInputRes {

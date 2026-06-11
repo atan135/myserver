@@ -1032,6 +1032,18 @@ async fn apply_runtime_config(
             runtime.player_msg_rate_max = parsed;
             Ok(())
         }
+        "input_timestamp_required" => {
+            runtime.input_timestamp_required = parse_bool_config_value(value)?;
+            Ok(())
+        }
+        "input_timestamp_max_skew_ms" => {
+            let parsed = value.parse::<u64>().map_err(|_| "INVALID_CONFIG_VALUE")?;
+            if parsed > 300_000 {
+                return Err("INVALID_CONFIG_VALUE");
+            }
+            runtime.input_timestamp_max_skew_ms = parsed;
+            Ok(())
+        }
         "drain_mode" | "drain_mode_enabled" => {
             let parsed = parse_bool_config_value(value)?;
             let previous = runtime.drain_mode_enabled;
@@ -1176,6 +1188,8 @@ mod tests {
             msg_rate_max: 0,
             player_msg_rate_window_ms: 1000,
             player_msg_rate_max: 0,
+            input_timestamp_required: false,
+            input_timestamp_max_skew_ms: 5000,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         }))
@@ -1417,6 +1431,47 @@ mod tests {
         assert_eq!(runtime.msg_rate_max, 20);
         assert_eq!(runtime.player_msg_rate_window_ms, 750);
         assert_eq!(runtime.player_msg_rate_max, 30);
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_updates_input_timestamp_window() {
+        let runtime_config = runtime_config_fixture();
+
+        apply_runtime_config(&runtime_config, "input_timestamp_required", "true")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "input_timestamp_max_skew_ms", "300000")
+            .await
+            .unwrap();
+
+        let runtime = *runtime_config.read().await;
+        assert!(runtime.input_timestamp_required);
+        assert_eq!(runtime.input_timestamp_max_skew_ms, 300_000);
+
+        apply_runtime_config(&runtime_config, "input_timestamp_required", "off")
+            .await
+            .unwrap();
+        apply_runtime_config(&runtime_config, "input_timestamp_max_skew_ms", "0")
+            .await
+            .unwrap();
+
+        let runtime = *runtime_config.read().await;
+        assert!(!runtime.input_timestamp_required);
+        assert_eq!(runtime.input_timestamp_max_skew_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_config_rejects_invalid_input_timestamp_window() {
+        let runtime_config = runtime_config_fixture();
+
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "input_timestamp_required", "maybe").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
+        assert_eq!(
+            apply_runtime_config(&runtime_config, "input_timestamp_max_skew_ms", "300001").await,
+            Err("INVALID_CONFIG_VALUE")
+        );
     }
 
     #[tokio::test]

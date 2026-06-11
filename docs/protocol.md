@@ -245,6 +245,17 @@
 - 当前该消息既可由已鉴权玩家 TCP 请求触发，也可由 `match-service` 通过 `game-server` 内部 socket 发送
 - `CreateMatchedRoomRes` 会返回实际创建后的 `room_id` 与初始 `RoomSnapshot`
 
+#### `PlayerInputReq`
+
+- `frame_id: uint32`
+- `action: string`
+- `payload_json: string`
+- `client_timestamp_ms: int64`
+
+说明：
+
+- `client_timestamp_ms` 与 `MoveInputReq` 使用同一套 `game-server` 可配置窗口校验；默认兼容旧客户端。
+
 #### `MoveInputReq`
 
 - `frame_id: uint32`
@@ -255,12 +266,15 @@
 - `client_x: float`
 - `client_y: float`
 - `client_frame_id: uint32`
+- `client_timestamp_ms: int64`
 
 说明：
 
 - `MOVE_INPUT_TYPE_MOVE_DIR` 和 `MOVE_INPUT_TYPE_MOVE_STOP` 是移动控制输入，客户端移动期间应持续发送。
 - `MOVE_INPUT_TYPE_FACE_TO` 只表示朝向变化，不会让服务端继续保持移动。
 - 服务端会拒绝非有限数值或超出安全范围的方向、客户端位置字段。
+- `client_timestamp_ms` 已在 `game-server` 落地可配置窗口校验，默认兼容旧客户端；字段缺失或为 `0` 时默认跳过校验，`INPUT_TIMESTAMP_REQUIRED=true` 时拒绝并返回 `INPUT_TIMESTAMP_REQUIRED`。
+- 当 `client_timestamp_ms > 0` 且 `INPUT_TIMESTAMP_MAX_SKEW_MS > 0` 时，服务端会按当前 Unix 毫秒时间校验绝对偏差，超出窗口返回 `INPUT_TIMESTAMP_SKEW`；`INPUT_TIMESTAMP_MAX_SKEW_MS=0` 表示只要求字段存在、不做偏差窗口校验。
 - 连续缺少真实移动控制输入达到房间策略阈值后，服务端会强制停步，并通过 `MovementSnapshotPush.reason_code = MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT` 下发权威状态。
 
 #### `MovementSnapshotPush`
@@ -339,7 +353,7 @@
 - `game-proxy` 默认 `PROXY_MSG_RATE_MAX=0` 不启用单连接入站消息频率限制；配置为正整数后，超频消息会收到 `MSG_RATE_EXCEEDED`，当前不断开连接，也不计入预鉴权失败次数
 - `game-server` 默认 `MSG_RATE_MAX=0` 不启用单连接消息频率限制；配置为正整数后，超频消息会收到 `MSG_RATE_EXCEEDED`，当前不断开连接
 - 一个连接同一时刻只能处于一个房间上下文
-- `PlayerInputReq` / `MoveInputReq` 只应在允许的对局状态中发送
+- `PlayerInputReq` / `MoveInputReq` 只应在允许的对局状态中发送；两者都带 `client_timestamp_ms`，`game-server` 默认兼容旧客户端，配置要求时间戳或窗口校验失败时不会进入玩法层
 - 重连和观战走独立消息，不复用普通 `RoomJoinReq`
 
 ---

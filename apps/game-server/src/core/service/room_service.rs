@@ -4,6 +4,7 @@ use tracing::{info, warn};
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
 use crate::core::system::movement::player_input_from_move_req;
+use crate::server::{RuntimeConfig, current_unix_ms};
 use crate::pb::{
     CreateMatchedRoomReq, CreateMatchedRoomRes, MoveInputReq, MoveInputRes, PlayerInputReq,
     PlayerInputRes, RoomEndReq, RoomEndRes, RoomJoinAsObserverReq, RoomJoinAsObserverRes,
@@ -433,6 +434,29 @@ pub async fn handle_player_input(
         }
     };
 
+    if let Err(error_code) =
+        validate_input_timestamp(&*services.runtime_config.read().await, request.client_timestamp_ms)
+    {
+        warn!(
+            room_id = %room_id,
+            player_id = %player_id,
+            frame_id = request.frame_id,
+            client_timestamp_ms = request.client_timestamp_ms,
+            error_code = %error_code,
+            "player input timestamp rejected"
+        );
+        connection.queue_message(
+            MessageType::PlayerInputRes,
+            packet.header.seq,
+            PlayerInputRes {
+                ok: false,
+                room_id,
+                error_code: error_code.to_string(),
+            },
+        )?;
+        return Ok(());
+    }
+
     let input_result = services
         .room_manager
         .accept_player_input(
@@ -526,6 +550,29 @@ pub async fn handle_move_input(
         }
     };
 
+    if let Err(error_code) =
+        validate_input_timestamp(&*services.runtime_config.read().await, request.client_timestamp_ms)
+    {
+        warn!(
+            room_id = %room_id,
+            player_id = %player_id,
+            frame_id = request.frame_id,
+            client_timestamp_ms = request.client_timestamp_ms,
+            error_code = %error_code,
+            "move input timestamp rejected"
+        );
+        connection.queue_message(
+            MessageType::MoveInputRes,
+            packet.header.seq,
+            MoveInputRes {
+                ok: false,
+                room_id,
+                error_code: error_code.to_string(),
+            },
+        )?;
+        return Ok(());
+    }
+
     let (action, payload_json) = match player_input_from_move_req(&request) {
         Ok(value) => value,
         Err(error) => {
@@ -601,6 +648,31 @@ pub async fn handle_move_input(
     }
 
     Ok(())
+}
+
+pub(crate) fn validate_input_timestamp(
+    runtime: &RuntimeConfig,
+    client_timestamp_ms: i64,
+) -> Result<(), &'static str> {
+    if client_timestamp_ms <= 0 {
+        return if runtime.input_timestamp_required {
+            Err("INPUT_TIMESTAMP_REQUIRED")
+        } else {
+            Ok(())
+        };
+    }
+
+    if runtime.input_timestamp_max_skew_ms == 0 {
+        return Ok(());
+    }
+
+    let now_ms = current_unix_ms();
+    let skew_ms = now_ms.abs_diff(client_timestamp_ms);
+    if skew_ms > runtime.input_timestamp_max_skew_ms {
+        Err("INPUT_TIMESTAMP_SKEW")
+    } else {
+        Ok(())
+    }
 }
 
 pub async fn handle_room_end(
@@ -1256,4 +1328,60 @@ fn log_drain_mode_room_creation_rejected(
         error_code = DRAIN_MODE_REJECT_NEW_ROOM_ERROR,
         "room creation rejected because server is in drain mode"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_config(input_timestamp_required: bool, input_timestamp_max_skew_ms: u64) -> RuntimeConfig {
+        RuntimeConfig {
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            player_msg_rate_window_ms: 1000,
+            player_msg_rate_max: 0,
+            input_timestamp_required,
+            input_timestamp_max_skew_ms,
+            drain_mode_enabled: false,
+            drain_mode_entered_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn missing_input_timestamp_passes_when_not_required() {
+        let runtime = runtime_config(false, 5000);
+
+        assert_eq!(validate_input_timestamp(&runtime, 0), Ok(()));
+    }
+
+    #[test]
+    fn missing_input_timestamp_rejects_when_required() {
+        let runtime = runtime_config(true, 5000);
+
+        assert_eq!(
+            validate_input_timestamp(&runtime, 0),
+            Err("INPUT_TIMESTAMP_REQUIRED")
+        );
+    }
+
+    #[test]
+    fn input_timestamp_outside_skew_window_rejects() {
+        let runtime = runtime_config(false, 5000);
+        let stale_timestamp = current_unix_ms() - 6000;
+
+        assert_eq!(
+            validate_input_timestamp(&runtime, stale_timestamp),
+            Err("INPUT_TIMESTAMP_SKEW")
+        );
+    }
+
+    #[test]
+    fn input_timestamp_skew_zero_disables_window_check() {
+        let runtime = runtime_config(true, 0);
+        let stale_timestamp = current_unix_ms() - 600_000;
+
+        assert_eq!(validate_input_timestamp(&runtime, stale_timestamp), Ok(()));
+    }
 }

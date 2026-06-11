@@ -67,6 +67,7 @@ message PlayerInputReq {
   uint32 frame_id = 1;
   string action = 2;
   string payload_json = 3;
+  int64 client_timestamp_ms = 4;
 }
 
 message PlayerInputRes {
@@ -111,6 +112,7 @@ message MoveInputReq {
   float client_x = 6;
   float client_y = 7;
   uint32 client_frame_id = 8;
+  int64 client_timestamp_ms = 9;
 }
 
 message MoveInputRes {

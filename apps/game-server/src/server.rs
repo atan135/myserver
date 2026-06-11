@@ -38,6 +38,8 @@ pub struct RuntimeConfig {
     pub msg_rate_max: u64,
     pub player_msg_rate_window_ms: u64,
     pub player_msg_rate_max: u64,
+    pub input_timestamp_required: bool,
+    pub input_timestamp_max_skew_ms: u64,
     pub drain_mode_enabled: bool,
     pub drain_mode_entered_at_ms: Option<u64>,
 }
@@ -211,6 +213,8 @@ pub async fn run(
             msg_rate_max: config.msg_rate_max,
             player_msg_rate_window_ms: config.player_msg_rate_window_ms,
             player_msg_rate_max: config.player_msg_rate_max,
+            input_timestamp_required: config.input_timestamp_required,
+            input_timestamp_max_skew_ms: config.input_timestamp_max_skew_ms,
             drain_mode_enabled: false,
             drain_mode_entered_at_ms: None,
         })),

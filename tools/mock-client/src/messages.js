@@ -60,15 +60,23 @@ export function encodeRoomStartReq() {
   return Buffer.alloc(0);
 }
 
-export function encodePlayerInputReq(frameId, action, payloadJson) {
+export function encodePlayerInputReq(frameId, action, payloadJson, clientTimestampMs = Date.now()) {
   return Buffer.concat([
     encodeUInt32Field(1, frameId),
     encodeStringField(2, action),
-    encodeStringField(3, payloadJson)
+    encodeStringField(3, payloadJson),
+    encodeInt64Field(4, clientTimestampMs)
   ]);
 }
 
-export function encodeMoveInputReq(frameId, inputType, dirX = 0, dirY = 0, clientState = null) {
+export function encodeMoveInputReq(
+  frameId,
+  inputType,
+  dirX = 0,
+  dirY = 0,
+  clientState = null,
+  clientTimestampMs = Date.now()
+) {
   const fields = [
     encodeUInt32Field(1, frameId),
     encodeInt32Field(2, inputType),
@@ -85,6 +93,8 @@ export function encodeMoveInputReq(frameId, inputType, dirX = 0, dirY = 0, clien
       fields.push(encodeUInt32Field(8, clientState.frameId ?? frameId));
     }
   }
+
+  fields.push(encodeInt64Field(9, clientState?.clientTimestampMs ?? clientTimestampMs));
 
   return Buffer.concat(fields);
 }

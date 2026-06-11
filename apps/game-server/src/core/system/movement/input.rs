@@ -265,6 +265,7 @@ mod tests {
             client_x: 10.0,
             client_y: 12.0,
             client_frame_id: 3,
+            client_timestamp_ms: 0,
         };
 
         let (action, payload_json) = player_input_from_move_req(&request).unwrap();
@@ -286,6 +287,7 @@ mod tests {
             client_x: 0.0,
             client_y: 0.0,
             client_frame_id: 0,
+            client_timestamp_ms: 0,
         };
 
         let error = player_input_from_move_req(&request).unwrap_err();
@@ -303,6 +305,7 @@ mod tests {
             client_x: f32::INFINITY,
             client_y: 12.0,
             client_frame_id: 3,
+            client_timestamp_ms: 0,
         };
 
         let error = player_input_from_move_req(&request).unwrap_err();
