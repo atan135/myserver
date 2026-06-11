@@ -185,12 +185,14 @@
 | `1608` | `RetireTransferredRoomRes` |
 | `1609` | `GetRolloutDrainStatusReq` |
 | `1610` | `GetRolloutDrainStatusRes` |
+| `1611` | `TriggerServerRedirectReq` |
+| `1612` | `TriggerServerRedirectRes` |
 
 说明：
 
-- 这些消息结构已在 `packages/proto/game.proto` 和 `game-server` / `game-proxy` 消息号枚举中定义。
-- 当前代码已落地 `drain_mode` 对新建房的拦截，以及 `game-proxy` 侧 rollout 路由状态；完整房间冻结、导出、导入、迁移退休链路仍以 `docs/game-server-room-rollout-spec.md` 和实际代码为准。
-- `ServerRedirectPush` 已作为协议结构和代理路由语义保留，当前主要用于 rollout 重连链路的后续补齐。
+- 这些消息结构已在 `packages/proto/game.proto` 定义；`game-server` 消息号枚举包含完整控制面消息，`game-proxy` 仅包含自身转发和路由判定需要识别的子集。
+- 当前代码已落地 `drain_mode` 对新建房的拦截、`game-proxy` 侧 rollout 路由状态、`game-server` 房间 freeze/export/import/retire 最小闭环，以及 `TriggerServerRedirectReq/Res` 可控 redirect push 下发入口；完整客户端重连、真实多进程联调和自动灰度收尾仍以 `docs/game-server-room-rollout-spec.md`、任务清单和实际代码为准。
+- `ServerRedirectPush` 已作为第一阶段显式重连协议使用。当前服务端可下发 push，但客户端自动断线重连到 new owner 的端到端链路尚未闭环。
 
 #### 通用错误
 
@@ -292,6 +294,12 @@
 - `rollout_epoch: string`
 - `reconnect_required: bool`
 - `retry_after_ms: uint32`
+- `target_host: string`
+- `target_port: uint32`
+- `target_server_id: string`
+- `transport: string`
+
+第一阶段 redirect 语义是显式重连，不是同连接迁移。客户端收到 `ServerRedirectPush` 后应断开当前游戏连接，重新连接 `target_host:target_port` 指向的 `game-proxy`，再发送 `AuthReq` 和 `RoomReconnectReq` / `RoomJoinReq`。
 
 #### `SessionKickPush`
 
@@ -478,6 +486,7 @@
 - admin 消息不走玩家 TCP 通道
 - 但为了保持统一封包方式，仍使用同一套包头和独立消息号段
 - `AdminServerStatusReq/Res` 与 `AdminUpdateConfigReq/Res` 使用 `packages/proto/admin.proto`
+- `TriggerServerRedirectReq/Res` 使用 `packages/proto/game.proto`，可走已鉴权 admin / internal 通道触发旧服向指定 room 当前在线成员下发 `ServerRedirectPush`
 - `GmSendItemReq/Res` 当前复用 `GrantItemsReq/GrantItemsRes`，并保留 JSON 旧格式兼容
 - `GmBroadcastReq`、`GmKickPlayerReq`、`GmBanPlayerReq` 当前由 `admin-api` 以 JSON body 调用；`game-server` 会返回对应 `Gm*Res` 消息号，失败时返回 `ErrorRes`
 - `GmBroadcastReq` 字段为 `{ title, content, sender }`，`game-server` 校验非空与长度后，复用玩家通道 `GameMessagePush` 推送在线连接：`event="gm_broadcast"`、`action="broadcast"`、`payload_json={ title, content, sender, timestamp }`

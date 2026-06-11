@@ -1261,3 +1261,55 @@ export async function runCreateMatchedRoomAndJoin(options) {
   await new Promise((resolve) => setTimeout(resolve, 500));
   clientHost.close();
 }
+
+export async function runServerRedirectListen(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+
+  const client = new TcpProtocolClient(options, "redirectClient");
+  await client.connect();
+
+  try {
+    await authenticateClient(client, options, login, 1);
+    const joined = await joinRoomExpectSuccess(client, options, options.roomId, 2, "redirectJoin");
+
+    console.log("redirectClient.waitingForServerRedirect:", JSON.stringify({
+      roomId: joined.joinRes.roomId,
+      playerId: login.playerId,
+      timeoutMs: options.timeoutMs
+    }, null, 2));
+
+    const redirect = await client.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.SERVER_REDIRECT_PUSH,
+      "serverRedirectPush"
+    );
+
+    const result = {
+      ok: true,
+      playerId: login.playerId,
+      roomId: redirect.roomId,
+      rolloutEpoch: redirect.rolloutEpoch,
+      reason: redirect.reason,
+      reconnectRequired: redirect.reconnectRequired,
+      retryAfterMs: redirect.retryAfterMs,
+      targetHost: redirect.targetHost,
+      targetPort: redirect.targetPort,
+      targetServerId: redirect.targetServerId,
+      transport: redirect.transport
+    };
+    if (result.roomId !== options.roomId) {
+      throw new Error(`redirect room mismatch: expected ${options.roomId}, got ${result.roomId}`);
+    }
+    if (!result.reconnectRequired) {
+      throw new Error("redirect push did not require reconnect");
+    }
+    if (!result.targetHost || !result.targetPort) {
+      throw new Error("redirect push missing target host or port");
+    }
+    console.log("serverRedirectResult:", JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    client.close();
+  }
+}

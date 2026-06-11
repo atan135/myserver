@@ -292,6 +292,10 @@ message ServerRedirectPush {
   string rollout_epoch = 3;
   bool reconnect_required = 4;
   uint32 retry_after_ms = 5;
+  string target_host = 6;
+  uint32 target_port = 7;
+  string target_server_id = 8;
+  string transport = 9;
 }
 
 enum AuthorityKind {
@@ -446,6 +450,26 @@ message GetRolloutDrainStatusRes {
   uint64 migrating_room_count = 6;
   uint64 connection_count = 7;
   repeated RoomRouteStatus routes = 8;
+}
+
+message TriggerServerRedirectReq {
+  string room_id = 1;
+  string rollout_epoch = 2;
+  string reason = 3;
+  string target_host = 4;
+  uint32 target_port = 5;
+  string target_server_id = 6;
+  string transport = 7;
+  uint32 retry_after_ms = 8;
+}
+
+message TriggerServerRedirectRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  uint64 delivered_count = 4;
+  uint64 failed_count = 5;
+  uint64 online_member_count = 6;
 }
 
 message RoomMemberOfflinePush {

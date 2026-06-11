@@ -73,6 +73,8 @@ export const MESSAGE_TYPE = {
   RETIRE_TRANSFERRED_ROOM_RES: 1608,
   GET_ROLLOUT_DRAIN_STATUS_REQ: 1609,
   GET_ROLLOUT_DRAIN_STATUS_RES: 1610,
+  TRIGGER_SERVER_REDIRECT_REQ: 1611,
+  TRIGGER_SERVER_REDIRECT_RES: 1612,
   // Chat TCP (20000-20999)
   CHAT_AUTH_REQ: 20001,
   CHAT_AUTH_RES: 20002,
@@ -168,6 +170,7 @@ export const SCENARIO = {
   DRAIN_EXISTING_ROOM_RECONNECT: "drain-existing-room-reconnect",
   DRAIN_EXISTING_ROOM_OBSERVER: "drain-existing-room-observer",
   DRAIN_CREATE_MATCHED_ROOM_REJECTED: "drain-create-matched-room-rejected",
+  SERVER_REDIRECT_LISTEN: "server-redirect-listen",
   // Match scenarios
   CREATE_MATCHED_ROOM: "create-matched-room",
   CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",

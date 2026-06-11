@@ -23,6 +23,13 @@ Required:
   --new-server-id <server-id>
 
 Options:
+  --trigger-redirect-only                 only call old game-server TriggerServerRedirectReq
+  --redirect-target-host <host>           required with --trigger-redirect-only
+  --redirect-target-port <port>           required with --trigger-redirect-only
+  --redirect-target-server-id <server-id> default: --new-server-id
+  --redirect-transport <transport>        default: kcp
+  --redirect-reason <reason>              default: rollout_redirect
+  --redirect-retry-after-ms <ms>          default: 0
   --old-admin-host <host>                 default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
   --old-admin-port <port>                 default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
   --old-admin-token <token>               default: MYSERVER_OLD_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
@@ -91,6 +98,27 @@ function parseArgs(argv) {
       case "--new-server-id":
         ({ value: options.newServerId, nextIndex: index } = takeValue(index));
         break;
+      case "--trigger-redirect-only":
+        options.triggerRedirectOnly = true;
+        break;
+      case "--redirect-target-host":
+        ({ value: options.redirectTargetHost, nextIndex: index } = takeValue(index));
+        break;
+      case "--redirect-target-port":
+        ({ value: options.redirectTargetPort, nextIndex: index } = takeNumber(index, 0));
+        break;
+      case "--redirect-target-server-id":
+        ({ value: options.redirectTargetServerId, nextIndex: index } = takeValue(index));
+        break;
+      case "--redirect-transport":
+        ({ value: options.redirectTransport, nextIndex: index } = takeValue(index));
+        break;
+      case "--redirect-reason":
+        ({ value: options.redirectReason, nextIndex: index } = takeValue(index));
+        break;
+      case "--redirect-retry-after-ms":
+        ({ value: options.redirectRetryAfterMs, nextIndex: index } = takeNumber(index, 0));
+        break;
       case "--old-admin-host":
         ({ value: options.oldAdminHost, nextIndex: index } = takeValue(index));
         break;
@@ -141,6 +169,20 @@ function requireOption(options, key) {
   }
 }
 
+function requirePort(options, key) {
+  const value = options[key];
+  if (!Number.isInteger(value) || value <= 0 || value > 65535) {
+    throw new Error(`invalid option --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: expected 1-65535`);
+  }
+}
+
+function requireNonNegativeInteger(options, key) {
+  const value = options[key] ?? 0;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`invalid option --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: expected non-negative integer`);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -148,8 +190,15 @@ async function main() {
     return;
   }
 
-  for (const key of ["rolloutEpoch", "roomId", "oldServerId", "newServerId"]) {
+  const requiredKeys = options.triggerRedirectOnly
+    ? ["rolloutEpoch", "roomId", "redirectTargetHost", "redirectTargetPort"]
+    : ["rolloutEpoch", "roomId", "oldServerId", "newServerId"];
+  for (const key of requiredKeys) {
     requireOption(options, key);
+  }
+  if (options.triggerRedirectOnly) {
+    requirePort(options, "redirectTargetPort");
+    requireNonNegativeInteger(options, "redirectRetryAfterMs");
   }
 
   const oldServer = new GameServerTransferClient({
@@ -158,6 +207,25 @@ async function main() {
     token: options.oldAdminToken,
     timeoutMs: options.timeoutMs
   });
+
+  if (options.triggerRedirectOnly) {
+    const result = await oldServer.triggerServerRedirect({
+      rolloutEpoch: options.rolloutEpoch,
+      roomId: options.roomId,
+      reason: options.redirectReason || "rollout_redirect",
+      targetHost: options.redirectTargetHost,
+      targetPort: options.redirectTargetPort,
+      targetServerId: options.redirectTargetServerId || options.newServerId || "",
+      transport: options.redirectTransport || "kcp",
+      retryAfterMs: options.redirectRetryAfterMs || 0
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   const newServer = new GameServerTransferClient({
     host: options.newAdminHost,
     port: options.newAdminPort,

@@ -22,7 +22,7 @@ use crate::metrics::METRICS;
 use crate::pb::{
     FrameBundlePush, FrameInput, MovementCorrectionReason,
     MovementRecoveryState as PbMovementRecoveryState, RoomMigrationState, RoomSnapshot,
-    RoomStatePush, RoomTransferPayload,
+    RoomStatePush, RoomTransferPayload, ServerRedirectPush,
 };
 use crate::protocol::{MessageType, encode_body};
 
@@ -61,6 +61,13 @@ pub struct RoomRecoveryState {
     pub waiting_inputs: Vec<FrameInput>,
     pub input_delay_frames: u32,
     pub movement_recovery: Option<PbMovementRecoveryState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRedirectDelivery {
+    pub delivered_count: u64,
+    pub failed_count: u64,
+    pub online_member_count: u64,
 }
 
 #[derive(Clone)]
@@ -1367,6 +1374,82 @@ impl RoomManager {
         Ok(())
     }
 
+    pub async fn trigger_server_redirect(
+        &self,
+        room_id: &str,
+        push: ServerRedirectPush,
+    ) -> Result<ServerRedirectDelivery, &'static str> {
+        if room_id.trim().is_empty() {
+            return Err("INVALID_ROOM_ID");
+        }
+        if push.rollout_epoch.trim().is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+        if push.target_host.trim().is_empty() || push.target_port == 0 {
+            return Err("INVALID_REDIRECT_TARGET");
+        }
+
+        let body = encode_body(&push);
+        let targets = {
+            let rooms = self.rooms.lock().await;
+            let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+            room.members
+                .values()
+                .filter(|member| !member.offline && !member.syncing)
+                .map(|member| (member.player_id.clone(), member.sender.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut delivered_count = 0u64;
+        let mut failed_count = 0u64;
+        for (player_id, sender) in &targets {
+            match sender.try_send(OutboundMessage {
+                message_type: MessageType::ServerRedirectPush,
+                seq: 0,
+                body: body.clone(),
+            }) {
+                Ok(()) => {
+                    delivered_count = delivered_count.saturating_add(1);
+                    info!(
+                        room_id = room_id,
+                        player_id = %player_id,
+                        rollout_epoch = %push.rollout_epoch,
+                        target_host = %push.target_host,
+                        target_port = push.target_port,
+                        target_server_id = %push.target_server_id,
+                        "server redirect push queued"
+                    );
+                }
+                Err(error) => {
+                    failed_count = failed_count.saturating_add(1);
+                    warn!(
+                        room_id = room_id,
+                        player_id = %player_id,
+                        rollout_epoch = %push.rollout_epoch,
+                        error = %error,
+                        "failed to queue server redirect push"
+                    );
+                }
+            }
+        }
+
+        let online_member_count = targets.len() as u64;
+        info!(
+            room_id = room_id,
+            rollout_epoch = %push.rollout_epoch,
+            delivered_count = delivered_count,
+            failed_count = failed_count,
+            online_member_count = online_member_count,
+            "server redirect trigger completed"
+        );
+
+        Ok(ServerRedirectDelivery {
+            delivered_count,
+            failed_count,
+            online_member_count,
+        })
+    }
+
     pub async fn broadcast_snapshot(
         &self,
         room_id: &str,
@@ -2157,6 +2240,52 @@ mod tests {
             .await;
 
         assert_eq!(result, Err("ROOM_TRANSFER_HAS_ONLINE_MEMBERS"));
+    }
+
+    #[tokio::test]
+    async fn trigger_server_redirect_only_pushes_online_members_in_target_room() {
+        let (manager, _factory, mut receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+
+        let delivery = manager
+            .trigger_server_redirect(
+                "room-test",
+                ServerRedirectPush {
+                    reason: "rollout".to_string(),
+                    room_id: "room-test".to_string(),
+                    rollout_epoch: "epoch-1".to_string(),
+                    reconnect_required: true,
+                    retry_after_ms: 250,
+                    target_host: "127.0.0.1".to_string(),
+                    target_port: 4000,
+                    target_server_id: "game-server-new".to_string(),
+                    transport: "kcp".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delivery,
+            ServerRedirectDelivery {
+                delivered_count: 1,
+                failed_count: 0,
+                online_member_count: 1,
+            }
+        );
+
+        let pushed = receivers[0].try_recv().expect("online member push");
+        assert_eq!(pushed.message_type, MessageType::ServerRedirectPush);
+        let push = ServerRedirectPush::decode(pushed.body.as_slice()).unwrap();
+        assert_eq!(push.room_id, "room-test");
+        assert_eq!(push.rollout_epoch, "epoch-1");
+        assert_eq!(push.target_host, "127.0.0.1");
+        assert_eq!(push.target_port, 4000);
+        assert!(push.reconnect_required);
+        assert!(receivers[1].try_recv().is_err());
     }
 
     #[tokio::test]

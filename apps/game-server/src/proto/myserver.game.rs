@@ -392,6 +392,14 @@ pub struct ServerRedirectPush {
     pub reconnect_required: bool,
     #[prost(uint32, tag = "5")]
     pub retry_after_ms: u32,
+    #[prost(string, tag = "6")]
+    pub target_host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "7")]
+    pub target_port: u32,
+    #[prost(string, tag = "8")]
+    pub target_server_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub transport: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuthorityEndpoint {
@@ -635,6 +643,40 @@ pub struct GetRolloutDrainStatusRes {
     pub connection_count: u64,
     #[prost(message, repeated, tag = "8")]
     pub routes: ::prost::alloc::vec::Vec<RoomRouteStatus>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TriggerServerRedirectReq {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub target_host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub target_port: u32,
+    #[prost(string, tag = "6")]
+    pub target_server_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub transport: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "8")]
+    pub retry_after_ms: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TriggerServerRedirectRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    pub delivered_count: u64,
+    #[prost(uint64, tag = "5")]
+    pub failed_count: u64,
+    #[prost(uint64, tag = "6")]
+    pub online_member_count: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {

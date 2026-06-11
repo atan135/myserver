@@ -17,6 +17,7 @@ export {
   runDrainExistingRoomReconnect,
   runDrainExistingRoomObserver,
   runDrainCreateMatchedRoomRejected,
+  runServerRedirectListen,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   expectErrorPacket,

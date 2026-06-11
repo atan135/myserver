@@ -60,6 +60,28 @@ function encodeRetireTransferredRoomReq(rolloutEpoch, roomId, checksum) {
   ]);
 }
 
+function encodeTriggerServerRedirectReq({
+  roomId,
+  rolloutEpoch,
+  reason,
+  targetHost,
+  targetPort,
+  targetServerId,
+  transport,
+  retryAfterMs
+}) {
+  return Buffer.concat([
+    encodeStringField(1, roomId),
+    encodeStringField(2, rolloutEpoch),
+    encodeStringField(3, reason || "rollout_redirect"),
+    encodeStringField(4, targetHost),
+    encodeUInt64Field(5, targetPort),
+    encodeStringField(6, targetServerId || ""),
+    encodeStringField(7, transport || "kcp"),
+    encodeUInt64Field(8, retryAfterMs || 0)
+  ]);
+}
+
 function decodeFreezeRoomForTransferRes(body) {
   const fields = decodeFieldsWithRepeated(body);
   return {
@@ -112,6 +134,18 @@ function decodeRetireTransferredRoomRes(body) {
     ok: readBool(fields, 1),
     roomId: readString(fields, 2),
     errorCode: readString(fields, 3)
+  };
+}
+
+function decodeTriggerServerRedirectRes(body) {
+  const fields = decodeFieldsWithRepeated(body);
+  return {
+    ok: readBool(fields, 1),
+    roomId: readString(fields, 2),
+    errorCode: readString(fields, 3),
+    deliveredCount: readInt64(fields, 4),
+    failedCount: readInt64(fields, 5),
+    onlineMemberCount: readInt64(fields, 6)
   };
 }
 
@@ -389,6 +423,16 @@ export class GameServerTransferClient {
       MESSAGE_TYPE.RETIRE_TRANSFERRED_ROOM_RES
     );
     return decodeRetireTransferredRoomRes(response.body);
+  }
+
+  async triggerServerRedirect(request) {
+    const body = encodeTriggerServerRedirectReq(request);
+    const response = await this.sendRequest(
+      MESSAGE_TYPE.TRIGGER_SERVER_REDIRECT_REQ,
+      body,
+      MESSAGE_TYPE.TRIGGER_SERVER_REDIRECT_RES
+    );
+    return decodeTriggerServerRedirectRes(response.body);
   }
 
   async sendRequest(messageType, body, expectedMessageType) {

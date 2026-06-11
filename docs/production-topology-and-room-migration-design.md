@@ -195,7 +195,7 @@ RoomRouteRecord {
 
 payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
-当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证。它不包含 `game-proxy` route 仲裁、redirect/reconnect 闭环、L7 relay、同连接 upstream swap，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
+当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。它不包含客户端自动重连闭环、真实多进程联调、L7 relay、同连接 upstream swap，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 
 补充实现状态（截至 `2026-06-11`）：`tools/mock-client` 已增加第一阶段显式编排入口，按 old `freeze/export`、new `import`、proxy room route `upsert`、old `retire` 的保守顺序调用现有控制面。编排会校验 export/import checksum 一致，并在 proxy upsert 成功后才 retire 旧 room；任一步失败都会返回失败阶段并停止后续步骤。该入口仍是控制流骨架，不是自动 rollout 控制面，也不包含真实多服务联调、客户端 redirect/reconnect 闭环或同连接迁移。
 
@@ -221,6 +221,7 @@ new game-server resumes room session
 阶段一要求：
 
 - `ServerRedirectPush` 能明确携带 `room_id`、`rollout_epoch`、原因和重连要求。
+- `ServerRedirectPush` 需要携带目标 proxy 的 `target_host`、`target_port`、`target_server_id` 和 `transport`。
 - 客户端断线后重新连接 `game-proxy`。
 - proxy 根据持久化或当前 route 将玩家送到正确 owner。
 - 旧连接不会继续留在错误 owner 上。
@@ -233,7 +234,7 @@ new game-server resumes room session
 - proxy 深度理解玩法协议。
 - 在线有人 room 无感迁移。
 
-当前客户端要求仍未闭环：外部 `mybevy` 或测试客户端需要处理 `ServerRedirectPush`，或在连接断开后主动重连到 `game-proxy`，重新发送 `AuthReq` 和 `RoomReconnectReq` / `RoomJoinReq`。只有客户端完成该能力后，proxy 已切换的 room route 才能在玩家侧形成端到端闭环。
+当前客户端要求仍未闭环：`tools/mock-client` 已能认证进房后监听 `ServerRedirectPush` 并输出结构化结果，但外部 `mybevy` 和真实测试客户端仍需要实现收到 push 后主动断线、重连到 `game-proxy`、重新发送 `AuthReq` 和 `RoomReconnectReq` / `RoomJoinReq`。只有客户端完成该能力后，proxy 已切换的 room route 才能在玩家侧形成端到端闭环。
 
 ### 9.2 阶段二：同连接迁移目标态
 

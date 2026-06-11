@@ -28,6 +28,7 @@ import {
   runDrainExistingRoomReconnect,
   runDrainExistingRoomObserver,
   runDrainCreateMatchedRoomRejected,
+  runServerRedirectListen,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   // Game scenarios
@@ -197,6 +198,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.DRAIN_CREATE_MATCHED_ROOM_REJECTED) {
     await runDrainCreateMatchedRoomRejected(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.SERVER_REDIRECT_LISTEN) {
+    await runServerRedirectListen(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

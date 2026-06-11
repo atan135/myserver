@@ -604,6 +604,18 @@ export function decodeByMessageType(messageType, body) {
         mailType: readString(fields, 4),
         createdAt: readInt64(fields, 5)
       };
+    case MESSAGE_TYPE.SERVER_REDIRECT_PUSH:
+      return {
+        reason: readString(fields, 1),
+        roomId: readString(fields, 2),
+        rolloutEpoch: readString(fields, 3),
+        reconnectRequired: readBool(fields, 4),
+        retryAfterMs: readUInt32(fields, 5) || 0,
+        targetHost: readString(fields, 6),
+        targetPort: readUInt32(fields, 7) || 0,
+        targetServerId: readString(fields, 8),
+        transport: readString(fields, 9)
+      };
     case MESSAGE_TYPE.SESSION_KICK_PUSH:
       return {
         reason: readString(fields, 1),

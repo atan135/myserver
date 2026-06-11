@@ -9,7 +9,8 @@ use crate::core::service::room_service;
 use crate::pb::{
     CreateMatchedRoomReq, ErrorRes, ExportRoomTransferReq, ExportRoomTransferRes,
     FreezeRoomForTransferReq, FreezeRoomForTransferRes, ImportRoomTransferReq,
-    ImportRoomTransferRes, RetireTransferredRoomReq, RetireTransferredRoomRes,
+    ImportRoomTransferRes, RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
+    TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 
@@ -219,6 +220,61 @@ where
                         room_id: request.room_id,
                         error_code: result.err().unwrap_or_default().to_string(),
                     },
+                )
+                .await?;
+            }
+            Some(MessageType::TriggerServerRedirectReq) => {
+                let request = packet
+                    .decode_body::<TriggerServerRedirectReq>("INVALID_TRIGGER_REDIRECT_BODY")
+                    .map_err(std::io::Error::other)?;
+
+                let room_id = request.room_id.clone();
+                let result = services
+                    .room_manager
+                    .trigger_server_redirect(
+                        &room_id,
+                        ServerRedirectPush {
+                            reason: request.reason,
+                            room_id: room_id.clone(),
+                            rollout_epoch: request.rollout_epoch,
+                            reconnect_required: true,
+                            retry_after_ms: request.retry_after_ms,
+                            target_host: request.target_host,
+                            target_port: request.target_port,
+                            target_server_id: request.target_server_id,
+                            transport: if request.transport.trim().is_empty() {
+                                "kcp".to_string()
+                            } else {
+                                request.transport
+                            },
+                        },
+                    )
+                    .await;
+
+                let response = match result {
+                    Ok(delivery) => TriggerServerRedirectRes {
+                        ok: true,
+                        room_id,
+                        error_code: String::new(),
+                        delivered_count: delivery.delivered_count,
+                        failed_count: delivery.failed_count,
+                        online_member_count: delivery.online_member_count,
+                    },
+                    Err(error_code) => TriggerServerRedirectRes {
+                        ok: false,
+                        room_id,
+                        error_code: error_code.to_string(),
+                        delivered_count: 0,
+                        failed_count: 0,
+                        online_member_count: 0,
+                    },
+                };
+
+                write_message(
+                    &mut writer,
+                    MessageType::TriggerServerRedirectRes,
+                    packet.header.seq,
+                    &response,
                 )
                 .await?;
             }
