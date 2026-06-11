@@ -1,17 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 
-import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_CONFIG, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
 import { badRequest, forbidden, notFound, unauthorized } from "../common/http-exception.js";
+import { getClientIp } from "../common/client-ip.js";
 import type { LoginDto } from "./dto/login.dto.js";
-
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  return req.ip || req.socket?.remoteAddress || null;
-}
 
 function toAdminDto(admin: any) {
   return {
@@ -22,18 +15,28 @@ function toAdminDto(admin: any) {
   };
 }
 
-async function recordLoginFailure(adminStore: any, username: string, req: any, reason: string) {
+async function appendSecurityAudit(adminStore: any, event: any) {
   if (typeof adminStore.appendSecurityAuditLog !== "function") {
     return;
   }
 
-  await adminStore.appendSecurityAuditLog({
+  await adminStore.appendSecurityAuditLog(event);
+}
+
+async function recordLoginFailure(
+  adminStore: any,
+  username: string,
+  clientIp: string | null,
+  reason: string,
+  details: Record<string, unknown> = {}
+) {
+  await appendSecurityAudit(adminStore, {
     eventType: "admin_login_failed",
     targetType: "admin",
     targetValue: username,
     severity: "warning",
-    clientIp: getClientIp(req),
-    details: { reason }
+    clientIp,
+    details: { reason, ...details }
   });
 }
 
@@ -42,7 +45,8 @@ export class AuthService {
   constructor(
     private readonly jwtService: JwtService,
     @Inject(ADMIN_CONFIG) private readonly config: any,
-    @Inject(ADMIN_STORE) private readonly adminStore: any
+    @Inject(ADMIN_STORE) private readonly adminStore: any,
+    @Inject(ADMIN_SESSION_STORE) private readonly sessionStore: any
   ) {}
 
   async login(dto: LoginDto, req: any) {
@@ -56,39 +60,91 @@ export class AuthService {
       throw badRequest("INVALID_PASSWORD", "password is required");
     }
 
-    const admin = await this.adminStore.findAdminByUsername(username.trim());
+    const normalizedUsername = username.trim();
+    const clientIp = getClientIp(req, this.config);
+    const lockStatus = await this.sessionStore.getLoginLock(normalizedUsername, clientIp);
+    if (lockStatus.locked) {
+      await appendSecurityAudit(this.adminStore, {
+        eventType: "admin_login_locked",
+        targetType: "admin",
+        targetValue: normalizedUsername,
+        severity: "warning",
+        clientIp,
+        details: { remainingSeconds: lockStatus.remainingSeconds }
+      });
+      throw forbidden("ADMIN_LOGIN_LOCKED", `Admin login is locked. Try again in ${lockStatus.remainingSeconds} seconds`);
+    }
+
+    const admin = await this.adminStore.findAdminByUsername(normalizedUsername);
     if (!admin) {
-      await recordLoginFailure(this.adminStore, username.trim(), req, "admin_not_found");
+      const attempts = await this.sessionStore.recordLoginFailure(normalizedUsername, clientIp, this.config);
+      await recordLoginFailure(this.adminStore, normalizedUsername, clientIp, "admin_not_found", { attempts });
+      if (attempts >= this.config.adminLoginMaxFailures) {
+        await appendSecurityAudit(this.adminStore, {
+          eventType: "admin_login_locked",
+          targetType: "admin",
+          targetValue: normalizedUsername,
+          severity: "critical",
+          clientIp,
+          details: { attempts, lockSeconds: this.config.adminLoginLockSeconds }
+        });
+      }
       throw unauthorized("INVALID_CREDENTIALS", "Invalid username or password");
     }
 
     if (admin.status !== "active") {
-      await recordLoginFailure(this.adminStore, admin.username, req, "account_disabled");
+      const attempts = await this.sessionStore.recordLoginFailure(admin.username, clientIp, this.config);
+      await recordLoginFailure(this.adminStore, admin.username, clientIp, "account_disabled", { attempts });
       throw forbidden("ACCOUNT_DISABLED", "Account is disabled");
     }
 
     const passwordValid = await this.adminStore.verifyPassword(password, admin.passwordHash);
     if (!passwordValid) {
-      await recordLoginFailure(this.adminStore, admin.username, req, "invalid_password");
+      const attempts = await this.sessionStore.recordLoginFailure(admin.username, clientIp, this.config);
+      await recordLoginFailure(this.adminStore, admin.username, clientIp, "invalid_password", { attempts });
+      if (attempts >= this.config.adminLoginMaxFailures) {
+        await appendSecurityAudit(this.adminStore, {
+          eventType: "admin_login_locked",
+          targetType: "admin",
+          targetValue: admin.username,
+          severity: "critical",
+          clientIp,
+          details: { attempts, lockSeconds: this.config.adminLoginLockSeconds }
+        });
+      }
       throw unauthorized("INVALID_CREDENTIALS", "Invalid username or password");
     }
 
+    const jti = this.sessionStore.createJti();
+    const tokenVersion = await this.sessionStore.getTokenVersion(admin.id);
     const tokenPayload = {
       sub: admin.id,
       username: admin.username,
-      role: admin.role
+      role: admin.role,
+      jti,
+      tokenVersion
     };
     const accessToken = await this.jwtService.signAsync(tokenPayload, {
       secret: this.config.jwtSecret,
       expiresIn: this.config.jwtExpiresIn
     });
 
+    await this.sessionStore.createSession({
+      adminId: admin.id,
+      username: admin.username,
+      role: admin.role,
+      jti,
+      tokenVersion,
+      clientIp,
+      ttlSeconds: this.config.adminSessionTtlSeconds
+    });
+    await this.sessionStore.clearLoginFailures(admin.username, clientIp);
     await this.adminStore.updateLastLogin(admin.id);
     await this.adminStore.appendAuditLog({
       adminId: admin.id,
       adminUsername: admin.username,
       action: "admin_login",
-      ip: getClientIp(req)
+      ip: clientIp
     });
 
     return {
@@ -112,11 +168,15 @@ export class AuthService {
   }
 
   async logout(req: any) {
+    if (req.admin?.jti) {
+      await this.sessionStore.deleteSession(req.admin.jti);
+    }
+
     await this.adminStore.appendAuditLog({
       adminId: req.admin.sub,
       adminUsername: req.admin.username,
       action: "admin_logout",
-      ip: getClientIp(req)
+      ip: getClientIp(req, this.config)
     });
 
     return { ok: true, message: "Logged out" };

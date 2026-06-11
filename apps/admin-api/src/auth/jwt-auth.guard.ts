@@ -1,7 +1,7 @@
 import { CanActivate, ExecutionContext, Inject, Injectable } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 
-import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_CONFIG, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
 import { forbidden, unauthorized } from "../common/http-exception.js";
 
 function getTokenFromHeader(req: any): string | null {
@@ -15,7 +15,8 @@ export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly jwtService: JwtService,
     @Inject(ADMIN_CONFIG) private readonly config: any,
-    @Inject(ADMIN_STORE) private readonly adminStore: any
+    @Inject(ADMIN_STORE) private readonly adminStore: any,
+    @Inject(ADMIN_SESSION_STORE) private readonly sessionStore: any
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -37,6 +38,10 @@ export class JwtAuthGuard implements CanActivate {
       throw unauthorized("INVALID_TOKEN", "Invalid token");
     }
 
+    if (!payload.jti) {
+      throw unauthorized("SESSION_REQUIRED", "Admin session is required");
+    }
+
     const admin = await this.adminStore.findAdminByUsername(payload.username);
     if (!admin) {
       throw unauthorized("ADMIN_NOT_FOUND", "Admin account no longer exists");
@@ -44,6 +49,20 @@ export class JwtAuthGuard implements CanActivate {
 
     if (admin.status !== "active") {
       throw forbidden("ACCOUNT_DISABLED", "Account is disabled");
+    }
+
+    const session = await this.sessionStore.getSession(payload.jti);
+    if (!session) {
+      throw unauthorized("SESSION_REVOKED", "Admin session has been revoked");
+    }
+
+    if (String(session.adminId) !== String(admin.id)) {
+      throw unauthorized("SESSION_MISMATCH", "Admin session does not match account");
+    }
+
+    const currentTokenVersion = await this.sessionStore.getTokenVersion(admin.id);
+    if (Number(payload.tokenVersion || 0) !== currentTokenVersion || Number(session.tokenVersion || 0) !== currentTokenVersion) {
+      throw unauthorized("TOKEN_VERSION_REVOKED", "Admin token version has been revoked");
     }
 
     req.admin = {

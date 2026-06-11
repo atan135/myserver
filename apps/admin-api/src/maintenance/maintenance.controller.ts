@@ -4,22 +4,18 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { Roles } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
-import { ADMIN_STORE } from "../tokens.js";
-
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  return req.ip || req.socket?.remoteAddress || null;
-}
+import { getClientIp } from "../common/client-ip.js";
+import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
 
 @ApiTags("maintenance")
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Controller("/api/v1/maintenance")
 export class MaintenanceController {
-  constructor(@Inject(ADMIN_STORE) private readonly adminStore: any) {}
+  constructor(
+    @Inject(ADMIN_CONFIG) private readonly config: any,
+    @Inject(ADMIN_STORE) private readonly adminStore: any
+  ) {}
 
   @Get()
   @Roles("viewer", "operator", "admin")
@@ -43,7 +39,7 @@ export class MaintenanceController {
       targetType: "system",
       targetValue: "maintenance",
       details: { reason },
-      ip: getClientIp(req)
+      ip: getClientIp(req, this.config)
     });
 
     return { ok: true, message: enabled ? "Maintenance mode enabled" : "Maintenance mode disabled" };

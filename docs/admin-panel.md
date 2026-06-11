@@ -103,9 +103,11 @@ npm run dev:admin-web
 
 - 前端页面级权限限制已生效
 - 后端接口级角色校验已生效
-- 管理员 JWT 仍缺少 session/version/blacklist，登出主要是审计记录；登录失败限流和锁定仍需补齐
+- 管理员 JWT 已包含 `jti` 和 `tokenVersion`，后端通过 Redis 管理员 session 校验实现登出撤销；Guard 每次仍会查库确认管理员存在且 `status=active`
+- 管理员登录失败已按 username + client IP 维度计数和锁定，并写入 `security_audit_logs`
+- 审计 IP 已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For`
 
-如果后续补上管理员 token 生命周期治理、登录失败限流或更细粒度权限矩阵，本文应同步更新。
+如果后续补上批量撤销、重置密码联动 token version、管理面 IP allowlist 或更细粒度权限矩阵，本文应同步更新。
 
 ## 数据库表
 
@@ -174,7 +176,7 @@ npm run dev:admin-web
 | details_json | JSON | 详情 |
 | created_at | DATETIME(3) | 时间 |
 
-该表由其他服务写入，`admin-api` 当前只提供查询能力。
+该表由 `auth-http` 等服务写入；`admin-api` 也会写入管理员登录失败和锁定事件，并提供查询能力。
 
 ### `player_accounts`
 
@@ -515,9 +517,16 @@ MYSQL_POOL_SIZE=10
 
 JWT_SECRET=replace-with-a-long-random-string-for-jwt
 JWT_EXPIRES_IN=8h
+ADMIN_SESSION_TTL_SECONDS=28800
+ADMIN_LOGIN_MAX_FAILURES=5
+ADMIN_LOGIN_FAILURE_WINDOW_SECONDS=900
+ADMIN_LOGIN_LOCK_SECONDS=900
+TRUST_PROXY=false
+TRUSTED_PROXIES=
 
 GAME_SERVER_ADMIN_HOST=127.0.0.1
 GAME_SERVER_ADMIN_PORT=7500
+GAME_ADMIN_TOKEN=dev-only-change-this-game-admin-token
 
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=AdminPass123!
@@ -526,15 +535,19 @@ ADMIN_DISPLAY_NAME=Administrator
 
 说明：
 
-- `GAME_SERVER_ADMIN_HOST` / `GAME_SERVER_ADMIN_PORT` 用于 GM 指令转发
+- `GAME_SERVER_ADMIN_HOST` / `GAME_SERVER_ADMIN_PORT` / `GAME_ADMIN_TOKEN` 用于 GM 指令转发
 - 默认仍对接 `game-server` admin 端口 `7500`
-- 生产环境必须修改 `JWT_SECRET` 和初始管理员密码
+- 生产环境必须修改 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 和初始管理员密码；`NODE_ENV=production` 下明显默认的 `JWT_SECRET` / `GAME_ADMIN_TOKEN` / `ADMIN_PASSWORD` 会导致配置加载失败
+- `TRUST_PROXY=false` 时审计 IP 使用直连来源；只有开启 `TRUST_PROXY` 且直连来源显式列在 `TRUSTED_PROXIES` 中时才采用 `X-Forwarded-For` 首个地址
 
 ## 安全说明
 
 1. `admin-api` 的 `/api/v1/*` 接口使用 `Authorization: Bearer <token>` 做 JWT 鉴权。
 2. 管理员密码当前使用 `bcrypt` 哈希存储。
-3. 关键后台操作会写入 `admin_audit_logs`。
-4. 安全事件通过 `security_audit_logs` 提供检索。
-5. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与角色校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
-6. 当前后端已有角色校验；管理员 JWT session/version/blacklist、登录失败限流和锁定仍需补齐。
+3. 登录成功会创建 Redis 管理员 session，JWT 中的 `jti` 必须仍存在；`POST /api/v1/auth/logout` 会删除当前 session，同一 token 后续会被拒绝。
+4. 管理员账号被禁用后，Guard 会在下一次请求查库时拒绝访问；token version 已进入校验链路，后续可用于重置密码或批量撤销。
+5. 登录失败、账号锁定等安全事件会写入 `security_audit_logs`，关键后台操作会写入 `admin_audit_logs`。
+6. 审计 IP 解析遵循 `TRUST_PROXY` / `TRUSTED_PROXIES`，生产如有反向代理需要显式配置可信代理地址。
+7. 安全事件通过 `security_audit_logs` 提供检索。
+8. 监控接口 `/api/admin/monitoring/*` 已挂 JWT 与角色校验，但生产仍应通过运营网段、堡垒机、VPN 或独立管理入口访问。
+9. 当前后端已有角色校验；管理面 IP allowlist、HTTPS/TLS 强制和更细粒度权限矩阵仍需继续推进。

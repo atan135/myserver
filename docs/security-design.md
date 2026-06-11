@@ -88,7 +88,7 @@
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未强制鉴权前消息白名单 |
 | `game-server` | ticket 签名与 Redis 归属校验、心跳超时、最大包体限制、连接审计、基础权威移动校正 | 没有统一消息频率限制、时间戳窗口、反重放和通用作弊计数 |
-| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、管理审计日志、安全日志查询、后端角色授权、监控接口鉴权 | 管理员 JWT 缺少 session/version/blacklist；登录失败限流和锁定仍需补齐；生产网络隔离仍需部署侧保证 |
+| `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和 token version 管理接口仍待补齐 |
 
 说明：
 
@@ -485,7 +485,15 @@ ADMIN_API_REQUIRE_TLS=false
 ADMIN_API_REQUIRE_IP_ALLOWLIST=false
 ADMIN_MONITORING_REQUIRE_AUTH=true
 ADMIN_ENFORCE_ROLE_CHECK=true
+ADMIN_SESSION_TTL_SECONDS=28800
+ADMIN_LOGIN_MAX_FAILURES=5
+ADMIN_LOGIN_FAILURE_WINDOW_SECONDS=900
+ADMIN_LOGIN_LOCK_SECONDS=900
+TRUST_PROXY=false
+TRUSTED_PROXIES=
 ```
+
+当前 `admin-api` 已读取 `ADMIN_SESSION_TTL_SECONDS`、`ADMIN_LOGIN_MAX_FAILURES`、`ADMIN_LOGIN_FAILURE_WINDOW_SECONDS`、`ADMIN_LOGIN_LOCK_SECONDS`、`TRUST_PROXY` 和 `TRUSTED_PROXIES`。`ADMIN_SESSION_TTL_SECONDS` 未配置时跟随 `JWT_EXPIRES_IN` 解析出的秒数；`TRUST_PROXY=true` 仍要求直连来源显式列在 `TRUSTED_PROXIES` 后才信任 `X-Forwarded-For`。`NODE_ENV=production` 下明显默认的 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 或 `ADMIN_PASSWORD` 会导致配置加载失败。`ADMIN_API_REQUIRE_TLS`、`ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_MONITORING_REQUIRE_AUTH`、`ADMIN_ENFORCE_ROLE_CHECK` 仍是部署或设计口径，其中监控接口和角色校验代码侧已经默认启用。
 
 ---
 
@@ -493,8 +501,8 @@ ADMIN_ENFORCE_ROLE_CHECK=true
 
 ### M0：立即补齐的高优先级项
 
-1. 管理员 JWT session/version/blacklist、登出撤销和禁用后失效
-2. 管理员登录失败限流、锁定和安全审计
+1. 管理员 JWT session/jti、登出撤销、禁用后失效和基础 token version 校验已落地；批量撤销、重置密码联动 bump version 和管理接口仍待补齐
+2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网
 4. `game-proxy` / `game-server` 增加鉴权前消息白名单
 5. 单连接 / 单玩家 / 单 IP 消息频率限制

@@ -2,6 +2,7 @@ import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 
 import { AdminStore } from "./admin-store.js";
+import { AdminSessionStore } from "./auth/admin-session-store.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
@@ -27,6 +28,7 @@ import {
   ADMIN_MYSQL_POOL,
   ADMIN_NATS,
   ADMIN_REDIS,
+  ADMIN_SESSION_STORE,
   ADMIN_STORE
 } from "./tokens.js";
 
@@ -75,6 +77,11 @@ import {
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
       }
+    },
+    {
+      provide: ADMIN_SESSION_STORE,
+      inject: [ADMIN_REDIS, ADMIN_CONFIG],
+      useFactory: (redis: any, config: any) => new AdminSessionStore(redis, config)
     },
     {
       provide: ADMIN_GAME_ADMIN_CLIENT,

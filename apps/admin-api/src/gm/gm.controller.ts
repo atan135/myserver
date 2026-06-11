@@ -4,16 +4,9 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { Roles } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
+import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
-import { ADMIN_GAME_ADMIN_CLIENT, ADMIN_STORE } from "../tokens.js";
-
-function getClientIp(req: any): string | null {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  return req.ip || req.socket?.remoteAddress || null;
-}
+import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_STORE } from "../tokens.js";
 
 function gameServerError(error: any) {
   return new ApiHttpException(502, {
@@ -29,6 +22,7 @@ function gameServerError(error: any) {
 @Controller("/api/v1/gm")
 export class GmController {
   constructor(
+    @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_STORE) private readonly adminStore: any,
     @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
   ) {}
@@ -57,7 +51,7 @@ export class GmController {
         targetType: "system",
         targetValue: "all",
         details: { title, content, sender },
-        ip: getClientIp(req)
+        ip: getClientIp(req, this.config)
       });
 
       return { ok: true, message: "Broadcast sent" };
@@ -94,7 +88,7 @@ export class GmController {
         targetType: "player",
         targetValue: playerId,
         details: { itemId, itemCount, reason },
-        ip: getClientIp(req)
+        ip: getClientIp(req, this.config)
       });
 
       return { ok: true, message: "Item sent" };
@@ -123,7 +117,7 @@ export class GmController {
         targetType: "player",
         targetValue: playerId,
         details: { reason },
-        ip: getClientIp(req)
+        ip: getClientIp(req, this.config)
       });
 
       return { ok: true, message: "Player kicked" };
@@ -156,7 +150,7 @@ export class GmController {
         targetType: "player",
         targetValue: playerId,
         details: { durationSeconds, reason },
-        ip: getClientIp(req)
+        ip: getClientIp(req, this.config)
       });
 
       return { ok: true, message: "Player banned" };
