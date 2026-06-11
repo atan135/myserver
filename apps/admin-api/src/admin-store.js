@@ -15,6 +15,19 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+function toAdmin(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    displayName: row.display_name,
+    role: row.role,
+    status: row.status,
+    passwordAlgo: row.password_algo,
+    passwordSalt: row.password_salt,
+    passwordHash: row.password_hash
+  };
+}
+
 export class AdminStore {
   constructor(pool) {
     this.pool = pool;
@@ -31,15 +44,19 @@ export class AdminStore {
 
     if (rows.length === 0) return null;
 
-    const row = rows[0];
-    return {
-      id: row.id,
-      username: row.username,
-      displayName: row.display_name,
-      role: row.role,
-      status: row.status,
-      passwordHash: row.password_hash
-    };
+    return toAdmin(rows[0]);
+  }
+
+  async findAdminById(adminId) {
+    const [rows] = await this.pool.execute(
+      `SELECT id, username, display_name, password_algo, password_salt, password_hash, role, status
+       FROM admin_accounts
+       WHERE id = ?
+       LIMIT 1`,
+      [adminId]
+    );
+
+    return rows.length > 0 ? toAdmin(rows[0]) : null;
   }
 
   async verifyPassword(password, hash) {
@@ -90,6 +107,21 @@ export class AdminStore {
       `UPDATE admin_accounts SET last_login_at = CURRENT_TIMESTAMP(3) WHERE id = ?`,
       [adminId]
     );
+  }
+
+  async updateAdminPassword(adminId, password) {
+    const passwordSalt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = hashPassword(password);
+    const [result] = await this.pool.execute(
+      `UPDATE admin_accounts
+       SET password_algo = 'bcrypt',
+           password_salt = ?,
+           password_hash = ?
+       WHERE id = ?`,
+      [passwordSalt, passwordHash, adminId]
+    );
+
+    return result.affectedRows > 0;
   }
 
   async appendAuditLog({ adminId, adminUsername, action, targetType, targetValue, details, ip }) {

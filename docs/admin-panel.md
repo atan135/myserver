@@ -12,6 +12,7 @@
 已经落地的后台能力包括：
 
 - 管理员登录、登出、当前身份查询
+- 管理员 token 批量撤销、管理员密码重置与 token version 联动失效
 - 管理操作审计日志查询
 - 安全日志查询
 - 玩家列表查询、玩家详情查询、玩家状态修改
@@ -80,6 +81,8 @@ npm run dev:admin-web
 
 - 维护模式查询：`GET /api/v1/maintenance`
 - 维护模式切换：`POST /api/v1/maintenance`
+- 撤销指定管理员全部 token：`POST /api/v1/admins/:adminId/revoke-tokens`
+- 重置指定管理员密码并撤销旧 token：`POST /api/v1/admins/:adminId/reset-password`
 - 手动触发 metrics 归档：`POST /api/admin/monitoring/archive`
 
 ## 权限说明
@@ -90,7 +93,7 @@ npm run dev:admin-web
 |------|------|
 | viewer | 查看概览、日志、玩家信息、监控 |
 | operator | viewer + 玩家状态调整 + GM 广播/发道具/踢人 |
-| admin | operator + 封禁玩家 + 维护模式切换 |
+| admin | operator + 封禁玩家 + 维护模式切换 + 管理员 token 生命周期操作 |
 
 ### 当前实现现状
 
@@ -104,10 +107,11 @@ npm run dev:admin-web
 - 前端页面级权限限制已生效
 - 后端接口级角色校验已生效
 - 管理员 JWT 已包含 `jti` 和 `tokenVersion`，后端通过 Redis 管理员 session 校验实现登出撤销；Guard 每次仍会查库确认管理员存在且 `status=active`
+- 管理员 token 撤销和密码重置接口已通过 bump Redis token version 让目标管理员全部旧 token 失效
 - 管理员登录失败已按 username + client IP 维度计数和锁定，并写入 `security_audit_logs`
 - 审计 IP 已按 `TRUST_PROXY` / `TRUSTED_PROXIES` 解析，不再无条件信任 `X-Forwarded-For`
 
-如果后续补上批量撤销、重置密码联动 token version、管理面 IP allowlist 或更细粒度权限矩阵，本文应同步更新。
+如果后续补上管理面 IP allowlist 或更细粒度权限矩阵，本文应同步更新。
 
 ## 数据库表
 
@@ -153,6 +157,10 @@ npm run dev:admin-web
 
 - `admin_login`
 - `admin_logout`
+- `admin_tokens_revoked`
+- `admin_tokens_revoke_failed`
+- `admin_password_reset`
+- `admin_password_reset_failed`
 - `player_status_change`
 - `maintenance_enabled`
 - `maintenance_disabled`
@@ -242,6 +250,61 @@ npm run dev:admin-web
 #### `POST /api/v1/auth/logout`
 
 登出，并写入审计日志。
+
+### 管理员账号安全
+
+以下接口均要求 `admin` 角色；`operator` 和 `viewer` 会被后端角色校验拒绝。
+
+#### `POST /api/v1/admins/:adminId/revoke-tokens`
+
+撤销指定管理员全部现有 token。实现方式是 bump 目标管理员 Redis token version；旧 JWT 和旧 session 中的 `tokenVersion` 会在下一次请求时被 Guard 拒绝。
+
+请求体：
+
+```json
+{
+  "reason": "权限调整"
+}
+```
+
+`reason` 必填，最长 512 个字符。
+
+返回结构：
+
+```json
+{
+  "ok": true,
+  "message": "Admin tokens revoked.",
+  "targetAdmin": {
+    "id": 2,
+    "username": "ops",
+    "displayName": "Ops",
+    "role": "operator",
+    "status": "active"
+  },
+  "tokenVersion": 3,
+  "currentTokenInvalidated": false
+}
+```
+
+如果管理员撤销自己的全部 token，本次请求会正常返回；响应中的 `currentTokenInvalidated` 为 `true`，表示当前请求使用的 token 已不能用于后续请求。
+
+#### `POST /api/v1/admins/:adminId/reset-password`
+
+重置指定管理员密码，并通过 bump 目标管理员 token version 使旧 token 全部失效。
+
+请求体：
+
+```json
+{
+  "newPassword": "NewPass456!X",
+  "reason": "管理员轮换"
+}
+```
+
+`reason` 必填，最长 512 个字符。密码长度要求为 12 到 128 个字符，不允许空白字符，且必须同时包含大写字母、小写字母、数字和符号。
+
+该接口会先 bump 目标管理员 Redis token version，再更新 `admin_accounts.password_algo/password_salt/password_hash`。如果 Redis token version 更新失败，密码不会写库，避免出现密码已重置但旧 token 仍可用的状态；如果后续密码写库失败，目标管理员旧 token 已失效，需要重新处理密码重置。接口会写入 `admin_audit_logs`，审计详情不会记录明文密码。
 
 ### 审计日志
 
@@ -545,7 +608,7 @@ ADMIN_DISPLAY_NAME=Administrator
 1. `admin-api` 的 `/api/v1/*` 接口使用 `Authorization: Bearer <token>` 做 JWT 鉴权。
 2. 管理员密码当前使用 `bcrypt` 哈希存储。
 3. 登录成功会创建 Redis 管理员 session，JWT 中的 `jti` 必须仍存在；`POST /api/v1/auth/logout` 会删除当前 session，同一 token 后续会被拒绝。
-4. 管理员账号被禁用后，Guard 会在下一次请求查库时拒绝访问；token version 已进入校验链路，后续可用于重置密码或批量撤销。
+4. 管理员账号被禁用后，Guard 会在下一次请求查库时拒绝访问；token version 已用于管理员 token 批量撤销和密码重置后的旧 token 失效。
 5. 登录失败、账号锁定等安全事件会写入 `security_audit_logs`，关键后台操作会写入 `admin_audit_logs`。
 6. 审计 IP 解析遵循 `TRUST_PROXY` / `TRUSTED_PROXIES`，生产如有反向代理需要显式配置可信代理地址。
 7. 安全事件通过 `security_audit_logs` 提供检索。

@@ -13,6 +13,7 @@ import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
 import { RolesGuard } from "./auth/roles.guard.js";
+import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
 import { PlayersController } from "./players/players.controller.js";
 import { MaintenanceController } from "./maintenance/maintenance.controller.js";
@@ -38,6 +39,7 @@ import {
   ],
   controllers: [
     AuthController,
+    AdminsController,
     AuditController,
     PlayersController,
     MaintenanceController,
