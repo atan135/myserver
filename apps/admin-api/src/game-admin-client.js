@@ -22,6 +22,7 @@ const MESSAGE_TYPE = {
   GM_BAN_PLAYER_RES: 3008,
   ERROR_RES: 9000
 };
+const ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 let nextSeqValue = 1;
 
 function encodePacket(messageType, seq, body) {
@@ -83,7 +84,26 @@ function nextSeq() {
   return seq;
 }
 
-async function sendRequest(config, messageType, payload, expectedType) {
+function normalizeGameAdminActor(actor) {
+  if (actor === undefined || actor === null) {
+    return null;
+  }
+
+  const normalized = String(actor).trim();
+  return ACTOR_PATTERN.test(normalized) ? normalized : null;
+}
+
+function buildAdminAuthBody(config, actor) {
+  const token = config.gameAdminToken || "";
+  const normalizedActor = normalizeGameAdminActor(actor);
+  if (!normalizedActor) {
+    return Buffer.from(token, "utf8");
+  }
+
+  return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
+}
+
+async function sendRequest(config, messageType, payload, expectedType, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({
       host: config.gameServerAdminHost,
@@ -100,7 +120,7 @@ async function sendRequest(config, messageType, payload, expectedType) {
       const authPacket = encodePacket(
         MESSAGE_TYPE.ADMIN_AUTH_REQ,
         0,
-        Buffer.from(config.gameAdminToken || "", "utf8")
+        buildAdminAuthBody(config, options.actor)
       );
       const packet = encodePacket(messageType, nextSeq(), payload);
       socket.write(Buffer.concat([authPacket, packet]), (err) => {
@@ -165,72 +185,78 @@ export class GameAdminClient {
     this.config = config;
   }
 
-  async getServerStatus() {
+  async getServerStatus(options = {}) {
     const body = await sendRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_SERVER_STATUS_REQ,
       Buffer.alloc(0),
-      MESSAGE_TYPE.ADMIN_SERVER_STATUS_RES
+      MESSAGE_TYPE.ADMIN_SERVER_STATUS_RES,
+      options
     );
     // Simplified: just return basic info, real implementation would decode protobuf
     return { ok: true };
   }
 
-  async updateConfig(key, value) {
+  async updateConfig(key, value, options = {}) {
     // Simple string-based for now, real impl would use protobuf
     const payload = Buffer.from(JSON.stringify({ key, value }));
     await sendRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
       payload,
-      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES
+      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
+      options
     );
     return { ok: true };
   }
 
-  async broadcast(title, content, sender = "System") {
+  async broadcast(title, content, sender = "System", options = {}) {
     const payload = Buffer.from(JSON.stringify({ title, content, sender }));
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_BROADCAST_REQ,
       payload,
-      MESSAGE_TYPE.GM_BROADCAST_RES
+      MESSAGE_TYPE.GM_BROADCAST_RES,
+      options
     );
     return { ok: true };
   }
 
-  async sendItem(playerId, itemId, itemCount, reason = "") {
+  async sendItem(playerId, itemId, itemCount, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, itemId, itemCount, reason }));
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_SEND_ITEM_REQ,
       payload,
-      MESSAGE_TYPE.GM_SEND_ITEM_RES
+      MESSAGE_TYPE.GM_SEND_ITEM_RES,
+      options
     );
     return { ok: true };
   }
 
-  async kickPlayer(playerId, reason = "") {
+  async kickPlayer(playerId, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, reason }));
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
       payload,
-      MESSAGE_TYPE.GM_KICK_PLAYER_RES
+      MESSAGE_TYPE.GM_KICK_PLAYER_RES,
+      options
     );
     return { ok: true };
   }
 
-  async banPlayer(playerId, durationSeconds, reason = "") {
+  async banPlayer(playerId, durationSeconds, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, durationSeconds, reason }));
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
       payload,
-      MESSAGE_TYPE.GM_BAN_PLAYER_RES
+      MESSAGE_TYPE.GM_BAN_PLAYER_RES,
+      options
     );
     return { ok: true };
   }
 }
 
-export { MESSAGE_TYPE };
+export { MESSAGE_TYPE, buildAdminAuthBody, normalizeGameAdminActor };

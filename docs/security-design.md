@@ -536,7 +536,7 @@ GAME_ADMIN_AUDIT_PATH=logs/game-server/admin-audit.jsonl
 GAME_ADMIN_AUDIT_REQUIRE_ACTOR=false
 ```
 
-`AdminAuthReq` 继续兼容旧的纯 token body。需要追踪具体操作人时，可以改为 JSON envelope：`{"token":"...","actor":"ops@example.com"}`。旧格式或空 actor 会在审计中记录为 `actor=unknown`、`actor_missing=true`。当 `GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时，`AdminUpdateConfigReq`、GM 写操作、房间迁移 freeze/export/import/retire 和 redirect 等写操作缺 actor 会在状态变更前被拒绝；`AdminServerStatusReq`、`GetRolloutDrainStatusReq` 等只读状态查询不因缺 actor 被拒绝。JSONL 审计只记录目标摘要、seq/message_type、结果和错误码，不记录 token、ticket、密码、完整 payload 或 room transfer payload。internal socket 不要求人类 actor，但 transfer/redirect 等服务间控制动作会输出 `channel=internal_socket`、`actor=internal_service` 的结构化 tracing 审计日志。
+`AdminAuthReq` 继续兼容旧的纯 token body。需要追踪具体操作人时，可以改为 JSON envelope：`{"token":"...","actor":"ops@example.com"}`。旧格式或空 actor 会在审计中记录为 `actor=unknown`、`actor_missing=true`。`admin-api` 调用 `game-server` 内网 admin TCP 写操作时会优先透传当前后台管理员 `username`，没有合法 username 时使用 `admin-<sub>`；actor 必须满足 `[A-Za-z0-9._@-]` 且最长 128 字符，非法值会回退为缺失 actor。当 `GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true` 时，`AdminUpdateConfigReq`、GM 写操作、房间迁移 freeze/export/import/retire 和 redirect 等写操作缺 actor 会在状态变更前被拒绝；`AdminServerStatusReq`、`GetRolloutDrainStatusReq` 等只读状态查询不因缺 actor 被拒绝。JSONL 审计只记录目标摘要、seq/message_type、结果和错误码，不记录 token、ticket、密码、完整 payload 或 room transfer payload。internal socket 不要求人类 actor，但 transfer/redirect 等服务间控制动作会输出 `channel=internal_socket`、`actor=internal_service` 的结构化 tracing 审计日志。
 
 仍属于设计目标、当前未读取的业务层配置示例：
 

@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
 const GM_BROADCAST_SUBJECT = "myserver.gm.broadcast";
+const GAME_ADMIN_ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 
 function gameServerError(error: any) {
   return new ApiHttpException(502, {
@@ -69,6 +70,23 @@ function normalizeGmReason(reason: any, prefix: "gm_kick" | "gm_ban") {
   }
   const normalized = reason.trim();
   return normalized.length > 0 ? `${prefix}:${normalized}` : prefix;
+}
+
+function normalizeGameAdminActor(req: any) {
+  const admin = req?.admin || {};
+  const candidates = [admin.username, admin.sub !== undefined && admin.sub !== null ? `admin-${admin.sub}` : null];
+
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null) {
+      continue;
+    }
+    const actor = String(candidate).trim();
+    if (GAME_ADMIN_ACTOR_PATTERN.test(actor)) {
+      return actor;
+    }
+  }
+
+  return undefined;
 }
 
 @ApiTags("gm")
@@ -141,6 +159,7 @@ export class GmController {
     const normalizedTitle = title.trim();
     const normalizedContent = content.trim();
     const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
+    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
     const globalBroadcast = await this.publishGlobalBroadcast(
       normalizedTitle,
       normalizedContent,
@@ -154,7 +173,12 @@ export class GmController {
     };
     if (!globalBroadcast.ok) {
       try {
-        await this.gameAdminClient.broadcast(normalizedTitle, normalizedContent, normalizedSender);
+        await this.gameAdminClient.broadcast(
+          normalizedTitle,
+          normalizedContent,
+          normalizedSender,
+          gameAdminOptions
+        );
         legacyBroadcast = { ok: true, fallback: true };
       } catch (error: any) {
         legacyBroadcast = gameServerFailure(error);
@@ -209,7 +233,9 @@ export class GmController {
     }
 
     try {
-      await this.gameAdminClient.sendItem(playerId, itemId, itemCount, reason || "");
+      await this.gameAdminClient.sendItem(playerId, itemId, itemCount, reason || "", {
+        actor: normalizeGameAdminActor(req)
+      });
 
       await this.adminStore.appendAuditLog({
         adminId: req.admin.sub,
@@ -234,12 +260,13 @@ export class GmController {
     const { playerId, reason } = body || {};
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_kick");
+    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
 
     const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
 
     let legacyKick: any = { ok: true };
     try {
-      await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason);
+      await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, gameAdminOptions);
     } catch (error: any) {
       legacyKick = gameServerFailure(error);
     }
@@ -283,6 +310,7 @@ export class GmController {
 
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_ban");
+    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
     const player = await this.adminStore.findPlayerById(normalizedPlayerId);
     if (!player) {
       throw notFound("PLAYER_NOT_FOUND", "Player not found");
@@ -298,7 +326,12 @@ export class GmController {
 
     let legacyBan: any = { ok: true };
     try {
-      await this.gameAdminClient.banPlayer(normalizedPlayerId, durationSeconds, normalizedReason);
+      await this.gameAdminClient.banPlayer(
+        normalizedPlayerId,
+        durationSeconds,
+        normalizedReason,
+        gameAdminOptions
+      );
     } catch (error: any) {
       legacyBan = gameServerFailure(error);
     }

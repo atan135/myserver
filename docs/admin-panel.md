@@ -446,7 +446,7 @@ npm run dev:admin-web
 
 ### GM 命令
 
-GM 广播通过 Core NATS 发布 `myserver.gm.broadcast`，由各 `game-server` 实例订阅后向本实例在线玩家推送；NATS 发布成功时不再调用 legacy admin TCP，避免被直连实例重复投递。GM 踢人/封禁会通过 Core NATS 发布 `myserver.session.kick.<player_id_token>`，由各 `game-server` 实例订阅后断开本实例上的目标玩家连接。legacy 单实例 admin TCP 调用仍保留为兼容和辅助结果。
+GM 广播通过 Core NATS 发布 `myserver.gm.broadcast`，由各 `game-server` 实例订阅后向本实例在线玩家推送；NATS 发布成功时不再调用 legacy admin TCP，避免被直连实例重复投递。GM 踢人/封禁会通过 Core NATS 发布 `myserver.session.kick.<player_id_token>`，由各 `game-server` 实例订阅后断开本实例上的目标玩家连接。legacy 单实例 admin TCP 调用仍保留为兼容和辅助结果。`admin-api` 调用 `game-server` 内网 admin TCP 写操作时，会在 `AdminAuthReq` 中优先使用后台管理员 `username` 作为 actor；没有合法 username 时使用 `admin-<sub>`，actor 仅允许 `[A-Za-z0-9._@-]` 且最长 128 字符。不合法时回退为缺失 actor，不会向下游发送非法字符。
 
 #### `POST /api/v1/gm/broadcast`
 
