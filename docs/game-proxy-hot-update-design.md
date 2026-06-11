@@ -36,6 +36,7 @@
 - proxy 维护模式判断：`AuthReq` 阶段同时检查本进程 admin 开关和 Redis 共享状态 `${REDIS_KEY_PREFIX}maintenance:global`；命中后返回 `AuthRes(ok=false, error_code=MAINTENANCE_MODE)`，不选择上游。Redis 状态带短 TTL 缓存，默认 `PROXY_MAINTENANCE_CACHE_TTL_MS=2000`。
 - `game-server` 仍执行最终鉴权。
 - admin HTTP 口，默认 `PROXY_ADMIN_PORT=7101`。
+- admin 操作级 scoped token RBAC：兼容全权限写 token、只读 token，并可通过 scoped token 限制维护、rollout 或 route 写入。
 - 本进程维护模式开关：`/maintenance/on`、`/maintenance/off`。
 - admin 写操作 `X-Admin-Actor` 操作人解析、结构化日志审计与 JSONL 持久审计。
 - upstream 操作状态：`Active`、`Draining`、`Disabled`。
@@ -307,12 +308,31 @@ proxy 当前只解析最小接入和路由所需消息：
 
 ## 8. Admin 接口
 
-当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。所有 admin 请求都需要 admin token 鉴权；`PROXY_ADMIN_TOKEN` 是读写 token，兼容 GET/POST；可选 `PROXY_ADMIN_READ_TOKEN` 是只读 token，仅允许 GET。当前兼容两种 header 形式：
+当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。所有 admin 请求都需要 admin token 鉴权；`PROXY_ADMIN_TOKEN` 是全权限写 token，兼容所有 GET/POST；可选 `PROXY_ADMIN_READ_TOKEN` 是只读 token，仅允许 GET；`PROXY_ADMIN_SCOPED_TOKENS` 可配置额外受限 token。当前兼容两种 header 形式：
 
 - `Authorization: Bearer <token>`
 - `X-Admin-Token: <token>`
 
 URL query 中不支持传 token，避免 token 进入访问日志。开发环境未设置时会使用 `dev-only-change-this-proxy-admin-token`；`NODE_ENV=production` 或 `APP_ENV=production` 时，`PROXY_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。生产环境如果设置 `PROXY_ADMIN_READ_TOKEN`，也必须是非空、非明显默认值，且不能与 `PROXY_ADMIN_TOKEN` 相同。
+
+`PROXY_ADMIN_SCOPED_TOKENS` 使用分号分隔 token，冒号后用逗号列权限，例如：
+
+```env
+PROXY_ADMIN_SCOPED_TOKENS=maint-token:proxy.maintenance.write;rollout-token:proxy.rollout.write;route-token:proxy.route.write,proxy.read
+```
+
+当前权限含义：
+
+| 权限 | 允许操作 |
+|------|----------|
+| `proxy.read` | `GET /status`、`/instances`、`/rollout`、`/room-routes`、`/player-routes` |
+| `proxy.maintenance.write` | `POST /maintenance/on`、`/maintenance/off` |
+| `proxy.rollout.write` | `POST /rollout/start`、`/rollout/end`、`/rollout/state` |
+| `proxy.route.write` | `POST /room-route/upsert`、`/player-route/upsert`、`/switch/<server_id>` |
+| `proxy.write` | 已知和未知 POST 写路径的通用写权限；不包含只读 GET |
+| `*` | 全部读写权限 |
+
+scoped token 配置会拒绝空 token、明显默认 token、重复 token、未知权限和空权限；生产环境下还会拒绝明显弱 token。scoped token 不会写入日志、响应或审计事件。
 
 已实现接口：
 
@@ -332,7 +352,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `POST` | `/player-route/upsert?...` | 手动 upsert player route；校验 player/room/server id、upstream 存在性和 rollout epoch |
 | `POST` | `/switch/<server_id>` | 将目标 upstream 置为 active，其余置为 draining |
 
-当前 admin 修改接口会记录结构化日志审计，包含 `action`、操作人、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。启用 Redis route store 时，admin 写入会同步更新 route store 快照；持久审计第一阶段采用本地 JSONL 文件，尚未接入 MySQL 审计查询或集中留存。
+当前 admin 修改接口会记录结构化日志审计，包含 `action`、操作人、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。权限不足返回 `403 insufficient admin permission`；写操作权限拒绝会尽量写入 JSONL 审计，`error=insufficient_permission`，审计写入失败时至少记录 structured warn。启用 Redis route store 时，admin 写入会同步更新 route store 快照；持久审计第一阶段采用本地 JSONL 文件，尚未接入 MySQL 审计查询或集中留存。
 
 当前 admin 写接口同时支持轻量 JSONL 持久审计，默认开启：
 
@@ -344,7 +364,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 仍未完成的生产化能力：
 
-- 更细操作级 RBAC；当前仅支持读写 token 分离。
+- 操作级 RBAC 仍是第一阶段 scoped token 模型，尚未数据库化，也没有集中策略、审批流、权限变更审计查询或按资源范围授权。
 - 审计查询、集中留存和统一 trace/request id。
 - 多 proxy 部署下 route store 已有 Redis pub/sub 本地缓存失效第一阶段能力；仍缺统一控制面 owner、真实 Redis 集成压测，以及必要的锁/冲突合并策略。
 - 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
@@ -387,6 +407,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 | `PROXY_ADMIN_PORT` | admin 监听端口 | `7101` |
 | `PROXY_ADMIN_TOKEN` | admin HTTP 口鉴权 token；支持 Bearer 和 `X-Admin-Token` header；生产环境禁止空值或默认值 | 开发默认值 |
 | `PROXY_ADMIN_READ_TOKEN` | 可选 admin 只读 token；仅允许 GET；支持 Bearer 和 `X-Admin-Token` header；生产环境设置时禁止空值、默认值或与写 token 相同 | 未设置 |
+| `PROXY_ADMIN_SCOPED_TOKENS` | 可选 admin scoped token；格式 `token:permission1,permission2;token2:permission3`，支持 `proxy.read`、`proxy.maintenance.write`、`proxy.rollout.write`、`proxy.route.write`、`proxy.write`、`*` | 未设置 |
 | `PROXY_ADMIN_AUDIT_ENABLED` | 是否启用 admin 写操作 JSONL 持久审计 | `true` |
 | `PROXY_ADMIN_AUDIT_PATH` | admin 写操作 JSONL 审计文件路径 | `logs/game-proxy/admin-audit.jsonl` |
 | `PROXY_ADMIN_AUDIT_REQUIRE_ACTOR` | 是否要求 admin 写操作携带合法 `X-Admin-Actor` header | `false` |
@@ -416,7 +437,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 
 短期建议优先补：
 
-1. proxy admin 更细操作级权限、审计查询、集中留存和统一 trace/request id。
+1. proxy admin scoped token RBAC 的集中策略、审批流、审计查询、集中留存和统一 trace/request id。
 2. route store 多 proxy 一致性：在已有 Redis 单 key CAS + pub/sub reload 基础上补统一控制面 owner、真实 Redis 集成压测和必要的锁/冲突合并策略。
 3. 跨 proxy 全局单 IP / 单玩家连接限额、消息频率限制和 Redis 动态黑名单。
 4. 自动 rollout 结束检测。

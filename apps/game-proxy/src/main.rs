@@ -190,9 +190,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maintenance = Arc::new(RwLock::new(false));
 
     let admin_bind_addr = config.admin_bind_addr();
-    let admin_auth_config = admin_server::AdminAuthConfig::new(
+    let admin_auth_config = admin_server::AdminAuthConfig::with_scoped_tokens(
         config.admin_token.clone(),
         config.admin_read_token.clone(),
+        config.admin_scoped_tokens.clone(),
     );
     let admin_audit_logger =
         admin_server::AdminAuditLogger::new(admin_server::AdminAuditConfig::new(

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 
 use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
@@ -8,6 +9,36 @@ const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
 const DEFAULT_PROXY_ADMIN_AUDIT_PATH: &str = "logs/game-proxy/admin-audit.jsonl";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AdminPermissionScope {
+    Read,
+    MaintenanceWrite,
+    RolloutWrite,
+    RouteWrite,
+    Write,
+    All,
+}
+
+impl AdminPermissionScope {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "proxy.read" => Some(Self::Read),
+            "proxy.maintenance.write" => Some(Self::MaintenanceWrite),
+            "proxy.rollout.write" => Some(Self::RolloutWrite),
+            "proxy.route.write" => Some(Self::RouteWrite),
+            "proxy.write" => Some(Self::Write),
+            "*" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminScopedTokenConfig {
+    pub token: String,
+    pub permissions: Vec<AdminPermissionScope>,
+}
 
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
@@ -54,6 +85,7 @@ pub struct Config {
     pub admin_port: u16,
     pub admin_token: String,
     pub admin_read_token: Option<String>,
+    pub admin_scoped_tokens: Vec<AdminScopedTokenConfig>,
     pub admin_audit_enabled: bool,
     pub admin_audit_path: String,
     pub admin_audit_require_actor: bool,
@@ -115,6 +147,11 @@ impl Config {
             .map(|value| value.trim().to_string());
         validate_admin_tokens(&admin_token, admin_read_token.as_deref())?;
         let admin_read_token = admin_read_token.filter(|token| !token.is_empty());
+        let admin_scoped_tokens = parse_admin_scoped_tokens(
+            env::var("PROXY_ADMIN_SCOPED_TOKENS").ok().as_deref(),
+            &admin_token,
+            admin_read_token.as_deref(),
+        )?;
         let admin_audit_enabled = parse_bool("PROXY_ADMIN_AUDIT_ENABLED", true);
         let admin_audit_path = env::var("PROXY_ADMIN_AUDIT_PATH")
             .map(|value| value.trim().to_string())
@@ -198,6 +235,7 @@ impl Config {
             admin_port,
             admin_token,
             admin_read_token,
+            admin_scoped_tokens,
             admin_audit_enabled,
             admin_audit_path,
             admin_audit_require_actor,
@@ -285,16 +323,108 @@ fn validate_admin_tokens(admin_token: &str, admin_read_token: Option<&str>) -> R
     Ok(())
 }
 
+fn parse_admin_scoped_tokens(
+    raw: Option<&str>,
+    admin_token: &str,
+    admin_read_token: Option<&str>,
+) -> Result<Vec<AdminScopedTokenConfig>, String> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut seen_tokens = HashSet::new();
+    let admin_token = admin_token.trim();
+    if !admin_token.is_empty() {
+        seen_tokens.insert(admin_token.to_string());
+    }
+    if let Some(read_token) = admin_read_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        seen_tokens.insert(read_token.to_string());
+    }
+
+    let mut scoped_tokens = Vec::new();
+    for entry in raw.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let Some((token, permissions_raw)) = entry.split_once(':') else {
+            return Err(
+                "PROXY_ADMIN_SCOPED_TOKENS entries must use token:permission1,permission2"
+                    .to_string(),
+            );
+        };
+        let token = token.trim();
+        if token.is_empty() {
+            return Err("PROXY_ADMIN_SCOPED_TOKENS contains empty token".to_string());
+        }
+        if is_default_admin_token(token) {
+            return Err("PROXY_ADMIN_SCOPED_TOKENS contains default token".to_string());
+        }
+        if is_production_env() && is_weak_admin_token(token) {
+            return Err("PROXY_ADMIN_SCOPED_TOKENS contains weak token in production".to_string());
+        }
+        if !seen_tokens.insert(token.to_string()) {
+            return Err("PROXY_ADMIN_SCOPED_TOKENS contains duplicate token".to_string());
+        }
+
+        let mut permissions = Vec::new();
+        let mut seen_permissions = HashSet::new();
+        for permission in permissions_raw.split(',') {
+            let permission = permission.trim();
+            if permission.is_empty() {
+                return Err("PROXY_ADMIN_SCOPED_TOKENS contains empty permission".to_string());
+            }
+            let Some(scope) = AdminPermissionScope::parse(permission) else {
+                return Err(format!(
+                    "PROXY_ADMIN_SCOPED_TOKENS contains unknown permission '{}'",
+                    permission
+                ));
+            };
+            if seen_permissions.insert(scope) {
+                permissions.push(scope);
+            }
+        }
+        if permissions.is_empty() {
+            return Err("PROXY_ADMIN_SCOPED_TOKENS token has no permissions".to_string());
+        }
+
+        scoped_tokens.push(AdminScopedTokenConfig {
+            token: token.to_string(),
+            permissions,
+        });
+    }
+
+    Ok(scoped_tokens)
+}
+
 fn is_default_admin_token(admin_token: &str) -> bool {
-    matches!(
-        admin_token,
-        DEFAULT_ADMIN_TOKEN
-            | DEFAULT_ADMIN_READ_TOKEN
-            | "change-me"
-            | "changeme"
-            | "default"
-            | "password"
-    )
+    let normalized = admin_token.trim().to_ascii_lowercase();
+    admin_token == DEFAULT_ADMIN_TOKEN
+        || admin_token == DEFAULT_ADMIN_READ_TOKEN
+        || matches!(
+            normalized.as_str(),
+            "change-me" | "changeme" | "default" | "password"
+        )
+}
+
+fn is_weak_admin_token(admin_token: &str) -> bool {
+    let token = admin_token.trim();
+    token.len() < 16
+        || matches!(
+            token.to_ascii_lowercase().as_str(),
+            "admin" | "root" | "test" | "token" | "secret"
+        )
+        || token
+            .chars()
+            .next()
+            .is_some_and(|first| token.chars().all(|ch| ch == first))
 }
 
 #[cfg(test)]
@@ -302,7 +432,10 @@ mod tests {
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
-    use super::{Config, DEFAULT_ADMIN_READ_TOKEN, DEFAULT_ADMIN_TOKEN, RouteStoreBackend};
+    use super::{
+        AdminPermissionScope, Config, DEFAULT_ADMIN_READ_TOKEN, DEFAULT_ADMIN_TOKEN,
+        RouteStoreBackend,
+    };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -315,12 +448,24 @@ mod tests {
 
     impl EnvGuard {
         fn capture(names: &[&'static str]) -> Self {
+            let mut names = names.to_vec();
+            if !names.contains(&"PROXY_ADMIN_SCOPED_TOKENS") {
+                names.push("PROXY_ADMIN_SCOPED_TOKENS");
+            }
             Self {
                 saved: names
                     .iter()
                     .map(|name| (*name, env::var(name).ok()))
                     .collect(),
             }
+            .without_ambient_scoped_tokens()
+        }
+
+        fn without_ambient_scoped_tokens(self) -> Self {
+            unsafe {
+                env::remove_var("PROXY_ADMIN_SCOPED_TOKENS");
+            }
+            self
         }
     }
 
@@ -666,6 +811,146 @@ mod tests {
             config.admin_read_token.as_deref(),
             Some("prod-proxy-admin-read-token-123")
         );
+    }
+
+    #[test]
+    fn parses_admin_scoped_tokens_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_SCOPED_TOKENS",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("PROXY_ADMIN_TOKEN", "write-token");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "read-token");
+            env::set_var(
+                "PROXY_ADMIN_SCOPED_TOKENS",
+                "maintenance-token:proxy.maintenance.write;route-token:proxy.route.write,proxy.read;all-token:*",
+            );
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(config.admin_scoped_tokens.len(), 3);
+        assert_eq!(config.admin_scoped_tokens[0].token, "maintenance-token");
+        assert_eq!(
+            config.admin_scoped_tokens[0].permissions,
+            vec![AdminPermissionScope::MaintenanceWrite]
+        );
+        assert_eq!(
+            config.admin_scoped_tokens[1].permissions,
+            vec![AdminPermissionScope::RouteWrite, AdminPermissionScope::Read]
+        );
+        assert_eq!(
+            config.admin_scoped_tokens[2].permissions,
+            vec![AdminPermissionScope::All]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_admin_scoped_token_config() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_SCOPED_TOKENS",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("PROXY_ADMIN_TOKEN", "write-token");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "read-token");
+            env::set_var(
+                "PROXY_ADMIN_SCOPED_TOKENS",
+                "scoped-token:proxy.route.delete",
+            );
+        }
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("unknown scoped admin permission should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("unknown permission"));
+
+        unsafe {
+            env::set_var(
+                "PROXY_ADMIN_SCOPED_TOKENS",
+                "same-token:proxy.read;same-token:proxy.route.write",
+            );
+        }
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("duplicate scoped admin token should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("duplicate token"));
+
+        unsafe {
+            env::set_var("PROXY_ADMIN_SCOPED_TOKENS", ":proxy.read");
+        }
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("empty scoped admin token should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("empty token"));
+    }
+
+    #[test]
+    fn rejects_admin_scoped_token_reusing_compat_tokens() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_SCOPED_TOKENS",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("PROXY_ADMIN_TOKEN", "write-token");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "read-token");
+            env::set_var("PROXY_ADMIN_SCOPED_TOKENS", "read-token:proxy.read");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("scoped admin token must not reuse compatibility tokens"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("duplicate token"));
+    }
+
+    #[test]
+    fn rejects_weak_admin_scoped_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ADMIN_SCOPED_TOKENS",
+        ]);
+
+        unsafe {
+            env::set_var("APP_ENV", "production");
+            env::remove_var("NODE_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::set_var("PROXY_ADMIN_READ_TOKEN", "prod-proxy-admin-read-token-123");
+            env::set_var("PROXY_ADMIN_SCOPED_TOKENS", "short:proxy.route.write");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("weak scoped admin token should be rejected in production"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("weak token"));
     }
 
     #[test]

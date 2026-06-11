@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
+use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
 use crate::route_store::{
     PlayerRouteRecord, ProxyRouteStore, RolloutSessionState, RoomMigrationState, RoomRouteRecord,
     RouteStoreUpdateError, UpstreamOperationState,
@@ -61,13 +62,37 @@ struct PlayerRoutesResponse {
 pub struct AdminAuthConfig {
     write_token: String,
     read_token: Option<String>,
+    scoped_tokens: Vec<AdminScopedToken>,
+}
+
+#[derive(Clone)]
+struct AdminScopedToken {
+    token: String,
+    permissions: Vec<AdminPermissionScope>,
 }
 
 impl AdminAuthConfig {
+    #[cfg(test)]
     pub fn new(write_token: String, read_token: Option<String>) -> Self {
+        Self::with_scoped_tokens(write_token, read_token, Vec::new())
+    }
+
+    pub fn with_scoped_tokens(
+        write_token: String,
+        read_token: Option<String>,
+        scoped_tokens: Vec<AdminScopedTokenConfig>,
+    ) -> Self {
         Self {
             write_token,
             read_token: read_token.filter(|token| !token.trim().is_empty()),
+            scoped_tokens: scoped_tokens
+                .into_iter()
+                .filter(|entry| !entry.token.trim().is_empty())
+                .map(|entry| AdminScopedToken {
+                    token: entry.token,
+                    permissions: entry.permissions,
+                })
+                .collect(),
         }
     }
 }
@@ -173,10 +198,30 @@ struct AdminAuditEvent<'a> {
     rollout_epoch: &'a str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AdminPermission {
     Read,
     Write,
+    Scoped(Vec<AdminPermissionScope>),
+}
+
+impl AdminPermission {
+    fn allows(&self, required: AdminPermissionScope) -> bool {
+        match self {
+            Self::Write => true,
+            Self::Read => required == AdminPermissionScope::Read,
+            Self::Scoped(permissions) => permissions
+                .iter()
+                .any(|permission| permission_grants(*permission, required)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdminRouteRequirement {
+    permission: AdminPermissionScope,
+    action: &'static str,
+    is_write: bool,
 }
 
 pub async fn run(
@@ -234,13 +279,36 @@ async fn handle_connection(
     let path = first_line.split_whitespace().nth(1).unwrap_or_default();
     let (route_path, query) = split_path_and_query(path);
 
-    if let Err((status, body)) = authorize_method(&request, method, auth_config.as_ref()) {
-        let response = http_response(status, "text/plain; charset=utf-8", body.to_string());
+    let context = admin_request_context(&request, method, route_path);
+    let route_requirement = admin_route_requirement(method, route_path)
+        .unwrap_or_else(|| fallback_route_requirement(method));
+    if let Err((status, body)) = authorize_route(&request, route_requirement, auth_config.as_ref())
+    {
+        let response = if status == 403 && route_requirement.is_write {
+            audited_forbidden(
+                &audit_logger,
+                &context,
+                route_requirement.action,
+                "insufficient_permission",
+            )
+            .await
+        } else {
+            if status == 403 {
+                warn!(
+                    method,
+                    path = route_path,
+                    action = route_requirement.action,
+                    result = "error",
+                    error = "insufficient_permission",
+                    "proxy admin operation rejected"
+                );
+            }
+            http_response(status, "text/plain; charset=utf-8", body.to_string())
+        };
         socket.write_all(response.as_bytes()).await?;
         return Ok(());
     }
 
-    let context = admin_request_context(&request, method, route_path);
     if method != "GET" {
         if let Err(error) = audit_logger.ensure_ready().await {
             warn!(
@@ -1431,6 +1499,26 @@ async fn audited_update_error(
     }
 }
 
+async fn audited_forbidden(
+    audit_logger: &AdminAuditLogger,
+    context: &AdminRequestContext,
+    action: &'static str,
+    error: &'static str,
+) -> String {
+    match audit_error(audit_logger, context, action, error, None, None, None, None).await {
+        Ok(()) => forbidden(),
+        Err(audit_error) => {
+            warn!(
+                action,
+                error = %audit_error,
+                audit_path = %audit_logger.config.path.display(),
+                "proxy admin permission denial audit write failed"
+            );
+            forbidden()
+        }
+    }
+}
+
 fn audit_write_failed(
     audit_logger: &AdminAuditLogger,
     action: &'static str,
@@ -1551,33 +1639,137 @@ fn authorize(request: &str, auth_config: &AdminAuthConfig) -> Option<AdminPermis
         return Some(AdminPermission::Write);
     }
 
-    let read_token = auth_config.read_token.as_deref()?.trim();
-    if read_token.is_empty() {
-        return None;
+    if let Some(read_token) = auth_config.read_token.as_deref().map(str::trim) {
+        if !read_token.is_empty()
+            && request
+                .lines()
+                .skip(1)
+                .take_while(|line| !line.is_empty())
+                .any(|line| header_matches_token(line, read_token))
+        {
+            return Some(AdminPermission::Read);
+        }
     }
 
-    request
-        .lines()
-        .skip(1)
-        .take_while(|line| !line.is_empty())
-        .any(|line| header_matches_token(line, read_token))
-        .then_some(AdminPermission::Read)
+    auth_config
+        .scoped_tokens
+        .iter()
+        .find(|entry| {
+            let token = entry.token.trim();
+            !token.is_empty()
+                && request
+                    .lines()
+                    .skip(1)
+                    .take_while(|line| !line.is_empty())
+                    .any(|line| header_matches_token(line, token))
+        })
+        .map(|entry| AdminPermission::Scoped(entry.permissions.clone()))
 }
 
-fn authorize_method<'a>(
+fn authorize_route<'a>(
     request: &str,
-    method: &str,
+    route_requirement: AdminRouteRequirement,
     auth_config: &AdminAuthConfig,
 ) -> Result<AdminPermission, (u16, &'a str)> {
     let Some(permission) = authorize(request, auth_config) else {
         return Err((401, "missing or invalid admin token"));
     };
 
-    if method != "GET" && permission != AdminPermission::Write {
-        return Err((403, "admin token does not allow write operations"));
+    if !permission.allows(route_requirement.permission) {
+        return Err((403, "insufficient admin permission"));
     }
 
     Ok(permission)
+}
+
+fn admin_route_requirement(method: &str, route_path: &str) -> Option<AdminRouteRequirement> {
+    match (method, route_path) {
+        ("GET", "/status")
+        | ("GET", "/instances")
+        | ("GET", "/rollout")
+        | ("GET", "/room-routes")
+        | ("GET", "/player-routes") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::Read,
+            action: "admin_read",
+            is_write: false,
+        }),
+        ("POST", "/maintenance/on") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::MaintenanceWrite,
+            action: "maintenance_on",
+            is_write: true,
+        }),
+        ("POST", "/maintenance/off") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::MaintenanceWrite,
+            action: "maintenance_off",
+            is_write: true,
+        }),
+        ("POST", "/rollout/start") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RolloutWrite,
+            action: "rollout_start",
+            is_write: true,
+        }),
+        ("POST", "/rollout/end") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RolloutWrite,
+            action: "rollout_end",
+            is_write: true,
+        }),
+        ("POST", "/rollout/state") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RolloutWrite,
+            action: "rollout_state",
+            is_write: true,
+        }),
+        ("POST", "/room-route/upsert") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RouteWrite,
+            action: "room_route_upsert",
+            is_write: true,
+        }),
+        ("POST", "/player-route/upsert") => Some(AdminRouteRequirement {
+            permission: AdminPermissionScope::RouteWrite,
+            action: "player_route_upsert",
+            is_write: true,
+        }),
+        ("POST", route_path) if route_path.strip_prefix("/switch/").is_some() => {
+            Some(AdminRouteRequirement {
+                permission: AdminPermissionScope::RouteWrite,
+                action: "switch",
+                is_write: true,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn fallback_route_requirement(method: &str) -> AdminRouteRequirement {
+    if method == "GET" {
+        AdminRouteRequirement {
+            permission: AdminPermissionScope::Read,
+            action: "admin_read",
+            is_write: false,
+        }
+    } else {
+        AdminRouteRequirement {
+            permission: AdminPermissionScope::Write,
+            action: "admin_write",
+            is_write: true,
+        }
+    }
+}
+
+fn permission_grants(granted: AdminPermissionScope, required: AdminPermissionScope) -> bool {
+    match granted {
+        AdminPermissionScope::All => true,
+        AdminPermissionScope::Write => required != AdminPermissionScope::Read,
+        _ => granted == required,
+    }
+}
+
+#[allow(dead_code)]
+fn authorize_method<'a>(
+    request: &str,
+    method: &str,
+    auth_config: &AdminAuthConfig,
+) -> Result<AdminPermission, (u16, &'a str)> {
+    authorize_route(request, fallback_route_requirement(method), auth_config)
 }
 
 #[cfg(test)]
@@ -1638,6 +1830,14 @@ fn bad_request(body: &str) -> String {
     http_response(400, "text/plain; charset=utf-8", body.to_string())
 }
 
+fn forbidden() -> String {
+    http_response(
+        403,
+        "text/plain; charset=utf-8",
+        "insufficient admin permission".to_string(),
+    )
+}
+
 fn http_response(status: u16, content_type: &str, body: String) -> String {
     let reason = match status {
         200 => "OK",
@@ -1669,10 +1869,12 @@ mod tests {
 
     use super::{
         AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
-        admin_request_context, audit_ok, audit_write_failed, authorize, authorize_method,
-        handle_connection, handle_player_route_upsert, handle_rollout_start, handle_rollout_state,
-        handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
+        admin_request_context, admin_route_requirement, audit_ok, audit_write_failed, authorize,
+        authorize_method, authorize_route, handle_connection, handle_player_route_upsert,
+        handle_rollout_start, handle_rollout_state, handle_room_route_upsert, handle_switch,
+        is_authorized, split_path_and_query,
     };
+    use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
     use crate::route_store::{
         ProxyRouteStore, RolloutSessionState, UpstreamHealthState, UpstreamOperationState,
         UpstreamRoute,
@@ -1717,6 +1919,17 @@ mod tests {
 
     fn auth_config() -> AdminAuthConfig {
         AdminAuthConfig::new(TOKEN.to_string(), Some(READ_TOKEN.to_string()))
+    }
+
+    fn scoped_auth_config(token: &str, permissions: Vec<AdminPermissionScope>) -> AdminAuthConfig {
+        AdminAuthConfig::with_scoped_tokens(
+            TOKEN.to_string(),
+            Some(READ_TOKEN.to_string()),
+            vec![AdminScopedTokenConfig {
+                token: token.to_string(),
+                permissions,
+            }],
+        )
     }
 
     fn test_audit_logger() -> AdminAuditLogger {
@@ -1786,7 +1999,7 @@ mod tests {
 
         assert_eq!(
             authorize_method(&request, "POST", &auth_config()),
-            Err((403, "admin token does not allow write operations"))
+            Err((403, "insufficient admin permission"))
         );
     }
 
@@ -1797,8 +2010,100 @@ mod tests {
 
         assert_eq!(
             authorize_method(&request, "DELETE", &auth_config()),
-            Err((403, "admin token does not allow write operations"))
+            Err((403, "insufficient admin permission"))
         );
+    }
+
+    #[test]
+    fn scoped_maintenance_token_allows_only_maintenance_writes() {
+        let token = "maintenance-token";
+        let config = scoped_auth_config(token, vec![AdminPermissionScope::MaintenanceWrite]);
+        let request =
+            format!("POST /maintenance/on HTTP/1.1\r\nauthorization: Bearer {token}\r\n\r\n");
+        let maintenance = admin_route_requirement("POST", "/maintenance/on").unwrap();
+        let rollout = admin_route_requirement("POST", "/rollout/start").unwrap();
+        let route = admin_route_requirement("POST", "/room-route/upsert").unwrap();
+        let switch = admin_route_requirement("POST", "/switch/game-server-2").unwrap();
+
+        assert_eq!(
+            authorize_route(&request, maintenance, &config),
+            Ok(AdminPermission::Scoped(vec![
+                AdminPermissionScope::MaintenanceWrite
+            ]))
+        );
+        assert_eq!(
+            authorize_route(&request, rollout, &config),
+            Err((403, "insufficient admin permission"))
+        );
+        assert_eq!(
+            authorize_route(&request, route, &config),
+            Err((403, "insufficient admin permission"))
+        );
+        assert_eq!(
+            authorize_route(&request, switch, &config),
+            Err((403, "insufficient admin permission"))
+        );
+    }
+
+    #[test]
+    fn scoped_rollout_token_allows_rollout_but_not_route_writes() {
+        let token = "rollout-token";
+        let config = scoped_auth_config(token, vec![AdminPermissionScope::RolloutWrite]);
+        let request = format!("POST /rollout/start HTTP/1.1\r\nx-admin-token: {token}\r\n\r\n");
+        let rollout_start = admin_route_requirement("POST", "/rollout/start").unwrap();
+        let rollout_end = admin_route_requirement("POST", "/rollout/end").unwrap();
+        let route = admin_route_requirement("POST", "/player-route/upsert").unwrap();
+
+        assert!(authorize_route(&request, rollout_start, &config).is_ok());
+        assert!(authorize_route(&request, rollout_end, &config).is_ok());
+        assert_eq!(
+            authorize_route(&request, route, &config),
+            Err((403, "insufficient admin permission"))
+        );
+    }
+
+    #[test]
+    fn scoped_route_token_allows_route_writes_and_switch_only() {
+        let token = "route-token";
+        let config = scoped_auth_config(token, vec![AdminPermissionScope::RouteWrite]);
+        let request =
+            format!("POST /room-route/upsert HTTP/1.1\r\nauthorization: Bearer {token}\r\n\r\n");
+        let room_route = admin_route_requirement("POST", "/room-route/upsert").unwrap();
+        let player_route = admin_route_requirement("POST", "/player-route/upsert").unwrap();
+        let switch = admin_route_requirement("POST", "/switch/game-server-2").unwrap();
+        let maintenance = admin_route_requirement("POST", "/maintenance/off").unwrap();
+
+        assert!(authorize_route(&request, room_route, &config).is_ok());
+        assert!(authorize_route(&request, player_route, &config).is_ok());
+        assert!(authorize_route(&request, switch, &config).is_ok());
+        assert_eq!(
+            authorize_route(&request, maintenance, &config),
+            Err((403, "insufficient admin permission"))
+        );
+    }
+
+    #[test]
+    fn scoped_read_and_wildcard_permissions_work() {
+        let read_token = "scoped-read-token";
+        let read_config = scoped_auth_config(read_token, vec![AdminPermissionScope::Read]);
+        let read_request =
+            format!("GET /status HTTP/1.1\r\nauthorization: Bearer {read_token}\r\n\r\n");
+        let read = admin_route_requirement("GET", "/status").unwrap();
+        let maintenance = admin_route_requirement("POST", "/maintenance/on").unwrap();
+
+        assert!(authorize_route(&read_request, read, &read_config).is_ok());
+        assert_eq!(
+            authorize_route(&read_request, maintenance, &read_config),
+            Err((403, "insufficient admin permission"))
+        );
+
+        let all_token = "all-token";
+        let all_config = scoped_auth_config(all_token, vec![AdminPermissionScope::All]);
+        let all_request =
+            format!("POST /maintenance/on HTTP/1.1\r\nx-admin-token: {all_token}\r\n\r\n");
+
+        assert!(authorize_route(&all_request, read, &all_config).is_ok());
+        assert!(authorize_route(&all_request, maintenance, &all_config).is_ok());
     }
 
     #[test]
@@ -2221,6 +2526,76 @@ mod tests {
         assert_eq!(event["action"], "admin_actor_required");
         assert_eq!(event["result"], "error");
         assert_eq!(event["error"], "missing X-Admin-Actor");
+
+        let _ = tokio::fs::remove_file(&audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn scoped_permission_denial_is_audited_without_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let route_store = route_store().await;
+        let connection_count = Arc::new(AtomicU64::new(0));
+        let maintenance = Arc::new(tokio::sync::RwLock::new(false));
+        let audit_path = std::env::temp_dir().join(format!(
+            "game-proxy-admin-audit-{}-permission-denied.jsonl",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_file(&audit_path).await;
+        let scoped_token = "maintenance-token";
+        let auth_config = Arc::new(scoped_auth_config(
+            scoped_token,
+            vec![AdminPermissionScope::MaintenanceWrite],
+        ));
+        let audit_logger = Arc::new(AdminAuditLogger::new(AdminAuditConfig::new(
+            true,
+            &audit_path,
+            false,
+        )));
+
+        let server = async {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_connection(
+                socket,
+                route_store,
+                connection_count,
+                maintenance,
+                auth_config,
+                audit_logger,
+            )
+            .await
+            .unwrap();
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "POST /rollout/start?rollout_epoch=rollout-1&old_server_id=game-server-1&new_server_id=game-server-2 HTTP/1.1\r\nauthorization: Bearer {scoped_token}\r\nX-Admin-Actor: ops@example.com\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+
+        let (_, response) = tokio::join!(server, client);
+
+        assert_eq!(status_code(&response), 403);
+        assert!(response.ends_with("insufficient admin permission"));
+
+        let content = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert!(!content.contains(scoped_token));
+        let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(event["actor"], "ops@example.com");
+        assert_eq!(event["method"], "POST");
+        assert_eq!(event["path"], "/rollout/start");
+        assert_eq!(event["action"], "rollout_start");
+        assert_eq!(event["result"], "error");
+        assert_eq!(event["error"], "insufficient_permission");
 
         let _ = tokio::fs::remove_file(&audit_path).await;
     }

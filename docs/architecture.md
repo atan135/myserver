@@ -69,7 +69,7 @@
 | `game-server` | `7000` | Rust + Tokio | 玩家鉴权、房间生命周期、帧推进、配置表热加载、游戏逻辑与管理接口 |
 | `game-server admin` | `7500` | Rust + Tokio | 供 `auth-http` / `admin-api` 调用的内部管理口 |
 | `game-proxy` | `4000` | Rust + Tokio KCP / TCP fallback | 客户端游戏入口，校验 ticket 与维护模式后转发到 `game-server` 本地 socket；本地调试保留 TCP fallback |
-| `game-proxy admin` | `7101` | Rust + Tokio | 查看上游、切换路由、维护模式 |
+| `game-proxy admin` | `7101` | Rust + Tokio | 内网控制面；查看上游、切换路由、维护模式，支持全权限写 token、只读 token 和第一阶段 scoped token RBAC |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
 | `announce-service` | `9004` | Node.js + NestJS + Fastify | 公告 CRUD、有效公告查询、服务注册与监控上报 |
@@ -191,7 +191,7 @@
 
 注意：GM 广播由 `admin-api` 发布 Core NATS `myserver.gm.broadcast`，各 `game-server` 实例订阅后复用玩家协议 `GameMessagePush(event="gm_broadcast", action="broadcast")` 推送本实例在线连接；NATS 发布成功时不调用 legacy admin TCP，避免直连实例重复投递，发布失败时才 fallback 到 legacy 单实例广播并记录结构化结果。GM 踢人/封禁由 `admin-api` 发布 Core NATS `myserver.session.kick.<player_id_token>`，各 `game-server` 实例订阅后断开本实例上的目标玩家连接；legacy 单实例 admin TCP kick/ban 仍作为兼容和辅助结果记录。GM 封禁由 `admin-api` 先写入 `player_accounts.status=banned` 和 `ban_expires_at`，NATS 发布失败时不回滚账号状态但会在响应和审计中标明 global kick 失败；限时封禁由 `auth-http` 登录/签票路径惰性自动解封。
 
-维护模式由 `admin-api` 写入 Redis `${REDIS_KEY_PREFIX}maintenance:global` 并记录 `admin_audit_logs`。`auth-http` 和 `game-proxy` 读取该共享状态做入口拦截；`game-proxy` 仍保留本地 admin HTTP `/maintenance/on|off` 作为单进程开关，最终新接入判断同时考虑本地开关和 Redis 共享状态。
+维护模式由 `admin-api` 写入 Redis `${REDIS_KEY_PREFIX}maintenance:global` 并记录 `admin_audit_logs`。`auth-http` 和 `game-proxy` 读取该共享状态做入口拦截；`game-proxy` 仍保留本地 admin HTTP `/maintenance/on|off` 作为单进程开关，最终新接入判断同时考虑本地开关和 Redis 共享状态。`game-proxy` admin HTTP 口属于内网控制面，不是公网接口；当前支持全权限写 token、只读 token 和第一阶段 scoped token RBAC，用于限制维护、rollout 或 route 写入权限。
 
 ### 6.4 聊天与邮件
 
