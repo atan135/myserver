@@ -153,7 +153,7 @@
 3. `room_version` 每次 owner 切换或关键迁移状态推进时必须单调递增。
 4. `rollout_epoch` 标识一次灰度或迁移会话，route 更新必须匹配当前 epoch。
 5. `last_transfer_checksum` 绑定最近一次成功导入的 transfer payload。
-6. 迁移状态进入 `OwnedByNew` 前，必须先完成 freeze/export/import 校验。
+6. 迁移状态进入 `OwnedByNew` 前，必须先完成 freeze/export/import 校验；对外切 route 前还必须完成新服 ownership confirm。
 7. route 更新必须使用 CAS，避免旧控制命令覆盖新 owner。
 
 推荐 route 结构：
@@ -205,9 +205,9 @@ RoomRouteRecord {
 
 payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
-当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、连接数、room 统计和 route 样本，供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景。它不包含真实 old/new/proxy 多进程联调自动化、mybevy 适配、L7 relay、同连接 upstream swap 或完整旧服停进程控制面，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
+当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/confirm/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；`ConfirmRoomOwnershipReq/Res` 会在新服校验 room 存在、`OwnedByNew` 状态、`rollout_epoch`、checksum 和 `room_version` 后才返回成功。同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、连接数、room 统计和 route 样本，供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景。它不包含真实 old/new/proxy 多进程联调自动化、mybevy 适配、L7 relay、同连接 upstream swap 或完整旧服停进程控制面，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 
-补充实现状态（截至 `2026-06-11`）：`tools/mock-client` 已增加第一阶段显式编排入口，按 old `freeze/export`、new `import`、proxy room route `upsert`、old `retire` 的保守顺序调用现有控制面。编排会校验 export/import checksum 一致，并在 proxy upsert 成功后才 retire 旧 room；任一步失败都会返回失败阶段并停止后续步骤。该入口仍是控制流骨架，不是自动 rollout 控制面，也不包含真实多服务联调或同连接迁移。redirect/reconnect 目前已有 mock-client 工具场景，但还没有 old/new/proxy 多进程自动化验收。
+补充实现状态（截至 `2026-06-11`）：`tools/mock-client` 已增加第一阶段显式编排入口，按 old `freeze/export`、new `import`、new `confirm ownership`、proxy room route `upsert`、old `retire` 的保守顺序调用现有控制面。编排会校验 export/import/confirm checksum 和 roomVersion 一致，并在 confirm 成功后才 upsert proxy route，在 proxy upsert 成功后才 retire 旧 room；任一步失败都会返回失败阶段并停止后续步骤。该入口仍是控制流骨架，不是自动 rollout 控制面，也不包含真实多服务联调或同连接迁移。redirect/reconnect 目前已有 mock-client 工具场景，但还没有 old/new/proxy 多进程自动化验收。
 
 ## 9. 两阶段迁移路线
 
@@ -236,7 +236,7 @@ new game-server resumes room session
 - proxy 根据持久化或当前 route 将玩家送到正确 owner。
 - 旧连接不会继续留在错误 owner 上。
 - transfer 流程先覆盖空房接管或低风险玩法。
-- 控制面必须按 `old freeze -> old export -> new import -> proxy route CAS upsert -> old retire` 顺序执行；导入 checksum 不一致、route CAS 失败或任一步失败时不能继续执行后续破坏性步骤。
+- 控制面必须按 `old freeze -> old export -> new import -> new confirm ownership -> proxy route CAS upsert -> old retire` 顺序执行；导入/confirm checksum 不一致、roomVersion 不一致、route CAS 失败或任一步失败时不能继续执行后续破坏性步骤。
 
 阶段一不要求：
 
@@ -333,6 +333,7 @@ client session
 - route version 单调递增。
 - rollout epoch 不匹配时拒绝更新。
 - checksum 缺失或不匹配时拒绝进入 `OwnedByNew`。
+- proxy route 切换前必须先通过新 owner 的 ownership confirm。
 - 旧 owner retire 后拒绝处理新输入。
 
 ### 11.4 Redirect/Reconnect 验收

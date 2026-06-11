@@ -17,6 +17,7 @@ export const ROOM_TRANSFER_STAGE = {
   OLD_FREEZE: "old_freeze",
   OLD_EXPORT: "old_export",
   NEW_IMPORT: "new_import",
+  NEW_CONFIRM_OWNERSHIP: "new_confirm_ownership",
   PROXY_ROUTE_UPSERT: "proxy_route_upsert",
   OLD_RETIRE: "old_retire"
 };
@@ -50,6 +51,15 @@ function encodeExportRoomTransferReq(rolloutEpoch, roomId) {
 
 function encodeImportRoomTransferReq(payloadRaw) {
   return encodeMessageField(1, payloadRaw);
+}
+
+function encodeConfirmRoomOwnershipReq({ rolloutEpoch, roomId, checksum, roomVersion }) {
+  return Buffer.concat([
+    encodeStringField(1, rolloutEpoch),
+    encodeStringField(2, roomId),
+    encodeStringField(3, checksum),
+    encodeUInt64Field(4, roomVersion)
+  ]);
 }
 
 function encodeRetireTransferredRoomReq(rolloutEpoch, roomId, checksum) {
@@ -118,6 +128,17 @@ function decodeExportRoomTransferRes(body) {
 }
 
 function decodeImportRoomTransferRes(body) {
+  const fields = decodeFieldsWithRepeated(body);
+  return {
+    ok: readBool(fields, 1),
+    roomId: readString(fields, 2),
+    errorCode: readString(fields, 3),
+    checksum: readString(fields, 4),
+    roomVersion: readInt64(fields, 5)
+  };
+}
+
+function decodeConfirmRoomOwnershipRes(body) {
   const fields = decodeFieldsWithRepeated(body);
   return {
     ok: readBool(fields, 1),
@@ -288,6 +309,7 @@ export async function orchestrateRoomTransfer(request, clients) {
 
   let exportResult;
   let importResult;
+  let confirmResult;
 
   try {
     const freezeResult = await clients.oldServer.freezeRoomForTransfer({
@@ -344,6 +366,33 @@ export async function orchestrateRoomTransfer(request, clients) {
     };
   } catch (error) {
     return failure(ROOM_TRANSFER_STAGE.NEW_IMPORT, error, context, completedStages);
+  }
+
+  try {
+    confirmResult = await clients.newServer.confirmRoomOwnership({
+      rolloutEpoch: request.rolloutEpoch,
+      roomId: request.roomId,
+      checksum: importResult.checksum,
+      roomVersion: importResult.roomVersion
+    });
+    assertOkResponse(confirmResult, "NEW_CONFIRM_OWNERSHIP_FAILED");
+    if (confirmResult.checksum !== importResult.checksum) {
+      throw Object.assign(new Error("ROOM_TRANSFER_CONFIRM_CHECKSUM_MISMATCH"), {
+        code: "ROOM_TRANSFER_CONFIRM_CHECKSUM_MISMATCH"
+      });
+    }
+    if (confirmResult.roomVersion !== importResult.roomVersion) {
+      throw Object.assign(new Error("ROOM_TRANSFER_CONFIRM_VERSION_MISMATCH"), {
+        code: "ROOM_TRANSFER_CONFIRM_VERSION_MISMATCH"
+      });
+    }
+    completedStages.push(ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP);
+    context.confirmed = {
+      checksum: confirmResult.checksum,
+      roomVersion: confirmResult.roomVersion
+    };
+  } catch (error) {
+    return failure(ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP, error, context, completedStages);
   }
 
   try {
@@ -413,6 +462,16 @@ export class GameServerTransferClient {
       MESSAGE_TYPE.IMPORT_ROOM_TRANSFER_RES
     );
     return decodeImportRoomTransferRes(response.body);
+  }
+
+  async confirmRoomOwnership(request) {
+    const body = encodeConfirmRoomOwnershipReq(request);
+    const response = await this.sendRequest(
+      MESSAGE_TYPE.CONFIRM_ROOM_OWNERSHIP_REQ,
+      body,
+      MESSAGE_TYPE.CONFIRM_ROOM_OWNERSHIP_RES
+    );
+    return decodeConfirmRoomOwnershipRes(response.body);
   }
 
   async retireTransferredRoom({ rolloutEpoch, roomId, checksum }) {

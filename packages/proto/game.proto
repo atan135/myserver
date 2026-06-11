@@ -419,6 +419,21 @@ message ImportRoomTransferRes {
   uint64 room_version = 5;
 }
 
+message ConfirmRoomOwnershipReq {
+  string rollout_epoch = 1;
+  string room_id = 2;
+  string checksum = 3;
+  uint64 room_version = 4;
+}
+
+message ConfirmRoomOwnershipRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  string checksum = 4;
+  uint64 room_version = 5;
+}
+
 message RetireTransferredRoomReq {
   string rollout_epoch = 1;
   string room_id = 2;

@@ -37,21 +37,20 @@
 
 已落地的基础能力:
 
-- `packages/proto/game.proto` 已定义 `ServerRedirectPush`、room transfer、drain status、`TriggerServerRedirectReq/Res` 等协议结构和消息号。
+- `packages/proto/game.proto` 已定义 `ServerRedirectPush`、room transfer、`ConfirmRoomOwnershipReq/Res`、drain status、`TriggerServerRedirectReq/Res` 等协议结构和消息号。
 - `game-proxy` 已有 `RolloutSession`、`RoomRouteRecord`、`PlayerRouteRecord`、room/player 路由选择和 admin 查询/更新接口。
 - `game-proxy` 已区分 upstream 运维状态与健康状态, 支持 `Active` / `Draining` / `Disabled` / `Unavailable` 的合成决策。
 - `game-server` 已有 server 级 `drain_mode` / `drain_mode_enabled`, 可阻止创建新房并允许已有房 join / reconnect / observer。
-- `game-server` 已在已鉴权 admin/internal 通道内支持 room freeze/export/import/retire 最小闭环。
-- `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，仅向目标 room 当前在线成员下发 push，不自动断开连接。
+- `game-server` 已在已鉴权 admin/internal 通道内支持 room freeze/export/import/confirm/retire 最小闭环。
+- `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`，仅向目标 room 当前在线成员下发 push；push 成功进入出站队列后，旧服会请求关闭旧连接。
 - `tools/mock-client` 已有 drain 验证、room transfer 显式编排和 redirect push 监听场景。
 
 尚未完整落地的目标能力:
 
-- 旧服下发 `ServerRedirectPush` 后主动断开连接。
-- 客户端收到 redirect 后自动显式重连并进入新 owner。
+- 外部 `mybevy` 客户端收到 redirect 后自动显式重连并进入新 owner。
 - old/new/proxy 真实多进程联调下的 route 切换与客户端重连闭环。
 - 可恢复完整玩法运行态的 transfer trait 与 payload 导出 / 导入。
-- `proxy` 基于旧服排空状态自动结束 rollout。
+- 旧服自动停进程控制面和真实多服务联调验收。
 
 因此阅读本文时应把它当作后续实现约束；当前代码状态以 [空房接管式灰度任务清单](./game-server-room-rollout-task-list.md) 和实际代码为准。
 
@@ -318,17 +317,18 @@ room 只有满足以下条件时，才允许从旧服切到新服:
 4. old_server 导出 RoomTransferPayload
 5. new_server 拉取或接收 payload
 6. new_server 导入 payload 并创建同 room_id 的 room
-7. new_server 返回导入成功和 checksum
+7. new_server 确认 `OwnedByNew`、checksum、room_version 和 rollout_epoch 一致
 8. proxy 更新 room route -> new_server
 9. old_server 将 room 标记为 RetiredOnOld 并删除本地实例
 ```
 
 当前实现边界（截至 `2026-06-11`）：
 
-- `game-server` 已在已鉴权 internal/admin 通道接入 `FreezeRoomForTransfer`、`ExportRoomTransfer`、`ImportRoomTransfer`、`RetireTransferredRoom`。
+- `game-server` 已在已鉴权 internal/admin 通道接入 `FreezeRoomForTransfer`、`ExportRoomTransfer`、`ImportRoomTransfer`、`ConfirmRoomOwnership`、`RetireTransferredRoom`。
 - `freeze` 只允许没有在线成员的 room；有人在线时返回 `ROOM_TRANSFER_HAS_ONLINE_MEMBERS`。这用于空房或全员离线的低风险基础 transfer，不是有人房无感迁移。
 - `export` 会调用 `RoomLogicTransfer::export_transfer_state()`，将返回的玩法迁移契约状态写入现有 `logic_state_json`、`movement_state_json`、`runtime_timers_json` 字段；未实现契约的玩法返回 `UNSUPPORTED_ROOM_TRANSFER`，不会产出 payload 或进入 Exported 状态。
 - `import` 会校验 checksum、`room_id` 冲突、必要字段和 transfer 契约 schema/version，并调用 `RoomLogicTransfer::import_transfer_state()`；失败时不会插入半成品 room。导入成员统一标记为 offline，等待后续 route/reconnect 控制流接入。
+- `confirm` 会在新服校验 room 存在、状态为 `OwnedByNew`、`rollout_epoch` 匹配、`last_transfer_checksum` 匹配且 `room_version` 匹配；失败时控制面不得切 proxy route 或 retire 旧 room。
 - `retire` 当前选择保留 tombstone，而不是物理删除 room：旧房清空成员和 pending input，进入 retired 状态，并拒绝 join/reconnect/input/start/end。这样可以保留最近 checksum 与状态，便于幂等和排错。
 - 当前实现没有改 `game-proxy` route 仲裁，没有实现 L7 relay 或同连接 upstream swap，也没有宣称完整恢复 movement/combat/NPC/AI/timer 状态。
 
@@ -478,9 +478,6 @@ RoomTransferPayload {
 
 - `ImportRoomTransferReq`
 - `ImportRoomTransferRes`
-
-仍待新增或确认:
-
 - `ConfirmRoomOwnershipReq`
 - `ConfirmRoomOwnershipRes`
 
@@ -545,10 +542,12 @@ RoomTransferPayload {
 - room 状态进入 `TransferFailed`
 - 记录失败原因与 checksum
 
-### 16.2 导入成功但确认失败
+### 16.2 导入成功但确认或 route 切换失败
 
-如果新服导入成功，但 route 切换失败:
+如果新服导入成功，但 ownership confirm 或 route 切换失败:
 
+- `proxy` 不得切换 room route
+- `old_server` 不得 retire
 - 不得同时让新旧服都对外宣称自己是 owner
 - 必须有唯一 owner
 - 默认回滚到 `old_server` owner

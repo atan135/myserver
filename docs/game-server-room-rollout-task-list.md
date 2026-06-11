@@ -21,7 +21,7 @@
 
 - `M0`：已完成。规范源、接管判定、第一阶段切服方式、协议名和消息编号已经冻结。
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
-- `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、proxy route upsert 和 old retire。
+- `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
 - `M5` ~ `M6`：完整玩法 payload、真实旧服状态联动、演练和旧服自动停止仍未完成；`game-proxy` 已具备基于 route store 的自动收尾入口。
 
@@ -48,6 +48,7 @@
   - `FreezeRoomForTransferReq/Res`
   - `ExportRoomTransferReq/Res`
   - `ImportRoomTransferReq/Res`
+  - `ConfirmRoomOwnershipReq/Res`
   - `RetireTransferredRoomReq/Res`
   - `GetRolloutDrainStatusReq/Res`
 - [x] 确认 `RoomTransferPayload` 的最小字段集合。
@@ -239,9 +240,9 @@
 - [x] 增加 `RetireTransferredRoomReq/Res`。
 - [x] retire 要求 room 已 frozen/exported，且请求 checksum 与最近 export checksum 一致。
 - [x] retire 后保留本地 tombstone 状态，清空成员和 pending input，并拒绝后续 join/reconnect/input/start/end。
-- [x] 后续 proxy route 切换确认落地后，再由控制面保证“新服导入成功并确认 route 切换后才 retire”。
+- [x] 控制面编排保证“新服导入成功、ownership confirm 成功并确认 route 切换后才 retire”。
 
-当前实现说明：`tools/mock-client/src/rollout-transfer-cli.js` 已提供显式控制流入口。编排顺序固定为 old `FreezeRoomForTransfer` 成功、old `ExportRoomTransfer` 得到 payload/checksum、new `ImportRoomTransfer` 成功且 checksum 与 export 一致、proxy `/room-route/upsert` 切到 `OwnedByNew` 并携带 checksum/version CAS、old `RetireTransferredRoom` 使用同一 checksum。任一步失败都会返回明确 `stage` 和 `errorCode`，不会继续执行后续步骤；例如 import checksum mismatch 不会 upsert route，proxy upsert 失败不会 retire old room。
+当前实现说明：`tools/mock-client/src/rollout-transfer-cli.js` 已提供显式控制流入口。编排顺序固定为 old `FreezeRoomForTransfer` 成功、old `ExportRoomTransfer` 得到 payload/checksum、new `ImportRoomTransfer` 成功且 checksum 与 export 一致、new `ConfirmRoomOwnership` 使用 import 返回的 checksum/roomVersion 确认成功、proxy `/room-route/upsert` 切到 `OwnedByNew` 并携带 checksum/version CAS、old `RetireTransferredRoom` 使用同一 checksum。任一步失败都会返回明确 `stage` 和 `errorCode`，不会继续执行后续步骤；例如 import checksum mismatch 或 confirm 失败不会 upsert route，proxy upsert 失败不会 retire old room。
 
 完成标准:
 
@@ -253,7 +254,7 @@
 
 - `ImportRoomTransferReq/Res` 已接入 `game-server` internal/admin 通道，能校验 checksum、拒绝 room_id 冲突，并创建同 room_id 的最小可运行 room；导入过程中短暂处于 `Importing`，完成后进入 `OwnedByNew`。
 - 当前导入恢复 policy、room snapshot、frame、recent/waiting inputs，并通过 `RoomLogicTransfer::import_transfer_state()` 导入玩法迁移契约状态；导入成员统一标记为 offline，不宣称支持有人房无感迁移。
-- `ConfirmRoomOwnershipReq/Res` 还未进入 `packages/proto`。
+- `ConfirmRoomOwnershipReq/Res` 已进入 `packages/proto`，消息号为 `1613/1614`，并接入 `game-server` 已鉴权 internal/admin 通道；它在新服上校验 room 存在、状态为 `OwnedByNew`、`rollout_epoch`、`checksum` 和 `room_version` 都匹配后才返回成功。
 
 ### 5.1 room 导入接口
 
@@ -269,9 +270,10 @@
 
 ### 5.2 owner 切换确认
 
-- [ ] 设计并实现 `ConfirmRoomOwnershipReq/Res` 或等价确认机制。
+- [x] 设计并实现 `ConfirmRoomOwnershipReq/Res` 确认机制。
 - [x] 只有在导入成功后，才允许 `proxy` 更新 room route。
-- [ ] 防止新旧服同时声称自己是 owner。
+- [x] `tools/mock-client` 显式编排在 confirm 成功前不会更新 proxy route 或 retire 旧 room。
+- [ ] 真实 old/new/proxy 三进程自动化联调仍需验证唯一 owner 闭环。
 
 ### 5.3 新服接管后的行为
 
@@ -279,7 +281,7 @@
 - [ ] route 切到新服后，新的 `RoomReconnectReq` 进入新服。
 - [ ] 新服需要能识别“这是已接管 room，不是全新 room”。
 
-当前实现说明：`tools/mock-client` 的 transfer 编排入口已把“导入成功后才 upsert proxy route”作为调用顺序约束。proxy route 创建/更新仍依赖 `game-proxy` admin HTTP 的校验；route 已存在时使用 `expected_room_version` 和 `expected_last_transfer_checksum` 做 CAS，route 不存在时按当前 proxy 创建规则使用 `expected_room_version=0`、`room_version=1`。
+当前实现说明：`tools/mock-client` 的 transfer 编排入口已把“导入成功并且新服 ownership confirm 成功后才 upsert proxy route”作为调用顺序约束。proxy route 创建/更新仍依赖 `game-proxy` admin HTTP 的校验；route 已存在时使用 `expected_room_version` 和 `expected_last_transfer_checksum` 做 CAS，route 不存在时按当前 proxy 创建规则使用 `expected_room_version=0`、`room_version=1`。
 
 完成标准:
 
@@ -446,6 +448,7 @@
 - [x] route 切换失败停止测试。
 - [ ] 旧服 freeze/export 失败路径测试。
 - [x] 新服 import/checksum 校验测试。
+- [x] 新服 ownership confirm 成功与 mismatch 拒绝测试。
 
 ### 9.2 集成测试
 
@@ -497,7 +500,7 @@
 2. `proxy` 的灰度会话和 route metadata
 3. `old_server` 的 drain/freeze/export
 4. `new_server` 的 import/ownership confirm
-5. 显式控制面编排入口：old freeze/export -> new import -> proxy route upsert -> old retire
+5. 显式控制面编排入口：old freeze/export -> new import -> new confirm ownership -> proxy route upsert -> old retire
 6. 客户端 redirect + reconnect
 7. movement/combat 的 transfer payload
 8. NPC / 怪物 / 行为树迁移

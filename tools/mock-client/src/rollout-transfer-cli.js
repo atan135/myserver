@@ -23,6 +23,9 @@ Required:
   --new-server-id <server-id>
 
 Options:
+  The default transfer order is old_freeze -> old_export -> new_import ->
+  new_confirm_ownership -> proxy_route_upsert -> old_retire.
+  new_confirm_ownership uses the checksum and roomVersion returned by import.
   --trigger-redirect-only                 only call old game-server TriggerServerRedirectReq
   --redirect-target-host <host>           required with --trigger-redirect-only
   --redirect-target-port <port>           required with --trigger-redirect-only

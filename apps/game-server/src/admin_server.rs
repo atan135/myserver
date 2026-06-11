@@ -24,14 +24,14 @@ use crate::gm_broadcast::{
     GmBroadcastCommand, broadcast_gm_message_to_online_players, normalize_optional_string,
     normalize_required_string,
 };
-use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::pb::{
-    ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
-    FreezeRoomForTransferRes, GetRolloutDrainStatusReq, GetRolloutDrainStatusRes,
-    ImportRoomTransferReq, ImportRoomTransferRes, RetireTransferredRoomReq,
-    RetireTransferredRoomRes, ServerRedirectPush, TriggerServerRedirectReq,
-    TriggerServerRedirectRes,
+    ConfirmRoomOwnershipReq, ConfirmRoomOwnershipRes, ExportRoomTransferReq, ExportRoomTransferRes,
+    FreezeRoomForTransferReq, FreezeRoomForTransferRes, GetRolloutDrainStatusReq,
+    GetRolloutDrainStatusRes, ImportRoomTransferReq, ImportRoomTransferRes,
+    RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
+    TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
+use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 use crate::server::RuntimeConfig;
 
@@ -844,6 +844,71 @@ async fn handle_admin_connection(
                 )
                 .await?;
             }
+            Some(MessageType::ConfirmRoomOwnershipReq) => {
+                let action = "confirm_room_ownership";
+                let request = match packet
+                    .decode_body::<ConfirmRoomOwnershipReq>("INVALID_CONFIRM_ROOM_OWNERSHIP_BODY")
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid confirm room ownership request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = confirm_room_ownership_target(&request);
+
+                let result = room_manager
+                    .confirm_room_ownership(
+                        &request.rollout_epoch,
+                        &request.room_id,
+                        &request.checksum,
+                        request.room_version,
+                    )
+                    .await;
+
+                let response = match result {
+                    Ok((checksum, room_version)) => ConfirmRoomOwnershipRes {
+                        ok: true,
+                        room_id: request.room_id,
+                        error_code: String::new(),
+                        checksum,
+                        room_version,
+                    },
+                    Err(error_code) => ConfirmRoomOwnershipRes {
+                        ok: false,
+                        room_id: request.room_id,
+                        error_code: error_code.to_string(),
+                        checksum: String::new(),
+                        room_version: 0,
+                    },
+                };
+
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_then_write_message(
+                    &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
+                    MessageType::ConfirmRoomOwnershipRes,
+                    &response,
+                    ok,
+                    &error_code,
+                    &target,
+                )
+                .await?;
+            }
             Some(MessageType::RetireTransferredRoomReq) => {
                 let action = "retire_transferred_room";
                 let request = match packet
@@ -1128,6 +1193,7 @@ fn admin_write_action(message_type: MessageType) -> Option<&'static str> {
         MessageType::FreezeRoomForTransferReq => Some("freeze_room_for_transfer"),
         MessageType::ExportRoomTransferReq => Some("export_room_transfer"),
         MessageType::ImportRoomTransferReq => Some("import_room_transfer"),
+        MessageType::ConfirmRoomOwnershipReq => Some("confirm_room_ownership"),
         MessageType::RetireTransferredRoomReq => Some("retire_transferred_room"),
         MessageType::TriggerServerRedirectReq => Some("trigger_server_redirect"),
         _ => None,
@@ -1325,6 +1391,15 @@ fn import_room_transfer_target(request: &ImportRoomTransferReq) -> AdminAuditTar
         room_id: payload.room_id.clone(),
         rollout_epoch: payload.rollout_epoch.clone(),
         checksum: payload.checksum.clone(),
+        ..Default::default()
+    }
+}
+
+fn confirm_room_ownership_target(request: &ConfirmRoomOwnershipReq) -> AdminAuditTarget {
+    AdminAuditTarget {
+        room_id: request.room_id.clone(),
+        rollout_epoch: request.rollout_epoch.clone(),
+        checksum: request.checksum.clone(),
         ..Default::default()
     }
 }

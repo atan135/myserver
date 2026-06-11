@@ -46,6 +46,16 @@ function createClients(overrides = {}) {
         checksum: "checksum-1",
         roomVersion: 3
       };
+    },
+    async confirmRoomOwnership(request) {
+      calls.push(`new.confirm:${request.checksum}:${request.roomVersion}`);
+      if (overrides.confirmError) throw overrides.confirmError;
+      return overrides.confirm ?? {
+        ok: true,
+        roomId: "room-1",
+        checksum: request.checksum,
+        roomVersion: request.roomVersion
+      };
     }
   };
 
@@ -88,6 +98,7 @@ test("room transfer orchestrator runs conservative success order", async () => {
     "old.freeze",
     "old.export",
     "new.import",
+    "new.confirm:checksum-1:3",
     "proxy.getRoomRoute",
     "proxy.upsert:2:1:checksum-1",
     "old.retire"
@@ -96,6 +107,7 @@ test("room transfer orchestrator runs conservative success order", async () => {
     ROOM_TRANSFER_STAGE.OLD_FREEZE,
     ROOM_TRANSFER_STAGE.OLD_EXPORT,
     ROOM_TRANSFER_STAGE.NEW_IMPORT,
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP,
     ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
     ROOM_TRANSFER_STAGE.OLD_RETIRE
   ]);
@@ -111,6 +123,7 @@ test("room transfer creates first proxy route with version one when route is abs
     "old.freeze",
     "old.export",
     "new.import",
+    "new.confirm:checksum-1:3",
     "proxy.getRoomRoute",
     "proxy.upsert:1:0:checksum-1",
     "old.retire"
@@ -131,6 +144,30 @@ test("room transfer stops when import checksum mismatches export checksum", asyn
   assert.deepEqual(calls, ["old.freeze", "old.export", "new.import"]);
 });
 
+test("room transfer stops before proxy route when ownership confirm fails", async () => {
+  const { calls, clients } = createClients({
+    confirm: {
+      ok: false,
+      roomId: "room-1",
+      errorCode: "ROOM_TRANSFER_VERSION_MISMATCH",
+      checksum: "",
+      roomVersion: 0
+    }
+  });
+
+  const result = await orchestrateRoomTransfer(request, clients);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP);
+  assert.equal(result.errorCode, "ROOM_TRANSFER_VERSION_MISMATCH");
+  assert.deepEqual(calls, [
+    "old.freeze",
+    "old.export",
+    "new.import",
+    "new.confirm:checksum-1:3"
+  ]);
+});
+
 test("room transfer does not retire old room when proxy upsert fails", async () => {
   const { calls, clients } = createClients({
     proxyError: Object.assign(new Error("ROOM_ROUTE_VERSION_MISMATCH"), {
@@ -147,6 +184,7 @@ test("room transfer does not retire old room when proxy upsert fails", async () 
     "old.freeze",
     "old.export",
     "new.import",
+    "new.confirm:checksum-1:3",
     "proxy.getRoomRoute",
     "proxy.upsert:2:1:checksum-1"
   ]);
@@ -168,6 +206,7 @@ test("room transfer reports old retire failures at retire stage", async () => {
     "old.freeze",
     "old.export",
     "new.import",
+    "new.confirm:checksum-1:3",
     "proxy.getRoomRoute",
     "proxy.upsert:2:1:checksum-1",
     "old.retire"

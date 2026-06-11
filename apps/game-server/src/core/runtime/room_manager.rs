@@ -1419,6 +1419,63 @@ impl RoomManager {
         Ok((checksum, source_room_version.saturating_add(1)))
     }
 
+    pub async fn confirm_room_ownership(
+        &self,
+        rollout_epoch: &str,
+        room_id: &str,
+        checksum: &str,
+        room_version: u64,
+    ) -> Result<(String, u64), &'static str> {
+        let rollout_epoch = rollout_epoch.trim();
+        if rollout_epoch.is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+        let checksum = checksum.trim();
+        if checksum.is_empty() {
+            return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+        }
+
+        let rooms = self.rooms.lock().await;
+        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+
+        if room.transfer_state.status != RoomTransferStatus::OwnedByNew {
+            return Err("ROOM_TRANSFER_NOT_OWNED_BY_NEW");
+        }
+        if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+            return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+        }
+        if room.transfer_state.last_transfer_checksum.as_deref() != Some(checksum) {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                expected = ?room.transfer_state.last_transfer_checksum,
+                actual = checksum,
+                "room ownership confirm rejected due to checksum mismatch"
+            );
+            return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+        }
+        if room.transfer_state.room_version != room_version {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                expected = room.transfer_state.room_version,
+                actual = room_version,
+                "room ownership confirm rejected due to room version mismatch"
+            );
+            return Err("ROOM_TRANSFER_VERSION_MISMATCH");
+        }
+
+        info!(
+            room_id = room_id,
+            rollout_epoch = rollout_epoch,
+            checksum = checksum,
+            room_version = room.transfer_state.room_version,
+            "room ownership confirmed on new owner"
+        );
+
+        Ok((checksum.to_string(), room.transfer_state.room_version))
+    }
+
     pub async fn retire_transferred_room(
         &self,
         rollout_epoch: &str,
@@ -3165,6 +3222,92 @@ mod tests {
             .unwrap()
             .snapshot;
         assert_eq!(snapshot.room_id, "room-test");
+    }
+
+    async fn setup_imported_room_for_confirm() -> (RoomManager, String, u64) {
+        let (source, _source_factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let checksum = payload.checksum.clone();
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory),
+        );
+        let (_imported_checksum, room_version) =
+            target.import_room_transfer(payload).await.unwrap();
+
+        (target, checksum, room_version)
+    }
+
+    #[tokio::test]
+    async fn confirm_room_ownership_succeeds_for_imported_room() {
+        let (target, checksum, room_version) = setup_imported_room_for_confirm().await;
+
+        let confirmed = target
+            .confirm_room_ownership("epoch-1", "room-test", &checksum, room_version)
+            .await
+            .unwrap();
+
+        assert_eq!(confirmed.0, checksum);
+        assert_eq!(confirmed.1, room_version);
+    }
+
+    #[tokio::test]
+    async fn confirm_room_ownership_rejects_mismatched_epoch_checksum_or_version() {
+        let (target, checksum, room_version) = setup_imported_room_for_confirm().await;
+
+        assert_eq!(
+            target
+                .confirm_room_ownership("epoch-2", "room-test", &checksum, room_version)
+                .await,
+            Err("ROOM_TRANSFER_EPOCH_MISMATCH")
+        );
+        assert_eq!(
+            target
+                .confirm_room_ownership("epoch-1", "room-test", "wrong", room_version)
+                .await,
+            Err("ROOM_TRANSFER_CHECKSUM_MISMATCH")
+        );
+        assert_eq!(
+            target
+                .confirm_room_ownership(
+                    "epoch-1",
+                    "room-test",
+                    &checksum,
+                    room_version.saturating_add(1)
+                )
+                .await,
+            Err("ROOM_TRANSFER_VERSION_MISMATCH")
+        );
+        assert_eq!(
+            target
+                .confirm_room_ownership("", "room-test", &checksum, room_version)
+                .await,
+            Err("INVALID_ROLLOUT_EPOCH")
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_room_ownership_rejects_room_not_owned_by_new() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+
+        let result = manager
+            .confirm_room_ownership("epoch-1", "room-test", "checksum", 1)
+            .await;
+
+        assert_eq!(result, Err("ROOM_TRANSFER_NOT_OWNED_BY_NEW"));
     }
 
     #[tokio::test]

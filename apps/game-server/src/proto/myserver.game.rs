@@ -593,6 +593,30 @@ pub struct ImportRoomTransferRes {
     pub room_version: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmRoomOwnershipReq {
+    #[prost(string, tag = "1")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub checksum: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfirmRoomOwnershipRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub checksum: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub room_version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetireTransferredRoomReq {
     #[prost(string, tag = "1")]
     pub rollout_epoch: ::prost::alloc::string::String,

@@ -9,11 +9,12 @@ use crate::core::context::ServiceContext;
 use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
 use crate::core::service::room_service;
 use crate::pb::{
-    CreateMatchedRoomReq, ErrorRes, ExportRoomTransferReq, ExportRoomTransferRes,
-    FreezeRoomForTransferReq, FreezeRoomForTransferRes, GetRolloutDrainStatusReq,
-    GetRolloutDrainStatusRes, ImportRoomTransferReq, ImportRoomTransferRes,
-    RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
-    TriggerServerRedirectReq, TriggerServerRedirectRes,
+    ConfirmRoomOwnershipReq, ConfirmRoomOwnershipRes, CreateMatchedRoomReq, ErrorRes,
+    ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
+    FreezeRoomForTransferRes, GetRolloutDrainStatusReq, GetRolloutDrainStatusRes,
+    ImportRoomTransferReq, ImportRoomTransferRes, RetireTransferredRoomReq,
+    RetireTransferredRoomRes, ServerRedirectPush, TriggerServerRedirectReq,
+    TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 
@@ -235,6 +236,60 @@ where
                 write_message(
                     &mut writer,
                     MessageType::ImportRoomTransferRes,
+                    packet.header.seq,
+                    &response,
+                )
+                .await?;
+            }
+            Some(MessageType::ConfirmRoomOwnershipReq) => {
+                let request = packet
+                    .decode_body::<ConfirmRoomOwnershipReq>("INVALID_CONFIRM_ROOM_OWNERSHIP_BODY")
+                    .map_err(std::io::Error::other)?;
+                let target = InternalAuditTarget {
+                    room_id: request.room_id.clone(),
+                    rollout_epoch: request.rollout_epoch.clone(),
+                    checksum: request.checksum.clone(),
+                    target_server_id: String::new(),
+                };
+
+                let result = services
+                    .room_manager
+                    .confirm_room_ownership(
+                        &request.rollout_epoch,
+                        &request.room_id,
+                        &request.checksum,
+                        request.room_version,
+                    )
+                    .await;
+
+                let response = match result {
+                    Ok((checksum, room_version)) => ConfirmRoomOwnershipRes {
+                        ok: true,
+                        room_id: request.room_id,
+                        error_code: String::new(),
+                        checksum,
+                        room_version,
+                    },
+                    Err(error_code) => ConfirmRoomOwnershipRes {
+                        ok: false,
+                        room_id: request.room_id,
+                        error_code: error_code.to_string(),
+                        checksum: String::new(),
+                        room_version: 0,
+                    },
+                };
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "confirm_room_ownership",
+                    response.ok,
+                    &response.error_code,
+                    &target,
+                );
+
+                write_message(
+                    &mut writer,
+                    MessageType::ConfirmRoomOwnershipRes,
                     packet.header.seq,
                     &response,
                 )
