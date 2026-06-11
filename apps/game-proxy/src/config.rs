@@ -1,5 +1,7 @@
 use std::env;
 
+pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-proxy-admin-token";
+
 fn parse_bool(name: &str, default: bool) -> bool {
     env::var(name)
         .ok()
@@ -54,6 +56,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        Self::try_from_env().expect("invalid game-proxy configuration")
+    }
+
+    pub fn try_from_env() -> Result<Self, String> {
         let host = env::var("PROXY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port = env::var("PROXY_PORT")
             .ok()
@@ -65,7 +71,10 @@ impl Config {
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7101);
         let admin_token = env::var("PROXY_ADMIN_TOKEN")
-            .unwrap_or_else(|_| "dev-only-change-this-proxy-admin-token".to_string());
+            .unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string())
+            .trim()
+            .to_string();
+        validate_admin_token(&admin_token)?;
         let tcp_fallback_host =
             env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
         let tcp_fallback_port = env::var("PROXY_TCP_FALLBACK_PORT")
@@ -108,7 +117,7 @@ impl Config {
         let upstream_local_socket_name = env::var("UPSTREAM_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
-        Self {
+        Ok(Self {
             host,
             port,
             admin_host,
@@ -134,7 +143,7 @@ impl Config {
             service_instance_id,
             upstream_server_id,
             upstream_local_socket_name,
-        }
+        })
     }
 
     pub fn bind_addr(&self) -> String {
@@ -150,71 +159,216 @@ impl Config {
     }
 }
 
+fn is_production_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        env::var(name)
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+    })
+}
+
+fn validate_admin_token(admin_token: &str) -> Result<(), String> {
+    if !is_production_env() {
+        return Ok(());
+    }
+
+    let trimmed = admin_token.trim();
+    if trimmed.is_empty() || is_default_admin_token(trimmed) {
+        return Err(
+            "PROXY_ADMIN_TOKEN must be set to a non-default value in production".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn is_default_admin_token(admin_token: &str) -> bool {
+    matches!(
+        admin_token,
+        DEFAULT_ADMIN_TOKEN | "change-me" | "changeme" | "default" | "password"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
-    use super::Config;
+    use super::{Config, DEFAULT_ADMIN_TOKEN};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn clear_production_env() {
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+        }
+    }
+
     #[test]
     fn parses_proxy_security_limits_from_env() {
         let _guard = env_lock().lock().unwrap();
-        let old_max_connections = env::var("PROXY_MAX_CONNECTIONS").ok();
-        let old_max_preauth_failures = env::var("PROXY_MAX_PREAUTH_FAILURES").ok();
+        let _env = EnvGuard::capture(&[
+            "PROXY_MAX_CONNECTIONS",
+            "PROXY_MAX_PREAUTH_FAILURES",
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+        ]);
 
         unsafe {
+            clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "42");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "5");
+            env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
         let config = Config::from_env();
 
         assert_eq!(config.proxy_max_connections, 42);
         assert_eq!(config.proxy_max_preauth_failures, 5);
-
-        unsafe {
-            match old_max_connections {
-                Some(value) => env::set_var("PROXY_MAX_CONNECTIONS", value),
-                None => env::remove_var("PROXY_MAX_CONNECTIONS"),
-            }
-            match old_max_preauth_failures {
-                Some(value) => env::set_var("PROXY_MAX_PREAUTH_FAILURES", value),
-                None => env::remove_var("PROXY_MAX_PREAUTH_FAILURES"),
-            }
-        }
     }
 
     #[test]
     fn uses_proxy_security_limit_defaults_for_invalid_env() {
         let _guard = env_lock().lock().unwrap();
-        let old_max_connections = env::var("PROXY_MAX_CONNECTIONS").ok();
-        let old_max_preauth_failures = env::var("PROXY_MAX_PREAUTH_FAILURES").ok();
+        let _env = EnvGuard::capture(&[
+            "PROXY_MAX_CONNECTIONS",
+            "PROXY_MAX_PREAUTH_FAILURES",
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+        ]);
 
         unsafe {
+            clear_production_env();
             env::set_var("PROXY_MAX_CONNECTIONS", "not-a-number");
             env::set_var("PROXY_MAX_PREAUTH_FAILURES", "not-a-number");
+            env::remove_var("PROXY_ADMIN_TOKEN");
         }
 
         let config = Config::from_env();
 
         assert_eq!(config.proxy_max_connections, 0);
         assert_eq!(config.proxy_max_preauth_failures, 3);
+    }
+
+    #[test]
+    fn keeps_development_default_admin_token_compatible() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
 
         unsafe {
-            match old_max_connections {
-                Some(value) => env::set_var("PROXY_MAX_CONNECTIONS", value),
-                None => env::remove_var("PROXY_MAX_CONNECTIONS"),
-            }
-            match old_max_preauth_failures {
-                Some(value) => env::set_var("PROXY_MAX_PREAUTH_FAILURES", value),
-                None => env::remove_var("PROXY_MAX_PREAUTH_FAILURES"),
-            }
+            clear_production_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
         }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
+    }
+
+    #[test]
+    fn rejects_default_admin_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+
+        unsafe {
+            env::set_var("APP_ENV", "production");
+            env::remove_var("NODE_ENV");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("production default admin token should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_empty_admin_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("production empty admin token should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_default_admin_token_when_app_env_is_production_even_if_node_env_is_not() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+            env::set_var("APP_ENV", "production");
+            env::set_var("PROXY_ADMIN_TOKEN", DEFAULT_ADMIN_TOKEN);
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("APP_ENV=production should reject default admin token"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("PROXY_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn accepts_custom_admin_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "PROXY_ADMIN_TOKEN"]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(config.admin_token, "prod-proxy-admin-token-123");
     }
 }

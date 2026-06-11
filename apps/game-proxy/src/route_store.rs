@@ -342,7 +342,9 @@ impl ProxyRouteStore {
         }
 
         record.updated_at_ms = now_ms();
-        state.room_routes.insert(record.room_id.clone(), record.clone());
+        state
+            .room_routes
+            .insert(record.room_id.clone(), record.clone());
         log_room_route_update("admin_upsert", existing.as_ref(), &record);
         Ok(())
     }
@@ -378,10 +380,39 @@ impl ProxyRouteStore {
         let existing_room_route = state.room_routes.get(room_id).cloned();
         let initial_member_count = if observer_only { 0 } else { 1 };
         let rollout_active = state.rollout_session.is_some();
-        let (bound_owner_server_id, migration_state, member_count, online_member_count, empty_since_ms, room_version, checksum, rollout_epoch) =
-            match existing_room_route.as_ref() {
-                Some(record) if record.owner_server_id == owner_server_id => (
-                    owner_server_id.to_string(),
+        let (
+            bound_owner_server_id,
+            migration_state,
+            member_count,
+            online_member_count,
+            empty_since_ms,
+            room_version,
+            checksum,
+            rollout_epoch,
+        ) = match existing_room_route.as_ref() {
+            Some(record) if record.owner_server_id == owner_server_id => (
+                owner_server_id.to_string(),
+                record.migration_state,
+                record.member_count.max(initial_member_count),
+                record.online_member_count.max(initial_member_count),
+                if record.online_member_count.max(initial_member_count) == 0 {
+                    record.empty_since_ms
+                } else {
+                    None
+                },
+                record.room_version,
+                record.last_transfer_checksum.clone(),
+                preserve_observed_rollout_epoch(record, &current_rollout_epoch),
+            ),
+            Some(record) if rollout_active => {
+                warn!(
+                    room_id = room_id,
+                    existing_owner_server_id = %record.owner_server_id,
+                    observed_owner_server_id = %owner_server_id,
+                    "ignored observed room owner mismatch during rollout"
+                );
+                (
+                    record.owner_server_id.clone(),
                     record.migration_state,
                     record.member_count.max(initial_member_count),
                     record.online_member_count.max(initial_member_count),
@@ -393,55 +424,34 @@ impl ProxyRouteStore {
                     record.room_version,
                     record.last_transfer_checksum.clone(),
                     preserve_observed_rollout_epoch(record, &current_rollout_epoch),
-                ),
-                Some(record) if rollout_active => {
-                    warn!(
-                        room_id = room_id,
-                        existing_owner_server_id = %record.owner_server_id,
-                        observed_owner_server_id = %owner_server_id,
-                        "ignored observed room owner mismatch during rollout"
-                    );
-                    (
-                        record.owner_server_id.clone(),
-                        record.migration_state,
-                        record.member_count.max(initial_member_count),
-                        record.online_member_count.max(initial_member_count),
-                        if record.online_member_count.max(initial_member_count) == 0 {
-                            record.empty_since_ms
-                        } else {
-                            None
-                        },
-                        record.room_version,
-                        record.last_transfer_checksum.clone(),
-                        preserve_observed_rollout_epoch(record, &current_rollout_epoch),
-                    )
-                }
-                Some(record) => (
+                )
+            }
+            Some(record) => (
+                owner_server_id.to_string(),
+                infer_migration_state(owner_server_id, state.rollout_session.as_ref()),
+                record.member_count.max(initial_member_count),
+                record.online_member_count.max(initial_member_count),
+                None,
+                record.room_version.saturating_add(1),
+                record.last_transfer_checksum.clone(),
+                current_rollout_epoch.clone(),
+            ),
+            None => {
+                let migration_state =
+                    infer_migration_state(owner_server_id, state.rollout_session.as_ref());
+                let online_member_count = initial_member_count;
+                (
                     owner_server_id.to_string(),
-                    infer_migration_state(owner_server_id, state.rollout_session.as_ref()),
-                    record.member_count.max(initial_member_count),
-                    record.online_member_count.max(initial_member_count),
+                    migration_state,
+                    initial_member_count,
+                    online_member_count,
                     None,
-                    record.room_version.saturating_add(1),
-                    record.last_transfer_checksum.clone(),
+                    1,
+                    String::new(),
                     current_rollout_epoch.clone(),
-                ),
-                None => {
-                    let migration_state =
-                        infer_migration_state(owner_server_id, state.rollout_session.as_ref());
-                    let online_member_count = initial_member_count;
-                    (
-                        owner_server_id.to_string(),
-                        migration_state,
-                        initial_member_count,
-                        online_member_count,
-                        None,
-                        1,
-                        String::new(),
-                        current_rollout_epoch.clone(),
-                    )
-                }
-            };
+                )
+            }
+        };
 
         let next_room_route = RoomRouteRecord {
             room_id: room_id.to_string(),
@@ -455,11 +465,14 @@ impl ProxyRouteStore {
             last_transfer_checksum: checksum,
             updated_at_ms: now_ms(),
         };
-        state.room_routes.insert(
-            room_id.to_string(),
-            next_room_route.clone(),
+        state
+            .room_routes
+            .insert(room_id.to_string(), next_room_route.clone());
+        log_room_route_update(
+            "bind_room_owner",
+            existing_room_route.as_ref(),
+            &next_room_route,
         );
-        log_room_route_update("bind_room_owner", existing_room_route.as_ref(), &next_room_route);
 
         if let Some(player_id) = player_id {
             let existing_player_route = state.player_routes.get(player_id).cloned();
@@ -470,10 +483,9 @@ impl ProxyRouteStore {
                 rollout_epoch,
                 updated_at_ms: now_ms(),
             };
-            state.player_routes.insert(
-                player_id.to_string(),
-                next_player_route.clone(),
-            );
+            state
+                .player_routes
+                .insert(player_id.to_string(), next_player_route.clone());
             log_player_route_update(
                 "bind_room_owner",
                 existing_player_route.as_ref(),
@@ -544,7 +556,12 @@ impl RouteStoreState {
             .iter()
             .copied()
             .find(|route| route.accepts_new_rooms())
-            .or_else(|| routes.iter().copied().find(|route| route.can_accept_bound_sessions()))
+            .or_else(|| {
+                routes
+                    .iter()
+                    .copied()
+                    .find(|route| route.can_accept_bound_sessions())
+            })
     }
 }
 
@@ -578,7 +595,10 @@ fn infer_migration_state(
     }
 }
 
-fn preserve_observed_rollout_epoch(existing: &RoomRouteRecord, current_rollout_epoch: &str) -> String {
+fn preserve_observed_rollout_epoch(
+    existing: &RoomRouteRecord,
+    current_rollout_epoch: &str,
+) -> String {
     if current_rollout_epoch.is_empty() {
         existing.rollout_epoch.clone()
     } else {
@@ -686,7 +706,8 @@ fn validate_room_route_create(
         return Err("INVALID_ROOM_ROUTE_VERSION");
     }
 
-    if transition_requires_checksum(record.migration_state) && record.last_transfer_checksum.is_empty()
+    if transition_requires_checksum(record.migration_state)
+        && record.last_transfer_checksum.is_empty()
     {
         return Err("MISSING_TRANSFER_CHECKSUM");
     }
@@ -698,7 +719,8 @@ fn validate_transition_checksum(
     existing: &RoomRouteRecord,
     incoming: &RoomRouteRecord,
 ) -> Result<(), &'static str> {
-    if transition_requires_checksum(incoming.migration_state) && incoming.last_transfer_checksum.is_empty()
+    if transition_requires_checksum(incoming.migration_state)
+        && incoming.last_transfer_checksum.is_empty()
     {
         return Err("MISSING_TRANSFER_CHECKSUM");
     }
@@ -817,9 +839,7 @@ mod tests {
         let mut conflicting = room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, "");
         conflicting.member_count = 2;
 
-        let result = store
-            .upsert_room_route(conflicting, None, None)
-            .await;
+        let result = store.upsert_room_route(conflicting, None, None).await;
 
         assert_eq!(result, Err("ROOM_ROUTE_CONFLICT"));
     }

@@ -1,8 +1,9 @@
 use std::io;
 
 use interprocess::local_socket::{
-    GenericFilePath, ListenerOptions, ToFsName, traits::tokio::Stream as _,
+    GenericFilePath, ListenerOptions, ToFsName,
     tokio::{Listener, Stream},
+    traits::tokio::Stream as _,
 };
 
 pub fn normalize_name(name: &str) -> String {

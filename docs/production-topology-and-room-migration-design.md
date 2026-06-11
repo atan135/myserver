@@ -32,7 +32,7 @@
 |------|--------------|
 | `game-server` 玩家协议口 | 不直接暴露公网；只由 `game-proxy` 或内部通道访问 |
 | `game-server admin` | 内网控制面；只允许 `auth-http`、`admin-api` 或控制面访问 |
-| `game-proxy admin` | 内网控制面；需要认证、权限、审计后才能生产使用 |
+| `game-proxy admin` | 内网控制面；已有 token 鉴权、生产默认 token 拒绝和写操作日志审计，生产仍需网络隔离、RBAC 和持久审计 |
 | `admin-api` / `admin-web` | 运营控制面，需独立鉴权、网络隔离和权限收口；不属于玩家公网主入口 |
 | `chat-server` | 内网能力服务；生产不作为客户端直连接口默认值 |
 | `match-service` | 内网能力服务；生产不作为客户端直连 gRPC 默认值 |
@@ -82,7 +82,7 @@
 | 服务 | 当前实现 | 生产目标 | 主要缺口 |
 |------|----------|----------|----------|
 | `auth-http` | 单实例可运行；使用 Redis/MySQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/MySQL | 网关层限流、统一配置、灰度和完整安全审计 |
-| `game-proxy` | 多 upstream 发现和切换基础能力；route store 进程内内存态 | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 路由持久化、多 proxy 一致性、admin 鉴权审计、L7 session relay |
+| `game-proxy` | 多 upstream 发现和切换基础能力；route store 进程内内存态；admin HTTP 口已有 token 鉴权和基础输入校验 | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 路由持久化、多 proxy 一致性、admin RBAC/持久审计、L7 session relay |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime 和 drain 基础 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
 | `chat-server` | 独立服务；当前可作为内部聊天能力 | 内网多实例服务；由服务端入口或聚合层调用，不作为生产客户端直连默认 | 协议收敛、会话路由、服务发现和横向扩展策略 |
 | `match-service` | gRPC 匹配服务；可与 `game-server` 协作建房 | 内网多实例服务；匹配池状态可分片或共享，建房目标可路由 | 匹配池分片、跨实例一致性、目标 game-server 选择策略 |
@@ -348,4 +348,3 @@ client session
 8. 客户端能力收敛：chat/mail/announce/match 经服务端入口或 BFF 收敛，不再要求生产客户端直连内部服务。
 9. L7 session relay：设计并实现同连接 upstream swap 所需的 proxy 协议解析、输入缓冲和 resume。
 10. 故障演练：覆盖 proxy 重启、game-server 崩溃、导入失败、route 切换失败和客户端中断。
-

@@ -86,7 +86,7 @@
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、在线推送与基础运行指标 | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、基础 HTTP 指标 | 当前无统一鉴权与角色控制、CRUD 面默认暴露风险未在代码中收敛、HTTPS/TLS 策略未正式落地 |
-| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、维护模式、接入转发、连接数统计 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未做单连接消息频率限制 |
+| `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、维护模式、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 没有 IP 黑名单、单 IP / 单账号连接上限、成熟的公网加密方案；尚未做单连接消息频率限制；proxy admin 尚无细粒度 RBAC、持久审计和多 proxy route store 共享 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、连接审计、基础权威移动校正、GM 广播/踢人/封禁的本实例在线连接处置 | 没有单 IP / 单玩家频率限制、时间戳窗口、反重放和通用作弊计数；跨实例 GM 目标定位仍需补齐 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和 token version 管理接口仍待补齐 |
 
@@ -459,14 +459,17 @@ SECURITY_ALLOWLIST_REDIS_PREFIX=security:allowlist:
 当前 `game-proxy` 已读取：
 
 ```env
+PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
 PROXY_MAX_CONNECTIONS=0
 PROXY_MAX_PREAUTH_FAILURES=3
 ```
 
 说明：
 
+- `PROXY_ADMIN_TOKEN` 用于保护 `game-proxy` admin HTTP 口，当前支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`；`NODE_ENV=production` 或 `APP_ENV=production` 时为空或仍为明显默认值会导致配置加载失败。
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时，超过上限的新连接会在 session 开始时拒绝。
 - `PROXY_MAX_PREAUTH_FAILURES=3` 表示同一连接在鉴权成功前，非法消息或鉴权失败累计达到阈值后关闭连接；配置为 `0` 表示不按失败次数断开。
+- proxy admin 写接口会记录结构化日志审计，包含 action、关键目标和 ok/error 结果，不记录 token；当前尚未接入持久审计库。
 
 仍属于设计目标、当前未读取的接入层配置示例：
 
@@ -519,11 +522,11 @@ TRUSTED_PROXIES=
 
 1. 管理员 JWT session/jti、登出撤销、禁用后失效和基础 token version 校验已落地；批量撤销、重置密码联动 bump version 和管理接口仍待补齐
 2. 管理员登录失败限流、锁定和安全审计已落地；跨用户名/IP 的全局风控策略仍待补齐
-3. 管理面、Redis、MySQL、admin 端口默认不暴露公网
+3. 管理面、Redis、MySQL、admin 端口默认不暴露公网；`game-proxy` admin HTTP 口已有 token 鉴权和生产默认 token 拒绝，仍需部署侧网络隔离
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
 5. 单连接消息频率限制已在 `game-server` 落地；单玩家 / 单 IP 消息频率限制仍需继续补齐
 6. `mail-service` / `announce-service` 补齐统一鉴权与角色边界，并从生产客户端直连模型中移除
-7. 非法包计数、异常输入计数和安全审计统一
+7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计，仍缺持久审计和细粒度 RBAC
 
 ### M1：当前阶段最值得做的安全增强
 

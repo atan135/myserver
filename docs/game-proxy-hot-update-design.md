@@ -265,7 +265,12 @@ proxy 当前只解析最小接入和路由所需消息：
 
 ## 8. Admin 接口
 
-当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。
+当前 `game-proxy` admin 口是轻量 HTTP，默认监听 `PROXY_ADMIN_HOST:PROXY_ADMIN_PORT`。所有 admin 请求都需要 `PROXY_ADMIN_TOKEN` 鉴权，当前兼容两种 header 形式：
+
+- `Authorization: Bearer <PROXY_ADMIN_TOKEN>`
+- `X-Admin-Token: <PROXY_ADMIN_TOKEN>`
+
+URL query 中不支持传 token，避免 token 进入访问日志。开发环境未设置时会使用 `dev-only-change-this-proxy-admin-token`；`NODE_ENV=production` 或 `APP_ENV=production` 时，`PROXY_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。
 
 已实现接口：
 
@@ -281,11 +286,18 @@ proxy 当前只解析最小接入和路由所需消息：
 | `POST` | `/rollout/start?rollout_epoch=...&old_server_id=...&new_server_id=...` | 开始 rollout |
 | `POST` | `/rollout/end` | 结束 rollout 并清理相关 route |
 | `POST` | `/rollout/state?state=Active|Ending|Interrupted` | 更新 rollout 状态 |
-| `POST` | `/room-route/upsert?...` | 手动 upsert room route |
-| `POST` | `/player-route/upsert?...` | 手动 upsert player route |
+| `POST` | `/room-route/upsert?...` | 手动 upsert room route；校验必填字段、迁移状态枚举、成员数、版本号、checksum 长度和 upstream 存在性 |
+| `POST` | `/player-route/upsert?...` | 手动 upsert player route；校验 player/room/server id、upstream 存在性和 rollout epoch |
 | `POST` | `/switch/<server_id>` | 将目标 upstream 置为 active，其余置为 draining |
 
-当前 admin 接口偏本地联调和内部控制用途，生产化前还需要认证、权限、审计和更严格的输入校验。
+当前 admin 修改接口会记录结构化日志审计，包含 `action`、关键目标（`server_id` / `room_id` / `player_id` / `rollout_epoch`）和 `result=ok|error`，不会记录 token。审计目前仅落在日志中，尚未接入 MySQL 等持久审计库。
+
+仍未完成的生产化能力：
+
+- 细粒度 RBAC / 操作者身份，不区分不同 admin token 的权限。
+- 持久审计、审计查询和统一 trace/request id。
+- 多 proxy 部署下 route store 共享或一致性复制。
+- 更完整的 HTTP parser、TLS 和管理网段访问控制，这些仍建议由部署侧限制。
 
 ## 9. 与 drain / rollout 的关系
 
@@ -323,6 +335,7 @@ proxy 当前只解析最小接入和路由所需消息：
 | `PROXY_PORT` | KCP 监听端口 | `4000` |
 | `PROXY_ADMIN_HOST` | admin 监听 host | 同 `PROXY_HOST` |
 | `PROXY_ADMIN_PORT` | admin 监听端口 | `7101` |
+| `PROXY_ADMIN_TOKEN` | admin HTTP 口鉴权 token；支持 Bearer 和 `X-Admin-Token` header；生产环境禁止空值或默认值 | 开发默认值 |
 | `PROXY_TCP_FALLBACK_HOST` | TCP fallback host | 同 `PROXY_HOST` |
 | `PROXY_TCP_FALLBACK_PORT` | TCP fallback 端口 | `PROXY_PORT + 10000` |
 | `UPSTREAM_SERVER_ID` | 静态上游 server id | `game-server-1` |
@@ -341,7 +354,7 @@ proxy 当前只解析最小接入和路由所需消息：
 
 短期建议优先补：
 
-1. proxy admin 权限细化和审计。
+1. proxy admin 权限细化、持久审计和操作人身份。
 2. route store 持久化或接入统一控制面，避免重启丢失 rollout metadata。
 3. 单 IP / 单玩家连接上限、消息频率限制和 Redis 黑名单。
 4. 自动 rollout 结束检测。

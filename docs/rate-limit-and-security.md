@@ -87,6 +87,9 @@ INTERNAL_API_TOKEN=
 - 动态上游发现或静态上游路由
 - 活跃前端连接数统计与监控暴露，包含尚未完成 `AuthReq` 的预鉴权连接
 - 维护模式开关
+- admin HTTP 口 token 鉴权，支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`
+- `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空的或明显默认的 `PROXY_ADMIN_TOKEN`
+- admin 写接口基础输入校验与结构化日志审计，不记录 token
 - 固定最大包体限制：`MAX_PROXY_BODY_LEN=1MiB`，当前不是环境变量
 
 ### 3.2 当前实际配置项
@@ -98,6 +101,7 @@ PROXY_HOST=127.0.0.1
 PROXY_PORT=4000
 PROXY_ADMIN_HOST=127.0.0.1
 PROXY_ADMIN_PORT=7101
+PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
 PROXY_TCP_FALLBACK_HOST=127.0.0.1
 PROXY_TCP_FALLBACK_PORT=14000
 PROXY_LOCAL_SOCKET_NAME=myserver-game-proxy.sock
@@ -127,6 +131,8 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
   - `MAX_CONNECTIONS_PER_ACCOUNT`
 - 当前 `game-proxy` 只统计总连接数，没有按 IP 或账号做连接上限控制
 - 当前代码里也没有 Redis 黑名单或封禁列表逻辑
+- 当前 `game-proxy` admin HTTP 口已经有 token 鉴权和生产默认 token 拒绝；开发默认 token 只适合本地联调，生产必须改为高强度随机值并限制 admin 端口在内网
+- 当前 proxy admin 修改接口会记录 action、关键目标和 ok/error 结果到结构化日志；尚未接入 MySQL 等持久审计库，也没有细粒度 RBAC
 - 当前 `game-proxy` 已强制鉴权前消息白名单；AuthReq 失败后仍保持未认证，后续业务包只会返回 `PREAUTH_MESSAGE_NOT_ALLOWED`，不会被转发到 `game-server`
 - `PROXY_MAX_CONNECTIONS=0` 表示不限制总前端连接数；配置为正整数时才启用拒绝新连接
 - `PROXY_MAX_PREAUTH_FAILURES=0` 表示不按预鉴权失败次数断开；默认 `3` 会在同一连接累计三次非法预鉴权消息或鉴权失败后关闭连接
@@ -241,6 +247,7 @@ LOG_DIR=logs
   - 使用 `TICKET_SECRET`、`TICKET_TTL_SECONDS`、`INTERNAL_API_TOKEN`
 - `game-proxy`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`
+  - 使用 `PROXY_ADMIN_TOKEN` 保护 admin HTTP 口，生产环境拒绝空值或开发默认值
   - 使用 `PROXY_MAX_CONNECTIONS`、`PROXY_MAX_PREAUTH_FAILURES`
   - 当前没有单 IP、单玩家、Redis 黑名单或消息频率限制环境变量
 - `game-server`：

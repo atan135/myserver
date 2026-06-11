@@ -40,7 +40,10 @@ impl ProxyAuthService {
         let ticket_payload = verify_ticket(&self.ticket_secret, ticket)?;
         let player_id = ticket_payload.player_id;
         let ticket_key = format!("{}ticket:{}", self.redis_key_prefix, hash_ticket(ticket));
-        let ticket_version_key = format!("{}player-ticket-version:{}", self.redis_key_prefix, player_id);
+        let ticket_version_key = format!(
+            "{}player-ticket-version:{}",
+            self.redis_key_prefix, player_id
+        );
         let mut conn = self
             .redis_client
             .get_multiplexed_async_connection()
