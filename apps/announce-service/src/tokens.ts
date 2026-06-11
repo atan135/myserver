@@ -5,3 +5,4 @@ export const ANNOUNCE_MYSQL_POOL = Symbol("ANNOUNCE_MYSQL_POOL");
 export const ANNOUNCE_STORE = Symbol("ANNOUNCE_STORE");
 export const ANNOUNCE_REGISTRY = Symbol("ANNOUNCE_REGISTRY");
 export const ANNOUNCE_METRICS = Symbol("ANNOUNCE_METRICS");
+export const ANNOUNCE_READ_AUTH = Symbol("ANNOUNCE_READ_AUTH");

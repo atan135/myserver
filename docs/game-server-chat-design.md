@@ -276,13 +276,15 @@ client
 - 已落地独立 `announce-service`
 - 当前对外使用 HTTP 接口，而不是独立 TCP / protobuf 公告协议
 - 当前支持：
-  - `GET /api/v1/announcements`，只读查询当前不要求公告写 token
-  - `GET /api/v1/announcements/:announceId`，只读查询当前不要求公告写 token
+  - `GET /api/v1/announcements`，默认要求 `ANNOUNCE_READ_TOKEN` 或玩家 game ticket
+  - `GET /api/v1/announcements/:announceId`，默认要求 `ANNOUNCE_READ_TOKEN` 或玩家 game ticket
   - `POST /api/v1/announcements`，要求 `ANNOUNCE_ADMIN_TOKEN`
   - `PUT /api/v1/announcements/:announceId`，要求 `ANNOUNCE_ADMIN_TOKEN`
   - `DELETE /api/v1/announcements/:announceId`，要求 `ANNOUNCE_ADMIN_TOKEN`
 - `ANNOUNCE_ADMIN_TOKEN` 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>` header，不支持 query token；生产环境禁止空值或开发默认值
-- `announce-service` 默认仍是内网能力服务，不是生产公网入口；只读查询如果临时公网暴露，也需要网关、TLS 和更高层鉴权或限流兜底
+- `ANNOUNCE_READ_TOKEN` 支持 `Authorization: Bearer <token>`、`X-Read-Token` 和 `X-Service-Token` header；玩家 game ticket 支持 `Authorization: Bearer <game_ticket>` 和 `X-Game-Ticket`，并校验签名、过期、Redis ticket 归属和 `player-ticket-version:<playerId>`；不支持 query token
+- `ANNOUNCE_READ_AUTH_REQUIRED=false` 只允许本地/内网兼容调试；生产环境强制为 `true`，并拒绝默认/弱 `ANNOUNCE_ADMIN_TOKEN`、默认/弱 `TICKET_SECRET` 和默认/弱或与 admin token 相同的 `ANNOUNCE_READ_TOKEN`
+- `announce-service` 默认仍是内网能力服务，不是生产公网入口；只读查询第一阶段鉴权已落地，但如果临时公网暴露，仍需要网关、TLS、用途隔离/换票、RBAC 和审计查询继续兜底
 - 当前存储支持：
   - `MYSQL_ENABLED=true` 时使用 MySQL 持久化
   - `MYSQL_ENABLED=false` 时回退到内存存储
@@ -375,7 +377,7 @@ CREATE TABLE announcements (
 1. 客户端启动
 2. 请求 auth-http 登录
 3. 登录成功后，可从返回的 `services.announce` 获取公告服务地址
-4. HTTP 请求 announce-service 获取公告列表
+4. HTTP 请求 announce-service 获取公告列表，并携带 game ticket；如果经内部网关读取，也可由网关携带 `ANNOUNCE_READ_TOKEN`
 5. announce-service 返回当前有效公告
 6. 客户端展示公告
 ```

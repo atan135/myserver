@@ -14,8 +14,9 @@ import {
 } from "@nestjs/common";
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
+import { authenticateAnnounceReadHeaders } from "../announce-auth.js";
 import { forbidden, unauthorized } from "../common/http-exception.js";
-import { ANNOUNCE_CONFIG } from "../tokens.js";
+import { ANNOUNCE_CONFIG, ANNOUNCE_READ_AUTH } from "../tokens.js";
 import { AnnouncementsService } from "./announcements.service.js";
 
 function firstHeaderValue(value: string | string[] | undefined): string {
@@ -55,19 +56,28 @@ function extractAdminToken(headers: Record<string, string | string[] | undefined
 export class AnnouncementsController {
   constructor(
     private readonly announcementsService: AnnouncementsService,
-    @Inject(ANNOUNCE_CONFIG) private readonly config: any
+    @Inject(ANNOUNCE_CONFIG) private readonly config: any,
+    @Inject(ANNOUNCE_READ_AUTH) private readonly readAuth: any
   ) {}
 
   @Get()
   @ApiOperation({ summary: "List announcements" })
   @ApiOkResponse({ schema: { example: { ok: true, announcements: [], limit: 50, offset: 0 } } })
-  list(@Query() query: any) {
+  async list(
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Query() query: any
+  ) {
+    await this.requireReadAccess(headers || {});
     return this.announcementsService.list(query);
   }
 
   @Get(":announceId")
   @ApiOperation({ summary: "Get announcement detail" })
-  get(@Param("announceId") announceId: string) {
+  async get(
+    @Param("announceId") announceId: string,
+    @Headers() headers: Record<string, string | string[] | undefined>
+  ) {
+    await this.requireReadAccess(headers || {});
     return this.announcementsService.get(announceId);
   }
 
@@ -114,6 +124,24 @@ export class AnnouncementsController {
       throw forbidden(
         "ANNOUNCE_ADMIN_TOKEN_INVALID",
         "Announcement admin token is invalid"
+      );
+    }
+  }
+
+  private async requireReadAccess(headers: Record<string, string | string[] | undefined>) {
+    try {
+      await authenticateAnnounceReadHeaders(headers, this.readAuth, this.config);
+    } catch (error: any) {
+      if (error?.statusCode === 403) {
+        throw forbidden(
+          error.code || "ANNOUNCE_READ_TOKEN_INVALID",
+          error.message || "Announcement read token is invalid"
+        );
+      }
+
+      throw unauthorized(
+        error?.code || "ANNOUNCE_READ_AUTH_REQUIRED",
+        error?.message || "Announcement read APIs require a read token or game ticket"
       );
     }
   }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
@@ -6,6 +7,46 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 import "reflect-metadata";
+
+import {
+  AnnounceReadAuthService,
+  ticketKey,
+  ticketVersionKey
+} from "../apps/announce-service/src/announce-auth.js";
+
+const ADMIN_TOKEN = "test-announce-admin-token";
+const READ_TOKEN = "test-announce-read-token";
+const TICKET_SECRET = "test-ticket-secret";
+
+function createTicket({
+  playerId = "player_001",
+  secret = TICKET_SECRET,
+  exp = new Date(Date.now() + 60_000).toISOString(),
+  ver = 1
+} = {}) {
+  const payload = {
+    playerId,
+    nonce: "test-nonce",
+    ver,
+    exp
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(payloadB64)
+    .digest("base64url");
+  return `${payloadB64}.${signature}`;
+}
+
+class MemoryRedis {
+  constructor(entries = []) {
+    this.values = new Map(entries);
+  }
+
+  async get(key) {
+    return this.values.get(key) ?? null;
+  }
+}
 
 async function transpileTypeScriptModule(sourcePath, outPath, replacements = {}) {
   const source = await readFile(sourcePath, "utf8");
@@ -38,6 +79,7 @@ async function loadAnnouncementsController() {
   await rm(outDir, { recursive: true, force: true });
   await mkdir(path.join(outDir, "common"), { recursive: true });
   await transpileTypeScriptModule(sourcePath, outPath, {
+    "../announce-auth.js": "./announce-auth.js",
     "../common/": "./common/",
     "../tokens.js": "./tokens.js",
     "./announcements.service.js": "./announcements.service.js"
@@ -53,6 +95,11 @@ async function loadAnnouncementsController() {
     "utf8"
   );
   await writeFile(
+    path.join(outDir, "announce-auth.js"),
+    "export * from '../../../apps/announce-service/src/announce-auth.js';\n",
+    "utf8"
+  );
+  await writeFile(
     path.join(outDir, "announcements.service.js"),
     "export class AnnouncementsService {}\n",
     "utf8"
@@ -60,6 +107,24 @@ async function loadAnnouncementsController() {
 
   const imported = await import(`${pathToFileURL(outPath).href}?v=${Date.now()}`);
   return imported.AnnouncementsController;
+}
+
+async function loadRequestLogSanitizer() {
+  const sourcePath = path.resolve(
+    "apps/announce-service/src/common/request-log.middleware.ts"
+  );
+  const outDir = path.resolve("tests/.tmp/announce-service-request-log");
+  const outPath = path.join(outDir, "request-log.middleware.mjs");
+
+  await rm(outDir, { recursive: true, force: true });
+  await mkdir(outDir, { recursive: true });
+  await transpileTypeScriptModule(sourcePath, outPath, {
+    "../logger.js": "./logger.js"
+  });
+  await writeFile(path.join(outDir, "logger.js"), "export function log() {}\n", "utf8");
+
+  const imported = await import(`${pathToFileURL(outPath).href}?v=${Date.now()}`);
+  return imported.sanitizeRequestPath;
 }
 
 function createServiceStub() {
@@ -89,11 +154,20 @@ function createServiceStub() {
   };
 }
 
-function createController(ControllerClass) {
+function createController(ControllerClass, overrides = {}) {
   const service = createServiceStub();
-  const controller = new ControllerClass(service, {
-    announceAdminToken: "test-announce-admin-token"
-  });
+  const config = {
+    announceAdminToken: ADMIN_TOKEN,
+    announceReadAuthRequired: true,
+    announceReadToken: READ_TOKEN,
+    ticketSecret: TICKET_SECRET,
+    redisKeyPrefix: "test:",
+    ...overrides.config
+  };
+  const readAuth =
+    overrides.readAuth ||
+    new AnnounceReadAuthService(config, new MemoryRedis());
+  const controller = new ControllerClass(service, config, readAuth);
   return { controller, service };
 }
 
@@ -150,8 +224,8 @@ test("announce write APIs do not accept token outside supported headers", async 
         {},
         {
           title: "Title",
-          admin_token: "test-announce-admin-token",
-          announce_admin_token: "test-announce-admin-token"
+          admin_token: ADMIN_TOKEN,
+          announce_admin_token: ADMIN_TOKEN
         }
       ),
     (error) => {
@@ -186,11 +260,11 @@ test("announce write APIs accept Bearer and X-Admin-Token headers", async () => 
   const { controller, service } = createController(AnnouncementsController);
 
   const created = controller.create(
-    { authorization: "Bearer test-announce-admin-token" },
+    { authorization: `Bearer ${ADMIN_TOKEN}` },
     { title: "Title" }
   );
   const deleted = controller.delete("ann_001", {
-    "X-Admin-Token": "test-announce-admin-token"
+    "X-Admin-Token": ADMIN_TOKEN
   });
 
   assert.equal(created.ok, true);
@@ -201,12 +275,184 @@ test("announce write APIs accept Bearer and X-Admin-Token headers", async () => 
   ]);
 });
 
-test("announce read APIs do not require admin token", async () => {
+test("announce read APIs require read auth by default", async () => {
   const AnnouncementsController = await loadAnnouncementsController();
   const { controller, service } = createController(AnnouncementsController);
 
-  assert.equal(controller.list({ locale: "zh-CN" }).ok, true);
-  assert.equal(controller.get("ann_001").ok, true);
+  await assert.rejects(
+    () => controller.list({}, { locale: "zh-CN" }),
+    (error) => {
+      assertApiError(error, 401, "ANNOUNCE_READ_AUTH_REQUIRED");
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () => controller.get("ann_001", {}),
+    (error) => {
+      assertApiError(error, 401, "ANNOUNCE_READ_AUTH_REQUIRED");
+      return true;
+    }
+  );
+  assert.deepEqual(service.calls, []);
+});
+
+test("announce read APIs reject query token without echoing token", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const { controller, service } = createController(AnnouncementsController);
+
+  await assert.rejects(
+    () =>
+      controller.list(
+        {},
+        {
+          locale: "zh-CN",
+          token: READ_TOKEN,
+          read_token: READ_TOKEN,
+          announce_read_token: READ_TOKEN
+        }
+      ),
+    (error) => {
+      assertApiError(error, 401, "ANNOUNCE_READ_AUTH_REQUIRED");
+      assert.equal(JSON.stringify(error.getResponse?.()).includes(READ_TOKEN), false);
+      return true;
+    }
+  );
+  assert.deepEqual(service.calls, []);
+});
+
+test("announce request logging strips query strings before logging paths", async () => {
+  const sanitizeRequestPath = await loadRequestLogSanitizer();
+
+  assert.equal(
+    sanitizeRequestPath(`/api/v1/announcements?token=${READ_TOKEN}&locale=zh-CN`),
+    "/api/v1/announcements"
+  );
+  assert.equal(
+    sanitizeRequestPath(`/api/v1/announcements/ann_001?read_token=${READ_TOKEN}`),
+    "/api/v1/announcements/ann_001"
+  );
+  assert.equal(sanitizeRequestPath(`?token=${READ_TOKEN}`), "/");
+});
+
+test("announce read token allows list and detail", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const { controller, service } = createController(AnnouncementsController);
+
+  const listResult = await controller.list(
+    { authorization: `Bearer ${READ_TOKEN}` },
+    { locale: "zh-CN" }
+  );
+  const detailResult = await controller.get("ann_001", {
+    "X-Read-Token": READ_TOKEN
+  });
+
+  assert.equal(listResult.ok, true);
+  assert.equal(detailResult.ok, true);
+  assert.deepEqual(service.calls, [
+    ["list", { locale: "zh-CN" }],
+    ["get", "ann_001"]
+  ]);
+});
+
+test("announce read token does not grant write access", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const { controller, service } = createController(AnnouncementsController);
+
+  assert.throws(
+    () =>
+      controller.create(
+        { authorization: `Bearer ${READ_TOKEN}` },
+        { title: "Title" }
+      ),
+    (error) => {
+      assertApiError(error, 403, "ANNOUNCE_ADMIN_TOKEN_INVALID");
+      return true;
+    }
+  );
+  assert.deepEqual(service.calls, []);
+});
+
+test("announce game ticket allows list and detail after Redis owner and version validation", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const ticket = createTicket({ playerId: "player_001", ver: 3 });
+  const config = {
+    announceAdminToken: ADMIN_TOKEN,
+    announceReadAuthRequired: true,
+    announceReadToken: READ_TOKEN,
+    ticketSecret: TICKET_SECRET,
+    redisKeyPrefix: "test:"
+  };
+  const readAuth = new AnnounceReadAuthService(
+    config,
+    new MemoryRedis([
+      [ticketKey("test:", ticket), "player_001"],
+      [ticketVersionKey("test:", "player_001"), "3"]
+    ])
+  );
+  const { controller, service } = createController(AnnouncementsController, {
+    config,
+    readAuth
+  });
+
+  const listResult = await controller.list(
+    { authorization: `Bearer ${ticket}` },
+    { locale: "zh-CN" }
+  );
+  const detailResult = await controller.get("ann_001", {
+    "X-Game-Ticket": ticket
+  });
+
+  assert.equal(listResult.ok, true);
+  assert.equal(detailResult.ok, true);
+  assert.deepEqual(service.calls, [
+    ["list", { locale: "zh-CN" }],
+    ["get", "ann_001"]
+  ]);
+});
+
+test("announce game ticket rejects Redis owner or version mismatch", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const ticket = createTicket({ playerId: "player_001", ver: 3 });
+  const config = {
+    announceAdminToken: ADMIN_TOKEN,
+    announceReadAuthRequired: true,
+    announceReadToken: READ_TOKEN,
+    ticketSecret: TICKET_SECRET,
+    redisKeyPrefix: "test:"
+  };
+  const readAuth = new AnnounceReadAuthService(
+    config,
+    new MemoryRedis([
+      [ticketKey("test:", ticket), "player_001"],
+      [ticketVersionKey("test:", "player_001"), "2"]
+    ])
+  );
+  const { controller, service } = createController(AnnouncementsController, {
+    config,
+    readAuth
+  });
+
+  await assert.rejects(
+    () => controller.list({ authorization: `Bearer ${ticket}` }, {}),
+    (error) => {
+      assertApiError(error, 401, "TICKET_REVOKED");
+      return true;
+    }
+  );
+  assert.deepEqual(service.calls, []);
+});
+
+test("announce read auth can be disabled outside production", async () => {
+  const AnnouncementsController = await loadAnnouncementsController();
+  const { controller, service } = createController(AnnouncementsController, {
+    config: {
+      announceReadAuthRequired: false
+    }
+  });
+
+  assert.equal((await controller.list({}, { locale: "zh-CN" })).ok, true);
+  assert.equal((await controller.get("ann_001", {})).ok, true);
   assert.deepEqual(service.calls, [
     ["list", { locale: "zh-CN" }],
     ["get", "ann_001"]
@@ -222,7 +468,10 @@ test("announce-service production config rejects default admin token", async () 
     {
       NODE_ENV: "production",
       APP_ENV: undefined,
-      ANNOUNCE_ADMIN_TOKEN: undefined
+      ANNOUNCE_ADMIN_TOKEN: undefined,
+      ANNOUNCE_READ_AUTH_REQUIRED: "true",
+      ANNOUNCE_READ_TOKEN: undefined,
+      TICKET_SECRET: "prod-ticket-secret-123456"
     },
     () => {
       assert.throws(
@@ -236,7 +485,10 @@ test("announce-service production config rejects default admin token", async () 
     {
       NODE_ENV: "development",
       APP_ENV: "production",
-      ANNOUNCE_ADMIN_TOKEN: "dev-only-change-this-announce-admin-token"
+      ANNOUNCE_ADMIN_TOKEN: "dev-only-change-this-announce-admin-token",
+      ANNOUNCE_READ_AUTH_REQUIRED: "true",
+      ANNOUNCE_READ_TOKEN: undefined,
+      TICKET_SECRET: "prod-ticket-secret-123456"
     },
     () => {
       assert.throws(
@@ -250,12 +502,81 @@ test("announce-service production config rejects default admin token", async () 
     {
       NODE_ENV: "production",
       APP_ENV: undefined,
-      ANNOUNCE_ADMIN_TOKEN: "prod-announce-admin-token"
+      ANNOUNCE_ADMIN_TOKEN: "prod-announce-admin-token",
+      ANNOUNCE_READ_AUTH_REQUIRED: "true",
+      ANNOUNCE_READ_TOKEN: undefined,
+      TICKET_SECRET: "prod-ticket-secret-123456"
     },
     () => {
       const config = getConfig();
       assert.equal(config.env, "production");
       assert.equal(config.announceAdminToken, "prod-announce-admin-token");
+    }
+  );
+});
+
+test("announce-service production config rejects weak read settings", async () => {
+  const { getConfig } = await import(
+    `../apps/announce-service/src/config.js?v=${Date.now()}`
+  );
+
+  withEnv(
+    {
+      NODE_ENV: "production",
+      APP_ENV: undefined,
+      ANNOUNCE_ADMIN_TOKEN: "prod-announce-admin-token",
+      ANNOUNCE_READ_AUTH_REQUIRED: "false",
+      ANNOUNCE_READ_TOKEN: "dev-only-change-this-announce-read-token",
+      TICKET_SECRET: "dev-only-change-this-ticket-secret"
+    },
+    () => {
+      assert.throws(
+        () => getConfig(),
+        (error) => {
+          assert.match(error.message, /ANNOUNCE_READ_AUTH_REQUIRED/);
+          assert.match(error.message, /ANNOUNCE_READ_TOKEN/);
+          assert.match(error.message, /TICKET_SECRET/);
+          return true;
+        }
+      );
+    }
+  );
+
+  withEnv(
+    {
+      NODE_ENV: "production",
+      APP_ENV: undefined,
+      ANNOUNCE_ADMIN_TOKEN: "prod-announce-admin-token",
+      ANNOUNCE_READ_AUTH_REQUIRED: "true",
+      ANNOUNCE_READ_TOKEN: "short",
+      TICKET_SECRET: "short"
+    },
+    () => {
+      assert.throws(
+        () => getConfig(),
+        (error) => {
+          assert.match(error.message, /ANNOUNCE_READ_TOKEN/);
+          assert.match(error.message, /TICKET_SECRET/);
+          return true;
+        }
+      );
+    }
+  );
+
+  withEnv(
+    {
+      NODE_ENV: "production",
+      APP_ENV: undefined,
+      ANNOUNCE_ADMIN_TOKEN: "shared-prod-token-123",
+      ANNOUNCE_READ_AUTH_REQUIRED: "true",
+      ANNOUNCE_READ_TOKEN: "shared-prod-token-123",
+      TICKET_SECRET: "prod-ticket-secret-123456"
+    },
+    () => {
+      assert.throws(
+        () => getConfig(),
+        /ANNOUNCE_READ_TOKEN must not match ANNOUNCE_ADMIN_TOKEN/
+      );
     }
   );
 });

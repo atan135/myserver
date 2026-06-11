@@ -2,6 +2,7 @@ import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 
 import { AnnouncementsController } from "./announcements/announcements.controller.js";
 import { AnnouncementsService } from "./announcements/announcements.service.js";
+import { AnnounceReadAuthService } from "./announce-auth.js";
 import { getConfig } from "./config.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import { HealthController } from "./health.controller.js";
@@ -16,6 +17,7 @@ import {
   ANNOUNCE_METRICS,
   ANNOUNCE_MYSQL_POOL,
   ANNOUNCE_NATS,
+  ANNOUNCE_READ_AUTH,
   ANNOUNCE_REDIS,
   ANNOUNCE_REGISTRY,
   ANNOUNCE_STORE
@@ -61,6 +63,11 @@ import {
       provide: ANNOUNCE_REGISTRY,
       inject: [ANNOUNCE_REDIS, ANNOUNCE_CONFIG],
       useFactory: (redis: any, config: any) => new RegistryClient(redis, config)
+    },
+    {
+      provide: ANNOUNCE_READ_AUTH,
+      inject: [ANNOUNCE_CONFIG, ANNOUNCE_REDIS],
+      useFactory: (config: any, redis: any) => new AnnounceReadAuthService(config, redis)
     },
     {
       provide: ANNOUNCE_METRICS,

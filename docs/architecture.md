@@ -72,7 +72,7 @@
 | `game-proxy admin` | `7101` | Rust + Tokio | 内网控制面；查看上游、切换路由、维护模式，支持全权限写 token、只读 token 和第一阶段 scoped token RBAC |
 | `chat-server` | `9001` | Rust + Tokio | 单聊、群聊、聊天历史、邮件通知推送 |
 | `match-service` | `9002` | Rust + tonic gRPC | 匹配池、撮合、向 `game-server` 发起房间协作 |
-| `announce-service` | `9004` | Node.js + NestJS + Fastify | 公告 CRUD、有效公告查询、服务注册与监控上报 |
+| `announce-service` | `9004` | Node.js + NestJS + Fastify | 公告 CRUD、read token / game ticket 保护的有效公告查询、服务注册与监控上报 |
 | `mail-service` | `9003` | Node.js + NestJS + Fastify | 邮件 CRUD、邮件通知发布、部分服务注册接入 |
 
 ---
@@ -196,7 +196,7 @@
 ### 6.4 聊天与邮件
 
 - `chat-server` 负责聊天会话、聊天历史和在线推送
-- `announce-service` 负责公告 CRUD 和当前有效公告查询
+- `announce-service` 负责公告 CRUD 和当前有效公告查询；只读查询第一阶段支持 `ANNOUNCE_READ_TOKEN` 或 game ticket 鉴权，game ticket 会校验 Redis ticket 归属和 `player-ticket-version`
 - `mail-service` 负责邮件 CRUD；玩家读邮件、邮件详情、标记已读和领取附件复用 game ticket + Redis ticket 归属/version 校验，内部发信入口使用 `MAIL_SERVICE_TOKEN`
 - `mail-service` 通过 Core NATS 通知 `chat-server`
 - `chat-server` 再把邮件通知推送给在线玩家

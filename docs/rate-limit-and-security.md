@@ -367,7 +367,9 @@ ADMIN_API_IP_ALLOWLIST=
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
   - 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`，不支持 query token
-  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝空值或开发默认值
-  - `GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 当前仍是无 token 只读查询；如果临时公网暴露，必须通过网关/TLS/更高层鉴权和限流兜底
+  - 使用 `ANNOUNCE_READ_AUTH_REQUIRED`、`ANNOUNCE_READ_TOKEN`、`TICKET_SECRET`、`REDIS_KEY_PREFIX` 保护只读公告查询；`GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 默认要求 `ANNOUNCE_READ_TOKEN` 或 game ticket，game ticket 校验签名、过期、Redis ticket 归属和 `player-ticket-version:<playerId>`
+  - 只读凭证支持 `Authorization: Bearer <ANNOUNCE_READ_TOKEN>`、`X-Read-Token`、`X-Service-Token`，玩家 ticket 支持 `Authorization: Bearer <game_ticket>`、`X-Game-Ticket`；不支持 query token
+  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝关闭 `ANNOUNCE_READ_AUTH_REQUIRED`，拒绝空值、开发默认值或明显弱值的 `ANNOUNCE_ADMIN_TOKEN` / `TICKET_SECRET`，并拒绝默认/弱或与 admin token 相同的 `ANNOUNCE_READ_TOKEN`
+  - 该能力只是第一阶段误暴露兜底；如果临时公网暴露，仍必须通过网关/TLS、用途隔离/换票、RBAC、审计查询和限流继续收敛
 
 如果后续要真正落地 `game-proxy` / `game-server` / `chat-server` 的风控策略，建议先补代码，再在文档中新增配置项；不要先在文档里约定一组尚未读取的环境变量。

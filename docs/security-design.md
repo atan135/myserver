@@ -85,15 +85,15 @@
 | `auth-http` | IP 限流、Redis 动态 IP / 玩家黑名单、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、GM 限时封禁到期后在登录/签票路径惰性恢复账号为 `active`、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
 | `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有跨实例全局连接数限制、账号级消息频率限制和公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、玩家读邮件/详情/标记已读/领取附件复用 game ticket，校验签名、过期、Redis ticket 归属和 ticket version，query/body `player_id` 只能与认证身份一致，邮件详情和领取均校验邮件归属；系统发信入口要求 `MAIL_SERVICE_TOKEN`；过期校验、附件格式校验、领取幂等、基础 HTTP 指标；production 下拒绝默认 `TICKET_SECRET`、默认 `MAIL_SERVICE_TOKEN` 或关闭 `MAIL_PLAYER_AUTH_REQUIRED` | 仍未网关化；共享 ticket 尚未做 mail 专用用途隔离/换票；缺少发信 RBAC、审批流、发信审计查询和公网 HTTPS/TLS 策略 |
-| `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
+| `announce-service` | HTTP 查询参数与公告载荷基础校验；只读 `GET /api/v1/announcements...` 默认要求 `ANNOUNCE_READ_TOKEN` 或 game ticket，game ticket 校验签名、过期、Redis ticket 归属和 ticket version；写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权；基础 HTTP 指标；production 下拒绝关闭 `ANNOUNCE_READ_AUTH_REQUIRED`、默认/弱 `ANNOUNCE_ADMIN_TOKEN`、默认/弱 `TICKET_SECRET`，并拒绝默认/弱或与 admin token 相同的 `ANNOUNCE_READ_TOKEN` | 仍未网关化；共享 ticket 尚未做 announce 专用用途隔离/换票；缺少公告读写 RBAC、审计查询和公网 HTTPS/TLS 策略 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、单连接入站消息频率限制、总连接上限、静态 IP denylist、Redis 动态 IP / 玩家黑名单、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、全权限写 token、只读 token、第一阶段 scoped token 操作级 RBAC、生产默认/弱 token 拒绝、写操作基础输入校验、权限拒绝审计、`X-Admin-Actor` 操作人解析、结构化日志和 JSONL 持久审计 | 成熟的公网加密方案尚未落地；尚未做多 proxy 全局连接限额；proxy admin scoped token RBAC 尚未数据库化或集中策略化，仍缺审批流、审计查询、集中留存、按资源范围授权和统一 trace/request id，多 proxy route store 强一致仍未完全闭环 |
 | `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、玩家输入 client timestamp 可配置窗口校验、玩家输入重复内容/过期帧/未来帧/时间戳异常的本实例短窗口计数与可配置拒绝、连接审计、基础权威移动校正、NATS GM 广播订阅并向本实例在线连接推送、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制和通用作弊计数；输入异常阈值当前只拒绝后续输入、不主动断开连接 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端第一阶段权限矩阵、监控接口鉴权、可信代理 IP 解析、请求级 HTTPS/TLS 强制、来源 IP allowlist、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 广播通过 NATS 跨实例推送、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接、GM 限时封禁写入 `ban_expires_at` | 代码侧 TLS/allowlist 不能替代生产网络隔离；权限仍未数据库化，缺少按资源范围授权、权限变更审计查询和审批流 |
 
 说明：
 
-- 当前同一张 ticket 会被 `game-proxy`、`game-server`、`chat-server`、`mail-service` 复用
-- 当前 `game-proxy`、`game-server`、`chat-server` 与 `mail-service` 都会检查 Redis ticket 记录和 `player-ticket-version:<playerId>`；`chat-server` 和 `mail-service` 对单张 ticket revoke 已具备精确感知
+- 当前同一张 ticket 会被 `game-proxy`、`game-server`、`chat-server`、`mail-service`、`announce-service` 复用
+- 当前 `game-proxy`、`game-server`、`chat-server`、`mail-service` 与 `announce-service` 都会检查 Redis ticket 记录和 `player-ticket-version:<playerId>`；`chat-server`、`mail-service` 和 `announce-service` 对单张 ticket revoke 已具备精确感知
 - 因此不能简单采用“任一服务首次校验成功后立即删除 Redis ticket 记录”的全局单次消费模型
 - 如果后续要进一步降低重放风险，更合理的方向是短 TTL、用途隔离、分服务换票，或显式的重放窗口控制
 - 维护模式共享状态位于 `${REDIS_KEY_PREFIX}maintenance:global`。开启后 `auth-http` 拦截普通玩家登录和新 game ticket 签发，`game-proxy` 拦截新 `AuthReq`；它不是在线踢人机制，已有在线连接不被主动断开
@@ -127,7 +127,7 @@
 
 1. 明文传输导致 token / ticket / 管理凭证泄露
 2. 未鉴权连接或非法包频繁打入，压垮登录服、代理或游戏服
-3. `mail-service` / `announce-service` 这类内网能力服务如果被误作为客户端直连 HTTP 入口，仍需要明确 TLS、网关和限流边界；其中 `mail-service` 已有第一阶段玩家 ticket 鉴权和发信 service token，`announce-service` 只读查询仍缺少玩家或网关鉴权
+3. `mail-service` / `announce-service` 这类内网能力服务如果被误作为客户端直连 HTTP 入口，仍需要明确 TLS、网关和限流边界；其中 `mail-service` 已有第一阶段玩家 ticket 鉴权和发信 service token，`announce-service` 只读查询已有第一阶段 read token 或 game ticket 鉴权，但仍未完成网关化、用途隔离和公网 TLS 策略
 4. 客户端伪造位置、帧号、时间戳、房间状态或业务结果
 5. 敏感后台操作缺少完整审计，出现误操作后无法追踪
 6. 管理口、监控口、Redis、MySQL 等控制面被误暴露到公网
@@ -160,7 +160,7 @@
 |------|----------|----------|
 | 客户端 -> `auth-http` | 开发期可明文 HTTP | 生产必须 HTTPS |
 | 客户端 -> `mail-service` | 本地/测试可直连明文 HTTP；玩家接口默认要求 game ticket，发信入口要求 `MAIL_SERVICE_TOKEN` | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS，并继续收敛到可信网关、用途隔离 ticket 或换票模型 |
-| 客户端 -> `announce-service` | 本地/测试可直连明文 HTTP；写接口要求 `ANNOUNCE_ADMIN_TOKEN` header | 生产不作为客户端直连默认入口；若临时暴露，只读查询也必须经过网关/TLS/更高层鉴权，后台 CRUD 继续与玩家读取路径隔离 |
+| 客户端 -> `announce-service` | 本地/测试可直连明文 HTTP；只读查询默认要求 `ANNOUNCE_READ_TOKEN` 或 game ticket；写接口要求 `ANNOUNCE_ADMIN_TOKEN` header | 生产不作为客户端直连默认入口；若临时暴露，必须 HTTPS，并继续收敛到可信网关、用途隔离 ticket 或换票模型，后台 CRUD 继续与玩家读取路径隔离 |
 | 浏览器 -> `admin-web` / `admin-api` | 当前未强制 HTTPS | 生产必须 HTTPS，Bearer token 只允许在 TLS 下使用，并限制在运营网段、堡垒机、VPN 或独立管理入口 |
 | 客户端 -> `chat-server` TCP | 本地/测试可直连明文 TCP | 生产不作为客户端直连默认入口；若临时暴露，必须在入口层做 TLS 终止或由 `chat-server` 直接支持 TLS |
 | 客户端 -> `game-proxy` TCP fallback | 当前明文 TCP | 生产建议在入口层做 TLS 终止，或由 `game-proxy` 直接支持 TLS |
@@ -182,6 +182,7 @@
 - `game-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时也会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 都会拒绝启动。该保护是内网服务的凭证基线，不表示 `game-server` 应作为生产公网入口暴露。
 - `chat-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `TICKET_SECRET` 会拒绝启动。该保护要求聊天服与 ticket 签发侧使用一致的真实密钥，但不改变 `chat-server` 默认内网化的部署边界。
 - `mail-service` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `TICKET_SECRET` / `MAIL_SERVICE_TOKEN` 会拒绝启动，且 `MAIL_PLAYER_AUTH_REQUIRED` 必须为 `true`。`GAME_ADMIN_TOKEN` 仍只用于 mail-service 调用下游 `game-server admin`，不能作为 mail 发信入口 token 复用。
+- `announce-service` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认、空值或明显占位的 `ANNOUNCE_ADMIN_TOKEN` / `TICKET_SECRET` 会拒绝启动，`ANNOUNCE_READ_AUTH_REQUIRED` 必须为 `true`；如果配置了 `ANNOUNCE_READ_TOKEN`，也必须是非默认强值，且不能与 `ANNOUNCE_ADMIN_TOKEN` 相同。
 
 建议后续补充：
 
@@ -573,12 +574,16 @@ TRUSTED_PROXIES=
 
 `admin-api` 第一阶段权限矩阵仍复用 `admin_accounts.role`，不新增数据库迁移：`viewer` 拥有审计、安全日志、玩家、维护状态和监控只读权限；`operator` 在只读权限外可调整玩家非封禁状态，并执行 GM 广播、发道具和踢人；`admin` 与兼容角色 `super_admin` 拥有全部权限，包括玩家/GM 封禁、维护模式写入、监控归档和管理员 token 生命周期操作。权限拒绝统一返回 `403 INSUFFICIENT_PERMISSION` 并写结构化日志，但不向响应泄露完整权限矩阵。
 
-### 9.6 `announce-service` / 公告写控制面
+### 9.6 `announce-service` / 公告读写边界
 
 当前 `announce-service` 已读取：
 
 ```env
 ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
+ANNOUNCE_READ_AUTH_REQUIRED=true
+ANNOUNCE_READ_TOKEN=dev-only-change-this-announce-read-token
+TICKET_SECRET=dev-only-change-this-ticket-secret
+REDIS_KEY_PREFIX=
 ```
 
 说明：
@@ -586,8 +591,13 @@ ANNOUNCE_ADMIN_TOKEN=dev-only-change-this-announce-admin-token
 - `ANNOUNCE_ADMIN_TOKEN` 用于保护 `POST /api/v1/announcements`、`PUT /api/v1/announcements/:announceId` 和 `DELETE /api/v1/announcements/:announceId`。
 - 当前支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>` 两种 header；不支持 query token，避免 token 进入访问日志。
 - 缺 token 返回 `ANNOUNCE_ADMIN_TOKEN_REQUIRED`，token 错误返回 `ANNOUNCE_ADMIN_TOKEN_INVALID`。
-- `GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 保持无公告写 token 要求，方便内网和测试读取；如果临时对公网暴露，仍需要网关、TLS 和更高层鉴权或限流策略。
-- `announce-service` 默认仍是内网能力服务，不是生产公网入口；生产公网入口仍只应是 `auth-http` 和 `game-proxy`。`NODE_ENV=production` 或 `APP_ENV=production` 时，`ANNOUNCE_ADMIN_TOKEN` 为空或仍为明显默认值会导致配置加载失败。
+- `GET /api/v1/announcements` 和 `GET /api/v1/announcements/:announceId` 默认要求只读凭证或玩家 game ticket：内部服务/网关可传 `Authorization: Bearer <ANNOUNCE_READ_TOKEN>`、`X-Read-Token` 或 `X-Service-Token`；玩家侧可传 `Authorization: Bearer <game_ticket>` 或 `X-Game-Ticket`。
+- Bearer token 会先按 `ANNOUNCE_READ_TOKEN` 比对；不匹配时再按 game ticket 解析。game ticket 格式沿用 `auth-http` 签发的 `payloadB64.signatureB64`，校验 HMAC-SHA256 签名、`exp` 过期时间、Redis `${REDIS_KEY_PREFIX}ticket:<sha256(ticket)>` 归属和 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>` 版本；Redis 不可用、owner key 缺失、version key 缺失或版本不一致均拒绝。
+- 只读接口不接受 query token；缺少只读凭证返回 `ANNOUNCE_READ_AUTH_REQUIRED`，显式 read token 错误返回 `ANNOUNCE_READ_TOKEN_INVALID`，ticket 错误返回对应 ticket 错误码。
+- `ANNOUNCE_READ_AUTH_REQUIRED=false` 只允许本地/内网兼容调试；production 环境会拒绝该配置。
+- `ANNOUNCE_READ_TOKEN` 只授予只读查询权限，不授予 `POST/PUT/DELETE` 写权限；生产环境若配置该 token，必须是非默认强值且不能与 `ANNOUNCE_ADMIN_TOKEN` 相同。
+- `announce-service` 默认仍是内网能力服务，不是生产公网入口；生产公网入口仍只应是 `auth-http` 和 `game-proxy`。`NODE_ENV=production` 或 `APP_ENV=production` 时，`ANNOUNCE_ADMIN_TOKEN`、`TICKET_SECRET`、`ANNOUNCE_READ_AUTH_REQUIRED` 和可选 `ANNOUNCE_READ_TOKEN` 的弱配置会导致配置加载失败。
+- 该阶段仍复用全局 game ticket，后续仍需网关化、announce 专用用途隔离/换票、公告读写 RBAC、审计查询和更完整的公网 TLS 策略。
 
 ### 9.7 `mail-service` / 邮件玩家入口与发信入口
 
@@ -620,7 +630,7 @@ MAIL_SERVICE_TOKEN=dev-only-change-this-mail-service-token
 3. 管理面、Redis、MySQL、admin 端口默认不暴露公网；`game-proxy` admin HTTP 口已有 token 鉴权和生产默认 token 拒绝，仍需部署侧网络隔离
 4. `game-proxy` 与 `game-server` 鉴权前消息白名单已落地
 5. 单连接消息频率限制和本实例内单玩家消息频率限制已在 `game-server` 落地，`chat-server` 已有有界出站写队列用于慢连接背压，并已在生产环境拒绝默认 `TICKET_SECRET`；单 IP 频率限制、`chat-server` 消息频率限制和跨实例全局玩家频率限制仍需继续补齐
-6. `announce-service` 公告写接口 token 鉴权已落地，`mail-service` 玩家入口 game ticket 鉴权和发信 service token 已落地，仍需保持这些能力服务默认内网化；公告只读查询的玩家/网关鉴权边界后续继续收敛
+6. `announce-service` 公告只读 read token / game ticket 鉴权和公告写接口 token 鉴权已落地，`mail-service` 玩家入口 game ticket 鉴权和发信 service token 已落地，仍需保持这些能力服务默认内网化；公告、邮件后续继续收敛到网关化、用途隔离/换票、RBAC、审计查询和公网 TLS 策略
 7. 非法包计数、异常输入计数和安全审计统一；proxy admin 已有日志审计、JSONL 持久审计、操作人字段、读写 token 分离和第一阶段 scoped token 操作级 RBAC，仍缺数据库化/集中策略、审批流、审计查询、集中留存、按资源范围授权和统一 trace/request id
 
 ### M1：当前阶段最值得做的安全增强
