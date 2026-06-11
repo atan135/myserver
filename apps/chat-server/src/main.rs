@@ -27,6 +27,8 @@ struct Config {
     bind_addr: String,
     heartbeat_timeout_secs: u64,
     max_body_len: usize,
+    msg_rate_window_ms: u64,
+    msg_rate_max: u64,
     outbound_queue_capacity: usize,
     ticket_secret: String,
     redis_url: String,
@@ -64,6 +66,8 @@ impl Config {
                 .unwrap_or_else(|_| "4096".to_string())
                 .parse()
                 .unwrap_or(4096),
+            msg_rate_window_ms: parse_u64_env("CHAT_MSG_RATE_WINDOW_MS", 1000),
+            msg_rate_max: parse_u64_env("CHAT_MSG_RATE_MAX", 0),
             outbound_queue_capacity: parse_outbound_queue_capacity(
                 std::env::var("CHAT_OUTBOUND_QUEUE_CAPACITY").ok(),
             ),
@@ -152,6 +156,13 @@ fn parse_outbound_queue_capacity(value: Option<String>) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_OUTBOUND_QUEUE_CAPACITY)
+}
+
+fn parse_u64_env(name: &str, default_value: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_value)
 }
 
 fn init_logging(config: &Config) {
@@ -272,6 +283,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_addr: config.bind_addr.clone(),
         heartbeat_timeout_secs: config.heartbeat_timeout_secs,
         max_body_len: config.max_body_len,
+        msg_rate_window_ms: config.msg_rate_window_ms,
+        msg_rate_max: config.msg_rate_max,
         ticket_secret: config.ticket_secret.clone(),
         redis_url: config.redis_url.clone(),
         redis_key_prefix: config.redis_key_prefix.clone(),
@@ -402,6 +415,38 @@ mod tests {
     #[test]
     fn outbound_queue_capacity_accepts_positive_value() {
         assert_eq!(parse_outbound_queue_capacity(Some("64".to_string())), 64);
+    }
+
+    #[test]
+    fn chat_message_rate_limit_config_defaults_to_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["CHAT_MSG_RATE_WINDOW_MS", "CHAT_MSG_RATE_MAX"]);
+
+        unsafe {
+            env::remove_var("CHAT_MSG_RATE_WINDOW_MS");
+            env::remove_var("CHAT_MSG_RATE_MAX");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.msg_rate_window_ms, 1000);
+        assert_eq!(config.msg_rate_max, 0);
+    }
+
+    #[test]
+    fn chat_message_rate_limit_config_accepts_env_values() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["CHAT_MSG_RATE_WINDOW_MS", "CHAT_MSG_RATE_MAX"]);
+
+        unsafe {
+            env::set_var("CHAT_MSG_RATE_WINDOW_MS", "500");
+            env::set_var("CHAT_MSG_RATE_MAX", "20");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.msg_rate_window_ms, 500);
+        assert_eq!(config.msg_rate_max, 20);
     }
 
     #[test]

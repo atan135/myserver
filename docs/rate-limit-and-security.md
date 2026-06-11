@@ -223,6 +223,7 @@ PLAYER_MSG_RATE_MAX=0
 - ticket version 校验：读取 `${REDIS_KEY_PREFIX}player-ticket-version:<playerId>`，用于感知 logout / 改密等玩家级失效
 - 心跳超时：首包读取和会话循环使用 `HEARTBEAT_TIMEOUT_SECS`
 - 最大包体限制：包体超过 `MAX_BODY_LEN` 时拒绝处理
+- 单连接消息频率限制：认证后读到完整 packet 并解析出 `MessageType` 后、业务 dispatch 前按连接本地窗口计数；`CHAT_MSG_RATE_MAX=0` 默认关闭，超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接
 - 有界出站写队列：每连接出站消息队列使用 `CHAT_OUTBOUND_QUEUE_CAPACITY` 限制容量，队列满时当前连接响应返回错误，其它玩家推送和邮件通知记录日志后跳过
 - 在线推送与邮件通知订阅：依赖 Core NATS 与内存会话表
 
@@ -234,6 +235,8 @@ PLAYER_MSG_RATE_MAX=0
 CHAT_BIND_ADDR=0.0.0.0:9001
 HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
+CHAT_MSG_RATE_WINDOW_MS=1000
+CHAT_MSG_RATE_MAX=0
 CHAT_OUTBOUND_QUEUE_CAPACITY=1024
 TICKET_SECRET=replace-with-a-long-random-string
 REDIS_URL=redis://127.0.0.1:6379
@@ -260,9 +263,10 @@ LOG_DIR=logs
 
 - `chat-server` 已读取 `REDIS_KEY_PREFIX`，并同时用于 `ticket:<sha256(ticket)>` 和 `player-ticket-version:<playerId>` 两类 key
 - `CHAT_OUTBOUND_QUEUE_CAPACITY` 默认 `1024`；未配置、解析失败或配置为 `0` 时使用默认值
+- `CHAT_MSG_RATE_WINDOW_MS` 默认 `1000`，`CHAT_MSG_RATE_MAX` 默认 `0` 表示关闭限制；生产部署可显式配置为非零值
 - `NODE_ENV=production` 或 `APP_ENV=production` 时，`chat-server` 会在配置加载阶段拒绝空值、开发默认值或 `.env.example` 占位的 `TICKET_SECRET`；生产值必须与 `auth-http` / `game-server` 的 ticket 签发和校验侧保持一致
 - 单张 ticket revoke 删除 Redis `ticket:<sha256(ticket)>` 后，新的 `ChatAuthReq` 会返回 `TICKET_REVOKED`
-- 当前没有消息频率限制、单 IP / 单账号连接数限制、Redis 黑名单或封禁列表逻辑
+- 当前没有单 IP / 单账号连接数限制、Redis 黑名单或封禁列表逻辑；消息频率限制是单连接本地状态，不是跨实例全局限额
 - 当前没有公网 TLS 策略，生产部署时应放在 TLS 终止层或补充直接 TLS 支持
 - `chat-server` 默认不作为生产公网入口；上述 fail-fast 只是内网服务凭证保护。如果内部或测试环境直连，也应继续保持与 `game-proxy` / `game-server` 一致的 ticket 校验边界
 
@@ -289,9 +293,9 @@ LOG_DIR=logs
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
   - 当前没有单 IP、Redis 黑名单、时间戳窗口或反重放环境变量；单玩家消息频率限制是单 `game-server` 实例内本地状态，不是跨实例全局限额
 - `chat-server`：
-  - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`CHAT_OUTBOUND_QUEUE_CAPACITY`
+  - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`CHAT_MSG_RATE_WINDOW_MS`、`CHAT_MSG_RATE_MAX`、`CHAT_OUTBOUND_QUEUE_CAPACITY`
   - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认、空值或明显占位的 `TICKET_SECRET`
-  - 当前没有消息频率限制配置
+  - 当前消息频率限制是单连接本地状态，不是单账号、单 IP 或跨实例全局限额
 - `announce-service`：
   - 使用 `ANNOUNCE_ADMIN_TOKEN` 保护公告写接口 `POST/PUT/DELETE /api/v1/announcements...`
   - 支持 `Authorization: Bearer <token>` 和 `X-Admin-Token: <token>`，不支持 query token

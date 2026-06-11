@@ -558,7 +558,7 @@ pub async fn unregister_session(sessions: &ChatSessionMap, player_id: &str) {
 // 辅助函数
 // ============================================================
 
-fn queue_error(
+pub(crate) fn queue_error(
     tx: &ChatOutboundSender,
     seq: u32,
     error_code: &str,

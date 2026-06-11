@@ -258,6 +258,7 @@ Todo 里的“客户端校验”不能理解成“相信客户端”。更合理
 
 - `invalid_msg_type`
 - `msg_rate_exceeded`
+- `chat_msg_rate_exceeded`
 - `packet_too_large`
 - `frame_out_of_window`
 - `timestamp_skew`
@@ -518,7 +519,18 @@ CHEAT_STRIKE_BAN_THRESHOLD=20
 TICKET_REPLAY_WINDOW_SECS=300
 ```
 
-### 9.4 `admin-api` / 控制面
+### 9.4 `chat-server` / 内部聊天服务
+
+当前已读取并生效的消息频率配置：
+
+```env
+CHAT_MSG_RATE_WINDOW_MS=1000
+CHAT_MSG_RATE_MAX=0
+```
+
+`CHAT_MSG_RATE_MAX=0` 默认关闭，避免影响本地联调；生产部署可配置为正整数。限制发生在认证后、读到完整 packet 并解析出 `MessageType` 后、进入单聊、群聊、群组和历史查询 handler 前。超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接。该限制是单连接本地状态，不是单账号、单 IP 或跨实例全局限额。`NODE_ENV=production` 或 `APP_ENV=production` 时，`chat-server` 会拒绝默认或空的 `TICKET_SECRET`。
+
+### 9.5 `admin-api` / 控制面
 
 ```env
 ADMIN_API_REQUIRE_TLS=false
@@ -535,7 +547,7 @@ TRUSTED_PROXIES=
 
 当前 `admin-api` 已读取 `ADMIN_SESSION_TTL_SECONDS`、`ADMIN_LOGIN_MAX_FAILURES`、`ADMIN_LOGIN_FAILURE_WINDOW_SECONDS`、`ADMIN_LOGIN_LOCK_SECONDS`、`TRUST_PROXY` 和 `TRUSTED_PROXIES`。`ADMIN_SESSION_TTL_SECONDS` 未配置时跟随 `JWT_EXPIRES_IN` 解析出的秒数；`TRUST_PROXY=true` 仍要求直连来源显式列在 `TRUSTED_PROXIES` 后才信任 `X-Forwarded-For`。`NODE_ENV=production` 下明显默认的 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 或 `ADMIN_PASSWORD` 会导致配置加载失败。`ADMIN_API_REQUIRE_TLS`、`ADMIN_API_REQUIRE_IP_ALLOWLIST`、`ADMIN_MONITORING_REQUIRE_AUTH`、`ADMIN_ENFORCE_ROLE_CHECK` 仍是部署或设计口径，其中监控接口和角色校验代码侧已经默认启用。
 
-### 9.5 `announce-service` / 公告写控制面
+### 9.6 `announce-service` / 公告写控制面
 
 当前 `announce-service` 已读取：
 

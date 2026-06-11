@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use prost::Message;
 use redis::AsyncCommands;
@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::chat_service::{self, ChatSessionMap};
 use crate::chat_store::ChatStore;
@@ -70,11 +70,65 @@ impl MessageType {
     }
 }
 
+#[derive(Debug)]
+pub struct ConnectionRateLimiter {
+    window_started_at: Option<Instant>,
+    count: u64,
+}
+
+impl ConnectionRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            window_started_at: None,
+            count: 0,
+        }
+    }
+
+    pub fn allow(&mut self, now: Instant, window_ms: u64, max_messages: u64) -> bool {
+        if window_ms == 0 || max_messages == 0 {
+            return true;
+        }
+
+        let window = Duration::from_millis(window_ms);
+        if self
+            .window_started_at
+            .is_none_or(|started_at| now.saturating_duration_since(started_at) >= window)
+        {
+            self.window_started_at = Some(now);
+            self.count = 0;
+        }
+
+        self.count = self.count.saturating_add(1);
+        self.count <= max_messages
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchDecision {
+    Dispatch,
+    RateLimited,
+}
+
+pub fn dispatch_decision(
+    limiter: &mut ConnectionRateLimiter,
+    now: Instant,
+    window_ms: u64,
+    max_messages: u64,
+) -> DispatchDecision {
+    if limiter.allow(now, window_ms, max_messages) {
+        DispatchDecision::Dispatch
+    } else {
+        DispatchDecision::RateLimited
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
+    pub msg_rate_window_ms: u64,
+    pub msg_rate_max: u64,
     pub ticket_secret: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
@@ -190,6 +244,7 @@ where
 {
     let (mut reader, mut writer) = tokio::io::split(socket);
     let (tx, mut rx) = mpsc::channel::<OutboundMessage>(config.outbound_queue_capacity);
+    let mut rate_limiter = ConnectionRateLimiter::new();
 
     // === 认证阶段 ===
     let auth_started_at = Instant::now();
@@ -284,8 +339,47 @@ where
             }
         };
 
-        // 处理聊天消息
         let started_at = Instant::now();
+        if dispatch_decision(
+            &mut rate_limiter,
+            started_at,
+            config.msg_rate_window_ms,
+            config.msg_rate_max,
+        ) == DispatchDecision::RateLimited
+        {
+            warn!(
+                peer = %peer_addr,
+                player_id = %player_id,
+                msg_type = ?msg_type,
+                window_ms = config.msg_rate_window_ms,
+                max_messages = config.msg_rate_max,
+                "chat message rate exceeded"
+            );
+            if let Err(e) = chat_service::queue_error(
+                &tx,
+                packet.header.seq,
+                "MSG_RATE_EXCEEDED",
+                "message rate exceeded",
+            ) {
+                warn!(
+                    peer = %peer_addr,
+                    player_id = %player_id,
+                    msg_type = ?msg_type,
+                    error = %e,
+                    "failed to queue chat message rate exceeded error"
+                );
+            }
+            continue;
+        }
+
+        debug!(
+            peer = %peer_addr,
+            player_id = %player_id,
+            msg_type = ?msg_type,
+            "dispatching chat client message"
+        );
+
+        // 处理聊天消息
         match msg_type {
             MessageType::ChatPrivateReq => {
                 if let Err(e) = chat_service::handle_chat_private(
@@ -511,6 +605,50 @@ mod tests {
         assert_eq!(
             validate_ticket_version(Some(2), Some(3)),
             Err("TICKET_REVOKED")
+        );
+    }
+
+    #[test]
+    fn rate_limiter_disabled_allows_all_messages() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 0));
+        assert!(limiter.allow(now, 0, 1));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_after_window_limit() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 2));
+        assert!(limiter.allow(now, 1000, 2));
+        assert!(!limiter.allow(now, 1000, 2));
+    }
+
+    #[test]
+    fn rate_limiter_resets_after_window_rolls() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert!(limiter.allow(now, 1000, 1));
+        assert!(!limiter.allow(now + Duration::from_millis(999), 1000, 1));
+        assert!(limiter.allow(now + Duration::from_millis(1000), 1000, 1));
+    }
+
+    #[test]
+    fn dispatch_decision_blocks_over_limit_before_business_dispatch() {
+        let mut limiter = ConnectionRateLimiter::new();
+        let now = Instant::now();
+
+        assert_eq!(
+            dispatch_decision(&mut limiter, now, 1000, 1),
+            DispatchDecision::Dispatch
+        );
+        assert_eq!(
+            dispatch_decision(&mut limiter, now, 1000, 1),
+            DispatchDecision::RateLimited
         );
     }
 }
