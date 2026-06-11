@@ -10,7 +10,7 @@
 
 - `auth-http`：已经实现 IP 限流、账号锁定、ticket 签发/撤销、维护模式入口拦截，以及安全审计写库；配置项以 `apps/auth-http/src/config.js` 为准
 - `game-proxy`：当前已实现 `AuthReq` 本地 ticket 校验、鉴权前消息白名单、单连接预鉴权失败阈值、总前端连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、接入转发、活跃前端连接数观测、本地开关 + Redis 共享状态的维护模式拦截与上游发现；文档里旧的 KCP 令牌桶限流配置项目前并不存在
-- `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用
+- `game-server`：当前已实现 ticket 校验、鉴权前消息白名单、心跳超时、包体长度限制、单连接消息频率限制和本实例内单玩家消息频率限制；频率限制默认关闭，分别按 `MSG_RATE_WINDOW_MS` / `MSG_RATE_MAX` 与 `PLAYER_MSG_RATE_WINDOW_MS` / `PLAYER_MSG_RATE_MAX` 启用；生产环境拒绝默认或空的 ticket/admin/internal token
 - `chat-server`：当前已实现首包鉴权、ticket 签名与过期校验、Redis ticket 归属校验、ticket version 校验、心跳超时和包体长度限制；暂未做消息频率限制
 
 ---
@@ -167,6 +167,7 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 - 单连接消息频率限制：读到完整 packet 后、业务 dispatch 前检查窗口计数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 单玩家消息频率限制：连接级限流通过后，对已鉴权连接按 `player_id` 在当前 `game-server` 实例内统计窗口消息数；超过阈值返回 `ErrorRes(MSG_RATE_EXCEEDED)` 并记录连接审计事件，当前不断开连接
 - 管理接口支持动态调整 `heartbeat_timeout_secs`、`max_body_len`、`msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms` 与 `player_msg_rate_max`
+- 生产配置保护：`NODE_ENV=production` 或 `APP_ENV=production` 时，配置加载阶段拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
 
 ### 4.2 当前实际配置项
 
@@ -174,6 +175,8 @@ UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock
 
 ```env
 TICKET_SECRET=replace-with-a-long-random-string
+GAME_ADMIN_TOKEN=dev-only-change-this-game-admin-token
+GAME_INTERNAL_TOKEN=dev-only-change-this-game-internal-token
 REDIS_KEY_PREFIX=
 HEARTBEAT_TIMEOUT_SECS=30
 MAX_BODY_LEN=4096
@@ -191,6 +194,7 @@ PLAYER_MSG_RATE_MAX=0
 - `PLAYER_MSG_RATE_MAX` 默认 `0`，表示不限制；配置为正整数时，同一玩家在当前 `game-server` 实例内的多连接合计消息数超过阈值会收到 `MSG_RATE_EXCEEDED`。
 - admin TCP 的 `AdminUpdateConfigReq` 可通过 key/value 动态更新 `msg_rate_window_ms`、`msg_rate_max`、`player_msg_rate_window_ms` 与 `player_msg_rate_max`。
 - 当前 `ServerStatusRes` 协议仍只回显 `max_body_len`、`heartbeat_timeout_secs` 等既有字段，尚未暴露消息频率限制配置。
+- `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 的示例值只用于开发；生产环境必须替换为非默认值。该 fail-fast 保护的是 `game-server` 内网服务凭证边界，不表示 `game-server` 要作为生产公网入口暴露。
 
 ### 4.3 与旧文档的关键差异
 
@@ -202,6 +206,7 @@ PLAYER_MSG_RATE_MAX=0
 
 - `game-server` 在认证阶段会验证 ticket 签名和 Redis 中的 ticket 所有权；这是 ticket 校验的核心落点之一，`auth-http` 只负责签发、存储与撤销
 - `game-server` 校验 ticket 时依赖 `TICKET_SECRET` 和 `REDIS_KEY_PREFIX`；这两个值需要与 `auth-http` 的签发侧保持一致
+- `game-server` 的 `GAME_ADMIN_TOKEN` 与 `GAME_INTERNAL_TOKEN` 用于内部管理/服务通道；生产拒绝默认值或空值，但仍应依赖私网、allowlist、TLS/mTLS 或同机 socket 等部署侧隔离
 - ticket 校验成功后当前不会自动删除 Redis 中的 ticket，因此并非严格的一次性消费模型
 - 这种设计和当前“同一 ticket 供 `game-proxy` / `game-server` / `chat-server` 复用”的接入方式是一致的；如果后续要降低重放风险，更适合考虑缩短 TTL、增加用途隔离或引入换票流程
 - 心跳、包体长度、鉴权前白名单、单连接消息频率限制和本实例单玩家消息频率限制属于当前已经生效的安全边界；单 IP 频率限制、跨实例全局玩家频率限制、异常解析失败率阈值、时间戳窗口和反重放仍属于设计目标
@@ -276,7 +281,8 @@ LOG_DIR=logs
   - 使用 `PROXY_IP_DENYLIST`、`PROXY_MAX_CONNECTIONS_PER_IP`、`PROXY_MAX_CONNECTIONS_PER_PLAYER` 做本地连接治理
   - 当前没有 Redis 动态黑名单或消息频率限制环境变量
 - `game-server`：
-  - 使用 `TICKET_SECRET`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`
+  - 使用 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`、`MSG_RATE_WINDOW_MS`、`MSG_RATE_MAX`、`PLAYER_MSG_RATE_WINDOW_MS`、`PLAYER_MSG_RATE_MAX`
+  - `NODE_ENV=production` 或 `APP_ENV=production` 时拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`
   - 当前没有单 IP、Redis 黑名单、时间戳窗口或反重放环境变量；单玩家消息频率限制是单 `game-server` 实例内本地状态，不是跨实例全局限额
 - `chat-server`：
   - 使用 `TICKET_SECRET`、`REDIS_URL`、`REDIS_KEY_PREFIX`、`HEARTBEAT_TIMEOUT_SECS`、`MAX_BODY_LEN`

@@ -1,5 +1,9 @@
 use std::env;
 
+pub const DEFAULT_TICKET_SECRET: &str = "dev-only-change-this-ticket-secret";
+pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-game-admin-token";
+pub const DEFAULT_INTERNAL_TOKEN: &str = "dev-only-change-this-game-internal-token";
+
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
@@ -87,10 +91,10 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(7500);
-        let admin_token = env::var("GAME_ADMIN_TOKEN")
-            .unwrap_or_else(|_| "dev-only-change-this-game-admin-token".to_string());
-        let internal_token = env::var("GAME_INTERNAL_TOKEN")
-            .unwrap_or_else(|_| "dev-only-change-this-game-internal-token".to_string());
+        let admin_token =
+            env::var("GAME_ADMIN_TOKEN").unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string());
+        let internal_token =
+            env::var("GAME_INTERNAL_TOKEN").unwrap_or_else(|_| DEFAULT_INTERNAL_TOKEN.to_string());
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
@@ -110,8 +114,8 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(10);
-        let ticket_secret = env::var("TICKET_SECRET")
-            .unwrap_or_else(|_| "dev-only-change-this-ticket-secret".to_string());
+        let ticket_secret =
+            env::var("TICKET_SECRET").unwrap_or_else(|_| DEFAULT_TICKET_SECRET.to_string());
         let heartbeat_timeout_secs = env::var("HEARTBEAT_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -132,7 +136,7 @@ impl Config {
         let service_instance_id = env::var("SERVICE_INSTANCE_ID")
             .unwrap_or_else(|_| format!("{}-{}", service_name, port));
 
-        Self {
+        let config = Self {
             host,
             port,
             csv_dir,
@@ -167,7 +171,11 @@ impl Config {
             registry_heartbeat_interval_secs,
             service_name,
             service_instance_id,
-        }
+        };
+
+        validate_production_config(&config);
+
+        config
     }
 
     pub fn bind_addr(&self) -> String {
@@ -187,9 +195,133 @@ fn derive_internal_socket_name(local_socket_name: &str) -> String {
     format!("{local_socket_name}-internal")
 }
 
+fn is_production_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        env::var(name)
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+    })
+}
+
+fn validate_production_config(config: &Config) {
+    if !is_production_env() {
+        return;
+    }
+
+    let mut errors = Vec::new();
+
+    if is_default_secret(&config.ticket_secret, DEFAULT_TICKET_SECRET) {
+        errors.push("TICKET_SECRET must be set to a non-default value in production");
+    }
+
+    if is_default_secret(&config.admin_token, DEFAULT_ADMIN_TOKEN) {
+        errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
+    }
+
+    if is_default_secret(&config.internal_token, DEFAULT_INTERNAL_TOKEN) {
+        errors.push("GAME_INTERNAL_TOKEN must be set to a non-default value in production");
+    }
+
+    if !errors.is_empty() {
+        panic!(
+            "invalid game-server production config: {}",
+            errors.join("; ")
+        );
+    }
+}
+
+fn is_default_secret(value: &str, service_default: &str) -> bool {
+    let normalized = value.trim();
+
+    normalized.is_empty()
+        || matches!(
+            normalized,
+            "replace-with-a-long-random-string" | "change-me" | "changeme" | "default" | "password"
+        )
+        || normalized == service_default
+}
+
 #[cfg(test)]
 mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    const SECURITY_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "TICKET_SECRET",
+        "GAME_ADMIN_TOKEN",
+        "GAME_INTERNAL_TOKEN",
+    ];
+
+    fn clear_production_env() {
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+        }
+    }
+
+    fn set_custom_production_tokens() {
+        unsafe {
+            env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+    }
+
+    fn panic_message(result: Result<Config, Box<dyn std::any::Any + Send>>) -> String {
+        match result {
+            Ok(_) => panic!("production config should be rejected"),
+            Err(payload) => {
+                if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else if let Some(message) = payload.downcast_ref::<&str>() {
+                    message.to_string()
+                } else {
+                    panic!("panic payload should be a string");
+                }
+            }
+        }
+    }
+
+    fn catch_config_from_env() -> Result<Config, Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(Config::from_env))
+    }
 
     #[test]
     fn parse_u64_value_uses_default_for_missing_or_invalid_value() {
@@ -200,5 +332,169 @@ mod tests {
     #[test]
     fn parse_u64_value_accepts_valid_value() {
         assert_eq!(parse_u64_value(Some("250".to_string()), 1000), 250);
+    }
+
+    #[test]
+    fn rejects_default_ticket_secret_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::remove_var("TICKET_SECRET");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("invalid game-server production config"));
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn rejects_env_example_ticket_secret_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "replace-with-a-long-random-string");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn rejects_default_game_admin_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
+            env::remove_var("GAME_ADMIN_TOKEN");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GAME_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_empty_game_admin_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
+            env::set_var("GAME_ADMIN_TOKEN", "");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GAME_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_default_game_internal_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::remove_var("GAME_INTERNAL_TOKEN");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GAME_INTERNAL_TOKEN"));
+    }
+
+    #[test]
+    fn rejects_empty_game_internal_token_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::set_var("GAME_INTERNAL_TOKEN", "");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GAME_INTERNAL_TOKEN"));
+    }
+
+    #[test]
+    fn accepts_custom_tokens_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+        }
+        set_custom_production_tokens();
+
+        let config = Config::from_env();
+
+        assert_eq!(config.ticket_secret, "prod-ticket-secret-123");
+        assert_eq!(config.admin_token, "prod-game-admin-token-123");
+        assert_eq!(config.internal_token, "prod-game-internal-token-123");
+    }
+
+    #[test]
+    fn app_env_production_triggers_production_validation() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+            env::set_var("APP_ENV", "production");
+            env::remove_var("TICKET_SECRET");
+            env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
+            env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("TICKET_SECRET"));
+    }
+
+    #[test]
+    fn keeps_development_default_tokens_compatible() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("TICKET_SECRET");
+            env::remove_var("GAME_ADMIN_TOKEN");
+            env::remove_var("GAME_INTERNAL_TOKEN");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.ticket_secret, DEFAULT_TICKET_SECRET);
+        assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
+        assert_eq!(config.internal_token, DEFAULT_INTERNAL_TOKEN);
     }
 }

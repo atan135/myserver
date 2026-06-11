@@ -87,7 +87,7 @@
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
-| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接 | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；GM 广播仍是本实例范围；限时自动解封仍未落地 |
+| `game-server` | ticket 签名与 Redis 归属校验、鉴权前消息白名单、心跳超时、最大包体限制、单连接消息频率限制、本实例内单玩家消息频率限制、连接审计、基础权威移动校正、GM 广播的本实例在线连接处置、NATS session kick 订阅并断开本实例目标玩家连接；production 下拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` | 没有单 IP 频率限制、跨实例全局玩家频率限制、时间戳窗口、反重放和通用作弊计数；GM 广播仍是本实例范围；限时自动解封仍未落地 |
 | `admin-api` / `admin-web` | JWT 鉴权、管理员密码哈希、Redis 管理员 session/jti 校验、登出撤销、管理员状态实时校验、登录失败锁定、安全审计、后端角色授权、监控接口鉴权、可信代理 IP 解析、管理员 token 批量撤销、重置密码联动 token version 失效、维护模式共享状态写入、GM 踢人/封禁通过 NATS session kick 跨实例断开在线连接 | 管理面 IP allowlist、HTTPS/TLS 强制和生产网络隔离仍需部署侧保证；更细粒度权限矩阵和限时自动解封仍待补齐 |
 
 说明：
@@ -179,6 +179,7 @@
 - 日志中不打印完整 token / ticket / secret
 - 生产环境必须替换默认示例密钥
 - `auth-http` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、默认或空的 `GAME_ADMIN_TOKEN`、空的 `INTERNAL_API_TOKEN` 都会拒绝启动。`AUTH_STRICT_SECURITY` 仍控制内部接口请求期缺 token 时的拒绝行为，但生产环境不再等到请求阶段才暴露空 token 配置错误。
+- `game-server` 在 `NODE_ENV=production` 或 `APP_ENV=production` 时也会在配置加载阶段 fail fast：默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN` 都会拒绝启动。该保护是内网服务的凭证基线，不表示 `game-server` 应作为生产公网入口暴露。
 
 建议后续补充：
 
@@ -503,7 +504,7 @@ PLAYER_MSG_RATE_WINDOW_MS=1000
 PLAYER_MSG_RATE_MAX=0
 ```
 
-其中 `PLAYER_MSG_RATE_MAX=0` 默认关闭；配置为正整数时，仅限制当前 `game-server` 实例内同一 `player_id` 的合计消息数，不是跨实例全局限额。由于生产链路里 `game-server` 通常通过 `game-proxy` 本地 socket 接入，单 IP 频率限制仍应放在 proxy、网关或后续透传协议层。
+其中 `PLAYER_MSG_RATE_MAX=0` 默认关闭；配置为正整数时，仅限制当前 `game-server` 实例内同一 `player_id` 的合计消息数，不是跨实例全局限额。`NODE_ENV=production` 或 `APP_ENV=production` 时，`game-server` 会拒绝默认或空的 `TICKET_SECRET`、`GAME_ADMIN_TOKEN`、`GAME_INTERNAL_TOKEN`，要求它们替换为高强度生产值。由于生产链路里 `game-server` 通常通过 `game-proxy` 本地 socket 接入，单 IP 频率限制仍应放在 proxy、网关或后续透传协议层；上述 fail-fast 只是内网服务凭证保护，不改变 `game-server` 默认内网化的部署边界。
 
 仍属于设计目标、当前未读取的业务层配置示例：
 
