@@ -10,6 +10,7 @@ const MESSAGE_TYPE = {
   GM_SEND_ITEM_RES: 3004,
   ERROR_RES: 9000
 };
+const ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 let nextSeqValue = 1;
 
 function encodePacket(messageType, seq, body) {
@@ -71,7 +72,58 @@ function nextSeq() {
   return seq;
 }
 
-async function sendRequest(config, messageType, payload, expectedType) {
+function normalizeGameAdminActor(actor) {
+  if (actor === undefined || actor === null) {
+    return null;
+  }
+
+  const normalized = String(actor).trim();
+  return ACTOR_PATTERN.test(normalized) ? normalized : null;
+}
+
+function normalizeServiceActorCandidate(actor) {
+  if (actor === undefined || actor === null) {
+    return null;
+  }
+
+  const normalized = String(actor)
+    .trim()
+    .replace(/[^A-Za-z0-9._@-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 128);
+  return ACTOR_PATTERN.test(normalized) ? normalized : null;
+}
+
+function getDefaultGameAdminActor(config = {}) {
+  return (
+    normalizeGameAdminActor(config.gameAdminActor) ||
+    normalizeServiceActorCandidate(config.serviceInstanceId) ||
+    normalizeServiceActorCandidate(config.serviceName) ||
+    "mail-service"
+  );
+}
+
+function buildAdminAuthBody(config, actor) {
+  const token = config.gameAdminToken || "";
+  const normalizedActor = normalizeGameAdminActor(actor);
+  if (!normalizedActor) {
+    return Buffer.from(token, "utf8");
+  }
+
+  return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
+}
+
+function buildGrantMailAttachmentsPayload(playerId, mailId, attachments, reason = "") {
+  return Buffer.from(JSON.stringify({
+    requestId: mailId,
+    playerId,
+    items: attachments,
+    source: "mail-claim",
+    reason
+  }));
+}
+
+async function sendRequest(config, messageType, payload, expectedType, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({
       host: config.gameServerAdminHost,
@@ -88,7 +140,7 @@ async function sendRequest(config, messageType, payload, expectedType) {
       const authPacket = encodePacket(
         MESSAGE_TYPE.ADMIN_AUTH_REQ,
         0,
-        Buffer.from(config.gameAdminToken || "", "utf8")
+        buildAdminAuthBody(config, options.actor)
       );
       const packet = encodePacket(messageType, nextSeq(), payload);
       socket.write(Buffer.concat([authPacket, packet]), (err) => {
@@ -153,22 +205,29 @@ export class GameAdminClient {
     this.config = config;
   }
 
-  async grantMailAttachments(playerId, mailId, attachments, reason = "") {
-    const payload = Buffer.from(JSON.stringify({
-      requestId: mailId,
-      playerId,
-      items: attachments,
-      source: "mail-claim",
-      reason
-    }));
+  async grantMailAttachments(playerId, mailId, attachments, reason = "", options = {}) {
+    const payload = buildGrantMailAttachmentsPayload(playerId, mailId, attachments, reason);
 
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_SEND_ITEM_REQ,
       payload,
-      MESSAGE_TYPE.GM_SEND_ITEM_RES
+      MESSAGE_TYPE.GM_SEND_ITEM_RES,
+      {
+        ...options,
+        actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
+      }
     );
 
     return { ok: true };
   }
 }
+
+export {
+  MESSAGE_TYPE,
+  buildAdminAuthBody,
+  buildGrantMailAttachmentsPayload,
+  getDefaultGameAdminActor,
+  normalizeGameAdminActor,
+  normalizeServiceActorCandidate
+};

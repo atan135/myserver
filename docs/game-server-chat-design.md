@@ -190,7 +190,7 @@ CREATE TABLE chat_group_members (
 当前仓库实现说明：
 - `mail-service` 已独立落地为 Node.js HTTP 服务
 - 新邮件通知通过 Core NATS 下发到 `myserver.mail.notify.<player_id_token>`
-- 附件领取由 `mail-service` 调用 `game-server admin` 完成真实发奖
+- 附件领取由 `mail-service` 调用内网 `game-server admin` 完成真实发奖；调用 `AdminAuthReq` 时使用 service actor，兼容 game-server 控制面审计
 - 当前未与 `chat-server` 共用同一套存储表
 
 ### 4.2 邮件特有字段
@@ -241,7 +241,8 @@ POST /api/v1/mails/:mailId/claim
 - 只能读取或领取属于自己的邮件，邮件详情也会校验 `to_player_id`
 - 已过期邮件不可领取
 - 当前真实发奖只支持 `attachments[].type = "item"`
-- `mail-service` 会先调用 `game-server admin` 发奖，成功后才把邮件状态更新为 `claimed`
+- `mail-service` 会先把邮件附件领取抢占为 `claiming`，再调用内网 `game-server admin` 发奖，成功后才把邮件状态更新为 `claimed`；下游发奖失败会释放抢占状态
+- 发奖请求使用稳定幂等键 `requestId = mail_claim:<mail_id>`，`source = "mail-claim"`，并在 `AdminAuthReq` 中带合法 service actor（默认 `mail-service` 或服务实例标识规范化结果），以兼容 `GAME_ADMIN_AUDIT_REQUIRE_ACTOR=true`
 - 返回体包含 `claimed`、`already_claimed`、`status`、`read_at`、`claimed_at`
 - 重复领取是幂等的，不会重复发放道具
 

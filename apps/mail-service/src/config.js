@@ -101,6 +101,7 @@ export function getConfig() {
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
+    gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
     ticketSecret: process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     mailPlayerAuthRequired: parseBoolean(process.env.MAIL_PLAYER_AUTH_REQUIRED, true),
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",

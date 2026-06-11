@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+const CONFIG_ENV_NAMES = [
+  "NODE_ENV",
+  "APP_ENV",
+  "GAME_ADMIN_ACTOR",
+  "GAME_ADMIN_TOKEN",
+  "MAIL_PLAYER_AUTH_REQUIRED",
+  "MAIL_SERVICE_TOKEN",
+  "TICKET_SECRET"
+];
+
+async function withEnv(values, callback) {
+  const saved = new Map(CONFIG_ENV_NAMES.map((name) => [name, process.env[name]]));
+  for (const name of CONFIG_ENV_NAMES) {
+    delete process.env[name];
+  }
+  Object.assign(process.env, values);
+
+  try {
+    const module = await import(`./config.js?test=${Date.now()}-${Math.random()}`);
+    return await callback(module.getConfig);
+  } finally {
+    for (const name of CONFIG_ENV_NAMES) {
+      const value = saved.get(name);
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+
+test("mail-service config reads optional game admin actor", async () => {
+  await withEnv({ GAME_ADMIN_ACTOR: "mail-ops" }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.gameAdminActor, "mail-ops");
+  });
+});
