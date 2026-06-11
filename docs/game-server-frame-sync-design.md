@@ -23,6 +23,7 @@
 - 严格等待 / 乐观推进两种输入等待策略。
 - 缺帧补偿策略：空输入、重复上一帧、连续缺帧后标记离线。
 - `FrameBundlePush` 按帧广播输入集合和定时快照。
+- `RoomFrameRatePush` 在房间运行 fps 实际变化时主动广播当前 fps。
 - `RoomSnapshot.game_state` 轻量业务状态快照。
 - 观战者加入与恢复数据。
 - 断线重连恢复：snapshot、当前帧、最近输入、等待帧输入、`input_delay_frames`、移动恢复状态。
@@ -33,7 +34,6 @@
 
 仍未完整落地：
 
-- `RoomFrameRatePush` 主动推送。协议和消息号已存在，当前 fps 变化主要通过服务端运行时和 `FrameBundlePush.fps` 体现。
 - 完整增量状态同步。当前主链路仍是输入帧同步，位移校正是辅链路。
 - OB 的暂停、快进、回放和回放持久化。
 - 可用于跨服迁移的完整 room transfer。`RoomLogic::get_serialized_state()` 只是轻量快照钩子，不等同于灰度迁移 payload。
@@ -182,7 +182,10 @@ server.rs / core/service
 - `InGame` 且在线人数达到阈值：`busy_room_fps`
 - 其他 `InGame`：`active_room_fps`
 
-fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFrameRatePush`，但 `FrameBundlePush.fps` 会携带该帧 fps。
+fps 变化会更新 `RoomRuntime.current_fps`，同时 `FrameBundlePush.fps` 会继续携带该帧 fps。
+当 `previous_fps != target_fps` 时，`RoomManager` 会向该 room 当前在线成员广播 `RoomFrameRatePush { room_id, fps, reason }`，`reason` 当前固定为 `runtime_policy_changed`，表示由运行时策略、房间阶段或在线成员数量变化导致的 fps 重算结果发生变化。fps 未实际变化时不会重复推送。
+
+`FrameBundlePush.fps` 仍保留，客户端可继续以每帧携带的 fps 作为帧同步上下文；`RoomFrameRatePush` 只用于提前感知运行时帧率变化，不替代 `FrameBundlePush.fps`。
 
 ### 6.3 离开、断线与清理
 
@@ -221,6 +224,7 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 |------|------|
 | `PlayerInputReq/Res` | 玩家提交帧输入 |
 | `FrameBundlePush` | 服务端按帧广播输入集合和可选快照 |
+| `RoomFrameRatePush` | 房间 fps 实际变化时主动广播当前 fps |
 | `RoomStatePush` | 房间状态变化广播 |
 | `RoomJoinAsObserverReq/Res` | 观战加入与恢复 |
 | `RoomReconnectReq/Res` | 断线重连与恢复 |
@@ -233,7 +237,6 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 
 | 消息 | 当前状态 |
 |------|----------|
-| `RoomFrameRatePush` | 协议已定义，尚未在 fps 变化时主动广播 |
 | `ServerRedirectPush` | 协议已定义并可通过已鉴权 admin/internal 控制入口触发；客户端自动断线重连与端到端 route 切换仍未闭环 |
 | `FreezeRoomForTransfer*` / `ExportRoomTransfer*` / `ImportRoomTransfer*` / `RetireTransferredRoom*` | 已接入 `game-server` 已鉴权 internal/admin 通道，完成空房/全员离线 room 的 freeze/export/import/retire 最小闭环；不包含 proxy route 切换、同连接迁移或完整玩法 payload |
 | `GetRolloutDrainStatus*` | 已接入 `game-server` 已鉴权 internal/admin 通道，返回本进程 room drain 快照、有限 route 样本和当前连接数；`empty_since_ms` 在当前实现中表示本进程内已空置时长，不是绝对时间戳；proxy / 控制面结合该真实状态自动停旧服仍未闭环 |
@@ -294,7 +297,7 @@ fps 变化会更新 `RoomRuntime.current_fps`。当前没有主动下发 `RoomFr
 
 短期建议优先补：
 
-1. `RoomFrameRatePush` 主动广播与客户端对接。
+1. 客户端对接 `RoomFrameRatePush`，并保留基于 `FrameBundlePush.fps` 的兼容处理。
 2. 有界发送队列、慢连接处理和消息频率限制。
 3. 更清晰的状态同步 / 增量快照模型。
 4. 回放数据结构和持久化。

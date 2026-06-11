@@ -21,8 +21,8 @@ use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
 use crate::pb::{
     FrameBundlePush, FrameInput, MovementCorrectionReason,
-    MovementRecoveryState as PbMovementRecoveryState, RoomMigrationState, RoomRouteStatus,
-    RoomSnapshot, RoomStatePush, RoomTransferPayload, ServerRedirectPush,
+    MovementRecoveryState as PbMovementRecoveryState, RoomFrameRatePush, RoomMigrationState,
+    RoomRouteStatus, RoomSnapshot, RoomStatePush, RoomTransferPayload, ServerRedirectPush,
 };
 use crate::protocol::{MessageType, encode_body};
 
@@ -586,6 +586,7 @@ impl RoomManager {
         if let Some(ref mid) = match_id {
             self.notify_player_joined(mid, player_id, room_id).await;
         }
+        self.update_room_fps(room_id).await;
 
         Ok(snapshot)
     }
@@ -686,6 +687,7 @@ impl RoomManager {
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
+        self.update_room_fps(room_id).await;
 
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "normal").await;
@@ -767,6 +769,7 @@ impl RoomManager {
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
+        self.update_room_fps(room_id).await;
 
         if let Some(ref mid) = match_id {
             let should_abort = self.notify_player_left(mid, player_id, "disconnect").await;
@@ -834,6 +837,7 @@ impl RoomManager {
             if let Some(ref mid) = match_id {
                 self.notify_player_joined(mid, player_id, room_id).await;
             }
+            self.update_room_fps(room_id).await;
 
             Ok(RoomRecoveryState {
                 snapshot,
@@ -931,6 +935,8 @@ impl RoomManager {
         };
         let room_count = rooms.len() as u64;
         METRICS.set_room_count(room_count);
+        drop(rooms);
+        drop(runtimes);
 
         info!(
             room_id = room_id,
@@ -938,6 +944,8 @@ impl RoomManager {
             current_frame_id = recovery.current_frame_id,
             "observer joined"
         );
+
+        self.update_room_fps(room_id).await;
 
         Ok(recovery)
     }
@@ -1600,8 +1608,11 @@ impl RoomManager {
             self.compute_room_fps(room)
         };
 
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.get_mut(room_id) {
+        let changed = {
+            let mut runtimes = self.runtimes.lock().await;
+            let Some(runtime) = runtimes.get_mut(room_id) else {
+                return;
+            };
             let previous_fps = runtime.current_fps;
             runtime.current_fps = target_fps;
             if previous_fps != target_fps {
@@ -1611,7 +1622,22 @@ impl RoomManager {
                     current_fps = target_fps,
                     "room fps updated"
                 );
+                true
+            } else {
+                false
             }
+        };
+
+        if changed {
+            let push = RoomFrameRatePush {
+                room_id: room_id.to_string(),
+                fps: u32::from(target_fps),
+                reason: "runtime_policy_changed".to_string(),
+            };
+            let body = encode_body(&push);
+            let _ = self
+                .broadcast_to_room(room_id, MessageType::RoomFrameRatePush, body)
+                .await;
         }
     }
 
@@ -2250,6 +2276,19 @@ mod tests {
         (manager, factory, receivers)
     }
 
+    fn drain_messages_of_type(
+        receiver: &mut mpsc::Receiver<OutboundMessage>,
+        message_type: MessageType,
+    ) -> Vec<OutboundMessage> {
+        let mut messages = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            if message.message_type == message_type {
+                messages.push(message);
+            }
+        }
+        messages
+    }
+
     #[tokio::test]
     async fn room_exists_reflects_room_creation() {
         let factory = RecordingRoomLogicFactory::default();
@@ -2506,7 +2545,9 @@ mod tests {
             }
         );
 
-        let pushed = receivers[0].try_recv().expect("online member push");
+        let pushed = drain_messages_of_type(&mut receivers[0], MessageType::ServerRedirectPush)
+            .pop()
+            .expect("online member push");
         assert_eq!(pushed.message_type, MessageType::ServerRedirectPush);
         let push = ServerRedirectPush::decode(pushed.body.as_slice()).unwrap();
         assert_eq!(push.room_id, "room-test");
@@ -2514,7 +2555,80 @@ mod tests {
         assert_eq!(push.target_host, "127.0.0.1");
         assert_eq!(push.target_port, 4000);
         assert!(push.reconnect_required);
-        assert!(receivers[1].try_recv().is_err());
+        assert!(
+            drain_messages_of_type(&mut receivers[1], MessageType::ServerRedirectPush).is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn fps_change_pushes_room_frame_rate_update_to_online_members() {
+        let (manager, _factory, mut receivers) =
+            setup_started_room("disposable_match", &["player-a", "player-b"]).await;
+        for receiver in &mut receivers {
+            drain_messages_of_type(receiver, MessageType::RoomFrameRatePush);
+        }
+
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+
+        let pushes = drain_messages_of_type(&mut receivers[0], MessageType::RoomFrameRatePush);
+        assert_eq!(pushes.len(), 1);
+        let push = RoomFrameRatePush::decode(pushes[0].body.as_slice()).unwrap();
+        assert_eq!(push.room_id, "room-test");
+        assert_eq!(push.fps, 15);
+        assert_eq!(push.reason, "runtime_policy_changed");
+        assert!(
+            drain_messages_of_type(&mut receivers[1], MessageType::RoomFrameRatePush).is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn join_room_pushes_initial_room_frame_rate_update() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        let (join_tx, mut join_rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                join_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let join_pushes = drain_messages_of_type(&mut join_rx, MessageType::RoomFrameRatePush);
+        assert_eq!(join_pushes.len(), 1);
+        let push = RoomFrameRatePush::decode(join_pushes[0].body.as_slice()).unwrap();
+        assert_eq!(push.room_id, "room-test");
+        assert_eq!(push.fps, 2);
+        assert_eq!(push.reason, "runtime_policy_changed");
+    }
+
+    #[tokio::test]
+    async fn unchanged_fps_does_not_push_duplicate_room_frame_rate_update() {
+        let (manager, _factory, mut receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        for receiver in &mut receivers {
+            drain_messages_of_type(receiver, MessageType::RoomFrameRatePush);
+        }
+
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+
+        assert!(
+            drain_messages_of_type(&mut receivers[0], MessageType::RoomFrameRatePush).is_empty()
+        );
+        assert!(
+            drain_messages_of_type(&mut receivers[1], MessageType::RoomFrameRatePush).is_empty()
+        );
     }
 
     #[tokio::test]
