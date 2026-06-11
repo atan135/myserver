@@ -16,7 +16,13 @@
 # 当前还不能直接用 mock-client 验证的能力:
 # 1. old_server 主动下发 ServerRedirectPush
 # 2. 客户端收到 redirect 后显式断开并重连到 proxy/new_server
-# 3. old_server + new_server + proxy 的完整灰度接管闭环
+# 3. 真实多进程联调下的完整灰度接管闭环
+#
+# 当前新增的控制流工具:
+# - tools/mock-client/src/rollout-transfer-cli.js 可显式编排
+#   old freeze/export -> new import -> proxy room route upsert -> old retire。
+# - 该工具只调用已鉴权 game-server admin TCP 包协议和 game-proxy admin HTTP，
+#   不实现同连接迁移、L7 relay，也不会替代客户端 redirect/reconnect。
 
 # ========== 测试 GM / 控制面 ==========
 
@@ -104,6 +110,30 @@ node tools/mock-client/src/index.js --scenario drain-existing-room-observer --ht
 # - errorCode = SERVER_DRAINING_REJECT_NEW_ROOM
 node tools/mock-client/src/index.js --scenario drain-create-matched-room-rejected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id rollout-drain-match
 
+# ========== room transfer 编排入口 ==========
+
+# 该命令用于显式执行第一阶段 room transfer 的控制面顺序:
+# 1. old game-server admin: FreezeRoomForTransferReq(1601)
+# 2. old game-server admin: ExportRoomTransferReq(1603)
+# 3. new game-server admin: ImportRoomTransferReq(1605)
+# 4. game-proxy admin HTTP: /room-route/upsert，migration_state=OwnedByNew，带 checksum 和 version CAS
+# 5. old game-server admin: RetireTransferredRoomReq(1607)
+#
+# 任一步失败都会停在当前阶段并输出 stage/errorCode，不会继续执行后续破坏性步骤。
+# proxy route 已存在时，工具会读取现有 room route，并默认使用 expected_room_version
+# 与 expected_last_transfer_checksum 做 CAS 后递增 route version；无旧 route 时按 proxy
+# 当前创建规则使用 expected_room_version=0、room_version=1。
+#
+# 示例:
+node tools/mock-client/src/rollout-transfer-cli.js ^
+  --rollout-epoch rollout-20260611-a ^
+  --room-id room-empty-001 ^
+  --old-server-id game-server-old ^
+  --new-server-id game-server-new ^
+  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
+  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
+  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>"
+
 # ========== 集成测试 ==========
 
 # Node 集成测试已经补充了 drain 场景组:
@@ -127,5 +157,6 @@ npm run test:integration
 
 # 还没有覆盖的 rollout 链路:
 # - redirect push
-# - reconnect 后通过 proxy 进入 new_server
-# - room route 切换与完整灰度收尾
+# - 客户端收到 ServerRedirectPush 后显式断开重连
+# - 断线后通过 proxy 进入 new_server 的端到端验证
+# - 完整灰度收尾

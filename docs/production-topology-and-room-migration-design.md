@@ -197,6 +197,8 @@ payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-r
 
 当前实现状态（截至 `2026-06-11`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证。它不包含 `game-proxy` route 仲裁、redirect/reconnect 闭环、L7 relay、同连接 upstream swap，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 
+补充实现状态（截至 `2026-06-11`）：`tools/mock-client` 已增加第一阶段显式编排入口，按 old `freeze/export`、new `import`、proxy room route `upsert`、old `retire` 的保守顺序调用现有控制面。编排会校验 export/import checksum 一致，并在 proxy upsert 成功后才 retire 旧 room；任一步失败都会返回失败阶段并停止后续步骤。该入口仍是控制流骨架，不是自动 rollout 控制面，也不包含真实多服务联调、客户端 redirect/reconnect 闭环或同连接迁移。
+
 ## 9. 两阶段迁移路线
 
 ### 9.1 阶段一：redirect/reconnect 闭环
@@ -223,12 +225,15 @@ new game-server resumes room session
 - proxy 根据持久化或当前 route 将玩家送到正确 owner。
 - 旧连接不会继续留在错误 owner 上。
 - transfer 流程先覆盖空房接管或低风险玩法。
+- 控制面必须按 `old freeze -> old export -> new import -> proxy route CAS upsert -> old retire` 顺序执行；导入 checksum 不一致、route CAS 失败或任一步失败时不能继续执行后续破坏性步骤。
 
 阶段一不要求：
 
 - 同一连接内换 upstream。
 - proxy 深度理解玩法协议。
 - 在线有人 room 无感迁移。
+
+当前客户端要求仍未闭环：外部 `mybevy` 或测试客户端需要处理 `ServerRedirectPush`，或在连接断开后主动重连到 `game-proxy`，重新发送 `AuthReq` 和 `RoomReconnectReq` / `RoomJoinReq`。只有客户端完成该能力后，proxy 已切换的 room route 才能在玩家侧形成端到端闭环。
 
 ### 9.2 阶段二：同连接迁移目标态
 

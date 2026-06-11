@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node src/index.js",
-    "flow": "node src/index.js"
+    "flow": "node src/index.js",
+    "rollout-transfer": "node src/rollout-transfer-cli.js"
   }
 }

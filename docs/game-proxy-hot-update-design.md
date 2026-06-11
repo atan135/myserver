@@ -45,7 +45,7 @@
 - proxy route store 当前是进程内内存态，尚未持久化。
 - 自动灰度结束检测尚未完整闭环。
 - `ServerRedirectPush` 由旧服下发、客户端显式重连、proxy 重新路由的完整链路尚未完成。
-- `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 只是协议和目标流程，尚未在 `game-server` 闭环。
+- `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口；真实多进程联调、客户端 redirect/reconnect 和自动灰度收尾仍未完成。
 - proxy 不做同一连接内换 upstream。
 - proxy 不保存玩法状态，不做 room transfer payload 权威存储。
 
@@ -314,16 +314,16 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 - `game-server` drain 开启后允许已有房 reconnect。
 - `game-server` drain 开启后允许 observer 加入已有房。
 - `game-proxy` 可按 room route / player route 将相关请求送回旧 owner 或送到新 owner。
+- `tools/mock-client` 提供显式 room transfer 编排入口，可在 new import 成功后调用 proxy admin `/room-route/upsert` 将 room route 切到 `OwnedByNew`，并带上 `rollout_epoch`、`last_transfer_checksum`、`room_version` 和 CAS 参数。
 
 尚未闭环的目标行为：
 
 - old server 主动下发 `ServerRedirectPush`。
 - 客户端收到 redirect 后断线重连。
-- old server freeze/export。
-- new server import。
-- proxy 在 transfer 成功后切换 room owner。
-- old server retire room。
+- 客户端重连后通过 proxy 进入 new owner 的端到端联调。
 - proxy 自动判断 rollout 结束。
+
+显式编排入口当前仍是第一阶段 redirect/reconnect 的前置控制流，不是同连接迁移。它只调用已鉴权 `game-server` admin TCP 包协议和 `game-proxy` admin HTTP；proxy 仍保持透明转发模型，不实现 L7 relay 或同连接 upstream swap。后续客户端仍需要处理 `ServerRedirectPush`，或在断线后重新连接 proxy 并发送 `AuthReq` + `RoomReconnectReq` / `RoomJoinReq`。
 
 ## 10. 配置项
 
@@ -359,7 +359,7 @@ URL query 中不支持传 token，避免 token 进入访问日志。开发环境
 3. 单 IP / 单玩家连接上限、消息频率限制和 Redis 黑名单。
 4. 自动 rollout 结束检测。
 5. old server `ServerRedirectPush` 下发与客户端重连链路。
-6. room transfer 的 freeze/export/import/retire 最小闭环。
+6. room transfer 编排入口的多进程联调和操作审计固化。
 7. 多 proxy 场景下的 route 一致性与健康判定。
 
 跨服状态迁移的完整一致性要求见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。
