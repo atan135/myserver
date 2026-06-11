@@ -83,7 +83,7 @@
 | 模块 | 当前已实现 | 当前缺口 |
 |------|------------|----------|
 | `auth-http` | IP 限流、账号锁定、ticket 签发与撤销、维护模式下拦截普通玩家登录和新 game ticket 签发、内部接口可选 service token、安全审计写库；production 下拒绝默认 `TICKET_SECRET`、默认 `GAME_ADMIN_TOKEN` 和空 `INTERNAL_API_TOKEN` | HTTPS/TLS 策略未正式落地；ticket 仍为跨服务复用票据，尚未做用途隔离、换票或重放窗口收敛 |
-| `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有统一消息频率限制；没有公网 TLS 策略；生产不作为客户端直连默认入口 |
+| `chat-server` | 首包强制鉴权、ticket 签名、过期、Redis ticket 归属与 ticket version 校验、心跳超时、最大包体限制、单连接消息频率限制、单 IP / 单账号本实例连接数限制、有界出站写队列与慢连接背压、在线推送与基础运行指标；production 下拒绝默认或空的 `TICKET_SECRET` | 没有跨实例全局连接数限制、账号级消息频率限制和公网 TLS 策略；生产不作为客户端直连默认入口 |
 | `mail-service` | HTTP 路由参数校验、邮件归属校验、过期校验、附件格式校验、领取幂等、基础 HTTP 指标 | 当前无统一玩家鉴权、中后台权限边界偏弱、HTTPS/TLS 策略未正式落地 |
 | `announce-service` | HTTP 查询参数与公告载荷基础校验、写接口 `POST/PUT/DELETE /api/v1/announcements...` 已通过 `ANNOUNCE_ADMIN_TOKEN` 做 token 鉴权、基础 HTTP 指标 | 只读 `GET` 接口仍无玩家鉴权；HTTPS/TLS、网关鉴权、RBAC 与持久审计策略仍需部署或后续控制面收敛 |
 | `game-proxy` | `AuthReq` 本地 ticket 签名与 Redis 存在性校验、鉴权前消息白名单、单连接预鉴权失败阈值、总连接上限、静态 IP denylist、单 IP / 单玩家本地连接上限、本地维护开关与 Redis 共享维护模式拦截新 `AuthReq`、接入转发、连接数统计；admin HTTP 口已有 token 鉴权、生产默认 token 拒绝、写操作结构化日志和基础输入校验 | 成熟的公网加密方案尚未落地；尚未做单连接消息频率限制、Redis 动态黑名单和多 proxy 全局连接限额；proxy admin 尚无细粒度 RBAC、持久审计，多 proxy route store 强一致仍未完全闭环 |
@@ -526,9 +526,13 @@ TICKET_REPLAY_WINDOW_SECS=300
 ```env
 CHAT_MSG_RATE_WINDOW_MS=1000
 CHAT_MSG_RATE_MAX=0
+CHAT_MAX_CONNECTIONS_PER_PLAYER=0
+CHAT_MAX_CONNECTIONS_PER_IP=0
 ```
 
-`CHAT_MSG_RATE_MAX=0` 默认关闭，避免影响本地联调；生产部署可配置为正整数。限制发生在认证后、读到完整 packet 并解析出 `MessageType` 后、进入单聊、群聊、群组和历史查询 handler 前。超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接。该限制是单连接本地状态，不是单账号、单 IP 或跨实例全局限额。`NODE_ENV=production` 或 `APP_ENV=production` 时，`chat-server` 会拒绝默认或空的 `TICKET_SECRET`。
+`CHAT_MSG_RATE_MAX=0` 默认关闭，避免影响本地联调；生产部署可配置为正整数。限制发生在认证后、读到完整 packet 并解析出 `MessageType` 后、进入单聊、群聊、群组和历史查询 handler 前。超限返回 `ErrorRes(MSG_RATE_EXCEEDED)`，当前不断开连接。该限制是单连接本地状态。
+
+`CHAT_MAX_CONNECTIONS_PER_PLAYER=0` 和 `CHAT_MAX_CONNECTIONS_PER_IP=0` 默认关闭；配置为正整数时，在 `ChatAuthReq` ticket 校验通过后、注册 session / online route 前限制当前 `chat-server` 实例内连接数，超限分别返回 `PLAYER_CONNECTION_LIMIT_EXCEEDED` 或 `IP_CONNECTION_LIMIT_EXCEEDED` 的失败 `ChatAuthRes` 并关闭新连接。该限制不是跨实例全局限额，在线推送仍沿用现有 `player_id -> sender` session map 行为。`NODE_ENV=production` 或 `APP_ENV=production` 时，`chat-server` 会拒绝默认或空的 `TICKET_SECRET`。
 
 ### 9.5 `admin-api` / 控制面
 

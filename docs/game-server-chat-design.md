@@ -11,7 +11,7 @@
 | 持久化存储 | ✅ | ✅ |
 | 群组模式 | ✅ (群聊) | ❌ |
 | 实时性 | ✅ | 部分支持：新邮件通过 Core NATS 通知在线玩家 |
-| 频率限制 | 已有单连接入站限流，默认关闭 | ❌ |
+| 频率/连接限制 | 已有单连接入站限流、单 IP / 单账号本实例连接数限制，默认关闭 | ❌ |
 
 **结论**：两者可以共用一套消息存储层，但在业务逻辑上保持独立。
 
@@ -21,6 +21,8 @@
 - `chat-server` 认证阶段已复用 game ticket，并检查签名、过期时间、Redis `ticket:<sha256(ticket)>` 归属和 `player-ticket-version:<playerId>`；Redis key 均受 `REDIS_KEY_PREFIX` 影响
 - `chat-server` 的生产 `TICKET_SECRET` 必须与 `auth-http` / `game-server` 的 ticket 签发和校验侧保持一致，且不能使用默认值或 `.env.example` 占位值
 - `chat-server` 已支持认证后的单连接入站消息频率限制，`CHAT_MSG_RATE_MAX=0` 默认关闭；启用后在业务 handler 前返回 `ErrorRes(MSG_RATE_EXCEEDED)`，不断开连接
+- `chat-server` 已支持 ticket 校验通过后的单账号 / 单 IP 本实例连接数限制，`CHAT_MAX_CONNECTIONS_PER_PLAYER=0` 与 `CHAT_MAX_CONNECTIONS_PER_IP=0` 默认关闭；超限时在注册 session 和 online route 前返回失败 `ChatAuthRes` 并关闭新连接
+- 当前在线聊天推送和邮件通知仍使用 `player_id -> sender` 内存 session map；同一账号多连接时推送路由沿用现有覆盖行为，连接数限制计数单独维护
 - `mail-service` 已作为独立 Node.js HTTP 服务落地，并已实现附件领取
 - `announce-service` 已作为独立 Node.js HTTP 服务落地，支持公告 CRUD、有效公告查询、Redis 注册与 NATS metrics 上报
 - “聊天与邮件共用同一套存储层”目前仍未实现

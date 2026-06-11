@@ -29,6 +29,8 @@ struct Config {
     max_body_len: usize,
     msg_rate_window_ms: u64,
     msg_rate_max: u64,
+    max_connections_per_player: u64,
+    max_connections_per_ip: u64,
     outbound_queue_capacity: usize,
     ticket_secret: String,
     redis_url: String,
@@ -68,6 +70,8 @@ impl Config {
                 .unwrap_or(4096),
             msg_rate_window_ms: parse_u64_env("CHAT_MSG_RATE_WINDOW_MS", 1000),
             msg_rate_max: parse_u64_env("CHAT_MSG_RATE_MAX", 0),
+            max_connections_per_player: parse_u64_env("CHAT_MAX_CONNECTIONS_PER_PLAYER", 0),
+            max_connections_per_ip: parse_u64_env("CHAT_MAX_CONNECTIONS_PER_IP", 0),
             outbound_queue_capacity: parse_outbound_queue_capacity(
                 std::env::var("CHAT_OUTBOUND_QUEUE_CAPACITY").ok(),
             ),
@@ -232,7 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
-                let client = client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let client =
+                    client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let port = extract_port(&config.bind_addr)?;
                 let instance = ServiceInstance::new(
                     config.service_instance_id.clone(),
@@ -285,6 +290,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_body_len: config.max_body_len,
         msg_rate_window_ms: config.msg_rate_window_ms,
         msg_rate_max: config.msg_rate_max,
+        max_connections_per_player: config.max_connections_per_player,
+        max_connections_per_ip: config.max_connections_per_ip,
         ticket_secret: config.ticket_secret.clone(),
         redis_url: config.redis_url.clone(),
         redis_key_prefix: config.redis_key_prefix.clone(),
@@ -301,7 +308,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nats_url_for_mail = config.nats_url.clone();
     let instance_id_for_mail = config.service_instance_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = mail_subscriber::subscribe_mail_notifications(nats_url_for_mail, instance_id_for_mail, sessions_for_mail).await {
+        if let Err(e) = mail_subscriber::subscribe_mail_notifications(
+            nats_url_for_mail,
+            instance_id_for_mail,
+            sessions_for_mail,
+        )
+        .await
+        {
             tracing::error!("mail subscriber error: {}", e);
         }
     });
@@ -447,6 +460,44 @@ mod tests {
 
         assert_eq!(config.msg_rate_window_ms, 500);
         assert_eq!(config.msg_rate_max, 20);
+    }
+
+    #[test]
+    fn chat_connection_limit_config_defaults_to_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_MAX_CONNECTIONS_PER_PLAYER",
+            "CHAT_MAX_CONNECTIONS_PER_IP",
+        ]);
+
+        unsafe {
+            env::remove_var("CHAT_MAX_CONNECTIONS_PER_PLAYER");
+            env::remove_var("CHAT_MAX_CONNECTIONS_PER_IP");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.max_connections_per_player, 0);
+        assert_eq!(config.max_connections_per_ip, 0);
+    }
+
+    #[test]
+    fn chat_connection_limit_config_accepts_env_values() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_MAX_CONNECTIONS_PER_PLAYER",
+            "CHAT_MAX_CONNECTIONS_PER_IP",
+        ]);
+
+        unsafe {
+            env::set_var("CHAT_MAX_CONNECTIONS_PER_PLAYER", "2");
+            env::set_var("CHAT_MAX_CONNECTIONS_PER_IP", "10");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.max_connections_per_player, 2);
+        assert_eq!(config.max_connections_per_ip, 10);
     }
 
     #[test]

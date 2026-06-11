@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use prost::Message;
@@ -15,6 +18,9 @@ use crate::online_route;
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
 use crate::protocol::{HEADER_LEN, OutboundMessage, Packet, encode_packet, parse_header};
 use crate::ticket::{hash_ticket, verify_ticket};
+
+const PLAYER_CONNECTION_LIMIT_EXCEEDED: &str = "PLAYER_CONNECTION_LIMIT_EXCEEDED";
+const IP_CONNECTION_LIMIT_EXCEEDED: &str = "IP_CONNECTION_LIMIT_EXCEEDED";
 
 #[derive(Debug, Clone, Copy)]
 pub enum MessageType {
@@ -122,6 +128,177 @@ pub fn dispatch_decision(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionLimitExceeded {
+    Player {
+        player_id: String,
+        current: u64,
+        limit: u64,
+    },
+    Ip {
+        ip: IpAddr,
+        current: u64,
+        limit: u64,
+    },
+}
+
+impl ConnectionLimitExceeded {
+    fn error_code(&self) -> &'static str {
+        match self {
+            Self::Player { .. } => PLAYER_CONNECTION_LIMIT_EXCEEDED,
+            Self::Ip { .. } => IP_CONNECTION_LIMIT_EXCEEDED,
+        }
+    }
+
+    fn current(&self) -> u64 {
+        match self {
+            Self::Player { current, .. } | Self::Ip { current, .. } => *current,
+        }
+    }
+
+    fn limit(&self) -> u64 {
+        match self {
+            Self::Player { limit, .. } | Self::Ip { limit, .. } => *limit,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConnectionLimitCounts {
+    by_player: HashMap<String, u64>,
+    by_ip: HashMap<IpAddr, u64>,
+}
+
+#[derive(Debug)]
+pub struct ConnectionLimitTracker {
+    max_per_player: u64,
+    max_per_ip: u64,
+    counts: Mutex<ConnectionLimitCounts>,
+}
+
+impl ConnectionLimitTracker {
+    pub fn new(max_per_player: u64, max_per_ip: u64) -> Self {
+        Self {
+            max_per_player,
+            max_per_ip,
+            counts: Mutex::new(ConnectionLimitCounts::default()),
+        }
+    }
+
+    pub fn acquire(
+        self: &Arc<Self>,
+        player_id: &str,
+        ip: IpAddr,
+    ) -> Result<ConnectionLimitGuard, ConnectionLimitExceeded> {
+        let mut counts = self.counts.lock().expect("connection limit mutex poisoned");
+        let player_current = counts.by_player.get(player_id).copied().unwrap_or(0);
+        if self.max_per_player > 0 && player_current >= self.max_per_player {
+            return Err(ConnectionLimitExceeded::Player {
+                player_id: player_id.to_string(),
+                current: player_current,
+                limit: self.max_per_player,
+            });
+        }
+
+        let ip_current = counts.by_ip.get(&ip).copied().unwrap_or(0);
+        if self.max_per_ip > 0 && ip_current >= self.max_per_ip {
+            return Err(ConnectionLimitExceeded::Ip {
+                ip,
+                current: ip_current,
+                limit: self.max_per_ip,
+            });
+        }
+
+        if self.max_per_player > 0 {
+            counts
+                .by_player
+                .insert(player_id.to_string(), player_current.saturating_add(1));
+        }
+        if self.max_per_ip > 0 {
+            counts.by_ip.insert(ip, ip_current.saturating_add(1));
+        }
+
+        Ok(ConnectionLimitGuard {
+            tracker: Arc::clone(self),
+            player_id: player_id.to_string(),
+            ip,
+            count_player: self.max_per_player > 0,
+            count_ip: self.max_per_ip > 0,
+            released: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn count_for_player(&self, player_id: &str) -> u64 {
+        self.counts
+            .lock()
+            .expect("connection limit mutex poisoned")
+            .by_player
+            .get(player_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn count_for_ip(&self, ip: IpAddr) -> u64 {
+        self.counts
+            .lock()
+            .expect("connection limit mutex poisoned")
+            .by_ip
+            .get(&ip)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn release(&self, player_id: &str, ip: IpAddr, count_player: bool, count_ip: bool) {
+        let mut counts = self.counts.lock().expect("connection limit mutex poisoned");
+        if count_player {
+            decrement_player_count(&mut counts.by_player, player_id);
+        }
+        if count_ip {
+            decrement_ip_count(&mut counts.by_ip, ip);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectionLimitGuard {
+    tracker: Arc<ConnectionLimitTracker>,
+    player_id: String,
+    ip: IpAddr,
+    count_player: bool,
+    count_ip: bool,
+    released: bool,
+}
+
+impl Drop for ConnectionLimitGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            self.tracker
+                .release(&self.player_id, self.ip, self.count_player, self.count_ip);
+            self.released = true;
+        }
+    }
+}
+
+fn decrement_player_count(counts: &mut HashMap<String, u64>, player_id: &str) {
+    if let Some(count) = counts.get_mut(player_id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(player_id);
+        }
+    }
+}
+
+fn decrement_ip_count(counts: &mut HashMap<IpAddr, u64>, ip: IpAddr) {
+    if let Some(count) = counts.get_mut(&ip) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(&ip);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
@@ -129,6 +306,8 @@ pub struct Config {
     pub max_body_len: usize,
     pub msg_rate_window_ms: u64,
     pub msg_rate_max: u64,
+    pub max_connections_per_player: u64,
+    pub max_connections_per_ip: u64,
     pub ticket_secret: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
@@ -146,8 +325,15 @@ pub async fn run(
 
     info!(
         addr = %config.bind_addr,
+        max_connections_per_player = config.max_connections_per_player,
+        max_connections_per_ip = config.max_connections_per_ip,
         "chat server listening"
     );
+
+    let connection_limits = Arc::new(ConnectionLimitTracker::new(
+        config.max_connections_per_player,
+        config.max_connections_per_ip,
+    ));
 
     loop {
         let accept_result = tokio::select! {
@@ -163,14 +349,18 @@ pub async fn run(
         let chat_store = chat_store.clone();
         let chat_sessions = chat_sessions.clone();
         let config = config.clone();
+        let connection_limits = Arc::clone(&connection_limits);
+        let peer_ip = peer_addr.ip();
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 socket,
                 peer_addr.to_string(),
+                peer_ip,
                 chat_store,
                 chat_sessions,
                 config,
+                connection_limits,
             )
             .await
             {
@@ -235,9 +425,11 @@ where
 async fn handle_connection<S>(
     socket: S,
     peer_addr: String,
+    peer_ip: IpAddr,
     chat_store: ChatStore,
     chat_sessions: ChatSessionMap,
     config: Config,
+    connection_limits: Arc<ConnectionLimitTracker>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -248,8 +440,8 @@ where
 
     // === 认证阶段 ===
     let auth_started_at = Instant::now();
-    let player_id = match read_auth_request(&mut reader, &mut writer, &config).await {
-        Ok(id) => id,
+    let auth = match read_auth_request(&mut reader, &mut writer, &config).await {
+        Ok(auth) => auth,
         Err(e) => {
             METRICS.record_request();
             METRICS.record_latency(auth_started_at.elapsed().as_millis() as u64);
@@ -260,6 +452,26 @@ where
     METRICS.record_request();
     METRICS.record_latency(auth_started_at.elapsed().as_millis() as u64);
 
+    let player_id = auth.player_id;
+    let _connection_limit_guard = match connection_limits.acquire(&player_id, peer_ip) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let error_code = error.error_code();
+            warn!(
+                peer = %peer_addr,
+                peer_ip = %peer_ip,
+                player_id = %player_id,
+                current = error.current(),
+                limit = error.limit(),
+                error_code = error_code,
+                "chat connection limit exceeded"
+            );
+            write_auth_response(&mut writer, auth.seq, false, error_code).await?;
+            return Ok(());
+        }
+    };
+
+    write_auth_response(&mut writer, auth.seq, true, "").await?;
     info!(peer = %peer_addr, player_id = %player_id, "player authenticated");
 
     // 注册聊天会话
@@ -293,7 +505,7 @@ where
     });
 
     // === 主消息循环 ===
-    loop {
+    let loop_error: Option<String> = loop {
         let mut header_buf = [0u8; HEADER_LEN];
         let read_header = timeout(
             std::time::Duration::from_secs(config.heartbeat_timeout_secs),
@@ -305,12 +517,12 @@ where
             Ok(Ok(_)) => {}
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!(peer = %peer_addr, "peer closed connection");
-                break;
+                break None;
             }
-            Ok(Err(error)) => return Err(Box::new(error)),
+            Ok(Err(error)) => break Some(error.to_string()),
             Err(_) => {
                 warn!(peer = %peer_addr, "heartbeat timeout");
-                break;
+                break None;
             }
         }
 
@@ -318,17 +530,19 @@ where
             Ok(value) => value,
             Err(e) => {
                 warn!(peer = %peer_addr, error = %e, "invalid header");
-                break;
+                break None;
             }
         };
 
         if header.body_len as usize > config.max_body_len {
             warn!(peer = %peer_addr, body_len = header.body_len, "body too large");
-            break;
+            break None;
         }
 
         let mut body = vec![0u8; header.body_len as usize];
-        reader.read_exact(&mut body).await?;
+        if let Err(error) = reader.read_exact(&mut body).await {
+            break Some(error.to_string());
+        }
         let packet = Packet::new(header, body);
 
         let msg_type = match MessageType::from_u16(packet.header.msg_type) {
@@ -455,7 +669,7 @@ where
         }
         METRICS.record_request();
         METRICS.record_latency(started_at.elapsed().as_millis() as u64);
-    }
+    };
 
     // 注销聊天会话
     chat_service::unregister_session(&chat_sessions, &player_id).await;
@@ -478,14 +692,23 @@ where
     drop(tx);
     let _ = writer_task.await;
 
-    Ok(())
+    match loop_error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug)]
+struct AuthenticatedPlayer {
+    player_id: String,
+    seq: u32,
 }
 
 async fn read_auth_request<R, W>(
     reader: &mut R,
     writer: &mut W,
     config: &Config,
-) -> Result<String, Box<dyn std::error::Error>>
+) -> Result<AuthenticatedPlayer, Box<dyn std::error::Error>>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -541,8 +764,10 @@ where
                 return Err(format!("auth failed: {}", error_code).into());
             }
 
-            write_auth_response(writer, header.seq, true, "").await?;
-            Ok(player_id)
+            Ok(AuthenticatedPlayer {
+                player_id,
+                seq: header.seq,
+            })
         }
         Err(e) => {
             write_auth_response(writer, header.seq, false, e).await?;
@@ -555,6 +780,8 @@ where
 mod tests {
     use super::*;
     use crate::ticket::hash_ticket;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
 
     #[test]
     fn ticket_key_uses_prefix_and_sha256_hash() {
@@ -635,6 +862,65 @@ mod tests {
         assert!(limiter.allow(now, 1000, 1));
         assert!(!limiter.allow(now + Duration::from_millis(999), 1000, 1));
         assert!(limiter.allow(now + Duration::from_millis(1000), 1000, 1));
+    }
+
+    #[test]
+    fn connection_limits_disabled_do_not_track_counts() {
+        let tracker = Arc::new(ConnectionLimitTracker::new(0, 0));
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+        let guard = tracker.acquire("player-1", ip).unwrap();
+
+        assert_eq!(tracker.count_for_player("player-1"), 0);
+        assert_eq!(tracker.count_for_ip(ip), 0);
+
+        drop(guard);
+        assert_eq!(tracker.count_for_player("player-1"), 0);
+        assert_eq!(tracker.count_for_ip(ip), 0);
+    }
+
+    #[test]
+    fn connection_limits_reject_player_at_boundary_and_release_on_drop() {
+        let tracker = Arc::new(ConnectionLimitTracker::new(1, 0));
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let first = tracker.acquire("player-1", ip).unwrap();
+
+        assert_eq!(
+            tracker.acquire("player-1", ip).unwrap_err(),
+            ConnectionLimitExceeded::Player {
+                player_id: "player-1".to_string(),
+                current: 1,
+                limit: 1,
+            }
+        );
+        assert_eq!(tracker.count_for_player("player-1"), 1);
+
+        drop(first);
+        assert_eq!(tracker.count_for_player("player-1"), 0);
+        let second = tracker.acquire("player-1", ip).unwrap();
+        assert_eq!(tracker.count_for_player("player-1"), 1);
+        drop(second);
+    }
+
+    #[test]
+    fn connection_limits_reject_ip_without_incrementing_player_count() {
+        let tracker = Arc::new(ConnectionLimitTracker::new(2, 1));
+        let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let first = tracker.acquire("player-1", ip).unwrap();
+
+        assert_eq!(
+            tracker.acquire("player-2", ip).unwrap_err(),
+            ConnectionLimitExceeded::Ip {
+                ip,
+                current: 1,
+                limit: 1,
+            }
+        );
+        assert_eq!(tracker.count_for_player("player-2"), 0);
+        assert_eq!(tracker.count_for_ip(ip), 1);
+
+        drop(first);
+        assert_eq!(tracker.count_for_ip(ip), 0);
     }
 
     #[test]
