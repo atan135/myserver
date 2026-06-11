@@ -368,6 +368,8 @@ where
                         routes: snapshot.routes,
                         drain_mode_enabled: runtime.drain_mode_enabled,
                         drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
+                        transferable_empty_room_count: snapshot.transferable_empty_room_count,
+                        transferable_empty_room_samples: snapshot.transferable_empty_room_samples,
                     },
                 )
                 .await?;

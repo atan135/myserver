@@ -1448,6 +1448,8 @@ async fn build_rollout_drain_status_response(
         routes: snapshot.routes,
         drain_mode_enabled: runtime.drain_mode_enabled,
         drain_mode_entered_at_ms: runtime.drain_mode_entered_at_ms.unwrap_or(0),
+        transferable_empty_room_count: snapshot.transferable_empty_room_count,
+        transferable_empty_room_samples: snapshot.transferable_empty_room_samples,
     }
 }
 
@@ -2437,6 +2439,8 @@ mod tests {
         assert_eq!(response.drain_mode_entered_at_ms, drain_mode_entered_at_ms);
         assert_eq!(response.owned_room_count, 1);
         assert_eq!(response.migrating_room_count, 0);
+        assert_eq!(response.transferable_empty_room_count, 0);
+        assert!(response.transferable_empty_room_samples.is_empty());
         assert_eq!(response.routes.len(), 1);
         assert_eq!(response.routes[0].room_id, "room-test");
         assert_eq!(response.routes[0].owner_server_id, "game-server-old");

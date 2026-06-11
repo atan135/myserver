@@ -23,7 +23,20 @@ function fieldString(fieldNumber, value) {
   return Buffer.concat([varint((fieldNumber << 3) | 2), varint(body.length), body]);
 }
 
-test("decodeRolloutDrainStatusRes exposes drain mode fields", () => {
+function fieldMessage(fieldNumber, body) {
+  return Buffer.concat([varint((fieldNumber << 3) | 2), varint(body.length), body]);
+}
+
+test("decodeRolloutDrainStatusRes exposes drain mode and transferable fields", () => {
+  const transferableSample = Buffer.concat([
+    fieldString(1, "room-empty"),
+    fieldString(2, "game-server-old"),
+    fieldVarint(3, 0),
+    fieldVarint(4, 1),
+    fieldVarint(5, 0),
+    fieldVarint(6, 2500),
+    fieldVarint(7, 3)
+  ]);
   const body = Buffer.concat([
     fieldVarint(1, 1),
     fieldString(3, "epoch-7"),
@@ -32,7 +45,9 @@ test("decodeRolloutDrainStatusRes exposes drain mode fields", () => {
     fieldVarint(6, 1),
     fieldVarint(7, 9),
     fieldVarint(9, 1),
-    fieldVarint(10, 1_717_000_000_123n)
+    fieldVarint(10, 1_717_000_000_123n),
+    fieldVarint(11, 1),
+    fieldMessage(12, transferableSample)
   ]);
 
   assert.deepEqual(decodeRolloutDrainStatusRes(body), {
@@ -45,6 +60,18 @@ test("decodeRolloutDrainStatusRes exposes drain mode fields", () => {
     connectionCount: 9,
     routes: [],
     drainModeEnabled: true,
-    drainModeEnteredAtMs: 1_717_000_000_123
+    drainModeEnteredAtMs: 1_717_000_000_123,
+    transferableEmptyRoomCount: 1,
+    transferableEmptyRoomSamples: [
+      {
+        roomId: "room-empty",
+        ownerServerId: "game-server-old",
+        migrationState: "OwnedByOld",
+        memberCount: 1,
+        onlineMemberCount: 0,
+        emptySinceMs: 2500,
+        roomVersion: 3
+      }
+    ]
   });
 });

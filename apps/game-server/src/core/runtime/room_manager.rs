@@ -89,6 +89,8 @@ pub struct RolloutDrainSnapshot {
     pub owned_room_count: u64,
     pub migrating_room_count: u64,
     pub routes: Vec<RoomRouteStatus>,
+    pub transferable_empty_room_count: u64,
+    pub transferable_empty_room_samples: Vec<RoomRouteStatus>,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,25 @@ pub struct RoomManager {
     policies: SharedRoomPolicyRegistry,
     logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
+}
+
+fn room_rollout_route_status(room: &Room, owner_server_id: &str) -> RoomRouteStatus {
+    RoomRouteStatus {
+        room_id: room.room_id.clone(),
+        owner_server_id: owner_server_id.to_string(),
+        migration_state: room.transfer_state.status.migration_state() as i32,
+        member_count: room.members.len() as u32,
+        online_member_count: room
+            .members
+            .values()
+            .filter(|member| !member.offline)
+            .count() as u32,
+        empty_since_ms: room
+            .empty_since
+            .map(|empty_since| empty_since.elapsed().as_millis() as u64)
+            .unwrap_or_default(),
+        room_version: room.transfer_state.room_version,
+    }
 }
 
 impl RoomManager {
@@ -297,6 +318,9 @@ impl RoomManager {
         let mut owned_room_count = 0_u64;
         let mut migrating_room_count = 0_u64;
         let mut routes = Vec::with_capacity(route_limit.min(room_ids.len()));
+        let mut transferable_empty_room_count = 0_u64;
+        let mut transferable_empty_room_samples =
+            Vec::with_capacity(route_limit.min(room_ids.len()));
         let mut rollout_epoch: Option<&str> = None;
         let mut mixed_rollout_epoch = false;
 
@@ -308,6 +332,14 @@ impl RoomManager {
             match room.transfer_state.status {
                 RoomTransferStatus::Owned => {
                     owned_room_count = owned_room_count.saturating_add(1);
+                    if !room.has_online_members() {
+                        transferable_empty_room_count =
+                            transferable_empty_room_count.saturating_add(1);
+                        if transferable_empty_room_samples.len() < route_limit {
+                            transferable_empty_room_samples
+                                .push(room_rollout_route_status(room, owner_server_id));
+                        }
+                    }
                 }
                 RoomTransferStatus::Frozen
                 | RoomTransferStatus::Exported
@@ -328,22 +360,7 @@ impl RoomManager {
             }
 
             if routes.len() < route_limit {
-                routes.push(RoomRouteStatus {
-                    room_id: room.room_id.clone(),
-                    owner_server_id: owner_server_id.to_string(),
-                    migration_state: room.transfer_state.status.migration_state() as i32,
-                    member_count: room.members.len() as u32,
-                    online_member_count: room
-                        .members
-                        .values()
-                        .filter(|member| !member.offline)
-                        .count() as u32,
-                    empty_since_ms: room
-                        .empty_since
-                        .map(|empty_since| empty_since.elapsed().as_millis() as u64)
-                        .unwrap_or_default(),
-                    room_version: room.transfer_state.room_version,
-                });
+                routes.push(room_rollout_route_status(room, owner_server_id));
             }
         }
 
@@ -357,6 +374,8 @@ impl RoomManager {
             owned_room_count,
             migrating_room_count,
             routes,
+            transferable_empty_room_count,
+            transferable_empty_room_samples,
         }
     }
 
@@ -2658,6 +2677,8 @@ mod tests {
         assert_eq!(snapshot.migrating_room_count, 0);
         assert!(snapshot.rollout_epoch.is_empty());
         assert!(snapshot.routes.is_empty());
+        assert_eq!(snapshot.transferable_empty_room_count, 0);
+        assert!(snapshot.transferable_empty_room_samples.is_empty());
     }
 
     #[tokio::test]
@@ -2683,6 +2704,8 @@ mod tests {
 
         assert_eq!(snapshot.owned_room_count, 1);
         assert_eq!(snapshot.migrating_room_count, 0);
+        assert_eq!(snapshot.transferable_empty_room_count, 0);
+        assert!(snapshot.transferable_empty_room_samples.is_empty());
         assert_eq!(snapshot.routes.len(), 1);
         let route = &snapshot.routes[0];
         assert_eq!(route.room_id, "room-test");
@@ -2691,6 +2714,80 @@ mod tests {
         assert_eq!(route.member_count, 1);
         assert_eq!(route.online_member_count, 1);
         assert_eq!(route.room_version, 1);
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_snapshot_counts_empty_owned_rooms_as_transferable() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory.clone()),
+        );
+
+        let empty_room = Room::new(
+            "room-empty".to_string(),
+            "owner".to_string(),
+            "default_match".to_string(),
+            factory.create("default_match"),
+        );
+        manager
+            .rooms
+            .lock()
+            .await
+            .insert("room-empty".to_string(), empty_room);
+
+        let (offline_tx, _offline_rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-offline",
+                "player-offline",
+                offline_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        manager
+            .disconnect_room_member("room-offline", "player-offline")
+            .await;
+
+        let (online_tx, _online_rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-online",
+                "player-online",
+                online_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let snapshot = manager.rollout_drain_snapshot("game-server-old", 50).await;
+
+        assert_eq!(snapshot.owned_room_count, 3);
+        assert_eq!(snapshot.migrating_room_count, 0);
+        assert_eq!(snapshot.transferable_empty_room_count, 2);
+        assert_eq!(
+            snapshot
+                .transferable_empty_room_samples
+                .iter()
+                .map(|route| route.room_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["room-empty", "room-offline"]
+        );
+        assert!(
+            snapshot
+                .transferable_empty_room_samples
+                .iter()
+                .all(|route| route.migration_state == RoomMigrationState::OwnedByOld as i32)
+        );
+        assert!(
+            snapshot
+                .transferable_empty_room_samples
+                .iter()
+                .all(|route| route.online_member_count == 0)
+        );
     }
 
     #[tokio::test]
@@ -2724,6 +2821,8 @@ mod tests {
         assert_eq!(snapshot.rollout_epoch, "epoch-1");
         assert_eq!(snapshot.owned_room_count, 0);
         assert_eq!(snapshot.migrating_room_count, 3);
+        assert_eq!(snapshot.transferable_empty_room_count, 0);
+        assert!(snapshot.transferable_empty_room_samples.is_empty());
         assert_eq!(snapshot.routes.len(), 3);
         assert_eq!(
             snapshot
@@ -2773,6 +2872,8 @@ mod tests {
 
         assert_eq!(snapshot.owned_room_count, 0);
         assert_eq!(snapshot.migrating_room_count, 0);
+        assert_eq!(snapshot.transferable_empty_room_count, 0);
+        assert!(snapshot.transferable_empty_room_samples.is_empty());
         assert_eq!(snapshot.routes.len(), 2);
         assert_eq!(
             snapshot

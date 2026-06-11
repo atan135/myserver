@@ -204,8 +204,19 @@ export async function runRolloutDrainStatus(options) {
     connectionCount: status.connectionCount,
     ownedRoomCount: status.ownedRoomCount,
     migratingRoomCount: status.migratingRoomCount,
+    transferableEmptyRoomCount: status.transferableEmptyRoomCount,
     routeSampleCount: status.routes?.length || 0,
+    transferableEmptyRoomSampleCount: status.transferableEmptyRoomSamples?.length || 0,
     routes: (status.routes || []).slice(0, 10).map((route) => ({
+      roomId: route.roomId,
+      ownerServerId: route.ownerServerId,
+      migrationState: route.migrationState,
+      memberCount: route.memberCount,
+      onlineMemberCount: route.onlineMemberCount,
+      emptySinceMs: route.emptySinceMs,
+      roomVersion: route.roomVersion
+    })),
+    transferableEmptyRoomSamples: (status.transferableEmptyRoomSamples || []).slice(0, 10).map((route) => ({
       roomId: route.roomId,
       ownerServerId: route.ownerServerId,
       migrationState: route.migrationState,
