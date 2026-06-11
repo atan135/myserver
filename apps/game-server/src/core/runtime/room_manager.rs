@@ -2089,6 +2089,9 @@ impl RoomManager {
                         room_id = room_id,
                         player_id = %player_id,
                         rollout_epoch = %push.rollout_epoch,
+                        target_host = %push.target_host,
+                        target_port = push.target_port,
+                        target_server_id = %push.target_server_id,
                         error = %error,
                         "failed to queue server redirect push"
                     );
@@ -2100,6 +2103,9 @@ impl RoomManager {
         info!(
             room_id = room_id,
             rollout_epoch = %push.rollout_epoch,
+            target_host = %push.target_host,
+            target_port = push.target_port,
+            target_server_id = %push.target_server_id,
             delivered_count = delivered_count,
             failed_count = failed_count,
             online_member_count = online_member_count,

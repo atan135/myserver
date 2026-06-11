@@ -2299,6 +2299,57 @@ mod tests {
         let _ = fs::remove_file(audit_path);
     }
 
+    #[tokio::test]
+    async fn admin_redirect_audit_event_includes_actor_action_result_and_target() {
+        let audit_path = temp_audit_path("redirect-audit");
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), false));
+        let context = AdminAuthContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+        };
+        let request = TriggerServerRedirectReq {
+            room_id: "room-1".to_string(),
+            rollout_epoch: "epoch-7".to_string(),
+            reason: "rollout".to_string(),
+            retry_after_ms: 250,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 4000,
+            target_server_id: "game-server-new".to_string(),
+            transport: "kcp".to_string(),
+        };
+        let packet = bytes_packet(
+            MessageType::TriggerServerRedirectReq,
+            17,
+            encode_body(&request),
+        );
+        let target = redirect_target(&request);
+
+        audit_admin_write_result(
+            &audit_logger,
+            &context,
+            &packet,
+            "trigger_server_redirect",
+            false,
+            "ROOM_NOT_FOUND",
+            &target,
+        )
+        .await
+        .unwrap();
+
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"channel\":\"admin_tcp\""));
+        assert!(audit.contains("\"actor\":\"ops@example.com\""));
+        assert!(audit.contains("\"action\":\"trigger_server_redirect\""));
+        assert!(audit.contains("\"ok\":false"));
+        assert!(audit.contains("\"error_code\":\"ROOM_NOT_FOUND\""));
+        assert!(audit.contains("\"room_id\":\"room-1\""));
+        assert!(audit.contains("\"rollout_epoch\":\"epoch-7\""));
+        assert!(audit.contains("\"target_server_id\":\"game-server-new\""));
+        assert!(!audit.contains("127.0.0.1"));
+        let _ = fs::remove_file(audit_path);
+    }
+
     #[test]
     fn decode_gm_broadcast_trims_and_defaults_sender() {
         let packet = json_packet(

@@ -397,15 +397,31 @@ where
                 .await?;
             }
             Some(MessageType::TriggerServerRedirectReq) => {
-                let request = packet
+                let request = match packet
                     .decode_body::<TriggerServerRedirectReq>("INVALID_TRIGGER_REDIRECT_BODY")
-                    .map_err(std::io::Error::other)?;
-                let target = InternalAuditTarget {
-                    room_id: request.room_id.clone(),
-                    rollout_epoch: request.rollout_epoch.clone(),
-                    checksum: String::new(),
-                    target_server_id: request.target_server_id.clone(),
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        let target = InternalAuditTarget::default();
+                        audit_internal_control_action(
+                            packet.header.seq,
+                            packet.header.msg_type,
+                            "trigger_server_redirect",
+                            false,
+                            error_code,
+                            &target,
+                        );
+                        write_error(
+                            &mut writer,
+                            packet.header.seq,
+                            error_code,
+                            "invalid trigger redirect request",
+                        )
+                        .await?;
+                        continue;
+                    }
                 };
+                let target = InternalAuditTarget::for_redirect(&request);
 
                 let room_id = request.room_id.clone();
                 let result = services
@@ -528,6 +544,15 @@ impl InternalAuditTarget {
             target_server_id: String::new(),
         }
     }
+
+    fn for_redirect(request: &TriggerServerRedirectReq) -> Self {
+        Self {
+            room_id: request.room_id.clone(),
+            rollout_epoch: request.rollout_epoch.clone(),
+            checksum: String::new(),
+            target_server_id: request.target_server_id.clone(),
+        }
+    }
 }
 
 fn audit_internal_control_action(
@@ -647,4 +672,208 @@ where
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use prost::Message;
+    use tokio::io::duplex;
+    use tokio::sync::{Mutex, RwLock};
+
+    use super::*;
+    use crate::config::{
+        Config, DEFAULT_ADMIN_TOKEN, DEFAULT_INTERNAL_TOKEN, DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+        DEFAULT_TICKET_SECRET,
+    };
+    use crate::core::config_table::ConfigTableRuntime;
+    use crate::core::context::PlayerRegistry;
+    use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
+    use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::runtime::RoomManager;
+    use crate::mysql_store::MySqlAuditStore;
+    use crate::protocol::{encode_packet, parse_header};
+    use crate::server::{
+        DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, PlayerInputAnomalyTracker,
+        PlayerMessageRateLimiter, RuntimeConfig,
+    };
+
+    struct NoopRoomLogic;
+
+    impl RoomLogic for NoopRoomLogic {}
+
+    impl RoomLogicTransfer for NoopRoomLogic {}
+
+    struct NoopRoomLogicFactory;
+
+    impl RoomLogicFactory for NoopRoomLogicFactory {
+        fn create(&self, _policy_id: &str) -> Box<dyn RoomLogic> {
+            Box::new(NoopRoomLogic)
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+            csv_dir: "csv".to_string(),
+            csv_reload_enabled: false,
+            csv_reload_interval_secs: 3,
+            room_cleanup_interval_secs: 3600,
+            admin_host: "127.0.0.1".to_string(),
+            admin_port: 7500,
+            admin_token: DEFAULT_ADMIN_TOKEN.to_string(),
+            admin_audit_enabled: false,
+            admin_audit_path: "logs/game-server/admin-audit.jsonl".to_string(),
+            admin_audit_require_actor: false,
+            internal_token: DEFAULT_INTERNAL_TOKEN.to_string(),
+            local_socket_name: "test-game-server.sock".to_string(),
+            internal_socket_name: "test-game-server-internal.sock".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: false,
+            log_enable_file: false,
+            log_dir: "logs/game-server".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            mysql_enabled: false,
+            mysql_url: "mysql://root:password@127.0.0.1:3306/myserver_game".to_string(),
+            mysql_pool_size: 1,
+            ticket_secret: DEFAULT_TICKET_SECRET.to_string(),
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            player_msg_rate_window_ms: 1000,
+            player_msg_rate_max: 0,
+            input_timestamp_required: false,
+            input_timestamp_max_skew_ms: 5000,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
+            registry_enabled: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "game-server".to_string(),
+            service_instance_id: "game-server-test".to_string(),
+        }
+    }
+
+    fn runtime_config() -> RuntimeConfig {
+        RuntimeConfig {
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            player_msg_rate_window_ms: 1000,
+            player_msg_rate_max: 0,
+            input_timestamp_required: false,
+            input_timestamp_max_skew_ms: 5000,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
+            drain_mode_enabled: false,
+            drain_mode_entered_at_ms: None,
+            drain_mode_reason: DEFAULT_DRAIN_MODE_REASON.to_string(),
+            drain_mode_source: DEFAULT_DRAIN_MODE_SOURCE.to_string(),
+        }
+    }
+
+    async fn service_context_fixture() -> ServiceContext {
+        let config = test_config();
+        let config_tables = ConfigTableRuntime::load(std::path::Path::new(&config.csv_dir))
+            .expect("test config tables should load");
+        let room_manager = Arc::new(RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(NoopRoomLogicFactory),
+            config_tables.room_policy_registry(),
+            3600,
+        ));
+
+        ServiceContext {
+            config: config.clone(),
+            mysql_store: MySqlAuditStore::new(&config)
+                .await
+                .expect("disabled mysql audit store"),
+            room_manager,
+            runtime_config: Arc::new(RwLock::new(runtime_config())),
+            connection_count: Arc::new(AtomicU64::new(0)),
+            config_tables,
+            player_manager: PlayerManager::new(MySqlPlayerStore::new_disabled()),
+            online_player_count: Arc::new(AtomicU64::new(0)),
+            player_registry: PlayerRegistry::default(),
+            player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),
+            player_input_anomaly_tracker: Arc::new(Mutex::new(PlayerInputAnomalyTracker::new())),
+        }
+    }
+
+    async fn read_test_packet<R>(reader: &mut R) -> Packet
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut header_buf = [0u8; HEADER_LEN];
+        reader.read_exact(&mut header_buf).await.unwrap();
+        let header = parse_header(header_buf).unwrap();
+        let mut body = vec![0u8; header.body_len as usize];
+        reader.read_exact(&mut body).await.unwrap();
+        Packet::new(header, body)
+    }
+
+    #[test]
+    fn internal_redirect_audit_target_includes_room_epoch_and_target_server() {
+        let target = InternalAuditTarget::for_redirect(&TriggerServerRedirectReq {
+            room_id: "room-1".to_string(),
+            rollout_epoch: "epoch-7".to_string(),
+            reason: "rollout".to_string(),
+            retry_after_ms: 250,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 4000,
+            target_server_id: "game-server-new".to_string(),
+            transport: "kcp".to_string(),
+        });
+
+        assert_eq!(target.room_id, "room-1");
+        assert_eq!(target.rollout_epoch, "epoch-7");
+        assert_eq!(target.target_server_id, "game-server-new");
+        assert_eq!(target.checksum, "");
+    }
+
+    #[tokio::test]
+    async fn invalid_internal_redirect_body_returns_error_response_after_audit() {
+        let services = service_context_fixture().await;
+        let (server_io, mut client_io) = duplex(4096);
+        let handler = tokio::spawn(async move {
+            handle_internal_connection(server_io, services, DEFAULT_INTERNAL_TOKEN.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        });
+
+        client_io
+            .write_all(&encode_packet(
+                MessageType::InternalAuthReq,
+                1,
+                DEFAULT_INTERNAL_TOKEN.as_bytes(),
+            ))
+            .await
+            .unwrap();
+        client_io
+            .write_all(&encode_packet(
+                MessageType::TriggerServerRedirectReq,
+                2,
+                b"not-protobuf",
+            ))
+            .await
+            .unwrap();
+
+        let packet = read_test_packet(&mut client_io).await;
+        assert_eq!(packet.header.msg_type, MessageType::ErrorRes as u16);
+        assert_eq!(packet.header.seq, 2);
+        let response = ErrorRes::decode(packet.body.as_slice()).unwrap();
+        assert_eq!(response.error_code, "INVALID_TRIGGER_REDIRECT_BODY");
+        assert_eq!(response.message, "invalid trigger redirect request");
+
+        drop(client_io);
+        handler.await.unwrap().unwrap();
+    }
 }
