@@ -1266,9 +1266,16 @@ mod tests {
     use super::{
         MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter, PREAUTH_MESSAGE_NOT_ALLOWED,
         PreauthDecision, preauth_decision, restore_authenticated_after_local_routing_error,
+        select_route_for_packet,
     };
+    use crate::pb::{RoomJoinReq, RoomReconnectReq};
     use crate::protocol::{MessageType, Packet, PacketHeader};
+    use crate::route_store::{
+        PlayerRouteRecord, ProxyRouteStore, RoomMigrationState, RoomRouteRecord,
+        UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
+    };
     use crate::session::{ProxySession, ProxySessionState};
+    use prost::Message;
     use std::time::{Duration, Instant};
 
     fn packet(msg_type: u16) -> Packet {
@@ -1280,6 +1287,51 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    fn packet_with_body<M: Message>(msg_type: MessageType, message: &M) -> Packet {
+        let mut body = Vec::new();
+        message
+            .encode(&mut body)
+            .expect("test protobuf encode should succeed");
+        Packet::new(
+            PacketHeader {
+                msg_type: msg_type as u16,
+                seq: 1,
+                body_len: body.len() as u32,
+            },
+            body,
+        )
+    }
+
+    fn upstream_route(server_id: &str, operation_state: UpstreamOperationState) -> UpstreamRoute {
+        UpstreamRoute {
+            server_id: server_id.to_string(),
+            local_socket_name: format!("{server_id}.sock"),
+            operation_state,
+            health_state: UpstreamHealthState::Healthy,
+        }
+    }
+
+    fn room_route(
+        room_id: &str,
+        owner_server_id: &str,
+        migration_state: RoomMigrationState,
+        room_version: u64,
+        checksum: &str,
+    ) -> RoomRouteRecord {
+        RoomRouteRecord {
+            room_id: room_id.to_string(),
+            owner_server_id: owner_server_id.to_string(),
+            migration_state,
+            member_count: 0,
+            online_member_count: 0,
+            empty_since_ms: Some(123),
+            room_version,
+            rollout_epoch: "rollout-1".to_string(),
+            last_transfer_checksum: checksum.to_string(),
+            updated_at_ms: 0,
+        }
     }
 
     #[test]
@@ -1404,5 +1456,108 @@ mod tests {
         let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 1), now);
         assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
         assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
+    }
+
+    #[tokio::test]
+    async fn room_join_packet_routes_to_new_owner_after_room_route_cutover() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                upstream_route("old", UpstreamOperationState::Draining),
+                upstream_route("new", UpstreamOperationState::Active),
+            ])
+            .await;
+        store
+            .upsert_room_route(
+                room_route("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_route(
+                    "room-1",
+                    "new",
+                    RoomMigrationState::OwnedByNew,
+                    2,
+                    "checksum-1",
+                ),
+                Some(1),
+                Some(String::new()),
+            )
+            .await
+            .unwrap();
+
+        let packet = packet_with_body(
+            MessageType::RoomJoinReq,
+            &RoomJoinReq {
+                room_id: "room-1".to_string(),
+                policy_id: "default_match".to_string(),
+            },
+        );
+
+        let route = select_route_for_packet(&store, &packet, Some("player-1"))
+            .await
+            .expect("route should be selected");
+
+        assert_eq!(route.server_id, "new");
+    }
+
+    #[tokio::test]
+    async fn room_reconnect_packet_prefers_transferred_room_owner_over_stale_player_route() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                upstream_route("old", UpstreamOperationState::Draining),
+                upstream_route("new", UpstreamOperationState::Active),
+            ])
+            .await;
+        store
+            .upsert_room_route(
+                room_route("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_room_route(
+                room_route(
+                    "room-1",
+                    "new",
+                    RoomMigrationState::OwnedByNew,
+                    2,
+                    "checksum-1",
+                ),
+                Some(1),
+                Some(String::new()),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_player_route(PlayerRouteRecord {
+                player_id: "player-1".to_string(),
+                current_room_id: Some("room-1".to_string()),
+                preferred_server_id: Some("old".to_string()),
+                rollout_epoch: "rollout-1".to_string(),
+                updated_at_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        let packet = packet_with_body(
+            MessageType::RoomReconnectReq,
+            &RoomReconnectReq {
+                player_id: "player-1".to_string(),
+            },
+        );
+
+        let route = select_route_for_packet(&store, &packet, Some("player-1"))
+            .await
+            .expect("route should be selected");
+
+        assert_eq!(route.server_id, "new");
     }
 }

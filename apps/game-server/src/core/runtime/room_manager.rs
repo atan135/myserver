@@ -3912,7 +3912,8 @@ mod tests {
         assert_eq!(snapshot.room_id, "room-test");
     }
 
-    async fn setup_imported_room_for_confirm() -> (RoomManager, String, u64) {
+    async fn setup_imported_room_for_confirm()
+    -> (RoomManager, RecordingRoomLogicFactory, String, u64) {
         let (source, _source_factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
         source.disconnect_room_member("room-test", "player-a").await;
@@ -3930,17 +3931,18 @@ mod tests {
         let target_factory = RecordingRoomLogicFactory::default();
         let target = RoomManager::with_match_client(
             crate::match_client::create_match_client_shared(),
-            Arc::new(target_factory),
+            Arc::new(target_factory.clone()),
         );
         let (_imported_checksum, room_version) =
             target.import_room_transfer(payload).await.unwrap();
 
-        (target, checksum, room_version)
+        (target, target_factory, checksum, room_version)
     }
 
     #[tokio::test]
     async fn confirm_room_ownership_succeeds_for_imported_room() {
-        let (target, checksum, room_version) = setup_imported_room_for_confirm().await;
+        let (target, _target_factory, checksum, room_version) =
+            setup_imported_room_for_confirm().await;
 
         let confirmed = target
             .confirm_room_ownership("epoch-1", "room-test", &checksum, room_version)
@@ -3953,7 +3955,8 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_room_ownership_rejects_mismatched_epoch_checksum_or_version() {
-        let (target, checksum, room_version) = setup_imported_room_for_confirm().await;
+        let (target, _target_factory, checksum, room_version) =
+            setup_imported_room_for_confirm().await;
 
         assert_eq!(
             target
@@ -3984,6 +3987,66 @@ mod tests {
                 .await,
             Err("INVALID_ROLLOUT_EPOCH")
         );
+    }
+
+    #[tokio::test]
+    async fn imported_room_is_treated_as_taken_over_room_for_join_and_reconnect() {
+        let (target, target_factory, checksum, room_version) =
+            setup_imported_room_for_confirm().await;
+        target
+            .confirm_room_ownership("epoch-1", "room-test", &checksum, room_version)
+            .await
+            .unwrap();
+
+        {
+            let rooms = target.rooms.lock().await;
+            let room = rooms.get("room-test").expect("imported room should exist");
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
+            assert_eq!(
+                room.transfer_state.rollout_epoch.as_deref(),
+                Some("epoch-1")
+            );
+            assert_eq!(room.transfer_state.room_version, room_version);
+            assert_eq!(
+                room.transfer_state.last_transfer_checksum.as_deref(),
+                Some(checksum.as_str())
+            );
+            assert!(room.members.contains_key("player-a"));
+            assert!(room.members.contains_key("player-b"));
+        }
+
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+        let reconnect = target
+            .reconnect_room("room-test", "player-a", reconnect_tx)
+            .await
+            .unwrap();
+        assert_eq!(reconnect.snapshot.room_id, "room-test");
+
+        let (join_tx, _join_rx) = mpsc::channel(1024);
+        let join_snapshot = target
+            .join_room(
+                "room-test",
+                "player-b",
+                join_tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(join_snapshot.room_id, "room-test");
+        assert!(
+            join_snapshot
+                .members
+                .iter()
+                .any(|member| member.player_id == "player-b")
+        );
+
+        let rooms = target.rooms.lock().await;
+        let room = rooms.get("room-test").expect("room should remain");
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
+        assert_eq!(room.transfer_state.room_version, room_version);
+        assert_eq!(target_factory.imported_transfer_states().len(), 1);
     }
 
     #[tokio::test]

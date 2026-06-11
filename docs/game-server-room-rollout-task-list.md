@@ -287,15 +287,18 @@
 
 ### 5.3 新服接管后的行为
 
-- [ ] route 切到新服后，新的 `RoomJoinReq` 进入新服。
-- [ ] route 切到新服后，新的 `RoomReconnectReq` 进入新服。
-- [ ] 新服需要能识别“这是已接管 room，不是全新 room”。
+- [x] route 切到新服后，新的 `RoomJoinReq` 进入新服。
+- [x] route 切到新服后，新的 `RoomReconnectReq` 进入新服。
+- [x] 新服需要能识别“这是已接管 room，不是全新 room”。
 
 当前实现说明：`tools/mock-client` 的 transfer 编排入口已把“导入成功并且新服 ownership confirm 成功后才 upsert proxy route”作为调用顺序约束。proxy route 创建/更新仍依赖 `game-proxy` admin HTTP 的校验；route 已存在时使用 `expected_room_version` 和 `expected_last_transfer_checksum` 做 CAS，route 不存在时按当前 proxy 创建规则使用 `expected_room_version=0`、`room_version=1`。
+
+代码覆盖状态：`game-proxy` 的包体级路由单测已覆盖 `RoomJoinReq` 在 room route owner 切到新服后选中新服，以及 `RoomReconnectReq` 在 player route 仍指向旧服时优先按 transferred room owner 选中新服。`game-server` 的 room transfer 单测已覆盖新服 `import_room_transfer` 后 room 进入 `OwnedByNew`，保留同一 `room_id`、版本和 checksum，后续 `RoomReconnectReq` / `RoomJoinReq` 命中该已接管 room 而不是创建全新 room。
 
 完成标准:
 
 - 新服已能从旧服导入 room，并在 route 切换后继续托管同 `room_id`。
+- 真实 old/new/proxy 三进程自动化联调仍在 M3/M4 边界任务中跟进。
 
 ## 6. M4 客户端显式重连任务
 
