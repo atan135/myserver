@@ -496,6 +496,24 @@ message TriggerServerRedirectRes {
   uint64 online_member_count = 6;
 }
 
+message TriggerRolloutDrainNoticeReq {
+  string room_id = 1;
+  string rollout_epoch = 2;
+  string reason = 3;
+  string message = 4;
+  uint32 retry_after_ms = 5;
+  uint64 deadline_ms = 6;
+}
+
+message TriggerRolloutDrainNoticeRes {
+  bool ok = 1;
+  string room_id = 2;
+  string error_code = 3;
+  uint64 delivered_count = 4;
+  uint64 failed_count = 5;
+  uint64 online_member_count = 6;
+}
+
 message RoomMemberOfflinePush {
   string room_id = 1;
   string player_id = 2;

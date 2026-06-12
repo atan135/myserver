@@ -6,15 +6,17 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::core::context::ServiceContext;
-use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
+use crate::core::runtime::room_manager::{
+    ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT, RolloutDrainNotice,
+};
 use crate::core::service::room_service;
 use crate::pb::{
     ConfirmRoomOwnershipReq, ConfirmRoomOwnershipRes, CreateMatchedRoomReq, ErrorRes,
     ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
     FreezeRoomForTransferRes, GetRolloutDrainStatusReq, GetRolloutDrainStatusRes,
     ImportRoomTransferReq, ImportRoomTransferRes, RetireTransferredRoomReq,
-    RetireTransferredRoomRes, ServerRedirectPush, TriggerServerRedirectReq,
-    TriggerServerRedirectRes,
+    RetireTransferredRoomRes, ServerRedirectPush, TriggerRolloutDrainNoticeReq,
+    TriggerRolloutDrainNoticeRes, TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 
@@ -483,6 +485,92 @@ where
                 )
                 .await?;
             }
+            Some(MessageType::TriggerRolloutDrainNoticeReq) => {
+                let request = match packet.decode_body::<TriggerRolloutDrainNoticeReq>(
+                    "INVALID_ROLLOUT_DRAIN_NOTICE_BODY",
+                ) {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        let target = InternalAuditTarget::default();
+                        audit_internal_control_action(
+                            packet.header.seq,
+                            packet.header.msg_type,
+                            "trigger_rollout_drain_notice",
+                            false,
+                            error_code,
+                            &target,
+                        );
+                        write_error(
+                            &mut writer,
+                            packet.header.seq,
+                            error_code,
+                            "invalid rollout drain notice request",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = InternalAuditTarget::for_rollout_drain_notice(&request);
+                let room_id = request.room_id.clone();
+                let result = services
+                    .room_manager
+                    .trigger_rollout_drain_notice(RolloutDrainNotice {
+                        room_id: request.room_id,
+                        rollout_epoch: request.rollout_epoch,
+                        reason: request.reason,
+                        message: request.message,
+                        retry_after_ms: request.retry_after_ms,
+                        deadline_ms: request.deadline_ms,
+                    })
+                    .await;
+
+                let response = match result {
+                    Ok(delivery) => TriggerRolloutDrainNoticeRes {
+                        ok: true,
+                        room_id,
+                        error_code: String::new(),
+                        delivered_count: delivery.delivered_count,
+                        failed_count: delivery.failed_count,
+                        online_member_count: delivery.online_member_count,
+                    },
+                    Err(error_code) => TriggerRolloutDrainNoticeRes {
+                        ok: false,
+                        room_id,
+                        error_code: error_code.to_string(),
+                        delivered_count: 0,
+                        failed_count: 0,
+                        online_member_count: 0,
+                    },
+                };
+                info!(
+                    channel = "internal_socket",
+                    action = "trigger_rollout_drain_notice",
+                    room_id = %response.room_id,
+                    rollout_epoch = %target.rollout_epoch,
+                    delivered_count = response.delivered_count,
+                    failed_count = response.failed_count,
+                    online_member_count = response.online_member_count,
+                    ok = response.ok,
+                    error_code = %response.error_code,
+                    "rollout drain notice internal trigger result"
+                );
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "trigger_rollout_drain_notice",
+                    response.ok,
+                    &response.error_code,
+                    &target,
+                );
+
+                write_message(
+                    &mut writer,
+                    MessageType::TriggerRolloutDrainNoticeRes,
+                    packet.header.seq,
+                    &response,
+                )
+                .await?;
+            }
             Some(_) => {
                 write_error(
                     &mut writer,
@@ -553,6 +641,15 @@ impl InternalAuditTarget {
             rollout_epoch: request.rollout_epoch.clone(),
             checksum: String::new(),
             target_server_id: request.target_server_id.clone(),
+        }
+    }
+
+    fn for_rollout_drain_notice(request: &TriggerRolloutDrainNoticeReq) -> Self {
+        Self {
+            room_id: request.room_id.clone(),
+            rollout_epoch: request.rollout_epoch.clone(),
+            checksum: String::new(),
+            target_server_id: String::new(),
         }
     }
 }
@@ -841,6 +938,23 @@ mod tests {
         assert_eq!(target.checksum, "");
     }
 
+    #[test]
+    fn internal_rollout_drain_notice_audit_target_includes_room_and_epoch() {
+        let target = InternalAuditTarget::for_rollout_drain_notice(&TriggerRolloutDrainNoticeReq {
+            room_id: "room-1".to_string(),
+            rollout_epoch: "epoch-7".to_string(),
+            reason: "rollout".to_string(),
+            message: "Please leave after this round".to_string(),
+            retry_after_ms: 500,
+            deadline_ms: 123_456,
+        });
+
+        assert_eq!(target.room_id, "room-1");
+        assert_eq!(target.rollout_epoch, "epoch-7");
+        assert_eq!(target.target_server_id, "");
+        assert_eq!(target.checksum, "");
+    }
+
     #[tokio::test]
     async fn invalid_internal_redirect_body_returns_error_response_after_audit() {
         let services = service_context_fixture().await;
@@ -874,6 +988,44 @@ mod tests {
         let response = ErrorRes::decode(packet.body.as_slice()).unwrap();
         assert_eq!(response.error_code, "INVALID_TRIGGER_REDIRECT_BODY");
         assert_eq!(response.message, "invalid trigger redirect request");
+
+        drop(client_io);
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_internal_rollout_drain_notice_body_returns_error_response_after_audit() {
+        let services = service_context_fixture().await;
+        let (server_io, mut client_io) = duplex(4096);
+        let handler = tokio::spawn(async move {
+            handle_internal_connection(server_io, services, DEFAULT_INTERNAL_TOKEN.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        });
+
+        client_io
+            .write_all(&encode_packet(
+                MessageType::InternalAuthReq,
+                1,
+                DEFAULT_INTERNAL_TOKEN.as_bytes(),
+            ))
+            .await
+            .unwrap();
+        client_io
+            .write_all(&encode_packet(
+                MessageType::TriggerRolloutDrainNoticeReq,
+                2,
+                b"not-protobuf",
+            ))
+            .await
+            .unwrap();
+
+        let packet = read_test_packet(&mut client_io).await;
+        assert_eq!(packet.header.msg_type, MessageType::ErrorRes as u16);
+        assert_eq!(packet.header.seq, 2);
+        let response = ErrorRes::decode(packet.body.as_slice()).unwrap();
+        assert_eq!(response.error_code, "INVALID_ROLLOUT_DRAIN_NOTICE_BODY");
+        assert_eq!(response.message, "invalid rollout drain notice request");
 
         drop(client_io);
         handler.await.unwrap().unwrap();

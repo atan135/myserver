@@ -721,6 +721,36 @@ pub struct TriggerServerRedirectRes {
     pub online_member_count: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TriggerRolloutDrainNoticeReq {
+    #[prost(string, tag = "1")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub rollout_epoch: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub message: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub retry_after_ms: u32,
+    #[prost(uint64, tag = "6")]
+    pub deadline_ms: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TriggerRolloutDrainNoticeRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub room_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    pub delivered_count: u64,
+    #[prost(uint64, tag = "5")]
+    pub failed_count: u64,
+    #[prost(uint64, tag = "6")]
+    pub online_member_count: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,

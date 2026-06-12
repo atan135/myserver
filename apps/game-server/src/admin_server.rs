@@ -18,7 +18,9 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{PlayerRegistry, SharedRoomManager, SharedRuntimeConfig};
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
-use crate::core::runtime::room_manager::ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT;
+use crate::core::runtime::room_manager::{
+    ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT, RolloutDrainNotice,
+};
 use crate::gm_broadcast::{
     GM_BROADCAST_CONTENT_MAX_LEN, GM_BROADCAST_TITLE_MAX_LEN, GM_SENDER_MAX_LEN,
     GmBroadcastCommand, broadcast_gm_message_to_online_players, normalize_optional_string,
@@ -29,7 +31,8 @@ use crate::pb::{
     FreezeRoomForTransferReq, FreezeRoomForTransferRes, GetRolloutDrainStatusReq,
     GetRolloutDrainStatusRes, ImportRoomTransferReq, ImportRoomTransferRes,
     RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
-    TriggerServerRedirectReq, TriggerServerRedirectRes,
+    TriggerRolloutDrainNoticeReq, TriggerRolloutDrainNoticeRes, TriggerServerRedirectReq,
+    TriggerServerRedirectRes,
 };
 use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
@@ -1061,6 +1064,86 @@ async fn handle_admin_connection(
                 )
                 .await?;
             }
+            Some(MessageType::TriggerRolloutDrainNoticeReq) => {
+                let action = "trigger_rollout_drain_notice";
+                let request = match packet.decode_body::<TriggerRolloutDrainNoticeReq>(
+                    "INVALID_ROLLOUT_DRAIN_NOTICE_BODY",
+                ) {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid rollout drain notice request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = rollout_drain_notice_target(&request);
+                let room_id = request.room_id.clone();
+                let result = room_manager
+                    .trigger_rollout_drain_notice(RolloutDrainNotice {
+                        room_id: request.room_id,
+                        rollout_epoch: request.rollout_epoch,
+                        reason: request.reason,
+                        message: request.message,
+                        retry_after_ms: request.retry_after_ms,
+                        deadline_ms: request.deadline_ms,
+                    })
+                    .await;
+
+                let response = match result {
+                    Ok(delivery) => TriggerRolloutDrainNoticeRes {
+                        ok: true,
+                        room_id,
+                        error_code: String::new(),
+                        delivered_count: delivery.delivered_count,
+                        failed_count: delivery.failed_count,
+                        online_member_count: delivery.online_member_count,
+                    },
+                    Err(error_code) => TriggerRolloutDrainNoticeRes {
+                        ok: false,
+                        room_id,
+                        error_code: error_code.to_string(),
+                        delivered_count: 0,
+                        failed_count: 0,
+                        online_member_count: 0,
+                    },
+                };
+
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                info!(
+                    action,
+                    room_id = %response.room_id,
+                    rollout_epoch = %target.rollout_epoch,
+                    delivered_count = response.delivered_count,
+                    failed_count = response.failed_count,
+                    online_member_count = response.online_member_count,
+                    ok = response.ok,
+                    error_code = %response.error_code,
+                    "rollout drain notice admin trigger result"
+                );
+                audit_then_write_message(
+                    &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
+                    MessageType::TriggerRolloutDrainNoticeRes,
+                    &response,
+                    ok,
+                    &error_code,
+                    &target,
+                )
+                .await?;
+            }
             Some(_) => {
                 write_error(
                     &mut writer,
@@ -1196,6 +1279,7 @@ fn admin_write_action(message_type: MessageType) -> Option<&'static str> {
         MessageType::ConfirmRoomOwnershipReq => Some("confirm_room_ownership"),
         MessageType::RetireTransferredRoomReq => Some("retire_transferred_room"),
         MessageType::TriggerServerRedirectReq => Some("trigger_server_redirect"),
+        MessageType::TriggerRolloutDrainNoticeReq => Some("trigger_rollout_drain_notice"),
         _ => None,
     }
 }
@@ -1409,6 +1493,14 @@ fn redirect_target(request: &TriggerServerRedirectReq) -> AdminAuditTarget {
         room_id: request.room_id.clone(),
         rollout_epoch: request.rollout_epoch.clone(),
         target_server_id: request.target_server_id.clone(),
+        ..Default::default()
+    }
+}
+
+fn rollout_drain_notice_target(request: &TriggerRolloutDrainNoticeReq) -> AdminAuditTarget {
+    AdminAuditTarget {
+        room_id: request.room_id.clone(),
+        rollout_epoch: request.rollout_epoch.clone(),
         ..Default::default()
     }
 }
@@ -2350,6 +2442,62 @@ mod tests {
         assert!(audit.contains("\"target_server_id\":\"game-server-new\""));
         assert!(!audit.contains("127.0.0.1"));
         let _ = fs::remove_file(audit_path);
+    }
+
+    #[tokio::test]
+    async fn admin_rollout_drain_notice_audit_event_includes_room_epoch_and_result() {
+        let audit_path = temp_audit_path("drain-notice-audit");
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), false));
+        let context = AdminAuthContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+        };
+        let request = TriggerRolloutDrainNoticeReq {
+            room_id: "room-1".to_string(),
+            rollout_epoch: "epoch-7".to_string(),
+            reason: "rollout".to_string(),
+            message: "Please leave after this round".to_string(),
+            retry_after_ms: 500,
+            deadline_ms: 123_456,
+        };
+        let packet = bytes_packet(
+            MessageType::TriggerRolloutDrainNoticeReq,
+            18,
+            encode_body(&request),
+        );
+        let target = rollout_drain_notice_target(&request);
+
+        audit_admin_write_result(
+            &audit_logger,
+            &context,
+            &packet,
+            "trigger_rollout_drain_notice",
+            false,
+            "ROOM_NOT_FOUND",
+            &target,
+        )
+        .await
+        .unwrap();
+
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"channel\":\"admin_tcp\""));
+        assert!(audit.contains("\"actor\":\"ops@example.com\""));
+        assert!(audit.contains("\"action\":\"trigger_rollout_drain_notice\""));
+        assert!(audit.contains("\"ok\":false"));
+        assert!(audit.contains("\"error_code\":\"ROOM_NOT_FOUND\""));
+        assert!(audit.contains("\"room_id\":\"room-1\""));
+        assert!(audit.contains("\"rollout_epoch\":\"epoch-7\""));
+        assert!(!audit.contains("Please leave after this round"));
+        let _ = fs::remove_file(audit_path);
+    }
+
+    #[test]
+    fn admin_rollout_drain_notice_is_write_action() {
+        assert_eq!(
+            admin_write_action(MessageType::TriggerRolloutDrainNoticeReq),
+            Some("trigger_rollout_drain_notice")
+        );
     }
 
     #[test]

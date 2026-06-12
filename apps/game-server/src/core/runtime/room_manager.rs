@@ -24,7 +24,7 @@ use crate::core::runtime::room_policy::{
 use crate::match_client::SharedMatchClient;
 use crate::metrics::METRICS;
 use crate::pb::{
-    FrameBundlePush, FrameInput, MovementCorrectionReason,
+    FrameBundlePush, FrameInput, GameMessagePush, MovementCorrectionReason,
     MovementRecoveryState as PbMovementRecoveryState, RoomFrameRatePush, RoomMigrationState,
     RoomRouteStatus, RoomSnapshot, RoomStatePush, RoomTransferPayload, ServerRedirectPush,
 };
@@ -88,6 +88,23 @@ pub struct RoomRecoveryState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerRedirectDelivery {
+    pub delivered_count: u64,
+    pub failed_count: u64,
+    pub online_member_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolloutDrainNotice {
+    pub room_id: String,
+    pub rollout_epoch: String,
+    pub reason: String,
+    pub message: String,
+    pub retry_after_ms: u32,
+    pub deadline_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolloutDrainNoticeDelivery {
     pub delivered_count: u64,
     pub failed_count: u64,
     pub online_member_count: u64,
@@ -2125,6 +2142,108 @@ impl RoomManager {
         })
     }
 
+    pub async fn trigger_rollout_drain_notice(
+        &self,
+        notice: RolloutDrainNotice,
+    ) -> Result<RolloutDrainNoticeDelivery, &'static str> {
+        let room_id = notice.room_id.trim();
+        if room_id.is_empty() {
+            return Err("INVALID_ROOM_ID");
+        }
+        if notice.rollout_epoch.trim().is_empty() {
+            return Err("INVALID_ROLLOUT_EPOCH");
+        }
+        if notice.message.trim().is_empty() {
+            return Err("INVALID_DRAIN_NOTICE_MESSAGE");
+        }
+
+        let payload_json = json!({
+            "room_id": room_id,
+            "rollout_epoch": &notice.rollout_epoch,
+            "reason": &notice.reason,
+            "message": &notice.message,
+            "retry_after_ms": notice.retry_after_ms,
+            "deadline_ms": notice.deadline_ms,
+        })
+        .to_string();
+        let push = GameMessagePush {
+            event: "rollout_drain_notice".to_string(),
+            room_id: room_id.to_string(),
+            player_id: String::new(),
+            action: "leave_room".to_string(),
+            payload_json,
+        };
+        let body = encode_body(&push);
+        let targets = {
+            let rooms = self.rooms.lock().await;
+            let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+            room.members
+                .values()
+                .filter(|member| !member.offline && !member.syncing)
+                .map(|member| {
+                    (
+                        member.player_id.clone(),
+                        member.sender.clone(),
+                        member.close_state.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut delivered_count = 0u64;
+        let mut failed_count = 0u64;
+        for (player_id, sender, close_state) in &targets {
+            match try_send_outbound(
+                sender,
+                close_state,
+                OutboundMessage {
+                    message_type: MessageType::GameMessagePush,
+                    seq: 0,
+                    body: body.clone(),
+                },
+                OutboundQueueLogContext {
+                    player_id: Some(player_id),
+                    room_id: Some(room_id),
+                    operation: "rollout_drain_notice",
+                    ..OutboundQueueLogContext::default()
+                },
+            ) {
+                Ok(()) => {
+                    delivered_count = delivered_count.saturating_add(1);
+                }
+                Err(error) => {
+                    failed_count = failed_count.saturating_add(1);
+                    warn!(
+                        room_id = room_id,
+                        player_id = %player_id,
+                        rollout_epoch = %notice.rollout_epoch,
+                        error = %error,
+                        "failed to queue rollout drain notice"
+                    );
+                }
+            }
+        }
+
+        let online_member_count = targets.len() as u64;
+        info!(
+            room_id = room_id,
+            rollout_epoch = %notice.rollout_epoch,
+            reason = %notice.reason,
+            retry_after_ms = notice.retry_after_ms,
+            deadline_ms = notice.deadline_ms,
+            delivered_count = delivered_count,
+            failed_count = failed_count,
+            online_member_count = online_member_count,
+            "rollout drain notice trigger completed"
+        );
+
+        Ok(RolloutDrainNoticeDelivery {
+            delivered_count,
+            failed_count,
+            online_member_count,
+        })
+    }
+
     pub async fn broadcast_snapshot(
         &self,
         room_id: &str,
@@ -3536,6 +3655,119 @@ mod tests {
         );
         assert_eq!(
             room.members["player-b"].close_state.reason().as_deref(),
+            Some(SERVER_REDIRECT_CLOSE_REASON)
+        );
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_notice_pushes_game_message_to_online_non_syncing_room_members() {
+        let (manager, _factory, mut receivers) =
+            setup_started_room("default_match", &["player-a", "player-b", "player-c"]).await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        {
+            let mut rooms = manager.rooms.lock().await;
+            let room = rooms.get_mut("room-test").unwrap();
+            room.members.get_mut("player-c").unwrap().syncing = true;
+        }
+
+        let delivery = manager
+            .trigger_rollout_drain_notice(RolloutDrainNotice {
+                room_id: "room-test".to_string(),
+                rollout_epoch: "epoch-1".to_string(),
+                reason: "rollout".to_string(),
+                message: "Please leave after this match".to_string(),
+                retry_after_ms: 500,
+                deadline_ms: 123_456,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delivery,
+            RolloutDrainNoticeDelivery {
+                delivered_count: 1,
+                failed_count: 0,
+                online_member_count: 1,
+            }
+        );
+
+        let pushed = drain_messages_of_type(&mut receivers[0], MessageType::GameMessagePush)
+            .pop()
+            .expect("online member notice");
+        let push = GameMessagePush::decode(pushed.body.as_slice()).unwrap();
+        assert_eq!(push.event, "rollout_drain_notice");
+        assert_eq!(push.room_id, "room-test");
+        assert_eq!(push.action, "leave_room");
+        assert!(push.player_id.is_empty());
+        let payload: serde_json::Value = serde_json::from_str(&push.payload_json).unwrap();
+        assert_eq!(payload["room_id"], "room-test");
+        assert_eq!(payload["rollout_epoch"], "epoch-1");
+        assert_eq!(payload["reason"], "rollout");
+        assert_eq!(payload["message"], "Please leave after this match");
+        assert_eq!(payload["retry_after_ms"], 500);
+        assert_eq!(payload["deadline_ms"], 123_456);
+        assert!(drain_messages_of_type(&mut receivers[1], MessageType::GameMessagePush).is_empty());
+        assert!(drain_messages_of_type(&mut receivers[2], MessageType::GameMessagePush).is_empty());
+
+        let rooms = manager.rooms.lock().await;
+        let room = rooms.get("room-test").unwrap();
+        assert!(
+            room.members
+                .values()
+                .all(|member| member.close_state.reason().is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn rollout_drain_notice_counts_queue_failure_without_closing_connection() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_tx
+            .try_send(OutboundMessage {
+                message_type: MessageType::RoomStatePush,
+                seq: 0,
+                body: Vec::new(),
+            })
+            .unwrap();
+        let close_state = ConnectionCloseState::new();
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                OutboundChannel::new(full_tx, close_state.clone()),
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        let delivery = manager
+            .trigger_rollout_drain_notice(RolloutDrainNotice {
+                room_id: "room-test".to_string(),
+                rollout_epoch: "epoch-1".to_string(),
+                reason: "rollout".to_string(),
+                message: "Leave room".to_string(),
+                retry_after_ms: 0,
+                deadline_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            delivery,
+            RolloutDrainNoticeDelivery {
+                delivered_count: 0,
+                failed_count: 1,
+                online_member_count: 1,
+            }
+        );
+        assert_ne!(
+            close_state.reason().as_deref(),
             Some(SERVER_REDIRECT_CLOSE_REASON)
         );
     }
