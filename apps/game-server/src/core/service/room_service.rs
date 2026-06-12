@@ -1965,6 +1965,61 @@ mod tests {
         assert!(!services.room_manager.room_exists("room-match-new").await);
     }
 
+    #[tokio::test]
+    async fn drain_mode_room_end_does_not_create_or_return_to_default_room() {
+        let services = service_context_fixture(true).await;
+        let room_id = "room-drain-active";
+
+        for player_id in ["player-a", "player-b"] {
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            services
+                .room_manager
+                .join_room(
+                    room_id,
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+            services
+                .room_manager
+                .set_ready_state(room_id, player_id, true)
+                .await
+                .unwrap();
+        }
+
+        services
+            .room_manager
+            .start_game(room_id, "player-a")
+            .await
+            .unwrap();
+
+        let ended = services
+            .room_manager
+            .end_game(room_id, "player-a")
+            .await
+            .unwrap();
+
+        assert_eq!(ended.room_id, room_id);
+        assert_eq!(ended.state, "waiting");
+        assert!(services.room_manager.room_exists(room_id).await);
+        assert!(!services.room_manager.room_exists("room-default").await);
+        assert_eq!(services.room_manager.room_count().await, 1);
+
+        let default_room_decision = evaluate_drain_new_room_creation(
+            &services,
+            DrainRoomCreateKind::DefaultRoom,
+            "room-default",
+        )
+        .await;
+        assert!(matches!(
+            default_room_decision,
+            DrainNewRoomDecision::RejectNewRoom(_)
+        ));
+    }
+
     #[test]
     fn missing_input_timestamp_passes_when_not_required() {
         let runtime = runtime_config(false, 5000);

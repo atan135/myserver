@@ -176,8 +176,8 @@
 - [x] 为运营 / 玩法层预留“诱导玩家离房”的触发点。
   - [x] 广播提示
   - [x] 禁止新开局
-  - [ ] 对局结束后不再自动回默认房
-- 当前实现说明：`game-server` 已通过已鉴权 admin/internal 控制通道增加 `TriggerRolloutDrainNoticeReq/Res`，控制面或内部玩法编排可指定 `room_id` 和 `rollout_epoch`，向目标 room 当前在线且非同步中的成员下发既有玩家通道 `GameMessagePush`：`event="rollout_drain_notice"`、`action="leave_room"`，`payload_json` 包含 `room_id`、`rollout_epoch`、`reason`、`message`、`retry_after_ms`、`deadline_ms`。该触发点只负责结构化提示和投递计数审计，不会强制踢人、不会调用 redirect、不会自动 leave room，也不是同连接迁移或 old/new/proxy 真实集成联调；对局结束后不再自动回默认房仍需后续结合玩法/客户端流程继续收敛。
+  - [x] 对局结束后不再自动回默认房
+- 当前实现说明：`game-server` 已通过已鉴权 admin/internal 控制通道增加 `TriggerRolloutDrainNoticeReq/Res`，控制面或内部玩法编排可指定 `room_id` 和 `rollout_epoch`，向目标 room 当前在线且非同步中的成员下发既有玩家通道 `GameMessagePush`：`event="rollout_drain_notice"`、`action="leave_room"`，`payload_json` 包含 `room_id`、`rollout_epoch`、`reason`、`message`、`retry_after_ms`、`deadline_ms`。该触发点只负责结构化提示和投递计数审计，不会强制踢人、不会调用 redirect、不会自动 leave room，也不是同连接迁移或 old/new/proxy 真实集成联调。代码核查确认 `RoomEndReq -> handle_room_end -> RoomManager::end_game` 只结束当前 room 并返回当前 room 快照，不会隐式发起 `RoomJoinReq`，也不会创建或切回 `room-default`；drain 下缺失默认房仍由新房 gate 拒绝。已补 `room_service::tests::drain_mode_room_end_does_not_create_or_return_to_default_room` 锁定该契约。
 - [x] 为 `room` 进入“成员为空，可接管”状态增加关键日志:
   - 仅在 `leave_room` / `disconnect_room_member` 导致 room 从有在线成员变为 `online_member_count == 0` 时记录，避免重复离线或重复断连刷日志。
 - [x] 为“新房创建被 drain 拒绝”增加关键日志。
@@ -188,7 +188,7 @@
   - drain 下默认 room 创建被拒
   - drain 下已有 room join / reconnect 仍可成功
   - drain 下 matched room 创建被拒
-- 当前测试覆盖：`admin_server::tests::apply_runtime_config_updates_drain_mode*` 覆盖开关和 reason/source；`room_service::tests::drain_new_room_policy_*` 覆盖 drain off/on、默认 room / matched room 新建拒绝和已有 room 放行；`room_service::tests::create_matched_room_impl_rejects_internal_create_during_drain` 覆盖 internal matched-room 创建拒绝；`room_manager::tests::existing_room_runtime_paths_continue_for_drain_mode_contract` 覆盖已有 room 的 ready/start/input/tick/reconnect/observer/cleanup 运行契约；`room_manager::tests::rollout_drain_notice_*` 覆盖 room 在线成员提示投递、离线 / syncing 成员过滤和队列失败计数；`admin_server::tests::admin_rollout_drain_notice_*` 与 `internal_server::tests::*rollout_drain_notice*` 覆盖控制入口审计 target、写操作识别和非法包体错误响应。
+- 当前测试覆盖：`admin_server::tests::apply_runtime_config_updates_drain_mode*` 覆盖开关和 reason/source；`room_service::tests::drain_new_room_policy_*` 覆盖 drain off/on、默认 room / matched room 新建拒绝和已有 room 放行；`room_service::tests::create_matched_room_impl_rejects_internal_create_during_drain` 覆盖 internal matched-room 创建拒绝；`room_service::tests::drain_mode_room_end_does_not_create_or_return_to_default_room` 覆盖 drain 下对局结束路径不会创建或切回 `room-default`；`room_manager::tests::existing_room_runtime_paths_continue_for_drain_mode_contract` 覆盖已有 room 的 ready/start/input/tick/reconnect/observer/cleanup 运行契约；`room_manager::tests::rollout_drain_notice_*` 覆盖 room 在线成员提示投递、离线 / syncing 成员过滤和队列失败计数；`admin_server::tests::admin_rollout_drain_notice_*` 与 `internal_server::tests::*rollout_drain_notice*` 覆盖控制入口审计 target、写操作识别和非法包体错误响应。
 - [ ] 增加集成测试覆盖:
   - drain 开启后旧房仍能自然结束并排空
   - drain 开启后 `proxy` 不再把新房流量导入旧服
