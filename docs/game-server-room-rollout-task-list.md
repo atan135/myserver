@@ -10,7 +10,7 @@
 - 旧 room 必须冻结后才能导出
 - 未实现完整 transfer payload 的玩法暂不纳入灰度接管范围
 
-当前核对说明（截至 `2026-05-19`）:
+当前核对说明（截至 `2026-06-12`）:
 
 - `[x]` 表示仓库内已有明确代码或协议实现支撑。
 - `[ ]` 表示当前未见实现。
@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：完整玩法 payload、真实旧服状态联动、演练和旧服自动停止仍未完成；`game-proxy` 已具备基于 route store 的自动收尾入口。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；NPC / 行为树、独立 timer wheel / scheduler、真实三进程自动化联调、演练和旧服自动停止仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -99,7 +99,8 @@
 - [x] 为 `proxy` 增加基于 route store 的灰度结束检测:
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
-- [ ] 将旧服真实 `connection_count == 0` 纳入自动收尾/停服前校验。
+- [x] 将旧服真实 `connection_count == 0` 纳入自动收尾/停服前校验。
+  - 当前实现说明：`game-proxy` 的 `complete-if-drained` 可在 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 时通过 `auth-http` 内部接口查询旧服真实 drain status，只有 `connectionCount == 0`、`ownedRoomCount == 0`、`migratingRoomCount == 0` 且接口返回成功才结束 rollout；该能力默认关闭，失败时返回 `409 ROLLOUT_NOT_DRAINED` 并保留 rollout session，仍不等于控制面自动停止旧服进程。
 - [x] 为 `proxy` 增加关键日志:
   - room route 更新
   - player route 更新
@@ -244,7 +245,7 @@
   - checksum
 - [x] 导出失败时返回明确错误码。
 
-限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement/combat/NPC/timer 的完整数据填充仍是后续任务。
+限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement_demo 已支持 movement runtime transfer schema v1；combat_demo 已支持 combat runtime transfer schema v1，`pending_events` 不导出也不在导入后重放。NPC / 行为树和独立 timer wheel / scheduler 的完整数据填充仍是后续任务。
 
 ### 4.4 旧服退役接口
 
@@ -277,7 +278,7 @@
   - `checksum`
 - [x] 导入时校验 `room_id` 不冲突、snapshot/policy/owner/phase 等必要字段可用。
 - [x] 已接入 transfer 契约 schema/version 骨架和导入侧校验。
-- [ ] 后续补齐 movement/combat/NPC/timer 的完整玩法状态字段和兼容策略。
+- [ ] 后续补齐 NPC / 行为树、独立 timer wheel / scheduler 的完整运行态字段和兼容策略；movement_demo / combat_demo 后续只按 schema 演进继续补兼容策略。
 
 ### 5.2 owner 切换确认
 
@@ -354,7 +355,7 @@
 - `game-server` 已完成 room freeze/export/import/confirm/retire 的最小闭环，并有 `RoomManager` 单元测试覆盖。
 - 已新增独立 transfer 契约骨架，`RoomLogic` 通过 `RoomLogicTransfer` 导出/导入迁移状态。
 - 默认未实现迁移契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会再把轻量 `get_serialized_state()` 当完整迁移能力。
-- 尚未完成 movement/combat/NPC/timer 完整状态填充，也没有 proxy route 仲裁或同连接迁移。
+- movement_demo 已支持 movement runtime transfer schema v1 导出 / 导入并有一致性测试；combat_demo 已支持 combat runtime transfer schema v1 导出 / 导入并有一致性测试，`pending_events` 不导出也不在导入后重放。NPC / 行为树和独立 timer wheel / scheduler 仍未完成，也没有同连接迁移。
 
 ### 7.1 通用 payload 结构
 
@@ -538,12 +539,17 @@
 如果要先做一版最小可运行版本，建议最低交付范围为:
 
 - [x] `proxy` 已能按 room route 把 join / reconnect 请求送到旧服或新服。
-- [ ] 旧服已支持 redirect + 断线。
-- [ ] 旧服已支持空房 freeze/export。
-- [ ] 新服已支持 import 并接管同 `room_id`。
+- [x] 旧服已支持 redirect + 断线。
+  - 当前实现说明：`game-server` 已通过已鉴权 admin/internal 通道支持 `TriggerServerRedirectReq/Res`，下发 `ServerRedirectPush` 成功进入出站队列后会以 `server_redirect_reconnect_required` 请求关闭旧连接；这仍不是同连接迁移，也不代表外部 `mybevy` 已适配。
+- [x] 旧服已支持空房 freeze/export。
+  - 当前实现说明：`FreezeRoomForTransferReq/Res` 和 `ExportRoomTransferReq/Res` 已接入已鉴权 internal/admin 通道；freeze 只允许无在线成员 room，有人在线会拒绝，因此只覆盖空房 / 全员离线的低风险 transfer。
+- [x] 新服已支持 import 并接管同 `room_id`。
+  - 当前实现说明：`ImportRoomTransferReq/Res` 会校验 checksum、拒绝 `room_id` 冲突，并创建同 `room_id` 的 `OwnedByNew` room；后续 join / reconnect 会命中已接管 room，不是新建另一个 room。
 - [x] `proxy` 已能根据 route store 判定并自动结束灰度。
-- [ ] `proxy` / 控制面已能结合旧服真实状态决定停旧服。
-- [ ] 至少一个简单 room logic 已跑通完整接管链路。
+- [x] `proxy` / 控制面已能结合旧服真实状态决定停旧服。
+  - 当前实现说明：`PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 时，`complete-if-drained` 会在 route store 排空后继续校验旧服真实 `connectionCount/ownedRoomCount/migratingRoomCount` 全为 `0` 才结束 rollout；该能力默认关闭，只提供停服前最小阻断闭环，不会自动停止旧服进程。
+- [x] 至少一个简单 room logic 已跑通完整接管链路。
+  - 当前实现说明：`tools/mock-client` 显式编排已覆盖 old freeze/export -> new import -> new confirm ownership -> proxy route upsert -> old retire；movement_demo / combat_demo 已支持 transfer schema v1 导出导入并有一致性测试。该结论不等于真实 old/new/proxy 三进程自动化联调已经完成。
 
 ## 13. 暂缓项
 
