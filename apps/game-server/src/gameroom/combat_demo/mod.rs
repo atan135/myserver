@@ -5,13 +5,14 @@ use tracing::info;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{
     ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicBroadcast, RoomLogicTransfer,
-    RoomLogicTransferState, RoomRuntimeTimerTransferState, RoomSchedulerTransferEntry,
-    RoomTimerTransferEntry,
+    RoomLogicTransferState, RoomNpcTransferEntity, RoomNpcTransferPosition,
+    RoomNpcTransferSkillState, RoomNpcTransferState, RoomRuntimeTimerTransferState,
+    RoomSchedulerTransferEntry, RoomTimerTransferEntry,
 };
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::combat::{
-    CombatCommandResult, CombatEntityBlueprint, CombatEvent, CombatEventKind, CombatSnapshot,
-    NoopCombatHooks, Position, RoomCombatEcs, parse_player_input,
+    CombatCommandResult, CombatEntityBlueprint, CombatEntitySnapshot, CombatEvent, CombatEventKind,
+    CombatSnapshot, EntityType, NoopCombatHooks, Position, RoomCombatEcs, parse_player_input,
 };
 use crate::pb::GameMessagePush;
 use crate::protocol::{MessageType, encode_body};
@@ -253,6 +254,98 @@ impl CombatDemoLogic {
         self.next_snapshot_frame = snapshot_scheduler.next_frame;
         Ok(())
     }
+
+    fn export_npc_transfer_state_json(&self) -> Result<String, &'static str> {
+        let mut npc_state = RoomNpcTransferState::new();
+        npc_state.metadata.insert(
+            "ownerKind".to_string(),
+            serde_json::json!("combat-demo.training-dummies"),
+        );
+        npc_state.metadata.insert(
+            "contractScope".to_string(),
+            serde_json::json!("structured-runtime-skeleton"),
+        );
+
+        for entity in self.npc_snapshot_entities() {
+            let Some(entity_kind) = npc_transfer_entity_kind(entity.entity_type) else {
+                continue;
+            };
+            let mut npc_entity = RoomNpcTransferEntity::new(
+                entity.entity_id,
+                entity_kind,
+                RoomNpcTransferPosition {
+                    x: entity.x,
+                    y: entity.y,
+                },
+                entity.hp,
+                entity.max_hp,
+                "training_dummy.idle",
+            );
+            npc_entity.skill_cooldowns = entity
+                .skills
+                .iter()
+                .map(|skill| RoomNpcTransferSkillState {
+                    skill_id: skill.skill_id,
+                    cooldown_remaining: skill.cooldown_remaining,
+                })
+                .collect();
+            npc_state.entities.push(npc_entity);
+        }
+
+        npc_state.to_json()
+    }
+
+    fn npc_snapshot_entities(&self) -> Vec<CombatEntitySnapshot> {
+        let config = self.config_tables.current_snapshot();
+        let snapshot = self.combat.snapshot(
+            self.combat.last_tick_frame(),
+            config.combat_catalog.as_ref(),
+        );
+        snapshot
+            .entities
+            .into_iter()
+            .filter(|entity| npc_transfer_entity_kind(entity.entity_type).is_some())
+            .collect()
+    }
+
+    fn validate_imported_npc_transfer_state(
+        &self,
+        state: &RoomLogicTransferState,
+    ) -> Result<(), &'static str> {
+        let npc_state = RoomNpcTransferState::from_json(&state.npc_state_json)?;
+        let combat_entities = self.npc_snapshot_entities();
+        if npc_state.entities.len() != combat_entities.len() {
+            return Err("ROOM_TRANSFER_INVALID_NPC_STATE");
+        }
+
+        for npc_entity in &npc_state.entities {
+            let combat_entity = combat_entities
+                .iter()
+                .find(|entity| entity.entity_id == npc_entity.entity_id)
+                .ok_or("ROOM_TRANSFER_INVALID_NPC_STATE")?;
+            let Some(entity_kind) = npc_transfer_entity_kind(combat_entity.entity_type) else {
+                return Err("ROOM_TRANSFER_INVALID_NPC_STATE");
+            };
+            if npc_entity.entity_kind != entity_kind
+                || npc_entity.position.x != combat_entity.x
+                || npc_entity.position.y != combat_entity.y
+                || npc_entity.hp != combat_entity.hp
+                || npc_entity.max_hp != combat_entity.max_hp
+            {
+                return Err("ROOM_TRANSFER_INVALID_NPC_STATE");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn npc_transfer_entity_kind(entity_type: EntityType) -> Option<&'static str> {
+    match entity_type {
+        EntityType::Npc => Some("npc"),
+        EntityType::Monster => Some("monster"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,7 +504,7 @@ impl RoomLogicTransfer for CombatDemoLogic {
                 .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?,
             movement_state_json: String::new(),
             combat_state_json: self.combat.export_transfer_state_json()?,
-            npc_state_json: String::new(),
+            npc_state_json: self.export_npc_transfer_state_json()?,
             timer_state_json,
         })
     }
@@ -457,6 +550,7 @@ impl RoomLogicTransfer for CombatDemoLogic {
         self.next_snapshot_frame = logic_state.next_snapshot_frame;
         self.roster = logic_state.roster;
         self.combat = combat;
+        self.validate_imported_npc_transfer_state(state)?;
         self.import_timer_transfer_state(state)?;
         self.pending_broadcasts.clear();
 
@@ -515,6 +609,27 @@ mod tests {
 
         let exported = source.export_transfer_state().unwrap();
         let timer_state = exported.timer_transfer_state().unwrap().unwrap();
+        let npc_state = RoomNpcTransferState::from_json(&exported.npc_state_json).unwrap();
+        assert_eq!(npc_state.schema, "room-transfer.npc-state.v1");
+        assert_eq!(npc_state.entities.len(), 2);
+        assert!(npc_state.entities.iter().all(|entity| {
+            entity.entity_kind == "monster" && entity.behavior_node == "training_dummy.idle"
+        }));
+        assert_eq!(npc_state.entities[0].entity_id, 2);
+        assert_eq!(npc_state.entities[0].position.x, 120.0);
+        assert_eq!(npc_state.entities[0].position.y, -16.0);
+        assert_eq!(npc_state.entities[0].hp, 150);
+        assert_eq!(npc_state.entities[0].max_hp, 150);
+        assert_eq!(
+            npc_state.entities[0]
+                .skill_cooldowns
+                .iter()
+                .map(|skill| skill.skill_id)
+                .collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+        assert!(npc_state.entities[0].blackboard.is_empty());
+        assert!(npc_state.entities[0].threat_entries.is_empty());
         assert_eq!(timer_state.runtime_summary.owner_kind, "combat-demo");
         assert_eq!(
             timer_state.scheduler_entries[0].next_frame,
@@ -542,5 +657,56 @@ mod tests {
         });
         assert!(scheduled_after_import);
         assert_eq!(imported.next_snapshot_frame, SNAPSHOT_INTERVAL_FRAMES * 3);
+    }
+
+    #[test]
+    fn transfer_state_rejects_invalid_npc_state_contract() {
+        let mut source = CombatDemoLogic::new(config_tables());
+        source.on_room_created("room-combat-transfer");
+        source.on_player_join("player-a");
+        source.on_game_started("room-combat-transfer");
+        source.on_tick(1, 20, &[]);
+
+        let exported = source.export_transfer_state().unwrap();
+
+        let mut unsupported_schema = exported.clone();
+        let mut npc_json =
+            serde_json::from_str::<serde_json::Value>(&unsupported_schema.npc_state_json).unwrap();
+        npc_json["schema"] = serde_json::json!("room-transfer.npc-state.v2");
+        unsupported_schema.npc_state_json = npc_json.to_string();
+        let mut imported = CombatDemoLogic::new(config_tables());
+        imported.on_room_created("room-combat-transfer");
+        assert_eq!(
+            imported.import_transfer_state(&unsupported_schema),
+            Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")
+        );
+
+        let mut duplicate_entity = exported.clone();
+        let mut npc_json =
+            serde_json::from_str::<serde_json::Value>(&duplicate_entity.npc_state_json).unwrap();
+        let first_entity = npc_json["entities"][0].clone();
+        npc_json["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(first_entity);
+        duplicate_entity.npc_state_json = npc_json.to_string();
+        let mut imported = CombatDemoLogic::new(config_tables());
+        imported.on_room_created("room-combat-transfer");
+        assert_eq!(
+            imported.import_transfer_state(&duplicate_entity),
+            Err("ROOM_TRANSFER_INVALID_NPC_STATE")
+        );
+
+        let mut mismatched_entity = exported;
+        let mut npc_json =
+            serde_json::from_str::<serde_json::Value>(&mismatched_entity.npc_state_json).unwrap();
+        npc_json["entities"][0]["hp"] = serde_json::json!(149);
+        mismatched_entity.npc_state_json = npc_json.to_string();
+        let mut imported = CombatDemoLogic::new(config_tables());
+        imported.on_room_created("room-combat-transfer");
+        assert_eq!(
+            imported.import_transfer_state(&mismatched_entity),
+            Err("ROOM_TRANSFER_INVALID_NPC_STATE")
+        );
     }
 }

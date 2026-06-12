@@ -10,7 +10,7 @@ use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::{debug, info, warn};
 
 use crate::core::logic::{
-    ROOM_TRANSFER_SCHEMA_VERSION, RoomLogicBroadcast, RoomLogicTransferState,
+    ROOM_TRANSFER_SCHEMA_VERSION, RoomLogicBroadcast, RoomLogicTransferState, RoomNpcTransferState,
     RoomRuntimeTimerTransferState, SharedRoomLogicFactory, UNSUPPORTED_ROOM_TRANSFER,
 };
 use crate::core::room::{
@@ -4560,15 +4560,6 @@ mod tests {
         };
         let source_player_b = combat_demo_entity_by_player(&source_game_state, "player-b");
         let source_player_b_hp = source_player_b["hp"].as_i64().unwrap();
-        let source_dummy_x = source_game_state["snapshot"]["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entity| entity["entity_id"] == 3)
-            .unwrap()["x"]
-            .as_f64()
-            .unwrap();
-
         source
             .disconnect_room_member("room-combat-transfer", "player-a")
             .await;
@@ -4590,6 +4581,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&transfer_state.logic_state_json).unwrap();
         let combat_json =
             serde_json::from_str::<serde_json::Value>(&transfer_state.combat_state_json).unwrap();
+        let npc_state = RoomNpcTransferState::from_json(&transfer_state.npc_state_json).unwrap();
         let timer_state =
             RoomRuntimeTimerTransferState::from_json(&transfer_state.timer_state_json).unwrap();
 
@@ -4625,6 +4617,56 @@ mod tests {
             0
         );
         assert!(combat_json["move_states"][2]["progress"].as_f64().unwrap() < 1.0);
+        assert_eq!(npc_state.schema, "room-transfer.npc-state.v1");
+        assert_eq!(npc_state.entities.len(), 2);
+        let npc_dummy = npc_state
+            .entities
+            .iter()
+            .find(|entity| entity.entity_id == 3)
+            .expect("dummy npc transfer entity should exist");
+        let combat_dummy_index = combat_json["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|entity| entity["entity_id"] == 3)
+            .expect("dummy combat transfer entity should exist");
+        let exported_dummy_x = combat_json["positions_x"][combat_dummy_index]
+            .as_f64()
+            .unwrap();
+        let exported_dummy_y = combat_json["positions_y"][combat_dummy_index]
+            .as_f64()
+            .unwrap();
+        assert_eq!(npc_dummy.entity_kind, "monster");
+        assert_eq!(npc_dummy.behavior_node, "training_dummy.idle");
+        assert_eq!(npc_dummy.position.x, exported_dummy_x as f32);
+        assert_eq!(npc_dummy.position.y, exported_dummy_y as f32);
+        assert_eq!(
+            i64::from(npc_dummy.hp),
+            combat_json["healths"][combat_dummy_index]["current"]
+                .as_i64()
+                .unwrap()
+        );
+        assert_eq!(
+            i64::from(npc_dummy.max_hp),
+            combat_json["healths"][combat_dummy_index]["max"]
+                .as_i64()
+                .unwrap()
+        );
+        assert!(npc_dummy.target_entity_id.is_none());
+        assert!(npc_dummy.threat_entries.is_empty());
+        assert!(npc_dummy.blackboard.is_empty());
+        assert!(npc_dummy.context.is_empty());
+        assert!(npc_dummy.rng_state.is_none());
+        assert!(npc_dummy.path.waypoints.is_empty());
+        assert!(npc_dummy.wait_timer.is_none());
+        assert_eq!(
+            npc_dummy
+                .skill_cooldowns
+                .iter()
+                .map(|skill| (skill.skill_id, skill.cooldown_remaining))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (5, 0)]
+        );
         assert_eq!(timer_state.runtime_summary.owner_kind, "combat-demo");
         assert_eq!(timer_state.runtime_summary.logical_frame, 2);
         assert_eq!(timer_state.runtime_summary.logical_tick, 2);
@@ -4704,7 +4746,7 @@ mod tests {
                 .iter()
                 .find(|entity| entity["entity_id"] == 3)
                 .unwrap();
-            assert!(dummy["x"].as_f64().unwrap() > source_dummy_x);
+            assert!(dummy["x"].as_f64().unwrap() > exported_dummy_x);
         }
 
         let mut invalid_json_payload = payload.clone();
@@ -4727,16 +4769,70 @@ mod tests {
             Err("ROOM_TRANSFER_INVALID_COMBAT_STATE")
         );
 
+        let mut mismatched_npc_payload = payload.clone();
+        let mut logic_wrapper =
+            serde_json::from_str::<serde_json::Value>(&mismatched_npc_payload.logic_state_json)
+                .unwrap();
+        let mut npc_inner = serde_json::from_str::<serde_json::Value>(
+            logic_wrapper["npcStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        npc_inner["entities"][0]["position"]["x"] = serde_json::json!(999.0);
+        logic_wrapper["npcStateJson"] = serde_json::json!(npc_inner.to_string());
+        mismatched_npc_payload.logic_state_json = logic_wrapper.to_string();
+        mismatched_npc_payload.checksum = room_transfer_checksum(&mismatched_npc_payload);
+        let mismatched_npc_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables.clone())),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        assert_eq!(
+            mismatched_npc_target
+                .import_room_transfer(mismatched_npc_payload)
+                .await,
+            Err("ROOM_TRANSFER_INVALID_NPC_STATE")
+        );
+
+        let mut duplicate_npc_payload = payload.clone();
+        let mut logic_wrapper =
+            serde_json::from_str::<serde_json::Value>(&duplicate_npc_payload.logic_state_json)
+                .unwrap();
+        let mut npc_inner = serde_json::from_str::<serde_json::Value>(
+            logic_wrapper["npcStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        let first_entity = npc_inner["entities"][0].clone();
+        npc_inner["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(first_entity);
+        logic_wrapper["npcStateJson"] = serde_json::json!(npc_inner.to_string());
+        duplicate_npc_payload.logic_state_json = logic_wrapper.to_string();
+        duplicate_npc_payload.checksum = room_transfer_checksum(&duplicate_npc_payload);
+        let duplicate_npc_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables.clone())),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        assert_eq!(
+            duplicate_npc_target
+                .import_room_transfer(duplicate_npc_payload)
+                .await,
+            Err("ROOM_TRANSFER_INVALID_NPC_STATE")
+        );
+
         let mut unsupported_schema_payload = payload;
         let mut logic_wrapper =
             serde_json::from_str::<serde_json::Value>(&unsupported_schema_payload.logic_state_json)
                 .unwrap();
-        let mut combat_inner = serde_json::from_str::<serde_json::Value>(
-            logic_wrapper["combatStateJson"].as_str().unwrap(),
+        let mut npc_inner = serde_json::from_str::<serde_json::Value>(
+            logic_wrapper["npcStateJson"].as_str().unwrap(),
         )
         .unwrap();
-        combat_inner["schemaVersion"] = serde_json::json!(2);
-        logic_wrapper["combatStateJson"] = serde_json::json!(combat_inner.to_string());
+        npc_inner["schemaVersion"] = serde_json::json!(2);
+        logic_wrapper["npcStateJson"] = serde_json::json!(npc_inner.to_string());
         unsupported_schema_payload.logic_state_json = logic_wrapper.to_string();
         unsupported_schema_payload.checksum = room_transfer_checksum(&unsupported_schema_payload);
         let unsupported_schema_target = RoomManager::with_policy_registry_and_cleanup_interval(

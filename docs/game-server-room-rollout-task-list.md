@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口和故障演练脚本入口已具备，但本次未实际执行真实三进程联调或真实三进程故障联调；NPC / 行为树、真实独立 timer wheel / scheduler、真实三进程自动化联调准入、完整故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；combat ECS 已在 `combat_state_json` 中迁移玩家与怪物基础 ECS 数据，`npc_state_json` 已增加 `room-transfer.npc-state.v1` 结构化运行态契约骨架，并在 combat_demo 中导出 training dummy / Monster 的 demo 级 NPC 状态且导入时与 combat ECS 交叉校验；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口和故障演练脚本入口已具备，但本次未实际执行真实三进程联调或真实三进程故障联调；完整行为树恢复、真实 AI timer/path/RNG 恢复、真实独立 timer wheel / scheduler、真实三进程自动化联调准入、完整故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -245,7 +245,7 @@
   - checksum
 - [x] 导出失败时返回明确错误码。
 
-限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement_demo 已支持 movement runtime transfer schema v1；combat_demo 已支持 combat runtime transfer schema v1，`pending_events` 不导出也不在导入后重放。room runtime timer/scheduler 已有 `room-transfer.runtime-timer-state.v1` 内层结构化契约和 `room-transfer.runtime-timers.v1` wrapper 校验；combat_demo 当前只填充 demo 级周期快照 scheduler，不代表真实独立 timer wheel。NPC / 行为树和真实独立 timer wheel / scheduler 的完整数据填充仍是后续任务。
+限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement_demo 已支持 movement runtime transfer schema v1；combat_demo 已支持 combat runtime transfer schema v1，`pending_events` 不导出也不在导入后重放。combat_demo 还会把 training dummy / Monster 导出到 `room-transfer.npc-state.v1`，包含位置、血量、demo 级行为节点占位、空 threat/blackboard/path 和技能冷却，并在导入时与 `combat_state_json` 恢复出的 ECS 实体交叉校验。room runtime timer/scheduler 已有 `room-transfer.runtime-timer-state.v1` 内层结构化契约和 `room-transfer.runtime-timers.v1` wrapper 校验；combat_demo 当前只填充 demo 级周期快照 scheduler，不代表真实独立 timer wheel。完整行为树、AI timer、路径和 RNG 恢复，以及真实独立 timer wheel / scheduler 的完整数据填充仍是后续任务。
 
 ### 4.4 旧服退役接口
 
@@ -389,12 +389,12 @@
 
 ### 7.4 NPC / 怪物 / 行为树
 
-- [ ] 为 NPC / 怪物定义可导出的运行态结构。
-- [ ] 导出怪物当前位置、血量、目标、仇恨、技能状态。
-- [ ] 导出行为树当前节点。
-- [ ] 导出行为树黑板或上下文变量。
-- [ ] 导出 AI 定时器、等待状态、路径状态、RNG 状态。
-- [ ] 导入后从相同运行点继续，而不是重新初始化。
+- [x] 为 NPC / 怪物定义可导出的运行态结构。
+- [x] 导出怪物当前位置、血量和技能基础状态；目标、仇恨当前为可校验空列表 / 空字段占位，真实 AI 填充未完成。
+- [ ] 导出行为树当前节点。部分完成：`combat_demo` 仅填充 demo 级 `training_dummy.idle` 占位，不代表真实行为树恢复点。
+- [ ] 导出行为树黑板或上下文变量。部分完成：契约已有 `blackboard` / `context` map 且会校验基础合法性，`combat_demo` 目前为空。
+- [ ] 导出 AI 定时器、等待状态、路径状态、RNG 状态。部分完成：契约已有 `waitTimer` / `path` / `rngState` 字段占位，`combat_demo` 目前未填充真实运行态。
+- [ ] 导入后从相同运行点继续，而不是重新初始化。部分完成：`combat_demo` 会校验 `npc_state_json` 与 `combat_state_json` 中恢复出的 Monster entity id、类型、位置、血量一致，并可继续 tick；完整行为树 / AI timer / path / RNG 仍未恢复。
 
 ### 7.5 定时器与一致性
 
@@ -403,7 +403,7 @@
 - [x] 至少一个 demo logic 导入后恢复等价 scheduler 运行态。
 - [ ] 真实独立 timer wheel / scheduler 抽象与通用重建。
 
-当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已锁定 transfer freeze 后停止 `RoomRuntime` tick handle / `tick_running`，清空 `wait_started_at`，且冻结/导出状态下 `process_room_tick` 不再推进 room 时间。`runtime_timers_json` 已收敛为 `room-transfer.runtime-timers.v1` wrapper，并校验 `schemaVersion`、内层 `timerStateJson` 契约和 `runtimeSummary` 基础字段。`apps/game-server/src/core/logic/room_logic.rs` 已提供 `RoomRuntimeTimerTransferState`，内层 schema 为 `room-transfer.runtime-timer-state.v1`，可表达 `runtimeSummary`、可选 `timerEntries`、可选 `schedulerEntries` 和 metadata。combat_demo 已导出 demo 级周期快照 scheduler，并在导入后恢复 `next_snapshot_frame` 继续运行同一调度点。当前仓库仍没有真实独立 room timer wheel / scheduler 抽象，因此这里完成的是结构化契约骨架和至少一个 demo 的等价运行态 roundtrip，不代表 NPC/行为树/AI timer wheel 已完整迁移。
+当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已锁定 transfer freeze 后停止 `RoomRuntime` tick handle / `tick_running`，清空 `wait_started_at`，且冻结/导出状态下 `process_room_tick` 不再推进 room 时间。`runtime_timers_json` 已收敛为 `room-transfer.runtime-timers.v1` wrapper，并校验 `schemaVersion`、内层 `timerStateJson` 契约和 `runtimeSummary` 基础字段。`apps/game-server/src/core/logic/room_logic.rs` 已提供 `RoomRuntimeTimerTransferState`，内层 schema 为 `room-transfer.runtime-timer-state.v1`，可表达 `runtimeSummary`、可选 `timerEntries`、可选 `schedulerEntries` 和 metadata；同文件也提供 `RoomNpcTransferState`，schema 为 `room-transfer.npc-state.v1`，用于表达 NPC / Monster entity id、kind、position、hp/max hp、target、threat、demo/真实行为节点、blackboard/context、rng、path、wait timer 和技能冷却。combat_demo 已导出 demo 级周期快照 scheduler，并在导入后恢复 `next_snapshot_frame` 继续运行同一调度点；也会导出 training dummy / Monster 的 demo 级 NPC 状态，并在导入后与 combat ECS 状态交叉校验。当前仓库仍没有真实独立 room timer wheel / scheduler 抽象，也没有完整行为树引擎迁移，因此这里完成的是结构化契约骨架和至少一个 demo 的等价运行态 roundtrip，不代表行为树 / AI timer / path / RNG 已完整迁移。
 
 完成标准:
 
@@ -504,8 +504,8 @@
 
 - [x] movement room 导出导入一致性测试。
 - [x] combat room 导出导入一致性测试。
-- [ ] NPC / 怪物状态一致性测试。
-- [ ] 行为树恢复点一致性测试。
+- [x] NPC / 怪物状态一致性测试。
+- [ ] 行为树恢复点一致性测试。部分完成：已有 demo 级 `behaviorNode` 占位校验，未覆盖真实行为树恢复。
 
 ### 9.4 故障演练
 
@@ -559,6 +559,8 @@
 6. 客户端 redirect + reconnect
 7. movement/combat 的 transfer payload
 8. NPC / 怪物 / 行为树迁移
+
+  - 当前已完成结构化 `npc_state_json` 契约骨架和 combat_demo training dummy / Monster 示例，但完整行为树、AI timer、路径和 RNG 恢复仍未完成。
 9. 自动化测试和演练脚本
 
 ## 12. 当前阶段的最低可交付版本

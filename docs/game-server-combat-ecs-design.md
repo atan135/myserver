@@ -467,6 +467,14 @@ for event in events {
 }
 ```
 
+### 7.3 迁移状态边界
+
+当前 `RoomCombatEcs` 的 `combat_state_json` 使用 `room-combat-ecs.v1`，导出所有 ECS 实体的基础战斗状态，包括玩家和 Monster 的 entity meta、位置、朝向、血量、基础属性、移动状态、技能冷却、Buff slot、玩家实体映射和待处理技能请求。`pending_events` 不迁移，避免导入后重复广播已经产生过的副作用。
+
+NPC / Monster 的非玩家运行态通过 `RoomLogicTransferState.npc_state_json` 承载，当前通用 schema 为 `room-transfer.npc-state.v1`。该契约可表达 entity id、entity kind、position、hp/max hp、target、threat/aggro、behavior node、blackboard/context、rng、path、wait timer 和技能冷却。`combat_demo` 目前只把 training dummy / Monster 导出为 demo 级 `training_dummy.idle`，并在导入时与 `combat_state_json` 恢复出的 ECS 实体做 entity id、类型、位置和血量一致性校验。
+
+这仍是生产方向的运行态契约骨架，不代表完整行为树引擎、AI timer、路径推进或 RNG 状态已经恢复；后续真实 AI 系统接入时应在该 schema 下补齐具体字段含义和版本兼容策略。
+
 ---
 
 ## 8. 性能优化
