@@ -3181,6 +3181,18 @@ mod tests {
         messages
     }
 
+    fn combat_demo_entity_by_player<'a>(
+        game_state: &'a serde_json::Value,
+        player_id: &str,
+    ) -> &'a serde_json::Value {
+        game_state["snapshot"]["entities"]
+            .as_array()
+            .expect("combat demo snapshot should contain entities")
+            .iter()
+            .find(|entity| entity["player_id"].as_str() == Some(player_id))
+            .expect("combat demo player entity should exist")
+    }
+
     #[tokio::test]
     async fn room_exists_reflects_room_creation() {
         let factory = RecordingRoomLogicFactory::default();
@@ -4184,6 +4196,289 @@ mod tests {
         movement_inner["schemaVersion"] = serde_json::json!(2);
         movement_wrapper["movementStateJson"] = serde_json::json!(movement_inner.to_string());
         unsupported_schema_payload.movement_state_json = movement_wrapper.to_string();
+        unsupported_schema_payload.checksum = room_transfer_checksum(&unsupported_schema_payload);
+        let unsupported_schema_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables)),
+            SharedRoomPolicyRegistry::default(),
+            3600,
+        );
+        assert_eq!(
+            unsupported_schema_target
+                .import_room_transfer(unsupported_schema_payload)
+                .await,
+            Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")
+        );
+    }
+
+    #[tokio::test]
+    async fn combat_demo_transfer_restores_combat_payload_consistently() {
+        let config_tables = crate::core::config_table::ConfigTableRuntime::load_with_scene_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+        )
+        .expect("game-server csv fixture should load");
+        let factory = Arc::new(GameRoomLogicFactory::new(config_tables.clone()));
+        let source = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            factory.clone(),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+
+        let (tx_a, _rx_a) = mpsc::channel(1024);
+        source
+            .join_room(
+                "room-combat-transfer",
+                "player-a",
+                tx_a,
+                MemberRole::Player,
+                Some("combat_demo"),
+            )
+            .await
+            .unwrap();
+        let (tx_b, _rx_b) = mpsc::channel(1024);
+        source
+            .join_room(
+                "room-combat-transfer",
+                "player-b",
+                tx_b,
+                MemberRole::Player,
+                Some("combat_demo"),
+            )
+            .await
+            .unwrap();
+        source
+            .set_ready_state("room-combat-transfer", "player-a", true)
+            .await
+            .unwrap();
+        source
+            .set_ready_state("room-combat-transfer", "player-b", true)
+            .await
+            .unwrap();
+        source
+            .start_game("room-combat-transfer", "player-a")
+            .await
+            .unwrap();
+        {
+            let mut runtimes = source.runtimes.lock().await;
+            if let Some(runtime) = runtimes.get_mut("room-combat-transfer") {
+                if let Some(handle) = runtime.tick_handle.take() {
+                    handle.abort();
+                }
+                runtime.tick_running = false;
+            }
+        }
+
+        source
+            .accept_player_input(
+                "room-combat-transfer",
+                "player-a",
+                1,
+                "combat_cast_skill",
+                "{\"skillId\":4,\"targetEntityId\":3}",
+            )
+            .await
+            .unwrap();
+        source
+            .process_room_tick("room-combat-transfer", 20)
+            .await
+            .unwrap();
+        source
+            .accept_player_input(
+                "room-combat-transfer",
+                "player-a",
+                2,
+                "combat_apply_buff",
+                "{\"buffId\":2,\"targetPlayerId\":\"player-b\",\"durationFrames\":77}",
+            )
+            .await
+            .unwrap();
+        source
+            .process_room_tick("room-combat-transfer", 20)
+            .await
+            .unwrap();
+        source
+            .accept_player_input(
+                "room-combat-transfer",
+                "player-a",
+                3,
+                "combat_cast_skill",
+                "{\"skillId\":2,\"targetPlayerId\":\"player-b\"}",
+            )
+            .await
+            .unwrap();
+
+        let source_game_state = {
+            let rooms = source.rooms.lock().await;
+            let room = rooms
+                .get("room-combat-transfer")
+                .expect("source room should exist");
+            serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap()
+        };
+        let source_player_b = combat_demo_entity_by_player(&source_game_state, "player-b");
+        let source_player_b_hp = source_player_b["hp"].as_i64().unwrap();
+        let source_dummy_x = source_game_state["snapshot"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["entity_id"] == 3)
+            .unwrap()["x"]
+            .as_f64()
+            .unwrap();
+
+        source
+            .disconnect_room_member("room-combat-transfer", "player-a")
+            .await;
+        source
+            .disconnect_room_member("room-combat-transfer", "player-b")
+            .await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-combat-transfer")
+            .await
+            .unwrap();
+
+        let payload = source
+            .export_room_transfer("epoch-1", "room-combat-transfer")
+            .await
+            .unwrap();
+        let checksum = payload.checksum.clone();
+        let transfer_state = room_transfer_state_from_payload(&payload).unwrap();
+        let logic_json =
+            serde_json::from_str::<serde_json::Value>(&transfer_state.logic_state_json).unwrap();
+        let combat_json =
+            serde_json::from_str::<serde_json::Value>(&transfer_state.combat_state_json).unwrap();
+
+        assert_eq!(logic_json["schema"], "combat-demo.logic.v1");
+        assert_eq!(logic_json["tick_count"], 2);
+        assert_eq!(
+            logic_json["roster"],
+            serde_json::json!(["player-a", "player-b"])
+        );
+        assert_eq!(combat_json["schema"], "room-combat-ecs.v1");
+        assert_eq!(combat_json["last_tick_frame"], 2);
+        assert_eq!(combat_json["pending_events_replayed"], false);
+        assert!(combat_json.get("pending_events").is_none());
+        assert_eq!(combat_json["entities"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            combat_json["player_entity_map"],
+            serde_json::json!([
+                {"player_id": "player-a", "entity_id": 1},
+                {"player_id": "player-b", "entity_id": 2}
+            ])
+        );
+        assert_eq!(combat_json["skill_slots"][0][3]["skill_id"], 4);
+        assert_eq!(combat_json["skill_slots"][0][3]["cooldown_remaining"], 59);
+        assert_eq!(combat_json["buff_slots"][1][0]["buff_id"], 2);
+        assert_eq!(combat_json["buff_slots"][1][0]["duration_remaining"], 76);
+        assert_eq!(combat_json["buff_slots"][1][0]["source_entity"], 1);
+        assert_eq!(
+            combat_json["pending_skill_requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(combat_json["move_states"][2]["progress"].as_f64().unwrap() < 1.0);
+
+        let target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            factory,
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        let imported = target.import_room_transfer(payload.clone()).await.unwrap();
+        assert_eq!(imported.0, checksum);
+
+        {
+            let rooms = target.rooms.lock().await;
+            let room = rooms
+                .get("room-combat-transfer")
+                .expect("target room should exist");
+            assert_eq!(room.current_frame, 2);
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
+            let imported_game_state =
+                serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
+            assert_eq!(imported_game_state, source_game_state);
+        }
+
+        let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
+        target
+            .reconnect_room("room-combat-transfer", "player-a", reconnect_a_tx)
+            .await
+            .unwrap();
+        let (reconnect_b_tx, _reconnect_b_rx) = mpsc::channel(1024);
+        target
+            .reconnect_room("room-combat-transfer", "player-b", reconnect_b_tx)
+            .await
+            .unwrap();
+        target
+            .process_room_tick("room-combat-transfer", 20)
+            .await
+            .unwrap();
+
+        {
+            let rooms = target.rooms.lock().await;
+            let room = rooms
+                .get("room-combat-transfer")
+                .expect("target room should exist");
+            assert_eq!(room.current_frame, 3);
+            let advanced_game_state =
+                serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
+            assert_eq!(advanced_game_state["tick_count"], 3);
+            assert_eq!(advanced_game_state["snapshot"]["frame_id"], 3);
+            let player_a = combat_demo_entity_by_player(&advanced_game_state, "player-a");
+            let fireball = player_a["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|skill| skill["skill_id"] == 2)
+                .expect("fireball skill should exist");
+            assert_eq!(fireball["cooldown_remaining"], 90);
+            let player_b = combat_demo_entity_by_player(&advanced_game_state, "player-b");
+            assert!(player_b["hp"].as_i64().unwrap() < source_player_b_hp);
+            assert_eq!(player_b["buffs"][0]["buff_id"], 2);
+            assert_eq!(player_b["buffs"][0]["duration_remaining"], 75);
+            let dummy = advanced_game_state["snapshot"]["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entity| entity["entity_id"] == 3)
+                .unwrap();
+            assert!(dummy["x"].as_f64().unwrap() > source_dummy_x);
+        }
+
+        let mut invalid_json_payload = payload.clone();
+        let mut logic_wrapper =
+            serde_json::from_str::<serde_json::Value>(&invalid_json_payload.logic_state_json)
+                .unwrap();
+        logic_wrapper["combatStateJson"] = serde_json::json!("{bad");
+        invalid_json_payload.logic_state_json = logic_wrapper.to_string();
+        invalid_json_payload.checksum = room_transfer_checksum(&invalid_json_payload);
+        let invalid_json_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables.clone())),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        assert_eq!(
+            invalid_json_target
+                .import_room_transfer(invalid_json_payload)
+                .await,
+            Err("ROOM_TRANSFER_INVALID_COMBAT_STATE")
+        );
+
+        let mut unsupported_schema_payload = payload;
+        let mut logic_wrapper =
+            serde_json::from_str::<serde_json::Value>(&unsupported_schema_payload.logic_state_json)
+                .unwrap();
+        let mut combat_inner = serde_json::from_str::<serde_json::Value>(
+            logic_wrapper["combatStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        combat_inner["schemaVersion"] = serde_json::json!(2);
+        logic_wrapper["combatStateJson"] = serde_json::json!(combat_inner.to_string());
+        unsupported_schema_payload.logic_state_json = logic_wrapper.to_string();
         unsupported_schema_payload.checksum = room_transfer_checksum(&unsupported_schema_payload);
         let unsupported_schema_target = RoomManager::with_policy_registry_and_cleanup_interval(
             crate::match_client::create_match_client_shared(),

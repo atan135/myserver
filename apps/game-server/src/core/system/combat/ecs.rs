@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::buffs::BuffEffectType;
 use super::catalog::CombatCatalog;
@@ -13,6 +14,10 @@ use super::skills::{SkillDefinition, SkillEffect, SkillEffectType, SkillTargetTy
 pub const MAX_ENTITIES: usize = 2048;
 pub const MAX_SKILLS_PER_ENTITY: usize = 8;
 pub const MAX_BUFFS_PER_ENTITY: usize = 6;
+const ROOM_COMBAT_TRANSFER_SCHEMA: &str = "room-combat-ecs.v1";
+const ROOM_COMBAT_TRANSFER_SCHEMA_VERSION: u32 = 1;
+const ROOM_TRANSFER_INVALID_COMBAT_STATE: &str = "ROOM_TRANSFER_INVALID_COMBAT_STATE";
+const ROOM_TRANSFER_UNSUPPORTED_SCHEMA: &str = "ROOM_TRANSFER_UNSUPPORTED_SCHEMA";
 
 pub type EntityId = u32;
 type DenseIndex = usize;
@@ -255,6 +260,36 @@ pub struct CombatSnapshot {
     pub frame_id: u32,
     pub entity_count: usize,
     pub entities: Vec<CombatEntitySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoomCombatTransferSnapshot {
+    schema: String,
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    next_entity_id: EntityId,
+    last_tick_frame: u32,
+    // pending_events are deliberately not transferred; they represent already
+    // emitted side effects and replaying them after import would duplicate pushes.
+    pending_events_replayed: bool,
+    entities: Vec<EntityMeta>,
+    positions_x: Vec<f32>,
+    positions_y: Vec<f32>,
+    directions_x: Vec<f32>,
+    directions_y: Vec<f32>,
+    healths: Vec<Health>,
+    base_stats: Vec<Stats>,
+    move_states: Vec<MoveState>,
+    skill_slots: Vec<[SkillSlot; MAX_SKILLS_PER_ENTITY]>,
+    buff_slots: Vec<[BuffSlot; MAX_BUFFS_PER_ENTITY]>,
+    player_entity_map: Vec<RoomCombatTransferPlayerEntity>,
+    pending_skill_requests: Vec<SkillCastRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoomCombatTransferPlayerEntity {
+    player_id: String,
+    entity_id: EntityId,
 }
 
 #[derive(Debug, Default)]
@@ -579,6 +614,28 @@ impl RoomCombatEcs {
         }
     }
 
+    pub fn export_transfer_state_json(&self) -> Result<String, &'static str> {
+        let snapshot = RoomCombatTransferSnapshot::from_state(self)?;
+        serde_json::to_string(&snapshot).map_err(|_| ROOM_TRANSFER_INVALID_COMBAT_STATE)
+    }
+
+    pub fn import_transfer_state_json(state_json: &str) -> Result<Self, &'static str> {
+        let value = serde_json::from_str::<Value>(state_json)
+            .map_err(|_| ROOM_TRANSFER_INVALID_COMBAT_STATE)?;
+        if value.get("schema").and_then(Value::as_str) != Some(ROOM_COMBAT_TRANSFER_SCHEMA) {
+            return Err(ROOM_TRANSFER_UNSUPPORTED_SCHEMA);
+        }
+        if value.get("schemaVersion").and_then(Value::as_u64)
+            != Some(ROOM_COMBAT_TRANSFER_SCHEMA_VERSION as u64)
+        {
+            return Err(ROOM_TRANSFER_UNSUPPORTED_SCHEMA);
+        }
+
+        let snapshot = serde_json::from_value::<RoomCombatTransferSnapshot>(value)
+            .map_err(|_| ROOM_TRANSFER_INVALID_COMBAT_STATE)?;
+        snapshot.into_state()
+    }
+
     fn entity_index(&self, entity_id: EntityId) -> Option<DenseIndex> {
         self.entity_index_map.get(&entity_id).copied()
     }
@@ -639,6 +696,334 @@ impl RoomCombatEcs {
                 slot.tick();
             }
         }
+    }
+}
+
+impl RoomCombatTransferSnapshot {
+    fn from_state(state: &RoomCombatEcs) -> Result<Self, &'static str> {
+        validate_parallel_lengths(state)?;
+        if state.next_entity_id == 0 {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+
+        for dense_index in 0..state.entities.len() {
+            validate_entity_meta(&state.entities[dense_index], state.next_entity_id)?;
+            validate_finite(state.positions_x[dense_index])?;
+            validate_finite(state.positions_y[dense_index])?;
+            validate_finite(state.directions_x[dense_index])?;
+            validate_finite(state.directions_y[dense_index])?;
+            validate_health(state.healths[dense_index])?;
+            validate_move_state(state.move_states[dense_index])?;
+            validate_skill_slots(&state.skill_slots[dense_index])?;
+            validate_buff_slots(&state.buff_slots[dense_index], state.next_entity_id)?;
+        }
+
+        let mut player_entity_map = state
+            .player_entity_map
+            .iter()
+            .map(|(player_id, entity_id)| {
+                validate_player_id(player_id)?;
+                validate_entity_id(*entity_id, state.next_entity_id)?;
+                Ok(RoomCombatTransferPlayerEntity {
+                    player_id: player_id.clone(),
+                    entity_id: *entity_id,
+                })
+            })
+            .collect::<Result<Vec<_>, &'static str>>()?;
+        player_entity_map.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+
+        for request in &state.pending_skill_requests {
+            validate_skill_request(request, state.next_entity_id)?;
+        }
+
+        Ok(Self {
+            schema: ROOM_COMBAT_TRANSFER_SCHEMA.to_string(),
+            schema_version: ROOM_COMBAT_TRANSFER_SCHEMA_VERSION,
+            next_entity_id: state.next_entity_id,
+            last_tick_frame: state.last_tick_frame,
+            pending_events_replayed: false,
+            entities: state.entities.clone(),
+            positions_x: state.positions_x.clone(),
+            positions_y: state.positions_y.clone(),
+            directions_x: state.directions_x.clone(),
+            directions_y: state.directions_y.clone(),
+            healths: state.healths.clone(),
+            base_stats: state.base_stats.clone(),
+            move_states: state.move_states.clone(),
+            skill_slots: state.skill_slots.clone(),
+            buff_slots: state.buff_slots.clone(),
+            player_entity_map,
+            pending_skill_requests: state.pending_skill_requests.clone(),
+        })
+    }
+
+    fn into_state(self) -> Result<RoomCombatEcs, &'static str> {
+        if self.schema != ROOM_COMBAT_TRANSFER_SCHEMA
+            || self.schema_version != ROOM_COMBAT_TRANSFER_SCHEMA_VERSION
+        {
+            return Err(ROOM_TRANSFER_UNSUPPORTED_SCHEMA);
+        }
+        if self.next_entity_id == 0 || self.pending_events_replayed {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+
+        let entity_count = self.entities.len();
+        validate_transfer_parallel_lengths(
+            entity_count,
+            &[
+                self.positions_x.len(),
+                self.positions_y.len(),
+                self.directions_x.len(),
+                self.directions_y.len(),
+                self.healths.len(),
+                self.base_stats.len(),
+                self.move_states.len(),
+                self.skill_slots.len(),
+                self.buff_slots.len(),
+            ],
+        )?;
+        if entity_count > MAX_ENTITIES {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+
+        let mut entity_index_map = HashMap::with_capacity(entity_count);
+        let mut index_entity_map = Vec::with_capacity(entity_count);
+        let mut seen_entity_ids = HashSet::with_capacity(entity_count);
+        let mut derived_player_entity_map: HashMap<String, EntityId> = HashMap::new();
+
+        for (dense_index, meta) in self.entities.iter().enumerate() {
+            validate_entity_meta(meta, self.next_entity_id)?;
+            if !seen_entity_ids.insert(meta.entity_id) {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+            entity_index_map.insert(meta.entity_id, dense_index);
+            index_entity_map.push(meta.entity_id);
+
+            if let Some(player_id) = meta.player_id.as_ref() {
+                validate_player_id(player_id)?;
+                if derived_player_entity_map
+                    .insert(player_id.clone(), meta.entity_id)
+                    .is_some()
+                {
+                    return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+                }
+            }
+        }
+
+        let mut player_entity_map = HashMap::new();
+        for entry in self.player_entity_map {
+            validate_player_id(&entry.player_id)?;
+            validate_entity_id(entry.entity_id, self.next_entity_id)?;
+            if player_entity_map
+                .insert(entry.player_id.clone(), entry.entity_id)
+                .is_some()
+            {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+            if derived_player_entity_map.get(&entry.player_id) != Some(&entry.entity_id) {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+        }
+        if player_entity_map.len() != derived_player_entity_map.len() {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+
+        for dense_index in 0..entity_count {
+            validate_finite(self.positions_x[dense_index])?;
+            validate_finite(self.positions_y[dense_index])?;
+            validate_finite(self.directions_x[dense_index])?;
+            validate_finite(self.directions_y[dense_index])?;
+            validate_health(self.healths[dense_index])?;
+            validate_move_state(self.move_states[dense_index])?;
+            validate_skill_slots(&self.skill_slots[dense_index])?;
+            validate_buff_slots(&self.buff_slots[dense_index], self.next_entity_id)?;
+        }
+
+        for request in &self.pending_skill_requests {
+            validate_skill_request(request, self.next_entity_id)?;
+            if !seen_entity_ids.contains(&request.source_entity)
+                || request
+                    .target_entity
+                    .is_some_and(|entity_id| !seen_entity_ids.contains(&entity_id))
+            {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+        }
+
+        Ok(RoomCombatEcs {
+            next_entity_id: self.next_entity_id,
+            entities: self.entities,
+            positions_x: self.positions_x,
+            positions_y: self.positions_y,
+            directions_x: self.directions_x,
+            directions_y: self.directions_y,
+            healths: self.healths,
+            base_stats: self.base_stats,
+            move_states: self.move_states,
+            skill_slots: self.skill_slots,
+            buff_slots: self.buff_slots,
+            player_entity_map,
+            entity_index_map,
+            index_entity_map,
+            pending_events: Vec::new(),
+            pending_skill_requests: self.pending_skill_requests,
+            last_tick_frame: self.last_tick_frame,
+        })
+    }
+}
+
+fn validate_parallel_lengths(state: &RoomCombatEcs) -> Result<(), &'static str> {
+    validate_transfer_parallel_lengths(
+        state.entities.len(),
+        &[
+            state.positions_x.len(),
+            state.positions_y.len(),
+            state.directions_x.len(),
+            state.directions_y.len(),
+            state.healths.len(),
+            state.base_stats.len(),
+            state.move_states.len(),
+            state.skill_slots.len(),
+            state.buff_slots.len(),
+            state.index_entity_map.len(),
+        ],
+    )
+}
+
+fn validate_transfer_parallel_lengths(
+    expected: usize,
+    lengths: &[usize],
+) -> Result<(), &'static str> {
+    if lengths.iter().any(|length| *length != expected) {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    Ok(())
+}
+
+fn validate_entity_meta(meta: &EntityMeta, next_entity_id: EntityId) -> Result<(), &'static str> {
+    validate_entity_id(meta.entity_id, next_entity_id)?;
+    if let Some(player_id) = meta.player_id.as_ref() {
+        validate_player_id(player_id)?;
+    }
+    Ok(())
+}
+
+fn validate_entity_id(entity_id: EntityId, next_entity_id: EntityId) -> Result<(), &'static str> {
+    if entity_id == 0 || entity_id >= next_entity_id {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    Ok(())
+}
+
+fn validate_player_id(player_id: &str) -> Result<(), &'static str> {
+    if player_id.trim().is_empty() {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    Ok(())
+}
+
+fn validate_health(health: Health) -> Result<(), &'static str> {
+    if health.max < 0
+        || health.base_max < 0
+        || health.current < 0
+        || health.current > health.max
+        || health.max > health.base_max
+    {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    Ok(())
+}
+
+fn validate_move_state(move_state: MoveState) -> Result<(), &'static str> {
+    validate_finite(move_state.start_x)?;
+    validate_finite(move_state.start_y)?;
+    validate_finite(move_state.target_x)?;
+    validate_finite(move_state.target_y)?;
+    validate_finite(move_state.progress)?;
+    validate_non_negative_finite(move_state.speed)?;
+    if !(0.0..=1.0).contains(&move_state.progress) {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    Ok(())
+}
+
+fn validate_skill_slots(
+    skill_slots: &[SkillSlot; MAX_SKILLS_PER_ENTITY],
+) -> Result<(), &'static str> {
+    let mut seen_skill_ids = HashSet::new();
+    for slot in skill_slots {
+        if slot.skill_id == 0 {
+            if slot.cooldown_remaining != 0 {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+            continue;
+        }
+        if !seen_skill_ids.insert(slot.skill_id) {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+    }
+    Ok(())
+}
+
+fn validate_buff_slots(
+    buff_slots: &[BuffSlot; MAX_BUFFS_PER_ENTITY],
+    next_entity_id: EntityId,
+) -> Result<(), &'static str> {
+    let mut seen_buff_ids = HashSet::new();
+    for slot in buff_slots {
+        if slot.is_empty() {
+            if *slot != BuffSlot::empty() {
+                return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+            }
+            continue;
+        }
+        if slot.buff_id == 0
+            || slot.duration_remaining == 0
+            || slot.stacks == 0
+            || !is_valid_buff_source(slot.source_entity, next_entity_id)
+            || !seen_buff_ids.insert(slot.buff_id)
+        {
+            return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_buff_source(source_entity: EntityId, next_entity_id: EntityId) -> bool {
+    source_entity == 0 || validate_entity_id(source_entity, next_entity_id).is_ok()
+}
+
+fn validate_skill_request(
+    request: &SkillCastRequest,
+    next_entity_id: EntityId,
+) -> Result<(), &'static str> {
+    validate_entity_id(request.source_entity, next_entity_id)?;
+    if request.skill_id == 0 {
+        return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
+    }
+    if let Some(target_entity) = request.target_entity {
+        validate_entity_id(target_entity, next_entity_id)?;
+    }
+    if let Some(target_point) = request.target_point {
+        validate_finite(target_point.x)?;
+        validate_finite(target_point.y)?;
+    }
+    Ok(())
+}
+
+fn validate_finite(value: f32) -> Result<(), &'static str> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(ROOM_TRANSFER_INVALID_COMBAT_STATE)
+    }
+}
+
+fn validate_non_negative_finite(value: f32) -> Result<(), &'static str> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(ROOM_TRANSFER_INVALID_COMBAT_STATE)
     }
 }
 
@@ -1521,6 +1906,73 @@ impl RoomCombatEcs {
 mod tests {
     use super::*;
     use crate::core::system::combat::BuiltinCombatCatalog;
+    use serde_json::json;
+
+    fn transfer_sample_ecs() -> RoomCombatEcs {
+        let catalog = BuiltinCombatCatalog::default();
+        let mut ecs = RoomCombatEcs::new();
+        let player_a = ecs
+            .spawn_entity(
+                CombatEntityBlueprint::player("player-a", 1, Position { x: 0.0, y: 0.0 })
+                    .with_skills(&[2, 4]),
+            )
+            .unwrap();
+        let player_b = ecs
+            .spawn_entity(
+                CombatEntityBlueprint::player("player-b", 2, Position { x: 20.0, y: 0.0 })
+                    .with_skills(&[1]),
+            )
+            .unwrap();
+        let mut hooks = NoopCombatHooks;
+
+        ecs.execute_command(
+            CombatCommand::CastSkill(SkillCastRequest {
+                frame_id: 1,
+                source_entity: player_a,
+                skill_id: 4,
+                target_entity: Some(player_b),
+                target_point: None,
+            }),
+            &catalog,
+            &mut hooks,
+        );
+        ecs.tick(1, 20, &catalog, &mut hooks);
+        ecs.drain_events();
+
+        assert_eq!(
+            ecs.execute_command(
+                CombatCommand::ApplyBuff {
+                    frame_id: 2,
+                    source_entity: Some(player_a),
+                    target_entity: player_b,
+                    buff_id: 2,
+                    duration_frames: Some(77),
+                },
+                &catalog,
+                &mut hooks,
+            ),
+            CombatCommandResult::Accepted
+        );
+        ecs.tick(2, 20, &catalog, &mut hooks);
+        ecs.request_skill(SkillCastRequest {
+            frame_id: 3,
+            source_entity: player_a,
+            skill_id: 2,
+            target_entity: Some(player_b),
+            target_point: None,
+        });
+
+        ecs
+    }
+
+    fn transfer_sample_value() -> serde_json::Value {
+        serde_json::from_str(
+            &transfer_sample_ecs()
+                .export_transfer_state_json()
+                .expect("sample combat transfer state should export"),
+        )
+        .expect("sample combat transfer state should be json")
+    }
 
     #[test]
     fn skill_cast_applies_damage_and_starts_cooldown() {
@@ -1615,5 +2067,156 @@ mod tests {
             .hp;
 
         assert!(after < before);
+    }
+
+    #[test]
+    fn combat_transfer_roundtrip_restores_runtime_state() {
+        let catalog = BuiltinCombatCatalog::default();
+        let ecs = transfer_sample_ecs();
+        let player_a = ecs.entity_id_by_player("player-a").unwrap();
+        let player_b = ecs.entity_id_by_player("player-b").unwrap();
+        let original_snapshot = ecs.snapshot(ecs.last_tick_frame(), &catalog);
+
+        let transfer_json = ecs.export_transfer_state_json().unwrap();
+        let transfer_value: serde_json::Value = serde_json::from_str(&transfer_json).unwrap();
+        assert_eq!(transfer_value["schema"], ROOM_COMBAT_TRANSFER_SCHEMA);
+        assert_eq!(transfer_value["last_tick_frame"], 2);
+        assert_eq!(transfer_value["pending_events_replayed"], false);
+        assert!(transfer_value.get("pending_events").is_none());
+
+        let mut restored = RoomCombatEcs::import_transfer_state_json(&transfer_json).unwrap();
+        assert_eq!(restored.last_tick_frame(), 2);
+        assert_eq!(restored.entity_count(), 2);
+        assert_eq!(restored.entity_id_by_player("player-a"), Some(player_a));
+        assert_eq!(restored.entity_id_by_player("player-b"), Some(player_b));
+        assert!(restored.pending_events.is_empty());
+        assert_eq!(restored.pending_skill_requests.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&restored.snapshot(2, &catalog)).unwrap(),
+            serde_json::to_value(&original_snapshot).unwrap()
+        );
+
+        let caster_index = restored.dense_index(player_a).unwrap();
+        let charge_slot = restored.skill_slots[caster_index]
+            .iter()
+            .find(|slot| slot.skill_id == 4)
+            .unwrap();
+        assert_eq!(charge_slot.cooldown_remaining, 59);
+
+        let target_index = restored.dense_index(player_b).unwrap();
+        assert!(restored.move_states[target_index].is_active());
+        let shield = restored.buff_slots[target_index]
+            .iter()
+            .find(|slot| slot.buff_id == 2)
+            .unwrap();
+        assert_eq!(shield.duration_remaining, 76);
+        assert_eq!(shield.source_entity, player_a);
+
+        restored.tick(3, 20, &catalog, &mut NoopCombatHooks);
+        assert!(restored.pending_skill_requests.is_empty());
+        assert!(
+            restored
+                .drain_events()
+                .iter()
+                .any(|event| event.kind == CombatEventKind::SkillCast && event.skill_id == Some(2))
+        );
+        let fireball_slot = restored.skill_slots[caster_index]
+            .iter()
+            .find(|slot| slot.skill_id == 2)
+            .unwrap();
+        assert_eq!(fireball_slot.cooldown_remaining, 90);
+        assert!(restored.positions_x[target_index] > ecs.positions_x[target_index]);
+    }
+
+    #[test]
+    fn combat_transfer_import_rejects_invalid_schema_and_payloads() {
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json("{bad").unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut unsupported_schema = transfer_sample_value();
+        unsupported_schema["schemaVersion"] = json!(ROOM_COMBAT_TRANSFER_SCHEMA_VERSION + 1);
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&unsupported_schema.to_string()).unwrap_err(),
+            ROOM_TRANSFER_UNSUPPORTED_SCHEMA
+        );
+
+        let mut duplicate_entity = transfer_sample_value();
+        let first_entity_id = duplicate_entity["entities"][0]["entity_id"].clone();
+        duplicate_entity["entities"][1]["entity_id"] = first_entity_id;
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&duplicate_entity.to_string()).unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut duplicate_player = transfer_sample_value();
+        let first_player_id = duplicate_player["entities"][0]["player_id"].clone();
+        duplicate_player["entities"][1]["player_id"] = first_player_id;
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&duplicate_player.to_string()).unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut duplicate_player_map = transfer_sample_value();
+        let first_map_entry = duplicate_player_map["player_entity_map"][0].clone();
+        duplicate_player_map["player_entity_map"]
+            .as_array_mut()
+            .unwrap()
+            .push(first_map_entry);
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&duplicate_player_map.to_string())
+                .unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut zero_entity_id = transfer_sample_value();
+        zero_entity_id["entities"][0]["entity_id"] = json!(0);
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&zero_entity_id.to_string()).unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut length_mismatch = transfer_sample_value();
+        length_mismatch["positions_x"].as_array_mut().unwrap().pop();
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&length_mismatch.to_string()).unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut invalid_move_state = transfer_sample_value();
+        invalid_move_state["move_states"][0]["progress"] = json!(1.5);
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&invalid_move_state.to_string()).unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut invalid_skill_request = transfer_sample_value();
+        invalid_skill_request["pending_skill_requests"][0]["source_entity"] = json!(0);
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&invalid_skill_request.to_string())
+                .unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut system_buff_source = transfer_sample_value();
+        system_buff_source["buff_slots"][1][0]["source_entity"] = json!(0);
+        assert!(RoomCombatEcs::import_transfer_state_json(&system_buff_source.to_string()).is_ok());
+
+        let mut invalid_buff_source = transfer_sample_value();
+        invalid_buff_source["buff_slots"][1][0]["source_entity"] =
+            invalid_buff_source["next_entity_id"].clone();
+        assert_eq!(
+            RoomCombatEcs::import_transfer_state_json(&invalid_buff_source.to_string())
+                .unwrap_err(),
+            ROOM_TRANSFER_INVALID_COMBAT_STATE
+        );
+
+        let mut non_finite_runtime = transfer_sample_ecs();
+        non_finite_runtime.positions_x[0] = f32::INFINITY;
+        assert_eq!(
+            non_finite_runtime.export_transfer_state_json(),
+            Err(ROOM_TRANSFER_INVALID_COMBAT_STATE)
+        );
     }
 }

@@ -1,8 +1,12 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tracing::info;
 
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::logic::{RoomLogic, RoomLogicBroadcast, RoomLogicTransfer};
+use crate::core::logic::{
+    ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicBroadcast, RoomLogicTransfer,
+    RoomLogicTransferState,
+};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::combat::{
     CombatCommandResult, CombatEntityBlueprint, CombatEvent, CombatEventKind, CombatSnapshot,
@@ -13,6 +17,7 @@ use crate::protocol::{MessageType, encode_body};
 
 const SNAPSHOT_INTERVAL_FRAMES: u32 = 5;
 const DUMMY_TEAM_ID: u16 = 90;
+const COMBAT_DEMO_TRANSFER_SCHEMA: &str = "combat-demo.logic.v1";
 
 pub struct CombatDemoLogic {
     room_id: String,
@@ -163,6 +168,16 @@ impl CombatDemoLogic {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CombatDemoTransferLogicState {
+    schema: String,
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    room_id: String,
+    tick_count: u64,
+    roster: Vec<String>,
+}
+
 impl RoomLogic for CombatDemoLogic {
     fn on_room_created(&mut self, room_id: &str) {
         self.room_id = room_id.to_string();
@@ -274,4 +289,79 @@ impl RoomLogic for CombatDemoLogic {
     }
 }
 
-impl RoomLogicTransfer for CombatDemoLogic {}
+impl RoomLogicTransfer for CombatDemoLogic {
+    fn export_transfer_state(&self) -> Result<RoomLogicTransferState, &'static str> {
+        let logic_state = CombatDemoTransferLogicState {
+            schema: COMBAT_DEMO_TRANSFER_SCHEMA.to_string(),
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            room_id: self.room_id.clone(),
+            tick_count: self.tick_count,
+            roster: self.roster.clone(),
+        };
+
+        Ok(RoomLogicTransferState {
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            logic_state_json: serde_json::to_string(&logic_state)
+                .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?,
+            movement_state_json: String::new(),
+            combat_state_json: self.combat.export_transfer_state_json()?,
+            npc_state_json: String::new(),
+            timer_state_json: String::new(),
+        })
+    }
+
+    fn import_transfer_state(
+        &mut self,
+        state: &RoomLogicTransferState,
+    ) -> Result<(), &'static str> {
+        if state.schema_version != ROOM_TRANSFER_SCHEMA_VERSION {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+
+        let logic_state = serde_json::from_str::<serde_json::Value>(&state.logic_state_json)
+            .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?;
+        if logic_state
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            != Some(COMBAT_DEMO_TRANSFER_SCHEMA)
+        {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        if logic_state
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            != Some(ROOM_TRANSFER_SCHEMA_VERSION as u64)
+        {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+
+        let logic_state = serde_json::from_value::<CombatDemoTransferLogicState>(logic_state)
+            .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?;
+        if !self.room_id.is_empty() && logic_state.room_id != self.room_id {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+        if logic_state.room_id.trim().is_empty() {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+        validate_transfer_roster(&logic_state.roster)?;
+        let combat = RoomCombatEcs::import_transfer_state_json(&state.combat_state_json)?;
+
+        self.room_id = logic_state.room_id;
+        self.tick_count = logic_state.tick_count;
+        self.roster = logic_state.roster;
+        self.combat = combat;
+        self.pending_broadcasts.clear();
+
+        Ok(())
+    }
+}
+
+fn validate_transfer_roster(roster: &[String]) -> Result<(), &'static str> {
+    let mut seen = HashSet::new();
+    for player_id in roster {
+        if player_id.trim().is_empty() || !seen.insert(player_id.as_str()) {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+    }
+    Ok(())
+}
