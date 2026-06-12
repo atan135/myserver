@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ROOM_TRANSFER_FAILURE_INJECTION,
   ROOM_TRANSFER_STAGE,
   encodeRoomTransferPayloadForTest,
   orchestrateRoomTransfer
@@ -38,8 +39,11 @@ function createClients(overrides = {}) {
   };
 
   const newServer = {
-    async importRoomTransfer() {
+    async importRoomTransfer(request) {
       calls.push("new.import");
+      if (overrides.importHandler) {
+        return overrides.importHandler(request, payloadRaw);
+      }
       return overrides.import ?? {
         ok: true,
         roomId: "room-1",
@@ -210,5 +214,72 @@ test("room transfer reports old retire failures at retire stage", async () => {
     "proxy.getRoomRoute",
     "proxy.upsert:2:1:checksum-1",
     "old.retire"
+  ]);
+});
+
+test("room transfer fault injection stops at import failure before confirm or route", async () => {
+  const { calls, clients } = createClients({
+    importHandler(request, payloadRaw) {
+      if (!Buffer.from(request.payloadRaw).equals(payloadRaw)) {
+        throw Object.assign(new Error("ROOM_TRANSFER_CHECKSUM_MISMATCH"), {
+          code: "ROOM_TRANSFER_CHECKSUM_MISMATCH"
+        });
+      }
+      return {
+        ok: true,
+        roomId: "room-1",
+        checksum: "checksum-1",
+        roomVersion: 3
+      };
+    }
+  });
+
+  const result = await orchestrateRoomTransfer(
+    {
+      ...request,
+      failureInjection: {
+        stage: ROOM_TRANSFER_STAGE.NEW_IMPORT,
+        mode: ROOM_TRANSFER_FAILURE_INJECTION.IMPORT_CORRUPT_PAYLOAD
+      }
+    },
+    clients
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.NEW_IMPORT);
+  assert.equal(result.expectedFailure, true);
+  assert.equal(result.errorCode, "ROOM_TRANSFER_CHECKSUM_MISMATCH");
+  assert.deepEqual(calls, ["old.freeze", "old.export", "new.import"]);
+});
+
+test("room transfer fault injection stops at proxy upsert before old retire", async () => {
+  const { calls, clients } = createClients({
+    proxyError: Object.assign(new Error("ROOM_ROUTE_VERSION_MISMATCH"), {
+      code: "ROOM_ROUTE_VERSION_MISMATCH"
+    })
+  });
+
+  const result = await orchestrateRoomTransfer(
+    {
+      ...request,
+      failureInjection: {
+        stage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+        mode: ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_ROOM_VERSION
+      }
+    },
+    clients
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(result.expectedFailure, true);
+  assert.equal(result.errorCode, "ROOM_ROUTE_VERSION_MISMATCH");
+  assert.deepEqual(calls, [
+    "old.freeze",
+    "old.export",
+    "new.import",
+    "new.confirm:checksum-1:3",
+    "proxy.getRoomRoute",
+    "proxy.upsert:2:1000004:checksum-1"
   ]);
 });

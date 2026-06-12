@@ -22,6 +22,12 @@ export const ROOM_TRANSFER_STAGE = {
   OLD_RETIRE: "old_retire"
 };
 
+export const ROOM_TRANSFER_FAILURE_INJECTION = {
+  IMPORT_CORRUPT_PAYLOAD: "import_corrupt_payload",
+  PROXY_BAD_EXPECTED_ROOM_VERSION: "proxy_bad_expected_room_version",
+  PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM: "proxy_bad_expected_last_transfer_checksum"
+};
+
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_BODY_LEN = 1024 * 1024;
 
@@ -231,9 +237,14 @@ function assertOkResponse(response, fallbackCode) {
   }
 }
 
-function failure(stage, error, context, completedStages) {
+function failure(stage, error, context, completedStages, options = {}) {
   const normalized = normalizeError(error);
-  return {
+  const hasExpectedFailure = typeof error?.expectedFailure === "boolean" ||
+    Object.hasOwn(options, "expectedFailure");
+  const expectedFailure = typeof error?.expectedFailure === "boolean"
+    ? error.expectedFailure
+    : options.expectedFailure === true;
+  const result = {
     ok: false,
     stage,
     errorCode: normalized.code,
@@ -241,6 +252,10 @@ function failure(stage, error, context, completedStages) {
     completedStages: [...completedStages],
     ...context
   };
+  if (hasExpectedFailure) {
+    result.expectedFailure = expectedFailure;
+  }
+  return result;
 }
 
 function success(context, completedStages) {
@@ -298,6 +313,106 @@ function buildProxyRouteUpsert(request, importResult, existingRoute) {
   };
 }
 
+function stageForFailureInjectionMode(mode) {
+  switch (mode) {
+    case ROOM_TRANSFER_FAILURE_INJECTION.IMPORT_CORRUPT_PAYLOAD:
+      return ROOM_TRANSFER_STAGE.NEW_IMPORT;
+    case ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_ROOM_VERSION:
+    case ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM:
+      return ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeFailureInjection(failureInjection) {
+  if (!failureInjection) {
+    return null;
+  }
+  if (typeof failureInjection === "string") {
+    return {
+      mode: failureInjection,
+      stage: stageForFailureInjectionMode(failureInjection)
+    };
+  }
+  return {
+    ...failureInjection,
+    stage: failureInjection.stage || stageForFailureInjectionMode(failureInjection.mode)
+  };
+}
+
+function hasFailureInjection(failureInjection, stage, modes = []) {
+  const normalized = normalizeFailureInjection(failureInjection);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.stage && normalized.stage !== stage) {
+    return false;
+  }
+  return modes.length === 0 || modes.includes(normalized.mode);
+}
+
+function markFailureInjection(context, stage, mode, detail) {
+  context.failureInjection = {
+    stage,
+    mode,
+    expectedFailure: true,
+    ...(detail ? { detail } : {})
+  };
+}
+
+function corruptPayloadRawForFailureDrill(payloadRaw) {
+  const corrupted = Buffer.from(payloadRaw);
+  if (corrupted.length === 0) {
+    return Buffer.from([0xff]);
+  }
+  corrupted[corrupted.length - 1] = corrupted[corrupted.length - 1] ^ 0xff;
+  return corrupted;
+}
+
+function withProxyRouteFailureInjection(route, failureInjection, context) {
+  if (hasFailureInjection(
+    failureInjection,
+    ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+    [ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_ROOM_VERSION]
+  )) {
+    const expectedRoomVersion = Number(route.expectedRoomVersion ?? 0);
+    const badExpectedRoomVersion = Number.isSafeInteger(expectedRoomVersion)
+      ? expectedRoomVersion + 1000003
+      : 1000003;
+    markFailureInjection(
+      context,
+      ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+      ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_ROOM_VERSION,
+      { expectedRoomVersion: badExpectedRoomVersion }
+    );
+    return {
+      ...route,
+      expectedRoomVersion: badExpectedRoomVersion
+    };
+  }
+
+  if (hasFailureInjection(
+    failureInjection,
+    ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+    [ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM]
+  )) {
+    const badChecksum = "fault-drill-expected-checksum-mismatch";
+    markFailureInjection(
+      context,
+      ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+      ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM,
+      { expectedLastTransferChecksum: badChecksum }
+    );
+    return {
+      ...route,
+      expectedLastTransferChecksum: badChecksum
+    };
+  }
+
+  return route;
+}
+
 export async function orchestrateRoomTransfer(request, clients) {
   const completedStages = [];
   const context = {
@@ -306,6 +421,7 @@ export async function orchestrateRoomTransfer(request, clients) {
     oldServerId: request.oldServerId,
     newServerId: request.newServerId
   };
+  const failureInjection = normalizeFailureInjection(request.failureInjection);
 
   let exportResult;
   let importResult;
@@ -350,13 +466,34 @@ export async function orchestrateRoomTransfer(request, clients) {
   }
 
   try {
+    let payloadRaw = exportResult.payload.raw;
+    if (hasFailureInjection(
+      failureInjection,
+      ROOM_TRANSFER_STAGE.NEW_IMPORT,
+      [ROOM_TRANSFER_FAILURE_INJECTION.IMPORT_CORRUPT_PAYLOAD]
+    )) {
+      payloadRaw = corruptPayloadRawForFailureDrill(payloadRaw);
+      markFailureInjection(
+        context,
+        ROOM_TRANSFER_STAGE.NEW_IMPORT,
+        ROOM_TRANSFER_FAILURE_INJECTION.IMPORT_CORRUPT_PAYLOAD,
+        { payloadMutation: "last-byte-xor" }
+      );
+    }
+
     importResult = await clients.newServer.importRoomTransfer({
-      payloadRaw: exportResult.payload.raw
+      payloadRaw
     });
     assertOkResponse(importResult, "NEW_IMPORT_FAILED");
     if (importResult.checksum !== exportResult.checksum) {
       throw Object.assign(new Error("ROOM_TRANSFER_IMPORT_CHECKSUM_MISMATCH"), {
         code: "ROOM_TRANSFER_IMPORT_CHECKSUM_MISMATCH"
+      });
+    }
+    if (hasFailureInjection(failureInjection, ROOM_TRANSFER_STAGE.NEW_IMPORT)) {
+      throw Object.assign(new Error("FAULT_DRILL_IMPORT_UNEXPECTED_SUCCESS"), {
+        code: "FAULT_DRILL_IMPORT_UNEXPECTED_SUCCESS",
+        expectedFailure: false
       });
     }
     completedStages.push(ROOM_TRANSFER_STAGE.NEW_IMPORT);
@@ -365,7 +502,9 @@ export async function orchestrateRoomTransfer(request, clients) {
       roomVersion: importResult.roomVersion
     };
   } catch (error) {
-    return failure(ROOM_TRANSFER_STAGE.NEW_IMPORT, error, context, completedStages);
+    return failure(ROOM_TRANSFER_STAGE.NEW_IMPORT, error, context, completedStages, {
+      expectedFailure: hasFailureInjection(failureInjection, ROOM_TRANSFER_STAGE.NEW_IMPORT)
+    });
   }
 
   try {
@@ -399,12 +538,24 @@ export async function orchestrateRoomTransfer(request, clients) {
     const existingRoute = clients.proxy.getRoomRoute
       ? await clients.proxy.getRoomRoute(request.roomId)
       : null;
-    const route = buildProxyRouteUpsert(request, importResult, existingRoute);
+    const route = withProxyRouteFailureInjection(
+      buildProxyRouteUpsert(request, importResult, existingRoute),
+      failureInjection,
+      context
+    );
     await clients.proxy.upsertRoomRoute(route);
+    if (hasFailureInjection(failureInjection, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT)) {
+      throw Object.assign(new Error("FAULT_DRILL_ROUTE_UPSERT_UNEXPECTED_SUCCESS"), {
+        code: "FAULT_DRILL_ROUTE_UPSERT_UNEXPECTED_SUCCESS",
+        expectedFailure: false
+      });
+    }
     completedStages.push(ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
     context.proxyRoute = route;
   } catch (error) {
-    return failure(ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT, error, context, completedStages);
+    return failure(ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT, error, context, completedStages, {
+      expectedFailure: hasFailureInjection(failureInjection, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT)
+    });
   }
 
   try {

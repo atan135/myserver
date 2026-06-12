@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口已具备但本次未实际执行真实三进程联调；NPC / 行为树、真实独立 timer wheel / scheduler、真实三进程自动化联调准入、故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口和故障演练脚本入口已具备，但本次未实际执行真实三进程联调或真实三进程故障联调；NPC / 行为树、真实独立 timer wheel / scheduler、真实三进程自动化联调准入、完整故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -509,9 +509,20 @@
 
 ### 9.4 故障演练
 
+当前状态（截至 `2026-06-12`）:
+
+- `tools/mock-client/src/rollout-fault-drill-cli.js` 已提供脚本级故障演练入口。默认 `dry-run` 只输出 JSON 计划，不访问服务、不调用写接口、不请求旧服停服；`--simulate` 使用纯 mock client 验证编排停止点；只有显式 `--execute` 才调用已运行服务的控制面接口。详见 [rollout 故障演练入口](./rollout-fault-drill-runbook.md)。
+- `orchestrateRoomTransfer` 已增加 opt-in failure injection，默认路径保持兼容。当前可模拟/执行 `import-failure` 和 `route-upsert-failure`，结果会输出 `ok=false`、`stage`、`expectedFailure=true`、`completedStages` 等字段，便于归档和后续 CI 消费。
+- `redirect-no-reconnect` 入口只触发或计划 `ServerRedirectPush`，并明确不运行 mock-client reconnect；该演练只覆盖 push/操作步骤，不代表 mybevy 已适配。
+- 这些条目只表示“脚本入口与纯模拟验证已具备”。真实 old/new/proxy 三进程自动化故障联调、部署平台自动停旧进程、同连接迁移和 route metadata 真实丢失恢复仍未完成。
+
 - [ ] 导出中断演练。
-- [ ] 导入失败演练。
-- [ ] redirect 后客户端不重连演练。
+- [x] 导入失败演练。
+  - 当前覆盖：`import-failure` 在 old freeze/export 后篡改 payload，预期停在 `new_import`，不会继续 confirm/upsert/retire；已具备 dry-run、纯模拟和可选执行入口。
+- [x] route upsert 失败演练。
+  - 当前覆盖：`route-upsert-failure` 在 import + confirm 成功后使用错误 `expected_room_version` 触发 proxy CAS 失败，预期停在 `proxy_route_upsert`，不会 retire old room；已具备 dry-run、纯模拟和可选执行入口。
+- [x] redirect 后客户端不重连演练。
+  - 当前覆盖：`redirect-no-reconnect` 只触发或计划 redirect push，不运行 reconnect，不验证 mybevy。
 - [ ] route metadata 丢失演练。
 
 完成标准:

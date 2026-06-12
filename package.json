@@ -30,6 +30,7 @@
     "dev:mock-client": "npm run dev --workspace mock-client",
     "flow:mock-client": "npm run flow --workspace mock-client --",
     "rollout:transfer": "npm run rollout-transfer --workspace mock-client --",
+    "rollout:fault-drill": "npm run rollout-fault-drill --workspace mock-client --",
     "check:mock-client-protocol": "node tools/check-mock-client-protocol.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:migrations": "node tools/db-migrate.js --check",
