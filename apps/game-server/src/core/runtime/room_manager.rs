@@ -2370,11 +2370,11 @@ impl RoomManager {
         let mut rooms = self.rooms.lock().await;
         let room = rooms.get_mut(room_id)?;
 
-        room.update_activity();
-
         if room.transfer_state.status.rejects_room_mutation() {
             return None;
         }
+
+        room.update_activity();
 
         if room.phase != RoomPhase::InGame {
             return None;
@@ -2834,6 +2834,69 @@ fn room_transfer_timer_state_json(
     .to_string()
 }
 
+fn validate_room_transfer_runtime_summary(summary: &serde_json::Value) -> Result<(), &'static str> {
+    let summary = summary
+        .as_object()
+        .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+
+    if !summary
+        .get("hasEmptySince")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+    if !summary
+        .get("hasWaitStarted")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+    if summary
+        .get("inputDelayFrames")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value <= u64::from(u32::MAX))
+        .is_none()
+    {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+    if summary
+        .get("snapshotIntervalFrames")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0 && *value <= u64::from(u32::MAX))
+        .is_none()
+    {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+
+    Ok(())
+}
+
+fn validate_room_transfer_timer_wrapper<'a>(
+    timers: &'a serde_json::Value,
+) -> Result<&'a str, &'static str> {
+    if timers.get("schema").and_then(|value| value.as_str())
+        != Some("room-transfer.runtime-timers.v1")
+    {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+    if timers.get("schemaVersion").and_then(|value| value.as_u64())
+        != Some(u64::from(ROOM_TRANSFER_SCHEMA_VERSION))
+    {
+        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+    }
+
+    let timer_state_json = timers
+        .get("timerStateJson")
+        .and_then(|value| value.as_str())
+        .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+    let runtime_summary = timers
+        .get("runtimeSummary")
+        .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+    validate_room_transfer_runtime_summary(runtime_summary)?;
+
+    Ok(timer_state_json)
+}
+
 fn room_transfer_state_from_payload(
     payload: &RoomTransferPayload,
 ) -> Result<RoomLogicTransferState, &'static str> {
@@ -2857,11 +2920,7 @@ fn room_transfer_state_from_payload(
     {
         return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
     }
-    if timers.get("schema").and_then(|value| value.as_str())
-        != Some("room-transfer.runtime-timers.v1")
-    {
-        return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
-    }
+    let timer_state_json = validate_room_transfer_timer_wrapper(&timers)?;
 
     let schema_version = logic
         .get("schemaVersion")
@@ -2872,7 +2931,6 @@ fn room_transfer_state_from_payload(
             .get("schemaVersion")
             .and_then(|value| value.as_u64())
             != Some(schema_version)
-        || timers.get("schemaVersion").and_then(|value| value.as_u64()) != Some(schema_version)
     {
         return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
     }
@@ -2899,11 +2957,7 @@ fn room_transfer_state_from_payload(
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string(),
-        timer_state_json: timers
-            .get("timerStateJson")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        timer_state_json: timer_state_json.to_string(),
     })
 }
 
@@ -3310,6 +3364,162 @@ mod tests {
             .await;
 
         assert_eq!(result, Err("ROOM_TRANSFER_EPOCH_MISMATCH"));
+    }
+
+    #[tokio::test]
+    async fn timer_freeze_stops_runtime_tick_and_clears_wait_started() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        for player_id in ["player-a", "player-b"] {
+            let (tx, _rx) = mpsc::channel(1024);
+            manager
+                .join_room(
+                    "room-test",
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+            manager
+                .set_ready_state("room-test", player_id, true)
+                .await
+                .unwrap();
+        }
+        manager.start_game("room-test", "player-a").await.unwrap();
+
+        {
+            let runtimes = manager.runtimes.lock().await;
+            let runtime = runtimes
+                .get("room-test")
+                .expect("room runtime should exist");
+            assert!(runtime.tick_running);
+            assert!(runtime.tick_handle.is_some());
+        }
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        {
+            let mut rooms = manager.rooms.lock().await;
+            let room = rooms.get_mut("room-test").expect("room should exist");
+            assert_eq!(room.phase, RoomPhase::InGame);
+            room.wait_started_at = Some(Instant::now());
+        }
+
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        {
+            let runtimes = manager.runtimes.lock().await;
+            let runtime = runtimes
+                .get("room-test")
+                .expect("room runtime should remain tracked");
+            assert!(!runtime.tick_running);
+            assert!(runtime.tick_handle.is_none());
+        }
+        let rooms = manager.rooms.lock().await;
+        let room = rooms.get("room-test").expect("room should exist");
+        assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
+        assert!(room.wait_started_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn timer_freeze_export_blocks_later_tick_and_emits_runtime_summary() {
+        let (manager, factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+
+        manager
+            .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
+            .await
+            .unwrap();
+        manager
+            .accept_player_input("room-test", "player-b", 1, "move", "{\"x\":2}")
+            .await
+            .unwrap();
+        assert!(manager.process_room_tick("room-test", 10).await.is_some());
+        assert_eq!(factory.recorded_ticks().len(), 1);
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        manager
+            .disconnect_room_member("room-test", "player-b")
+            .await;
+        {
+            let mut rooms = manager.rooms.lock().await;
+            let room = rooms.get_mut("room-test").expect("room should exist");
+            room.wait_started_at = Some(Instant::now());
+        }
+        manager
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = manager
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+
+        let timers =
+            serde_json::from_str::<serde_json::Value>(&payload.runtime_timers_json).unwrap();
+        assert_eq!(timers["schema"], "room-transfer.runtime-timers.v1");
+        assert_eq!(
+            timers["schemaVersion"].as_u64(),
+            Some(u64::from(ROOM_TRANSFER_SCHEMA_VERSION))
+        );
+        assert!(timers["timerStateJson"].is_string());
+        let summary = timers["runtimeSummary"]
+            .as_object()
+            .expect("runtime summary should be an object");
+        assert_eq!(
+            summary
+                .get("hasEmptySince")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            summary
+                .get("hasWaitStarted")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(
+            summary
+                .get("inputDelayFrames")
+                .and_then(|value| value.as_u64())
+                .is_some()
+        );
+        assert!(
+            summary
+                .get("snapshotIntervalFrames")
+                .and_then(|value| value.as_u64())
+                .is_some_and(|value| value > 0)
+        );
+
+        let last_active_before_tick = {
+            let rooms = manager.rooms.lock().await;
+            rooms
+                .get("room-test")
+                .expect("room should exist")
+                .last_active_at
+        };
+        assert!(manager.process_room_tick("room-test", 10).await.is_none());
+        assert_eq!(factory.recorded_ticks().len(), 1);
+        let rooms = manager.rooms.lock().await;
+        let room = rooms.get("room-test").expect("room should exist");
+        assert_eq!(room.current_frame, 1);
+        assert_eq!(room.last_active_at, last_active_before_tick);
+        assert!(room.wait_started_at.is_none());
     }
 
     #[tokio::test]
@@ -4607,6 +4817,105 @@ mod tests {
 
         assert_eq!(result, Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA"));
         assert!(!target.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn import_room_transfer_rejects_invalid_timer_wrapper_contract() {
+        let (source, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let base_timers =
+            serde_json::from_str::<serde_json::Value>(&payload.runtime_timers_json).unwrap();
+
+        let mut unsupported_schema = base_timers.clone();
+        unsupported_schema["schema"] = serde_json::json!("room-transfer.runtime-timers.v2");
+
+        let mut unsupported_version = base_timers.clone();
+        unsupported_version["schemaVersion"] = serde_json::json!(ROOM_TRANSFER_SCHEMA_VERSION + 1);
+
+        let mut non_string_timer_state = base_timers.clone();
+        non_string_timer_state["timerStateJson"] = serde_json::json!({});
+
+        let mut missing_runtime_summary = base_timers.clone();
+        missing_runtime_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("runtimeSummary");
+
+        let mut bad_runtime_summary_type = base_timers.clone();
+        bad_runtime_summary_type["runtimeSummary"]["hasWaitStarted"] = serde_json::json!("false");
+
+        let mut bad_snapshot_interval = base_timers;
+        bad_snapshot_interval["runtimeSummary"]["snapshotIntervalFrames"] = serde_json::json!(0);
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory),
+        );
+        for (runtime_timers_json, expected) in [
+            (unsupported_schema, "ROOM_TRANSFER_UNSUPPORTED_SCHEMA"),
+            (unsupported_version, "ROOM_TRANSFER_UNSUPPORTED_SCHEMA"),
+            (non_string_timer_state, "ROOM_TRANSFER_INVALID_TIMER_STATE"),
+            (missing_runtime_summary, "ROOM_TRANSFER_INVALID_TIMER_STATE"),
+            (
+                bad_runtime_summary_type,
+                "ROOM_TRANSFER_INVALID_TIMER_STATE",
+            ),
+            (bad_snapshot_interval, "ROOM_TRANSFER_INVALID_TIMER_STATE"),
+        ] {
+            let mut bad_payload = payload.clone();
+            bad_payload.runtime_timers_json = runtime_timers_json.to_string();
+            bad_payload.checksum = room_transfer_checksum(&bad_payload);
+
+            assert_eq!(
+                target.import_room_transfer(bad_payload).await,
+                Err(expected)
+            );
+            assert!(!target.room_exists("room-test").await);
+        }
+    }
+
+    #[tokio::test]
+    async fn import_room_transfer_accepts_empty_timer_state_json() {
+        let (source, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        source.disconnect_room_member("room-test", "player-a").await;
+        source.disconnect_room_member("room-test", "player-b").await;
+        source
+            .freeze_room_for_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let mut payload = source
+            .export_room_transfer("epoch-1", "room-test")
+            .await
+            .unwrap();
+        let mut timers =
+            serde_json::from_str::<serde_json::Value>(&payload.runtime_timers_json).unwrap();
+        timers["timerStateJson"] = serde_json::json!("");
+        payload.runtime_timers_json = timers.to_string();
+        payload.checksum = room_transfer_checksum(&payload);
+
+        let target_factory = RecordingRoomLogicFactory::default();
+        let target = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(target_factory.clone()),
+        );
+
+        target.import_room_transfer(payload).await.unwrap();
+
+        let imported_states = target_factory.imported_transfer_states();
+        assert_eq!(imported_states.len(), 1);
+        assert!(imported_states[0].timer_state_json.is_empty());
     }
 
     #[tokio::test]

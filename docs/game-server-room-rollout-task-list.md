@@ -396,8 +396,10 @@
 ### 7.5 定时器与一致性
 
 - [ ] 为 room 内部 timer / scheduler 增加可导出结构。
-- [ ] 明确冻结点之后不允许再推进时间。
+- [x] 明确冻结点之后不允许再推进时间。
 - [ ] 导入后重建 timer wheel 或等价运行态。
+
+当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已锁定 transfer freeze 后停止 `RoomRuntime` tick handle / `tick_running`，清空 `wait_started_at`，且冻结/导出状态下 `process_room_tick` 不再推进 room 时间。`runtime_timers_json` 已收敛为 `room-transfer.runtime-timers.v1` wrapper，并校验 `schemaVersion`、`timerStateJson` 字符串和 `runtimeSummary` 基础字段。当前仓库仍没有独立 room timer wheel / scheduler 抽象，因此“为 room 内部 timer / scheduler 增加可导出结构”和“导入后重建 timer wheel 或等价运行态”保持未完成。
 
 完成标准:
 
