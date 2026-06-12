@@ -80,6 +80,8 @@ export const monitoringApi = {
     api.get("/services", { baseURL: "/api/admin/monitoring" }),
   getServiceMetrics: (name, window) =>
     api.get(`/services/${name}/metrics`, { baseURL: "/api/admin/monitoring", params: { window } }),
+  getRolloutDrain: () =>
+    api.get("/rollout-drain", { baseURL: "/api/admin/monitoring" }),
   triggerArchive: () =>
     api.post("/archive", undefined, { baseURL: "/api/admin/monitoring" })
 };

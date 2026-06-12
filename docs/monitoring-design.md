@@ -9,6 +9,7 @@
 - 同服务多实例实时指标明细
 - 服务专属在线类指标
 - 历史窗口图表查询
+- rollout / drain 控制面状态轮询、展示和告警
 - 超期 metrics 数据归档
 
 这套能力由以下模块共同组成：
@@ -16,7 +17,8 @@
 - 各服务内部 metrics 模块，周期性发布到 Core NATS
 - `metrics-collector` 订阅 `myserver.metrics.>`，写入 Redis metrics / metrics heartbeat 快照
 - `admin-api` 监控接口，读取 Redis，并提供手动归档入口
-- `admin-web` 监控页面，展示总览卡片与详情图表
+- `admin-api` 只读查询 `game-proxy` admin HTTP `GET /rollout`，归一化 rollout / drain 观测状态
+- `admin-web` 监控页面，展示总览卡片、rollout / drain 告警区域与详情图表
 
 当前实现已经落地，不再是纯设计稿。
 
@@ -30,6 +32,10 @@
   -> metrics-collector 写入 Redis metrics / metrics heartbeat
   -> admin-api 读取 Redis 生成监控接口响应
   -> admin-web 通过监控页面轮询展示
+
+game-proxy admin GET /rollout
+  -> admin-api GET /api/admin/monitoring/rollout-drain 归一化状态和告警
+  -> admin-web /monitoring 每 5 秒轮询展示
 ```
 
 ### 2.2 代码落点
@@ -299,7 +305,61 @@ window=1m|5m|15m|1h
 - 当前详情接口没有从 MySQL `metrics_archive` 回查历史数据
 - 因此归档后的老数据目前不会通过该接口重新读出来
 
-### 5.4 `POST /api/admin/monitoring/archive`
+### 5.4 `GET /api/admin/monitoring/rollout-drain`
+
+用于监控总览页展示 rollout / drain 控制面状态。接口仍挂 `monitoring.read` 权限，只做只读观测，不会调用 `POST /rollout/complete-if-drained`、`POST /rollout/end`，也不会自动停止旧服进程。
+
+数据来源:
+
+- `admin-api` 通过 `GAME_PROXY_ADMIN_HOST` / `GAME_PROXY_ADMIN_PORT` 访问 `game-proxy` admin HTTP
+- 优先使用 `GAME_PROXY_ADMIN_READ_TOKEN`，未配置时使用 `GAME_PROXY_ADMIN_TOKEN`
+- 请求 `GET /rollout`，读取 `rollout_session` 与 `drain_evaluation`
+
+返回会归一化为适合前端展示和告警的结构:
+
+```json
+{
+  "ok": true,
+  "source": "game-proxy",
+  "checked_at": 1713000000000,
+  "updated_at": 1713000000000,
+  "active": true,
+  "status": "blocked",
+  "alert_level": "warning",
+  "alert_message": "仍有旧服房间/玩家/迁移中阻塞",
+  "drained": false,
+  "rollout": {
+    "epoch": "rollout-20260612-1",
+    "old_server": "game-server-old",
+    "new_server": "game-server-new",
+    "state": "Active",
+    "started_at": 1713000000000
+  },
+  "blockers": {
+    "blocked_room_count": 2,
+    "blocked_player_count": 1,
+    "stale_room_route_count": 0,
+    "stale_player_route_count": 0,
+    "blocked_room_samples": ["room-1", "room-2"],
+    "blocked_player_samples": ["player-1"]
+  }
+}
+```
+
+状态语义:
+
+- `empty` / `info`：没有 active rollout
+- `blocked` / `warning`：仍有 old owner room route、迁移中/失败 room route 或指向旧服的 player route
+- `drained` / `warning`：proxy route store 已排空，rollout 仍 active，需要人工收尾或显式控制面收尾
+- `interrupted` / `critical`：rollout state 为 `Interrupted`，需要人工复查
+- `error` / `critical`：`game-proxy` admin 控制面不可达、鉴权失败、超时、响应过大或 JSON 异常
+
+失败兜底:
+
+- `admin-api` 不把 `game-proxy` admin 失败升级成监控页 500 崩溃，而是返回 `ok=false`、`status=error`、`alert_level=critical` 与错误信息
+- 前端再额外兜底 admin-api 请求失败，仍在 rollout 区域显示“控制面不可达”
+
+### 5.5 `POST /api/admin/monitoring/archive`
 
 手动触发归档任务。
 
@@ -343,7 +403,7 @@ window=1m|5m|15m|1h
 
 ### 6.2 API 接线
 
-`apps/admin-web/src/api/index.js` 中监控请求使用单独的 axios 实例：
+`apps/admin-web/src/api/index.js` 中监控请求复用统一的 axios 实例，并在单次请求里覆盖 baseURL：
 
 ```text
 baseURL = /api/admin/monitoring
@@ -353,9 +413,10 @@ baseURL = /api/admin/monitoring
 
 - `getServices()`
 - `getServiceMetrics(name, window)`
+- `getRolloutDrain()`
 - `triggerArchive()`
 
-与普通 `/api/v1/*` 接口不同，这个实例当前没有注入 JWT 头。
+这些请求仍会经过统一 axios request interceptor 注入 `Authorization: Bearer <admin_token>`，后端继续由 `JwtAuthGuard` 和 `monitoring.read` / `monitoring.archive` 权限控制。
 
 ### 6.3 总览页
 
@@ -366,7 +427,10 @@ baseURL = /api/admin/monitoring
 当前行为：
 
 - 进入页面后立即请求 `/api/admin/monitoring/services`
+- 进入页面后立即请求 `/api/admin/monitoring/rollout-drain`
 - 每 5 秒轮询一次
+- 使用 rollout / drain 区域展示 active / empty / error 状态、old/new server、epoch、阻塞计数、阻塞样本和更新时间
+- 明确提示“已排空可收尾”“仍有旧服房间/玩家/迁移中阻塞”“控制面不可达”等状态，不提供自动停进程按钮
 - 使用卡片网格展示所有服务
 - 离线服务会加红色样式
 - 延迟大于 `500ms` 时延迟数值标红

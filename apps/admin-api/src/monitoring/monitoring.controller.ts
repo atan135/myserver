@@ -25,6 +25,12 @@ export class MonitoringController {
     return this.monitoringService.metrics(name, window);
   }
 
+  @Get("rollout-drain")
+  @Permissions("monitoring.read")
+  rolloutDrain() {
+    return this.monitoringService.rolloutDrain();
+  }
+
   @Post("archive")
   @Permissions("monitoring.archive")
   @HttpCode(HttpStatus.OK)

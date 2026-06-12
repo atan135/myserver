@@ -24,6 +24,82 @@
         </div>
       </div>
 
+      <el-card class="rollout-card" :class="`rollout-card-${rolloutDrain.status}`" v-loading="rolloutDrain.loading">
+        <template #header>
+          <div class="rollout-header">
+            <div>
+              <span class="rollout-title">Rollout / Drain 状态</span>
+              <span class="rollout-subtitle">game-proxy 控制面</span>
+            </div>
+            <el-tag :type="rolloutTagType" size="small">{{ rolloutStatusText }}</el-tag>
+          </div>
+        </template>
+
+        <div v-if="rolloutDrain.data" class="rollout-content">
+          <div class="rollout-summary">
+            <div class="rollout-alert">
+              <span class="alert-dot" :class="`alert-${rolloutDrain.data.alert_level}`"></span>
+              <span>{{ rolloutDrain.data.alert_message }}</span>
+            </div>
+            <span class="rollout-updated">更新 {{ formatTimestamp(rolloutDrain.data.updated_at) }}</span>
+          </div>
+
+          <div v-if="rolloutDrain.data.rollout" class="rollout-meta">
+            <div class="rollout-meta-item">
+              <span class="label">Epoch</span>
+              <span class="value">{{ rolloutDrain.data.rollout.epoch || "--" }}</span>
+            </div>
+            <div class="rollout-meta-item">
+              <span class="label">Old</span>
+              <span class="value">{{ rolloutDrain.data.rollout.old_server || "--" }}</span>
+            </div>
+            <div class="rollout-meta-item">
+              <span class="label">New</span>
+              <span class="value">{{ rolloutDrain.data.rollout.new_server || "--" }}</span>
+            </div>
+            <div class="rollout-meta-item">
+              <span class="label">State</span>
+              <span class="value">{{ rolloutDrain.data.rollout.state || "--" }}</span>
+            </div>
+          </div>
+
+          <div v-if="rolloutDrain.data.active" class="blocker-grid">
+            <div class="blocker-item">
+              <span class="label">旧服房间阻塞</span>
+              <span class="value">{{ rolloutDrain.data.blockers.blocked_room_count }}</span>
+            </div>
+            <div class="blocker-item">
+              <span class="label">旧服玩家阻塞</span>
+              <span class="value">{{ rolloutDrain.data.blockers.blocked_player_count }}</span>
+            </div>
+            <div class="blocker-item">
+              <span class="label">过期房间路由</span>
+              <span class="value">{{ rolloutDrain.data.blockers.stale_room_route_count }}</span>
+            </div>
+            <div class="blocker-item">
+              <span class="label">过期玩家路由</span>
+              <span class="value">{{ rolloutDrain.data.blockers.stale_player_route_count }}</span>
+            </div>
+          </div>
+
+          <div v-if="hasRolloutSamples" class="rollout-samples">
+            <div v-if="rolloutDrain.data.blockers.blocked_room_samples.length" class="sample-row">
+              <span class="label">房间样本</span>
+              <span class="sample-list">{{ rolloutDrain.data.blockers.blocked_room_samples.join(", ") }}</span>
+            </div>
+            <div v-if="rolloutDrain.data.blockers.blocked_player_samples.length" class="sample-row">
+              <span class="label">玩家样本</span>
+              <span class="sample-list">{{ rolloutDrain.data.blockers.blocked_player_samples.join(", ") }}</span>
+            </div>
+          </div>
+
+          <div v-if="rolloutDrain.data.error" class="rollout-error">
+            {{ rolloutDrain.data.error }}：{{ rolloutDrain.data.message }}
+          </div>
+        </div>
+        <div v-else class="rollout-placeholder">等待控制面状态...</div>
+      </el-card>
+
       <div class="services-grid">
         <el-card
           v-for="service in services"
@@ -71,7 +147,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue";
+import { computed, reactive, ref, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import AdminLayout from "../../components/AdminLayout.vue";
@@ -84,6 +160,11 @@ const authStore = useAuthStore();
 const services = ref([]);
 const currentWindow = ref("5m");
 const archiveLoading = ref(false);
+const rolloutDrain = reactive({
+  loading: false,
+  data: null,
+  status: "loading"
+});
 let pollTimer = null;
 
 const SERVICE_ONLINE_LABELS = {
@@ -112,6 +193,35 @@ function secondaryMetric(service) {
   return null;
 }
 
+const rolloutStatusText = computed(() => {
+  const status = rolloutDrain.data?.status || rolloutDrain.status;
+  const labels = {
+    loading: "加载中",
+    empty: "无进行中",
+    blocked: "阻塞中",
+    drained: "已排空",
+    interrupted: "已中断",
+    error: "不可达"
+  };
+  return labels[status] || status;
+});
+
+const rolloutTagType = computed(() => {
+  const level = rolloutDrain.data?.alert_level;
+  if (level === "critical") {
+    return "danger";
+  }
+  if (level === "warning") {
+    return "warning";
+  }
+  return "info";
+});
+
+const hasRolloutSamples = computed(() => {
+  const blockers = rolloutDrain.data?.blockers;
+  return Boolean(blockers?.blocked_room_samples?.length || blockers?.blocked_player_samples?.length);
+});
+
 async function fetchServices() {
   try {
     const response = await monitoringApi.getServices();
@@ -121,6 +231,69 @@ async function fetchServices() {
   } catch (error) {
     console.error("Failed to fetch services:", error);
   }
+}
+
+async function fetchRolloutDrain() {
+  rolloutDrain.loading = !rolloutDrain.data;
+  try {
+    const response = await monitoringApi.getRolloutDrain();
+    rolloutDrain.data = normalizeRolloutDrain(response.data);
+    rolloutDrain.status = rolloutDrain.data.status;
+  } catch (error) {
+    console.error("Failed to fetch rollout drain:", error);
+    rolloutDrain.data = normalizeRolloutDrain({
+      ok: false,
+      updated_at: Date.now(),
+      status: "error",
+      alert_level: "critical",
+      alert_message: "控制面不可达",
+      error: error.response?.data?.error || "ADMIN_API_UNAVAILABLE",
+      message: error.response?.data?.message || error.message
+    });
+    rolloutDrain.status = "error";
+  } finally {
+    rolloutDrain.loading = false;
+  }
+}
+
+function normalizeRolloutDrain(data) {
+  const blockers = data?.blockers || {};
+  return {
+    ok: data?.ok !== false,
+    updated_at: data?.updated_at || data?.checked_at || Date.now(),
+    active: Boolean(data?.active),
+    status: data?.status || "error",
+    alert_level: data?.alert_level || "critical",
+    alert_message: data?.alert_message || "控制面状态异常",
+    error: data?.error || "",
+    message: data?.message || "",
+    rollout: data?.rollout || null,
+    blockers: {
+      blocked_room_count: blockers.blocked_room_count || 0,
+      blocked_player_count: blockers.blocked_player_count || 0,
+      stale_room_route_count: blockers.stale_room_route_count || 0,
+      stale_player_route_count: blockers.stale_player_route_count || 0,
+      blocked_room_samples: blockers.blocked_room_samples || [],
+      blocked_player_samples: blockers.blocked_player_samples || []
+    }
+  };
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) {
+    return "--";
+  }
+
+  return new Date(timestamp).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+function fetchMonitoringOverview() {
+  fetchServices();
+  fetchRolloutDrain();
 }
 
 function goToDetail(serviceName) {
@@ -141,9 +314,9 @@ async function handleArchive() {
 }
 
 onMounted(() => {
-  fetchServices();
+  fetchMonitoringOverview();
   // Poll every 5 seconds
-  pollTimer = setInterval(fetchServices, 5000);
+  pollTimer = setInterval(fetchMonitoringOverview, 5000);
 });
 
 onUnmounted(() => {
@@ -174,6 +347,155 @@ onUnmounted(() => {
 .header h2 {
   margin: 0;
   font-size: 20px;
+}
+
+.rollout-card {
+  margin-bottom: 16px;
+  border-left: 4px solid #909399;
+}
+
+.rollout-card-blocked,
+.rollout-card-drained {
+  border-left-color: #e6a23c;
+}
+
+.rollout-card-interrupted,
+.rollout-card-error {
+  border-left-color: #f56c6c;
+}
+
+.rollout-card-empty {
+  border-left-color: #409eff;
+}
+
+.rollout-header,
+.rollout-summary,
+.rollout-meta,
+.blocker-grid,
+.sample-row {
+  display: flex;
+  align-items: center;
+}
+
+.rollout-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rollout-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.rollout-subtitle {
+  margin-left: 8px;
+  color: #909399;
+  font-size: 13px;
+}
+
+.rollout-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rollout-summary {
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rollout-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.alert-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #909399;
+  flex: 0 0 auto;
+}
+
+.alert-info {
+  background: #409eff;
+}
+
+.alert-warning {
+  background: #e6a23c;
+}
+
+.alert-critical {
+  background: #f56c6c;
+}
+
+.rollout-updated,
+.rollout-placeholder {
+  color: #909399;
+  font-size: 13px;
+}
+
+.rollout-meta,
+.blocker-grid {
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rollout-meta-item,
+.blocker-item {
+  min-width: 160px;
+  padding: 10px 12px;
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rollout-meta-item .label,
+.blocker-item .label,
+.sample-row .label {
+  color: #909399;
+  font-size: 13px;
+}
+
+.rollout-meta-item .value,
+.blocker-item .value {
+  color: #303133;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rollout-samples {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.sample-row {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sample-list {
+  color: #606266;
+  overflow-wrap: anywhere;
+}
+
+.rollout-error {
+  padding: 8px 10px;
+  background: #fef0f0;
+  color: #c45656;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
 }
 
 .services-grid {

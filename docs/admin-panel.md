@@ -530,6 +530,22 @@ GM 广播通过 Core NATS 发布 `myserver.gm.broadcast`，由各 `game-server` 
 - `15m`
 - `1h`
 
+#### `GET /api/admin/monitoring/rollout-drain`
+
+查询 rollout / drain 控制面观测状态，供监控总览页轮询展示。接口要求 `monitoring.read`，不会触发 `rollout/end`、`complete-if-drained` 或旧服停进程。
+
+当前实现通过 `admin-api` 读取 `game-proxy` admin HTTP `GET /rollout`，归一化返回:
+
+- 是否有 active rollout
+- `epoch`、`old_server`、`new_server`、rollout state
+- proxy route store drain 状态、是否已排空
+- 阻塞 room / player 计数与样本
+- stale route 计数
+- 更新时间
+- `info` / `warning` / `critical` 告警级别和可展示错误信息
+
+当 `game-proxy` admin 控制面不可达、鉴权失败或返回异常时，接口仍返回可展示的 `ok=false` / `status=error` / `alert_level=critical` 状态，避免监控总览页整体崩溃。
+
 #### `POST /api/admin/monitoring/archive`
 
 手动触发 metrics 归档任务，把超过 7 天的 Redis 指标迁移到 MySQL `metrics_archive`。
@@ -584,6 +600,7 @@ GM 广播通过 Core NATS 发布 `myserver.gm.broadcast`，由各 `game-server` 
 - 轮询刷新，当前周期 5 秒
 - 查看在线 / 离线状态
 - 查看 QPS、延迟、在线人数 / 连接数 / 匹配池大小
+- 展示 rollout / drain 状态，包含无进行中、阻塞中、已排空可收尾、控制面不可达等状态
 - 有 `monitoring.archive` 时可手动触发 metrics 归档
 
 详情页已支持：
@@ -628,6 +645,13 @@ GAME_SERVER_ADMIN_HOST=127.0.0.1
 GAME_SERVER_ADMIN_PORT=7500
 GAME_ADMIN_TOKEN=dev-only-change-this-game-admin-token
 
+GAME_PROXY_ADMIN_HOST=127.0.0.1
+GAME_PROXY_ADMIN_PORT=7101
+GAME_PROXY_ADMIN_TOKEN=dev-only-change-this-proxy-admin-token
+GAME_PROXY_ADMIN_READ_TOKEN=
+GAME_PROXY_ADMIN_REQUEST_TIMEOUT_MS=3000
+GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES=1048576
+
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=AdminPass123!
 ADMIN_DISPLAY_NAME=Administrator
@@ -637,7 +661,8 @@ ADMIN_DISPLAY_NAME=Administrator
 
 - `GAME_SERVER_ADMIN_HOST` / `GAME_SERVER_ADMIN_PORT` / `GAME_ADMIN_TOKEN` 用于 GM 指令转发
 - 默认仍对接 `game-server` admin 端口 `7500`
-- 生产环境必须修改 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 和初始管理员密码；`NODE_ENV=production` 下明显默认的 `JWT_SECRET` / `GAME_ADMIN_TOKEN` / `ADMIN_PASSWORD` 会导致配置加载失败
+- `GAME_PROXY_ADMIN_HOST` / `GAME_PROXY_ADMIN_PORT` / `GAME_PROXY_ADMIN_TOKEN` / `GAME_PROXY_ADMIN_READ_TOKEN` 用于监控页只读查询 `game-proxy` admin HTTP 的 rollout / drain 状态；优先配置 read token，未配置时使用 admin token
+- 生产环境必须修改 `JWT_SECRET`、`GAME_ADMIN_TOKEN` 和初始管理员密码，并为 proxy 监控配置非默认的 `GAME_PROXY_ADMIN_READ_TOKEN` 或 `GAME_PROXY_ADMIN_TOKEN`；`NODE_ENV=production` 下明显默认的 `JWT_SECRET` / `GAME_ADMIN_TOKEN` / `GAME_PROXY_ADMIN_TOKEN` / `GAME_PROXY_ADMIN_READ_TOKEN` / `ADMIN_PASSWORD` 会导致配置加载失败
 - `ADMIN_API_REQUIRE_TLS` 开发默认 `false`，`NODE_ENV=production` 默认 `true`；直连 HTTPS 通过 socket TLS 判断，经代理部署时只有可信代理来源的 `X-Forwarded-Proto=https` 才生效
 - `ADMIN_API_REQUIRE_IP_ALLOWLIST=false` 默认关闭；启用后 `ADMIN_API_IP_ALLOWLIST` 支持精确 IP 和 IPv4 CIDR，例如 `127.0.0.1,10.0.0.0/24`
 - `TRUST_PROXY=false` 时审计 IP 和 allowlist 来源 IP 使用直连来源；只有开启 `TRUST_PROXY` 且直连来源显式列在 `TRUSTED_PROXIES` 中时才采用 `X-Forwarded-For` 首个地址

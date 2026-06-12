@@ -22,6 +22,11 @@ const DEFAULT_GAME_ADMIN_TOKENS = new Set([
   "dev-only-change-this-game-admin-token"
 ]);
 
+const DEFAULT_GAME_PROXY_ADMIN_TOKENS = new Set([
+  "dev-only-change-this-proxy-admin-token",
+  "dev-only-change-this-proxy-admin-read-token"
+]);
+
 const DEFAULT_INITIAL_ADMIN_PASSWORDS = new Set([
   "AdminPass123!"
 ]);
@@ -86,6 +91,15 @@ function validateProductionConfig(config) {
     errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
   }
 
+  const gameProxyAdminToken = String(config.gameProxyAdminToken || "").trim();
+  const gameProxyAdminReadToken = String(config.gameProxyAdminReadToken || "").trim();
+  if (gameProxyAdminReadToken && DEFAULT_GAME_PROXY_ADMIN_TOKENS.has(gameProxyAdminReadToken)) {
+    errors.push("GAME_PROXY_ADMIN_READ_TOKEN must be set to a non-default value in production");
+  }
+  if (!gameProxyAdminReadToken && (!gameProxyAdminToken || DEFAULT_GAME_PROXY_ADMIN_TOKENS.has(gameProxyAdminToken))) {
+    errors.push("GAME_PROXY_ADMIN_READ_TOKEN or GAME_PROXY_ADMIN_TOKEN must be set to a non-default value in production");
+  }
+
   if (!config.initialAdminPassword || DEFAULT_INITIAL_ADMIN_PASSWORDS.has(config.initialAdminPassword)) {
     errors.push("ADMIN_PASSWORD must be set to a non-default value in production");
   }
@@ -141,6 +155,18 @@ export function getConfig() {
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
     gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
+    gameProxyAdminHost: process.env.GAME_PROXY_ADMIN_HOST || "127.0.0.1",
+    gameProxyAdminPort: Number.parseInt(process.env.GAME_PROXY_ADMIN_PORT || "7101", 10),
+    gameProxyAdminToken: process.env.GAME_PROXY_ADMIN_TOKEN || "dev-only-change-this-proxy-admin-token",
+    gameProxyAdminReadToken: process.env.GAME_PROXY_ADMIN_READ_TOKEN || "",
+    gameProxyAdminRequestTimeoutMs: parsePositiveIntegerWithFallback(
+      process.env.GAME_PROXY_ADMIN_REQUEST_TIMEOUT_MS,
+      3000
+    ),
+    gameProxyAdminMaxResponseBytes: parsePositiveIntegerWithFallback(
+      process.env.GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES,
+      1048576
+    ),
     initialAdminUsername: process.env.ADMIN_USERNAME || "admin",
     initialAdminPassword: process.env.ADMIN_PASSWORD || "AdminPass123!",
     initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator"
