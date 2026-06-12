@@ -25,7 +25,8 @@ export const ROOM_TRANSFER_STAGE = {
 export const ROOM_TRANSFER_FAILURE_INJECTION = {
   IMPORT_CORRUPT_PAYLOAD: "import_corrupt_payload",
   PROXY_BAD_EXPECTED_ROOM_VERSION: "proxy_bad_expected_room_version",
-  PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM: "proxy_bad_expected_last_transfer_checksum"
+  PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM: "proxy_bad_expected_last_transfer_checksum",
+  PROXY_MISSING_ROUTE_METADATA: "proxy_missing_route_metadata"
 };
 
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -319,6 +320,7 @@ function stageForFailureInjectionMode(mode) {
       return ROOM_TRANSFER_STAGE.NEW_IMPORT;
     case ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_ROOM_VERSION:
     case ROOM_TRANSFER_FAILURE_INJECTION.PROXY_BAD_EXPECTED_LAST_TRANSFER_CHECKSUM:
+    case ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA:
       return ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT;
     default:
       return undefined;
@@ -538,6 +540,26 @@ export async function orchestrateRoomTransfer(request, clients) {
     const existingRoute = clients.proxy.getRoomRoute
       ? await clients.proxy.getRoomRoute(request.roomId)
       : null;
+
+    if (hasFailureInjection(
+      failureInjection,
+      ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+      [ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA]
+    )) {
+      markFailureInjection(
+        context,
+        ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+        ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA,
+        {
+          missingRouteMetadata: true,
+          actualRouteFound: Boolean(existingRoute)
+        }
+      );
+      throw Object.assign(new Error("ROOM_ROUTE_METADATA_MISSING"), {
+        code: "ROOM_ROUTE_METADATA_MISSING"
+      });
+    }
+
     const route = withProxyRouteFailureInjection(
       buildProxyRouteUpsert(request, importResult, existingRoute),
       failureInjection,

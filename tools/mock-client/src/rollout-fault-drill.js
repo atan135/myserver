@@ -13,6 +13,7 @@ import {
 export const ROLLOUT_FAULT_DRILL = {
   IMPORT_FAILURE: "import-failure",
   ROUTE_UPSERT_FAILURE: "route-upsert-failure",
+  ROUTE_METADATA_MISSING: "route-metadata-missing",
   REDIRECT_NO_RECONNECT: "redirect-no-reconnect"
 };
 
@@ -69,6 +70,34 @@ export const ROLLOUT_FAULT_DRILL_DEFINITIONS = [
       "uses an intentionally wrong expected_room_version for proxy CAS",
       "stops at proxy_route_upsert when game-proxy rejects the route update",
       "does not retire the old room after a failed proxy route switch"
+    ]
+  },
+  {
+    name: ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING,
+    type: "transfer",
+    title: "Route metadata missing",
+    expectedStage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+    expectedFailure: true,
+    expectedErrorCode: "ROOM_ROUTE_METADATA_MISSING",
+    failureInjection: {
+      stage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+      mode: ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA
+    },
+    simulateExistingRoute: null,
+    expectedCompletedStages: [
+      ROOM_TRANSFER_STAGE.OLD_FREEZE,
+      ROOM_TRANSFER_STAGE.OLD_EXPORT,
+      ROOM_TRANSFER_STAGE.NEW_IMPORT,
+      ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+    ],
+    mustNotCompleteStages: [
+      ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+      ROOM_TRANSFER_STAGE.OLD_RETIRE
+    ],
+    safety: [
+      "simulates proxy getRoomRoute returning no pre-existing room metadata",
+      "treats missing metadata as a proxy_route_upsert-stage failure before POST /room-route/upsert",
+      "stops at proxy_route_upsert and does not retire the old room"
     ]
   },
   {
@@ -138,6 +167,18 @@ function displayValue(value, fallback) {
 }
 
 function buildTransferPlan(definition, options) {
+  const reachesProxyRouteStage = definition.expectedCompletedStages.includes(
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+  );
+  const proxyRouteCalls = reachesProxyRouteStage
+    ? [
+      "new.confirmRoomOwnership",
+      "proxy.getRoomRoute",
+      ...(definition.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING
+        ? []
+        : ["proxy.upsertRoomRoute"])
+    ]
+    : [];
   const common = {
     rolloutEpoch: displayValue(options.rolloutEpoch, "<ROLLOUT_EPOCH>"),
     roomId: displayValue(options.roomId, "<ROOM_ID>"),
@@ -149,14 +190,13 @@ function buildTransferPlan(definition, options) {
     ...common,
     expectedFailure: true,
     expectedStage: definition.expectedStage,
+    ...(definition.expectedErrorCode ? { expectedErrorCode: definition.expectedErrorCode } : {}),
     failureInjection: definition.failureInjection,
     plannedCalls: [
       "old.freezeRoomForTransfer",
       "old.exportRoomTransfer",
       "new.importRoomTransfer",
-      ...(definition.name === ROLLOUT_FAULT_DRILL.ROUTE_UPSERT_FAILURE
-        ? ["new.confirmRoomOwnership", "proxy.getRoomRoute", "proxy.upsertRoomRoute"]
-        : [])
+      ...proxyRouteCalls
     ],
     skippedAfterExpectedFailure: definition.mustNotCompleteStages,
     endpoints: {
@@ -327,6 +367,24 @@ export function createSimulatedTransferClients(options = {}) {
   return { calls, clients: { oldServer, newServer, proxy } };
 }
 
+function withSimulatedMissingRouteMetadata(clients) {
+  const proxy = clients.proxy;
+  return {
+    ...clients,
+    proxy: {
+      async getRoomRoute(roomId) {
+        if (proxy.getRoomRoute) {
+          await proxy.getRoomRoute.call(proxy, roomId);
+        }
+        return null;
+      },
+      async upsertRoomRoute(route) {
+        return await proxy.upsertRoomRoute.call(proxy, route);
+      }
+    }
+  };
+}
+
 function buildTransferRequest(definition, options) {
   return {
     rolloutEpoch: options.rolloutEpoch || "rollout-fault-drill-sim",
@@ -342,10 +400,18 @@ function buildTransferRequest(definition, options) {
 
 async function runTransferDrill(definition, options, mode) {
   const mock = mode === "simulate"
-    ? createSimulatedTransferClients(options)
+    ? createSimulatedTransferClients({
+      ...options,
+      ...(Object.hasOwn(definition, "simulateExistingRoute")
+        ? { existingRoute: definition.simulateExistingRoute }
+        : {})
+    })
     : null;
   const clients = mock?.clients || createRealTransferClients(options);
-  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), clients);
+  const transferClients = definition.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING
+    ? withSimulatedMissingRouteMetadata(clients)
+    : clients;
+  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), transferClients);
   if (!mock) {
     return result;
   }
@@ -433,15 +499,19 @@ function validateDrillResult(definition, result) {
 
   const stoppedAtExpectedStage = result.ok === false && result.stage === definition.expectedStage;
   const expectedFailureObserved = result.expectedFailure === true;
+  const expectedErrorCodeObserved = !definition.expectedErrorCode ||
+    result.errorCode === definition.expectedErrorCode;
   const noForbiddenCompletedStage = hasNoForbiddenCompletedStage(result, definition);
   const expectedCompletedStages = hasExpectedCompletedStages(result, definition);
   return {
     ok: stoppedAtExpectedStage &&
       expectedFailureObserved &&
+      expectedErrorCodeObserved &&
       noForbiddenCompletedStage &&
       expectedCompletedStages,
     stoppedAtExpectedStage,
     expectedFailureObserved,
+    expectedErrorCodeObserved,
     noForbiddenCompletedStage,
     expectedCompletedStages
   };

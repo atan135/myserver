@@ -5,7 +5,12 @@ import {
   ROLLOUT_FAULT_DRILL,
   runRolloutFaultDrills
 } from "../tools/mock-client/src/rollout-fault-drill.js";
-import { ROOM_TRANSFER_STAGE } from "../tools/mock-client/src/rollout-transfer.js";
+import {
+  ROOM_TRANSFER_FAILURE_INJECTION,
+  ROOM_TRANSFER_STAGE,
+  encodeRoomTransferPayloadForTest,
+  orchestrateRoomTransfer
+} from "../tools/mock-client/src/rollout-transfer.js";
 
 test("rollout fault drill dry-run prints a safe plan without service calls", async () => {
   const report = await runRolloutFaultDrills({
@@ -24,9 +29,20 @@ test("rollout fault drill dry-run prints a safe plan without service calls", asy
     [
       ROLLOUT_FAULT_DRILL.IMPORT_FAILURE,
       ROLLOUT_FAULT_DRILL.ROUTE_UPSERT_FAILURE,
+      ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING,
       ROLLOUT_FAULT_DRILL.REDIRECT_NO_RECONNECT
     ]
   );
+
+  const routeMetadataMissing = report.drills.find((drill) => drill.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING);
+  assert.equal(routeMetadataMissing.plan.expectedErrorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.deepEqual(routeMetadataMissing.plan.plannedCalls, [
+    "old.freezeRoomForTransfer",
+    "old.exportRoomTransfer",
+    "new.importRoomTransfer",
+    "new.confirmRoomOwnership",
+    "proxy.getRoomRoute"
+  ]);
 });
 
 test("rollout fault drill simulate validates expected stop stages", async () => {
@@ -67,10 +83,121 @@ test("rollout fault drill simulate validates expected stop stages", async () => 
     "proxy.upsertRoomRoute"
   ]);
 
+  const routeMetadataMissing = report.drills.find((drill) => drill.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING);
+  assert.equal(routeMetadataMissing.validation.ok, true);
+  assert.equal(routeMetadataMissing.result.ok, false);
+  assert.equal(routeMetadataMissing.result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(routeMetadataMissing.result.expectedFailure, true);
+  assert.equal(routeMetadataMissing.result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.equal(routeMetadataMissing.validation.expectedErrorCodeObserved, true);
+  assert.deepEqual(routeMetadataMissing.result.completedStages, [
+    ROOM_TRANSFER_STAGE.OLD_FREEZE,
+    ROOM_TRANSFER_STAGE.OLD_EXPORT,
+    ROOM_TRANSFER_STAGE.NEW_IMPORT,
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+  ]);
+  assert.deepEqual(routeMetadataMissing.result.mockCalls, [
+    "old.freezeRoomForTransfer",
+    "old.exportRoomTransfer",
+    "new.importRoomTransfer",
+    "new.confirmRoomOwnership",
+    "proxy.getRoomRoute"
+  ]);
+  assert.equal(routeMetadataMissing.result.mockCalls.includes("proxy.upsertRoomRoute"), false);
+  assert.equal(routeMetadataMissing.result.mockCalls.includes("old.retireTransferredRoom"), false);
+
   const redirectFailure = report.drills.find((drill) => drill.name === ROLLOUT_FAULT_DRILL.REDIRECT_NO_RECONNECT);
   assert.equal(redirectFailure.validation.ok, true);
   assert.equal(redirectFailure.result.ok, false);
   assert.equal(redirectFailure.result.stage, "redirect_no_reconnect");
   assert.equal(redirectFailure.result.expectedFailure, true);
   assert.equal(redirectFailure.result.reconnectAttempted, false);
+});
+
+test("route metadata missing fault does not rely on proxy upsert rejection", async () => {
+  const calls = [];
+  const payloadRaw = encodeRoomTransferPayloadForTest({
+    rolloutEpoch: "rollout-test",
+    roomId: "room-test",
+    roomVersion: 2,
+    checksum: "checksum-test"
+  });
+  const clients = {
+    oldServer: {
+      async freezeRoomForTransfer() {
+        calls.push("old.freezeRoomForTransfer");
+        return { ok: true, roomId: "room-test", roomVersion: 1 };
+      },
+      async exportRoomTransfer() {
+        calls.push("old.exportRoomTransfer");
+        return {
+          ok: true,
+          roomId: "room-test",
+          checksum: "checksum-test",
+          payload: { raw: payloadRaw, roomVersion: 2, checksum: "checksum-test" }
+        };
+      },
+      async retireTransferredRoom() {
+        calls.push("old.retireTransferredRoom");
+        return { ok: true, roomId: "room-test" };
+      }
+    },
+    newServer: {
+      async importRoomTransfer() {
+        calls.push("new.importRoomTransfer");
+        return { ok: true, roomId: "room-test", checksum: "checksum-test", roomVersion: 3 };
+      },
+      async confirmRoomOwnership(request) {
+        calls.push("new.confirmRoomOwnership");
+        return {
+          ok: true,
+          roomId: "room-test",
+          checksum: request.checksum,
+          roomVersion: request.roomVersion
+        };
+      }
+    },
+    proxy: {
+      async getRoomRoute() {
+        calls.push("proxy.getRoomRoute");
+        return null;
+      },
+      async upsertRoomRoute() {
+        calls.push("proxy.upsertRoomRoute");
+        return { ok: true };
+      }
+    }
+  };
+
+  const result = await orchestrateRoomTransfer(
+    {
+      rolloutEpoch: "rollout-test",
+      roomId: "room-test",
+      oldServerId: "game-server-old",
+      newServerId: "game-server-new",
+      failureInjection: {
+        stage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+        mode: ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA
+      }
+    },
+    clients
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(result.expectedFailure, true);
+  assert.equal(result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.deepEqual(result.completedStages, [
+    ROOM_TRANSFER_STAGE.OLD_FREEZE,
+    ROOM_TRANSFER_STAGE.OLD_EXPORT,
+    ROOM_TRANSFER_STAGE.NEW_IMPORT,
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+  ]);
+  assert.deepEqual(calls, [
+    "old.freezeRoomForTransfer",
+    "old.exportRoomTransfer",
+    "new.importRoomTransfer",
+    "new.confirmRoomOwnership",
+    "proxy.getRoomRoute"
+  ]);
 });

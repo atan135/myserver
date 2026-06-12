@@ -16,6 +16,7 @@
 |------|----------|------|----------|
 | `import-failure` | `new_import` | old freeze/export 后，在 new import 前篡改 transfer payload，预期 import 或 checksum 校验失败。 | 停在 `new_import`；不 confirm ownership，不 upsert proxy route，不 retire old room。 |
 | `route-upsert-failure` | `proxy_route_upsert` | import 与 ownership confirm 成功后，使用错误 `expected_room_version` 触发 proxy route CAS 失败。 | 停在 `proxy_route_upsert`；不 retire old room。 |
+| `route-metadata-missing` | `proxy_route_upsert` | import 与 ownership confirm 成功后，模拟 proxy 读取不到既有 room route metadata。 | 停在 `proxy_route_upsert`；不调用 `/room-route/upsert` 创建新 route，不 retire old room。 |
 | `redirect-no-reconnect` | `redirect_no_reconnect` | 只触发或计划 `ServerRedirectPush`，明确不运行 mock-client reconnect 场景。 | 只验证 push/操作步骤；不声称 mybevy 已适配，不执行 reconnect。 |
 
 ## 默认 dry-run
@@ -44,6 +45,8 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
 - `expectedFailure=true`
 - `stage` 停在预期故障阶段
 - 后续破坏性阶段未完成
+
+其中 `route-metadata-missing` 会在 `proxy.getRoomRoute` 返回缺失后直接失败，不继续调用 `proxy.upsertRoomRoute`，避免把缺失 metadata 当作首次建 route 成功。
 
 ## 执行模式
 
@@ -96,4 +99,4 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --simulate --archive-file 
 - mybevy 客户端 redirect/reconnect 适配。
 - 部署平台自动停旧进程。
 - 同连接迁移 / L7 relay。
-- `route metadata` 真实丢失后的端到端恢复演练。
+- `route metadata` 真实丢失后的端到端恢复演练；当前只覆盖 dry-run / simulate / optional execute 的保守失败入口。
