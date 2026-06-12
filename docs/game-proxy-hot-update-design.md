@@ -11,6 +11,7 @@
 - room 内 CSV 或运行时配置更新属于 [game-server 更新策略拆分](./game-server-update-strategy.md)。
 - 空房接管式灰度的完整目标规范见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。
 - 任务状态见 [空房接管式灰度任务清单](./game-server-room-rollout-task-list.md)。
+- 可重复演练入口见 [old/new/proxy 三进程 rollout 演练入口](./rollout-three-process-drill-runbook.md)。
 
 当前代码优先于本文。如果本文与 `apps/game-proxy/src` 冲突，应以代码为准并同步修正文档。
 
@@ -55,10 +56,11 @@
 - `game-server` 已通过已鉴权 admin/internal 通道提供 `RequestServerShutdownReq/Res` 受控 graceful shutdown 入口，并由 `auth-http` 暴露为 `POST /api/v1/internal/game-server/shutdown-if-drained`；入口会再次校验旧服 `drain_mode_enabled`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0`，通过后触发 game-server 自身 graceful shutdown 信号，`retired_room_count` 只作为观测字段。`tools/mock-client` 可用 `request-server-shutdown` 场景人工演练该入口。
 - `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`；push 成功进入目标连接出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接。mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
 - `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `ConfirmRoomOwnership` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口。
+- `scripts/rollout-three-process-drill.ps1` 已提供 old/new/proxy 第一阶段演练入口。默认 dry-run，只做工具检查、端口探测和步骤命令输出；显式 `-ExecuteSteps` 才调用已运行服务的 rollout start、old drain、transfer、drain status 和 complete-if-drained，旧服 shutdown 请求还需要额外 `-AllowShutdownRequest`。
 
 仍未完整落地：
 
-- 真实 old/new/proxy 多进程联调、mybevy 适配、部署平台自动停止旧进程仍未完成。`complete-if-drained` 已具备可选旧服真实状态联动，`game-server` 已有受控 graceful shutdown 安全闸入口，但还不是完整部署编排自动停服控制面。
+- 真实 old/new/proxy 多进程联调验收、mybevy 适配、部署平台自动停止旧进程仍未完成。演练脚本入口已经具备，但本次任务未实际启动服务或执行三进程联调。`complete-if-drained` 已具备可选旧服真实状态联动，`game-server` 已有受控 graceful shutdown 安全闸入口，但还不是完整部署编排自动停服控制面。
 - proxy 不做同一连接内换 upstream。
 - proxy 不保存玩法状态，不做 room transfer payload 权威存储。
 - 当前 Redis route store 仍不是完整多 proxy 强一致方案；它已有单 key 快照级 revision/CAS 和 pub/sub 本地缓存失效第一阶段能力，但仍缺统一控制面 owner、真实 Redis 多 proxy 压测和更细粒度冲突合并。

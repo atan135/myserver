@@ -447,6 +447,18 @@ node tools/mock-client/src/index.js --scenario get-room-data \
   --login-name test001 --password Passw0rd!
 ```
 
+### Rollout 演练入口
+
+`tools/mock-client/src/rollout-transfer-cli.js` 负责单个 room 的控制面迁移顺序。完整 old/new/proxy 第一阶段演练应优先使用仓库根目录脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
+  -RolloutEpoch rollout-20260612-a `
+  -RoomId room-empty-001
+```
+
+该脚本默认 dry-run，不启动服务、不调用写接口；确认 old/new game-server、game-proxy 和 auth-http 已运行后，才传 `-ExecuteSteps`。详细流程见 `docs/rollout-three-process-drill-runbook.md`。
+
 ## 扩展开发
 
 ### 添加新消息类型
