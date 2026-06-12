@@ -469,6 +469,23 @@ $transferArgs = @(
     "--proxy-admin-token", $ProxyAdminToken,
     "--timeout-ms", [string]$TimeoutMs
 )
+$transferDryRunArgs = @(
+    $TransferCli,
+    "--dry-run",
+    "--rollout-epoch", $displayRolloutEpoch,
+    "--room-id", $displayRoomId,
+    "--old-server-id", $OldServerId,
+    "--new-server-id", $NewServerId,
+    "--old-admin-host", $OldAdminHost,
+    "--old-admin-port", [string]$OldAdminPort,
+    "--old-admin-token", $OldAdminToken,
+    "--new-admin-host", $NewAdminHost,
+    "--new-admin-port", [string]$NewAdminPort,
+    "--new-admin-token", $NewAdminToken,
+    "--proxy-admin-url", $ProxyAdminUrl,
+    "--proxy-admin-token", $ProxyAdminToken,
+    "--timeout-ms", [string]$TimeoutMs
+)
 $transferDisplayArgs = @(
     "node",
     "tools/mock-client/src/rollout-transfer-cli.js",
@@ -491,6 +508,14 @@ if ($ExecuteSteps) {
     Invoke-ExternalStep -Name "room transfer orchestration" -FilePath "node" -Arguments $transferArgs
     Add-StageResult "room-transfer" "ok"
 } else {
+    Write-Host "Transfer dry-run plan:" -ForegroundColor Gray
+    & node @transferDryRunArgs
+    if ($LASTEXITCODE -ne 0) {
+        Add-StageResult "room-transfer-dry-run" "failed" "rollout-transfer-cli validation failed"
+        Write-RunSummary
+        throw "room transfer dry-run plan failed with exit code $LASTEXITCODE"
+    }
+    Add-StageResult "room-transfer-dry-run" "ok"
     Add-StageResult "room-transfer" "planned"
 }
 

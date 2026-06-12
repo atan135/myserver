@@ -1,8 +1,11 @@
 import {
   GameServerTransferClient,
+  ROOM_TRANSFER_STAGE,
   ProxyAdminClient,
   orchestrateRoomTransfer
 } from "./rollout-transfer.js";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function optionValue(argv, index) {
   return { value: argv[index + 1] || "", nextIndex: index + 1 };
@@ -23,6 +26,7 @@ Required:
   --new-server-id <server-id>
 
 Options:
+  --dry-run                              validate arguments and print a JSON plan; no service calls
   The default transfer order is old_freeze -> old_export -> new_import ->
   new_confirm_ownership -> proxy_route_upsert -> old_retire.
   new_confirm_ownership uses the checksum and roomVersion returned by import.
@@ -52,11 +56,13 @@ function parseNumber(value, fallback) {
   if (value === "" || value === undefined || value === null) {
     return fallback;
   }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (!/^-?\d+$/.test(String(value))) {
+    return Number.NaN;
+  }
+  return Number.parseInt(value, 10);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     oldAdminHost: process.env.MYSERVER_OLD_GAME_ADMIN_HOST || "127.0.0.1",
     oldAdminPort: parseNumber(process.env.MYSERVER_OLD_GAME_ADMIN_PORT, 7500),
@@ -88,6 +94,9 @@ function parseArgs(argv) {
       case "-h":
       case "--help":
         options.help = true;
+        break;
+      case "--dry-run":
+        options.dryRun = true;
         break;
       case "--rollout-epoch":
         ({ value: options.rolloutEpoch, nextIndex: index } = takeValue(index));
@@ -166,23 +175,251 @@ function parseArgs(argv) {
   return options;
 }
 
+function optionName(key) {
+  return `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+}
+
+function requiredOptionKeys(options) {
+  return options.triggerRedirectOnly
+    ? ["rolloutEpoch", "roomId", "redirectTargetHost", "redirectTargetPort"]
+    : ["rolloutEpoch", "roomId", "oldServerId", "newServerId"];
+}
+
 function requireOption(options, key) {
   if (!options[key]) {
-    throw new Error(`missing required option --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
+    throw new Error(`missing required option ${optionName(key)}`);
   }
+}
+
+function validPort(value) {
+  return Number.isInteger(value) && value > 0 && value <= 65535;
 }
 
 function requirePort(options, key) {
   const value = options[key];
-  if (!Number.isInteger(value) || value <= 0 || value > 65535) {
-    throw new Error(`invalid option --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: expected 1-65535`);
+  if (!validPort(value)) {
+    throw new Error(`invalid option ${optionName(key)}: expected 1-65535`);
   }
 }
 
 function requireNonNegativeInteger(options, key) {
   const value = options[key] ?? 0;
   if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`invalid option --${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: expected non-negative integer`);
+    throw new Error(`invalid option ${optionName(key)}: expected non-negative integer`);
+  }
+}
+
+function requirePositiveInteger(options, key) {
+  const value = options[key];
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`invalid option ${optionName(key)}: expected positive integer`);
+  }
+}
+
+function validateHttpUrl(value, name) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("expected http or https");
+    }
+    return null;
+  } catch {
+    return `invalid option ${name}: expected http(s) URL`;
+  }
+}
+
+function tokenState(token) {
+  if (!token) {
+    return "missing";
+  }
+  if (token.startsWith("dev-only-change-this-")) {
+    return "default-dev";
+  }
+  return "set";
+}
+
+export function validateTransferCliOptions(options) {
+  const errors = [];
+  const warnings = [];
+
+  for (const key of requiredOptionKeys(options)) {
+    if (!options[key]) {
+      errors.push(`missing required option ${optionName(key)}`);
+    }
+  }
+
+  if (options.triggerRedirectOnly) {
+    if (!validPort(options.oldAdminPort)) {
+      errors.push(`invalid option --old-admin-port: expected 1-65535`);
+    }
+    if (!validPort(options.redirectTargetPort)) {
+      errors.push(`invalid option --redirect-target-port: expected 1-65535`);
+    }
+    if (!Number.isInteger(options.redirectRetryAfterMs ?? 0) || (options.redirectRetryAfterMs ?? 0) < 0) {
+      errors.push(`invalid option --redirect-retry-after-ms: expected non-negative integer`);
+    }
+  } else {
+    if (!validPort(options.oldAdminPort)) {
+      errors.push(`invalid option --old-admin-port: expected 1-65535`);
+    }
+    if (!validPort(options.newAdminPort)) {
+      errors.push(`invalid option --new-admin-port: expected 1-65535`);
+    }
+    const proxyUrlError = validateHttpUrl(options.proxyAdminUrl, "--proxy-admin-url");
+    if (proxyUrlError) {
+      errors.push(proxyUrlError);
+    }
+    if (options.oldServerId && options.newServerId && options.oldServerId === options.newServerId) {
+      errors.push("--old-server-id and --new-server-id must be different for a transfer drill");
+    }
+    if (
+      options.oldAdminHost &&
+      options.newAdminHost &&
+      options.oldAdminHost === options.newAdminHost &&
+      options.oldAdminPort === options.newAdminPort
+    ) {
+      errors.push("old and new game-server admin endpoints must be different for a three-process transfer drill");
+    }
+    for (const key of [
+      "proxyExpectedRoomVersion",
+      "proxyRoomVersion"
+    ]) {
+      if (options[key] !== undefined && (!Number.isInteger(options[key]) || options[key] < 0)) {
+        errors.push(`invalid option ${optionName(key)}: expected non-negative integer`);
+      }
+    }
+  }
+
+  if (!Number.isInteger(options.timeoutMs) || options.timeoutMs <= 0) {
+    errors.push("invalid option --timeout-ms: expected positive integer");
+  }
+
+  if (!options.oldAdminToken) {
+    warnings.push("old game-server admin token is missing");
+  }
+  if (!options.triggerRedirectOnly && !options.newAdminToken) {
+    warnings.push("new game-server admin token is missing");
+  }
+  if (!options.triggerRedirectOnly && !options.proxyAdminToken) {
+    warnings.push("game-proxy admin token is missing");
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    requiredOptions: requiredOptionKeys(options).map((key) => ({
+      name: optionName(key),
+      key,
+      present: Boolean(options[key])
+    }))
+  };
+}
+
+function endpoint(host, port) {
+  return `${host}:${port}`;
+}
+
+export function buildTransferCliDryRunPlan(options) {
+  const validation = validateTransferCliOptions(options);
+  const common = {
+    rolloutEpoch: options.rolloutEpoch || "<ROLLOUT_EPOCH>",
+    roomId: options.roomId || "<ROOM_ID>",
+    oldServerId: options.oldServerId || "<OLD_SERVER_ID>",
+    newServerId: options.newServerId || "<NEW_SERVER_ID>"
+  };
+
+  if (options.triggerRedirectOnly) {
+    return {
+      ok: validation.ok,
+      mode: "redirect-dry-run",
+      dryRun: true,
+      safety: {
+        startsServices: false,
+        callsControlPlane: false,
+        requestsShutdown: false,
+        runsReconnectClient: false
+      },
+      validation,
+      plan: {
+        ...common,
+        plannedCalls: ["old.triggerServerRedirect"],
+        endpoints: {
+          oldGameServerAdmin: {
+            endpoint: endpoint(options.oldAdminHost, options.oldAdminPort),
+            tokenState: tokenState(options.oldAdminToken)
+          }
+        },
+        redirectTarget: {
+          host: options.redirectTargetHost || "<REDIRECT_TARGET_HOST>",
+          port: options.redirectTargetPort || "<REDIRECT_TARGET_PORT>",
+          serverId: options.redirectTargetServerId || options.newServerId || "<TARGET_SERVER_ID>",
+          transport: options.redirectTransport || "kcp",
+          retryAfterMs: options.redirectRetryAfterMs || 0
+        },
+        timeoutMs: options.timeoutMs
+      }
+    };
+  }
+
+  return {
+    ok: validation.ok,
+    mode: "transfer-dry-run",
+    dryRun: true,
+    safety: {
+      startsServices: false,
+      callsControlPlane: false,
+      requestsShutdown: false,
+      runsReconnectClient: false
+    },
+    validation,
+    plan: {
+      ...common,
+      plannedStages: [
+        ROOM_TRANSFER_STAGE.OLD_FREEZE,
+        ROOM_TRANSFER_STAGE.OLD_EXPORT,
+        ROOM_TRANSFER_STAGE.NEW_IMPORT,
+        ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP,
+        ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+        ROOM_TRANSFER_STAGE.OLD_RETIRE
+      ],
+      plannedCalls: [
+        "old.freezeRoomForTransfer",
+        "old.exportRoomTransfer",
+        "new.importRoomTransfer",
+        "new.confirmRoomOwnership",
+        "proxy.getRoomRoute",
+        "proxy.upsertRoomRoute",
+        "old.retireTransferredRoom"
+      ],
+      endpoints: {
+        oldGameServerAdmin: {
+          endpoint: endpoint(options.oldAdminHost, options.oldAdminPort),
+          tokenState: tokenState(options.oldAdminToken)
+        },
+        newGameServerAdmin: {
+          endpoint: endpoint(options.newAdminHost, options.newAdminPort),
+          tokenState: tokenState(options.newAdminToken)
+        },
+        gameProxyAdmin: {
+          url: options.proxyAdminUrl,
+          tokenState: tokenState(options.proxyAdminToken)
+        }
+      },
+      routeCas: {
+        proxyExpectedRoomVersion: options.proxyExpectedRoomVersion ?? "auto-from-existing-route",
+        proxyRoomVersion: options.proxyRoomVersion ?? "auto-next-version",
+        proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum ?? "auto-from-existing-route"
+      },
+      timeoutMs: options.timeoutMs
+    }
+  };
+}
+
+function assertValidForExecution(options) {
+  const validation = validateTransferCliOptions(options);
+  if (!validation.ok) {
+    throw new Error(validation.errors.join("; "));
   }
 }
 
@@ -193,16 +430,27 @@ async function main() {
     return;
   }
 
-  const requiredKeys = options.triggerRedirectOnly
-    ? ["rolloutEpoch", "roomId", "redirectTargetHost", "redirectTargetPort"]
-    : ["rolloutEpoch", "roomId", "oldServerId", "newServerId"];
-  for (const key of requiredKeys) {
+  if (options.dryRun) {
+    const plan = buildTransferCliDryRunPlan(options);
+    console.log(JSON.stringify(plan, null, 2));
+    if (!plan.ok) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  assertValidForExecution(options);
+  for (const key of requiredOptionKeys(options)) {
     requireOption(options, key);
   }
   if (options.triggerRedirectOnly) {
     requirePort(options, "redirectTargetPort");
     requireNonNegativeInteger(options, "redirectRetryAfterMs");
+  } else {
+    requirePort(options, "oldAdminPort");
+    requirePort(options, "newAdminPort");
   }
+  requirePositiveInteger(options, "timeoutMs");
 
   const oldServer = new GameServerTransferClient({
     host: options.oldAdminHost,
@@ -260,8 +508,17 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  console.error("Run with --help for usage.");
-  process.exitCode = 1;
-});
+function isMainModule() {
+  if (!process.argv[1]) {
+    return false;
+  }
+  return fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+}
+
+if (isMainModule()) {
+  main().catch((error) => {
+    console.error(error.message);
+    console.error("Run with --help for usage.");
+    process.exitCode = 1;
+  });
+}

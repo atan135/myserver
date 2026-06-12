@@ -18,7 +18,7 @@ preflight
 -> 可选 request-server-shutdown
 ```
 
-脚本默认是 dry-run，只做本地工具检查、端口探测和命令输出，不会启动服务，不会修改正在运行的服务状态，也不会请求旧服停服。本次任务只提供演练入口和文档，没有实际执行真实 old/new/proxy 三进程联调。
+脚本默认是 dry-run，只做本地工具检查、端口探测、命令输出和 `rollout-transfer-cli --dry-run` 机器可读计划校验，不会启动服务，不会修改正在运行的服务状态，也不会请求旧服停服。本次任务只提供演练入口和文档，没有实际执行真实 old/new/proxy 三进程联调。
 
 ## 前置条件
 
@@ -62,6 +62,27 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
   -OldServerId game-server-old `
   -NewServerId game-server-new
 ```
+
+默认 dry-run 允许 `RoomId` / `RolloutEpoch` 为空，此时脚本会在展示命令和计划里使用 `<ROOM_ID>` / `<ROLLOUT_EPOCH>` 占位，便于先检查工具、端口和步骤顺序。需要把参数完整性作为准入条件时，直接调用底层 CLI：
+
+```powershell
+node tools/mock-client/src/rollout-transfer-cli.js --dry-run `
+  --rollout-epoch rollout-20260612-a `
+  --room-id room-empty-001 `
+  --old-server-id game-server-old `
+  --new-server-id game-server-new `
+  --old-admin-port 7500 `
+  --new-admin-port 7501 `
+  --proxy-admin-url http://127.0.0.1:7101
+```
+
+该 CLI dry-run 只做参数和计划校验，不打开 game-server admin socket，不访问 proxy HTTP，也不会 retire / shutdown。输出 JSON 中的关键字段：
+
+- `safety.callsControlPlane=false`
+- `safety.requestsShutdown=false`
+- `plan.plannedStages=old_freeze -> old_export -> new_import -> new_confirm_ownership -> proxy_route_upsert -> old_retire`
+- `plan.endpoints` 展示 old/new game-server admin 和 game-proxy admin 目标
+- `plan.routeCas` 展示 route CAS 默认策略
 
 ## 执行步骤
 
@@ -117,8 +138,7 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 这个入口只把当前已存在的控制面调用串成可重复步骤，不代表以下能力已经完成：
 
 - 本次任务没有实际启动或执行真实 old/new/proxy 三进程联调。
-- 还没有把三进程联调纳入自动测试准入。
+- 还没有把真实三进程联调纳入自动测试准入；当前只覆盖 dry-run / preflight / plan 级准入。
 - 外部 `mybevy` redirect/reconnect 适配仍未完成。
 - 部署平台自动停止旧进程仍未完成。
 - 同连接迁移 / L7 relay 仍是后续目标态。
-
