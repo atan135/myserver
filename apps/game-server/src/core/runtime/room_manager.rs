@@ -3017,6 +3017,7 @@ mod tests {
         RoomLogicTransferState,
     };
     use crate::core::room::PlayerInputRecord;
+    use crate::gameroom::GameRoomLogicFactory;
 
     use super::*;
 
@@ -3980,6 +3981,222 @@ mod tests {
             r#"{"timer":"recording-v1"}"#
         );
         assert_eq!(payload.snapshot.as_ref().unwrap().room_id, "room-test");
+    }
+
+    #[tokio::test]
+    async fn movement_demo_transfer_restores_movement_payload_consistently() {
+        let config_tables = crate::core::config_table::ConfigTableRuntime::load_with_scene_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+        )
+        .expect("game-server csv fixture should load");
+        let factory = Arc::new(GameRoomLogicFactory::new(config_tables.clone()));
+        let source = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            factory.clone(),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        source
+            .join_room(
+                "room-movement-transfer",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("movement_demo"),
+            )
+            .await
+            .unwrap();
+        source
+            .set_ready_state("room-movement-transfer", "player-a", true)
+            .await
+            .unwrap();
+        source
+            .start_game("room-movement-transfer", "player-a")
+            .await
+            .unwrap();
+        {
+            let mut runtimes = source.runtimes.lock().await;
+            if let Some(runtime) = runtimes.get_mut("room-movement-transfer") {
+                if let Some(handle) = runtime.tick_handle.take() {
+                    handle.abort();
+                }
+                runtime.tick_running = false;
+            }
+        }
+
+        source
+            .accept_player_input(
+                "room-movement-transfer",
+                "player-a",
+                1,
+                "move_dir",
+                "{\"dirX\":1.0,\"dirY\":0.0,\"hasClientState\":true,\"clientX\":1.0,\"clientY\":1.0,\"clientFrameId\":1}",
+            )
+            .await
+            .unwrap();
+        source
+            .process_room_tick("room-movement-transfer", 20)
+            .await
+            .unwrap();
+        source
+            .accept_player_input("room-movement-transfer", "player-a", 2, "", "")
+            .await
+            .unwrap();
+        source
+            .process_room_tick("room-movement-transfer", 20)
+            .await
+            .unwrap();
+
+        {
+            let mut rooms = source.rooms.lock().await;
+            let room = rooms
+                .get_mut("room-movement-transfer")
+                .expect("source room should exist");
+            let member = room
+                .members
+                .get_mut("player-a")
+                .expect("source member should exist");
+            member.offline = true;
+            member.offline_since = Some(Instant::now());
+            room.mark_empty();
+        }
+        source
+            .freeze_room_for_transfer("epoch-1", "room-movement-transfer")
+            .await
+            .unwrap();
+
+        let payload = source
+            .export_room_transfer("epoch-1", "room-movement-transfer")
+            .await
+            .unwrap();
+        let checksum = payload.checksum.clone();
+        let transfer_state = room_transfer_state_from_payload(&payload).unwrap();
+        let logic_json =
+            serde_json::from_str::<serde_json::Value>(&transfer_state.logic_state_json).unwrap();
+        let movement_json =
+            serde_json::from_str::<serde_json::Value>(&transfer_state.movement_state_json).unwrap();
+
+        assert_eq!(logic_json["schema"], "movement-demo.logic.v1");
+        assert_eq!(logic_json["tick_count"], 2);
+        assert_eq!(logic_json["recipients"], serde_json::json!(["player-a"]));
+        assert_eq!(movement_json["schema"], "room-movement-state.v1");
+        assert_eq!(movement_json["scene_id"], 1);
+        assert_eq!(movement_json["last_snapshot_frame"], 1);
+        assert_eq!(movement_json["last_full_sync_frame"], 0);
+        assert_eq!(movement_json["movement_control_stop_frames"], 3);
+        assert_eq!(
+            movement_json["latest_client_state_by_player"][0]["player_id"],
+            "player-a"
+        );
+        assert_eq!(
+            movement_json["missing_control_frames_by_player"][0]["frame_id"],
+            1
+        );
+        assert_eq!(movement_json["entities"][0]["player_id"], "player-a");
+        assert_eq!(movement_json["entities"][0]["moving"], true);
+        assert_eq!(movement_json["entities"][0]["last_input_frame"], 1);
+
+        let target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            factory,
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        let imported = target.import_room_transfer(payload).await.unwrap();
+        assert_eq!(imported.0, checksum);
+
+        {
+            let rooms = target.rooms.lock().await;
+            let room = rooms
+                .get("room-movement-transfer")
+                .expect("target room should exist");
+            assert_eq!(room.current_frame, 2);
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
+            let game_state =
+                serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
+            assert_eq!(game_state["tick_count"], 2);
+            assert_eq!(game_state["entity_count"], 1);
+            assert_eq!(game_state["entities"][0]["moving"], true);
+            assert_eq!(game_state["entities"][0]["last_input_frame"], 1);
+        }
+
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+        let recovery = target
+            .reconnect_room("room-movement-transfer", "player-a", reconnect_tx)
+            .await
+            .unwrap();
+        let movement_recovery = recovery
+            .movement_recovery
+            .expect("movement recovery should exist after import");
+        assert_eq!(movement_recovery.frame_id, 2);
+        assert_eq!(movement_recovery.reference_frame_id, 2);
+        assert!(movement_recovery.aoi_enabled);
+        assert_eq!(movement_recovery.entities.len(), 1);
+        assert_eq!(movement_recovery.entities[0].player_id, "player-a");
+        assert!(movement_recovery.entities[0].moving);
+        assert_eq!(movement_recovery.entities[0].last_input_frame, 1);
+
+        assert_eq!(
+            target
+                .export_room_transfer("epoch-1", "room-movement-transfer")
+                .await,
+            Err("ROOM_TRANSFER_OWNED_BY_NEW")
+        );
+
+        let mut invalid_json_payload = source
+            .export_room_transfer("epoch-1", "room-movement-transfer")
+            .await
+            .unwrap();
+        let mut movement_wrapper =
+            serde_json::from_str::<serde_json::Value>(&invalid_json_payload.movement_state_json)
+                .unwrap();
+        movement_wrapper["movementStateJson"] = serde_json::json!("{bad");
+        invalid_json_payload.movement_state_json = movement_wrapper.to_string();
+        invalid_json_payload.checksum = room_transfer_checksum(&invalid_json_payload);
+        let invalid_json_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables.clone())),
+            config_tables.room_policy_registry(),
+            3600,
+        );
+        assert_eq!(
+            invalid_json_target
+                .import_room_transfer(invalid_json_payload)
+                .await,
+            Err("ROOM_TRANSFER_INVALID_MOVEMENT_STATE")
+        );
+
+        let mut unsupported_schema_payload = source
+            .export_room_transfer("epoch-1", "room-movement-transfer")
+            .await
+            .unwrap();
+        let mut movement_wrapper = serde_json::from_str::<serde_json::Value>(
+            &unsupported_schema_payload.movement_state_json,
+        )
+        .unwrap();
+        let mut movement_inner = serde_json::from_str::<serde_json::Value>(
+            movement_wrapper["movementStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        movement_inner["schemaVersion"] = serde_json::json!(2);
+        movement_wrapper["movementStateJson"] = serde_json::json!(movement_inner.to_string());
+        unsupported_schema_payload.movement_state_json = movement_wrapper.to_string();
+        unsupported_schema_payload.checksum = room_transfer_checksum(&unsupported_schema_payload);
+        let unsupported_schema_target = RoomManager::with_policy_registry_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(GameRoomLogicFactory::new(config_tables)),
+            SharedRoomPolicyRegistry::default(),
+            3600,
+        );
+        assert_eq!(
+            unsupported_schema_target
+                .import_room_transfer(unsupported_schema_payload)
+                .await,
+            Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA")
+        );
     }
 
     #[tokio::test]

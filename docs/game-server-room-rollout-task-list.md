@@ -380,9 +380,9 @@
 
 ### 7.3 movement / combat 迁移
 
-- [ ] movement 相关 room 导出实体位置信息、朝向、最近输入参考状态。
+- [x] movement 相关 room 导出实体位置信息、朝向、最近输入参考状态。
 - [ ] combat 相关 room 导出实体列表、血量、buff、冷却、技能状态。
-- [ ] 导入后恢复相同的 frame 基准。
+- [x] 导入后恢复相同的 frame 基准。
 
 ### 7.4 NPC / 怪物 / 行为树
 
@@ -483,7 +483,7 @@
 
 ### 9.3 玩法测试
 
-- [ ] movement room 导出导入一致性测试。
+- [x] movement room 导出导入一致性测试。
 - [ ] combat room 导出导入一致性测试。
 - [ ] NPC / 怪物状态一致性测试。
 - [ ] 行为树恢复点一致性测试。

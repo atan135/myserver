@@ -1,8 +1,12 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tracing::{info, warn};
 
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::logic::{RoomLogic, RoomLogicBroadcast, RoomLogicTransfer};
+use crate::core::logic::{
+    ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicBroadcast, RoomLogicTransfer,
+    RoomLogicTransferState,
+};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::movement::{
     RoomMovementState, decide_corrections, full_sync_broadcast, reject_broadcast,
@@ -12,6 +16,7 @@ use crate::core::system::scene::SceneQuery;
 use crate::pb::{MovementCorrectionReason, MovementRecoveryState};
 
 const DEFAULT_MOVE_SPEED: f32 = 4.0;
+const MOVEMENT_DEMO_TRANSFER_SCHEMA: &str = "movement-demo.logic.v1";
 
 #[derive(Default)]
 pub struct MovementDemoLogic {
@@ -22,6 +27,17 @@ pub struct MovementDemoLogic {
     pub movement_state: Option<RoomMovementState>,
     pub pending_broadcasts: Vec<RoomLogicBroadcast>,
     pub recipients: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MovementDemoTransferLogicState {
+    schema: String,
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    room_id: String,
+    tick_count: u64,
+    default_scene_id: i32,
+    recipients: Vec<String>,
 }
 
 impl MovementDemoLogic {
@@ -264,4 +280,138 @@ impl RoomLogic for MovementDemoLogic {
     }
 }
 
-impl RoomLogicTransfer for MovementDemoLogic {}
+impl RoomLogicTransfer for MovementDemoLogic {
+    fn export_transfer_state(&self) -> Result<RoomLogicTransferState, &'static str> {
+        let movement_state = self
+            .movement_state
+            .as_ref()
+            .ok_or("ROOM_TRANSFER_INVALID_MOVEMENT_STATE")?;
+        let logic_state = MovementDemoTransferLogicState {
+            schema: MOVEMENT_DEMO_TRANSFER_SCHEMA.to_string(),
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            room_id: self.room_id.clone(),
+            tick_count: self.tick_count,
+            default_scene_id: self.default_scene_id,
+            recipients: self.recipients.clone(),
+        };
+
+        Ok(RoomLogicTransferState {
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            logic_state_json: serde_json::to_string(&logic_state)
+                .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?,
+            movement_state_json: movement_state.export_transfer_state_json()?,
+            combat_state_json: String::new(),
+            npc_state_json: String::new(),
+            timer_state_json: String::new(),
+        })
+    }
+
+    fn import_transfer_state(
+        &mut self,
+        state: &RoomLogicTransferState,
+    ) -> Result<(), &'static str> {
+        if state.schema_version != ROOM_TRANSFER_SCHEMA_VERSION {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+
+        let logic_state = serde_json::from_str::<serde_json::Value>(&state.logic_state_json)
+            .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?;
+        if logic_state
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            != Some(MOVEMENT_DEMO_TRANSFER_SCHEMA)
+        {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        if logic_state
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            != Some(ROOM_TRANSFER_SCHEMA_VERSION as u64)
+        {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        let logic_state = serde_json::from_value::<MovementDemoTransferLogicState>(logic_state)
+            .map_err(|_| "ROOM_TRANSFER_INVALID_LOGIC_STATE")?;
+        if !self.room_id.is_empty() && logic_state.room_id != self.room_id {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+        if logic_state.room_id.trim().is_empty() {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+        validate_transfer_recipients(&logic_state.recipients)?;
+        let movement_state =
+            RoomMovementState::import_transfer_state_json(&state.movement_state_json)?;
+
+        self.room_id = logic_state.room_id;
+        self.tick_count = logic_state.tick_count;
+        self.default_scene_id = logic_state.default_scene_id;
+        self.recipients = logic_state.recipients;
+        self.movement_state = Some(movement_state);
+        self.pending_broadcasts.clear();
+
+        Ok(())
+    }
+}
+
+fn validate_transfer_recipients(recipients: &[String]) -> Result<(), &'static str> {
+    let mut seen = HashSet::new();
+    for recipient in recipients {
+        if recipient.trim().is_empty() || !seen.insert(recipient.as_str()) {
+            return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn transfer_state_with_logic(logic_state_json: String) -> RoomLogicTransferState {
+        RoomLogicTransferState {
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            logic_state_json,
+            movement_state_json: String::new(),
+            combat_state_json: String::new(),
+            npc_state_json: String::new(),
+            timer_state_json: String::new(),
+        }
+    }
+
+    #[test]
+    fn import_transfer_state_rejects_invalid_logic_identity() {
+        let mut logic = MovementDemoLogic::default();
+        let duplicate_recipient_state = transfer_state_with_logic(
+            json!({
+                "schema": MOVEMENT_DEMO_TRANSFER_SCHEMA,
+                "schemaVersion": ROOM_TRANSFER_SCHEMA_VERSION,
+                "room_id": "room-a",
+                "tick_count": 1,
+                "default_scene_id": 1,
+                "recipients": ["player-a", "player-a"]
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            logic.import_transfer_state(&duplicate_recipient_state),
+            Err("ROOM_TRANSFER_INVALID_LOGIC_STATE")
+        );
+
+        let empty_room_state = transfer_state_with_logic(
+            json!({
+                "schema": MOVEMENT_DEMO_TRANSFER_SCHEMA,
+                "schemaVersion": ROOM_TRANSFER_SCHEMA_VERSION,
+                "room_id": "",
+                "tick_count": 1,
+                "default_scene_id": 1,
+                "recipients": ["player-a"]
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            logic.import_transfer_state(&empty_room_state),
+            Err("ROOM_TRANSFER_INVALID_LOGIC_STATE")
+        );
+    }
+}
