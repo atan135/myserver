@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::core::logic::{
     ROOM_TRANSFER_SCHEMA_VERSION, RoomLogicBroadcast, RoomLogicTransferState,
-    SharedRoomLogicFactory, UNSUPPORTED_ROOM_TRANSFER,
+    RoomRuntimeTimerTransferState, SharedRoomLogicFactory, UNSUPPORTED_ROOM_TRANSFER,
 };
 use crate::core::room::{
     ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage, OutboundQueueLogContext,
@@ -1521,7 +1521,7 @@ impl RoomManager {
                         "inputDelayFrames": policy.input_delay_frames,
                         "snapshotIntervalFrames": policy.snapshot_interval_frames
                     }),
-                ),
+                )?,
                 match_id: room.match_id.clone().unwrap_or_default(),
                 checksum: String::new(),
             }
@@ -2824,14 +2824,20 @@ fn room_transfer_movement_state_json(state: &RoomLogicTransferState) -> String {
 fn room_transfer_timer_state_json(
     state: &RoomLogicTransferState,
     runtime_summary: serde_json::Value,
-) -> String {
-    json!({
+) -> Result<String, &'static str> {
+    let timer_state_json = state
+        .timer_transfer_state()?
+        .map(|timer_state| timer_state.to_json())
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(json!({
         "schema": "room-transfer.runtime-timers.v1",
         "schemaVersion": state.schema_version,
-        "timerStateJson": state.timer_state_json,
+        "timerStateJson": timer_state_json,
         "runtimeSummary": runtime_summary,
     })
-    .to_string()
+    .to_string())
 }
 
 fn validate_room_transfer_runtime_summary(summary: &serde_json::Value) -> Result<(), &'static str> {
@@ -2889,6 +2895,7 @@ fn validate_room_transfer_timer_wrapper<'a>(
         .get("timerStateJson")
         .and_then(|value| value.as_str())
         .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+    RoomRuntimeTimerTransferState::from_optional_json(timer_state_json)?;
     let runtime_summary = timers
         .get("runtimeSummary")
         .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
@@ -3068,7 +3075,7 @@ mod tests {
 
     use crate::core::logic::{
         ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicFactory, RoomLogicTransfer,
-        RoomLogicTransferState,
+        RoomLogicTransferState, RoomRuntimeTimerTransferState, RoomTimerTransferEntry,
     };
     use crate::core::room::PlayerInputRecord;
     use crate::gameroom::GameRoomLogicFactory;
@@ -3103,6 +3110,21 @@ mod tests {
         state: String,
     }
 
+    fn recording_timer_state_json() -> String {
+        let mut timer_state = RoomRuntimeTimerTransferState::new("recording-room-logic", 0, 0);
+        timer_state.timer_entries.push(RoomTimerTransferEntry {
+            id: "recording-timer".to_string(),
+            timer_kind: "recording-fixture".to_string(),
+            remaining_frames: 1,
+            repeat_interval_frames: Some(1),
+            payload_json: r#"{"timer":"recording-v1"}"#.to_string(),
+        });
+        timer_state
+            .metadata
+            .insert("fixture".to_string(), "recording-v1".to_string());
+        timer_state.to_json().unwrap()
+    }
+
     impl RoomLogic for RecordingRoomLogic {
         fn on_player_input(&mut self, player_id: &str, action: &str, payload_json: &str) {
             self.inputs.lock().unwrap().push((
@@ -3129,7 +3151,7 @@ mod tests {
                 movement_state_json: r#"{"movement":"recording-v1"}"#.to_string(),
                 combat_state_json: r#"{"combat":"recording-v1"}"#.to_string(),
                 npc_state_json: r#"{"npc":"recording-v1"}"#.to_string(),
-                timer_state_json: r#"{"timer":"recording-v1"}"#.to_string(),
+                timer_state_json: recording_timer_state_json(),
             })
         }
 
@@ -4198,9 +4220,19 @@ mod tests {
             r#"{"combat":"recording-v1"}"#
         );
         assert_eq!(transfer_state.npc_state_json, r#"{"npc":"recording-v1"}"#);
+        let timer_state =
+            RoomRuntimeTimerTransferState::from_json(&transfer_state.timer_state_json).unwrap();
+        assert_eq!(timer_state.schema_version, ROOM_TRANSFER_SCHEMA_VERSION);
         assert_eq!(
-            transfer_state.timer_state_json,
-            r#"{"timer":"recording-v1"}"#
+            timer_state.runtime_summary.owner_kind,
+            "recording-room-logic"
+        );
+        assert_eq!(timer_state.timer_entries.len(), 1);
+        assert_eq!(timer_state.timer_entries[0].id, "recording-timer");
+        assert_eq!(timer_state.timer_entries[0].remaining_frames, 1);
+        assert_eq!(
+            timer_state.metadata.get("fixture").map(String::as_str),
+            Some("recording-v1")
         );
         assert_eq!(payload.snapshot.as_ref().unwrap().room_id, "room-test");
     }
@@ -4558,9 +4590,12 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&transfer_state.logic_state_json).unwrap();
         let combat_json =
             serde_json::from_str::<serde_json::Value>(&transfer_state.combat_state_json).unwrap();
+        let timer_state =
+            RoomRuntimeTimerTransferState::from_json(&transfer_state.timer_state_json).unwrap();
 
         assert_eq!(logic_json["schema"], "combat-demo.logic.v1");
         assert_eq!(logic_json["tick_count"], 2);
+        assert_eq!(logic_json["next_snapshot_frame"], 5);
         assert_eq!(
             logic_json["roster"],
             serde_json::json!(["player-a", "player-b"])
@@ -4590,6 +4625,18 @@ mod tests {
             0
         );
         assert!(combat_json["move_states"][2]["progress"].as_f64().unwrap() < 1.0);
+        assert_eq!(timer_state.runtime_summary.owner_kind, "combat-demo");
+        assert_eq!(timer_state.runtime_summary.logical_frame, 2);
+        assert_eq!(timer_state.runtime_summary.logical_tick, 2);
+        assert_eq!(timer_state.scheduler_entries.len(), 1);
+        assert_eq!(
+            timer_state.scheduler_entries[0].id,
+            "combat-demo.snapshot-push"
+        );
+        assert_eq!(timer_state.scheduler_entries[0].next_frame, 5);
+        assert_eq!(timer_state.scheduler_entries[0].interval_frames, Some(5));
+        assert_eq!(timer_state.timer_entries.len(), 1);
+        assert_eq!(timer_state.timer_entries[0].remaining_frames, 3);
 
         let target = RoomManager::with_policy_registry_and_cleanup_interval(
             crate::match_client::create_match_client_shared(),
@@ -4610,6 +4657,7 @@ mod tests {
             let imported_game_state =
                 serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
             assert_eq!(imported_game_state, source_game_state);
+            assert_eq!(imported_game_state["next_snapshot_frame"], 5);
         }
 
         let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
@@ -4636,6 +4684,7 @@ mod tests {
             let advanced_game_state =
                 serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
             assert_eq!(advanced_game_state["tick_count"], 3);
+            assert_eq!(advanced_game_state["next_snapshot_frame"], 5);
             assert_eq!(advanced_game_state["snapshot"]["frame_id"], 3);
             let player_a = combat_demo_entity_by_player(&advanced_game_state, "player-a");
             let fireball = player_a["skills"]
@@ -4854,8 +4903,49 @@ mod tests {
         let mut bad_runtime_summary_type = base_timers.clone();
         bad_runtime_summary_type["runtimeSummary"]["hasWaitStarted"] = serde_json::json!("false");
 
-        let mut bad_snapshot_interval = base_timers;
+        let mut bad_snapshot_interval = base_timers.clone();
         bad_snapshot_interval["runtimeSummary"]["snapshotIntervalFrames"] = serde_json::json!(0);
+
+        let mut timer_inner_unsupported_schema = serde_json::from_str::<serde_json::Value>(
+            base_timers["timerStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        timer_inner_unsupported_schema["schema"] =
+            serde_json::json!("room-transfer.runtime-timer-state.v2");
+        let mut bad_timer_inner_schema = base_timers.clone();
+        bad_timer_inner_schema["timerStateJson"] =
+            serde_json::json!(timer_inner_unsupported_schema.to_string());
+
+        let mut timer_inner_missing_owner = serde_json::from_str::<serde_json::Value>(
+            base_timers["timerStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        timer_inner_missing_owner["runtimeSummary"]["ownerKind"] = serde_json::json!("");
+        let mut bad_timer_inner_owner = base_timers.clone();
+        bad_timer_inner_owner["timerStateJson"] =
+            serde_json::json!(timer_inner_missing_owner.to_string());
+
+        let mut timer_inner_bad_interval = serde_json::from_str::<serde_json::Value>(
+            base_timers["timerStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        timer_inner_bad_interval["timerEntries"][0]["repeatIntervalFrames"] = serde_json::json!(0);
+        let mut bad_timer_inner_interval = base_timers.clone();
+        bad_timer_inner_interval["timerStateJson"] =
+            serde_json::json!(timer_inner_bad_interval.to_string());
+
+        let mut timer_inner_duplicate_id = serde_json::from_str::<serde_json::Value>(
+            base_timers["timerStateJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        timer_inner_duplicate_id["schedulerEntries"] = serde_json::json!([{
+            "id": "recording-timer",
+            "schedulerKind": "duplicate",
+            "nextFrame": 1
+        }]);
+        let mut bad_timer_inner_duplicate_id = base_timers;
+        bad_timer_inner_duplicate_id["timerStateJson"] =
+            serde_json::json!(timer_inner_duplicate_id.to_string());
 
         let target_factory = RecordingRoomLogicFactory::default();
         let target = RoomManager::with_match_client(
@@ -4872,6 +4962,16 @@ mod tests {
                 "ROOM_TRANSFER_INVALID_TIMER_STATE",
             ),
             (bad_snapshot_interval, "ROOM_TRANSFER_INVALID_TIMER_STATE"),
+            (bad_timer_inner_schema, "ROOM_TRANSFER_UNSUPPORTED_SCHEMA"),
+            (bad_timer_inner_owner, "ROOM_TRANSFER_INVALID_TIMER_STATE"),
+            (
+                bad_timer_inner_interval,
+                "ROOM_TRANSFER_INVALID_TIMER_STATE",
+            ),
+            (
+                bad_timer_inner_duplicate_id,
+                "ROOM_TRANSFER_INVALID_TIMER_STATE",
+            ),
         ] {
             let mut bad_payload = payload.clone();
             bad_payload.runtime_timers_json = runtime_timers_json.to_string();
@@ -4944,16 +5044,31 @@ mod tests {
 
         assert_eq!(imported.0, checksum);
         assert!(target.room_exists("room-test").await);
+        let imported_states = target_factory.imported_transfer_states();
+        assert_eq!(imported_states.len(), 1);
+        let imported_state = &imported_states[0];
+        assert_eq!(imported_state.schema_version, ROOM_TRANSFER_SCHEMA_VERSION);
+        assert_eq!(imported_state.logic_state_json, "recording-state-v1");
         assert_eq!(
-            target_factory.imported_transfer_states(),
-            vec![RoomLogicTransferState {
-                schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
-                logic_state_json: "recording-state-v1".to_string(),
-                movement_state_json: r#"{"movement":"recording-v1"}"#.to_string(),
-                combat_state_json: r#"{"combat":"recording-v1"}"#.to_string(),
-                npc_state_json: r#"{"npc":"recording-v1"}"#.to_string(),
-                timer_state_json: r#"{"timer":"recording-v1"}"#.to_string(),
-            }]
+            imported_state.movement_state_json,
+            r#"{"movement":"recording-v1"}"#
+        );
+        assert_eq!(
+            imported_state.combat_state_json,
+            r#"{"combat":"recording-v1"}"#
+        );
+        assert_eq!(imported_state.npc_state_json, r#"{"npc":"recording-v1"}"#);
+        let timer_state =
+            RoomRuntimeTimerTransferState::from_json(&imported_state.timer_state_json).unwrap();
+        assert_eq!(
+            timer_state.runtime_summary.owner_kind,
+            "recording-room-logic"
+        );
+        assert_eq!(timer_state.timer_entries.len(), 1);
+        assert_eq!(timer_state.timer_entries[0].id, "recording-timer");
+        assert_eq!(
+            timer_state.metadata.get("fixture").map(String::as_str),
+            Some("recording-v1")
         );
 
         let (tx, _rx) = mpsc::channel(1024);

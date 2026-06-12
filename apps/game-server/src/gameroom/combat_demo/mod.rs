@@ -5,7 +5,8 @@ use tracing::info;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{
     ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicBroadcast, RoomLogicTransfer,
-    RoomLogicTransferState,
+    RoomLogicTransferState, RoomRuntimeTimerTransferState, RoomSchedulerTransferEntry,
+    RoomTimerTransferEntry,
 };
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::combat::{
@@ -24,6 +25,7 @@ pub struct CombatDemoLogic {
     tick_count: u64,
     roster: Vec<String>,
     combat: RoomCombatEcs,
+    next_snapshot_frame: u32,
     config_tables: ConfigTableRuntime,
     pending_broadcasts: Vec<RoomLogicBroadcast>,
 }
@@ -35,6 +37,7 @@ impl CombatDemoLogic {
             tick_count: 0,
             roster: Vec::new(),
             combat: RoomCombatEcs::new(),
+            next_snapshot_frame: SNAPSHOT_INTERVAL_FRAMES,
             config_tables,
             pending_broadcasts: Vec::new(),
         }
@@ -166,6 +169,90 @@ impl CombatDemoLogic {
             },
         );
     }
+
+    fn timer_transfer_state(&self) -> RoomRuntimeTimerTransferState {
+        let mut timer_state = RoomRuntimeTimerTransferState::new(
+            "combat-demo",
+            self.combat.last_tick_frame(),
+            self.tick_count,
+        );
+        timer_state
+            .metadata
+            .insert("roomId".to_string(), self.room_id.clone());
+        timer_state.timer_entries.push(RoomTimerTransferEntry {
+            id: "combat-demo.snapshot-countdown".to_string(),
+            timer_kind: "periodic_snapshot_countdown".to_string(),
+            remaining_frames: self
+                .next_snapshot_frame
+                .saturating_sub(self.combat.last_tick_frame()),
+            repeat_interval_frames: Some(SNAPSHOT_INTERVAL_FRAMES),
+            payload_json: serde_json::json!({
+                "snapshotIntervalFrames": SNAPSHOT_INTERVAL_FRAMES
+            })
+            .to_string(),
+        });
+        timer_state
+            .scheduler_entries
+            .push(RoomSchedulerTransferEntry {
+                id: "combat-demo.snapshot-push".to_string(),
+                scheduler_kind: "periodic_snapshot_push".to_string(),
+                next_frame: self.next_snapshot_frame,
+                interval_frames: Some(SNAPSHOT_INTERVAL_FRAMES),
+                payload_json: serde_json::json!({
+                    "reason": "tick_sync"
+                })
+                .to_string(),
+            });
+        timer_state
+    }
+
+    fn import_timer_transfer_state(
+        &mut self,
+        state: &RoomLogicTransferState,
+    ) -> Result<(), &'static str> {
+        let timer_state = state
+            .timer_transfer_state()?
+            .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+        if timer_state.runtime_summary.owner_kind != "combat-demo" {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+        if timer_state.runtime_summary.logical_frame != self.combat.last_tick_frame()
+            || timer_state.runtime_summary.logical_tick != self.tick_count
+        {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+
+        let snapshot_scheduler = timer_state
+            .scheduler_entries
+            .iter()
+            .find(|entry| entry.id == "combat-demo.snapshot-push")
+            .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+        if snapshot_scheduler.scheduler_kind != "periodic_snapshot_push"
+            || snapshot_scheduler.interval_frames != Some(SNAPSHOT_INTERVAL_FRAMES)
+            || snapshot_scheduler.next_frame <= self.combat.last_tick_frame()
+            || snapshot_scheduler.next_frame != self.next_snapshot_frame
+        {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+
+        let snapshot_timer = timer_state
+            .timer_entries
+            .iter()
+            .find(|entry| entry.id == "combat-demo.snapshot-countdown")
+            .ok_or("ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+        if snapshot_timer.timer_kind != "periodic_snapshot_countdown"
+            || snapshot_timer.repeat_interval_frames != Some(SNAPSHOT_INTERVAL_FRAMES)
+            || snapshot_timer.remaining_frames
+                != snapshot_scheduler
+                    .next_frame
+                    .saturating_sub(self.combat.last_tick_frame())
+        {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+
+        self.next_snapshot_frame = snapshot_scheduler.next_frame;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +262,7 @@ struct CombatDemoTransferLogicState {
     schema_version: u32,
     room_id: String,
     tick_count: u64,
+    next_snapshot_frame: u32,
     roster: Vec<String>,
 }
 
@@ -203,12 +291,14 @@ impl RoomLogic for CombatDemoLogic {
 
     fn on_game_started(&mut self, _room_id: &str) {
         self.rebuild_combat_state();
+        self.next_snapshot_frame = SNAPSHOT_INTERVAL_FRAMES;
         self.queue_snapshot_push(0, "game_started", true);
     }
 
     fn on_game_ended(&mut self, _room_id: &str) {
         self.queue_snapshot_push(self.combat.last_tick_frame(), "game_ended", true);
         self.combat.clear();
+        self.next_snapshot_frame = SNAPSHOT_INTERVAL_FRAMES;
     }
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
@@ -251,12 +341,24 @@ impl RoomLogic for CombatDemoLogic {
             self.queue_event_push(event);
         }
 
-        if frame_id % SNAPSHOT_INTERVAL_FRAMES == 0 || force_snapshot {
-            self.queue_snapshot_push(
-                frame_id,
-                "tick_sync",
-                frame_id % SNAPSHOT_INTERVAL_FRAMES == 0,
-            );
+        let scheduled_snapshot = frame_id >= self.next_snapshot_frame;
+        if scheduled_snapshot {
+            while self.next_snapshot_frame <= frame_id {
+                match self
+                    .next_snapshot_frame
+                    .checked_add(SNAPSHOT_INTERVAL_FRAMES)
+                {
+                    Some(next_frame) => self.next_snapshot_frame = next_frame,
+                    None => {
+                        self.next_snapshot_frame = u32::MAX;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if scheduled_snapshot || force_snapshot {
+            self.queue_snapshot_push(frame_id, "tick_sync", scheduled_snapshot);
         }
     }
 
@@ -265,6 +367,7 @@ impl RoomLogic for CombatDemoLogic {
         struct CombatRoomState<'a> {
             room_id: &'a str,
             tick_count: u64,
+            next_snapshot_frame: u32,
             roster: &'a [String],
             snapshot: CombatSnapshot,
         }
@@ -272,6 +375,7 @@ impl RoomLogic for CombatDemoLogic {
         serde_json::to_string(&CombatRoomState {
             room_id: &self.room_id,
             tick_count: self.tick_count,
+            next_snapshot_frame: self.next_snapshot_frame,
             roster: &self.roster,
             snapshot: self.combat.snapshot(
                 self.combat.last_tick_frame(),
@@ -296,8 +400,10 @@ impl RoomLogicTransfer for CombatDemoLogic {
             schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
             room_id: self.room_id.clone(),
             tick_count: self.tick_count,
+            next_snapshot_frame: self.next_snapshot_frame,
             roster: self.roster.clone(),
         };
+        let timer_state_json = self.timer_transfer_state().to_json()?;
 
         Ok(RoomLogicTransferState {
             schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
@@ -306,7 +412,7 @@ impl RoomLogicTransfer for CombatDemoLogic {
             movement_state_json: String::new(),
             combat_state_json: self.combat.export_transfer_state_json()?,
             npc_state_json: String::new(),
-            timer_state_json: String::new(),
+            timer_state_json,
         })
     }
 
@@ -348,8 +454,10 @@ impl RoomLogicTransfer for CombatDemoLogic {
 
         self.room_id = logic_state.room_id;
         self.tick_count = logic_state.tick_count;
+        self.next_snapshot_frame = logic_state.next_snapshot_frame;
         self.roster = logic_state.roster;
         self.combat = combat;
+        self.import_timer_transfer_state(state)?;
         self.pending_broadcasts.clear();
 
         Ok(())
@@ -364,4 +472,75 @@ fn validate_transfer_roster(roster: &[String]) -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    fn config_tables() -> ConfigTableRuntime {
+        ConfigTableRuntime::load_with_scene_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+        )
+        .expect("game-server csv fixture should load")
+    }
+
+    fn drain_broadcasts(logic: &mut CombatDemoLogic) -> Vec<serde_json::Value> {
+        logic
+            .take_pending_broadcasts()
+            .into_iter()
+            .filter_map(|broadcast| GameMessagePush::decode(broadcast.body.as_slice()).ok())
+            .filter_map(|push| serde_json::from_str::<serde_json::Value>(&push.payload_json).ok())
+            .collect()
+    }
+
+    #[test]
+    fn transfer_state_roundtrip_restores_demo_scheduler() {
+        let mut source = CombatDemoLogic::new(config_tables());
+        source.on_room_created("room-combat-transfer");
+        source.on_player_join("player-a");
+        source.on_game_started("room-combat-transfer");
+        drain_broadcasts(&mut source);
+
+        for frame_id in 1..=SNAPSHOT_INTERVAL_FRAMES {
+            source.on_tick(frame_id, 20, &[]);
+        }
+        let scheduled_before_export = drain_broadcasts(&mut source).into_iter().any(|payload| {
+            payload["frame_id"] == SNAPSHOT_INTERVAL_FRAMES && payload["full_sync"] == true
+        });
+        assert!(scheduled_before_export);
+        assert_eq!(source.next_snapshot_frame, SNAPSHOT_INTERVAL_FRAMES * 2);
+
+        let exported = source.export_transfer_state().unwrap();
+        let timer_state = exported.timer_transfer_state().unwrap().unwrap();
+        assert_eq!(timer_state.runtime_summary.owner_kind, "combat-demo");
+        assert_eq!(
+            timer_state.scheduler_entries[0].next_frame,
+            SNAPSHOT_INTERVAL_FRAMES * 2
+        );
+        assert_eq!(
+            timer_state.timer_entries[0].remaining_frames,
+            SNAPSHOT_INTERVAL_FRAMES
+        );
+
+        let mut imported = CombatDemoLogic::new(config_tables());
+        imported.on_room_created("room-combat-transfer");
+        imported.import_transfer_state(&exported).unwrap();
+        assert_eq!(imported.next_snapshot_frame, SNAPSHOT_INTERVAL_FRAMES * 2);
+
+        imported.on_tick(SNAPSHOT_INTERVAL_FRAMES + 1, 20, &[]);
+        assert!(
+            drain_broadcasts(&mut imported)
+                .into_iter()
+                .all(|payload| payload["full_sync"] != true)
+        );
+        imported.on_tick(SNAPSHOT_INTERVAL_FRAMES * 2, 20, &[]);
+        let scheduled_after_import = drain_broadcasts(&mut imported).into_iter().any(|payload| {
+            payload["frame_id"] == SNAPSHOT_INTERVAL_FRAMES * 2 && payload["full_sync"] == true
+        });
+        assert!(scheduled_after_import);
+        assert_eq!(imported.next_snapshot_frame, SNAPSHOT_INTERVAL_FRAMES * 3);
+    }
 }

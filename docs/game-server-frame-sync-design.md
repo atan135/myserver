@@ -293,7 +293,13 @@ fps 变化会更新 `RoomRuntime.current_fps`，同时 `FrameBundlePush.fps` 会
 - 通用移动、战斗、场景能力优先沉淀到 `core/system/`。
 - 具体玩法逻辑只做规则编排和系统装配。
 
-## 10. 后续重点
+## 10. Room Transfer Timer 契约边界
+
+跨服迁移的 runtime timer/scheduler 状态不属于 `get_serialized_state()` 的轻量 `game_state` 快照。当前 `RoomLogicTransferState.timer_state_json` 保留字符串兼容字段，但内容应优先使用 `core::logic::RoomRuntimeTimerTransferState` 序列化为 `room-transfer.runtime-timer-state.v1`；外层 `RoomTransferPayload.runtime_timers_json` 继续使用 `room-transfer.runtime-timers.v1` wrapper，并由 room manager 校验 schema/version、`runtimeSummary` 和内层 timer/scheduler entries。
+
+现阶段该契约提供可导出的结构化骨架：runtime summary、可选 timer entries、可选 scheduler entries 和 metadata。combat_demo 已用周期快照 scheduler 证明导出、导入后可以继续按同一调度帧运行。它仍不是通用独立 timer wheel，也不表示 NPC / 行为树 / AI 定时器、路径状态或 RNG 状态已经完整迁移。
+
+## 11. 后续重点
 
 短期建议优先补：
 

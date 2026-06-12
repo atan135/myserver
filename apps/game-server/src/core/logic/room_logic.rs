@@ -1,7 +1,12 @@
+use std::collections::{BTreeMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
 use crate::core::room::PlayerInputRecord;
 use crate::protocol::MessageType;
 
 pub const ROOM_TRANSFER_SCHEMA_VERSION: u32 = 1;
+pub const ROOM_RUNTIME_TIMER_TRANSFER_SCHEMA: &str = "room-transfer.runtime-timer-state.v1";
 pub const UNSUPPORTED_ROOM_TRANSFER: &str = "UNSUPPORTED_ROOM_TRANSFER";
 
 #[derive(Debug, Clone)]
@@ -54,12 +59,175 @@ impl RoomLogicTransferState {
             timer_state_json: String::new(),
         }
     }
+
+    pub fn timer_transfer_state(
+        &self,
+    ) -> Result<Option<RoomRuntimeTimerTransferState>, &'static str> {
+        RoomRuntimeTimerTransferState::from_optional_json(&self.timer_state_json)
+    }
 }
 
 impl Default for RoomLogicTransferState {
     fn default() -> Self {
         Self::new(ROOM_TRANSFER_SCHEMA_VERSION)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomRuntimeTimerTransferSummary {
+    #[serde(rename = "ownerKind")]
+    pub owner_kind: String,
+    #[serde(rename = "logicalFrame")]
+    pub logical_frame: u32,
+    #[serde(rename = "logicalTick")]
+    pub logical_tick: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomTimerTransferEntry {
+    pub id: String,
+    #[serde(rename = "timerKind")]
+    pub timer_kind: String,
+    #[serde(rename = "remainingFrames")]
+    pub remaining_frames: u32,
+    #[serde(rename = "repeatIntervalFrames", default)]
+    pub repeat_interval_frames: Option<u32>,
+    #[serde(rename = "payloadJson", default)]
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSchedulerTransferEntry {
+    pub id: String,
+    #[serde(rename = "schedulerKind")]
+    pub scheduler_kind: String,
+    #[serde(rename = "nextFrame")]
+    pub next_frame: u32,
+    #[serde(rename = "intervalFrames", default)]
+    pub interval_frames: Option<u32>,
+    #[serde(rename = "payloadJson", default)]
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomRuntimeTimerTransferState {
+    pub schema: String,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    #[serde(rename = "runtimeSummary")]
+    pub runtime_summary: RoomRuntimeTimerTransferSummary,
+    #[serde(rename = "timerEntries", default)]
+    pub timer_entries: Vec<RoomTimerTransferEntry>,
+    #[serde(rename = "schedulerEntries", default)]
+    pub scheduler_entries: Vec<RoomSchedulerTransferEntry>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl RoomRuntimeTimerTransferState {
+    pub fn new(owner_kind: impl Into<String>, logical_frame: u32, logical_tick: u64) -> Self {
+        Self {
+            schema: ROOM_RUNTIME_TIMER_TRANSFER_SCHEMA.to_string(),
+            schema_version: ROOM_TRANSFER_SCHEMA_VERSION,
+            runtime_summary: RoomRuntimeTimerTransferSummary {
+                owner_kind: owner_kind.into(),
+                logical_frame,
+                logical_tick,
+            },
+            timer_entries: Vec::new(),
+            scheduler_entries: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, &'static str> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|_| "ROOM_TRANSFER_INVALID_TIMER_STATE")
+    }
+
+    pub fn from_json(state_json: &str) -> Result<Self, &'static str> {
+        let state = serde_json::from_str::<Self>(state_json)
+            .map_err(|_| "ROOM_TRANSFER_INVALID_TIMER_STATE")?;
+        state.validate()?;
+        Ok(state)
+    }
+
+    pub fn from_optional_json(state_json: &str) -> Result<Option<Self>, &'static str> {
+        if state_json.trim().is_empty() {
+            return Ok(None);
+        }
+        Self::from_json(state_json).map(Some)
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != ROOM_RUNTIME_TIMER_TRANSFER_SCHEMA {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        if self.schema_version != ROOM_TRANSFER_SCHEMA_VERSION {
+            return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        if self.runtime_summary.owner_kind.trim().is_empty() {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+
+        const MAX_RUNTIME_TIMER_ENTRIES: usize = 1024;
+        if self.timer_entries.len() + self.scheduler_entries.len() > MAX_RUNTIME_TIMER_ENTRIES {
+            return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+        }
+
+        let mut seen_ids = HashSet::new();
+        for entry in &self.timer_entries {
+            validate_transfer_entry_id(&entry.id, &mut seen_ids)?;
+            if entry.timer_kind.trim().is_empty() {
+                return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+            }
+            validate_optional_interval(entry.repeat_interval_frames)?;
+            validate_payload_json(&entry.payload_json)?;
+        }
+
+        for entry in &self.scheduler_entries {
+            validate_transfer_entry_id(&entry.id, &mut seen_ids)?;
+            if entry.scheduler_kind.trim().is_empty() {
+                return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+            }
+            validate_optional_interval(entry.interval_frames)?;
+            validate_payload_json(&entry.payload_json)?;
+        }
+
+        for key in self.metadata.keys() {
+            if key.trim().is_empty() {
+                return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_transfer_entry_id(
+    id: &str,
+    seen_ids: &mut HashSet<String>,
+) -> Result<(), &'static str> {
+    if id.trim().is_empty() || !seen_ids.insert(id.to_string()) {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+    Ok(())
+}
+
+fn validate_optional_interval(interval_frames: Option<u32>) -> Result<(), &'static str> {
+    if interval_frames == Some(0) {
+        return Err("ROOM_TRANSFER_INVALID_TIMER_STATE");
+    }
+    Ok(())
+}
+
+fn validate_payload_json(payload_json: &str) -> Result<(), &'static str> {
+    if payload_json.trim().is_empty() {
+        return Ok(());
+    }
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .map(|_| ())
+        .map_err(|_| "ROOM_TRANSFER_INVALID_TIMER_STATE")
 }
 
 pub trait RoomLogicTransfer {

@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口已具备但本次未实际执行真实三进程联调；NPC / 行为树、独立 timer wheel / scheduler、真实三进程自动化联调准入、故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy 演练脚本入口已具备但本次未实际执行真实三进程联调；NPC / 行为树、真实独立 timer wheel / scheduler、真实三进程自动化联调准入、故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -245,7 +245,7 @@
   - checksum
 - [x] 导出失败时返回明确错误码。
 
-限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement_demo 已支持 movement runtime transfer schema v1；combat_demo 已支持 combat runtime transfer schema v1，`pending_events` 不导出也不在导入后重放。NPC / 行为树和独立 timer wheel / scheduler 的完整数据填充仍是后续任务。
+限制：当前 checksum 基于清空 `checksum` 字段后的 `RoomTransferPayload` protobuf 编码计算 SHA-256；成员快照按 `player_id` 排序以保持稳定。未实现独立 transfer 契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会继续复用轻量 snapshot 状态假装可迁移。movement_demo 已支持 movement runtime transfer schema v1；combat_demo 已支持 combat runtime transfer schema v1，`pending_events` 不导出也不在导入后重放。room runtime timer/scheduler 已有 `room-transfer.runtime-timer-state.v1` 内层结构化契约和 `room-transfer.runtime-timers.v1` wrapper 校验；combat_demo 当前只填充 demo 级周期快照 scheduler，不代表真实独立 timer wheel。NPC / 行为树和真实独立 timer wheel / scheduler 的完整数据填充仍是后续任务。
 
 ### 4.4 旧服退役接口
 
@@ -355,7 +355,9 @@
 - `game-server` 已完成 room freeze/export/import/confirm/retire 的最小闭环，并有 `RoomManager` 单元测试覆盖。
 - 已新增独立 transfer 契约骨架，`RoomLogic` 通过 `RoomLogicTransfer` 导出/导入迁移状态。
 - 默认未实现迁移契约的玩法会返回 `UNSUPPORTED_ROOM_TRANSFER`，不会再把轻量 `get_serialized_state()` 当完整迁移能力。
-- movement_demo 已支持 movement runtime transfer schema v1 导出 / 导入并有一致性测试；combat_demo 已支持 combat runtime transfer schema v1 导出 / 导入并有一致性测试，`pending_events` 不导出也不在导入后重放。NPC / 行为树和独立 timer wheel / scheduler 仍未完成，也没有同连接迁移。
+- movement_demo 已支持 movement runtime transfer schema v1 导出 / 导入并有一致性测试；combat_demo 已支持 combat runtime transfer schema v1 导出 / 导入并有一致性测试，`pending_events` 不导出也不在导入后重放。
+- room runtime timer/scheduler 已新增 `room-transfer.runtime-timer-state.v1` 内层契约，能表达 `runtimeSummary`、`timerEntries`、`schedulerEntries` 和 metadata，并由 `room-transfer.runtime-timers.v1` wrapper 在导入侧校验 schema/version、关键字段类型和基础范围；combat_demo 已用 demo 级周期快照 scheduler 验证 roundtrip 后继续按同一调度帧运行。
+- NPC / 行为树、真实独立 timer wheel / scheduler、同连接迁移仍未完成。
 
 ### 7.1 通用 payload 结构
 
@@ -396,11 +398,12 @@
 
 ### 7.5 定时器与一致性
 
-- [ ] 为 room 内部 timer / scheduler 增加可导出结构。
+- [x] 为 room 内部 timer / scheduler 增加可导出结构契约骨架。
 - [x] 明确冻结点之后不允许再推进时间。
-- [ ] 导入后重建 timer wheel 或等价运行态。
+- [x] 至少一个 demo logic 导入后恢复等价 scheduler 运行态。
+- [ ] 真实独立 timer wheel / scheduler 抽象与通用重建。
 
-当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已锁定 transfer freeze 后停止 `RoomRuntime` tick handle / `tick_running`，清空 `wait_started_at`，且冻结/导出状态下 `process_room_tick` 不再推进 room 时间。`runtime_timers_json` 已收敛为 `room-transfer.runtime-timers.v1` wrapper，并校验 `schemaVersion`、`timerStateJson` 字符串和 `runtimeSummary` 基础字段。当前仓库仍没有独立 room timer wheel / scheduler 抽象，因此“为 room 内部 timer / scheduler 增加可导出结构”和“导入后重建 timer wheel 或等价运行态”保持未完成。
+当前实现说明：`apps/game-server/src/core/runtime/room_manager.rs` 已锁定 transfer freeze 后停止 `RoomRuntime` tick handle / `tick_running`，清空 `wait_started_at`，且冻结/导出状态下 `process_room_tick` 不再推进 room 时间。`runtime_timers_json` 已收敛为 `room-transfer.runtime-timers.v1` wrapper，并校验 `schemaVersion`、内层 `timerStateJson` 契约和 `runtimeSummary` 基础字段。`apps/game-server/src/core/logic/room_logic.rs` 已提供 `RoomRuntimeTimerTransferState`，内层 schema 为 `room-transfer.runtime-timer-state.v1`，可表达 `runtimeSummary`、可选 `timerEntries`、可选 `schedulerEntries` 和 metadata。combat_demo 已导出 demo 级周期快照 scheduler，并在导入后恢复 `next_snapshot_frame` 继续运行同一调度点。当前仓库仍没有真实独立 room timer wheel / scheduler 抽象，因此这里完成的是结构化契约骨架和至少一个 demo 的等价运行态 roundtrip，不代表 NPC/行为树/AI timer wheel 已完整迁移。
 
 完成标准:
 
