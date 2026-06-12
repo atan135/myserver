@@ -106,6 +106,7 @@ const DEFAULT_OPTIONS = {
   addBinded: false,
   // Internal API token
   serviceToken: "",
+  shutdownReason: "mock-client",
   useServiceDiscovery: true,
   allowRedirectJoinFallback: false
 };
@@ -392,6 +393,9 @@ export function parseArgs(argv) {
         break;
       case "--service-token":
         ({ value: result.serviceToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--shutdown-reason":
+        ({ value: result.shutdownReason, nextIndex: index } = collectOptionValue(argv, index));
         break;
     }
   }

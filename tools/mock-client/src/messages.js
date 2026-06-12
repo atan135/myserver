@@ -626,6 +626,16 @@ export function decodeByMessageType(messageType, body) {
         targetServerId: readString(fields, 8),
         transport: readString(fields, 9)
       };
+    case MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        connectionCount: readInt64(fields, 3),
+        ownedRoomCount: readInt64(fields, 4),
+        migratingRoomCount: readInt64(fields, 5),
+        drainModeEnabled: readBool(fields, 6),
+        retiredRoomCount: readInt64(fields, 7)
+      };
     case MESSAGE_TYPE.SESSION_KICK_PUSH:
       return {
         reason: readString(fields, 1),

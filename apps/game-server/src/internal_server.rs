@@ -14,9 +14,10 @@ use crate::pb::{
     ConfirmRoomOwnershipReq, ConfirmRoomOwnershipRes, CreateMatchedRoomReq, ErrorRes,
     ExportRoomTransferReq, ExportRoomTransferRes, FreezeRoomForTransferReq,
     FreezeRoomForTransferRes, GetRolloutDrainStatusReq, GetRolloutDrainStatusRes,
-    ImportRoomTransferReq, ImportRoomTransferRes, RetireTransferredRoomReq,
-    RetireTransferredRoomRes, ServerRedirectPush, TriggerRolloutDrainNoticeReq,
-    TriggerRolloutDrainNoticeRes, TriggerServerRedirectReq, TriggerServerRedirectRes,
+    ImportRoomTransferReq, ImportRoomTransferRes, RequestServerShutdownReq,
+    RequestServerShutdownRes, RetireTransferredRoomReq, RetireTransferredRoomRes,
+    ServerRedirectPush, TriggerRolloutDrainNoticeReq, TriggerRolloutDrainNoticeRes,
+    TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
 
@@ -571,6 +572,64 @@ where
                 )
                 .await?;
             }
+            Some(MessageType::RequestServerShutdownReq) => {
+                let request = match packet
+                    .decode_body::<RequestServerShutdownReq>("INVALID_SERVER_SHUTDOWN_BODY")
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        let target = InternalAuditTarget::default();
+                        audit_internal_control_action(
+                            packet.header.seq,
+                            packet.header.msg_type,
+                            "request_server_shutdown",
+                            false,
+                            error_code,
+                            &target,
+                        );
+                        write_error(
+                            &mut writer,
+                            packet.header.seq,
+                            error_code,
+                            "invalid server shutdown request",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = InternalAuditTarget::for_shutdown();
+                let response = build_server_shutdown_response(&services).await;
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_internal_control_action(
+                    packet.header.seq,
+                    packet.header.msg_type,
+                    "request_server_shutdown",
+                    ok,
+                    &error_code,
+                    &target,
+                );
+                write_message(
+                    &mut writer,
+                    MessageType::RequestServerShutdownRes,
+                    packet.header.seq,
+                    &response,
+                )
+                .await?;
+
+                if ok {
+                    info!(
+                        channel = "internal_socket",
+                        reason = %request.reason,
+                        connection_count = response.connection_count,
+                        owned_room_count = response.owned_room_count,
+                        migrating_room_count = response.migrating_room_count,
+                        retired_room_count = response.retired_room_count,
+                        "requesting game-server graceful shutdown"
+                    );
+                    services.shutdown_signal.notify_one();
+                }
+            }
             Some(_) => {
                 write_error(
                     &mut writer,
@@ -651,6 +710,44 @@ impl InternalAuditTarget {
             checksum: String::new(),
             target_server_id: String::new(),
         }
+    }
+
+    fn for_shutdown() -> Self {
+        Self::default()
+    }
+}
+
+pub async fn build_server_shutdown_response(services: &ServiceContext) -> RequestServerShutdownRes {
+    let snapshot = services
+        .room_manager
+        .rollout_drain_snapshot(
+            &services.config.service_instance_id,
+            ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT,
+        )
+        .await;
+    let runtime = services.runtime_config.read().await.clone();
+    let connection_count = services.connection_count.load(Ordering::Relaxed);
+
+    let error_code = if !runtime.drain_mode_enabled {
+        "SHUTDOWN_DRAIN_MODE_REQUIRED"
+    } else if connection_count != 0 {
+        "SHUTDOWN_CONNECTIONS_REMAIN"
+    } else if snapshot.owned_room_count != 0 {
+        "SHUTDOWN_OWNED_ROOMS_REMAIN"
+    } else if snapshot.migrating_room_count != 0 {
+        "SHUTDOWN_MIGRATING_ROOMS_REMAIN"
+    } else {
+        ""
+    };
+
+    RequestServerShutdownRes {
+        ok: error_code.is_empty(),
+        error_code: error_code.to_string(),
+        connection_count,
+        owned_room_count: snapshot.owned_room_count,
+        migrating_room_count: snapshot.migrating_room_count,
+        drain_mode_enabled: runtime.drain_mode_enabled,
+        retired_room_count: snapshot.retired_room_count,
     }
 }
 
@@ -780,7 +877,7 @@ mod tests {
 
     use prost::Message;
     use tokio::io::duplex;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{Mutex, Notify, RwLock};
 
     use super::*;
     use crate::config::{
@@ -791,6 +888,7 @@ mod tests {
     use crate::core::context::PlayerRegistry;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
     use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::room::MemberRole;
     use crate::core::runtime::RoomManager;
     use crate::mysql_store::MySqlAuditStore;
     use crate::protocol::{encode_packet, parse_header};
@@ -904,6 +1002,7 @@ mod tests {
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),
             player_input_anomaly_tracker: Arc::new(Mutex::new(PlayerInputAnomalyTracker::new())),
+            shutdown_signal: Arc::new(Notify::new()),
         }
     }
 
@@ -1026,6 +1125,138 @@ mod tests {
         let response = ErrorRes::decode(packet.body.as_slice()).unwrap();
         assert_eq!(response.error_code, "INVALID_ROLLOUT_DRAIN_NOTICE_BODY");
         assert_eq!(response.message, "invalid rollout drain notice request");
+
+        drop(client_io);
+        handler.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_request_rejects_when_drain_mode_is_disabled() {
+        let services = service_context_fixture().await;
+
+        let response = build_server_shutdown_response(&services).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "SHUTDOWN_DRAIN_MODE_REQUIRED");
+        assert!(!response.drain_mode_enabled);
+        assert_eq!(response.connection_count, 0);
+        assert_eq!(response.owned_room_count, 0);
+        assert_eq!(response.migrating_room_count, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_request_rejects_when_connections_remain() {
+        let services = service_context_fixture().await;
+        services.runtime_config.write().await.drain_mode_enabled = true;
+        services.connection_count.store(1, Ordering::Relaxed);
+
+        let response = build_server_shutdown_response(&services).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "SHUTDOWN_CONNECTIONS_REMAIN");
+        assert_eq!(response.connection_count, 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_request_rejects_when_owned_room_remains() {
+        let services = service_context_fixture().await;
+        services.runtime_config.write().await.drain_mode_enabled = true;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        services
+            .room_manager
+            .join_room(
+                "room-owned",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        let response = build_server_shutdown_response(&services).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "SHUTDOWN_OWNED_ROOMS_REMAIN");
+        assert_eq!(response.owned_room_count, 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_request_rejects_when_migrating_room_remains() {
+        let services = service_context_fixture().await;
+        services.runtime_config.write().await.drain_mode_enabled = true;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        services
+            .room_manager
+            .join_room(
+                "room-migrating",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        services
+            .room_manager
+            .disconnect_room_member("room-migrating", "player-a")
+            .await;
+        services
+            .room_manager
+            .freeze_room_for_transfer("epoch-1", "room-migrating")
+            .await
+            .unwrap();
+
+        let response = build_server_shutdown_response(&services).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "SHUTDOWN_MIGRATING_ROOMS_REMAIN");
+        assert_eq!(response.migrating_room_count, 1);
+    }
+
+    #[tokio::test]
+    async fn internal_shutdown_request_writes_success_then_triggers_signal() {
+        let services = service_context_fixture().await;
+        services.runtime_config.write().await.drain_mode_enabled = true;
+        let shutdown_signal = services.shutdown_signal.clone();
+        let (server_io, mut client_io) = duplex(4096);
+        let handler = tokio::spawn(async move {
+            handle_internal_connection(server_io, services, DEFAULT_INTERNAL_TOKEN.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        });
+
+        client_io
+            .write_all(&encode_packet(
+                MessageType::InternalAuthReq,
+                1,
+                DEFAULT_INTERNAL_TOKEN.as_bytes(),
+            ))
+            .await
+            .unwrap();
+        client_io
+            .write_all(&encode_packet(
+                MessageType::RequestServerShutdownReq,
+                2,
+                &encode_body(&RequestServerShutdownReq {
+                    reason: "unit-test".to_string(),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let packet = read_test_packet(&mut client_io).await;
+        assert_eq!(
+            packet.header.msg_type,
+            MessageType::RequestServerShutdownRes as u16
+        );
+        assert_eq!(packet.header.seq, 2);
+        let response = RequestServerShutdownRes::decode(packet.body.as_slice()).unwrap();
+        assert!(response.ok);
+        assert!(response.error_code.is_empty());
+        tokio::time::timeout(Duration::from_millis(50), shutdown_signal.notified())
+            .await
+            .expect("shutdown signal should be triggered after success response");
 
         drop(client_io);
         handler.await.unwrap().unwrap();

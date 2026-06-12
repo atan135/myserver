@@ -191,14 +191,17 @@
 | `1614` | `ConfirmRoomOwnershipRes` |
 | `1615` | `TriggerRolloutDrainNoticeReq` |
 | `1616` | `TriggerRolloutDrainNoticeRes` |
+| `1617` | `RequestServerShutdownReq` |
+| `1618` | `RequestServerShutdownRes` |
 
 说明：
 
 - 这些消息结构已在 `packages/proto/game.proto` 定义；`game-server` 消息号枚举包含完整控制面消息，`game-proxy` 仅包含自身转发和路由判定需要识别的子集。
 - `GetRolloutDrainStatusRes` 返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、`connection_count`、`owned_room_count`、`migrating_room_count`、`retired_room_count`、`transferable_empty_room_count`、`RoomRouteStatus` 样本与 `transferable_empty_room_samples`；未进入 drain mode 时 `drain_mode_entered_at_ms=0`。`retired_room_count` 仅统计旧服上已进入 `Retired` tombstone 状态的 room，不参与旧服排空通过条件。可接管空房样本仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，`empty_since_ms` 表示已空置时长，不是绝对时间戳。
-- 当前代码已落地 `drain_mode` 对新建房的拦截、`game-proxy` 侧 rollout 路由状态、`game-server` 房间 freeze/export/import/confirm/retire 最小闭环、`TriggerServerRedirectReq/Res` 可控 redirect push 下发入口，以及 `TriggerRolloutDrainNoticeReq/Res` 对指定 room 在线成员下发 `GameMessagePush(event="rollout_drain_notice", action="leave_room")` 的提示入口；真实多进程联调和自动灰度收尾仍以 `docs/game-server-room-rollout-spec.md`、任务清单和实际代码为准。
+- 当前代码已落地 `drain_mode` 对新建房的拦截、`game-proxy` 侧 rollout 路由状态、`game-server` 房间 freeze/export/import/confirm/retire 最小闭环、`TriggerServerRedirectReq/Res` 可控 redirect push 下发入口、`TriggerRolloutDrainNoticeReq/Res` 对指定 room 在线成员下发 `GameMessagePush(event="rollout_drain_notice", action="leave_room")` 的提示入口，以及 `RequestServerShutdownReq/Res` 旧服排空后的受控 graceful shutdown 请求入口；真实多进程联调和部署编排自动停进程仍以 `docs/game-server-room-rollout-spec.md`、任务清单和实际代码为准。
 - `ServerRedirectPush` 已作为第一阶段显式重连协议使用。服务端可下发 push，push 成功入队后旧服会以 `server_redirect_reconnect_required` 请求关闭旧连接；`tools/mock-client` 已有收到 push 后主动重连目标入口并优先 `RoomReconnectReq` 的验证场景。
 - `TriggerRolloutDrainNoticeReq/Res` 使用已鉴权 admin / internal 控制通道，字段为 `{ room_id, rollout_epoch, reason, message, retry_after_ms, deadline_ms }`。服务端只复用 `GameMessagePush` 下发结构化提示并返回 `delivered_count`、`failed_count`、`online_member_count`，不会强制断开连接、不会调用 redirect、不会自动 leave room。
+- `RequestServerShutdownReq/Res` 使用已鉴权 admin / internal 控制通道，字段为请求 `{ reason }`，响应 `{ ok, error_code, connection_count, owned_room_count, migrating_room_count, drain_mode_enabled, retired_room_count }`。服务端仅在 `drain_mode_enabled == true && connection_count == 0 && owned_room_count == 0 && migrating_room_count == 0` 时返回 `ok=true` 并触发现有 graceful shutdown 信号；`retired_room_count` 只作为观测字段，不阻塞停服。拒绝时不会触发 shutdown，错误码包括 `SHUTDOWN_DRAIN_MODE_REQUIRED`、`SHUTDOWN_CONNECTIONS_REMAIN`、`SHUTDOWN_OWNED_ROOMS_REMAIN`、`SHUTDOWN_MIGRATING_ROOMS_REMAIN`。
 
 #### 通用错误
 
@@ -515,6 +518,7 @@
 - `AdminServerStatusReq/Res` 与 `AdminUpdateConfigReq/Res` 使用 `packages/proto/admin.proto`
 - `TriggerServerRedirectReq/Res` 使用 `packages/proto/game.proto`，可走已鉴权 admin / internal 通道触发旧服向指定 room 当前在线成员下发 `ServerRedirectPush`
 - `TriggerRolloutDrainNoticeReq/Res` 使用 `packages/proto/game.proto`，可走已鉴权 admin / internal 通道触发旧服向指定 room 当前在线成员下发 `GameMessagePush(event="rollout_drain_notice", action="leave_room")`；这只是提示玩家主动离房或结束当前局，不等价于踢人、redirect、自动 leave 或同连接迁移
+- `RequestServerShutdownReq/Res` 使用 `packages/proto/game.proto`，可走已鉴权 admin / internal 通道在停服前安全闸通过后触发 game-server graceful shutdown 信号；它不调用部署平台杀进程，也不会绕过 drain/连接/room 条件
 - `GmSendItemReq/Res` 当前复用 `GrantItemsReq/GrantItemsRes`，并保留 JSON 旧格式兼容
 - `GmBroadcastReq`、`GmKickPlayerReq`、`GmBanPlayerReq` 当前由 `admin-api` 以 JSON body 调用；`game-server` 会返回对应 `Gm*Res` 消息号，失败时返回 `ErrorRes`
 - `GmBroadcastReq` 字段为 `{ title, content, sender }`，`game-server` 校验非空与长度后，复用玩家通道 `GameMessagePush` 推送在线连接：`event="gm_broadcast"`、`action="broadcast"`、`payload_json={ title, content, sender, timestamp }`

@@ -514,6 +514,20 @@ message TriggerRolloutDrainNoticeRes {
   uint64 online_member_count = 6;
 }
 
+message RequestServerShutdownReq {
+  string reason = 1;
+}
+
+message RequestServerShutdownRes {
+  bool ok = 1;
+  string error_code = 2;
+  uint64 connection_count = 3;
+  uint64 owned_room_count = 4;
+  uint64 migrating_room_count = 5;
+  bool drain_mode_enabled = 6;
+  uint64 retired_room_count = 7;
+}
+
 message RoomMemberOfflinePush {
   string room_id = 1;
   string player_id = 2;

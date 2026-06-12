@@ -751,6 +751,28 @@ pub struct TriggerRolloutDrainNoticeRes {
     pub online_member_count: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestServerShutdownReq {
+    #[prost(string, tag = "1")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestServerShutdownRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub connection_count: u64,
+    #[prost(uint64, tag = "4")]
+    pub owned_room_count: u64,
+    #[prost(uint64, tag = "5")]
+    pub migrating_room_count: u64,
+    #[prost(bool, tag = "6")]
+    pub drain_mode_enabled: bool,
+    #[prost(uint64, tag = "7")]
+    pub retired_room_count: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMemberOfflinePush {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,

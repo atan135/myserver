@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeRolloutDrainStatusRes } from "./game-admin-client.js";
+import { decodeRequestServerShutdownRes, decodeRolloutDrainStatusRes } from "./game-admin-client.js";
 
 function varint(value) {
   let remaining = BigInt(value);
@@ -79,5 +79,27 @@ test("decodeRolloutDrainStatusRes exposes drain mode and transferable fields", (
         roomVersion: 3
       }
     ]
+  });
+});
+
+test("decodeRequestServerShutdownRes exposes shutdown safety gate fields", () => {
+  const body = Buffer.concat([
+    fieldVarint(1, 0),
+    fieldString(2, "SHUTDOWN_CONNECTIONS_REMAIN"),
+    fieldVarint(3, 2),
+    fieldVarint(4, 0),
+    fieldVarint(5, 0),
+    fieldVarint(6, 1),
+    fieldVarint(7, 3)
+  ]);
+
+  assert.deepEqual(decodeRequestServerShutdownRes(body), {
+    ok: false,
+    errorCode: "SHUTDOWN_CONNECTIONS_REMAIN",
+    connectionCount: 2,
+    ownedRoomCount: 0,
+    migratingRoomCount: 0,
+    drainModeEnabled: true,
+    retiredRoomCount: 3
   });
 });

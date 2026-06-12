@@ -18,6 +18,7 @@ export {
   runDrainExistingRoomObserver,
   runDrainCreateMatchedRoomRejected,
   runRolloutDrainStatus,
+  runRequestServerShutdown,
   runServerRedirectListen,
   runServerRedirectReconnect,
   runCreateMatchedRoom,

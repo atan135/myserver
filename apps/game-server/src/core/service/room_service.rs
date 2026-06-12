@@ -1737,7 +1737,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{Mutex, Notify, RwLock};
 
     use super::*;
     use crate::config::{
@@ -1868,6 +1868,7 @@ mod tests {
             player_input_anomaly_tracker: Arc::new(Mutex::new(
                 crate::server::PlayerInputAnomalyTracker::new(),
             )),
+            shutdown_signal: Arc::new(Notify::new()),
         }
     }
 

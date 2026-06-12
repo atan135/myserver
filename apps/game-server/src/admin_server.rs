@@ -15,7 +15,9 @@ use crate::admin_pb::{
     UpdateConfigRes,
 };
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::context::{PlayerRegistry, SharedRoomManager, SharedRuntimeConfig};
+use crate::core::context::{
+    PlayerRegistry, SharedRoomManager, SharedRuntimeConfig, ShutdownSignal,
+};
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
 use crate::core::runtime::room_manager::{
@@ -30,9 +32,9 @@ use crate::pb::{
     ConfirmRoomOwnershipReq, ConfirmRoomOwnershipRes, ExportRoomTransferReq, ExportRoomTransferRes,
     FreezeRoomForTransferReq, FreezeRoomForTransferRes, GetRolloutDrainStatusReq,
     GetRolloutDrainStatusRes, ImportRoomTransferReq, ImportRoomTransferRes,
-    RetireTransferredRoomReq, RetireTransferredRoomRes, ServerRedirectPush,
-    TriggerRolloutDrainNoticeReq, TriggerRolloutDrainNoticeRes, TriggerServerRedirectReq,
-    TriggerServerRedirectRes,
+    RequestServerShutdownReq, RequestServerShutdownRes, RetireTransferredRoomReq,
+    RetireTransferredRoomRes, ServerRedirectPush, TriggerRolloutDrainNoticeReq,
+    TriggerRolloutDrainNoticeRes, TriggerServerRedirectReq, TriggerServerRedirectRes,
 };
 use crate::pb::{ErrorRes, InventoryUpdatePush, Item as PbItem, ItemObtainPush};
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_body, encode_packet, parse_header};
@@ -226,6 +228,7 @@ pub async fn run_listener(
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
+    shutdown_signal: ShutdownSignal,
 ) -> Result<(), std::io::Error> {
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -238,6 +241,7 @@ pub async fn run_listener(
         let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
         let audit_logger = audit_logger.clone();
+        let shutdown_signal = shutdown_signal.clone();
 
         tokio::spawn(async move {
             if let Err(error) = handle_admin_connection(
@@ -251,6 +255,7 @@ pub async fn run_listener(
                 owner_server_id,
                 admin_token,
                 audit_logger,
+                shutdown_signal,
             )
             .await
             {
@@ -271,6 +276,7 @@ async fn handle_admin_connection(
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
+    shutdown_signal: ShutdownSignal,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut reader, mut writer) = socket.into_split();
 
@@ -1144,6 +1150,65 @@ async fn handle_admin_connection(
                 )
                 .await?;
             }
+            Some(MessageType::RequestServerShutdownReq) => {
+                let action = "request_server_shutdown";
+                let request = match packet
+                    .decode_body::<RequestServerShutdownReq>("INVALID_SERVER_SHUTDOWN_BODY")
+                {
+                    Ok(request) => request,
+                    Err(error_code) => {
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            error_code,
+                            "invalid server shutdown request",
+                            &AdminAuditTarget::default(),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let target = server_shutdown_target();
+                let response = build_server_shutdown_response(
+                    &room_manager,
+                    &runtime_config,
+                    &owner_server_id,
+                    &connection_count,
+                )
+                .await;
+                let ok = response.ok;
+                let error_code = response.error_code.clone();
+                audit_then_write_message(
+                    &mut writer,
+                    &audit_logger,
+                    &auth_context,
+                    &packet,
+                    action,
+                    MessageType::RequestServerShutdownRes,
+                    &response,
+                    ok,
+                    &error_code,
+                    &target,
+                )
+                .await?;
+
+                if ok {
+                    info!(
+                        channel = "admin_tcp",
+                        actor = %auth_context.actor,
+                        reason = %request.reason,
+                        connection_count = response.connection_count,
+                        owned_room_count = response.owned_room_count,
+                        migrating_room_count = response.migrating_room_count,
+                        retired_room_count = response.retired_room_count,
+                        "requesting game-server graceful shutdown"
+                    );
+                    shutdown_signal.notify_one();
+                }
+            }
             Some(_) => {
                 write_error(
                     &mut writer,
@@ -1280,6 +1345,7 @@ fn admin_write_action(message_type: MessageType) -> Option<&'static str> {
         MessageType::RetireTransferredRoomReq => Some("retire_transferred_room"),
         MessageType::TriggerServerRedirectReq => Some("trigger_server_redirect"),
         MessageType::TriggerRolloutDrainNoticeReq => Some("trigger_rollout_drain_notice"),
+        MessageType::RequestServerShutdownReq => Some("request_server_shutdown"),
         _ => None,
     }
 }
@@ -1505,6 +1571,10 @@ fn rollout_drain_notice_target(request: &TriggerRolloutDrainNoticeReq) -> AdminA
     }
 }
 
+fn server_shutdown_target() -> AdminAuditTarget {
+    AdminAuditTarget::default()
+}
+
 async fn ensure_parent_dir(path: &Path) -> Result<(), AdminAuditError> {
     if let Some(parent) = path
         .parent()
@@ -1563,6 +1633,41 @@ async fn build_rollout_drain_status_response(
         transferable_empty_room_samples: snapshot.transferable_empty_room_samples,
         drain_mode_reason: runtime.drain_mode_reason,
         drain_mode_source: runtime.drain_mode_source,
+        retired_room_count: snapshot.retired_room_count,
+    }
+}
+
+async fn build_server_shutdown_response(
+    room_manager: &SharedRoomManager,
+    runtime_config: &SharedRuntimeConfig,
+    owner_server_id: &str,
+    connection_count: &Arc<AtomicU64>,
+) -> RequestServerShutdownRes {
+    let snapshot = room_manager
+        .rollout_drain_snapshot(owner_server_id, ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT)
+        .await;
+    let runtime = runtime_config.read().await.clone();
+    let connection_count = connection_count.load(Ordering::Relaxed);
+
+    let error_code = if !runtime.drain_mode_enabled {
+        "SHUTDOWN_DRAIN_MODE_REQUIRED"
+    } else if connection_count != 0 {
+        "SHUTDOWN_CONNECTIONS_REMAIN"
+    } else if snapshot.owned_room_count != 0 {
+        "SHUTDOWN_OWNED_ROOMS_REMAIN"
+    } else if snapshot.migrating_room_count != 0 {
+        "SHUTDOWN_MIGRATING_ROOMS_REMAIN"
+    } else {
+        ""
+    };
+
+    RequestServerShutdownRes {
+        ok: error_code.is_empty(),
+        error_code: error_code.to_string(),
+        connection_count,
+        owned_room_count: snapshot.owned_room_count,
+        migrating_room_count: snapshot.migrating_room_count,
+        drain_mode_enabled: runtime.drain_mode_enabled,
         retired_room_count: snapshot.retired_room_count,
     }
 }
@@ -2140,7 +2245,9 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use prost::Message;
     use serde_json::json;
+    use tokio::net::TcpStream as TokioTcpStream;
     use tokio::sync::Notify;
     use tokio::sync::RwLock;
     use tokio::sync::mpsc;
@@ -2148,6 +2255,7 @@ mod tests {
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
+    use crate::core::player::{MySqlPlayerStore, PlayerManager};
     use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
     use crate::core::runtime::RoomManager;
     use crate::pb::GameMessagePush;
@@ -2238,6 +2346,15 @@ mod tests {
         )])));
 
         (registry, notify, kick_reason, rx)
+    }
+
+    async fn read_tcp_test_packet(stream: &mut TokioTcpStream) -> Packet {
+        let mut header_buf = [0u8; HEADER_LEN];
+        stream.read_exact(&mut header_buf).await.unwrap();
+        let header = parse_header(header_buf).unwrap();
+        let mut body = vec![0u8; header.body_len as usize];
+        stream.read_exact(&mut body).await.unwrap();
+        Packet::new(header, body)
     }
 
     #[test]
@@ -2498,6 +2615,90 @@ mod tests {
             admin_write_action(MessageType::TriggerRolloutDrainNoticeReq),
             Some("trigger_rollout_drain_notice")
         );
+    }
+
+    #[test]
+    fn admin_shutdown_request_is_write_action() {
+        assert_eq!(
+            admin_write_action(MessageType::RequestServerShutdownReq),
+            Some("request_server_shutdown")
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_shutdown_request_writes_success_then_triggers_signal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let room_manager = Arc::new(RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(NoopRoomLogicFactory),
+        ));
+        let runtime_config = runtime_config_fixture();
+        runtime_config.write().await.drain_mode_enabled = true;
+        let connection_count = Arc::new(AtomicU64::new(0));
+        let config_tables = ConfigTableRuntime::load(std::path::Path::new("csv"))
+            .expect("test config tables should load");
+        let shutdown_signal = Arc::new(Notify::new());
+        let handler_shutdown_signal = shutdown_signal.clone();
+        let handler = tokio::spawn({
+            let room_manager = room_manager.clone();
+            let runtime_config = runtime_config.clone();
+            let connection_count = connection_count.clone();
+            async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                handle_admin_connection(
+                    socket,
+                    room_manager,
+                    runtime_config,
+                    connection_count,
+                    PlayerRegistry::default(),
+                    PlayerManager::new(MySqlPlayerStore::new_disabled()),
+                    config_tables,
+                    "game-server-test".to_string(),
+                    "secret-admin-token".to_string(),
+                    AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),
+                    handler_shutdown_signal,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            }
+        });
+
+        let mut client = TokioTcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&encode_packet(
+                MessageType::AdminAuthReq,
+                1,
+                b"secret-admin-token",
+            ))
+            .await
+            .unwrap();
+        client
+            .write_all(&encode_packet(
+                MessageType::RequestServerShutdownReq,
+                2,
+                &encode_body(&RequestServerShutdownReq {
+                    reason: "unit-test".to_string(),
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let packet = read_tcp_test_packet(&mut client).await;
+        assert_eq!(
+            packet.header.msg_type,
+            MessageType::RequestServerShutdownRes as u16
+        );
+        assert_eq!(packet.header.seq, 2);
+        let response = RequestServerShutdownRes::decode(packet.body.as_slice()).unwrap();
+        assert!(response.ok);
+        assert!(response.error_code.is_empty());
+        tokio::time::timeout(Duration::from_millis(50), shutdown_signal.notified())
+            .await
+            .expect("shutdown signal should be triggered after success response");
+
+        drop(client);
+        handler.await.unwrap().unwrap();
     }
 
     #[test]

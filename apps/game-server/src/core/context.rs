@@ -20,6 +20,7 @@ use crate::session::{Session, SessionState};
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
+pub type ShutdownSignal = Arc<Notify>;
 /// Maps player_id -> current authenticated connection on this game-server instance.
 pub type PlayerRegistry = Arc<RwLock<HashMap<String, PlayerConnectionHandle>>>;
 pub type SharedPlayerMessageRateLimiter = Arc<Mutex<PlayerMessageRateLimiter>>;
@@ -46,6 +47,7 @@ pub struct ServiceContext {
     pub player_registry: PlayerRegistry,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
     pub player_input_anomaly_tracker: SharedPlayerInputAnomalyTracker,
+    pub shutdown_signal: ShutdownSignal,
 }
 
 pub struct ConnectionContext {
@@ -65,6 +67,7 @@ pub struct ServerSharedState {
     pub online_player_count: Arc<AtomicU64>,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
     pub player_input_anomaly_tracker: SharedPlayerInputAnomalyTracker,
+    pub shutdown_signal: ShutdownSignal,
 }
 
 impl ConnectionContext {

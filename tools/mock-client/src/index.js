@@ -29,6 +29,7 @@ import {
   runDrainExistingRoomObserver,
   runDrainCreateMatchedRoomRejected,
   runRolloutDrainStatus,
+  runRequestServerShutdown,
   runServerRedirectListen,
   runServerRedirectReconnect,
   runCreateMatchedRoom,
@@ -206,6 +207,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.ROLLOUT_DRAIN_STATUS) {
     await runRolloutDrainStatus(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.REQUEST_SERVER_SHUTDOWN) {
+    await runRequestServerShutdown(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

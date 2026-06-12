@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mybevy 适配和三进程端到端自动化联调仍未完成。
-- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；NPC / 行为树、独立 timer wheel / scheduler、真实三进程自动化联调、演练和旧服自动停止仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；NPC / 行为树、独立 timer wheel / scheduler、真实三进程自动化联调、故障演练和部署平台自动停旧进程仍未完成。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -415,7 +415,8 @@
 - `auth-http` 已把 `GetRolloutDrainStatusReq/Res` 暴露为已鉴权内部控制接口 `GET /api/v1/internal/game-server/rollout-drain-status`，可作为 proxy 自动收尾后、停旧服前的人工或控制面校验入口。
 - `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数、已 retired room 数、可接管空房数量、route 样本和可接管空房样本。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
-- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；`retiredRoomCount` / `retired_room_count` 作为观测字段透传，不改变 pass/fail 判定；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整旧服自动停进程控制面。
+- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；`retiredRoomCount` / `retired_room_count` 作为观测字段透传，不改变 pass/fail 判定；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整部署编排自动停旧进程控制面。
+- `game-server` 已通过已鉴权 admin/internal 控制通道增加 `RequestServerShutdownReq/Res`，并由 `auth-http` 暴露为 `POST /api/v1/internal/game-server/shutdown-if-drained`。入口会在触发前校验 `drain_mode_enabled == true`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0`；未通过时返回 `ok=false` 和明确错误码，不触发 shutdown；通过后先写回成功响应，再触发现有 graceful shutdown 信号。`retired_room_count` 只作为观测字段，不阻塞停服。`tools/mock-client` 已增加 `request-server-shutdown` 场景用于人工演练。
 - `admin-api` / `admin-web` 已补齐第一阶段控制面周期轮询、展示和告警闭环：`GET /api/admin/monitoring/rollout-drain` 读取 `game-proxy` admin HTTP `GET /rollout`，归一化 active / empty / blocked / drained / interrupted / error 状态、阻塞计数和样本，并由监控总览页每 5 秒轮询展示。该能力只做只读观测和人工收尾提示，不会调用自动停旧服，也不代表真实 old/new/proxy 三进程集成已完成。
 
 ### 8.1 旧服状态查询
@@ -446,6 +447,12 @@
   - `connection_count == 0`
   - `owned_room_count == 0`
   - `migrating_room_count == 0`
+- [x] game-server 受控 graceful shutdown 入口满足同一组旧服安全闸才触发:
+  - `drain_mode_enabled == true`
+  - `connection_count == 0`
+  - `owned_room_count == 0`
+  - `migrating_room_count == 0`
+  - `retired_room_count` 不作为阻塞项
 - [x] 灰度结束后清理:
   - `rollout_epoch`
   - `old_server` 的 room route metadata
@@ -453,7 +460,8 @@
 
 ### 8.3 停服流程
 
-- [ ] 在灰度结束后执行旧服停止。
+- [x] 在 game-server 自身提供旧服排空后的受控 graceful shutdown 请求入口。
+- [ ] 接入部署平台 / 进程管理器，在灰度结束后自动停止旧进程。
 - [x] 停服前再次校验 route 中已无 `owner_server_id == old_server` 的 room。
 - [x] 旧服停服后，`proxy` 自动退回普通单服路由模式。
 
@@ -461,7 +469,7 @@
 
 - 旧服只能在 room 全部接管并且连接排空后退出。
 
-当前实现说明：`game-proxy` 的 `complete-if-drained` 和 `/rollout/end` 在结束 rollout 前通过 route store 显式检查当前 `rollout_epoch` 内是否仍有 `owner_server_id == old_server` 的 room route，并继续阻塞迁移中 / 失败 room route 与指向旧服的 player route；未排空时保留 rollout session，不允许自动收尾。route store 完成 rollout 后会将 `new_server` 的 upstream operation state 置为 `Active`、`old_server` 置为 `Draining`，使没有 `rollout_session` 的默认新房路由稳定落到新服。真实 old process stop 仍未实现，后续需要部署控制面或运维编排负责；当前监控页只展示状态和告警，不提供自动停进程按钮。
+当前实现说明：`game-proxy` 的 `complete-if-drained` 和 `/rollout/end` 在结束 rollout 前通过 route store 显式检查当前 `rollout_epoch` 内是否仍有 `owner_server_id == old_server` 的 room route，并继续阻塞迁移中 / 失败 room route 与指向旧服的 player route；未排空时保留 rollout session，不允许自动收尾。route store 完成 rollout 后会将 `new_server` 的 upstream operation state 置为 `Active`、`old_server` 置为 `Draining`，使没有 `rollout_session` 的默认新房路由稳定落到新服。game-server 现在可在已 drain 且真实排空后通过 `RequestServerShutdownReq/Res` 触发自身 graceful shutdown 信号，但真实部署平台 old process 自动停止仍未实现，后续需要部署控制面或运维编排负责；当前监控页只展示状态和告警，不提供自动停进程按钮。
 
 ## 9. 测试任务
 
@@ -549,7 +557,7 @@
   - 当前实现说明：`ImportRoomTransferReq/Res` 会校验 checksum、拒绝 `room_id` 冲突，并创建同 `room_id` 的 `OwnedByNew` room；后续 join / reconnect 会命中已接管 room，不是新建另一个 room。
 - [x] `proxy` 已能根据 route store 判定并自动结束灰度。
 - [x] `proxy` / 控制面已能结合旧服真实状态提供停服前阻断与人工收尾依据。
-  - 当前实现说明：`PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 时，`complete-if-drained` 会在 route store 排空后继续校验旧服真实 `connectionCount/ownedRoomCount/migratingRoomCount` 全为 `0` 才结束 rollout；`admin-api` / `admin-web` 已能轮询展示 proxy route store 的 drain 状态和阻塞项。该能力默认关闭或只读展示时都只提供停服前最小阻断 / 告警闭环，不会自动停止旧服进程。
+  - 当前实现说明：`PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 时，`complete-if-drained` 会在 route store 排空后继续校验旧服真实 `connectionCount/ownedRoomCount/migratingRoomCount` 全为 `0` 才结束 rollout；`admin-api` / `admin-web` 已能轮询展示 proxy route store 的 drain 状态和阻塞项。game-server 已提供受控 graceful shutdown 安全闸入口，供后续控制面或部署编排调用。该能力默认关闭或只读展示时都只提供停服前最小阻断 / 告警闭环，不会自动停止旧服进程。
 - [x] 至少一个简单 room logic 已跑通完整接管链路。
   - 当前实现说明：`tools/mock-client` 显式编排已覆盖 old freeze/export -> new import -> new confirm ownership -> proxy route upsert -> old retire；movement_demo / combat_demo 已支持 transfer schema v1 导出导入并有一致性测试。该结论不等于真实 old/new/proxy 三进程自动化联调已经完成。
 

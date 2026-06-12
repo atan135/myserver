@@ -419,6 +419,7 @@ pub async fn run(
         player_input_anomaly_tracker: Arc::new(tokio::sync::Mutex::new(
             PlayerInputAnomalyTracker::new(),
         )),
+        shutdown_signal: Arc::new(Notify::new()),
     };
 
     // Initialize MySqlPlayerStore for inventory persistence
@@ -438,6 +439,7 @@ pub async fn run(
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
         player_input_anomaly_tracker: shared_state.player_input_anomaly_tracker.clone(),
+        shutdown_signal: shared_state.shutdown_signal.clone(),
     };
     info!(
         addr = %config.bind_addr(),
@@ -464,6 +466,7 @@ pub async fn run(
             config.admin_audit_path.clone(),
             config.admin_audit_require_actor,
         )),
+        shared_state.shutdown_signal.clone(),
     ));
 
     let local_socket_task = tokio::spawn(run_local_socket_listener(
@@ -493,6 +496,7 @@ pub async fn run(
     loop {
         let accept_result = tokio::select! {
             result = tcp_listener.accept() => Some(result),
+            _ = shared_state.shutdown_signal.notified() => None,
             _ = tokio::signal::ctrl_c() => None,
         };
 

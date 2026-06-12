@@ -71,6 +71,21 @@ export class InternalController {
     }
   }
 
+  @Post("shutdown-if-drained")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Request game-server graceful shutdown after drain safety checks" })
+  async shutdownIfDrained(@Req() req: any, @Body() body: any) {
+    verifyInternalToken(req, this.config);
+
+    const reason = typeof body?.reason === "string" ? body.reason : "";
+
+    try {
+      return await this.gameAdminClient.requestServerShutdown(reason);
+    } catch (error: any) {
+      throw gameServerError(error);
+    }
+  }
+
   @Post("config")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Update game-server runtime config" })

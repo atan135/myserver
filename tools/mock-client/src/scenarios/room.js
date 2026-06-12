@@ -193,6 +193,26 @@ export async function fetchRolloutDrainStatus(options) {
   return payload;
 }
 
+export async function requestServerShutdown(options) {
+  const headers = { "content-type": "application/json" };
+  if (options.serviceToken) {
+    headers["x-service-token"] = options.serviceToken;
+  }
+
+  const response = await fetch(`${options.httpBaseUrl}/api/v1/internal/game-server/shutdown-if-drained`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ reason: options.shutdownReason || "mock-client" })
+  });
+  const payload = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`request server shutdown failed with status ${response.status}: ${JSON.stringify(payload)}`);
+  }
+
+  return payload;
+}
+
 export async function runRolloutDrainStatus(options) {
   const status = await fetchRolloutDrainStatus(options);
   const summary = {
@@ -231,6 +251,12 @@ export async function runRolloutDrainStatus(options) {
   };
   console.log("rolloutDrainStatus:", JSON.stringify(summary, null, 2));
   return status;
+}
+
+export async function runRequestServerShutdown(options) {
+  const result = await requestServerShutdown(options);
+  console.log("requestServerShutdown:", JSON.stringify(result, null, 2));
+  return result;
 }
 
 async function setDrainMode(options, enabled) {

@@ -79,6 +79,8 @@ export const MESSAGE_TYPE = {
   CONFIRM_ROOM_OWNERSHIP_RES: 1614,
   TRIGGER_ROLLOUT_DRAIN_NOTICE_REQ: 1615,
   TRIGGER_ROLLOUT_DRAIN_NOTICE_RES: 1616,
+  REQUEST_SERVER_SHUTDOWN_REQ: 1617,
+  REQUEST_SERVER_SHUTDOWN_RES: 1618,
   // Chat TCP (20000-20999)
   CHAT_AUTH_REQ: 20001,
   CHAT_AUTH_RES: 20002,
@@ -175,6 +177,7 @@ export const SCENARIO = {
   DRAIN_EXISTING_ROOM_OBSERVER: "drain-existing-room-observer",
   DRAIN_CREATE_MATCHED_ROOM_REJECTED: "drain-create-matched-room-rejected",
   ROLLOUT_DRAIN_STATUS: "rollout-drain-status",
+  REQUEST_SERVER_SHUTDOWN: "request-server-shutdown",
   SERVER_REDIRECT_LISTEN: "server-redirect-listen",
   SERVER_REDIRECT_RECONNECT: "server-redirect-reconnect",
   // Match scenarios
