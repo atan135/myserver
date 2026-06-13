@@ -228,7 +228,7 @@
   - 第 3 项 mock-client redirect -> transfer -> proxy reconnect 已通过并准备提交，不要重新打开。
   - 第 4 项继续处理真实 route metadata 缺失后的恢复演练；可参考第 1 项模拟 drill，但需要在真实 Redis/proxy route store 场景下验证不会误 retire old room，并明确恢复路径。
   - 注意 `apps/chat-server/*` 仍为既有无关 modified；下一项不要触碰或暂存这些文件。
-- 相关提交：待提交
+- 相关提交：`b7eb2a1 test(rollout): 验证 redirect 后代理重连`
 
 ### 4. route metadata 真实丢失后的恢复演练
 
