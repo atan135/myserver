@@ -324,13 +324,24 @@ test("proxy admin client sends actor header for auditable writes", async () => {
       expectedLastTransferChecksum: "",
       importedRoomVersion: 3
     });
+    await proxy.upsertPlayerRoute({
+      playerId: "player-1",
+      currentRoomId: "room-1",
+      preferredServerId: "game-server-new",
+      rolloutEpoch: "rollout-1"
+    });
 
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
     assert.equal(requests[0].url, "/room-routes");
     assert.equal(requests[0].authorization, "Bearer proxy-token");
     assert.equal(requests[0].actor, "ops@example.com");
     assert(requests[1].url.startsWith("/room-route/upsert?"));
     assert.equal(requests[1].actor, "ops@example.com");
+    assert(requests[2].url.startsWith("/player-route/upsert?"));
+    assert(requests[2].url.includes("player_id=player-1"));
+    assert(requests[2].url.includes("current_room_id=room-1"));
+    assert(requests[2].url.includes("preferred_server_id=game-server-new"));
+    assert.equal(requests[2].actor, "ops@example.com");
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

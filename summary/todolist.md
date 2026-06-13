@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-13 21:03:34 +08:00
+更新时间：2026-06-13 21:32:57 +08:00
 
 ## 协作流程
 
@@ -167,9 +167,9 @@
 
 ### 3. redirect 后真实客户端重连验证
 
-- 状态：待开始
-- 开始时间：待填写
-- 结束时间：待填写
+- 状态：已完成
+- 开始时间：2026-06-13 21:05:00 +08:00
+- 结束时间：2026-06-13 21:32:57 +08:00
 - 优先级：P0
 - 范围：
   - `tools/mock-client`
@@ -179,18 +179,56 @@
 - 目标：
   - 验证 `ServerRedirectPush` 下发后，客户端断开旧连接并通过 proxy 重连到新服。
   - 明确 mock-client 与 mybevy 的适配边界。
-- 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 派发说明：
+  - 本项原计划交给新的 subagent 做只读复核和局部实现检查；subagent 因上游 stream disconnect 未返回结果，主 agent 继续本地复核、修正、验收和提交。
+  - subagent 不直接 commit/push，不触碰 `apps/chat-server/*` 既有无关改动。
+- 已完成上下文：
+  - 新增 mock-client 场景 `server-redirect-transfer-reconnect`，覆盖登录、进房、old admin 触发 `ServerRedirectPush`、old/new room transfer、proxy room route upsert、proxy player route upsert、按 redirect target 重新连接 proxy、重新 `AuthReq` 并优先 `RoomReconnectReq`。
+  - `joinRoomExpectSuccess` 现在会传递 `--policy-id`，并按消息类型等待 `ROOM_JOIN_RES` 和 `ROOM_STATE_PUSH`，可处理 `ROOM_FRAME_RATE_PUSH` 先到达的包顺序。
+  - 抽取 redirect reconnect helper，保留既有 `server-redirect-reconnect` 场景“等待外部控制面触发 push”的语义；主动触发只放在新的三进程 transfer reconnect 场景。
+  - `ProxyAdminClient` 新增 `upsertPlayerRoute`，用于 transfer 后把玩家路由绑定到新 owner，避免 proxy reconnect 因找不到离线 player route 返回 `PLAYER_NOT_OFFLINE`。
+  - 早期失败观察已转化为修正：
+    - 只等待 redirect 的旧场景不会自行触发 push，无法独立完成端到端验证。
+    - 新场景初版缺少主动 trigger，无法收到 `ServerRedirectPush`。
+    - 仅迁移 room route 不足以让 proxy 将 `RoomReconnectReq` 路由到新服，需要同步写 player route。
 - 验收计划：
   - 启动必要服务。
   - 用 mock-client 覆盖 redirect/reconnect 场景。
   - 如 `MYSERVER_CLIENT_ROOT` 可用，再检查 mybevy 侧配置和协议适配。
-- 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
-- 阻塞/回退：待填写
-- 交给下一 subagent 的上下文：待填写
-- 相关提交：待填写
+- 验收说明：
+  - 代码复核范围：`tools/mock-client/src/args.js`、`constants.js`、`index.js`、`rollout-transfer.js`、`scenarios/index.js`、`scenarios/room.js`，以及 `tests/server-redirect-reconnect.test.mjs`、`tests/room-transfer-orchestrator.test.mjs`。
+  - 单测已通过：
+    - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\server-redirect-reconnect.test.mjs`
+    - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\rollout-transfer-cli.test.mjs tests\room-transfer-orchestrator.test.mjs`
+  - 真实服务验收已通过：
+    - room：`redirect-room-20260613212549`
+    - epoch：`redirect-20260613212549`
+    - log：`.tmp\server-redirect-transfer-reconnect.log`
+    - `ServerRedirectPush` 下发成功：`deliveredCount=1`、`failedCount=0`、`onlineMemberCount=1`。
+    - transfer completed stages：`old_freeze`、`old_export`、`new_import`、`new_confirm_ownership`、`proxy_route_upsert`、`old_retire`。
+    - transfer 后写入 proxy player route：`player-aaec2642-452a-4c58-955b-99fb6218411f` -> `redirect-room-20260613212549`，preferred server 为 `game-server-new`。
+    - 重连经过 proxy target `127.0.0.1:14000`，重新鉴权后 `RoomReconnectRes.ok=true`、`finalMode=reconnect`、`finalRoomId=redirect-room-20260613212549`。
+    - 重连期间先收到 `ROOM_FRAME_RATE_PUSH` 再收到 `ROOM_RECONNECT_RES`，新实现通过 `readUntil` 正确处理。
+  - 未覆盖项：
+    - 本项只验证 mock-client；外部 `mybevy` 尚未做真实联调，仍需按 `MYSERVER_CLIENT_ROOT` 和客户端仓库当前实现另行验证。
+    - 本项不处理部署平台自动停旧进程，继续由第 5 项跟进。
+- 运行服务/依赖：
+  - 已复用第 2 项启动的 Redis Windows service、NATS、auth-http、old/new game-server、game-proxy。
+  - 关键端口：auth `3000`、NATS `4222`、old game/admin `7000/7500`、new game/admin `7001/7501`、proxy admin `7101`、proxy TCP fallback `14000`。
+  - 真实验收后临时服务仍在运行；`.tmp/` 日志和报告不提交。
+- 测试命令：
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\server-redirect-reconnect.test.mjs`
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\rollout-transfer-cli.test.mjs tests\room-transfer-orchestrator.test.mjs`
+  - `node tools\mock-client\src\index.js --scenario server-redirect-transfer-reconnect --http-base-url http://127.0.0.1:3000 --no-service-discovery --host 127.0.0.1 --port 14000 --room-id redirect-room-20260613212549 --guest-id redirect-room-20260613212549-guest --policy-id movement_demo --rollout-epoch redirect-20260613212549 --old-server-id game-server-old --new-server-id game-server-new --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token <set> --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token <set> --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token <set> --proxy-admin-actor task3-redirect-reconnect --redirect-target-host 127.0.0.1 --redirect-target-port 14000 --redirect-target-server-id game-proxy --redirect-transport tcp --redirect-retry-after-ms 0 --timeout-ms 15000`
+- 阻塞/回退：
+  - 无当前阻塞。
+  - 若复现时 reconnect 返回 `PLAYER_NOT_OFFLINE` 或 room not found，优先检查 proxy `/player-routes` 是否存在当前 player -> room -> preferred server 绑定，以及 room route 是否指向 `game-server-new`。
+  - 若 push 未收到，先确认 old room 仍在线且 old admin trigger 返回 `deliveredCount > 0`。
+- 交给下一 subagent 的上下文：
+  - 第 3 项 mock-client redirect -> transfer -> proxy reconnect 已通过并准备提交，不要重新打开。
+  - 第 4 项继续处理真实 route metadata 缺失后的恢复演练；可参考第 1 项模拟 drill，但需要在真实 Redis/proxy route store 场景下验证不会误 retire old room，并明确恢复路径。
+  - 注意 `apps/chat-server/*` 仍为既有无关 modified；下一项不要触碰或暂存这些文件。
+- 相关提交：待提交
 
 ### 4. route metadata 真实丢失后的恢复演练
 

@@ -180,6 +180,7 @@ export const SCENARIO = {
   REQUEST_SERVER_SHUTDOWN: "request-server-shutdown",
   SERVER_REDIRECT_LISTEN: "server-redirect-listen",
   SERVER_REDIRECT_RECONNECT: "server-redirect-reconnect",
+  SERVER_REDIRECT_TRANSFER_RECONNECT: "server-redirect-transfer-reconnect",
   // Match scenarios
   CREATE_MATCHED_ROOM: "create-matched-room",
   CREATE_MATCHED_ROOM_AND_JOIN: "create-matched-room-and-join",

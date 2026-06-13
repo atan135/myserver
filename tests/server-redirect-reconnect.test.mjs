@@ -7,6 +7,7 @@ import {
   summarizeRedirectReconnectResult,
   validateServerRedirectPush
 } from "../tools/mock-client/src/server-redirect-reconnect.js";
+import { parseArgs } from "../tools/mock-client/src/args.js";
 
 const redirect = {
   reason: "rollout_redirect",
@@ -22,7 +23,15 @@ const redirect = {
 
 test("server redirect reconnect options use push target", () => {
   const options = buildRedirectReconnectOptions(
-    { host: "old-host", gameHost: "", port: 7000, roomId: "room-a", timeoutMs: 5000 },
+    {
+      host: "old-host",
+      gameHost: "",
+      port: 7000,
+      roomId: "room-a",
+      timeoutMs: 5000,
+      policyId: "movement_demo",
+      redirectReconnectDelayMs: 1200
+    },
     redirect
   );
 
@@ -30,6 +39,8 @@ test("server redirect reconnect options use push target", () => {
   assert.equal(options.gameHost, "127.0.0.1");
   assert.equal(options.port, 4000);
   assert.equal(options.timeoutMs, 5000);
+  assert.equal(options.policyId, "movement_demo");
+  assert.equal(options.redirectReconnectDelayMs, 1200);
 });
 
 test("server redirect validation rejects wrong room and missing target", () => {
@@ -76,4 +87,46 @@ test("server redirect reconnect summary exposes redirect and final room", () => 
   assert.equal(summary.finalMode, "join");
   assert.equal(summary.finalRoomId, "room-a");
   assert.deepEqual(summary.redirect, redirect);
+});
+
+test("server redirect reconnect cli options parse policy and delayed reconnect", () => {
+  const options = parseArgs([
+    "--scenario", "server-redirect-transfer-reconnect",
+    "--room-id", "room-a",
+    "--rollout-epoch", "rollout-1",
+    "--old-server-id", "old",
+    "--new-server-id", "new",
+    "--policy-id", "movement_demo",
+    "--redirect-reconnect-delay-ms", "1500",
+    "--old-admin-port", "7500",
+    "--new-admin-port", "7501",
+    "--proxy-admin-url", "http://127.0.0.1:7101",
+    "--proxy-admin-actor", "rollout-drill",
+    "--redirect-target-host", "127.0.0.1",
+    "--redirect-target-port", "14000",
+    "--redirect-target-server-id", "game-proxy",
+    "--redirect-transport", "tcp",
+    "--redirect-reason", "rollout_redirect",
+    "--redirect-retry-after-ms", "250",
+    "--allow-redirect-join-fallback"
+  ]);
+
+  assert.equal(options.scenario, "server-redirect-transfer-reconnect");
+  assert.equal(options.roomId, "room-a");
+  assert.equal(options.rolloutEpoch, "rollout-1");
+  assert.equal(options.oldServerId, "old");
+  assert.equal(options.newServerId, "new");
+  assert.equal(options.policyId, "movement_demo");
+  assert.equal(options.redirectReconnectDelayMs, 1500);
+  assert.equal(options.oldAdminPort, 7500);
+  assert.equal(options.newAdminPort, 7501);
+  assert.equal(options.proxyAdminUrl, "http://127.0.0.1:7101");
+  assert.equal(options.proxyAdminActor, "rollout-drill");
+  assert.equal(options.redirectTargetHost, "127.0.0.1");
+  assert.equal(options.redirectTargetPort, 14000);
+  assert.equal(options.redirectTargetServerId, "game-proxy");
+  assert.equal(options.redirectTransport, "tcp");
+  assert.equal(options.redirectReason, "rollout_redirect");
+  assert.equal(options.redirectRetryAfterMs, 250);
+  assert.equal(options.allowRedirectJoinFallback, true);
 });

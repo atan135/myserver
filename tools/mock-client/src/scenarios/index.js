@@ -21,6 +21,7 @@ export {
   runRequestServerShutdown,
   runServerRedirectListen,
   runServerRedirectReconnect,
+  runServerRedirectTransferReconnect,
   runCreateMatchedRoom,
   runCreateMatchedRoomAndJoin,
   expectErrorPacket,

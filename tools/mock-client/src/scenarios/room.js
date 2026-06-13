@@ -23,6 +23,11 @@ import {
   summarizeRedirectReconnectResult,
   validateServerRedirectPush
 } from "../server-redirect-reconnect.js";
+import {
+  GameServerTransferClient,
+  ProxyAdminClient,
+  orchestrateRoomTransfer
+} from "../rollout-transfer.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 
@@ -276,21 +281,21 @@ async function setDrainMode(options, enabled) {
 }
 
 async function joinRoomExpectSuccess(client, options, roomId, seq, label = "roomJoin") {
-  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, seq, encodeRoomJoinReq(roomId));
-  const joinPacket = await client.readNextPacket(options.timeoutMs);
-  const joinRes = printResponse(`${client.label}.${label}`, joinPacket);
-  if (joinPacket.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
-    throw new Error(`${client.label} expected ROOM_JOIN_RES, got ${joinPacket.messageType}`);
-  }
+  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, seq, encodeRoomJoinReq(roomId, options.policyId || ""));
+  const joinRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === seq,
+    label
+  );
   if (!joinRes.ok) {
     throw new Error(`${client.label} room join failed: ${joinRes.errorCode}`);
   }
 
-  const pushPacket = await client.readNextPacket(options.timeoutMs);
-  const push = printResponse(`${client.label}.roomStatePush(${label})`, pushPacket);
-  if (pushPacket.messageType !== MESSAGE_TYPE.ROOM_STATE_PUSH) {
-    throw new Error(`${client.label} expected ROOM_STATE_PUSH after join, got ${pushPacket.messageType}`);
-  }
+  const push = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH,
+    `roomStatePush(${label})`
+  );
 
   return { joinRes, push };
 }
@@ -305,6 +310,182 @@ async function safeLeaveRoom(client, options, seq, label = "roomLeave") {
   } catch (error) {
     console.warn(`${client.label}.${label}: cleanup skipped: ${error.message}`);
   }
+}
+
+async function waitBeforeRedirectReconnect(options, redirect) {
+  const reconnectDelayMs = Math.max(
+    redirect.retryAfterMs || 0,
+    Number.isFinite(options.redirectReconnectDelayMs) ? options.redirectReconnectDelayMs : 0
+  );
+  if (reconnectDelayMs <= 0) {
+    return;
+  }
+
+  console.log("redirectOldClient.waitBeforeReconnect:", JSON.stringify({ delayMs: reconnectDelayMs }, null, 2));
+  await new Promise((resolve) => setTimeout(resolve, reconnectDelayMs));
+}
+
+async function reconnectAfterRedirect(options, login, redirect) {
+  const reconnectOptions = buildRedirectReconnectOptions(options, redirect);
+  console.log("redirectOldClient.closingForRedirect:", JSON.stringify({
+    roomId: redirect.roomId,
+    targetHost: reconnectOptions.gameHost || reconnectOptions.host,
+    targetPort: reconnectOptions.port,
+    transport: redirect.transport,
+    retryAfterMs: redirect.retryAfterMs
+  }, null, 2));
+
+  await waitBeforeRedirectReconnect(options, redirect);
+
+  const newClient = new TcpProtocolClient(reconnectOptions, "redirectNewClient");
+  await newClient.connect();
+
+  try {
+    await authenticateClient(newClient, reconnectOptions, login, 3);
+
+    await newClient.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(login.playerId));
+    const reconnectRes = await newClient.readUntil(
+      reconnectOptions.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_RECONNECT_RES,
+      "roomReconnect"
+    );
+
+    let joinRes = null;
+    let finalMode = "reconnect";
+    if (!reconnectRes.ok) {
+      if (!shouldFallbackToJoin(reconnectRes, options)) {
+        throw new Error(`redirect reconnect failed: ${reconnectRes.errorCode}`);
+      }
+
+      finalMode = "join";
+      await newClient.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 5, encodeRoomJoinReq(redirect.roomId, options.policyId || ""));
+      joinRes = await newClient.readUntil(
+        reconnectOptions.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 5,
+        "roomJoinFallback"
+      );
+      if (!joinRes.ok) {
+        throw new Error(`redirect join fallback failed: ${joinRes.errorCode}`);
+      }
+      await newClient.readUntil(
+        reconnectOptions.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH,
+        "roomStatePush(joinFallback)"
+      );
+    }
+
+    const result = summarizeRedirectReconnectResult({
+      login,
+      redirect,
+      reconnectRes,
+      joinRes,
+      finalMode
+    });
+    if (result.finalRoomId !== options.roomId) {
+      throw new Error(`redirect final room mismatch: expected ${options.roomId}, got ${result.finalRoomId}`);
+    }
+
+    return result;
+  } finally {
+    newClient.close();
+  }
+}
+
+async function runRoomTransferForRedirect(options, redirect) {
+  const rolloutEpoch = options.rolloutEpoch || redirect.rolloutEpoch;
+  if (!rolloutEpoch) {
+    throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch or a redirect rollout epoch");
+  }
+
+  const oldServer = new GameServerTransferClient({
+    host: options.oldAdminHost,
+    port: options.oldAdminPort,
+    token: options.oldAdminToken,
+    timeoutMs: options.timeoutMs
+  });
+  const newServer = new GameServerTransferClient({
+    host: options.newAdminHost,
+    port: options.newAdminPort,
+    token: options.newAdminToken,
+    timeoutMs: options.timeoutMs
+  });
+  const proxy = new ProxyAdminClient({
+    baseUrl: options.proxyAdminUrl,
+    token: options.proxyAdminToken,
+    actor: options.proxyAdminActor,
+    timeoutMs: options.timeoutMs
+  });
+
+  const transfer = await orchestrateRoomTransfer(
+    {
+      rolloutEpoch,
+      roomId: options.roomId,
+      oldServerId: options.oldServerId,
+      newServerId: options.newServerId
+    },
+    { oldServer, newServer, proxy }
+  );
+  console.log("serverRedirectTransferResult:", JSON.stringify(transfer, null, 2));
+  if (!transfer.ok) {
+    throw new Error(`redirect transfer failed at ${transfer.stage}: ${transfer.errorCode || transfer.error || "ERROR"}`);
+  }
+  return transfer;
+}
+
+async function bindRedirectPlayerRoute(options, login, redirect, transfer) {
+  const proxy = new ProxyAdminClient({
+    baseUrl: options.proxyAdminUrl,
+    token: options.proxyAdminToken,
+    actor: options.proxyAdminActor,
+    timeoutMs: options.timeoutMs
+  });
+  const result = await proxy.upsertPlayerRoute({
+    playerId: login.playerId,
+    currentRoomId: options.roomId,
+    preferredServerId: options.newServerId,
+    rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
+  });
+  console.log("serverRedirectPlayerRouteResult:", JSON.stringify({
+    ok: result.ok,
+    playerId: login.playerId,
+    currentRoomId: options.roomId,
+    preferredServerId: options.newServerId,
+    rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
+  }, null, 2));
+  return result;
+}
+
+async function triggerRedirectForCurrentRoom(options) {
+  const rolloutEpoch = options.rolloutEpoch;
+  if (!rolloutEpoch) {
+    throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch before redirect trigger");
+  }
+
+  const oldServer = new GameServerTransferClient({
+    host: options.oldAdminHost,
+    port: options.oldAdminPort,
+    token: options.oldAdminToken,
+    timeoutMs: options.timeoutMs
+  });
+  const targetHost = options.redirectTargetHost || options.gameHost || options.host;
+  const targetPort = options.redirectTargetPort || options.port;
+  const targetServerId = options.redirectTargetServerId || options.newServerId || "game-proxy";
+
+  const result = await oldServer.triggerServerRedirect({
+    rolloutEpoch,
+    roomId: options.roomId,
+    reason: options.redirectReason || "rollout_redirect",
+    targetHost,
+    targetPort,
+    targetServerId,
+    transport: options.redirectTransport || "tcp",
+    retryAfterMs: Number.isFinite(options.redirectRetryAfterMs) ? options.redirectRetryAfterMs : 0
+  });
+  console.log("serverRedirectTriggerResult:", JSON.stringify(result, null, 2));
+  if (!result.ok) {
+    throw new Error(`trigger server redirect failed: ${result.errorCode}`);
+  }
+  return result;
 }
 
 /**
@@ -1402,7 +1583,6 @@ export async function runServerRedirectReconnect(options) {
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
 
   const oldClient = new TcpProtocolClient(options, "redirectOldClient");
-  let newClient = null;
   await oldClient.connect();
 
   try {
@@ -1422,70 +1602,60 @@ export async function runServerRedirectReconnect(options) {
     );
     validateServerRedirectPush(redirect, options.roomId);
 
-    const reconnectOptions = buildRedirectReconnectOptions(options, redirect);
-    console.log("redirectOldClient.closingForRedirect:", JSON.stringify({
-      roomId: redirect.roomId,
-      targetHost: reconnectOptions.gameHost || reconnectOptions.host,
-      targetPort: reconnectOptions.port,
-      transport: redirect.transport,
-      retryAfterMs: redirect.retryAfterMs
-    }, null, 2));
-
     oldClient.close();
-    if (redirect.retryAfterMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, redirect.retryAfterMs));
-    }
-
-    newClient = new TcpProtocolClient(reconnectOptions, "redirectNewClient");
-    await newClient.connect();
-    await authenticateClient(newClient, reconnectOptions, login, 3);
-
-    await newClient.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(login.playerId));
-    const reconnectPacket = await newClient.readNextPacket(reconnectOptions.timeoutMs);
-    const reconnectRes = printResponse("redirectNewClient.roomReconnect", reconnectPacket);
-    if (reconnectPacket.messageType !== MESSAGE_TYPE.ROOM_RECONNECT_RES) {
-      throw new Error(`redirectNewClient expected ROOM_RECONNECT_RES, got ${reconnectPacket.messageType}`);
-    }
-
-    let joinRes = null;
-    let finalMode = "reconnect";
-    if (!reconnectRes.ok) {
-      if (!shouldFallbackToJoin(reconnectRes, options)) {
-        throw new Error(`redirect reconnect failed: ${reconnectRes.errorCode}`);
-      }
-
-      finalMode = "join";
-      await newClient.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 5, encodeRoomJoinReq(redirect.roomId));
-      const joinPacket = await newClient.readNextPacket(reconnectOptions.timeoutMs);
-      joinRes = printResponse("redirectNewClient.roomJoinFallback", joinPacket);
-      if (joinPacket.messageType !== MESSAGE_TYPE.ROOM_JOIN_RES) {
-        throw new Error(`redirectNewClient expected ROOM_JOIN_RES, got ${joinPacket.messageType}`);
-      }
-      if (!joinRes.ok) {
-        throw new Error(`redirect join fallback failed: ${joinRes.errorCode}`);
-      }
-      await newClient.readUntil(
-        reconnectOptions.timeoutMs,
-        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH,
-        "roomStatePush(joinFallback)"
-      );
-    }
-
-    const result = summarizeRedirectReconnectResult({
-      login,
-      redirect,
-      reconnectRes,
-      joinRes,
-      finalMode
-    });
-    if (result.finalRoomId !== options.roomId) {
-      throw new Error(`redirect final room mismatch: expected ${options.roomId}, got ${result.finalRoomId}`);
-    }
-
+    const result = await reconnectAfterRedirect(options, login, redirect);
     console.log("serverRedirectReconnectResult:", JSON.stringify(result, null, 2));
     return result;
   } finally {
     oldClient.close();
-    newClient?.close();
+  }
+}
+
+export async function runServerRedirectTransferReconnect(options) {
+  const login = await fetchTicket(options);
+  console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+
+  const oldClient = new TcpProtocolClient(options, "redirectOldClient");
+  await oldClient.connect();
+
+  try {
+    await authenticateClient(oldClient, options, login, 1);
+    const joined = await joinRoomExpectSuccess(oldClient, options, options.roomId, 2, "redirectJoin");
+
+    console.log("redirectOldClient.waitingForServerRedirect:", JSON.stringify({
+      roomId: joined.joinRes.roomId,
+      playerId: login.playerId,
+      timeoutMs: options.timeoutMs
+    }, null, 2));
+
+    await triggerRedirectForCurrentRoom(options);
+
+    const redirect = await oldClient.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.SERVER_REDIRECT_PUSH,
+      "serverRedirectPush"
+    );
+    validateServerRedirectPush(redirect, options.roomId);
+
+    oldClient.close();
+    const transfer = await runRoomTransferForRedirect(options, redirect);
+    await bindRedirectPlayerRoute(options, login, redirect, transfer);
+    const reconnect = await reconnectAfterRedirect(options, login, redirect);
+
+    const result = {
+      ok: true,
+      transfer: {
+        stage: transfer.stage,
+        completedStages: transfer.completedStages,
+        checksum: transfer.confirmed?.checksum || transfer.imported?.checksum || transfer.exported?.checksum || "",
+        proxyRoomVersion: transfer.proxyRoute?.roomVersion,
+        importedRoomVersion: transfer.proxyRoute?.importedRoomVersion ?? transfer.imported?.roomVersion
+      },
+      reconnect
+    };
+    console.log("serverRedirectTransferReconnectResult:", JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    oldClient.close();
   }
 }

@@ -108,7 +108,26 @@ const DEFAULT_OPTIONS = {
   serviceToken: "",
   shutdownReason: "mock-client",
   useServiceDiscovery: true,
-  allowRedirectJoinFallback: false
+  allowRedirectJoinFallback: false,
+  redirectReconnectDelayMs: 0,
+  rolloutEpoch: "",
+  oldServerId: "game-server-old",
+  newServerId: "game-server-new",
+  oldAdminHost: "127.0.0.1",
+  oldAdminPort: 7500,
+  oldAdminToken: process.env.MYSERVER_OLD_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
+  newAdminHost: "127.0.0.1",
+  newAdminPort: 7501,
+  newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
+  proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
+  proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
+  proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "mock-client",
+  redirectTargetHost: "",
+  redirectTargetPort: 0,
+  redirectTargetServerId: "",
+  redirectTransport: "tcp",
+  redirectReason: "rollout_redirect",
+  redirectRetryAfterMs: 0
 };
 
 /**
@@ -187,6 +206,68 @@ export function parseArgs(argv) {
         break;
       case "--allow-redirect-join-fallback":
         result.allowRedirectJoinFallback = true;
+        break;
+      case "--redirect-reconnect-delay-ms":
+        result.redirectReconnectDelayMs = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--rollout-epoch":
+        ({ value: result.rolloutEpoch, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--old-server-id":
+        ({ value: result.oldServerId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--new-server-id":
+        ({ value: result.newServerId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--old-admin-host":
+        ({ value: result.oldAdminHost, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--old-admin-port":
+        result.oldAdminPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--old-admin-token":
+        ({ value: result.oldAdminToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--new-admin-host":
+        ({ value: result.newAdminHost, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--new-admin-port":
+        result.newAdminPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--new-admin-token":
+        ({ value: result.newAdminToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--proxy-admin-url":
+        ({ value: result.proxyAdminUrl, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--proxy-admin-token":
+        ({ value: result.proxyAdminToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--proxy-admin-actor":
+        ({ value: result.proxyAdminActor, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--redirect-target-host":
+        ({ value: result.redirectTargetHost, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--redirect-target-port":
+        result.redirectTargetPort = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--redirect-target-server-id":
+        ({ value: result.redirectTargetServerId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--redirect-transport":
+        ({ value: result.redirectTransport, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--redirect-reason":
+        ({ value: result.redirectReason, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--redirect-retry-after-ms":
+        result.redirectRetryAfterMs = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--timeout-ms":
         result.timeoutMs = Number.parseInt(collectOptionValue(argv, index).value, 10);

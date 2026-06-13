@@ -771,6 +771,21 @@ export class ProxyAdminClient {
     return { ok: true };
   }
 
+  async upsertPlayerRoute(route) {
+    const params = new URLSearchParams();
+    params.set("player_id", route.playerId);
+    if (route.currentRoomId) {
+      params.set("current_room_id", route.currentRoomId);
+    }
+    if (route.preferredServerId) {
+      params.set("preferred_server_id", route.preferredServerId);
+    }
+    params.set("rollout_epoch", route.rolloutEpoch || "");
+
+    await this.requestText(`/player-route/upsert?${params.toString()}`, { method: "POST" });
+    return { ok: true };
+  }
+
   async requestJson(path, init = {}) {
     const text = await this.requestText(path, init);
     return JSON.parse(text);
