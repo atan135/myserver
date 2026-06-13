@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-13 19:41:40 +08:00
+更新时间：2026-06-13 20:07:37 +08:00
 
 ## 协作流程
 
@@ -110,6 +110,7 @@
   - 当前工作区已有未提交改动，集中在 `scripts/rollout-three-process-drill.ps1`、`docs/rollout-three-process-drill-runbook.md`、`tools/mock-client/src/rollout-transfer-cli.js`、`tools/mock-client/src/rollout-transfer.js`、相关 Node tests 和 `summary/todolist.md`。
   - 这些未提交改动主要增强 dry-run/report/envelope/actor header，不能视为真实 old/new/proxy 三进程 `-ExecuteSteps` 联调已完成。
   - 真实 old/new/proxy 管理面链路的 execute 验收仍未完成，不能把本项状态改为 `已完成`。
+  - 已派发第 2 项收口准备 subagent，完成 dry-run/report/envelope/actor header 与失败路径 JSON 输出补齐；主 agent 已完成轻量验收，准备作为阶段性提交落地。
 - 验收计划：
   - 启动 old game-server、new game-server、game-proxy 及必要依赖。
   - 执行三进程演练脚本的非 destructive 路径。
@@ -117,23 +118,32 @@
   - 在主 agent 复核 diff 后，按 runbook 启动 auth-http、old/new game-server、game-proxy，以及 Redis/MySQL/NATS 等脚本实际需要的依赖。
   - 先运行 dry-run/report，确认 envelope、actor header、端口和 route metadata 参数正确，再执行 `-ExecuteSteps`。
   - execute 通过后检查 old freeze/export、new import/ownership confirm、proxy route upsert、old retire、complete-if-drained 的结果和日志。
-- 验收说明：待填写
+- 验收说明：
+  - 阶段性工具收口已通过：脚本 dry-run / execute 都会写 report，`-ExecuteSteps` 在控制面调用前拒绝空值、占位值、非法 `RoomId` / `RolloutEpoch` / `AdminActor`。
+  - `rollout-transfer-cli.js` 的 parse error、validation failure、execute failure、fatal catch 均输出机器可读 JSON envelope。
+  - `--proxy-admin-actor` 已由外层脚本传到底层 CLI，`ProxyAdminClient` 会发送 `X-Admin-Actor`。
+  - 已运行并通过：
+    - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/rollout-transfer-cli.test.mjs tests/room-transfer-orchestrator.test.mjs`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -SkipPortProbe -ReportPath .tmp\rollout-three-process-drill-report-main-check.json`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -ExecuteSteps -SkipPortProbe -RoomId '<ROOM_ID>' -RolloutEpoch rollout-test -ReportPath .tmp\rollout-three-process-drill-report-main-fail-check.json`，预期失败且未调用服务，report 只记录 `preflight-gate failed`。
+  - 尚未执行真实 old/new/proxy/auth 服务环境下的 `-ExecuteSteps`，本项仍保持 `进行中`。
 - 运行服务/依赖：
   - 需要 old game-server、new game-server、game-proxy、auth-http。
   - 需要 Redis；如登录、ticket、审计或脚本路径要求，还需要 MySQL/MariaDB 和 Core NATS。
   - 需要 mock-client 可用，并按实际端口配置 old/new/proxy/admin/auth 地址。
   - 本次文档改造不实际启动任何服务。
 - 测试命令：
-  - 待主 agent 确认当前未提交 diff 后运行相关 Node 单测，例如 rollout transfer CLI / orchestrator 覆盖。
-  - dry-run/report 命令以 `scripts/rollout-three-process-drill.ps1` 当前参数为准。
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/rollout-transfer-cli.test.mjs tests/room-transfer-orchestrator.test.mjs`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -SkipPortProbe -ReportPath .tmp\rollout-three-process-drill-report-main-check.json`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -ExecuteSteps -SkipPortProbe -RoomId '<ROOM_ID>' -RolloutEpoch rollout-test -ReportPath .tmp\rollout-three-process-drill-report-main-fail-check.json`
   - 真实验收必须包含 `scripts/rollout-three-process-drill.ps1` 的 `-ExecuteSteps` 路径；本次文档改造不运行。
 - 阻塞/回退：
   - 如 old/new/proxy/auth 或 Redis/MySQL/NATS 未就绪，保持 `进行中` 或转 `阻塞`，不要标记完成。
   - 如 execute 中途失败，保留日志和 report，优先确认 old room 未被错误 retire；必要时按 runbook 回退 route metadata 或重新拉起旧服。
 - 交给下一 subagent 的上下文：
-  - 从当前未提交 dry-run/report/envelope/actor header 改动继续，先复核 diff 是否只服务三进程 rollout 联调。
-  - 明确真实 `-ExecuteSteps` 仍待主 agent 启动服务后验收；subagent 只能准备脚本、CLI、测试和 runbook。
-- 相关提交：待填写
+  - 已完成三进程演练工具收口准备；下一步进入真实 old/new/proxy/auth 服务联调。
+  - 真实 `-ExecuteSteps` 仍待主 agent 启动服务后验收；不要默认加 `-AllowShutdownRequest`。
+- 相关提交：阶段性提交待填写；真实联调完成后再填写最终完成提交。
 
 ### 3. redirect 后真实客户端重连验证
 

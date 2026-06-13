@@ -104,7 +104,10 @@ param(
     [int]$TimeoutMs = $(if ($env:MYSERVER_ROLLOUT_TIMEOUT_MS) { [int]$env:MYSERVER_ROLLOUT_TIMEOUT_MS } else { 5000 }),
 
     [Parameter(Mandatory=$false)]
-    [string]$AdminActor = $(if ($env:MYSERVER_ADMIN_ACTOR) { $env:MYSERVER_ADMIN_ACTOR } else { "rollout-three-process-drill" })
+    [string]$AdminActor = $(if ($env:MYSERVER_ADMIN_ACTOR) { $env:MYSERVER_ADMIN_ACTOR } elseif ($env:MYSERVER_PROXY_ADMIN_ACTOR) { $env:MYSERVER_PROXY_ADMIN_ACTOR } else { "rollout-three-process-drill" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$ReportPath = $(if ($env:MYSERVER_ROLLOUT_REPORT_PATH) { $env:MYSERVER_ROLLOUT_REPORT_PATH } else { "" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -112,7 +115,13 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TransferCli = Join-Path $ProjectRoot "tools\mock-client\src\rollout-transfer-cli.js"
 $MockClientIndex = Join-Path $ProjectRoot "tools\mock-client\src\index.js"
+if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+    $ReportPath = Join-Path $ProjectRoot ".tmp\rollout-three-process-drill-report.json"
+}
 $script:StageResults = @()
+$script:TransferCliResult = $null
+$script:ReportWritten = $false
+$script:StartedAt = (Get-Date).ToUniversalTime().ToString("o")
 
 function Write-Section {
     param([Parameter(Mandatory=$true)][string]$Title)
@@ -141,7 +150,7 @@ function Format-CommandPart {
         return "''"
     }
 
-    if ($Value -match "^[A-Za-z0-9_.,:/=@%+\\<>-]+$") {
+    if ($Value -match "^[A-Za-z0-9_.,:/=@%+\\-]+$") {
         return $Value
     }
 
@@ -165,6 +174,16 @@ function Mask-TokenState {
         return "default-dev"
     }
     return "set"
+}
+
+function Test-RolloutIdentifier {
+    param([Parameter(Mandatory=$true)][AllowEmptyString()][string]$Value)
+    return $Value -match "^[A-Za-z0-9_.:@-]{1,128}$"
+}
+
+function Test-AdminActor {
+    param([Parameter(Mandatory=$true)][AllowEmptyString()][string]$Value)
+    return $Value -match "^[A-Za-z0-9_.@-]{1,128}$"
 }
 
 function Join-UrlPath {
@@ -266,6 +285,34 @@ function Invoke-ExternalStep {
     }
 }
 
+function Invoke-ExternalJsonStep {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments
+    )
+
+    Write-Host "Running $Name" -ForegroundColor Yellow
+    $output = & $FilePath @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if (-not [string]::IsNullOrWhiteSpace($text)) {
+        Write-Host $text
+    }
+
+    try {
+        $json = $text | ConvertFrom-Json
+    } catch {
+        throw "$Name did not produce valid JSON output. exitCode=$exitCode output=$text"
+    }
+
+    return [pscustomobject]@{
+        exitCode = $exitCode
+        json = $json
+        text = $text
+    }
+}
+
 function New-ProxyHeaders {
     return @{
         Authorization = "Bearer $ProxyAdminToken"
@@ -301,6 +348,83 @@ function Write-RunSummary {
     }
 }
 
+function New-RunReport {
+    $mode = if ($ExecuteSteps) { "execute" } else { "dry-run" }
+    $roomValue = if ($RoomId) { $RoomId } else { $null }
+    $rolloutValue = if ($RolloutEpoch) { $RolloutEpoch } else { $null }
+
+    return [pscustomobject]@{
+        ok = -not ($script:StageResults | Where-Object { $_.status -eq "failed" })
+        mode = $mode
+        startedAt = $script:StartedAt
+        completedAt = (Get-Date).ToUniversalTime().ToString("o")
+        projectRoot = $ProjectRoot
+        script = "scripts/rollout-three-process-drill.ps1"
+        inputs = [pscustomobject]@{
+            roomId = $roomValue
+            roomIdPlaceholder = if ($RoomId) { $RoomId } else { "<ROOM_ID>" }
+            rolloutEpoch = $rolloutValue
+            rolloutEpochPlaceholder = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPOCH>" }
+            oldServerId = $OldServerId
+            newServerId = $NewServerId
+            oldGamePort = $OldGamePort
+            newGamePort = $NewGamePort
+            oldAdminEndpoint = "$($OldAdminHost):$($OldAdminPort)"
+            newAdminEndpoint = "$($NewAdminHost):$($NewAdminPort)"
+            authBaseUrl = $AuthBaseUrl
+            proxyAdminUrl = $ProxyAdminUrl
+            proxyAdminActor = $AdminActor
+            timeoutMs = $TimeoutMs
+            tokenStates = [pscustomobject]@{
+                oldAdmin = Mask-TokenState $OldAdminToken
+                newAdmin = Mask-TokenState $NewAdminToken
+                proxyAdmin = Mask-TokenState $ProxyAdminToken
+                authInternalService = Mask-TokenState $ServiceToken
+            }
+        }
+        safety = [pscustomobject]@{
+            startsServices = $false
+            executeSteps = [bool]$ExecuteSteps
+            skipPortProbe = [bool]$SkipPortProbe
+            allowShutdownRequest = [bool]$AllowShutdownRequest
+            skipShutdownRequest = [bool]$SkipShutdownRequest
+            shutdownRequestCanRun = [bool]($ExecuteSteps -and $AllowShutdownRequest -and -not $SkipShutdownRequest)
+        }
+        stages = $script:StageResults
+        transfer = $script:TransferCliResult
+    }
+}
+
+function Write-RunReport {
+    if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+        return
+    }
+
+    try {
+        $parent = Split-Path -Parent $ReportPath
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+
+        New-RunReport | ConvertTo-Json -Depth 100 | Set-Content -Path $ReportPath -Encoding UTF8
+        $script:ReportWritten = $true
+        Write-Host "Report: $ReportPath" -ForegroundColor Gray
+    } catch {
+        Write-Warning "failed to write report ${ReportPath}: $($_.Exception.Message)"
+    }
+}
+
+trap {
+    if (-not $script:ReportWritten) {
+        if (-not ($script:StageResults | Where-Object { $_.status -eq "failed" })) {
+            Add-StageResult "script" "failed" $_.Exception.Message
+        }
+        Write-RunSummary
+        Write-RunReport
+    }
+    throw
+}
+
 $displayRoomId = if ($RoomId) { $RoomId } else { "<ROOM_ID>" }
 $displayRolloutEpoch = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPOCH>" }
 
@@ -312,6 +436,7 @@ if ($ExecuteSteps) {
 }
 
 Write-Host "ProjectRoot: $ProjectRoot" -ForegroundColor Gray
+Write-Host "ReportPath: $ReportPath" -ForegroundColor Gray
 Write-Host "RoomId: $displayRoomId" -ForegroundColor Gray
 Write-Host "RolloutEpoch: $displayRolloutEpoch" -ForegroundColor Gray
 Write-Host "OldServerId: $OldServerId" -ForegroundColor Gray
@@ -341,10 +466,22 @@ if (-not (Test-Path $MockClientIndex)) {
 
 if ($ExecuteSteps -and [string]::IsNullOrWhiteSpace($RoomId)) {
     $preflightErrors += "RoomId is required in -ExecuteSteps mode"
+} elseif ($ExecuteSteps -and $RoomId -match "^<[^>]+>$") {
+    $preflightErrors += "RoomId placeholder values are not allowed in -ExecuteSteps mode"
+} elseif ($ExecuteSteps -and -not (Test-RolloutIdentifier $RoomId)) {
+    $preflightErrors += "RoomId must be 1-128 chars matching [A-Za-z0-9_.:@-] in -ExecuteSteps mode"
 }
 
 if ($ExecuteSteps -and [string]::IsNullOrWhiteSpace($RolloutEpoch)) {
     $preflightErrors += "RolloutEpoch is required in -ExecuteSteps mode"
+} elseif ($ExecuteSteps -and $RolloutEpoch -match "^<[^>]+>$") {
+    $preflightErrors += "RolloutEpoch placeholder values are not allowed in -ExecuteSteps mode"
+} elseif ($ExecuteSteps -and -not (Test-RolloutIdentifier $RolloutEpoch)) {
+    $preflightErrors += "RolloutEpoch must be 1-128 chars matching [A-Za-z0-9_.:@-] in -ExecuteSteps mode"
+}
+
+if ($ExecuteSteps -and -not (Test-AdminActor $AdminActor)) {
+    $preflightErrors += "AdminActor must be 1-128 chars matching [A-Za-z0-9_.@-] in -ExecuteSteps mode"
 }
 
 Write-Host "Token states:" -ForegroundColor Gray
@@ -392,7 +529,6 @@ if ($preflightErrors.Count -gt 0) {
         Write-Error $errorMessage -ErrorAction Continue
     }
     Add-StageResult "preflight-gate" "failed" ($preflightErrors -join "; ")
-    Write-RunSummary
     throw "Preflight failed"
 }
 
@@ -467,6 +603,7 @@ $transferArgs = @(
     "--new-admin-token", $NewAdminToken,
     "--proxy-admin-url", $ProxyAdminUrl,
     "--proxy-admin-token", $ProxyAdminToken,
+    "--proxy-admin-actor", $AdminActor,
     "--timeout-ms", [string]$TimeoutMs
 )
 $transferDryRunArgs = @(
@@ -484,6 +621,7 @@ $transferDryRunArgs = @(
     "--new-admin-token", $NewAdminToken,
     "--proxy-admin-url", $ProxyAdminUrl,
     "--proxy-admin-token", $ProxyAdminToken,
+    "--proxy-admin-actor", $AdminActor,
     "--timeout-ms", [string]$TimeoutMs
 )
 $transferDisplayArgs = @(
@@ -501,19 +639,29 @@ $transferDisplayArgs = @(
     "--new-admin-token", "<new-admin-token>",
     "--proxy-admin-url", $ProxyAdminUrl,
     "--proxy-admin-token", "<proxy-admin-token>",
+    "--proxy-admin-actor", $AdminActor,
     "--timeout-ms", [string]$TimeoutMs
 )
 Write-CommandLine $transferDisplayArgs
 if ($ExecuteSteps) {
-    Invoke-ExternalStep -Name "room transfer orchestration" -FilePath "node" -Arguments $transferArgs
-    Add-StageResult "room-transfer" "ok"
+    $transferExecution = Invoke-ExternalJsonStep -Name "room transfer orchestration" -FilePath "node" -Arguments $transferArgs
+    $script:TransferCliResult = $transferExecution.json
+    if ($transferExecution.exitCode -ne 0 -or -not $transferExecution.json.ok) {
+        $stage = if ($transferExecution.json.summary.stage) { $transferExecution.json.summary.stage } else { "unknown" }
+        $errorCode = if ($transferExecution.json.summary.errorCode) { $transferExecution.json.summary.errorCode } else { "transfer failed" }
+        Add-StageResult "room-transfer" "failed" "$stage $errorCode"
+        throw "room transfer orchestration failed with exit code $($transferExecution.exitCode)"
+    }
+    Add-StageResult "room-transfer" "ok" "stage=$($transferExecution.json.summary.stage)"
 } else {
     Write-Host "Transfer dry-run plan:" -ForegroundColor Gray
-    & node @transferDryRunArgs
-    if ($LASTEXITCODE -ne 0) {
+    $transferDryRun = Invoke-ExternalJsonStep -Name "room transfer dry-run plan" -FilePath "node" -Arguments $transferDryRunArgs
+    $script:TransferCliResult = $transferDryRun.json
+    if ($transferDryRun.exitCode -ne 0 -or -not $transferDryRun.json.ok) {
         Add-StageResult "room-transfer-dry-run" "failed" "rollout-transfer-cli validation failed"
         Write-RunSummary
-        throw "room transfer dry-run plan failed with exit code $LASTEXITCODE"
+        Write-RunReport
+        throw "room transfer dry-run plan failed with exit code $($transferDryRun.exitCode)"
     }
     Add-StageResult "room-transfer-dry-run" "ok"
     Add-StageResult "room-transfer" "planned"
@@ -584,3 +732,4 @@ if ($SkipShutdownRequest) {
 }
 
 Write-RunSummary
+Write-RunReport

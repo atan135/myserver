@@ -45,6 +45,7 @@ Options:
   --new-admin-token <token>               default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
   --proxy-admin-url <url>                 default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
   --proxy-admin-token <token>             default: PROXY_ADMIN_TOKEN
+  --proxy-admin-actor <actor>             default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-transfer-cli
   --proxy-expected-room-version <n>
   --proxy-room-version <n>
   --proxy-expected-last-transfer-checksum <checksum>
@@ -72,6 +73,7 @@ export function parseArgs(argv) {
     newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
     proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
     proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
+    proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "rollout-transfer-cli",
     timeoutMs: 5000
   };
 
@@ -155,6 +157,9 @@ export function parseArgs(argv) {
       case "--proxy-admin-token":
         ({ value: options.proxyAdminToken, nextIndex: index } = takeValue(index));
         break;
+      case "--proxy-admin-actor":
+        ({ value: options.proxyAdminActor, nextIndex: index } = takeValue(index));
+        break;
       case "--proxy-expected-room-version":
         ({ value: options.proxyExpectedRoomVersion, nextIndex: index } = takeNumber(index, undefined));
         break;
@@ -185,35 +190,8 @@ function requiredOptionKeys(options) {
     : ["rolloutEpoch", "roomId", "oldServerId", "newServerId"];
 }
 
-function requireOption(options, key) {
-  if (!options[key]) {
-    throw new Error(`missing required option ${optionName(key)}`);
-  }
-}
-
 function validPort(value) {
   return Number.isInteger(value) && value > 0 && value <= 65535;
-}
-
-function requirePort(options, key) {
-  const value = options[key];
-  if (!validPort(value)) {
-    throw new Error(`invalid option ${optionName(key)}: expected 1-65535`);
-  }
-}
-
-function requireNonNegativeInteger(options, key) {
-  const value = options[key] ?? 0;
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`invalid option ${optionName(key)}: expected non-negative integer`);
-  }
-}
-
-function requirePositiveInteger(options, key) {
-  const value = options[key];
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`invalid option ${optionName(key)}: expected positive integer`);
-  }
 }
 
 function validateHttpUrl(value, name) {
@@ -238,13 +216,30 @@ function tokenState(token) {
   return "set";
 }
 
-export function validateTransferCliOptions(options) {
+function actorState(actor) {
+  return actor ? "set" : "missing";
+}
+
+function validProxyAdminActor(value) {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    /^[A-Za-z0-9_.@-]+$/.test(value);
+}
+
+function isPlaceholderValue(value) {
+  return typeof value === "string" && /^<[^>]+>$/.test(value);
+}
+
+export function validateTransferCliOptions(options, { allowPlaceholders = false } = {}) {
   const errors = [];
   const warnings = [];
 
   for (const key of requiredOptionKeys(options)) {
     if (!options[key]) {
       errors.push(`missing required option ${optionName(key)}`);
+    } else if (!allowPlaceholders && isPlaceholderValue(options[key])) {
+      errors.push(`invalid option ${optionName(key)}: placeholder values are only allowed in --dry-run`);
     }
   }
 
@@ -303,6 +298,9 @@ export function validateTransferCliOptions(options) {
   if (!options.triggerRedirectOnly && !options.proxyAdminToken) {
     warnings.push("game-proxy admin token is missing");
   }
+  if (!options.triggerRedirectOnly && !validProxyAdminActor(options.proxyAdminActor)) {
+    errors.push("invalid option --proxy-admin-actor: expected 1-128 chars matching [A-Za-z0-9_.@-]");
+  }
 
   return {
     ok: errors.length === 0,
@@ -321,7 +319,7 @@ function endpoint(host, port) {
 }
 
 export function buildTransferCliDryRunPlan(options) {
-  const validation = validateTransferCliOptions(options);
+  const validation = validateTransferCliOptions(options, { allowPlaceholders: true });
   const common = {
     rolloutEpoch: options.rolloutEpoch || "<ROLLOUT_EPOCH>",
     roomId: options.roomId || "<ROOM_ID>",
@@ -403,7 +401,9 @@ export function buildTransferCliDryRunPlan(options) {
         },
         gameProxyAdmin: {
           url: options.proxyAdminUrl,
-          tokenState: tokenState(options.proxyAdminToken)
+          tokenState: tokenState(options.proxyAdminToken),
+          actorState: actorState(options.proxyAdminActor),
+          actor: options.proxyAdminActor || "<PROXY_ADMIN_ACTOR>"
         }
       },
       routeCas: {
@@ -416,15 +416,146 @@ export function buildTransferCliDryRunPlan(options) {
   };
 }
 
-function assertValidForExecution(options) {
+export function buildTransferCliExecutionEnvelope(options, result, safetyOverrides = {}) {
   const validation = validateTransferCliOptions(options);
-  if (!validation.ok) {
-    throw new Error(validation.errors.join("; "));
-  }
+  const ok = Boolean(result?.ok);
+  const mode = options.triggerRedirectOnly ? "redirect-execute" : "transfer-execute";
+  const summary = options.triggerRedirectOnly
+    ? {
+        ok,
+        rolloutEpoch: options.rolloutEpoch,
+        roomId: options.roomId,
+        stage: result?.stage || (ok ? "complete" : "trigger_redirect"),
+        errorCode: result?.errorCode || result?.code || "",
+        deliveredCount: result?.deliveredCount,
+        failedCount: result?.failedCount,
+        onlineMemberCount: result?.onlineMemberCount
+      }
+    : {
+        ok,
+        rolloutEpoch: options.rolloutEpoch,
+        roomId: options.roomId,
+        oldServerId: options.oldServerId,
+        newServerId: options.newServerId,
+        stage: result?.stage || "",
+        completedStages: result?.completedStages || [],
+        errorCode: result?.errorCode || result?.code || "",
+        checksum: result?.confirmed?.checksum || result?.imported?.checksum || result?.exported?.checksum || "",
+        importedRoomVersion: result?.proxyRoute?.importedRoomVersion ?? result?.imported?.roomVersion,
+        proxyRoomVersion: result?.proxyRoute?.roomVersion
+      };
+
+  return {
+    ok,
+    mode,
+    dryRun: false,
+    safety: {
+      startsServices: false,
+      callsControlPlane: true,
+      requestsShutdown: false,
+      runsReconnectClient: false,
+      ...safetyOverrides
+    },
+    validation,
+    summary,
+    result
+  };
+}
+
+function errorResult(stage, error) {
+  return {
+    ok: false,
+    stage,
+    errorCode: error?.code || error?.errorCode || "ERROR",
+    error: error?.message || String(error)
+  };
+}
+
+function invalidOptionsResult(validation) {
+  return {
+    ok: false,
+    stage: "validation",
+    errorCode: "INVALID_OPTIONS",
+    error: validation.errors.join("; ")
+  };
+}
+
+export function buildTransferCliParseErrorEnvelope(error) {
+  const message = error?.message || String(error);
+  return {
+    ok: false,
+    mode: "argument-error",
+    dryRun: false,
+    safety: {
+      startsServices: false,
+      callsControlPlane: false,
+      requestsShutdown: false,
+      runsReconnectClient: false
+    },
+    validation: {
+      ok: false,
+      errors: [message],
+      warnings: [],
+      requiredOptions: []
+    },
+    summary: {
+      ok: false,
+      stage: "argument_parse",
+      errorCode: "INVALID_OPTIONS",
+      error: message
+    },
+    result: {
+      ok: false,
+      stage: "argument_parse",
+      errorCode: "INVALID_OPTIONS",
+      error: message
+    }
+  };
+}
+
+export function buildTransferCliFatalErrorEnvelope(error) {
+  const message = error?.message || String(error);
+  return {
+    ok: false,
+    mode: "fatal-error",
+    dryRun: false,
+    safety: {
+      startsServices: false,
+      callsControlPlane: false,
+      requestsShutdown: false,
+      runsReconnectClient: false
+    },
+    validation: {
+      ok: false,
+      errors: [message],
+      warnings: [],
+      requiredOptions: []
+    },
+    summary: {
+      ok: false,
+      stage: "fatal",
+      errorCode: error?.code || error?.errorCode || "FATAL_ERROR",
+      error: message
+    },
+    result: {
+      ok: false,
+      stage: "fatal",
+      errorCode: error?.code || error?.errorCode || "FATAL_ERROR",
+      error: message
+    }
+  };
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  let options;
+  try {
+    options = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.log(JSON.stringify(buildTransferCliParseErrorEnvelope(error), null, 2));
+    process.exitCode = 1;
+    return;
+  }
+
   if (options.help) {
     printUsage();
     return;
@@ -439,18 +570,17 @@ async function main() {
     return;
   }
 
-  assertValidForExecution(options);
-  for (const key of requiredOptionKeys(options)) {
-    requireOption(options, key);
+  const validation = validateTransferCliOptions(options);
+  if (!validation.ok) {
+    const envelope = buildTransferCliExecutionEnvelope(
+      options,
+      invalidOptionsResult(validation),
+      { callsControlPlane: false }
+    );
+    console.log(JSON.stringify(envelope, null, 2));
+    process.exitCode = 1;
+    return;
   }
-  if (options.triggerRedirectOnly) {
-    requirePort(options, "redirectTargetPort");
-    requireNonNegativeInteger(options, "redirectRetryAfterMs");
-  } else {
-    requirePort(options, "oldAdminPort");
-    requirePort(options, "newAdminPort");
-  }
-  requirePositiveInteger(options, "timeoutMs");
 
   const oldServer = new GameServerTransferClient({
     host: options.oldAdminHost,
@@ -460,18 +590,24 @@ async function main() {
   });
 
   if (options.triggerRedirectOnly) {
-    const result = await oldServer.triggerServerRedirect({
-      rolloutEpoch: options.rolloutEpoch,
-      roomId: options.roomId,
-      reason: options.redirectReason || "rollout_redirect",
-      targetHost: options.redirectTargetHost,
-      targetPort: options.redirectTargetPort,
-      targetServerId: options.redirectTargetServerId || options.newServerId || "",
-      transport: options.redirectTransport || "kcp",
-      retryAfterMs: options.redirectRetryAfterMs || 0
-    });
-    console.log(JSON.stringify(result, null, 2));
-    if (!result.ok) {
+    let result;
+    try {
+      result = await oldServer.triggerServerRedirect({
+        rolloutEpoch: options.rolloutEpoch,
+        roomId: options.roomId,
+        reason: options.redirectReason || "rollout_redirect",
+        targetHost: options.redirectTargetHost,
+        targetPort: options.redirectTargetPort,
+        targetServerId: options.redirectTargetServerId || options.newServerId || "",
+        transport: options.redirectTransport || "kcp",
+        retryAfterMs: options.redirectRetryAfterMs || 0
+      });
+    } catch (error) {
+      result = errorResult("trigger_redirect", error);
+    }
+    const envelope = buildTransferCliExecutionEnvelope(options, result);
+    console.log(JSON.stringify(envelope, null, 2));
+    if (!envelope.ok) {
       process.exitCode = 1;
     }
     return;
@@ -486,24 +622,31 @@ async function main() {
   const proxy = new ProxyAdminClient({
     baseUrl: options.proxyAdminUrl,
     token: options.proxyAdminToken,
+    actor: options.proxyAdminActor,
     timeoutMs: options.timeoutMs
   });
 
-  const result = await orchestrateRoomTransfer(
-    {
-      rolloutEpoch: options.rolloutEpoch,
-      roomId: options.roomId,
-      oldServerId: options.oldServerId,
-      newServerId: options.newServerId,
-      proxyExpectedRoomVersion: options.proxyExpectedRoomVersion,
-      proxyRoomVersion: options.proxyRoomVersion,
-      proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum
-    },
-    { oldServer, newServer, proxy }
-  );
+  let result;
+  try {
+    result = await orchestrateRoomTransfer(
+      {
+        rolloutEpoch: options.rolloutEpoch,
+        roomId: options.roomId,
+        oldServerId: options.oldServerId,
+        newServerId: options.newServerId,
+        proxyExpectedRoomVersion: options.proxyExpectedRoomVersion,
+        proxyRoomVersion: options.proxyRoomVersion,
+        proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum
+      },
+      { oldServer, newServer, proxy }
+    );
+  } catch (error) {
+    result = errorResult("transfer_execute", error);
+  }
 
-  console.log(JSON.stringify(result, null, 2));
-  if (!result.ok) {
+  const envelope = buildTransferCliExecutionEnvelope(options, result);
+  console.log(JSON.stringify(envelope, null, 2));
+  if (!envelope.ok) {
     process.exitCode = 1;
   }
 }
@@ -517,8 +660,7 @@ function isMainModule() {
 
 if (isMainModule()) {
   main().catch((error) => {
-    console.error(error.message);
-    console.error("Run with --help for usage.");
+    console.log(JSON.stringify(buildTransferCliFatalErrorEnvelope(error), null, 2));
     process.exitCode = 1;
   });
 }

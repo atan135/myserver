@@ -742,6 +742,7 @@ export class ProxyAdminClient {
   constructor(options) {
     this.baseUrl = (options.baseUrl || "http://127.0.0.1:7101").replace(/\/+$/, "");
     this.token = options.token || "";
+    this.actor = options.actor || "";
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
   }
 
@@ -784,6 +785,7 @@ export class ProxyAdminClient {
         signal: controller.signal,
         headers: {
           authorization: `Bearer ${this.token}`,
+          ...(this.actor ? { "x-admin-actor": this.actor } : {}),
           ...(init.headers || {})
         }
       });

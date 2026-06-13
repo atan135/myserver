@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 
 import {
+  ProxyAdminClient,
   ROOM_TRANSFER_FAILURE_INJECTION,
   ROOM_TRANSFER_STAGE,
   encodeRoomTransferPayloadForTest,
@@ -282,4 +284,54 @@ test("room transfer fault injection stops at proxy upsert before old retire", as
     "proxy.getRoomRoute",
     "proxy.upsert:2:1000004:checksum-1"
   ]);
+});
+
+test("proxy admin client sends actor header for auditable writes", async () => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push({
+      method: req.method,
+      url: req.url,
+      authorization: req.headers.authorization,
+      actor: req.headers["x-admin-actor"]
+    });
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end(req.url === "/room-routes" ? '{"routes":[]}' : "ok");
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  try {
+    const proxy = new ProxyAdminClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      token: "proxy-token",
+      actor: "ops@example.com",
+      timeoutMs: 500
+    });
+
+    await proxy.getRoomRoute("room-1");
+    await proxy.upsertRoomRoute({
+      roomId: "room-1",
+      ownerServerId: "game-server-new",
+      migrationState: "OwnedByNew",
+      memberCount: 0,
+      onlineMemberCount: 0,
+      roomVersion: 1,
+      rolloutEpoch: "rollout-1",
+      lastTransferChecksum: "checksum-1",
+      expectedRoomVersion: 0,
+      expectedLastTransferChecksum: "",
+      importedRoomVersion: 3
+    });
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].url, "/room-routes");
+    assert.equal(requests[0].authorization, "Bearer proxy-token");
+    assert.equal(requests[0].actor, "ops@example.com");
+    assert(requests[1].url.startsWith("/room-route/upsert?"));
+    assert.equal(requests[1].actor, "ops@example.com");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
