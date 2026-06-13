@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-13 20:07:37 +08:00
+更新时间：2026-06-13 21:03:34 +08:00
 
 ## 协作流程
 
@@ -90,9 +90,9 @@
 
 ### 2. 真实 old/new/proxy 三进程 rollout 联调
 
-- 状态：进行中
+- 状态：已完成
 - 开始时间：2026-06-12 18:43:54 +08:00
-- 结束时间：待填写
+- 结束时间：2026-06-13 21:03:34 +08:00
 - 优先级：P0
 - 范围：
   - `scripts/rollout-three-process-drill.ps1`
@@ -107,10 +107,11 @@
   - subagent 不提交 git、不 push、不启动长期服务；完成后交还 diff 说明、已运行命令和下一步 execute 验收入口。
 - 已完成上下文：
   - 第 1 项 route metadata 缺失演练已完成并提交：`test(rollout): 增加 route metadata 缺失演练`。
-  - 当前工作区已有未提交改动，集中在 `scripts/rollout-three-process-drill.ps1`、`docs/rollout-three-process-drill-runbook.md`、`tools/mock-client/src/rollout-transfer-cli.js`、`tools/mock-client/src/rollout-transfer.js`、相关 Node tests 和 `summary/todolist.md`。
-  - 这些未提交改动主要增强 dry-run/report/envelope/actor header，不能视为真实 old/new/proxy 三进程 `-ExecuteSteps` 联调已完成。
-  - 真实 old/new/proxy 管理面链路的 execute 验收仍未完成，不能把本项状态改为 `已完成`。
-  - 已派发第 2 项收口准备 subagent，完成 dry-run/report/envelope/actor header 与失败路径 JSON 输出补齐；主 agent 已完成轻量验收，准备作为阶段性提交落地。
+  - 阶段性工具收口已提交：
+    - `8bf8a5c docs: 完善 todolist 协作交接模板`
+    - `8281202 test(rollout): 完善三进程演练报告准入`
+  - 本次真实验收使用直连 old game-server TCP `7000` 创建 `movement_demo` retained empty room，避免 proxy 在 room 准备阶段产生旧 player route 干扰 `complete-if-drained`。
+  - 临时验收文件和报告均保留在 `.tmp/`，不提交；`apps/chat-server/*` 仍为既有无关 modified，本项不触碰。
 - 验收计划：
   - 启动 old game-server、new game-server、game-proxy 及必要依赖。
   - 执行三进程演练脚本的非 destructive 路径。
@@ -126,24 +127,43 @@
     - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/rollout-transfer-cli.test.mjs tests/room-transfer-orchestrator.test.mjs`
     - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -SkipPortProbe -ReportPath .tmp\rollout-three-process-drill-report-main-check.json`
     - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -ExecuteSteps -SkipPortProbe -RoomId '<ROOM_ID>' -RolloutEpoch rollout-test -ReportPath .tmp\rollout-three-process-drill-report-main-fail-check.json`，预期失败且未调用服务，report 只记录 `preflight-gate failed`。
-  - 尚未执行真实 old/new/proxy/auth 服务环境下的 `-ExecuteSteps`，本项仍保持 `进行中`。
+  - 真实服务验收已完成：
+    - 运行环境：Redis Windows service、NATS、本地 `auth-http`、`game-server-old`、`game-server-new`、`game-proxy`。
+    - 房间准备：`.tmp\prepare-rollout-room.mjs` 直连 old `127.0.0.1:7000`，以 `movement_demo` 创建并 leave `rollout-room-20260613210106`；脚本按消息类型等待 `ROOM_JOIN_RES`，确认可处理 `ROOM_FRAME_RATE_PUSH` 先到达。
+    - 准备后 old drain status：`ownedRoomCount=1`、`transferableEmptyRoomCount=1`，目标 room `onlineMemberCount=0`。
+    - 准备后 proxy `/room-routes` 和 `/player-routes` 均为空，确认没有旧 proxy route 污染。
+    - dry-run 报告：`.tmp\rollout-three-process-drill-report-dryrun-real.json`，计划包含 `old_freeze -> old_export -> new_import -> new_confirm_ownership -> proxy_route_upsert -> old_retire`，shutdown safety gate 保持 skipped。
+    - execute 报告：`.tmp\rollout-three-process-drill-report-execute.json`，`ok=true`、`mode=execute`、`transfer.ok=true`、`transfer.summary.stage=complete`。
+    - execute completed stages：`old_freeze`、`old_export`、`new_import`、`new_confirm_ownership`、`proxy_route_upsert`、`old_retire`。
+    - `proxy-complete-if-drained=ok`，drain evaluation 为 `Drained`，`blocked_room_count=0`、`blocked_player_count=0`，end summary 清理当前 rollout room route 1 条。
+    - shutdown safety gate 未执行：`allowShutdownRequest=false`、`shutdownRequestCanRun=false`、`shutdown-safety-gate=skipped`。
+    - 事后 proxy `/status`：`active_upstream=game-server-new`、`rollout_session=null`、`room_route_count=0`、`player_route_count=0`。
+    - 事后 old drain status：目标 room 为 `RetiredOnOld`，`ownedRoomCount=0`、`migratingRoomCount=0`、`retiredRoomCount=1`、`connectionCount=0`。
+  - 未覆盖项：
+    - 本项只覆盖空房迁移控制面第一阶段，不覆盖 `ServerRedirectPush` 后真实客户端重连；该项继续由第 3 项跟进。
+    - 本项没有传 `-AllowShutdownRequest`，不会自动停止 old server；部署平台自动停旧进程继续由第 5 项跟进。
 - 运行服务/依赖：
-  - 需要 old game-server、new game-server、game-proxy、auth-http。
-  - 需要 Redis；如登录、ticket、审计或脚本路径要求，还需要 MySQL/MariaDB 和 Core NATS。
-  - 需要 mock-client 可用，并按实际端口配置 old/new/proxy/admin/auth 地址。
-  - 本次文档改造不实际启动任何服务。
+  - 已使用 Redis、Core NATS、auth-http、old/new game-server、game-proxy。
+  - `MYSQL_ENABLED=false`，本次登录和控制面验收未依赖 MySQL。
+  - 关键端口：auth `3000`、old game/admin `7000/7500`、new game/admin `7001/7501`、proxy admin `7101`、proxy TCP fallback `14000`、Redis `6379`、NATS `4222`。
 - 测试命令：
   - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/rollout-transfer-cli.test.mjs tests/room-transfer-orchestrator.test.mjs`
   - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -SkipPortProbe -ReportPath .tmp\rollout-three-process-drill-report-main-check.json`
   - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 -ExecuteSteps -SkipPortProbe -RoomId '<ROOM_ID>' -RolloutEpoch rollout-test -ReportPath .tmp\rollout-three-process-drill-report-main-fail-check.json`
-  - 真实验收必须包含 `scripts/rollout-three-process-drill.ps1` 的 `-ExecuteSteps` 路径；本次文档改造不运行。
+  - `node .tmp\prepare-rollout-room.mjs --room-id rollout-room-20260613210106 --guest-id rollout-room-20260613210106-guest --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --policy-id movement_demo --timeout-ms 10000`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rollout-three-process-drill.ps1 -RoomId rollout-room-20260613210106 -RolloutEpoch rollout-20260613210231 -OldServerId game-server-old -NewServerId game-server-new -OldAdminPort 7500 -NewAdminPort 7501 -ProxyAdminUrl http://127.0.0.1:7101 -ProxyAdminToken <set> -OldAdminToken <set> -NewAdminToken <set> -AuthBaseUrl http://127.0.0.1:3000 -ServiceToken <set> -AdminActor rollout-three-process-drill -ReportPath .tmp\rollout-three-process-drill-report-dryrun-real.json`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rollout-three-process-drill.ps1 -ExecuteSteps -RoomId rollout-room-20260613210106 -RolloutEpoch rollout-20260613210231 -OldServerId game-server-old -NewServerId game-server-new -OldAdminPort 7500 -NewAdminPort 7501 -ProxyAdminUrl http://127.0.0.1:7101 -ProxyAdminToken <set> -OldAdminToken <set> -NewAdminToken <set> -AuthBaseUrl http://127.0.0.1:3000 -ServiceToken <set> -AdminActor rollout-three-process-drill -ReportPath .tmp\rollout-three-process-drill-report-execute.json`
+  - `Invoke-RestMethod http://127.0.0.1:7101/status -Headers @{ Authorization = 'Bearer <proxy-admin-token>' }`
+  - `Invoke-RestMethod http://127.0.0.1:7101/rollout -Headers @{ Authorization = 'Bearer <proxy-admin-token>' }`
+  - `Invoke-RestMethod http://127.0.0.1:3000/api/v1/internal/game-server/rollout-drain-status -Headers @{ 'X-Service-Token' = '<service-token>' }`
 - 阻塞/回退：
-  - 如 old/new/proxy/auth 或 Redis/MySQL/NATS 未就绪，保持 `进行中` 或转 `阻塞`，不要标记完成。
-  - 如 execute 中途失败，保留日志和 report，优先确认 old room 未被错误 retire；必要时按 runbook 回退 route metadata 或重新拉起旧服。
+  - 无当前阻塞。
+  - 如复现时 execute 中途失败，保留 `.tmp\rollout-three-process-drill-report-execute.json` 和 `.tmp\rollout-drill-logs/`，优先确认 old room 是否仍未 retire、proxy route 是否仍指向 old，再按 runbook 回退 route metadata 或重新准备空房。
 - 交给下一 subagent 的上下文：
-  - 已完成三进程演练工具收口准备；下一步进入真实 old/new/proxy/auth 服务联调。
-  - 真实 `-ExecuteSteps` 仍待主 agent 启动服务后验收；不要默认加 `-AllowShutdownRequest`。
-- 相关提交：阶段性提交待填写；真实联调完成后再填写最终完成提交。
+  - 第 2 项真实 old/new/proxy/auth 空房迁移控制面已完成，不要重新打开。
+  - 第 3 项继续验证 redirect 后真实客户端重连；可复用已启动服务，但注意 proxy 当前 active upstream 已是 `game-server-new`，old server 仍处于 drain mode，若要构造 redirect 场景需先按 runbook 恢复或重新准备 old/new 状态。
+  - 第 5 项才处理 `-AllowShutdownRequest` / 自动停旧服，本项验收明确未执行停服请求。
+- 相关提交：本次提交 `docs: 记录真实三进程 rollout 验收结果`
 
 ### 3. redirect 后真实客户端重连验证
 
