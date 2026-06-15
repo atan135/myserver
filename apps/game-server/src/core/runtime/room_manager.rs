@@ -126,6 +126,8 @@ pub struct RolloutDrainSnapshot {
 pub struct RoomManager {
     rooms: std::sync::Arc<RwLock<HashMap<String, SharedRoom>>>,
     runtimes: std::sync::Arc<RwLock<HashMap<String, SharedRoomRuntime>>>,
+    player_rooms: PlayerRoomIndex,
+    offline_players: PlayerRoomIndex,
     policies: SharedRoomPolicyRegistry,
     logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
@@ -133,6 +135,128 @@ pub struct RoomManager {
 
 type SharedRoom = std::sync::Arc<Mutex<Room>>;
 type SharedRoomRuntime = std::sync::Arc<Mutex<RoomRuntime>>;
+type PlayerRoomIndex = std::sync::Arc<RwLock<HashMap<String, String>>>;
+
+fn room_member_index_entries(room: &Room) -> Vec<(String, bool)> {
+    if room.marked_for_destruction || room.transfer_state.status == RoomTransferStatus::Retired {
+        return Vec::new();
+    }
+
+    room.members
+        .values()
+        .map(|member| (member.player_id.clone(), member.offline))
+        .collect()
+}
+
+async fn replace_room_member_indexes(
+    player_rooms: &PlayerRoomIndex,
+    offline_players: &PlayerRoomIndex,
+    room_id: &str,
+    members: Vec<(String, bool)>,
+) {
+    {
+        let mut player_rooms = player_rooms.write().await;
+        player_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        for (player_id, _offline) in &members {
+            player_rooms.insert(player_id.clone(), room_id.to_string());
+        }
+    }
+
+    {
+        let mut offline_players = offline_players.write().await;
+        offline_players.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        for (player_id, offline) in &members {
+            if *offline {
+                offline_players.insert(player_id.clone(), room_id.to_string());
+            } else {
+                offline_players.remove(player_id);
+            }
+        }
+    }
+}
+
+async fn set_player_room_index(
+    player_rooms: &PlayerRoomIndex,
+    offline_players: &PlayerRoomIndex,
+    player_id: &str,
+    room_id: &str,
+    offline: bool,
+) {
+    {
+        let mut player_rooms = player_rooms.write().await;
+        player_rooms.insert(player_id.to_string(), room_id.to_string());
+    }
+
+    {
+        let mut offline_players = offline_players.write().await;
+        if offline {
+            offline_players.insert(player_id.to_string(), room_id.to_string());
+        } else {
+            offline_players.remove(player_id);
+        }
+    }
+}
+
+async fn remove_room_member_indexes(
+    player_rooms: &PlayerRoomIndex,
+    offline_players: &PlayerRoomIndex,
+    room_id: &str,
+) {
+    {
+        let mut player_rooms = player_rooms.write().await;
+        player_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
+    }
+
+    {
+        let mut offline_players = offline_players.write().await;
+        offline_players.retain(|_, indexed_room_id| indexed_room_id != room_id);
+    }
+}
+
+async fn remove_player_index_for_room(
+    player_rooms: &PlayerRoomIndex,
+    offline_players: &PlayerRoomIndex,
+    player_id: &str,
+    room_id: &str,
+) {
+    {
+        let mut player_rooms = player_rooms.write().await;
+        if player_rooms.get(player_id).map(String::as_str) == Some(room_id) {
+            player_rooms.remove(player_id);
+        }
+    }
+
+    {
+        let mut offline_players = offline_players.write().await;
+        if offline_players.get(player_id).map(String::as_str) == Some(room_id) {
+            offline_players.remove(player_id);
+        }
+    }
+}
+
+async fn remove_offline_player_index_for_room(
+    offline_players: &PlayerRoomIndex,
+    player_id: &str,
+    room_id: &str,
+) {
+    let mut offline_players = offline_players.write().await;
+    if offline_players.get(player_id).map(String::as_str) == Some(room_id) {
+        offline_players.remove(player_id);
+    }
+}
+
+async fn sync_room_member_indexes_from_entry(
+    player_rooms: &PlayerRoomIndex,
+    offline_players: &PlayerRoomIndex,
+    room_id: &str,
+    room_entry: &SharedRoom,
+) {
+    let members = {
+        let room = room_entry.lock().await;
+        room_member_index_entries(&room)
+    };
+    replace_room_member_indexes(player_rooms, offline_players, room_id, members).await;
+}
 
 fn room_rejects_mutation(room: &Room) -> bool {
     room.marked_for_destruction || room.transfer_state.status.rejects_room_mutation()
@@ -236,6 +360,8 @@ impl RoomManager {
         let this = Self {
             rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
             runtimes: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            player_rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            offline_players: std::sync::Arc::new(RwLock::new(HashMap::new())),
             policies,
             logic_factory,
             match_client,
@@ -263,22 +389,76 @@ impl RoomManager {
     }
 
     async fn publish_room_entry(&self, room_id: &str, room: Room) -> (SharedRoom, usize, bool) {
-        let mut runtimes = self.runtimes.write().await;
-        let mut rooms = self.rooms.write().await;
-        let room_count = rooms.len();
-        match rooms.entry(room_id.to_string()) {
-            std::collections::hash_map::Entry::Occupied(entry) => {
-                (std::sync::Arc::clone(entry.get()), room_count, false)
+        let members = room_member_index_entries(&room);
+        let (room_entry, room_count, inserted) = {
+            let mut runtimes = self.runtimes.write().await;
+            let mut rooms = self.rooms.write().await;
+            let room_count = rooms.len();
+            match rooms.entry(room_id.to_string()) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    (std::sync::Arc::clone(entry.get()), room_count, false)
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    runtimes
+                        .entry(room_id.to_string())
+                        .or_insert_with(|| std::sync::Arc::new(Mutex::new(RoomRuntime::default())));
+                    let room_entry = std::sync::Arc::new(Mutex::new(room));
+                    entry.insert(std::sync::Arc::clone(&room_entry));
+                    (room_entry, room_count.saturating_add(1), true)
+                }
             }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                runtimes
-                    .entry(room_id.to_string())
-                    .or_insert_with(|| std::sync::Arc::new(Mutex::new(RoomRuntime::default())));
-                let room_entry = std::sync::Arc::new(Mutex::new(room));
-                entry.insert(std::sync::Arc::clone(&room_entry));
-                (room_entry, room_count.saturating_add(1), true)
-            }
+        };
+
+        if inserted {
+            replace_room_member_indexes(
+                &self.player_rooms,
+                &self.offline_players,
+                room_id,
+                members,
+            )
+            .await;
         }
+
+        (room_entry, room_count, inserted)
+    }
+
+    async fn rebuild_room_indexes(&self, room_id: &str, room_entry: &SharedRoom) {
+        sync_room_member_indexes_from_entry(
+            &self.player_rooms,
+            &self.offline_players,
+            room_id,
+            room_entry,
+        )
+        .await;
+    }
+
+    async fn remove_room_indexes(&self, room_id: &str) {
+        remove_room_member_indexes(&self.player_rooms, &self.offline_players, room_id).await;
+    }
+
+    async fn remove_player_indexes_for_room(&self, player_id: &str, room_id: &str) {
+        remove_player_index_for_room(
+            &self.player_rooms,
+            &self.offline_players,
+            player_id,
+            room_id,
+        )
+        .await;
+    }
+
+    async fn remove_offline_player_index(&self, player_id: &str, room_id: &str) {
+        remove_offline_player_index_for_room(&self.offline_players, player_id, room_id).await;
+    }
+
+    async fn set_player_index(&self, player_id: &str, room_id: &str, offline: bool) {
+        set_player_room_index(
+            &self.player_rooms,
+            &self.offline_players,
+            player_id,
+            room_id,
+            offline,
+        )
+        .await;
     }
 
     async fn ensure_runtime_entry(&self, room_id: &str) -> SharedRoomRuntime {
@@ -293,6 +473,8 @@ impl RoomManager {
     fn spawn_cleanup_task(&self, cleanup_interval_secs: u64) {
         let rooms = std::sync::Arc::clone(&self.rooms);
         let runtimes = std::sync::Arc::clone(&self.runtimes);
+        let player_rooms = std::sync::Arc::clone(&self.player_rooms);
+        let offline_players = std::sync::Arc::clone(&self.offline_players);
         let policies = self.policies.clone();
         let match_client = std::sync::Arc::clone(&self.match_client);
         let cleanup_interval_secs = cleanup_interval_secs.max(1);
@@ -309,7 +491,6 @@ impl RoomManager {
 
                 let mut to_destroy = Vec::new();
                 let mut matches_to_abort = Vec::new();
-
                 let room_entries = {
                     let rooms_guard = rooms.read().await;
                     rooms_guard
@@ -344,6 +525,15 @@ impl RoomManager {
                             }
 
                             room.remove_members(&expired_players);
+                            for player_id in &expired_players {
+                                remove_player_index_for_room(
+                                    &player_rooms,
+                                    &offline_players,
+                                    player_id,
+                                    &room_id,
+                                )
+                                .await;
+                            }
 
                             if !room.has_online_members() {
                                 room.mark_empty();
@@ -411,6 +601,7 @@ impl RoomManager {
                         let mut runtimes = runtimes.write().await;
                         runtimes.remove(&room_id);
                     }
+                    remove_room_member_indexes(&player_rooms, &offline_players, &room_id).await;
                     let room_count = {
                         let mut rooms = rooms.write().await;
                         rooms.remove(&room_id);
@@ -526,21 +717,36 @@ impl RoomManager {
     }
 
     pub async fn find_room_by_offline_player(&self, player_id: &str) -> Option<String> {
-        for (room_id, room_entry) in self.room_entries_snapshot().await {
+        let room_id = self.offline_players.read().await.get(player_id).cloned()?;
+        let Some(room_entry) = self.get_room_entry(&room_id).await else {
+            self.remove_player_indexes_for_room(player_id, &room_id)
+                .await;
+            return None;
+        };
+
+        let index_state = {
             let room = room_entry.lock().await;
-            if room.marked_for_destruction {
-                continue;
-            }
-            if room
-                .members
-                .get(player_id)
-                .filter(|member| member.offline)
-                .is_some()
+            if room.marked_for_destruction
+                || room.transfer_state.status == RoomTransferStatus::Retired
             {
-                return Some(room_id);
+                None
+            } else {
+                room.members.get(player_id).map(|member| member.offline)
+            }
+        };
+
+        match index_state {
+            Some(true) => Some(room_id),
+            Some(false) => {
+                self.remove_offline_player_index(player_id, &room_id).await;
+                None
+            }
+            None => {
+                self.remove_player_indexes_for_room(player_id, &room_id)
+                    .await;
+                None
             }
         }
-        None
     }
 
     pub async fn create_matched_room(
@@ -858,6 +1064,7 @@ impl RoomManager {
         if self.get_runtime_entry(room_id).await.is_none() {
             self.ensure_runtime_entry(room_id).await;
         }
+        self.set_player_index(player_id, room_id, false).await;
         METRICS.set_room_count(room_count as u64);
 
         if let Some(ref mid) = match_id {
@@ -977,6 +1184,8 @@ impl RoomManager {
         let match_id = room.match_id.clone();
         drop(room);
 
+        self.set_player_index(player_id, room_id, true).await;
+
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
         self.update_room_fps(room_id).await;
@@ -1078,6 +1287,8 @@ impl RoomManager {
         let match_id = room.match_id.clone();
         drop(room);
 
+        self.set_player_index(player_id, room_id, true).await;
+
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
         self.update_room_fps(room_id).await;
@@ -1146,6 +1357,9 @@ impl RoomManager {
             );
             let match_id = room.match_id.clone();
             drop(room);
+
+            self.remove_offline_player_index(player_id, room_id).await;
+            self.set_player_index(player_id, room_id, false).await;
 
             if let Some(ref mid) = match_id {
                 self.notify_player_joined(mid, player_id, room_id).await;
@@ -1222,6 +1436,7 @@ impl RoomManager {
         if self.get_runtime_entry(room_id).await.is_none() {
             self.ensure_runtime_entry(room_id).await;
         }
+        self.set_player_index(player_id, room_id, false).await;
         METRICS.set_room_count(room_count as u64);
 
         info!(
@@ -1259,6 +1474,10 @@ impl RoomManager {
                 }
 
                 room.remove_members(&expired);
+                for player_id in &expired {
+                    self.remove_player_indexes_for_room(player_id, &room_id)
+                        .await;
+                }
 
                 if !room.has_online_members() {
                     room.mark_empty();
@@ -1902,6 +2121,9 @@ impl RoomManager {
             );
             return Err("ROOM_TRANSFER_ROOM_CONFLICT");
         }
+        if let Some(room_entry) = self.get_room_entry(&room_id).await {
+            self.rebuild_room_indexes(&room_id, &room_entry).await;
+        }
         METRICS.set_room_count(room_count as u64);
 
         info!(
@@ -2163,6 +2385,7 @@ impl RoomManager {
             );
         }
 
+        self.remove_room_indexes(room_id).await;
         self.stop_room_tick(room_id).await;
         Ok(())
     }
@@ -2556,7 +2779,8 @@ impl RoomManager {
             return None;
         }
 
-        let tick_inputs = resolve_tick_inputs(&mut room, &participants, waiting_frame_id, &policy);
+        let (tick_inputs, newly_offline_players) =
+            resolve_tick_inputs(&mut room, &participants, waiting_frame_id, &policy);
         let inputs = tick_inputs
             .iter()
             .map(frame_input_from_record)
@@ -2625,9 +2849,15 @@ impl RoomManager {
             );
         }
 
+        drop(room);
+
+        for player_id in newly_offline_players {
+            self.set_player_index(&player_id, room_id, true).await;
+        }
+
         Some((
             FrameBundlePush {
-                room_id: room.room_id.clone(),
+                room_id: room_id.to_string(),
                 frame_id: waiting_frame_id,
                 fps: u32::from(fps),
                 is_silent_frame,
@@ -2851,23 +3081,32 @@ impl RoomManager {
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        let mut outbound = None;
-        for (_room_id, room_entry) in self.room_entries_snapshot().await {
+        let Some(room_id) = self.player_rooms.read().await.get(player_id).cloned() else {
+            return Ok(());
+        };
+        let Some(room_entry) = self.get_room_entry(&room_id).await else {
+            self.remove_player_indexes_for_room(player_id, &room_id)
+                .await;
+            return Ok(());
+        };
+
+        let (outbound, stale_index) = {
             let room = room_entry.lock().await;
-            if room.marked_for_destruction {
-                continue;
-            }
-            if let Some(candidate) = room.members.get(player_id).and_then(|member| {
-                if member.offline {
-                    None
-                } else {
-                    Some((member.sender.clone(), member.close_state.clone()))
+            if room.marked_for_destruction
+                || room.transfer_state.status == RoomTransferStatus::Retired
+            {
+                (None, true)
+            } else {
+                match room.members.get(player_id) {
+                    Some(member) if !member.offline => (
+                        Some((member.sender.clone(), member.close_state.clone())),
+                        false,
+                    ),
+                    Some(_) => (None, false),
+                    None => (None, true),
                 }
-            }) {
-                outbound = Some(candidate);
-                break;
             }
-        }
+        };
 
         if let Some((sender, close_state)) = outbound {
             if let Err(error) = try_send_outbound(
@@ -2891,6 +3130,9 @@ impl RoomManager {
                     "failed to queue player message"
                 );
             }
+        } else if stale_index {
+            self.remove_player_indexes_for_room(player_id, &room_id)
+                .await;
         }
 
         Ok(())
@@ -3180,9 +3422,10 @@ fn resolve_tick_inputs(
     participants: &[String],
     frame_id: u32,
     policy: &RoomRuntimePolicy,
-) -> Vec<PlayerInputRecord> {
+) -> (Vec<PlayerInputRecord>, Vec<String>) {
     let mut frame_inputs = room.take_pending_inputs_for_frame(frame_id);
     let mut resolved_inputs = Vec::with_capacity(participants.len());
+    let mut newly_offline_players = Vec::new();
 
     for player_id in participants {
         if let Some(input) = frame_inputs.remove(player_id) {
@@ -3212,6 +3455,7 @@ fn resolve_tick_inputs(
                             member.offline_since = Some(Instant::now());
                         }
                         room.logic.on_player_offline(&room.room_id, player_id);
+                        newly_offline_players.push(player_id.clone());
                     }
                 }
                 synthetic_empty_input(frame_id, player_id)
@@ -3222,7 +3466,7 @@ fn resolve_tick_inputs(
         resolved_inputs.push(resolved);
     }
 
-    resolved_inputs
+    (resolved_inputs, newly_offline_players)
 }
 
 #[cfg(test)]
@@ -3422,11 +3666,30 @@ mod tests {
     }
 
     async fn insert_room_for_test(manager: &RoomManager, room_id: &str, room: Room) {
+        let members = room_member_index_entries(&room);
         manager
             .rooms
             .write()
             .await
             .insert(room_id.to_string(), std::sync::Arc::new(Mutex::new(room)));
+        replace_room_member_indexes(
+            &manager.player_rooms,
+            &manager.offline_players,
+            room_id,
+            members,
+        )
+        .await;
+    }
+
+    async fn player_room_index_for_test(manager: &RoomManager, player_id: &str) -> Option<String> {
+        manager.player_rooms.read().await.get(player_id).cloned()
+    }
+
+    async fn offline_player_index_for_test(
+        manager: &RoomManager,
+        player_id: &str,
+    ) -> Option<String> {
+        manager.offline_players.read().await.get(player_id).cloned()
     }
 
     async fn with_room_for_test<R>(
@@ -6133,6 +6396,184 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        assert_eq!(
+            player_room_index_for_test(&manager, "player-a").await,
+            Some("room-test".to_string())
+        );
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            Some("room-test".to_string())
+        );
+        assert_eq!(
+            manager.find_room_by_offline_player("player-a").await,
+            Some("room-test".to_string())
+        );
+
+        let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+        manager
+            .reconnect_room("room-test", "player-a", reconnect_tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            player_room_index_for_test(&manager, "player-a").await,
+            Some("room-test".to_string())
+        );
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            None
+        );
+        assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
+
+        manager.leave_room("room-test", "player-a").await;
+        assert_eq!(
+            manager.find_room_by_offline_player("player-a").await,
+            Some("room-test".to_string())
+        );
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            Some("room-test".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_offline_players_removes_player_indexes() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+
+        manager
+            .disconnect_room_member("room-test", "player-a")
+            .await;
+        with_room_mut_for_test(&manager, "room-test", |room| {
+            let member = room.members.get_mut("player-a").unwrap();
+            member.offline_since = Some(Instant::now() - Duration::from_secs(120));
+        })
+        .await;
+
+        manager.cleanup_expired_offline_players().await;
+
+        assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            None
+        );
+        assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
+        with_room_for_test(&manager, "room-test", |room| {
+            assert!(!room.members.contains_key("player-a"));
+            assert!(room.members.contains_key("player-b"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_task_removes_player_index_before_room_id_reuse() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+            1,
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-reused-index",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("disposable_match"),
+            )
+            .await
+            .unwrap();
+        manager.leave_room("room-reused-index", "player-a").await;
+
+        for _ in 0..30 {
+            if !manager.room_exists("room-reused-index").await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!manager.room_exists("room-reused-index").await);
+        assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            None
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-reused-index",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            player_room_index_for_test(&manager, "player-a").await,
+            Some("room-reused-index".to_string())
+        );
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_player_uses_index_and_self_heals_stale_entry() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let (tx, mut rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+
+        manager
+            .send_to_player("player-a", MessageType::GameMessagePush, vec![1, 2, 3])
+            .await
+            .unwrap();
+        let delivered = rx
+            .try_recv()
+            .expect("indexed player should receive message");
+        assert_eq!(delivered.message_type, MessageType::GameMessagePush);
+        assert_eq!(delivered.body, vec![1, 2, 3]);
+
+        {
+            let mut rooms = manager.rooms.write().await;
+            rooms.remove("room-test");
+        }
+        manager
+            .send_to_player("player-a", MessageType::GameMessagePush, vec![4, 5, 6])
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
+        assert_eq!(
+            offline_player_index_for_test(&manager, "player-a").await,
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
         let (manager, _factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
@@ -6268,9 +6709,15 @@ mod tests {
         };
 
         for frame_id in 1..=MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
-            let resolved = resolve_tick_inputs(&mut room, &participants, frame_id, &policy);
+            let (resolved, newly_offline_players) =
+                resolve_tick_inputs(&mut room, &participants, frame_id, &policy);
             assert_eq!(resolved.len(), 1);
             assert_eq!(resolved[0].frame_id, frame_id);
+            if frame_id < MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
+                assert!(newly_offline_players.is_empty());
+            } else {
+                assert_eq!(newly_offline_players, vec!["player-a".to_string()]);
+            }
         }
 
         let member = room.members.get("player-a").expect("player should exist");
