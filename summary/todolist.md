@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-15 13:09:20 +08:00
+更新时间：2026-06-15 15:04:32 +08:00
 
 ## 协作流程
 
@@ -381,8 +381,8 @@
 
 ### 7. RoomManager 扩展性改造
 
-- 状态：待开始
-- 开始时间：待填写
+- 状态：进行中
+- 开始时间：2026-06-15 13:30:00 +08:00
 - 结束时间：待填写
 - 优先级：P1
 - 范围：
@@ -392,18 +392,35 @@
   - 评估并落地 actor、shard 或拆锁方案。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
 - 已完成上下文：
-  - 当前 `RoomManager` 仍使用 `Arc<Mutex<HashMap<...>>>` 保存 `rooms` 和 `runtimes`。
-  - 现有 room lifecycle、drain、transfer、redirect/reconnect 单测较多，后续改造需要优先保持这些契约。
-  - 尚未看到 actor、shard、DashMap 或拆锁方案落地。
+  - 子任务 7.1 已完成第一阶段拆锁：`rooms` / `runtimes` 从全局 `Arc<Mutex<HashMap<...>>>` 改为全局 `RwLock<HashMap<...>>` + 单房间 / 单 runtime `Arc<Mutex<...>>` entry。
+  - 已新增 `get_room_entry`、`get_runtime_entry`、`room_entries_snapshot`、`publish_room_entry`、`ensure_runtime_entry` 等 helper，避免业务路径长时间持有全局 map 锁。
+  - room lifecycle、drain snapshot、transfer、redirect / drain notice、tick、broadcast、测试辅助访问已切到短 map 锁 + entry 锁模式。
+  - 已补 `marked_for_destruction` 保护：cleanup 标记销毁但尚未从 map 移除的 stale entry 会拒绝后续 join / ready / input / tick 等操作，避免拆锁后旧 entry 被继续写入。
+  - subagent 复核发现的新房间发布顺序、cleanup stale runtime、tick stop/freeze 竞态风险已修正：room/runtime 同步发布，cleanup 同步删除 runtime，tick handle 写回前复查 `tick_running`。
 - 验收计划：
   - 保持现有房间生命周期和 transfer 测试通过。
   - 增加并发房间操作或压力型单元测试。
   - 记录改造前后风险和行为边界。
-- 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
-- 阻塞/回退：待填写
-- 交给下一 subagent 的上下文：待填写
+- 验收说明：
+  - 子任务 7.1 已通过 Rust focused / full 单线程测试和真实 mock-client TCP 路径验收。
+  - `cargo test room_manager` 当前 58 项通过；`cargo test -- --test-threads=1` 当前 194 项通过。
+  - mock-client 验收使用 `readUntil` 等待目标包，确认 auth -> room join -> ready -> leave 全流程成功；同次输出也确认 join 前可能先收到 `RoomFrameRatePush`，后续可单独修正 `movement-demo` 场景的 `readNextPacket` 顺序假设。
+- 运行服务/依赖：
+  - Rust 单测不需要启动外部依赖。
+  - mock-client 验收已启动 Redis、Core NATS、auth-http、game-server；验收后已停止本地栈。
+- 测试命令：
+  - `cargo test room_manager`
+  - `cargo test -- --test-threads=1`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-stack.ps1 -Restart -NoProxy -NoAdminApi -NoAdminWeb -NoMetricsCollector -WaitTimeoutSeconds 180`
+  - `node --input-type=module -e "<auth/join/ready/leave mock-client readUntil smoke>"`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-stack.ps1 -Stop`
+  - `git diff --check`
+- 阻塞/回退：
+  - 当前无服务端阻塞；若后续发现 entry 级锁带来不可接受的单房间串行瓶颈，可在 7.2/7.3 引入 player index 或 actor/shard 方案。
+  - 回退时恢复 `RoomManager` 的全局 `Mutex<HashMap<...>>` 存储和测试辅助访问即可，协议与外部接口未变化。
+- 交给下一 subagent 的上下文：
+  - 子任务 7.2 建议做 player_id -> room_id / offline player 索引，消除 `find_room_by_offline_player`、`send_to_player` 这类跨房间扫描。
+  - 子任务 7.3 再评估 actor/shard 是否有必要；当前 7.1 只是低风险拆锁，不改变 room 行为契约。
 - 相关提交：待填写
 
 ### 8. 协议生成与一致性检查

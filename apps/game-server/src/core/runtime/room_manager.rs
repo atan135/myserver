@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use prost::Message;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use tracing::{debug, info, warn};
@@ -124,11 +124,26 @@ pub struct RolloutDrainSnapshot {
 
 #[derive(Clone)]
 pub struct RoomManager {
-    rooms: std::sync::Arc<Mutex<HashMap<String, Room>>>,
-    runtimes: std::sync::Arc<Mutex<HashMap<String, RoomRuntime>>>,
+    rooms: std::sync::Arc<RwLock<HashMap<String, SharedRoom>>>,
+    runtimes: std::sync::Arc<RwLock<HashMap<String, SharedRoomRuntime>>>,
     policies: SharedRoomPolicyRegistry,
     logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
+}
+
+type SharedRoom = std::sync::Arc<Mutex<Room>>;
+type SharedRoomRuntime = std::sync::Arc<Mutex<RoomRuntime>>;
+
+fn room_rejects_mutation(room: &Room) -> bool {
+    room.marked_for_destruction || room.transfer_state.status.rejects_room_mutation()
+}
+
+fn room_mutation_error_code(room: &Room) -> &'static str {
+    if room.marked_for_destruction {
+        "ROOM_NOT_FOUND"
+    } else {
+        room.transfer_state.mutation_error_code()
+    }
 }
 
 fn room_rollout_route_status(room: &Room, owner_server_id: &str) -> RoomRouteStatus {
@@ -219,14 +234,60 @@ impl RoomManager {
         cleanup_interval_secs: u64,
     ) -> Self {
         let this = Self {
-            rooms: std::sync::Arc::new(Mutex::new(HashMap::new())),
-            runtimes: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            runtimes: std::sync::Arc::new(RwLock::new(HashMap::new())),
             policies,
             logic_factory,
             match_client,
         };
         this.spawn_cleanup_task(cleanup_interval_secs);
         this
+    }
+
+    async fn get_room_entry(&self, room_id: &str) -> Option<SharedRoom> {
+        self.rooms.read().await.get(room_id).cloned()
+    }
+
+    async fn get_runtime_entry(&self, room_id: &str) -> Option<SharedRoomRuntime> {
+        self.runtimes.read().await.get(room_id).cloned()
+    }
+
+    async fn room_entries_snapshot(&self) -> Vec<(String, SharedRoom)> {
+        let rooms = self.rooms.read().await;
+        let mut entries = rooms
+            .iter()
+            .map(|(room_id, room)| (room_id.clone(), std::sync::Arc::clone(room)))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+    }
+
+    async fn publish_room_entry(&self, room_id: &str, room: Room) -> (SharedRoom, usize, bool) {
+        let mut runtimes = self.runtimes.write().await;
+        let mut rooms = self.rooms.write().await;
+        let room_count = rooms.len();
+        match rooms.entry(room_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                (std::sync::Arc::clone(entry.get()), room_count, false)
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                runtimes
+                    .entry(room_id.to_string())
+                    .or_insert_with(|| std::sync::Arc::new(Mutex::new(RoomRuntime::default())));
+                let room_entry = std::sync::Arc::new(Mutex::new(room));
+                entry.insert(std::sync::Arc::clone(&room_entry));
+                (room_entry, room_count.saturating_add(1), true)
+            }
+        }
+    }
+
+    async fn ensure_runtime_entry(&self, room_id: &str) -> SharedRoomRuntime {
+        let mut runtimes = self.runtimes.write().await;
+        std::sync::Arc::clone(
+            runtimes
+                .entry(room_id.to_string())
+                .or_insert_with(|| std::sync::Arc::new(Mutex::new(RoomRuntime::default()))),
+        )
     }
 
     fn spawn_cleanup_task(&self, cleanup_interval_secs: u64) {
@@ -249,10 +310,17 @@ impl RoomManager {
                 let mut to_destroy = Vec::new();
                 let mut matches_to_abort = Vec::new();
 
-                {
-                    let mut rooms_guard = rooms.lock().await;
+                let room_entries = {
+                    let rooms_guard = rooms.read().await;
+                    rooms_guard
+                        .iter()
+                        .map(|(room_id, room)| (room_id.clone(), std::sync::Arc::clone(room)))
+                        .collect::<Vec<_>>()
+                };
 
-                    for (room_id, room) in rooms_guard.iter_mut() {
+                {
+                    for (room_id, room_entry) in room_entries {
+                        let mut room = room_entry.lock().await;
                         if room.marked_for_destruction {
                             continue;
                         }
@@ -265,7 +333,7 @@ impl RoomManager {
                             room.collect_expired_offline_players(policy.offline_ttl_secs);
                         if !expired_players.is_empty() {
                             info!(
-                                room_id = room_id,
+                                room_id = %room_id,
                                 expired_players = ?expired_players,
                                 ttl_secs = policy.offline_ttl_secs,
                                 "removing expired offline players from cleanup task"
@@ -297,7 +365,7 @@ impl RoomManager {
 
                         if !policy.retain_state_when_empty {
                             info!(
-                                room_id = room_id,
+                                room_id = %room_id,
                                 policy_id = %policy.policy_id,
                                 "room marked for destruction (no retain)"
                             );
@@ -310,7 +378,7 @@ impl RoomManager {
                             let elapsed = empty_since.elapsed().as_secs();
                             if elapsed >= policy.empty_ttl_secs {
                                 info!(
-                                    room_id = room_id,
+                                    room_id = %room_id,
                                     policy_id = %policy.policy_id,
                                     elapsed_secs = elapsed,
                                     "room TTL expired, marked for destruction"
@@ -329,13 +397,25 @@ impl RoomManager {
                 }
 
                 for room_id in to_destroy {
-                    if let Some(runtime) = runtimes.lock().await.get(&room_id) {
+                    let runtime_entry = {
+                        let runtimes = runtimes.read().await;
+                        runtimes.get(&room_id).cloned()
+                    };
+                    if let Some(runtime_entry) = runtime_entry {
+                        let runtime = runtime_entry.lock().await;
                         if let Some(handle) = &runtime.tick_handle {
                             handle.abort();
                         }
                     }
-                    rooms.lock().await.remove(&room_id);
-                    let room_count = rooms.lock().await.len() as u64;
+                    {
+                        let mut runtimes = runtimes.write().await;
+                        runtimes.remove(&room_id);
+                    }
+                    let room_count = {
+                        let mut rooms = rooms.write().await;
+                        rooms.remove(&room_id);
+                        rooms.len() as u64
+                    };
                     METRICS.set_room_count(room_count);
                     info!(room_id = room_id, "room destroyed by cleanup task");
                 }
@@ -361,7 +441,7 @@ impl RoomManager {
     }
 
     pub async fn room_count(&self) -> usize {
-        self.rooms.lock().await.len()
+        self.rooms.read().await.len()
     }
 
     pub async fn rollout_drain_snapshot(
@@ -369,24 +449,23 @@ impl RoomManager {
         owner_server_id: &str,
         route_limit: usize,
     ) -> RolloutDrainSnapshot {
-        let rooms = self.rooms.lock().await;
-        let mut room_ids = rooms.keys().cloned().collect::<Vec<_>>();
-        room_ids.sort();
+        let room_entries = self.room_entries_snapshot().await;
 
         let mut owned_room_count = 0_u64;
         let mut migrating_room_count = 0_u64;
-        let mut routes = Vec::with_capacity(route_limit.min(room_ids.len()));
+        let mut routes = Vec::with_capacity(route_limit.min(room_entries.len()));
         let mut transferable_empty_room_count = 0_u64;
         let mut transferable_empty_room_samples =
-            Vec::with_capacity(route_limit.min(room_ids.len()));
+            Vec::with_capacity(route_limit.min(room_entries.len()));
         let mut retired_room_count = 0_u64;
-        let mut rollout_epoch: Option<&str> = None;
+        let mut rollout_epoch: Option<String> = None;
         let mut mixed_rollout_epoch = false;
 
-        for room_id in room_ids {
-            let Some(room) = rooms.get(&room_id) else {
+        for (_room_id, room_entry) in room_entries {
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
                 continue;
-            };
+            }
 
             match room.transfer_state.status {
                 RoomTransferStatus::Owned => {
@@ -396,7 +475,7 @@ impl RoomManager {
                             transferable_empty_room_count.saturating_add(1);
                         if transferable_empty_room_samples.len() < route_limit {
                             transferable_empty_room_samples
-                                .push(room_rollout_route_status(room, owner_server_id));
+                                .push(room_rollout_route_status(&room, owner_server_id));
                         }
                     }
                 }
@@ -414,15 +493,15 @@ impl RoomManager {
             if let Some(epoch) = room.transfer_state.rollout_epoch.as_deref() {
                 if !epoch.is_empty() {
                     match rollout_epoch {
-                        None => rollout_epoch = Some(epoch),
-                        Some(existing) if existing == epoch => {}
+                        None => rollout_epoch = Some(epoch.to_string()),
+                        Some(ref existing) if existing == epoch => {}
                         Some(_) => mixed_rollout_epoch = true,
                     }
                 }
             }
 
             if routes.len() < route_limit {
-                routes.push(room_rollout_route_status(room, owner_server_id));
+                routes.push(room_rollout_route_status(&room, owner_server_id));
             }
         }
 
@@ -430,7 +509,7 @@ impl RoomManager {
             rollout_epoch: if mixed_rollout_epoch {
                 String::new()
             } else {
-                rollout_epoch.unwrap_or_default().to_string()
+                rollout_epoch.unwrap_or_default()
             },
             owner_server_id: owner_server_id.to_string(),
             owned_room_count,
@@ -443,17 +522,25 @@ impl RoomManager {
     }
 
     pub async fn room_exists(&self, room_id: &str) -> bool {
-        self.rooms.lock().await.contains_key(room_id)
+        self.rooms.read().await.contains_key(room_id)
     }
 
     pub async fn find_room_by_offline_player(&self, player_id: &str) -> Option<String> {
-        let rooms = self.rooms.lock().await;
-        rooms.iter().find_map(|(room_id, room)| {
-            room.members
+        for (room_id, room_entry) in self.room_entries_snapshot().await {
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                continue;
+            }
+            if room
+                .members
                 .get(player_id)
                 .filter(|member| member.offline)
-                .map(|_| room_id.clone())
-        })
+                .is_some()
+            {
+                return Some(room_id);
+            }
+        }
+        None
     }
 
     pub async fn create_matched_room(
@@ -463,43 +550,42 @@ impl RoomManager {
         player_ids: &[String],
         mode: &str,
     ) -> Result<RoomSnapshot, &'static str> {
-        let mut rooms = self.rooms.lock().await;
-        let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy();
-        {
-            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-                let mut logic = self.logic_factory.create(&default_policy.policy_id);
-                logic.on_room_created(room_id);
-                info!(
-                    room_id = room_id,
-                    match_id = match_id,
-                    mode = mode,
-                    "matched room created"
-                );
-                let mut room = Room::new(
-                    room_id.to_string(),
-                    player_ids.first().cloned().unwrap_or_default(),
-                    default_policy.policy_id.clone(),
-                    logic,
-                );
-                room.set_match_id(match_id.to_string());
-                room
-            });
-
-            if room.transfer_state.status.rejects_room_mutation() {
-                return Err(room.transfer_state.mutation_error_code());
+        let (snapshot, room_count) = if let Some(room_entry) = self.get_room_entry(room_id).await {
+            let room = room_entry.lock().await;
+            if room_rejects_mutation(&room) {
+                return Err(room_mutation_error_code(&room));
             }
-            runtimes
-                .entry(room_id.to_string())
-                .or_insert_with(RoomRuntime::default);
-        }
-        let room_count = rooms.len() as u64;
-        METRICS.set_room_count(room_count);
 
-        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
-        let snapshot = room.snapshot();
-        drop(rooms);
-        drop(runtimes);
+            (room.snapshot(), self.room_count().await)
+        } else {
+            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            logic.on_room_created(room_id);
+            info!(
+                room_id = room_id,
+                match_id = match_id,
+                mode = mode,
+                "matched room created"
+            );
+            let mut room = Room::new(
+                room_id.to_string(),
+                player_ids.first().cloned().unwrap_or_default(),
+                default_policy.policy_id.clone(),
+                logic,
+            );
+            room.set_match_id(match_id.to_string());
+            let (room_entry, room_count, inserted) = self.publish_room_entry(room_id, room).await;
+            let room = room_entry.lock().await;
+            if !inserted && room_rejects_mutation(&room) {
+                return Err(room_mutation_error_code(&room));
+            }
+            (room.snapshot(), room_count)
+        };
+
+        if self.get_runtime_entry(room_id).await.is_none() {
+            self.ensure_runtime_entry(room_id).await;
+        }
+        METRICS.set_room_count(room_count as u64);
 
         self.notify_room_created(match_id, room_id, player_ids, mode)
             .await;
@@ -594,6 +680,112 @@ impl RoomManager {
         }
     }
 
+    fn join_existing_room_locked(
+        &self,
+        room: &mut Room,
+        player_id: &str,
+        outbound: OutboundChannel,
+        role: MemberRole,
+    ) -> Result<(RoomSnapshot, Option<String>), &'static str> {
+        if room_rejects_mutation(room) {
+            return Err(room_mutation_error_code(room));
+        }
+
+        let policy = self.policies.resolve(&room.policy_id);
+        if room.phase == RoomPhase::InGame
+            && !policy.allow_join_in_game
+            && !room.members.contains_key(player_id)
+        {
+            return Err("ROOM_ALREADY_IN_GAME");
+        }
+
+        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+            return Err("ROOM_FULL");
+        }
+
+        let is_new_member = !room.members.contains_key(player_id);
+        let sync_before_broadcast =
+            is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
+        room.members.insert(
+            player_id.to_string(),
+            RoomMemberState {
+                player_id: player_id.to_string(),
+                ready: false,
+                sender: outbound.sender,
+                close_state: outbound.close_state,
+                offline: false,
+                offline_since: None,
+                role,
+                syncing: sync_before_broadcast,
+            },
+        );
+
+        if is_new_member {
+            room.update_activity();
+            room.clear_empty();
+            room.logic.on_player_join(player_id);
+        }
+
+        Ok((room.snapshot(), room.match_id.clone()))
+    }
+
+    fn join_observer_locked(
+        &self,
+        room: &mut Room,
+        player_id: &str,
+        outbound: OutboundChannel,
+    ) -> Result<RoomRecoveryState, &'static str> {
+        if room_rejects_mutation(room) {
+            return Err(room_mutation_error_code(room));
+        }
+
+        let policy = self.policies.resolve(&room.policy_id);
+        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+            return Err("ROOM_FULL");
+        }
+
+        let is_new_member = !room.members.contains_key(player_id);
+        room.members.insert(
+            player_id.to_string(),
+            RoomMemberState {
+                player_id: player_id.to_string(),
+                ready: false,
+                sender: outbound.sender,
+                close_state: outbound.close_state,
+                offline: false,
+                offline_since: None,
+                role: MemberRole::Observer,
+                syncing: false,
+            },
+        );
+
+        if is_new_member {
+            room.update_activity();
+            room.clear_empty();
+            room.logic.on_player_join(player_id);
+        }
+
+        let snapshot = room.snapshot();
+        let current_frame_id = room.current_frame;
+        let recent_inputs = room_frame_inputs_from_history(room, current_frame_id);
+        let waiting_frame_id = room.current_waiting_frame_id();
+        let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
+        let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
+        let movement_recovery = room
+            .logic
+            .movement_recovery_state(None, MovementCorrectionReason::ObserverRecovery);
+
+        Ok(RoomRecoveryState {
+            snapshot,
+            current_frame_id,
+            recent_inputs,
+            waiting_frame_id,
+            waiting_inputs,
+            input_delay_frames,
+            movement_recovery,
+        })
+    }
+
     pub async fn join_room(
         &self,
         room_id: &str,
@@ -603,80 +795,70 @@ impl RoomManager {
         requested_policy_id: Option<&str>,
     ) -> Result<RoomSnapshot, &'static str> {
         let outbound = outbound.into();
-        let mut rooms = self.rooms.lock().await;
-        let mut runtimes = self.runtimes.lock().await;
         let requested_policy_id = requested_policy_id
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| self.policies.default_policy().policy_id);
         let selected_policy = self.policies.resolve(&requested_policy_id);
-        let (snapshot, match_id) = {
-            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-                let mut logic = self.logic_factory.create(&selected_policy.policy_id);
-                logic.on_room_created(room_id);
+        let mut outbound = Some(outbound);
+        let (snapshot, match_id, room_count) = if let Some(room_entry) =
+            self.get_room_entry(room_id).await
+        {
+            let mut room = room_entry.lock().await;
+            let (snapshot, match_id) = self.join_existing_room_locked(
+                &mut room,
+                player_id,
+                outbound.take().expect("outbound should be available"),
+                role,
+            )?;
+            (snapshot, match_id, self.room_count().await)
+        } else {
+            let mut logic = self.logic_factory.create(&selected_policy.policy_id);
+            logic.on_room_created(room_id);
+            info!(
+                room_id = room_id,
+                owner_player_id = player_id,
+                policy_id = %selected_policy.policy_id,
+                "room created"
+            );
+            let mut room = Room::new(
+                room_id.to_string(),
+                player_id.to_string(),
+                selected_policy.policy_id.clone(),
+                logic,
+            );
+            let (new_snapshot, new_match_id) = self.join_existing_room_locked(
+                &mut room,
+                player_id,
+                outbound
+                    .as_ref()
+                    .expect("outbound should be available")
+                    .clone(),
+                role,
+            )?;
+            let (room_entry, room_count, inserted) = self.publish_room_entry(room_id, room).await;
+            if inserted {
                 info!(
                     room_id = room_id,
-                    owner_player_id = player_id,
-                    policy_id = %selected_policy.policy_id,
-                    "room created"
+                    player_id = player_id,
+                    "room initialized and published"
                 );
-                Room::new(
-                    room_id.to_string(),
-                    player_id.to_string(),
-                    selected_policy.policy_id.clone(),
-                    logic,
-                )
-            });
-
-            if room.transfer_state.status.rejects_room_mutation() {
-                return Err(room.transfer_state.mutation_error_code());
-            }
-
-            let policy = self.policies.resolve(&room.policy_id);
-            if room.phase == RoomPhase::InGame
-                && !policy.allow_join_in_game
-                && !room.members.contains_key(player_id)
-            {
-                return Err("ROOM_ALREADY_IN_GAME");
-            }
-
-            if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
-                return Err("ROOM_FULL");
-            }
-
-            let is_new_member = !room.members.contains_key(player_id);
-            let sync_before_broadcast =
-                is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
-            room.members.insert(
-                player_id.to_string(),
-                RoomMemberState {
-                    player_id: player_id.to_string(),
-                    ready: false,
-                    sender: outbound.sender,
-                    close_state: outbound.close_state,
-                    offline: false,
-                    offline_since: None,
+                (new_snapshot, new_match_id, room_count)
+            } else {
+                let mut room = room_entry.lock().await;
+                let (snapshot, match_id) = self.join_existing_room_locked(
+                    &mut room,
+                    player_id,
+                    outbound.take().expect("outbound should be available"),
                     role,
-                    syncing: sync_before_broadcast,
-                },
-            );
-
-            if is_new_member {
-                room.update_activity();
-                room.clear_empty();
-                room.logic.on_player_join(player_id);
+                )?;
+                (snapshot, match_id, room_count)
             }
-
-            runtimes
-                .entry(room_id.to_string())
-                .or_insert_with(RoomRuntime::default);
-
-            (room.snapshot(), room.match_id.clone())
         };
-        let room_count = rooms.len() as u64;
-        METRICS.set_room_count(room_count);
-        drop(rooms);
-        drop(runtimes);
+        if self.get_runtime_entry(room_id).await.is_none() {
+            self.ensure_runtime_entry(room_id).await;
+        }
+        METRICS.set_room_count(room_count as u64);
 
         if let Some(ref mid) = match_id {
             self.notify_player_joined(mid, player_id, room_id).await;
@@ -688,10 +870,10 @@ impl RoomManager {
 
     pub async fn finish_member_sync(&self, room_id: &str, player_id: &str) {
         let sync_completed = {
-            let mut rooms = self.rooms.lock().await;
-            let Some(room) = rooms.get_mut(room_id) else {
+            let Some(room_entry) = self.get_room_entry(room_id).await else {
                 return;
             };
+            let mut room = room_entry.lock().await;
             room.finish_member_sync(player_id)
         };
 
@@ -706,10 +888,12 @@ impl RoomManager {
     }
 
     pub async fn is_member_syncing(&self, room_id: &str, player_id: &str) -> bool {
-        let rooms = self.rooms.lock().await;
-        rooms
-            .get(room_id)
-            .and_then(|room| room.members.get(player_id))
+        let Some(room_entry) = self.get_room_entry(room_id).await else {
+            return false;
+        };
+        let room = room_entry.lock().await;
+        room.members
+            .get(player_id)
             .map(|member| member.syncing)
             .unwrap_or(false)
     }
@@ -721,15 +905,20 @@ impl RoomManager {
             "leave_room called"
         );
 
-        let mut rooms = self.rooms.lock().await;
-        let runtimes = self.runtimes.lock().await;
-        let Some(room) = rooms.get_mut(room_id) else {
+        let Some(room_entry) = self.get_room_entry(room_id).await else {
             info!(room_id = room_id, "leave_room: room not found");
             return RoomLeaveResult {
                 snapshot: None,
                 room_removed: false,
             };
         };
+        let mut room = room_entry.lock().await;
+        if room.marked_for_destruction {
+            return RoomLeaveResult {
+                snapshot: None,
+                room_removed: false,
+            };
+        }
         let previous_online_member_count = room
             .members
             .values()
@@ -776,7 +965,7 @@ impl RoomManager {
         if !room.has_online_members() {
             room.mark_empty();
             if previous_online_member_count > 0 {
-                log_room_entered_transferable_empty_candidate(room, player_id, "leave_room");
+                log_room_entered_transferable_empty_candidate(&room, player_id, "leave_room");
             }
         }
 
@@ -786,8 +975,7 @@ impl RoomManager {
         let pending_broadcasts = room.logic.take_pending_broadcasts();
         let snapshot = room.snapshot();
         let match_id = room.match_id.clone();
-        drop(rooms);
-        drop(runtimes);
+        drop(room);
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
@@ -818,14 +1006,20 @@ impl RoomManager {
             "disconnect_room_member called"
         );
 
-        let mut rooms = self.rooms.lock().await;
-        let Some(room) = rooms.get_mut(room_id) else {
+        let Some(room_entry) = self.get_room_entry(room_id).await else {
             info!(room_id = room_id, "disconnect_room_member: room not found");
             return RoomLeaveResult {
                 snapshot: None,
                 room_removed: false,
             };
         };
+        let mut room = room_entry.lock().await;
+        if room.marked_for_destruction {
+            return RoomLeaveResult {
+                snapshot: None,
+                room_removed: false,
+            };
+        }
         let previous_online_member_count = room
             .members
             .values()
@@ -872,7 +1066,7 @@ impl RoomManager {
             room.wait_started_at = None;
             if previous_online_member_count > 0 {
                 log_room_entered_transferable_empty_candidate(
-                    room,
+                    &room,
                     player_id,
                     "disconnect_room_member",
                 );
@@ -882,7 +1076,7 @@ impl RoomManager {
         let pending_broadcasts = room.logic.take_pending_broadcasts();
         let snapshot = room.snapshot();
         let match_id = room.match_id.clone();
-        drop(rooms);
+        drop(room);
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
@@ -913,11 +1107,11 @@ impl RoomManager {
         outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let outbound = outbound.into();
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let mut room = room_entry.lock().await;
 
-        if room.transfer_state.status.rejects_room_mutation() {
-            return Err(room.transfer_state.mutation_error_code());
+        if room_rejects_mutation(&room) {
+            return Err(room_mutation_error_code(&room));
         }
 
         if let Some(member) = room.members.get_mut(player_id) {
@@ -942,16 +1136,16 @@ impl RoomManager {
 
             let snapshot = room.snapshot();
             let current_frame_id = room.current_frame;
-            let recent_inputs = room_frame_inputs_from_history(room, current_frame_id);
+            let recent_inputs = room_frame_inputs_from_history(&room, current_frame_id);
             let waiting_frame_id = room.current_waiting_frame_id();
-            let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
+            let waiting_inputs = room_frame_inputs_from_pending(&room, waiting_frame_id);
             let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
             let movement_recovery = room.logic.movement_recovery_state(
                 Some(player_id),
                 MovementCorrectionReason::ReconnectRecovery,
             );
             let match_id = room.match_id.clone();
-            drop(rooms);
+            drop(room);
 
             if let Some(ref mid) = match_id {
                 self.notify_player_joined(mid, player_id, room_id).await;
@@ -979,85 +1173,56 @@ impl RoomManager {
         outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let outbound = outbound.into();
-        let mut rooms = self.rooms.lock().await;
-        let mut runtimes = self.runtimes.lock().await;
         let default_policy = self.policies.default_policy().clone();
-        let recovery = {
-            let room = rooms.entry(room_id.to_string()).or_insert_with(|| {
-                let mut logic = self.logic_factory.create(&default_policy.policy_id);
-                logic.on_room_created(room_id);
-                info!(
-                    room_id = room_id,
-                    owner_player_id = player_id,
-                    policy_id = %default_policy.policy_id,
-                    "room created for observer"
-                );
-                Room::new(
-                    room_id.to_string(),
-                    player_id.to_string(),
-                    default_policy.policy_id.clone(),
-                    logic,
-                )
-            });
-
-            if room.transfer_state.status.rejects_room_mutation() {
-                return Err(room.transfer_state.mutation_error_code());
-            }
-
-            let policy = self.policies.resolve(&room.policy_id);
-            if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
-                return Err("ROOM_FULL");
-            }
-
-            let is_new_member = !room.members.contains_key(player_id);
-            room.members.insert(
-                player_id.to_string(),
-                RoomMemberState {
-                    player_id: player_id.to_string(),
-                    ready: false,
-                    sender: outbound.sender,
-                    close_state: outbound.close_state,
-                    offline: false,
-                    offline_since: None,
-                    role: MemberRole::Observer,
-                    syncing: false,
-                },
+        let mut outbound = Some(outbound);
+        let (recovery, room_count) = if let Some(room_entry) = self.get_room_entry(room_id).await {
+            let mut room = room_entry.lock().await;
+            let recovery = self.join_observer_locked(
+                &mut room,
+                player_id,
+                outbound.take().expect("outbound should be available"),
+            )?;
+            (recovery, self.room_count().await)
+        } else {
+            let mut logic = self.logic_factory.create(&default_policy.policy_id);
+            logic.on_room_created(room_id);
+            info!(
+                room_id = room_id,
+                owner_player_id = player_id,
+                policy_id = %default_policy.policy_id,
+                "room created for observer"
             );
-
-            if is_new_member {
-                room.update_activity();
-                room.clear_empty();
-                room.logic.on_player_join(player_id);
-            }
-
-            runtimes
-                .entry(room_id.to_string())
-                .or_insert_with(RoomRuntime::default);
-
-            let snapshot = room.snapshot();
-            let current_frame_id = room.current_frame;
-            let recent_inputs = room_frame_inputs_from_history(room, current_frame_id);
-            let waiting_frame_id = room.current_waiting_frame_id();
-            let waiting_inputs = room_frame_inputs_from_pending(room, waiting_frame_id);
-            let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
-            let movement_recovery = room
-                .logic
-                .movement_recovery_state(None, MovementCorrectionReason::ObserverRecovery);
-
-            RoomRecoveryState {
-                snapshot,
-                current_frame_id,
-                recent_inputs,
-                waiting_frame_id,
-                waiting_inputs,
-                input_delay_frames,
-                movement_recovery,
+            let mut room = Room::new(
+                room_id.to_string(),
+                player_id.to_string(),
+                default_policy.policy_id.clone(),
+                logic,
+            );
+            let new_recovery = self.join_observer_locked(
+                &mut room,
+                player_id,
+                outbound
+                    .as_ref()
+                    .expect("outbound should be available")
+                    .clone(),
+            )?;
+            let (room_entry, room_count, inserted) = self.publish_room_entry(room_id, room).await;
+            if inserted {
+                (new_recovery, room_count)
+            } else {
+                let mut room = room_entry.lock().await;
+                let recovery = self.join_observer_locked(
+                    &mut room,
+                    player_id,
+                    outbound.take().expect("outbound should be available"),
+                )?;
+                (recovery, room_count)
             }
         };
-        let room_count = rooms.len() as u64;
-        METRICS.set_room_count(room_count);
-        drop(rooms);
-        drop(runtimes);
+        if self.get_runtime_entry(room_id).await.is_none() {
+            self.ensure_runtime_entry(room_id).await;
+        }
+        METRICS.set_room_count(room_count as u64);
 
         info!(
             room_id = room_id,
@@ -1072,10 +1237,9 @@ impl RoomManager {
     }
 
     pub async fn cleanup_expired_offline_players(&self) {
-        let mut rooms = self.rooms.lock().await;
-
-        for (room_id, room) in rooms.iter_mut() {
-            if room.transfer_state.status.rejects_room_mutation() {
+        for (room_id, room_entry) in self.room_entries_snapshot().await {
+            let mut room = room_entry.lock().await;
+            if room_rejects_mutation(&room) {
                 continue;
             }
 
@@ -1111,11 +1275,11 @@ impl RoomManager {
         player_id: &str,
         ready: bool,
     ) -> Result<RoomSnapshot, &'static str> {
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let mut room = room_entry.lock().await;
 
-        if room.transfer_state.status.rejects_room_mutation() {
-            return Err(room.transfer_state.mutation_error_code());
+        if room_rejects_mutation(&room) {
+            return Err(room_mutation_error_code(&room));
         }
         if room.phase == RoomPhase::InGame {
             return Err("ROOM_ALREADY_IN_GAME");
@@ -1134,30 +1298,31 @@ impl RoomManager {
         room_id: &str,
         player_id: &str,
     ) -> Result<RoomSnapshot, &'static str> {
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
-        let policy = self.policies.resolve(&room.policy_id);
+        {
+            let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+            let mut room = room_entry.lock().await;
+            let policy = self.policies.resolve(&room.policy_id);
 
-        if room.transfer_state.status.rejects_room_mutation() {
-            return Err(room.transfer_state.mutation_error_code());
+            if room_rejects_mutation(&room) {
+                return Err(room_mutation_error_code(&room));
+            }
+            room.can_start_game(player_id, policy.min_start_players)?;
+            room.phase = RoomPhase::InGame;
+            room.clear_runtime_inputs();
+            room.logic.on_game_started(room_id);
+            info!(
+                room_id = room_id,
+                owner_player_id = player_id,
+                member_count = room.members.len(),
+                "room entered in_game phase"
+            );
         }
-        room.can_start_game(player_id, policy.min_start_players)?;
-        room.phase = RoomPhase::InGame;
-        room.clear_runtime_inputs();
-        room.logic.on_game_started(room_id);
-        info!(
-            room_id = room_id,
-            owner_player_id = player_id,
-            member_count = room.members.len(),
-            "room entered in_game phase"
-        );
-        drop(rooms);
 
         self.ensure_room_tick_running(room_id).await;
         self.update_room_fps(room_id).await;
 
-        let rooms = self.rooms.lock().await;
-        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let room = room_entry.lock().await;
         Ok(room.snapshot())
     }
 
@@ -1169,12 +1334,12 @@ impl RoomManager {
         action: &str,
         payload_json: &str,
     ) -> Result<(), &'static str> {
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let mut room = room_entry.lock().await;
         let policy = self.policies.resolve(&room.policy_id);
 
-        if room.transfer_state.status.rejects_room_mutation() {
-            return Err(room.transfer_state.mutation_error_code());
+        if room_rejects_mutation(&room) {
+            return Err(room_mutation_error_code(&room));
         }
         room.can_send_input(player_id)?;
         room.logic
@@ -1218,11 +1383,11 @@ impl RoomManager {
         room_id: &str,
         player_id: &str,
     ) -> Result<RoomSnapshot, &'static str> {
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let mut room = room_entry.lock().await;
 
-        if room.transfer_state.status.rejects_room_mutation() {
-            return Err(room.transfer_state.mutation_error_code());
+        if room_rejects_mutation(&room) {
+            return Err(room_mutation_error_code(&room));
         }
         room.can_end_game(player_id)?;
         room.logic.on_game_ended(room_id);
@@ -1235,7 +1400,7 @@ impl RoomManager {
         );
 
         let match_id = room.match_id.clone();
-        drop(rooms);
+        drop(room);
 
         self.update_room_fps(room_id).await;
 
@@ -1243,8 +1408,8 @@ impl RoomManager {
             self.notify_match_end(mid, room_id, "game_over").await;
         }
 
-        let rooms = self.rooms.lock().await;
-        let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+        let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+        let room = room_entry.lock().await;
         Ok(room.snapshot())
     }
 
@@ -1265,9 +1430,8 @@ impl RoomManager {
         }
 
         let (state, version) = {
-            let mut rooms = self.rooms.lock().await;
-            let room = match rooms.get_mut(room_id) {
-                Some(room) => room,
+            let room_entry = match self.get_room_entry(room_id).await {
+                Some(room_entry) => room_entry,
                 None => {
                     warn!(
                         room_id = room_id,
@@ -1278,6 +1442,17 @@ impl RoomManager {
                     return Err("ROOM_NOT_FOUND");
                 }
             };
+            let mut room = room_entry.lock().await;
+
+            if room.marked_for_destruction {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_NOT_FOUND",
+                    "room transfer freeze rejected because room is being destroyed"
+                );
+                return Err("ROOM_NOT_FOUND");
+            }
 
             match room.transfer_state.status {
                 RoomTransferStatus::Retired => {
@@ -1402,185 +1577,32 @@ impl RoomManager {
             return Err("INVALID_ROLLOUT_EPOCH");
         }
 
-        let mut payload = {
-            let mut rooms = self.rooms.lock().await;
-            let room = match rooms.get_mut(room_id) {
-                Some(room) => room,
-                None => {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_NOT_FOUND",
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_NOT_FOUND");
-                }
-            };
-
-            match room.transfer_state.status {
-                RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {}
-                RoomTransferStatus::Retired => {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_RETIRED",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_RETIRED");
-                }
-                RoomTransferStatus::Importing => {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_IMPORTING",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_IMPORTING");
-                }
-                RoomTransferStatus::OwnedByNew => {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_OWNED_BY_NEW",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_OWNED_BY_NEW");
-                }
-                _ => {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_NOT_FROZEN",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_NOT_FROZEN");
-                }
-            }
-
-            if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
-                warn!(
-                    room_id = room_id,
-                    rollout_epoch = rollout_epoch,
-                    error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
-                    current_status = transfer_status_label(room.transfer_state.status),
-                    expected = ?room.transfer_state.rollout_epoch,
-                    actual = rollout_epoch,
-                    room_version = room.transfer_state.room_version,
-                    "room transfer export rejected"
-                );
-                return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
-            }
-
-            let policy = self.policies.resolve(&room.policy_id);
-            let current_frame_id = room.current_frame;
-            let last_applied_frame_id = room
-                .last_applied_inputs
-                .values()
-                .map(|input| input.frame_id)
-                .max()
-                .unwrap_or(current_frame_id);
-            let transfer_state = room.logic.export_transfer_state()?;
-
-            let room_version = if room.transfer_state.status == RoomTransferStatus::Exported {
-                room.transfer_state.room_version
-            } else {
-                room.transfer_state.room_version.saturating_add(1)
-            };
-
-            RoomTransferPayload {
-                rollout_epoch: rollout_epoch.to_string(),
-                room_id: room.room_id.clone(),
-                room_version,
-                policy_id: room.policy_id.clone(),
-                owner_player_id: room.owner_player_id.clone(),
-                room_phase: room_phase_name(room.phase).to_string(),
-                current_frame_id,
-                last_applied_frame_id,
-                snapshot: Some(room.snapshot()),
-                recent_inputs: room_frame_inputs_from_history(room, current_frame_id),
-                waiting_frame_id: room.current_waiting_frame_id(),
-                waiting_inputs: room_frame_inputs_from_pending(
-                    room,
-                    room.current_waiting_frame_id(),
-                ),
-                movement_state_json: room_transfer_movement_state_json(&transfer_state),
-                logic_state_json: room_transfer_logic_state_json(&transfer_state),
-                runtime_timers_json: room_transfer_timer_state_json(
-                    &transfer_state,
-                    json!({
-                        "hasEmptySince": room.empty_since.is_some(),
-                        "hasWaitStarted": room.wait_started_at.is_some(),
-                        "inputDelayFrames": policy.input_delay_frames,
-                        "snapshotIntervalFrames": policy.snapshot_interval_frames
-                    }),
-                )?,
-                match_id: room.match_id.clone().unwrap_or_default(),
-                checksum: String::new(),
-            }
-        };
-
-        payload.checksum = room_transfer_checksum(&payload);
-
-        let mut rooms = self.rooms.lock().await;
-        let room = match rooms.get_mut(room_id) {
-            Some(room) => room,
+        let room_entry = match self.get_room_entry(room_id).await {
+            Some(room_entry) => room_entry,
             None => {
                 warn!(
                     room_id = room_id,
                     rollout_epoch = rollout_epoch,
                     error_code = "ROOM_NOT_FOUND",
-                    checksum = %payload.checksum,
-                    room_version = payload.room_version,
                     "room transfer export rejected"
                 );
                 return Err("ROOM_NOT_FOUND");
             }
         };
+
+        let mut room = room_entry.lock().await;
+        if room.marked_for_destruction {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_NOT_FOUND",
+                "room transfer export rejected because room is being destroyed"
+            );
+            return Err("ROOM_NOT_FOUND");
+        }
         let was_exported = room.transfer_state.status == RoomTransferStatus::Exported;
         match room.transfer_state.status {
-            RoomTransferStatus::Frozen => {
-                room.transfer_state.status = RoomTransferStatus::Exported;
-                room.transfer_state.room_version = payload.room_version;
-                room.transfer_state.last_transfer_checksum = Some(payload.checksum.clone());
-            }
-            RoomTransferStatus::Exported => {
-                if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        expected = ?room.transfer_state.rollout_epoch,
-                        actual = rollout_epoch,
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
-                }
-                if room.transfer_state.last_transfer_checksum.as_deref()
-                    != Some(payload.checksum.as_str())
-                {
-                    warn!(
-                        room_id = room_id,
-                        rollout_epoch = rollout_epoch,
-                        error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
-                        current_status = transfer_status_label(room.transfer_state.status),
-                        expected = ?room.transfer_state.last_transfer_checksum,
-                        actual = %payload.checksum,
-                        room_version = room.transfer_state.room_version,
-                        "room transfer export rejected"
-                    );
-                    return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
-                }
-            }
+            RoomTransferStatus::Frozen | RoomTransferStatus::Exported => {}
             RoomTransferStatus::Retired => {
                 warn!(
                     room_id = room_id,
@@ -1625,6 +1647,87 @@ impl RoomManager {
                 );
                 return Err("ROOM_TRANSFER_NOT_FROZEN");
             }
+        }
+
+        if room.transfer_state.rollout_epoch.as_deref() != Some(rollout_epoch) {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_TRANSFER_EPOCH_MISMATCH",
+                current_status = transfer_status_label(room.transfer_state.status),
+                expected = ?room.transfer_state.rollout_epoch,
+                actual = rollout_epoch,
+                room_version = room.transfer_state.room_version,
+                "room transfer export rejected"
+            );
+            return Err("ROOM_TRANSFER_EPOCH_MISMATCH");
+        }
+
+        let policy = self.policies.resolve(&room.policy_id);
+        let current_frame_id = room.current_frame;
+        let last_applied_frame_id = room
+            .last_applied_inputs
+            .values()
+            .map(|input| input.frame_id)
+            .max()
+            .unwrap_or(current_frame_id);
+        let transfer_state = room.logic.export_transfer_state()?;
+
+        let room_version = if was_exported {
+            room.transfer_state.room_version
+        } else {
+            room.transfer_state.room_version.saturating_add(1)
+        };
+
+        let mut payload = RoomTransferPayload {
+            rollout_epoch: rollout_epoch.to_string(),
+            room_id: room.room_id.clone(),
+            room_version,
+            policy_id: room.policy_id.clone(),
+            owner_player_id: room.owner_player_id.clone(),
+            room_phase: room_phase_name(room.phase).to_string(),
+            current_frame_id,
+            last_applied_frame_id,
+            snapshot: Some(room.snapshot()),
+            recent_inputs: room_frame_inputs_from_history(&room, current_frame_id),
+            waiting_frame_id: room.current_waiting_frame_id(),
+            waiting_inputs: room_frame_inputs_from_pending(&room, room.current_waiting_frame_id()),
+            movement_state_json: room_transfer_movement_state_json(&transfer_state),
+            logic_state_json: room_transfer_logic_state_json(&transfer_state),
+            runtime_timers_json: room_transfer_timer_state_json(
+                &transfer_state,
+                json!({
+                    "hasEmptySince": room.empty_since.is_some(),
+                    "hasWaitStarted": room.wait_started_at.is_some(),
+                    "inputDelayFrames": policy.input_delay_frames,
+                    "snapshotIntervalFrames": policy.snapshot_interval_frames
+                }),
+            )?,
+            match_id: room.match_id.clone().unwrap_or_default(),
+            checksum: String::new(),
+        };
+        payload.checksum = room_transfer_checksum(&payload);
+
+        if was_exported {
+            if room.transfer_state.last_transfer_checksum.as_deref()
+                != Some(payload.checksum.as_str())
+            {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+                    current_status = transfer_status_label(room.transfer_state.status),
+                    expected = ?room.transfer_state.last_transfer_checksum,
+                    actual = %payload.checksum,
+                    room_version = room.transfer_state.room_version,
+                    "room transfer export rejected"
+                );
+                return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
+            }
+        } else {
+            room.transfer_state.status = RoomTransferStatus::Exported;
+            room.transfer_state.room_version = payload.room_version;
+            room.transfer_state.last_transfer_checksum = Some(payload.checksum.clone());
         }
 
         if was_exported {
@@ -1714,8 +1817,7 @@ impl RoomManager {
             }
         };
 
-        let mut rooms = self.rooms.lock().await;
-        if rooms.contains_key(&room_id) {
+        if self.room_exists(&room_id).await {
             warn!(
                 room_id = %room_id,
                 rollout_epoch = %rollout_epoch,
@@ -1788,16 +1890,19 @@ impl RoomManager {
         }
         room.transfer_state.status = RoomTransferStatus::OwnedByNew;
 
-        rooms.insert(room_id.clone(), room);
-        let room_count = rooms.len() as u64;
-        METRICS.set_room_count(room_count);
-        drop(rooms);
-
-        self.runtimes
-            .lock()
-            .await
-            .entry(room_id.clone())
-            .or_insert_with(RoomRuntime::default);
+        let (_room_entry, room_count, inserted) = self.publish_room_entry(&room_id, room).await;
+        if !inserted {
+            warn!(
+                room_id = %room_id,
+                rollout_epoch = %rollout_epoch,
+                error_code = "ROOM_TRANSFER_ROOM_CONFLICT",
+                checksum = %checksum,
+                room_version = source_room_version,
+                "room transfer import rejected because room already exists"
+            );
+            return Err("ROOM_TRANSFER_ROOM_CONFLICT");
+        }
+        METRICS.set_room_count(room_count as u64);
 
         info!(
             room_id = %room_id,
@@ -1843,9 +1948,8 @@ impl RoomManager {
             return Err("ROOM_TRANSFER_CHECKSUM_MISMATCH");
         }
 
-        let rooms = self.rooms.lock().await;
-        let room = match rooms.get(room_id) {
-            Some(room) => room,
+        let room_entry = match self.get_room_entry(room_id).await {
+            Some(room_entry) => room_entry,
             None => {
                 warn!(
                     room_id = room_id,
@@ -1858,6 +1962,18 @@ impl RoomManager {
                 return Err("ROOM_NOT_FOUND");
             }
         };
+        let room = room_entry.lock().await;
+        if room.marked_for_destruction {
+            warn!(
+                room_id = room_id,
+                rollout_epoch = rollout_epoch,
+                error_code = "ROOM_NOT_FOUND",
+                checksum = checksum,
+                room_version = room_version,
+                "room ownership confirm rejected because room is being destroyed"
+            );
+            return Err("ROOM_NOT_FOUND");
+        }
 
         if room.transfer_state.status != RoomTransferStatus::OwnedByNew {
             warn!(
@@ -1950,9 +2066,8 @@ impl RoomManager {
         }
 
         {
-            let mut rooms = self.rooms.lock().await;
-            let room = match rooms.get_mut(room_id) {
-                Some(room) => room,
+            let room_entry = match self.get_room_entry(room_id).await {
+                Some(room_entry) => room_entry,
                 None => {
                     warn!(
                         room_id = room_id,
@@ -1964,6 +2079,17 @@ impl RoomManager {
                     return Err("ROOM_NOT_FOUND");
                 }
             };
+            let mut room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                warn!(
+                    room_id = room_id,
+                    rollout_epoch = rollout_epoch,
+                    error_code = "ROOM_NOT_FOUND",
+                    checksum = checksum,
+                    "room transfer retire rejected because room is being destroyed"
+                );
+                return Err("ROOM_NOT_FOUND");
+            }
 
             if room.transfer_state.status == RoomTransferStatus::Retired {
                 info!(
@@ -2058,8 +2184,11 @@ impl RoomManager {
 
         let body = encode_body(&push);
         let targets = {
-            let rooms = self.rooms.lock().await;
-            let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+            let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                return Err("ROOM_NOT_FOUND");
+            }
             room.members
                 .values()
                 .filter(|member| !member.offline && !member.syncing)
@@ -2175,8 +2304,11 @@ impl RoomManager {
         };
         let body = encode_body(&push);
         let targets = {
-            let rooms = self.rooms.lock().await;
-            let room = rooms.get(room_id).ok_or("ROOM_NOT_FOUND")?;
+            let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                return Err("ROOM_NOT_FOUND");
+            }
             room.members
                 .values()
                 .filter(|member| !member.offline && !member.syncing)
@@ -2259,11 +2391,9 @@ impl RoomManager {
     }
 
     async fn ensure_room_tick_running(&self, room_id: &str) {
+        let runtime_entry = self.ensure_runtime_entry(room_id).await;
         let should_spawn = {
-            let mut runtimes = self.runtimes.lock().await;
-            let runtime = runtimes
-                .entry(room_id.to_string())
-                .or_insert_with(RoomRuntime::default);
+            let mut runtime = runtime_entry.lock().await;
             if runtime.tick_running {
                 false
             } else {
@@ -2284,15 +2414,21 @@ impl RoomManager {
             manager.run_room_tick_loop(room_id_owned).await;
         });
 
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.get_mut(room_id) {
-            runtime.tick_handle = Some(handle);
+        if let Some(runtime_entry) = self.get_runtime_entry(room_id).await {
+            let mut runtime = runtime_entry.lock().await;
+            if runtime.tick_running {
+                runtime.tick_handle = Some(handle);
+            } else {
+                handle.abort();
+            }
+        } else {
+            handle.abort();
         }
     }
 
     async fn stop_room_tick(&self, room_id: &str) {
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.get_mut(room_id) {
+        if let Some(runtime_entry) = self.get_runtime_entry(room_id).await {
+            let mut runtime = runtime_entry.lock().await;
             if let Some(handle) = runtime.tick_handle.take() {
                 handle.abort();
             }
@@ -2302,18 +2438,21 @@ impl RoomManager {
 
     async fn update_room_fps(&self, room_id: &str) {
         let target_fps = {
-            let rooms = self.rooms.lock().await;
-            let Some(room) = rooms.get(room_id) else {
+            let Some(room_entry) = self.get_room_entry(room_id).await else {
                 return;
             };
-            self.compute_room_fps(room)
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                return;
+            }
+            self.compute_room_fps(&room)
         };
 
         let changed = {
-            let mut runtimes = self.runtimes.lock().await;
-            let Some(runtime) = runtimes.get_mut(room_id) else {
+            let Some(runtime_entry) = self.get_runtime_entry(room_id).await else {
                 return;
             };
+            let mut runtime = runtime_entry.lock().await;
             let previous_fps = runtime.current_fps;
             runtime.current_fps = target_fps;
             if previous_fps != target_fps {
@@ -2367,10 +2506,10 @@ impl RoomManager {
         room_id: &str,
         fps: u16,
     ) -> Option<(FrameBundlePush, Vec<RoomLogicBroadcast>)> {
-        let mut rooms = self.rooms.lock().await;
-        let room = rooms.get_mut(room_id)?;
+        let room_entry = self.get_room_entry(room_id).await?;
+        let mut room = room_entry.lock().await;
 
-        if room.transfer_state.status.rejects_room_mutation() {
+        if room_rejects_mutation(&room) {
             return None;
         }
 
@@ -2417,7 +2556,7 @@ impl RoomManager {
             return None;
         }
 
-        let tick_inputs = resolve_tick_inputs(room, &participants, waiting_frame_id, &policy);
+        let tick_inputs = resolve_tick_inputs(&mut room, &participants, waiting_frame_id, &policy);
         let inputs = tick_inputs
             .iter()
             .map(frame_input_from_record)
@@ -2502,10 +2641,10 @@ impl RoomManager {
     async fn run_room_tick_loop(self, room_id: String) {
         loop {
             let fps = {
-                let runtimes = self.runtimes.lock().await;
-                let Some(runtime) = runtimes.get(&room_id) else {
+                let Some(runtime_entry) = self.get_runtime_entry(&room_id).await else {
                     break;
                 };
+                let runtime = runtime_entry.lock().await;
                 runtime.current_fps.max(1)
             };
 
@@ -2528,8 +2667,8 @@ impl RoomManager {
                 .await;
         }
 
-        let mut runtimes = self.runtimes.lock().await;
-        if let Some(runtime) = runtimes.get_mut(&room_id) {
+        if let Some(runtime_entry) = self.get_runtime_entry(&room_id).await {
+            let mut runtime = runtime_entry.lock().await;
             runtime.tick_running = false;
             runtime.tick_handle = None;
         }
@@ -2543,11 +2682,18 @@ impl RoomManager {
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
         let senders = {
-            let rooms = self.rooms.lock().await;
-            let Some(room) = rooms.get(room_id) else {
+            let Some(room_entry) = self.get_room_entry(room_id).await else {
                 info!(room_id = room_id, "broadcast_to_room: room not found");
                 return Ok(());
             };
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                info!(
+                    room_id = room_id,
+                    "broadcast_to_room: room is being destroyed"
+                );
+                return Ok(());
+            }
 
             let online = room.broadcast_members();
             info!(
@@ -2606,11 +2752,18 @@ impl RoomManager {
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
         let senders = {
-            let rooms = self.rooms.lock().await;
-            let Some(room) = rooms.get(room_id) else {
+            let Some(room_entry) = self.get_room_entry(room_id).await else {
                 info!(room_id = room_id, "broadcast_to_players: room not found");
                 return Ok(());
             };
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                info!(
+                    room_id = room_id,
+                    "broadcast_to_players: room is being destroyed"
+                );
+                return Ok(());
+            }
 
             let targets = target_player_ids
                 .iter()
@@ -2698,18 +2851,23 @@ impl RoomManager {
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        let outbound = {
-            let rooms = self.rooms.lock().await;
-            rooms.values().find_map(|room| {
-                room.members.get(player_id).and_then(|member| {
-                    if member.offline {
-                        None
-                    } else {
-                        Some((member.sender.clone(), member.close_state.clone()))
-                    }
-                })
-            })
-        };
+        let mut outbound = None;
+        for (_room_id, room_entry) in self.room_entries_snapshot().await {
+            let room = room_entry.lock().await;
+            if room.marked_for_destruction {
+                continue;
+            }
+            if let Some(candidate) = room.members.get(player_id).and_then(|member| {
+                if member.offline {
+                    None
+                } else {
+                    Some((member.sender.clone(), member.close_state.clone()))
+                }
+            }) {
+                outbound = Some(candidate);
+                break;
+            }
+        }
 
         if let Some((sender, close_state)) = outbound {
             if let Err(error) = try_send_outbound(
@@ -3231,17 +3389,70 @@ mod tests {
                 .unwrap();
         }
         manager.start_game("room-test", players[0]).await.unwrap();
-        {
-            let mut runtimes = manager.runtimes.lock().await;
-            if let Some(runtime) = runtimes.get_mut("room-test") {
-                if let Some(handle) = runtime.tick_handle.take() {
-                    handle.abort();
-                }
-                runtime.tick_running = false;
-            }
-        }
+        stop_runtime_for_test(&manager, "room-test").await;
 
         (manager, factory, receivers)
+    }
+
+    async fn stop_runtime_for_test(manager: &RoomManager, room_id: &str) {
+        if let Some(runtime_entry) = manager.get_runtime_entry(room_id).await {
+            let mut runtime = runtime_entry.lock().await;
+            if let Some(handle) = runtime.tick_handle.take() {
+                handle.abort();
+            }
+            runtime.tick_running = false;
+        }
+    }
+
+    async fn with_runtime_for_test<R>(
+        manager: &RoomManager,
+        room_id: &str,
+        f: impl FnOnce(&RoomRuntime) -> R,
+    ) -> R {
+        let runtime_entry = manager
+            .get_runtime_entry(room_id)
+            .await
+            .expect("room runtime should exist");
+        let runtime = runtime_entry.lock().await;
+        f(&runtime)
+    }
+
+    async fn runtime_exists_for_test(manager: &RoomManager, room_id: &str) -> bool {
+        manager.get_runtime_entry(room_id).await.is_some()
+    }
+
+    async fn insert_room_for_test(manager: &RoomManager, room_id: &str, room: Room) {
+        manager
+            .rooms
+            .write()
+            .await
+            .insert(room_id.to_string(), std::sync::Arc::new(Mutex::new(room)));
+    }
+
+    async fn with_room_for_test<R>(
+        manager: &RoomManager,
+        room_id: &str,
+        f: impl FnOnce(&Room) -> R,
+    ) -> R {
+        let room_entry = manager
+            .get_room_entry(room_id)
+            .await
+            .expect("room should exist");
+        let room = room_entry.lock().await;
+        f(&room)
+    }
+
+    async fn with_room_mut_for_test<R>(
+        manager: &RoomManager,
+        room_id: &str,
+        f: impl FnOnce(&mut Room) -> R,
+    ) -> R {
+        let room_entry = manager
+            .get_room_entry(room_id)
+            .await
+            .expect("room should exist");
+        let mut room = room_entry.lock().await;
+        f(&mut room)
     }
 
     fn drain_messages_of_type(
@@ -3292,6 +3503,70 @@ mod tests {
             .unwrap();
 
         assert!(manager.room_exists("room-test").await);
+    }
+
+    #[tokio::test]
+    async fn new_room_publish_creates_runtime_before_room_is_observable() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-test",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.room_exists("room-test").await);
+        assert!(runtime_exists_for_test(&manager, "room-test").await);
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(room.members.len(), 1);
+            assert!(room.members.contains_key("player-a"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn marked_for_destruction_room_rejects_later_operations() {
+        let (manager, _factory, _receivers) =
+            setup_started_room("default_match", &["player-a", "player-b"]).await;
+        with_room_mut_for_test(&manager, "room-test", |room| {
+            room.mark_for_destruction();
+        })
+        .await;
+
+        assert_eq!(
+            manager
+                .join_room(
+                    "room-test",
+                    "player-c",
+                    mpsc::channel(1024).0,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await,
+            Err("ROOM_NOT_FOUND")
+        );
+        assert_eq!(
+            manager.set_ready_state("room-test", "player-a", true).await,
+            Err("ROOM_NOT_FOUND")
+        );
+        assert_eq!(
+            manager
+                .accept_player_input("room-test", "player-a", 1, "move", "{}")
+                .await,
+            Err("ROOM_NOT_FOUND")
+        );
+        assert!(manager.process_room_tick("room-test", 10).await.is_none());
+        assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
     }
 
     #[tokio::test]
@@ -3415,14 +3690,11 @@ mod tests {
         }
         manager.start_game("room-test", "player-a").await.unwrap();
 
-        {
-            let runtimes = manager.runtimes.lock().await;
-            let runtime = runtimes
-                .get("room-test")
-                .expect("room runtime should exist");
+        with_runtime_for_test(&manager, "room-test", |runtime| {
             assert!(runtime.tick_running);
             assert!(runtime.tick_handle.is_some());
-        }
+        })
+        .await;
 
         manager
             .disconnect_room_member("room-test", "player-a")
@@ -3430,30 +3702,27 @@ mod tests {
         manager
             .disconnect_room_member("room-test", "player-b")
             .await;
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").expect("room should exist");
+        with_room_mut_for_test(&manager, "room-test", |room| {
             assert_eq!(room.phase, RoomPhase::InGame);
             room.wait_started_at = Some(Instant::now());
-        }
+        })
+        .await;
 
         manager
             .freeze_room_for_transfer("epoch-1", "room-test")
             .await
             .unwrap();
 
-        {
-            let runtimes = manager.runtimes.lock().await;
-            let runtime = runtimes
-                .get("room-test")
-                .expect("room runtime should remain tracked");
+        with_runtime_for_test(&manager, "room-test", |runtime| {
             assert!(!runtime.tick_running);
             assert!(runtime.tick_handle.is_none());
-        }
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").expect("room should exist");
-        assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
-        assert!(room.wait_started_at.is_none());
+        })
+        .await;
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
+            assert!(room.wait_started_at.is_none());
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3478,11 +3747,10 @@ mod tests {
         manager
             .disconnect_room_member("room-test", "player-b")
             .await;
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").expect("room should exist");
+        with_room_mut_for_test(&manager, "room-test", |room| {
             room.wait_started_at = Some(Instant::now());
-        }
+        })
+        .await;
         manager
             .freeze_room_for_transfer("epoch-1", "room-test")
             .await
@@ -3528,20 +3796,16 @@ mod tests {
                 .is_some_and(|value| value > 0)
         );
 
-        let last_active_before_tick = {
-            let rooms = manager.rooms.lock().await;
-            rooms
-                .get("room-test")
-                .expect("room should exist")
-                .last_active_at
-        };
+        let last_active_before_tick =
+            with_room_for_test(&manager, "room-test", |room| room.last_active_at).await;
         assert!(manager.process_room_tick("room-test", 10).await.is_none());
         assert_eq!(factory.recorded_ticks().len(), 1);
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").expect("room should exist");
-        assert_eq!(room.current_frame, 1);
-        assert_eq!(room.last_active_at, last_active_before_tick);
-        assert!(room.wait_started_at.is_none());
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(room.current_frame, 1);
+            assert_eq!(room.last_active_at, last_active_before_tick);
+            assert!(room.wait_started_at.is_none());
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3614,11 +3878,7 @@ mod tests {
             "default_match".to_string(),
             factory.create("default_match"),
         );
-        manager
-            .rooms
-            .lock()
-            .await
-            .insert("room-empty".to_string(), empty_room);
+        insert_room_for_test(&manager, "room-empty", empty_room).await;
 
         let (offline_tx, _offline_rx) = mpsc::channel(1024);
         manager
@@ -3698,7 +3958,7 @@ mod tests {
                 "room-importing" => RoomTransferStatus::Importing,
                 _ => unreachable!(),
             };
-            manager.rooms.lock().await.insert(room_id.to_string(), room);
+            insert_room_for_test(&manager, room_id, room).await;
         }
 
         let snapshot = manager.rollout_drain_snapshot("game-server-old", 50).await;
@@ -3751,7 +4011,7 @@ mod tests {
             );
             room.transfer_state.rollout_epoch = Some("epoch-1".to_string());
             room.transfer_state.status = status;
-            manager.rooms.lock().await.insert(room_id.to_string(), room);
+            insert_room_for_test(&manager, room_id, room).await;
         }
 
         let snapshot = manager.rollout_drain_snapshot("game-server-old", 50).await;
@@ -3783,12 +4043,11 @@ mod tests {
             .disconnect_room_member("room-test", "player-b")
             .await;
 
-        {
-            let rooms = manager.rooms.lock().await;
-            let room = rooms.get("room-test").unwrap();
+        with_room_for_test(&manager, "room-test", |room| {
             assert_eq!(room.members["player-a"].close_state.reason(), None);
             assert_eq!(room.members["player-b"].close_state.reason(), None);
-        }
+        })
+        .await;
 
         let delivery = manager
             .trigger_server_redirect(
@@ -3831,15 +4090,14 @@ mod tests {
             drain_messages_of_type(&mut receivers[1], MessageType::ServerRedirectPush).is_empty()
         );
 
-        {
-            let rooms = manager.rooms.lock().await;
-            let room = rooms.get("room-test").unwrap();
+        with_room_for_test(&manager, "room-test", |room| {
             assert_eq!(
                 room.members["player-a"].close_state.reason().as_deref(),
                 Some(SERVER_REDIRECT_CLOSE_REASON)
             );
             assert_eq!(room.members["player-b"].close_state.reason(), None);
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3857,13 +4115,12 @@ mod tests {
         let close_state = ConnectionCloseState::new();
         assert!(close_state.request_close("existing_reason"));
 
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").unwrap();
+        with_room_mut_for_test(&manager, "room-test", |room| {
             let member = room.members.get_mut("player-a").unwrap();
             member.sender = full_tx;
             member.close_state = close_state;
-        }
+        })
+        .await;
 
         let delivery = manager
             .trigger_server_redirect(
@@ -3892,16 +4149,17 @@ mod tests {
             }
         );
 
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").unwrap();
-        assert_eq!(
-            room.members["player-a"].close_state.reason().as_deref(),
-            Some("existing_reason")
-        );
-        assert_eq!(
-            room.members["player-b"].close_state.reason().as_deref(),
-            Some(SERVER_REDIRECT_CLOSE_REASON)
-        );
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(
+                room.members["player-a"].close_state.reason().as_deref(),
+                Some("existing_reason")
+            );
+            assert_eq!(
+                room.members["player-b"].close_state.reason().as_deref(),
+                Some(SERVER_REDIRECT_CLOSE_REASON)
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -3911,11 +4169,10 @@ mod tests {
         manager
             .disconnect_room_member("room-test", "player-b")
             .await;
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").unwrap();
+        with_room_mut_for_test(&manager, "room-test", |room| {
             room.members.get_mut("player-c").unwrap().syncing = true;
-        }
+        })
+        .await;
 
         let delivery = manager
             .trigger_rollout_drain_notice(RolloutDrainNotice {
@@ -3956,13 +4213,14 @@ mod tests {
         assert!(drain_messages_of_type(&mut receivers[1], MessageType::GameMessagePush).is_empty());
         assert!(drain_messages_of_type(&mut receivers[2], MessageType::GameMessagePush).is_empty());
 
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").unwrap();
-        assert!(
-            room.members
-                .values()
-                .all(|member| member.close_state.reason().is_none())
-        );
+        with_room_for_test(&manager, "room-test", |room| {
+            assert!(
+                room.members
+                    .values()
+                    .all(|member| member.close_state.reason().is_none())
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -4116,10 +4374,11 @@ mod tests {
         let result = manager.export_room_transfer("epoch-1", "room-test").await;
 
         assert_eq!(result, Err("UNSUPPORTED_ROOM_TRANSFER"));
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").expect("room should remain");
-        assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
-        assert!(room.transfer_state.last_transfer_checksum.is_none());
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
+            assert!(room.transfer_state.last_transfer_checksum.is_none());
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -4271,15 +4530,7 @@ mod tests {
             .start_game("room-movement-transfer", "player-a")
             .await
             .unwrap();
-        {
-            let mut runtimes = source.runtimes.lock().await;
-            if let Some(runtime) = runtimes.get_mut("room-movement-transfer") {
-                if let Some(handle) = runtime.tick_handle.take() {
-                    handle.abort();
-                }
-                runtime.tick_running = false;
-            }
-        }
+        stop_runtime_for_test(&source, "room-movement-transfer").await;
 
         source
             .accept_player_input(
@@ -4304,11 +4555,7 @@ mod tests {
             .await
             .unwrap();
 
-        {
-            let mut rooms = source.rooms.lock().await;
-            let room = rooms
-                .get_mut("room-movement-transfer")
-                .expect("source room should exist");
+        with_room_mut_for_test(&source, "room-movement-transfer", |room| {
             let member = room
                 .members
                 .get_mut("player-a")
@@ -4316,7 +4563,8 @@ mod tests {
             member.offline = true;
             member.offline_since = Some(Instant::now());
             room.mark_empty();
-        }
+        })
+        .await;
         source
             .freeze_room_for_transfer("epoch-1", "room-movement-transfer")
             .await
@@ -4362,11 +4610,7 @@ mod tests {
         let imported = target.import_room_transfer(payload).await.unwrap();
         assert_eq!(imported.0, checksum);
 
-        {
-            let rooms = target.rooms.lock().await;
-            let room = rooms
-                .get("room-movement-transfer")
-                .expect("target room should exist");
+        with_room_for_test(&target, "room-movement-transfer", |room| {
             assert_eq!(room.current_frame, 2);
             assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
             let game_state =
@@ -4375,7 +4619,8 @@ mod tests {
             assert_eq!(game_state["entity_count"], 1);
             assert_eq!(game_state["entities"][0]["moving"], true);
             assert_eq!(game_state["entities"][0]["last_input_frame"], 1);
-        }
+        })
+        .await;
 
         let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
         let recovery = target
@@ -4502,15 +4747,7 @@ mod tests {
             .start_game("room-combat-transfer", "player-a")
             .await
             .unwrap();
-        {
-            let mut runtimes = source.runtimes.lock().await;
-            if let Some(runtime) = runtimes.get_mut("room-combat-transfer") {
-                if let Some(handle) = runtime.tick_handle.take() {
-                    handle.abort();
-                }
-                runtime.tick_running = false;
-            }
-        }
+        stop_runtime_for_test(&source, "room-combat-transfer").await;
 
         source
             .accept_player_input(
@@ -4551,13 +4788,10 @@ mod tests {
             .await
             .unwrap();
 
-        let source_game_state = {
-            let rooms = source.rooms.lock().await;
-            let room = rooms
-                .get("room-combat-transfer")
-                .expect("source room should exist");
+        let source_game_state = with_room_for_test(&source, "room-combat-transfer", |room| {
             serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap()
-        };
+        })
+        .await;
         let source_player_b = combat_demo_entity_by_player(&source_game_state, "player-b");
         let source_player_b_hp = source_player_b["hp"].as_i64().unwrap();
         source
@@ -4689,18 +4923,15 @@ mod tests {
         let imported = target.import_room_transfer(payload.clone()).await.unwrap();
         assert_eq!(imported.0, checksum);
 
-        {
-            let rooms = target.rooms.lock().await;
-            let room = rooms
-                .get("room-combat-transfer")
-                .expect("target room should exist");
+        with_room_for_test(&target, "room-combat-transfer", |room| {
             assert_eq!(room.current_frame, 2);
             assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
             let imported_game_state =
                 serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
             assert_eq!(imported_game_state, source_game_state);
             assert_eq!(imported_game_state["next_snapshot_frame"], 5);
-        }
+        })
+        .await;
 
         let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
         target
@@ -4717,11 +4948,7 @@ mod tests {
             .await
             .unwrap();
 
-        {
-            let rooms = target.rooms.lock().await;
-            let room = rooms
-                .get("room-combat-transfer")
-                .expect("target room should exist");
+        with_room_for_test(&target, "room-combat-transfer", |room| {
             assert_eq!(room.current_frame, 3);
             let advanced_game_state =
                 serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap();
@@ -4747,7 +4974,8 @@ mod tests {
                 .find(|entity| entity["entity_id"] == 3)
                 .unwrap();
             assert!(dummy["x"].as_f64().unwrap() > exported_dummy_x);
-        }
+        })
+        .await;
 
         let mut invalid_json_payload = payload.clone();
         let mut logic_wrapper =
@@ -5262,9 +5490,7 @@ mod tests {
             .await
             .unwrap();
 
-        {
-            let rooms = target.rooms.lock().await;
-            let room = rooms.get("room-test").expect("imported room should exist");
+        with_room_for_test(&target, "room-test", |room| {
             assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
             assert_eq!(
                 room.transfer_state.rollout_epoch.as_deref(),
@@ -5277,7 +5503,8 @@ mod tests {
             );
             assert!(room.members.contains_key("player-a"));
             assert!(room.members.contains_key("player-b"));
-        }
+        })
+        .await;
 
         let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
         let reconnect = target
@@ -5305,11 +5532,12 @@ mod tests {
                 .any(|member| member.player_id == "player-b")
         );
 
-        let rooms = target.rooms.lock().await;
-        let room = rooms.get("room-test").expect("room should remain");
-        assert_eq!(rooms.len(), 1);
-        assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
-        assert_eq!(room.transfer_state.room_version, room_version);
+        assert_eq!(target.room_count().await, 1);
+        with_room_for_test(&target, "room-test", |room| {
+            assert_eq!(room.transfer_state.status, RoomTransferStatus::OwnedByNew);
+            assert_eq!(room.transfer_state.room_version, room_version);
+        })
+        .await;
         assert_eq!(target_factory.imported_transfer_states().len(), 1);
     }
 
@@ -5632,28 +5860,19 @@ mod tests {
             .await
             .unwrap();
         manager.start_game("room-test", "player-a").await.unwrap();
-        {
-            let mut runtimes = manager.runtimes.lock().await;
-            if let Some(runtime) = runtimes.get_mut("room-test") {
-                if let Some(handle) = runtime.tick_handle.take() {
-                    handle.abort();
-                }
-                runtime.tick_running = false;
-            }
-        }
+        stop_runtime_for_test(&manager, "room-test").await;
 
         manager
             .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
             .await
             .unwrap();
 
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").unwrap();
+        with_room_mut_for_test(&manager, "room-test", |room| {
             let member = room.members.get_mut("player-a").unwrap();
             member.offline = true;
             member.offline_since = Some(Instant::now());
-        }
+        })
+        .await;
 
         let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
         let recovery = manager
@@ -5710,15 +5929,7 @@ mod tests {
             .await
             .unwrap();
         manager.start_game("room-test", "player-a").await.unwrap();
-        {
-            let mut runtimes = manager.runtimes.lock().await;
-            if let Some(runtime) = runtimes.get_mut("room-test") {
-                if let Some(handle) = runtime.tick_handle.take() {
-                    handle.abort();
-                }
-                runtime.tick_running = false;
-            }
-        }
+        stop_runtime_for_test(&manager, "room-test").await;
 
         manager
             .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
@@ -5765,6 +5976,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_removes_runtime_so_reused_room_can_restart_tick() {
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client_and_cleanup_interval(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+            1,
+        );
+
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                "room-reused",
+                "player-a",
+                tx,
+                MemberRole::Player,
+                Some("disposable_match"),
+            )
+            .await
+            .unwrap();
+        assert!(runtime_exists_for_test(&manager, "room-reused").await);
+        manager.leave_room("room-reused", "player-a").await;
+
+        for _ in 0..30 {
+            if !manager.room_exists("room-reused").await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!manager.room_exists("room-reused").await);
+        assert!(!runtime_exists_for_test(&manager, "room-reused").await);
+
+        for player_id in ["player-a", "player-b"] {
+            let (tx, _rx) = mpsc::channel(1024);
+            manager
+                .join_room(
+                    "room-reused",
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+            manager
+                .set_ready_state("room-reused", player_id, true)
+                .await
+                .unwrap();
+        }
+
+        manager.start_game("room-reused", "player-a").await.unwrap();
+        with_runtime_for_test(&manager, "room-reused", |runtime| {
+            assert!(runtime.tick_running);
+            assert!(runtime.tick_handle.is_some());
+        })
+        .await;
+        stop_runtime_for_test(&manager, "room-reused").await;
+    }
+
+    #[tokio::test]
     async fn strict_wait_timeout_repeats_last_input() {
         let (manager, factory, _receivers) =
             setup_started_room("default_match", &["player-a", "player-b"]).await;
@@ -5783,11 +6053,10 @@ mod tests {
             .accept_player_input("room-test", "player-a", 2, "move", "{\"x\":3}")
             .await
             .unwrap();
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").unwrap();
+        with_room_mut_for_test(&manager, "room-test", |room| {
             room.wait_started_at = Some(Instant::now() - Duration::from_millis(500));
-        }
+        })
+        .await;
 
         let _ = manager.process_room_tick("room-test", 10).await;
         let recorded = factory.recorded_ticks();
@@ -5913,9 +6182,10 @@ mod tests {
         assert!(progressed.is_none());
         assert!(factory.recorded_ticks().is_empty());
 
-        let rooms = manager.rooms.lock().await;
-        let room = rooms.get("room-test").expect("room should exist");
-        assert_eq!(room.current_frame, 0);
+        with_room_for_test(&manager, "room-test", |room| {
+            assert_eq!(room.current_frame, 0);
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -5930,11 +6200,10 @@ mod tests {
         let progressed = manager.process_room_tick("room-test", 10).await;
         assert!(progressed.is_none());
 
-        {
-            let mut rooms = manager.rooms.lock().await;
-            let room = rooms.get_mut("room-test").unwrap();
+        with_room_mut_for_test(&manager, "room-test", |room| {
             room.wait_started_at = Some(Instant::now() - Duration::from_millis(500));
-        }
+        })
+        .await;
 
         manager
             .disconnect_room_member("room-test", "player-a")
