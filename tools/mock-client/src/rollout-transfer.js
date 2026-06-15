@@ -314,6 +314,45 @@ function buildProxyRouteUpsert(request, importResult, existingRoute) {
   };
 }
 
+function summarizeExistingRouteMetadata(route) {
+  if (!route) {
+    return null;
+  }
+  return {
+    roomId: routeField(route, "roomId", "room_id", ""),
+    ownerServerId: routeField(route, "ownerServerId", "owner_server_id", ""),
+    migrationState: routeField(route, "migrationState", "migration_state", ""),
+    roomVersion: routeField(route, "roomVersion", "room_version", 0),
+    lastTransferChecksum: routeField(
+      route,
+      "lastTransferChecksum",
+      "last_transfer_checksum",
+      ""
+    )
+  };
+}
+
+function buildRouteMetadataReport(existingRoute, options = {}) {
+  const found = Boolean(existingRoute);
+  return {
+    requiredExistingRoute: options.requiredExistingRoute === true,
+    found,
+    checkedVia: options.checkedVia || "proxy.getRoomRoute",
+    actionOnMissing: options.actionOnMissing || "allow_first_route_create",
+    ...(found ? { existingRoute: summarizeExistingRouteMetadata(existingRoute) } : {})
+  };
+}
+
+function metadataMissingError(expectedFailure = false) {
+  const error = Object.assign(new Error("ROOM_ROUTE_METADATA_MISSING"), {
+    code: "ROOM_ROUTE_METADATA_MISSING"
+  });
+  if (expectedFailure) {
+    error.expectedFailure = true;
+  }
+  return error;
+}
+
 function stageForFailureInjectionMode(mode) {
   switch (mode) {
     case ROOM_TRANSFER_FAILURE_INJECTION.IMPORT_CORRUPT_PAYLOAD:
@@ -540,12 +579,24 @@ export async function orchestrateRoomTransfer(request, clients) {
     const existingRoute = clients.proxy.getRoomRoute
       ? await clients.proxy.getRoomRoute(request.roomId)
       : null;
-
-    if (hasFailureInjection(
+    const missingRouteMetadataInjection = hasFailureInjection(
       failureInjection,
       ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
       [ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA]
-    )) {
+    );
+    const requireExistingRouteMetadata =
+      request.requireExistingRouteMetadata === true || missingRouteMetadataInjection;
+    context.routeMetadata = buildRouteMetadataReport(existingRoute, {
+      requiredExistingRoute: requireExistingRouteMetadata,
+      checkedVia: clients.proxy.getRoomRoute
+        ? "proxy.getRoomRoute"
+        : "proxy.getRoomRoute unavailable",
+      actionOnMissing: requireExistingRouteMetadata
+        ? "fail_before_proxy_route_upsert"
+        : "allow_first_route_create"
+    });
+
+    if (missingRouteMetadataInjection) {
       markFailureInjection(
         context,
         ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
@@ -555,9 +606,18 @@ export async function orchestrateRoomTransfer(request, clients) {
           actualRouteFound: Boolean(existingRoute)
         }
       );
-      throw Object.assign(new Error("ROOM_ROUTE_METADATA_MISSING"), {
-        code: "ROOM_ROUTE_METADATA_MISSING"
-      });
+      if (existingRoute) {
+        throw Object.assign(new Error("FAULT_DRILL_ROUTE_METADATA_PRESENT"), {
+          code: "FAULT_DRILL_ROUTE_METADATA_PRESENT",
+          expectedFailure: false
+        });
+      }
+    }
+
+    if (requireExistingRouteMetadata && !existingRoute) {
+      throw metadataMissingError(
+        missingRouteMetadataInjection || request.expectMissingRouteMetadataFailure === true
+      );
     }
 
     const route = withProxyRouteFailureInjection(

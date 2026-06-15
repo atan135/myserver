@@ -48,7 +48,30 @@ test("rollout transfer cli dry-run builds a safe three-process plan", () => {
   assert.equal(plan.plan.endpoints.gameProxyAdmin.actorState, "set");
   assert.equal(plan.plan.routeCas.proxyExpectedRoomVersion, "auto-from-existing-route");
   assert.equal(plan.plan.routeCas.proxyRoomVersion, "auto-next-version");
+  assert.equal(plan.plan.routeMetadata.requiredExistingRoute, false);
+  assert.equal(plan.plan.routeMetadata.actionOnMissing, "allow_first_route_create");
   assert.equal(plan.plan.timeoutMs, 6000);
+});
+
+test("rollout transfer cli dry-run can require existing route metadata", () => {
+  const options = parseArgs([
+    "--dry-run",
+    "--rollout-epoch", "rollout-test",
+    "--room-id", "room-test",
+    "--old-server-id", "game-server-old",
+    "--new-server-id", "game-server-new",
+    "--old-admin-port", "7500",
+    "--new-admin-port", "7501",
+    "--proxy-admin-url", "http://127.0.0.1:7101",
+    "--proxy-admin-actor", "ops@example.com",
+    "--require-existing-route-metadata"
+  ]);
+
+  const plan = buildTransferCliDryRunPlan(options);
+
+  assert.equal(plan.ok, true);
+  assert.equal(plan.plan.routeMetadata.requiredExistingRoute, true);
+  assert.equal(plan.plan.routeMetadata.actionOnMissing, "fail_before_proxy_route_upsert");
 });
 
 test("rollout transfer cli rejects invalid proxy admin actor before service calls", () => {
@@ -137,6 +160,55 @@ test("rollout transfer cli execution envelope summarizes transfer result", () =>
   assert.equal(envelope.summary.checksum, "checksum-1");
   assert.equal(envelope.summary.importedRoomVersion, 3);
   assert.equal(envelope.summary.proxyRoomVersion, 2);
+});
+
+test("rollout transfer cli execution envelope reports missing route metadata", () => {
+  const options = parseArgs([
+    "--rollout-epoch", "rollout-test",
+    "--room-id", "room-test",
+    "--old-server-id", "game-server-old",
+    "--new-server-id", "game-server-new",
+    "--old-admin-port", "7500",
+    "--new-admin-port", "7501",
+    "--proxy-admin-url", "http://127.0.0.1:7101",
+    "--proxy-admin-actor", "rollout-drill",
+    "--require-existing-route-metadata"
+  ]);
+
+  const envelope = buildTransferCliExecutionEnvelope(options, {
+    ok: false,
+    stage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+    errorCode: "ROOM_ROUTE_METADATA_MISSING",
+    error: "ROOM_ROUTE_METADATA_MISSING",
+    completedStages: [
+      ROOM_TRANSFER_STAGE.OLD_FREEZE,
+      ROOM_TRANSFER_STAGE.OLD_EXPORT,
+      ROOM_TRANSFER_STAGE.NEW_IMPORT,
+      ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+    ],
+    routeMetadata: {
+      requiredExistingRoute: true,
+      found: false,
+      checkedVia: "proxy.getRoomRoute",
+      actionOnMissing: "fail_before_proxy_route_upsert"
+    }
+  });
+
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.summary.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(envelope.summary.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.deepEqual(envelope.summary.completedStages, [
+    ROOM_TRANSFER_STAGE.OLD_FREEZE,
+    ROOM_TRANSFER_STAGE.OLD_EXPORT,
+    ROOM_TRANSFER_STAGE.NEW_IMPORT,
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+  ]);
+  assert.deepEqual(envelope.summary.routeMetadata, {
+    requiredExistingRoute: true,
+    found: false,
+    checkedVia: "proxy.getRoomRoute",
+    actionOnMissing: "fail_before_proxy_route_upsert"
+  });
 });
 
 test("rollout transfer cli dry-run reports missing required arguments without service calls", () => {

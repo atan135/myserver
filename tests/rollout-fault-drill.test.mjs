@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createSimulatedTransferClients,
   ROLLOUT_FAULT_DRILL,
   runRolloutFaultDrills
 } from "../tools/mock-client/src/rollout-fault-drill.js";
@@ -90,6 +91,12 @@ test("rollout fault drill simulate validates expected stop stages", async () => 
   assert.equal(routeMetadataMissing.result.expectedFailure, true);
   assert.equal(routeMetadataMissing.result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
   assert.equal(routeMetadataMissing.validation.expectedErrorCodeObserved, true);
+  assert.deepEqual(routeMetadataMissing.result.routeMetadata, {
+    requiredExistingRoute: true,
+    found: false,
+    checkedVia: "proxy.getRoomRoute",
+    actionOnMissing: "fail_before_proxy_route_upsert"
+  });
   assert.deepEqual(routeMetadataMissing.result.completedStages, [
     ROOM_TRANSFER_STAGE.OLD_FREEZE,
     ROOM_TRANSFER_STAGE.OLD_EXPORT,
@@ -187,6 +194,12 @@ test("route metadata missing fault does not rely on proxy upsert rejection", asy
   assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
   assert.equal(result.expectedFailure, true);
   assert.equal(result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.deepEqual(result.routeMetadata, {
+    requiredExistingRoute: true,
+    found: false,
+    checkedVia: "proxy.getRoomRoute",
+    actionOnMissing: "fail_before_proxy_route_upsert"
+  });
   assert.deepEqual(result.completedStages, [
     ROOM_TRANSFER_STAGE.OLD_FREEZE,
     ROOM_TRANSFER_STAGE.OLD_EXPORT,
@@ -200,4 +213,36 @@ test("route metadata missing fault does not rely on proxy upsert rejection", asy
     "new.confirmRoomOwnership",
     "proxy.getRoomRoute"
   ]);
+});
+
+test("route metadata missing fault reports precondition when metadata is still present", async () => {
+  const { calls, clients } = createSimulatedTransferClients({
+    rolloutEpoch: "rollout-test",
+    roomId: "room-test"
+  });
+
+  const result = await orchestrateRoomTransfer(
+    {
+      rolloutEpoch: "rollout-test",
+      roomId: "room-test",
+      oldServerId: "game-server-old",
+      newServerId: "game-server-new",
+      requireExistingRouteMetadata: true,
+      expectMissingRouteMetadataFailure: true,
+      failureInjection: {
+        stage: ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
+        mode: ROOM_TRANSFER_FAILURE_INJECTION.PROXY_MISSING_ROUTE_METADATA
+      }
+    },
+    clients
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(result.expectedFailure, false);
+  assert.equal(result.errorCode, "FAULT_DRILL_ROUTE_METADATA_PRESENT");
+  assert.equal(result.routeMetadata.requiredExistingRoute, true);
+  assert.equal(result.routeMetadata.found, true);
+  assert.equal(calls.includes("proxy.upsertRoomRoute"), false);
+  assert.equal(calls.includes("old.retireTransferredRoom"), false);
 });

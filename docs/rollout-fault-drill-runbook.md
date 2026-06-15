@@ -16,7 +16,7 @@
 |------|----------|------|----------|
 | `import-failure` | `new_import` | old freeze/export 后，在 new import 前篡改 transfer payload，预期 import 或 checksum 校验失败。 | 停在 `new_import`；不 confirm ownership，不 upsert proxy route，不 retire old room。 |
 | `route-upsert-failure` | `proxy_route_upsert` | import 与 ownership confirm 成功后，使用错误 `expected_room_version` 触发 proxy route CAS 失败。 | 停在 `proxy_route_upsert`；不 retire old room。 |
-| `route-metadata-missing` | `proxy_route_upsert` | import 与 ownership confirm 成功后，模拟 proxy 读取不到既有 room route metadata。 | 停在 `proxy_route_upsert`；不调用 `/room-route/upsert` 创建新 route，不 retire old room。 |
+| `route-metadata-missing` | `proxy_route_upsert` | import 与 ownership confirm 成功后，要求 proxy 真实读取既有 room route metadata；如果 route store 查不到该 room，则按缺失 metadata 失败。 | 停在 `proxy_route_upsert`；不调用 `/room-route/upsert` 创建新 route，不 retire old room。 |
 | `redirect-no-reconnect` | `redirect_no_reconnect` | 只触发或计划 `ServerRedirectPush`，明确不运行 mock-client reconnect 场景。 | 只验证 push/操作步骤；不声称 mybevy 已适配，不执行 reconnect。 |
 
 ## 默认 dry-run
@@ -46,7 +46,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
 - `stage` 停在预期故障阶段
 - 后续破坏性阶段未完成
 
-其中 `route-metadata-missing` 会在 `proxy.getRoomRoute` 返回缺失后直接失败，不继续调用 `proxy.upsertRoomRoute`，避免把缺失 metadata 当作首次建 route 成功。
+其中 `route-metadata-missing` 会在 `proxy.getRoomRoute` 返回缺失后直接失败，不继续调用 `proxy.upsertRoomRoute`，避免把缺失 metadata 当作首次建 route 成功。该检查与普通 transfer 的首次 route 创建能力是分开的：只有故障演练或 CLI 显式要求 existing route metadata 时才启用这个安全闸。
 
 ## 执行模式
 
@@ -62,8 +62,58 @@ node tools/mock-client/src/rollout-fault-drill-cli.js ^
   --new-server-id game-server-new ^
   --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
   --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
-  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>"
+  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>" ^
+  --proxy-admin-actor rollout-fault-drill
 ```
+
+`route-metadata-missing` 的 execute 模式不再伪造缺失 metadata。它会真实调用 proxy admin `GET /room-routes`，只有目标 `room_id` 在 route store 中确实缺失时才返回预期 `ROOM_ROUTE_METADATA_MISSING`。如果 metadata 仍存在，报告会以 `FAULT_DRILL_ROUTE_METADATA_PRESENT` 失败，表示演练前置条件没有制造成功；此时不会 upsert route，也不会 retire old room。
+
+真实缺失检查入口:
+
+```bash
+node tools/mock-client/src/rollout-fault-drill-cli.js ^
+  --execute ^
+  --drill route-metadata-missing ^
+  --rollout-epoch rollout-20260612-route-missing ^
+  --room-id room-empty-001 ^
+  --old-server-id game-server-old ^
+  --new-server-id game-server-new ^
+  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
+  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
+  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>" ^
+  --proxy-admin-actor rollout-route-metadata-recovery ^
+  --archive-file artifacts/rollout/route-metadata-missing.json
+```
+
+预期报告关键字段:
+
+- `ok=true`
+- `drills[0].validation.ok=true`
+- `drills[0].result.ok=false`
+- `drills[0].result.stage=proxy_route_upsert`
+- `drills[0].result.errorCode=ROOM_ROUTE_METADATA_MISSING`
+- `drills[0].result.expectedFailure=true`
+- `drills[0].result.completedStages=old_freeze,old_export,new_import,new_confirm_ownership`
+- `drills[0].result.routeMetadata.requiredExistingRoute=true`
+- `drills[0].result.routeMetadata.found=false`
+- `proxy.upsertRoomRoute` 和 `old.retireTransferredRoom` 不应出现在模拟 call list；真实 execute 可用 proxy audit / old room 状态复核没有发生 upsert/retire。
+
+如果只需要验证普通 transfer CLI 的安全闸，而不是跑完整 fault drill，可使用:
+
+```bash
+node tools/mock-client/src/rollout-transfer-cli.js ^
+  --rollout-epoch rollout-20260612-route-missing ^
+  --room-id room-empty-001 ^
+  --old-server-id game-server-old ^
+  --new-server-id game-server-new ^
+  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
+  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
+  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>" ^
+  --proxy-admin-actor rollout-route-metadata-recovery ^
+  --require-existing-route-metadata
+```
+
+该 CLI 输出统一 envelope。缺失时 envelope 顶层 `ok=false`，`summary.stage=proxy_route_upsert`、`summary.errorCode=ROOM_ROUTE_METADATA_MISSING`、`summary.routeMetadata.found=false`，并且 `summary.completedStages` 不包含 `old_retire`。
 
 `redirect-no-reconnect` 执行模式需要 redirect target:
 
@@ -93,10 +143,37 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --simulate --archive-file 
 
 归档内容是完整 JSON report，便于后续 CI 或人工复核。
 
+## route metadata 缺失后的恢复策略
+
+该故障发生在 old 已 freeze/export、new 已 import/confirm，但 proxy route 尚未切换且 old 未 retire 的阶段。当前 game-server 没有自动 unfreeze/abort transfer 控制口，因此不要在缺失 metadata 未查明前继续执行 `old_retire` 或手工把缺失 metadata 当作新建 route 成功。
+
+恢复前先判定:
+
+- proxy `GET /room-routes` 中目标 room 缺失，或 Redis route store 快照中的 `room_routes` 不含该 `room_id`。
+- old drain status 仍显示该 room 在 old 侧未 retired；如果能看到 route 样本，`roomVersion` 可作为恢复时的 CAS 基线。
+- new import/confirm 结果中的 checksum 与 roomVersion 保留在 fault drill report 中，后续只能用于比对，不代表 proxy route 已切换。
+- proxy audit 中没有成功的 `/room-route/upsert`；old admin 没有成功 retire。
+
+可选恢复路径:
+
+1. 人工恢复旧 metadata 后重新执行。
+   - 从可信来源恢复 room route：优先使用演练前归档的 `GET /room-routes`、Redis route store 备份、old drain status 中的 room route 样本。
+   - 恢复值应指向 `oldServerId`，`migration_state` 为 `OwnedByOld` 或 `FrozenForTransfer`，`room_version` 使用丢失前版本，`last_transfer_checksum` 使用丢失前值或空值。
+   - 通过 proxy admin `POST /room-route/upsert` 恢复时必须使用 CAS：`expected_room_version=0` 只适合确认 route 确实缺失后的人工恢复；如果 Redis 中又出现记录，改用记录中的实际版本和 checksum。
+   - 恢复后重新运行带 `--require-existing-route-metadata` 的 transfer CLI 或本 fault drill，确认 `routeMetadata.found=true` 后再进入正常迁移。
+
+2. 重新 upsert / 重新执行 transfer。
+   - 如果旧 metadata 已恢复且 old room 仍处于 `Exported`，可以重新执行同一 `rollout_epoch` / `room_id` 的 transfer 编排；old export 是幂等的，新服如果已存在导入 room 可能返回 conflict，需按实际错误决定是否换新的演练 room。
+   - 如果新服已保留导入 room 且无法重复 import，停止当前 room 的恢复演练，选择新的空房重新演练；不要绕过 import/confirm 直接 upsert proxy route。
+
+3. 保守中止。
+   - 如果无法确认丢失前 `room_version`、checksum、owner，或无法确认 old/new 唯一 owner 状态，则中止该 room 的恢复演练。
+   - 保留 report、proxy route store 快照、old/new drain status 和审计日志，交由人工清理测试环境；不要执行 `old_retire`，不要结束 rollout。
+
 ## 未覆盖范围
 
 - 真实 old/new/proxy 三进程自动化故障联调。
 - mybevy 客户端 redirect/reconnect 适配。
 - 部署平台自动停旧进程。
 - 同连接迁移 / L7 relay。
-- `route metadata` 真实丢失后的端到端恢复演练；当前只覆盖 dry-run / simulate / optional execute 的保守失败入口。
+- `route metadata` 真实丢失后的自动修复；当前覆盖 dry-run / simulate / optional execute 的保守失败入口和人工恢复 runbook。

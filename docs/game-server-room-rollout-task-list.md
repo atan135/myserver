@@ -512,12 +512,12 @@
 
 ### 9.4 故障演练
 
-当前状态（截至 `2026-06-12`）:
+当前状态（截至 `2026-06-15`）:
 
 - `tools/mock-client/src/rollout-fault-drill-cli.js` 已提供脚本级故障演练入口。默认 `dry-run` 只输出 JSON 计划，不访问服务、不调用写接口、不请求旧服停服；`--simulate` 使用纯 mock client 验证编排停止点；只有显式 `--execute` 才调用已运行服务的控制面接口。详见 [rollout 故障演练入口](./rollout-fault-drill-runbook.md)。
 - `orchestrateRoomTransfer` 已增加 opt-in failure injection，默认路径保持兼容。当前可模拟/执行 `import-failure` 和 `route-upsert-failure`，结果会输出 `ok=false`、`stage`、`expectedFailure=true`、`completedStages` 等字段，便于归档和后续 CI 消费。
 - `redirect-no-reconnect` 入口只触发或计划 `ServerRedirectPush`，并明确不运行 mock-client reconnect；该演练只覆盖 push/操作步骤，不代表 mybevy 已适配。独立的 `server-redirect-transfer-reconnect` 场景已覆盖 mock-client 真实重连验收。
-- 这些故障条目目前主要表示“脚本入口与纯模拟验证已具备”。真实 old/new/proxy 三进程自动化故障联调、部署平台自动停旧进程、同连接迁移和 route metadata 真实丢失恢复仍未完成。
+- 这些故障条目已覆盖脚本入口、纯模拟验证和一轮真实 route metadata 缺失安全失败验收。真实 old/new/proxy 三进程自动化故障联调、部署平台自动停旧进程、同连接迁移和 route metadata 自动修复仍未完成。
 
 - [ ] 导出中断演练。
 - [x] 导入失败演练。
@@ -528,7 +528,8 @@
   - 当前覆盖：`redirect-no-reconnect` 只触发或计划 redirect push，不运行 reconnect，不验证 mybevy。
 - [x] route metadata 丢失模拟演练。
   - 当前覆盖：`route-metadata-missing` 在 proxy 查询不到既有 room route metadata 后停在 `proxy_route_upsert`，不调用 `/room-route/upsert` 创建新 route，也不会 retire old room；已覆盖 dry-run、simulate 和 Node 测试。
-- [ ] route metadata 真实丢失后的恢复演练。
+- [x] route metadata 真实丢失后的恢复演练。
+  - 当前覆盖：`route-metadata-missing --execute` 会真实读取 proxy `/room-routes`，当目标 room route metadata 缺失时停在 `proxy_route_upsert`，报告 `ROOM_ROUTE_METADATA_MISSING`，不调用 `/room-route/upsert`，不 retire old room。2026-06-15 已用直连 old 创建的 `movement_demo` 空房 `route-missing-room-20260615101735` 验证真实缺失路径；fault drill 结束后、人工恢复前 old room 停在 `FrozenForTransfer`，proxy 仍无该 route。runbook 已补人工恢复、重新执行和保守中止策略；自动修复不在本项范围。
 
 完成标准:
 

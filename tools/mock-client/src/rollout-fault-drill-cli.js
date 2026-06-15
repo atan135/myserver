@@ -37,6 +37,7 @@ Options:
   --new-admin-token <token>              default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
   --proxy-admin-url <url>                default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
   --proxy-admin-token <token>            default: PROXY_ADMIN_TOKEN
+  --proxy-admin-actor <actor>            default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-fault-drill
   --redirect-target-host <host>          required with --execute redirect-no-reconnect
   --redirect-target-port <port>          required with --execute redirect-no-reconnect
   --redirect-target-server-id <id>       default: --new-server-id
@@ -68,6 +69,7 @@ function parseArgs(argv) {
     newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
     proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
     proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
+    proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "rollout-fault-drill",
     oldServerId: process.env.MYSERVER_OLD_SERVER_ID || "game-server-old",
     newServerId: process.env.MYSERVER_NEW_SERVER_ID || "game-server-new",
     timeoutMs: 5000
@@ -150,6 +152,9 @@ function parseArgs(argv) {
         break;
       case "--proxy-admin-token":
         ({ value: options.proxyAdminToken, nextIndex: index } = takeValue(index));
+        break;
+      case "--proxy-admin-actor":
+        ({ value: options.proxyAdminActor, nextIndex: index } = takeValue(index));
         break;
       case "--redirect-target-host":
         ({ value: options.redirectTargetHost, nextIndex: index } = takeValue(index));

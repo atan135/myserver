@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-15 09:33:54 +08:00
+更新时间：2026-06-15 10:20:57 +08:00
 
 ## 协作流程
 
@@ -232,9 +232,9 @@
 
 ### 4. route metadata 真实丢失后的恢复演练
 
-- 状态：待开始
-- 开始时间：待填写
-- 结束时间：待填写
+- 状态：已完成
+- 开始时间：2026-06-15 10:00:00 +08:00
+- 结束时间：2026-06-15 10:20:57 +08:00
 - 优先级：P1
 - 范围：
   - `game-proxy` route store
@@ -244,18 +244,62 @@
 - 目标：
   - 在真实 route metadata 缺失场景下验证控制面行为。
   - 明确恢复策略：人工恢复、重新导出导入、重新 upsert，或保守中止。
-- 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：第 1 项已覆盖模拟演练；真实 Redis/proxy route metadata 缺失恢复仍未执行。
+- 派发说明：
+  - 已派发给 subagent 实现 `route-metadata-missing` 真实缺失安全闸、CLI 参数、测试和 runbook。
+  - subagent 不直接 commit/push，不修改 `summary/todolist.md`，不触碰 `apps/chat-server/*` 既有无关 modified。
+- 已完成上下文：
+  - 第 1 项已覆盖模拟演练。
+  - `orchestrateRoomTransfer` 新增 opt-in `requireExistingRouteMetadata`，当 proxy `GET /room-routes` 查不到目标 room route 时，会在 `proxy_route_upsert` 阶段返回 `ROOM_ROUTE_METADATA_MISSING`，不调用 `/room-route/upsert`，不执行 `old_retire`。
+  - `route-metadata-missing --execute` 不再伪造 metadata 缺失；如果真实 proxy route 仍存在，会以 `FAULT_DRILL_ROUTE_METADATA_PRESENT` 报告前置条件未成立。
+  - `rollout-transfer-cli.js` 新增 `--require-existing-route-metadata`，执行 envelope 会输出 `summary.routeMetadata`。
+  - `docs/rollout-fault-drill-runbook.md` 和 `docs/rollout-three-process-drill-runbook.md` 已补充真实缺失执行入口、通过条件和人工恢复/重跑/保守中止策略。
 - 验收计划：
   - 构造真实 Redis/proxy route metadata 缺失。
   - 运行 fault drill 或手动控制面调用。
   - 确认不会错误 retire old room。
-- 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
-- 阻塞/回退：待填写
-- 交给下一 subagent 的上下文：待填写
-- 相关提交：待填写
+- 验收说明：
+  - 代码复核确认 `route-metadata-missing` 真实 execute 模式使用真实 `ProxyAdminClient.getRoomRoute`，不会通过 wrapper 强制返回 `null`。
+  - 单测覆盖：
+    - 普通 transfer 在 route 缺失时仍可首次创建 route，保持兼容。
+    - 显式 `requireExistingRouteMetadata` 时，route 缺失会停在 `proxy_route_upsert`，请求列表只到 `GET /room-routes`。
+    - fault drill 在 metadata 仍存在时返回 `FAULT_DRILL_ROUTE_METADATA_PRESENT`，不会 upsert 或 retire。
+  - 真实服务验收已通过：
+    - 环境：Redis、Core NATS、auth-http、old/new game-server、game-proxy。
+    - 准备 room：`.tmp\prepare-rollout-room.mjs` 直连 old `127.0.0.1:7000` 创建并 leave `route-missing-room-20260615101735`，policy 为 `movement_demo`。
+    - 前置检查：proxy `/room-routes` 中该 room 不存在，old drain status 中该 room 存在且为 `OwnedByOld`、`onlineMemberCount=0`。
+    - execute 报告：`.tmp\route-metadata-missing-fault-drill-report.json`。
+    - 报告结果：`ok=true`、`mode=execute`、drill `validation.ok=true`，但 transfer `result.ok=false`。
+    - 停止阶段：`result.stage=proxy_route_upsert`、`result.errorCode=ROOM_ROUTE_METADATA_MISSING`、`result.expectedFailure=true`。
+    - 已完成阶段只包含 `old_freeze`、`old_export`、`new_import`、`new_confirm_ownership`，不包含 `proxy_route_upsert` 或 `old_retire`。
+    - `result.routeMetadata.requiredExistingRoute=true`、`found=false`，确认真实 proxy route metadata 缺失。
+    - 事后 proxy `/room-routes` 仍无该 room；old drain status 显示该 room 为 `FrozenForTransfer`，不是 `RetiredOnOld`。
+  - 恢复验证：
+    - 人工按 runbook 将该 room 的 proxy route 恢复为 `game-server-old` / `FrozenForTransfer`，`room_version=1`、`expected_room_version=0`。
+    - 恢复后 proxy `/room-routes` 可见该 room route。
+    - 再次用 `rollout-transfer-cli --require-existing-route-metadata` 执行时不再报 `ROOM_ROUTE_METADATA_MISSING`，而是在 `new_import` 因 new 侧已导入同 room 返回 `ROOM_TRANSFER_ROOM_CONFLICT`，符合 runbook 中“同一 room 已导入时保守中止，不绕过 import/confirm 直接 upsert 或 retire”的说明。
+  - 未覆盖项：当前完成的是安全失败和人工恢复 runbook，不包含自动修复 route metadata、不包含真实 Redis 快照手术自动化。
+- 运行服务/依赖：
+  - 已使用 Redis、Core NATS、auth-http、old/new game-server、game-proxy。
+  - 关键端口：auth `3000`、old game/admin `7000/7500`、new game/admin `7001/7501`、proxy admin `7101`、proxy TCP fallback `14000`、Redis `6379`、NATS `4222`。
+  - `.tmp\route-metadata-missing-fault-drill-report.json`、`.tmp\route-metadata-missing-room-id.txt`、`.tmp\route-metadata-missing-epoch.txt` 为本地验收产物，不提交。
+- 测试命令：
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\rollout-fault-drill.test.mjs tests\rollout-transfer-cli.test.mjs tests\room-transfer-orchestrator.test.mjs`
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\server-redirect-reconnect.test.mjs`
+  - `npm run rollout:fault-drill -- --simulate --drill route-metadata-missing --rollout-epoch rollout-test --room-id room-test`
+  - `node tools\mock-client\src\rollout-transfer-cli.js --dry-run --rollout-epoch rollout-test --room-id room-test --old-server-id game-server-old --new-server-id game-server-new --old-admin-port 7500 --new-admin-port 7501 --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-actor rollout-route-metadata-recovery --require-existing-route-metadata`
+  - `node .tmp\prepare-rollout-room.mjs --room-id route-missing-room-20260615101735 --guest-id route-missing-room-20260615101735-guest --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --policy-id movement_demo --timeout-ms 10000`
+  - `node tools\mock-client\src\rollout-fault-drill-cli.js --execute --drill route-metadata-missing --rollout-epoch route-missing-20260615101808 --room-id route-missing-room-20260615101735 --old-server-id game-server-old --new-server-id game-server-new --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token <set> --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token <set> --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token <set> --proxy-admin-actor rollout-route-metadata-recovery --timeout-ms 15000 --archive-file .tmp\route-metadata-missing-fault-drill-report.json`
+  - `Invoke-RestMethod http://127.0.0.1:7101/room-routes -Headers @{ Authorization = 'Bearer <proxy-admin-token>' }`
+  - `Invoke-RestMethod http://127.0.0.1:3000/api/v1/internal/game-server/rollout-drain-status -Headers @{ 'X-Service-Token' = '<service-token>' }`
+- 阻塞/回退：
+  - 无当前阻塞。
+  - 如果真实恢复中 new 侧已经导入同 room，不要绕过 import/confirm 直接 upsert proxy route 或 retire old；应保守中止该 room，保留报告和状态快照，换新空房重新演练。
+  - 如果无法确认丢失前 `room_version`、checksum 或 owner，不要执行 `old_retire`，不要结束 rollout。
+- 交给下一 subagent 的上下文：
+  - 第 4 项真实 route metadata 缺失安全失败和人工恢复 runbook 已完成，不要重新打开。
+  - 第 5 项可继续处理部署平台自动停旧进程；注意本次验收留下的测试 room 已处于人为恢复后的 proxy route 状态，但 old/new 对同一 room 的 transfer 已不适合继续复用。
+  - `apps/chat-server/*` 仍为既有无关 modified，不要触碰或暂存。
+- 相关提交：本次提交 `test(rollout): 验证 route metadata 缺失恢复`
 
 ### 5. 部署平台自动停旧进程
 

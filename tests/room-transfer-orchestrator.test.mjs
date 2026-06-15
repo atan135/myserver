@@ -137,6 +137,41 @@ test("room transfer creates first proxy route with version one when route is abs
   assert.equal(result.proxyRoute.importedRoomVersion, 3);
 });
 
+test("room transfer requires existing route metadata when requested", async () => {
+  const { calls, clients } = createClients({ existingRoute: null });
+
+  const result = await orchestrateRoomTransfer(
+    {
+      ...request,
+      requireExistingRouteMetadata: true
+    },
+    clients
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+  assert.equal(result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.deepEqual(result.completedStages, [
+    ROOM_TRANSFER_STAGE.OLD_FREEZE,
+    ROOM_TRANSFER_STAGE.OLD_EXPORT,
+    ROOM_TRANSFER_STAGE.NEW_IMPORT,
+    ROOM_TRANSFER_STAGE.NEW_CONFIRM_OWNERSHIP
+  ]);
+  assert.deepEqual(calls, [
+    "old.freeze",
+    "old.export",
+    "new.import",
+    "new.confirm:checksum-1:3",
+    "proxy.getRoomRoute"
+  ]);
+  assert.deepEqual(result.routeMetadata, {
+    requiredExistingRoute: true,
+    found: false,
+    checkedVia: "proxy.getRoomRoute",
+    actionOnMissing: "fail_before_proxy_route_upsert"
+  });
+});
+
 test("room transfer stops when import checksum mismatches export checksum", async () => {
   const { calls, clients } = createClients({
     import: { ok: true, roomId: "room-1", checksum: "checksum-mismatch", roomVersion: 3 }
@@ -342,6 +377,49 @@ test("proxy admin client sends actor header for auditable writes", async () => {
     assert(requests[2].url.includes("current_room_id=room-1"));
     assert(requests[2].url.includes("preferred_server_id=game-server-new"));
     assert.equal(requests[2].actor, "ops@example.com");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("proxy admin client missing route plus required metadata stops before upsert", async () => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ routes: [] }));
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const { clients } = createClients({
+    existingRoute: {
+      room_id: "room-1",
+      room_version: 1,
+      last_transfer_checksum: ""
+    }
+  });
+  clients.proxy = new ProxyAdminClient({
+    baseUrl: `http://127.0.0.1:${port}`,
+    token: "proxy-token",
+    actor: "ops@example.com",
+    timeoutMs: 500
+  });
+
+  try {
+    const result = await orchestrateRoomTransfer(
+      {
+        ...request,
+        requireExistingRouteMetadata: true
+      },
+      clients
+    );
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT);
+    assert.equal(result.errorCode, "ROOM_ROUTE_METADATA_MISSING");
+    assert.equal(result.routeMetadata.found, false);
+    assert.deepEqual(requests, [{ method: "GET", url: "/room-routes" }]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

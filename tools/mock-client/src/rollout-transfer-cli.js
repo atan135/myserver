@@ -49,6 +49,7 @@ Options:
   --proxy-expected-room-version <n>
   --proxy-room-version <n>
   --proxy-expected-last-transfer-checksum <checksum>
+  --require-existing-route-metadata       fail before /room-route/upsert if proxy has no room route
   --timeout-ms <ms>                       default: 5000
   -h, --help`);
 }
@@ -168,6 +169,9 @@ export function parseArgs(argv) {
         break;
       case "--proxy-expected-last-transfer-checksum":
         ({ value: options.proxyExpectedLastTransferChecksum, nextIndex: index } = takeValue(index));
+        break;
+      case "--require-existing-route-metadata":
+        options.requireExistingRouteMetadata = true;
         break;
       case "--timeout-ms":
         ({ value: options.timeoutMs, nextIndex: index } = takeNumber(index, options.timeoutMs));
@@ -411,6 +415,12 @@ export function buildTransferCliDryRunPlan(options) {
         proxyRoomVersion: options.proxyRoomVersion ?? "auto-next-version",
         proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum ?? "auto-from-existing-route"
       },
+      routeMetadata: {
+        requiredExistingRoute: options.requireExistingRouteMetadata === true,
+        actionOnMissing: options.requireExistingRouteMetadata === true
+          ? "fail_before_proxy_route_upsert"
+          : "allow_first_route_create"
+      },
       timeoutMs: options.timeoutMs
     }
   };
@@ -442,7 +452,8 @@ export function buildTransferCliExecutionEnvelope(options, result, safetyOverrid
         errorCode: result?.errorCode || result?.code || "",
         checksum: result?.confirmed?.checksum || result?.imported?.checksum || result?.exported?.checksum || "",
         importedRoomVersion: result?.proxyRoute?.importedRoomVersion ?? result?.imported?.roomVersion,
-        proxyRoomVersion: result?.proxyRoute?.roomVersion
+        proxyRoomVersion: result?.proxyRoute?.roomVersion,
+        routeMetadata: result?.routeMetadata
       };
 
   return {
@@ -636,7 +647,8 @@ async function main() {
         newServerId: options.newServerId,
         proxyExpectedRoomVersion: options.proxyExpectedRoomVersion,
         proxyRoomVersion: options.proxyRoomVersion,
-        proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum
+        proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum,
+        requireExistingRouteMetadata: options.requireExistingRouteMetadata === true
       },
       { oldServer, newServer, proxy }
     );

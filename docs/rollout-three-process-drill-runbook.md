@@ -176,6 +176,37 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 3. 检查 old drain status 输出中 `ownedRoomCount=0`、`migratingRoomCount=0`、`connectionCount=0`；如开启 proxy 真实 drain 校验，`complete-if-drained` 不应返回 blocker。
 4. 需要演练停服安全闸时，再单独执行带 `-ExecuteSteps -AllowShutdownRequest` 的命令，或用 mock-client `request-server-shutdown` 场景调用；不要把 shutdown 作为默认执行路径。
 
+### route metadata 缺失恢复检查
+
+第 4 项故障恢复演练不走 `scripts/rollout-three-process-drill.ps1` 的默认成功迁移路径。主 agent 需要先在受控测试环境中制造目标 room 的 proxy route metadata 缺失，例如使用 Redis route store 快照备份后移除对应 `room_routes.<room_id>`，或在内存 route store 测试环境中通过重启/重置 route store 制造缺失。制造前必须归档 `GET /room-routes`、old drain status 和 Redis route store 原始快照，方便恢复。
+
+缺失制造完成后执行:
+
+```powershell
+node tools/mock-client/src/rollout-fault-drill-cli.js `
+  --execute `
+  --drill route-metadata-missing `
+  --rollout-epoch rollout-20260612-route-missing `
+  --room-id room-empty-001 `
+  --old-server-id game-server-old `
+  --new-server-id game-server-new `
+  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" `
+  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" `
+  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>" `
+  --proxy-admin-actor rollout-route-metadata-recovery `
+  --archive-file artifacts/rollout/route-metadata-missing.json
+```
+
+通过条件:
+
+- report `ok=true`，表示预期故障演练通过；该 drill 的 `validation.ok=true`，但 `result.ok=false`。
+- `result.stage=proxy_route_upsert`，`result.errorCode=ROOM_ROUTE_METADATA_MISSING`，`result.expectedFailure=true`。
+- `result.completedStages` 只到 `new_confirm_ownership`，不包含 `proxy_route_upsert` 或 `old_retire`。
+- `result.routeMetadata.requiredExistingRoute=true` 且 `result.routeMetadata.found=false`。
+- proxy audit 中没有成功 `/room-route/upsert`；old drain status / admin 状态中该 room 未 retired。
+
+恢复策略见 [rollout 故障演练入口](./rollout-fault-drill-runbook.md) 的 “route metadata 缺失后的恢复策略”。在缺失 metadata 未恢复并复核前，不要继续 `old_retire`，不要执行 `complete-if-drained`。
+
 最近一次人工验收记录见 `summary/todolist.md` 第 2 项。该次验收使用 Redis、Core NATS、auth-http、old/new game-server 和 game-proxy，跑通 old freeze/export、new import/confirm ownership、proxy route upsert、old retire 和 `complete-if-drained`；未传 `-AllowShutdownRequest`，因此没有请求自动停旧服。
 
 ## 仍未完成
@@ -184,6 +215,6 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 
 - 还没有把真实三进程联调纳入自动测试准入；当前只覆盖 dry-run / preflight / plan/result 归档级准入和一次人工验收记录。
 - 外部 `mybevy` redirect/reconnect 适配仍未完成。
-- route metadata 真实丢失后的恢复演练仍未完成。
+- route metadata 真实丢失已有 fault drill / transfer CLI 安全检查、人工恢复 runbook 和一轮真实 old/new/proxy/auth 受控验收；自动修复仍未完成。
 - 部署平台自动停止旧进程仍未完成。
 - 同连接迁移 / L7 relay 仍是后续目标态。

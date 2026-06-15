@@ -95,7 +95,7 @@ export const ROLLOUT_FAULT_DRILL_DEFINITIONS = [
       ROOM_TRANSFER_STAGE.OLD_RETIRE
     ],
     safety: [
-      "simulates proxy getRoomRoute returning no pre-existing room metadata",
+      "requires proxy getRoomRoute to observe that pre-existing room metadata is actually missing",
       "treats missing metadata as a proxy_route_upsert-stage failure before POST /room-route/upsert",
       "stops at proxy_route_upsert and does not retire the old room"
     ]
@@ -274,6 +274,7 @@ function createRealTransferClients(options) {
     proxy: new ProxyAdminClient({
       baseUrl: options.proxyAdminUrl || "http://127.0.0.1:7101",
       token: options.proxyAdminToken || "",
+      actor: options.proxyAdminActor || "rollout-fault-drill",
       timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
     })
   };
@@ -367,24 +368,6 @@ export function createSimulatedTransferClients(options = {}) {
   return { calls, clients: { oldServer, newServer, proxy } };
 }
 
-function withSimulatedMissingRouteMetadata(clients) {
-  const proxy = clients.proxy;
-  return {
-    ...clients,
-    proxy: {
-      async getRoomRoute(roomId) {
-        if (proxy.getRoomRoute) {
-          await proxy.getRoomRoute.call(proxy, roomId);
-        }
-        return null;
-      },
-      async upsertRoomRoute(route) {
-        return await proxy.upsertRoomRoute.call(proxy, route);
-      }
-    }
-  };
-}
-
 function buildTransferRequest(definition, options) {
   return {
     rolloutEpoch: options.rolloutEpoch || "rollout-fault-drill-sim",
@@ -394,6 +377,8 @@ function buildTransferRequest(definition, options) {
     proxyExpectedRoomVersion: options.proxyExpectedRoomVersion,
     proxyRoomVersion: options.proxyRoomVersion,
     proxyExpectedLastTransferChecksum: options.proxyExpectedLastTransferChecksum,
+    requireExistingRouteMetadata: definition.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING,
+    expectMissingRouteMetadataFailure: definition.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING,
     failureInjection: definition.failureInjection
   };
 }
@@ -408,10 +393,7 @@ async function runTransferDrill(definition, options, mode) {
     })
     : null;
   const clients = mock?.clients || createRealTransferClients(options);
-  const transferClients = definition.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING
-    ? withSimulatedMissingRouteMetadata(clients)
-    : clients;
-  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), transferClients);
+  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), clients);
   if (!mock) {
     return result;
   }
