@@ -18,7 +18,7 @@ preflight
 -> 可选 request-server-shutdown
 ```
 
-脚本默认是 dry-run，只做本地工具检查、端口探测、命令输出、`rollout-transfer-cli --dry-run` 机器可读计划校验和执行报告归档，不会启动服务，不会修改正在运行的服务状态，也不会请求旧服停服。本次任务只提供演练入口和文档，没有实际执行真实 old/new/proxy 三进程联调。
+脚本默认是 dry-run，只做本地工具检查、端口探测、命令输出、`rollout-transfer-cli --dry-run` 机器可读计划校验和执行报告归档，不会启动服务，不会修改正在运行的服务状态，也不会请求旧服停服。2026-06-13 已在真实 old/new/proxy/auth 环境中人工执行一轮 `movement_demo` 空房迁移控制面并通过；后续复现仍需要主 agent 或人工先确认依赖和服务状态。
 
 ## 前置条件
 
@@ -176,12 +176,14 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 3. 检查 old drain status 输出中 `ownedRoomCount=0`、`migratingRoomCount=0`、`connectionCount=0`；如开启 proxy 真实 drain 校验，`complete-if-drained` 不应返回 blocker。
 4. 需要演练停服安全闸时，再单独执行带 `-ExecuteSteps -AllowShutdownRequest` 的命令，或用 mock-client `request-server-shutdown` 场景调用；不要把 shutdown 作为默认执行路径。
 
+最近一次人工验收记录见 `summary/todolist.md` 第 2 项。该次验收使用 Redis、Core NATS、auth-http、old/new game-server 和 game-proxy，跑通 old freeze/export、new import/confirm ownership、proxy route upsert、old retire 和 `complete-if-drained`；未传 `-AllowShutdownRequest`，因此没有请求自动停旧服。
+
 ## 仍未完成
 
-这个入口只把当前已存在的控制面调用串成可重复步骤，不代表以下能力已经完成：
+这个入口只把当前已存在的控制面调用串成可重复步骤。它已有一轮真实服务人工验收，但不代表以下能力已经完成：
 
-- 本次任务没有实际启动或执行真实 old/new/proxy 三进程联调。
-- 还没有把真实三进程联调纳入自动测试准入；当前只覆盖 dry-run / preflight / plan/result 归档级准入。
+- 还没有把真实三进程联调纳入自动测试准入；当前只覆盖 dry-run / preflight / plan/result 归档级准入和一次人工验收记录。
 - 外部 `mybevy` redirect/reconnect 适配仍未完成。
+- route metadata 真实丢失后的恢复演练仍未完成。
 - 部署平台自动停止旧进程仍未完成。
 - 同连接迁移 / L7 relay 仍是后续目标态。

@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-13 21:32:57 +08:00
+更新时间：2026-06-15 09:33:54 +08:00
 
 ## 协作流程
 
@@ -272,7 +272,11 @@
   - 在灰度结束且旧服真实排空后，接入部署平台或进程管理器自动停止旧服进程。
   - 保留安全闸：drain enabled、connection/owned/migrating 均为 0。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - `RequestServerShutdownReq/Res` 已在 `game-server` admin/internal 通道落地。
+  - `auth-http` 已暴露 `POST /api/v1/internal/game-server/shutdown-if-drained`，会在触发前校验 drain mode、连接数、owned room 和 migrating room。
+  - `tools/mock-client` 已有 `request-server-shutdown` 场景，`scripts/rollout-three-process-drill.ps1` 也已有 `-AllowShutdownRequest` 安全闸参数。
+  - 尚未完成的是把该安全闸接入部署平台、进程管理器或统一控制面，实现灰度完成后的自动停旧服编排。
 - 验收计划：
   - 启动服务并构造已排空状态。
   - 验证安全闸不满足时不会触发停服。
@@ -298,7 +302,11 @@
   - 从当前 demo 级 NPC 迁移契约推进到真实行为树恢复点、AI timer、path、RNG 的完整迁移。
   - 导入后行为继续推进并保持可验证一致性。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - `RoomNpcTransferState` / `room-transfer.npc-state.v1` 结构化契约骨架已存在。
+  - `combat_demo` 已导出 training dummy / Monster 的 demo 级 NPC 状态，并在导入时与 combat ECS 状态交叉校验。
+  - room runtime timer/scheduler 已有迁移契约骨架，combat_demo 已覆盖 demo 级周期快照 scheduler 的导出、导入和继续运行。
+  - 尚未完成完整行为树恢复点、真实 AI timer、path、RNG 状态迁移。
 - 验收计划：
   - 增加至少一个真实或接近真实的 AI 状态 roundtrip 测试。
   - 验证导出、导入、继续 tick 后状态一致。
@@ -321,7 +329,10 @@
   - 降低当前全局 `Mutex<HashMap<...>>` 带来的锁热点。
   - 评估并落地 actor、shard 或拆锁方案。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - 当前 `RoomManager` 仍使用 `Arc<Mutex<HashMap<...>>>` 保存 `rooms` 和 `runtimes`。
+  - 现有 room lifecycle、drain、transfer、redirect/reconnect 单测较多，后续改造需要优先保持这些契约。
+  - 尚未看到 actor、shard、DashMap 或拆锁方案落地。
 - 验收计划：
   - 保持现有房间生命周期和 transfer 测试通过。
   - 增加并发房间操作或压力型单元测试。
@@ -335,8 +346,8 @@
 
 ### 8. 协议生成与一致性检查
 
-- 状态：待开始
-- 开始时间：待填写
+- 状态：进行中
+- 开始时间：2026-06-15 09:33:54 +08:00
 - 结束时间：待填写
 - 优先级：P2
 - 范围：
@@ -348,22 +359,26 @@
   - 建立 mock-client、mybevy、Rust、Node 之间的协议生成或一致性校验。
   - 降低手写消息号、字段和枚举漂移风险。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - 根 `package.json` 已有 `check:proto`，当前指向 `npm run check:mock-client-protocol`。
+  - `tools/check-mock-client-protocol.js` 已能校验 `tools/mock-client` 的 `MESSAGE_TYPE` 与 `apps/game-server/src/protocol/message_type.rs` 一致，并校验部分 movement 相关枚举与 `packages/proto/game.proto` 一致。
+  - 现有检查仍未覆盖外部 `mybevy`、`apps/chat-server` 本地 proto、game-proxy 消息号、字段级模型生成或完整多语言生成链路。
 - 验收计划：
-  - 增加 `check:proto` 或等价脚本。
-  - 覆盖 mock-client 与 `packages/proto` 的消息号/字段校验。
+  - 扩展 `check:proto` 或新增子命令，覆盖 mock-client、game-server、game-proxy 与 `packages/proto` 的消息号/字段校验。
+  - 在 `MYSERVER_CLIENT_ROOT` 可用时检查外部 `mybevy` 协议绑定；不可用时输出明确 skipped 结果。
   - 明确 chat proto 迁入共享包的路线。
 - 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
+- 运行服务/依赖：不需要启动服务；如校验外部客户端，需要设置 `MYSERVER_CLIENT_ROOT`。
+- 测试命令：
+  - `npm run check:proto`
 - 阻塞/回退：待填写
 - 交给下一 subagent 的上下文：待填写
-- 相关提交：待填写
+- 相关提交：部分基础能力已落地于 `197039f feat(infra): 收敛协议注册与迁移基础设施`；完整任务待提交。
 
 ### 9. DB migration 体系
 
-- 状态：待开始
-- 开始时间：待填写
+- 状态：进行中
+- 开始时间：2026-06-15 09:33:54 +08:00
 - 结束时间：待填写
 - 优先级：P2
 - 范围：
@@ -374,17 +389,25 @@
   - 从单一 `db/init.sql` 和局部 `ALTER TABLE IF NOT EXISTS` 过渡到版本化 migration。
   - 支持增量迁移、回滚或至少明确的修复脚本。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - 根 `package.json` 已有 `check:migrations`、`db:migrate` 和 `db:migrate:dry-run`。
+  - `tools/db-migrate.js` 已支持 migration 文件名/顺序/checksum 校验、dry-run、按 `MYSQL_URL` / `DATABASE_URL` 执行未应用 migration，并检查已应用 migration checksum。
+  - `scripts/db-migrate.ps1` 已提供 PowerShell 封装。
+  - `db/migrations/0001_create_schema_migrations.sql` 已创建 migration 元表。
+  - 尚未完成把 `db/init.sql` 拆成正式版本化初始 schema migration；也未形成已有库 baseline、增量升级和回滚/修复脚本说明。
 - 验收计划：
-  - 新增 migration 目录和版本表。
+  - 在现有 migration runner 基础上补齐正式初始 schema migration。
+  - 明确已有库 baseline 策略，避免重复执行 `db/init.sql` 或破坏已有数据。
   - 提供本地执行脚本。
   - 验证空库初始化和已有库增量升级路径。
 - 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
+- 运行服务/依赖：`--check` / `--dry-run` 不需要数据库；真实迁移需要 MySQL/MariaDB 和 `MYSQL_URL` / `DATABASE_URL`。
+- 测试命令：
+  - `npm run check:migrations`
+  - `npm run db:migrate:dry-run`
 - 阻塞/回退：待填写
 - 交给下一 subagent 的上下文：待填写
-- 相关提交：待填写
+- 相关提交：部分基础能力已落地于 `197039f feat(infra): 收敛协议注册与迁移基础设施`；完整任务待提交。
 
 ### 10. match-service 多实例与恢复
 
@@ -400,7 +423,10 @@
   - 设计并逐步实现匹配池、任务状态和事件流的多实例/重启恢复能力。
   - 引入租约、状态机和超时补偿。
 - 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
-- 已完成上下文：待填写
+- 已完成上下文：
+  - 当前 `match-service` 已有 gRPC 服务、内存匹配池、匹配任务、超时清理和 game-server 建房协作。
+  - `docs/match-service-design.md` 已描述当前实现和重启恢复缺口。
+  - 尚未看到 Redis/DB 状态存储、租约、多实例 owner 或重启恢复状态机落地。
 - 验收计划：
   - 先形成设计文档和最小状态持久化方案。
   - 覆盖撮合成功、失败、超时、取消和重启恢复测试。
