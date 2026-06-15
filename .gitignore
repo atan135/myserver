@@ -5,6 +5,7 @@ summary/
 .env
 .env.local
 *.local.json
+local_help.txt
 *.log
 logs/
 coverage/

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -32,6 +32,10 @@ const PROTO_ENUMS = [
 
 function readRepoFile(relativePath) {
   return readFileSync(path.join(rootDir, relativePath), "utf8");
+}
+
+function readFile(filePath) {
+  return readFileSync(filePath, "utf8");
 }
 
 function stripComments(source) {
@@ -120,6 +124,106 @@ function compareSubset(label, expected, actual) {
   return errors;
 }
 
+function firstExistingPath(baseDir, relativePaths) {
+  for (const relativePath of relativePaths) {
+    const candidate = path.join(baseDir, relativePath);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function readLocalHelpClientRoot() {
+  const localHelpPath = path.join(rootDir, "local_help.txt");
+  if (!existsSync(localHelpPath)) {
+    return null;
+  }
+
+  const lines = readFile(localHelpPath)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  for (const line of lines) {
+    const match = line.match(/^MYSERVER_CLIENT_ROOT\s*=\s*(.+)$/);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return lines[0] ?? null;
+}
+
+function validateMybevyBuildScript(buildSource, buildPath) {
+  const errors = [];
+  if (!/compile_protos\s*\(/.test(buildSource)) {
+    errors.push(`${buildPath} does not call prost_build::Config::compile_protos`);
+  }
+  if (!/game\.proto/.test(buildSource)) {
+    errors.push(`${buildPath} does not reference game.proto`);
+  }
+  if (!/join\("MyServer"\)[\s\S]*join\("packages"\)[\s\S]*join\("proto"\)/m.test(buildSource)) {
+    errors.push(`${buildPath} does not resolve proto input from MyServer/packages/proto`);
+  }
+  return errors;
+}
+
+function checkMybevyClientProtocol(expectedMessageTypes) {
+  const rawClientRoot = process.env.MYSERVER_CLIENT_ROOT?.trim() || readLocalHelpClientRoot();
+  if (!rawClientRoot) {
+    return {
+      checkedFiles: [],
+      errors: [],
+      skipped: "MYSERVER_CLIENT_ROOT is not set and local_help.txt has no client root"
+    };
+  }
+
+  const clientRoot = path.resolve(rawClientRoot);
+  if (!existsSync(clientRoot)) {
+    return {
+      checkedFiles: [],
+      errors: [`mybevy root does not exist: ${clientRoot}`],
+      skipped: null
+    };
+  }
+
+  const protocolPath = firstExistingPath(clientRoot, [
+    "project/src/myserver/protocol.rs",
+    "src/myserver/protocol.rs"
+  ]);
+  const buildPath = firstExistingPath(clientRoot, ["project/build.rs", "build.rs"]);
+  const errors = [];
+  const checkedFiles = [];
+
+  if (!protocolPath) {
+    errors.push(`mybevy protocol.rs not found under ${clientRoot}`);
+  } else {
+    checkedFiles.push(protocolPath);
+    const mybevyProtocolSource = readFile(protocolPath);
+    const mybevyMessageTypes = parseRustMessageTypes(mybevyProtocolSource);
+    errors.push(...compareSubset("mybevy MessageType", expectedMessageTypes, mybevyMessageTypes));
+    errors.push(
+      ...compareObject(
+        "mybevy MessageType::from_u16",
+        mybevyMessageTypes,
+        parseRustMessageTypeFromU16(mybevyProtocolSource)
+      )
+    );
+  }
+
+  if (!buildPath) {
+    errors.push(`mybevy build.rs not found under ${clientRoot}`);
+  } else {
+    checkedFiles.push(buildPath);
+    errors.push(...validateMybevyBuildScript(readFile(buildPath), buildPath));
+  }
+
+  return {
+    checkedFiles: checkedFiles.map((filePath) => path.relative(clientRoot, filePath)),
+    errors,
+    skipped: null
+  };
+}
+
 function main() {
   const errors = [];
   const protoSource = readRepoFile("packages/proto/game.proto");
@@ -152,6 +256,9 @@ function main() {
     errors.push(...compareObject(enumSpec.enumName, expectedEnum, enumSpec.actual));
   }
 
+  const mybevyResult = checkMybevyClientProtocol(expectedMessageTypes);
+  errors.push(...mybevyResult.errors);
+
   if (errors.length > 0) {
     console.error("protocol constants drift detected:");
     for (const error of errors) {
@@ -160,7 +267,12 @@ function main() {
     process.exit(1);
   }
 
-  console.log("protocol constants are in sync across mock-client, game-server, game-proxy, and proto enums.");
+  if (mybevyResult.skipped) {
+    console.log(`mybevy protocol check skipped: ${mybevyResult.skipped}.`);
+  } else {
+    console.log(`mybevy protocol checked: ${mybevyResult.checkedFiles.join(", ")}.`);
+  }
+  console.log("protocol constants are in sync across mock-client, game-server, game-proxy, optional mybevy, and proto enums.");
 }
 
 main();
