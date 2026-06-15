@@ -3718,6 +3718,34 @@ mod tests {
         f(&mut room)
     }
 
+    async fn setup_started_room_with_id(
+        manager: &RoomManager,
+        room_id: &str,
+        players: &[String],
+        receivers: &mut Vec<mpsc::Receiver<OutboundMessage>>,
+    ) {
+        for player_id in players {
+            let (tx, rx) = mpsc::channel(1024);
+            receivers.push(rx);
+            manager
+                .join_room(
+                    room_id,
+                    player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+            manager
+                .set_ready_state(room_id, player_id, true)
+                .await
+                .unwrap();
+        }
+        manager.start_game(room_id, &players[0]).await.unwrap();
+        stop_runtime_for_test(manager, room_id).await;
+    }
+
     fn drain_messages_of_type(
         receiver: &mut mpsc::Receiver<OutboundMessage>,
         message_type: MessageType,
@@ -6571,6 +6599,179 @@ mod tests {
             offline_player_index_for_test(&manager, "player-a").await,
             None
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cross_room_runtime_paths_keep_room_state_isolated() {
+        let room_count = 16;
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory.clone()),
+        );
+        let mut receivers = Vec::new();
+
+        for room_idx in 0..room_count {
+            let players = [
+                format!("player-{room_idx}-a"),
+                format!("player-{room_idx}-b"),
+            ];
+            setup_started_room_with_id(
+                &manager,
+                &format!("room-{room_idx}"),
+                &players,
+                &mut receivers,
+            )
+            .await;
+        }
+
+        let manager = Arc::new(manager);
+        let mut handles = Vec::new();
+        for room_idx in 0..room_count {
+            let manager = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move {
+                let room_id = format!("room-{room_idx}");
+                let player_a = format!("player-{room_idx}-a");
+                let player_b = format!("player-{room_idx}-b");
+
+                manager
+                    .accept_player_input(&room_id, &player_a, 1, "move", "{\"x\":1}")
+                    .await
+                    .unwrap();
+                manager
+                    .accept_player_input(&room_id, &player_b, 1, "move", "{\"x\":2}")
+                    .await
+                    .unwrap();
+                let tick = manager
+                    .process_room_tick(&room_id, 10)
+                    .await
+                    .expect("room should advance after both inputs");
+                assert_eq!(tick.0.room_id, room_id);
+                assert_eq!(tick.0.frame_id, 1);
+                assert_eq!(tick.0.inputs.len(), 2);
+
+                manager.disconnect_room_member(&room_id, &player_b).await;
+                assert_eq!(
+                    manager.find_room_by_offline_player(&player_b).await,
+                    Some(room_id.clone())
+                );
+
+                let (tx, _rx) = mpsc::channel(1024);
+                let recovery = manager
+                    .reconnect_room(&room_id, &player_b, tx)
+                    .await
+                    .unwrap();
+                assert_eq!(recovery.snapshot.room_id, room_id);
+                assert_eq!(manager.find_room_by_offline_player(&player_b).await, None);
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(manager.room_count().await, room_count);
+        assert_eq!(factory.recorded_ticks().len(), room_count);
+        for room_idx in 0..room_count {
+            let player_a = format!("player-{room_idx}-a");
+            let player_b = format!("player-{room_idx}-b");
+            assert_eq!(
+                player_room_index_for_test(&manager, &player_a).await,
+                Some(format!("room-{room_idx}"))
+            );
+            assert_eq!(
+                player_room_index_for_test(&manager, &player_b).await,
+                Some(format!("room-{room_idx}"))
+            );
+            assert_eq!(
+                offline_player_index_for_test(&manager, &player_b).await,
+                None
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
+        let room_count = 24;
+        let factory = RecordingRoomLogicFactory::default();
+        let manager = RoomManager::with_match_client(
+            crate::match_client::create_match_client_shared(),
+            Arc::new(factory),
+        );
+        let mut receivers = Vec::new();
+
+        for room_idx in 0..room_count {
+            let player_id = format!("indexed-player-{room_idx}");
+            let (tx, rx) = mpsc::channel(1024);
+            receivers.push(rx);
+            manager
+                .join_room(
+                    &format!("indexed-room-{room_idx}"),
+                    &player_id,
+                    tx,
+                    MemberRole::Player,
+                    Some("default_match"),
+                )
+                .await
+                .unwrap();
+        }
+
+        for receiver in &mut receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+
+        let manager = Arc::new(manager);
+        let mut send_handles = Vec::new();
+        for room_idx in 0..room_count {
+            let manager = Arc::clone(&manager);
+            send_handles.push(tokio::spawn(async move {
+                manager
+                    .send_to_player(
+                        &format!("indexed-player-{room_idx}"),
+                        MessageType::GameMessagePush,
+                        vec![room_idx as u8],
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for handle in send_handles {
+            handle.await.unwrap();
+        }
+
+        for (room_idx, receiver) in receivers.iter_mut().enumerate() {
+            let delivered = receiver
+                .try_recv()
+                .expect("indexed send should deliver to the target room");
+            assert_eq!(delivered.message_type, MessageType::GameMessagePush);
+            assert_eq!(delivered.body, vec![room_idx as u8]);
+            assert!(receiver.try_recv().is_err());
+        }
+
+        let mut disconnect_handles = Vec::new();
+        for room_idx in 0..room_count {
+            let manager = Arc::clone(&manager);
+            disconnect_handles.push(tokio::spawn(async move {
+                let room_id = format!("indexed-room-{room_idx}");
+                let player_id = format!("indexed-player-{room_idx}");
+                manager.disconnect_room_member(&room_id, &player_id).await;
+                assert_eq!(
+                    manager.find_room_by_offline_player(&player_id).await,
+                    Some(room_id)
+                );
+            }));
+        }
+        for handle in disconnect_handles {
+            handle.await.unwrap();
+        }
+
+        for room_idx in 0..room_count {
+            assert_eq!(
+                offline_player_index_for_test(&manager, &format!("indexed-player-{room_idx}"))
+                    .await,
+                Some(format!("indexed-room-{room_idx}"))
+            );
+        }
     }
 
     #[tokio::test]
