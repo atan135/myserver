@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-15 10:20:57 +08:00
+更新时间：2026-06-15 11:25:11 +08:00
 
 ## 协作流程
 
@@ -303,9 +303,9 @@
 
 ### 5. 部署平台自动停旧进程
 
-- 状态：待开始
-- 开始时间：待填写
-- 结束时间：待填写
+- 状态：已完成
+- 开始时间：2026-06-15 11:02:15 +08:00
+- 结束时间：2026-06-15 11:25:11 +08:00
 - 优先级：P1
 - 范围：
   - `RequestServerShutdownReq/Res`
@@ -315,22 +315,40 @@
 - 目标：
   - 在灰度结束且旧服真实排空后，接入部署平台或进程管理器自动停止旧服进程。
   - 保留安全闸：drain enabled、connection/owned/migrating 均为 0。
-- 派发说明：待派发时填写单个子任务边界；subagent 不直接 commit/push。
+- 派发说明：
+  - 本项先落地本地/部署编排适配层：在已有 shutdown 安全闸通过后，等待并验证指定旧服进程 PID 退出。
+  - 不改 `RequestServerShutdownReq/Res` 的服务端安全条件，不引入强杀旧进程逻辑，不触碰 `apps/chat-server/*` 既有无关 modified。
 - 已完成上下文：
   - `RequestServerShutdownReq/Res` 已在 `game-server` admin/internal 通道落地。
   - `auth-http` 已暴露 `POST /api/v1/internal/game-server/shutdown-if-drained`，会在触发前校验 drain mode、连接数、owned room 和 migrating room。
   - `tools/mock-client` 已有 `request-server-shutdown` 场景，`scripts/rollout-three-process-drill.ps1` 也已有 `-AllowShutdownRequest` 安全闸参数。
-  - 尚未完成的是把该安全闸接入部署平台、进程管理器或统一控制面，实现灰度完成后的自动停旧服编排。
+  - 本次实现方向：mock-client 的 `request-server-shutdown` 增加可选 `--shutdown-wait-pid` / `--shutdown-wait-timeout-ms`，在安全闸 `ok=true` 后等待该 PID 退出；三进程脚本增加 `-OldProcessPid` / `-OldProcessPidFile` / `-OldProcessPidName` / `-ShutdownWaitTimeoutMs`，把进程管理器 PID 接入 shutdown 后验证，并在 report 中输出 `old-process-stop` 阶段。
 - 验收计划：
-  - 启动服务并构造已排空状态。
-  - 验证安全闸不满足时不会触发停服。
-  - 验证安全闸满足时可请求 graceful shutdown。
-- 验收说明：待填写
-- 运行服务/依赖：待填写
-- 测试命令：待填写
-- 阻塞/回退：待填写
-- 交给下一 subagent 的上下文：待填写
-- 相关提交：待填写
+  - 运行新增 Node 单测，覆盖无 PID 跳过、安全闸失败不等待、进程退出成功、进程未退出超时。
+  - 运行三进程脚本 dry-run，确认 PID 文件参数进入 report 且不启动服务、不请求 shutdown。
+  - 如真实 old/new/proxy/auth 环境仍可用，再以独立旧服进程或现有 PID 文件做可选 execute 验收；否则记录未执行真实停旧服，避免误停用户环境。
+- 验收说明：
+  - `tools/mock-client` 的 `request-server-shutdown` 已支持 `--shutdown-wait-pid` / `--shutdown-wait-timeout-ms`，只在 shutdown 安全闸 `ok=true` 后等待旧进程退出。
+  - `request-server-shutdown` 已补 `--json-output` 机器可读 envelope；安全闸业务 `ok=false` 时会返回非 0，避免脚本误报 `shutdown-safety-gate=ok`。
+  - `scripts/rollout-three-process-drill.ps1` 已支持 `-OldProcessPid`、`-OldProcessPidFile`、`-OldProcessPidName`、`-ShutdownWaitTimeoutMs`，report 中输出 `inputs.oldProcessManager`、`safety.waitsForOldProcessExit`、`shutdown`、`old-process-stop` 阶段。
+  - 真实 `-ExecuteSteps -AllowShutdownRequest` 会请求旧服 graceful shutdown，本次未执行，避免误停用户当前环境；旧进程退出等待由单测和 dry-run report 覆盖。
+- 运行服务/依赖：
+  - 本次 Node 单测、参数解析验证和三进程脚本 dry-run 不需要启动 Redis、NATS、auth-http、game-server 或 game-proxy。
+  - 真实 execute 验收需要用户确认后启动 Redis、Core NATS、auth-http、old/new game-server、game-proxy，并提供 old PID 或 PID 文件。
+- 测试命令：
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\request-server-shutdown-process.test.mjs`
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests\server-redirect-reconnect.test.mjs tests\rollout-transfer-cli.test.mjs`
+  - `node --input-type=module -e "import { parseArgs } from './tools/mock-client/src/args.js'; const o=parseArgs(['--scenario','request-server-shutdown','--shutdown-wait-pid','123','--shutdown-wait-timeout-ms','456','--json-output']); console.log(JSON.stringify({scenario:o.scenario, shutdownWaitPid:o.shutdownWaitPid, shutdownWaitTimeoutMs:o.shutdownWaitTimeoutMs, jsonOutput:o.jsonOutput}))"`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rollout-three-process-drill.ps1 -SkipPortProbe -RoomId room-test -RolloutEpoch rollout-test -OldProcessPid 999999 -ShutdownWaitTimeoutMs 1000 -ReportPath .tmp\rollout-three-process-drill-shutdown-dry-run.json`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rollout-three-process-drill.ps1 -SkipPortProbe -AllowShutdownRequest -RoomId room-test -RolloutEpoch rollout-test -OldProcessPid 999999 -ShutdownWaitTimeoutMs 1000 -ReportPath .tmp\rollout-three-process-drill-shutdown-planned.json`
+  - `git diff --check`
+- 阻塞/回退：
+  - 生产部署平台自身的实例 ID、PID 文件生成或 stop hook 调用仍需按实际平台接入；本项完成的是本地 / 部署编排适配层和旧 PID 退出验证。
+  - 回退时可不传 `-OldProcessPid` / `-OldProcessPidFile`，脚本仍只执行原有 shutdown safety gate；不影响服务端 `RequestServerShutdownReq/Res` 安全条件。
+- 交给下一 subagent 的上下文：
+  - `apps/chat-server/*` 仍为既有无关 modified，不要触碰或暂存。
+  - 后续若接生产平台，只需要把平台的 old 实例 PID 文件或 stop hook 结果接入 `-OldProcessPidFile` / `-OldProcessPid`，不要绕过 shutdown-if-drained 安全闸。
+- 相关提交：待提交 `test(rollout): 接入旧服停进程验证`
 
 ### 6. 完整 NPC/AI 行为迁移
 

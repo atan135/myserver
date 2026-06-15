@@ -213,7 +213,13 @@ async function main() {
   }
 
   if (options.scenario === SCENARIO.REQUEST_SERVER_SHUTDOWN) {
-    await runRequestServerShutdown(options);
+    const result = await runRequestServerShutdown(options);
+    if (options.jsonOutput) {
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+      return;
+    }
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

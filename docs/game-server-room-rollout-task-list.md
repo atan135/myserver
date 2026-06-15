@@ -23,7 +23,7 @@
 - `M1`：核心能力已完成。`game-proxy` 已有 rollout session、room/player route 元数据、按 room/player 选 upstream 的路由逻辑和基础管理接口。
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mock-client 已在真实 old/new/proxy/auth 环境中验证 redirect -> transfer -> proxy reconnect，外部 mybevy 适配仍未完成。
-- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；combat ECS 已在 `combat_state_json` 中迁移玩家与怪物基础 ECS 数据，`npc_state_json` 已增加 `room-transfer.npc-state.v1` 结构化运行态契约骨架，并在 combat_demo 中导出 training dummy / Monster 的 demo 级 NPC 状态且导入时与 combat ECS 交叉校验；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy/auth 空房迁移控制面已人工执行通过，脚本 dry-run/execute 报告、transfer CLI envelope、故障演练模拟入口已具备；尚未完成自动测试准入、真实三进程 route metadata 丢失恢复、完整行为树恢复、真实 AI timer/path/RNG 恢复、真实独立 timer wheel / scheduler、部署平台自动停旧进程和外部 mybevy 验收。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；combat ECS 已在 `combat_state_json` 中迁移玩家与怪物基础 ECS 数据，`npc_state_json` 已增加 `room-transfer.npc-state.v1` 结构化运行态契约骨架，并在 combat_demo 中导出 training dummy / Monster 的 demo 级 NPC 状态且导入时与 combat ECS 交叉校验；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy/auth 空房迁移控制面已人工执行通过，脚本 dry-run/execute 报告、transfer CLI envelope、故障演练模拟入口已具备；尚未完成自动测试准入、真实三进程 route metadata 丢失恢复、完整行为树恢复、真实 AI timer/path/RNG 恢复、真实独立 timer wheel / scheduler、生产部署平台 stop hook 接入和外部 mybevy 验收。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
 
 ## 1. 里程碑划分
 
@@ -419,7 +419,7 @@
 - `auth-http` 已把 `GetRolloutDrainStatusReq/Res` 暴露为已鉴权内部控制接口 `GET /api/v1/internal/game-server/rollout-drain-status`，可作为 proxy 自动收尾后、停旧服前的人工或控制面校验入口。
 - `tools/mock-client` 已增加 `rollout-drain-status` 场景，通过 `auth-http` 内部控制接口打印旧服真实 drain mode、连接数、仍持有 room 数、迁移中 room 数、已 retired room 数、可接管空房数量、route 样本和可接管空房样本。
 - `game-proxy` 已支持手动结束 rollout 并清理 route metadata，也已支持 `POST /rollout/complete-if-drained` 基于 proxy route store 自动收尾：当前 epoch 内仍有 old owner / 迁移中 room route 或指向 old 的 player route 时返回阻塞计数和示例 id；排空后结束 rollout 并返回清理摘要。
-- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；`retiredRoomCount` / `retired_room_count` 作为观测字段透传，不改变 pass/fail 判定；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代完整部署编排自动停旧进程控制面。
+- `game-proxy` 自动收尾已支持可选结合旧服真实 drain status：启用 `PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED=true` 后，proxy route store 排空后还会通过 `auth-http` 内部接口查询旧服真实状态，只有 HTTP 2xx、`ok=true` 且 `ownedRoomCount == 0`、`migratingRoomCount == 0`、`connectionCount == 0` 才结束 rollout；`retiredRoomCount` / `retired_room_count` 作为观测字段透传，不改变 pass/fail 判定；失败、超时、非 2xx、JSON 解析失败或字段不满足会返回 `409` 并保留 rollout session。该能力默认关闭，仍不能替代生产部署平台自身的 stop hook / 实例管理接入。
 - `game-server` 已通过已鉴权 admin/internal 控制通道增加 `RequestServerShutdownReq/Res`，并由 `auth-http` 暴露为 `POST /api/v1/internal/game-server/shutdown-if-drained`。入口会在触发前校验 `drain_mode_enabled == true`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0`；未通过时返回 `ok=false` 和明确错误码，不触发 shutdown；通过后先写回成功响应，再触发现有 graceful shutdown 信号。`retired_room_count` 只作为观测字段，不阻塞停服。`tools/mock-client` 已增加 `request-server-shutdown` 场景用于人工演练。
 - `admin-api` / `admin-web` 已补齐第一阶段控制面周期轮询、展示和告警闭环：`GET /api/admin/monitoring/rollout-drain` 读取 `game-proxy` admin HTTP `GET /rollout`，归一化 active / empty / blocked / drained / interrupted / error 状态、阻塞计数和样本，并由监控总览页每 5 秒轮询展示。该能力只做只读观测和人工收尾提示，不会调用自动停旧服。
 - `scripts/rollout-three-process-drill.ps1` 已提供第一阶段 old/new/proxy 演练入口，默认 dry-run，只做工具检查、端口探测、步骤命令输出和 `rollout-transfer-cli --dry-run` JSON 计划校验；显式 `-ExecuteSteps` 才调用已运行服务的控制面接口，`request-server-shutdown` 还需要额外 `-AllowShutdownRequest`。详见 [old/new/proxy 三进程 rollout 演练入口](./rollout-three-process-drill-runbook.md)。2026-06-13 已在真实 old/new/proxy/auth 环境中人工执行空房迁移控制面并通过；该验收仍未沉淀为自动测试准入。
@@ -466,7 +466,8 @@
 ### 8.3 停服流程
 
 - [x] 在 game-server 自身提供旧服排空后的受控 graceful shutdown 请求入口。
-- [ ] 接入部署平台 / 进程管理器，在灰度结束后自动停止旧进程。
+- [x] 接入本地 / 进程管理器 PID 验证适配层，在 shutdown 安全闸通过后等待旧进程退出。
+- [ ] 接入生产部署平台自身的实例 ID、PID 文件或 stop hook。
 - [x] 停服前再次校验 route 中已无 `owner_server_id == old_server` 的 room。
 - [x] 旧服停服后，`proxy` 自动退回普通单服路由模式。
 
@@ -474,7 +475,7 @@
 
 - 旧服只能在 room 全部接管并且连接排空后退出。
 
-当前实现说明：`game-proxy` 的 `complete-if-drained` 和 `/rollout/end` 在结束 rollout 前通过 route store 显式检查当前 `rollout_epoch` 内是否仍有 `owner_server_id == old_server` 的 room route，并继续阻塞迁移中 / 失败 room route 与指向旧服的 player route；未排空时保留 rollout session，不允许自动收尾。route store 完成 rollout 后会将 `new_server` 的 upstream operation state 置为 `Active`、`old_server` 置为 `Draining`，使没有 `rollout_session` 的默认新房路由稳定落到新服。game-server 现在可在已 drain 且真实排空后通过 `RequestServerShutdownReq/Res` 触发自身 graceful shutdown 信号，但真实部署平台 old process 自动停止仍未实现，后续需要部署控制面或运维编排负责；当前监控页只展示状态和告警，不提供自动停进程按钮。
+当前实现说明：`game-proxy` 的 `complete-if-drained` 和 `/rollout/end` 在结束 rollout 前通过 route store 显式检查当前 `rollout_epoch` 内是否仍有 `owner_server_id == old_server` 的 room route，并继续阻塞迁移中 / 失败 room route 与指向旧服的 player route；未排空时保留 rollout session，不允许自动收尾。route store 完成 rollout 后会将 `new_server` 的 upstream operation state 置为 `Active`、`old_server` 置为 `Draining`，使没有 `rollout_session` 的默认新房路由稳定落到新服。game-server 现在可在已 drain 且真实排空后通过 `RequestServerShutdownReq/Res` 触发自身 graceful shutdown 信号；`tools/mock-client` 与 `scripts/rollout-three-process-drill.ps1` 已能在安全闸 `ok=true` 后等待指定旧服 PID 退出，并把 `shutdown-safety-gate` / `old-process-stop` 写入报告。生产部署平台仍需要把自身实例 ID、PID 文件或 stop hook 接入该入口；当前监控页只展示状态和告警，不提供自动停进程按钮。
 
 ## 9. 测试任务
 
@@ -517,7 +518,7 @@
 - `tools/mock-client/src/rollout-fault-drill-cli.js` 已提供脚本级故障演练入口。默认 `dry-run` 只输出 JSON 计划，不访问服务、不调用写接口、不请求旧服停服；`--simulate` 使用纯 mock client 验证编排停止点；只有显式 `--execute` 才调用已运行服务的控制面接口。详见 [rollout 故障演练入口](./rollout-fault-drill-runbook.md)。
 - `orchestrateRoomTransfer` 已增加 opt-in failure injection，默认路径保持兼容。当前可模拟/执行 `import-failure` 和 `route-upsert-failure`，结果会输出 `ok=false`、`stage`、`expectedFailure=true`、`completedStages` 等字段，便于归档和后续 CI 消费。
 - `redirect-no-reconnect` 入口只触发或计划 `ServerRedirectPush`，并明确不运行 mock-client reconnect；该演练只覆盖 push/操作步骤，不代表 mybevy 已适配。独立的 `server-redirect-transfer-reconnect` 场景已覆盖 mock-client 真实重连验收。
-- 这些故障条目已覆盖脚本入口、纯模拟验证和一轮真实 route metadata 缺失安全失败验收。真实 old/new/proxy 三进程自动化故障联调、部署平台自动停旧进程、同连接迁移和 route metadata 自动修复仍未完成。
+- 这些故障条目已覆盖脚本入口、纯模拟验证和一轮真实 route metadata 缺失安全失败验收。真实 old/new/proxy 三进程自动化故障联调、生产部署平台 stop hook 接入、同连接迁移和 route metadata 自动修复仍未完成。
 
 - [ ] 导出中断演练。
 - [x] 导入失败演练。

@@ -32,10 +32,12 @@ services, but do not request old game-server shutdown.
 powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
   -ExecuteSteps `
   -AllowShutdownRequest `
+  -OldProcessPidFile .tmp\rollout-drill-pids.json `
   -RolloutEpoch rollout-20260612-a `
   -RoomId room-empty-001
 
-Also call the old-server shutdown safety gate after complete-if-drained.
+Also call the old-server shutdown safety gate after complete-if-drained and
+wait for the old game-server process recorded in the PID file to exit.
 #>
 
 [CmdletBinding()]
@@ -104,6 +106,18 @@ param(
     [int]$TimeoutMs = $(if ($env:MYSERVER_ROLLOUT_TIMEOUT_MS) { [int]$env:MYSERVER_ROLLOUT_TIMEOUT_MS } else { 5000 }),
 
     [Parameter(Mandatory=$false)]
+    [int]$OldProcessPid = $(if ($env:MYSERVER_OLD_PROCESS_PID) { [int]$env:MYSERVER_OLD_PROCESS_PID } else { 0 }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$OldProcessPidFile = $(if ($env:MYSERVER_OLD_PROCESS_PID_FILE) { $env:MYSERVER_OLD_PROCESS_PID_FILE } else { "" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$OldProcessPidName = $(if ($env:MYSERVER_OLD_PROCESS_PID_NAME) { $env:MYSERVER_OLD_PROCESS_PID_NAME } else { "game-server-old" }),
+
+    [Parameter(Mandatory=$false)]
+    [int]$ShutdownWaitTimeoutMs = $(if ($env:MYSERVER_SHUTDOWN_WAIT_TIMEOUT_MS) { [int]$env:MYSERVER_SHUTDOWN_WAIT_TIMEOUT_MS } else { 30000 }),
+
+    [Parameter(Mandatory=$false)]
     [string]$AdminActor = $(if ($env:MYSERVER_ADMIN_ACTOR) { $env:MYSERVER_ADMIN_ACTOR } elseif ($env:MYSERVER_PROXY_ADMIN_ACTOR) { $env:MYSERVER_PROXY_ADMIN_ACTOR } else { "rollout-three-process-drill" }),
 
     [Parameter(Mandatory=$false)]
@@ -120,6 +134,8 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
 }
 $script:StageResults = @()
 $script:TransferCliResult = $null
+$script:ShutdownResult = $null
+$script:OldProcessManager = $null
 $script:ReportWritten = $false
 $script:StartedAt = (Get-Date).ToUniversalTime().ToString("o")
 
@@ -335,6 +351,70 @@ function Get-MockClientServiceTokenArgs {
     return @("--service-token", $ServiceToken)
 }
 
+function Resolve-OldProcessManager {
+    $resolvedPid = [int]$OldProcessPid
+    $source = if ($resolvedPid -gt 0) { "parameter" } else { "" }
+    $resolvedFile = ""
+
+    if ($resolvedPid -le 0 -and -not [string]::IsNullOrWhiteSpace($OldProcessPidFile)) {
+        $candidate = if ([System.IO.Path]::IsPathRooted($OldProcessPidFile)) {
+            $OldProcessPidFile
+        } else {
+            Join-Path $ProjectRoot $OldProcessPidFile
+        }
+        $resolvedFile = $candidate
+        if (Test-Path $candidate) {
+            try {
+                $json = Get-Content -LiteralPath $candidate -Raw | ConvertFrom-Json
+                $processes = @()
+                if ($json.processes) {
+                    $processes = @($json.processes)
+                } elseif ($json -is [array]) {
+                    $processes = @($json)
+                } elseif ($json.pid) {
+                    $processes = @($json)
+                }
+
+                $match = $processes | Where-Object { $_.name -eq $OldProcessPidName } | Select-Object -First 1
+                if (-not $match -and $processes.Count -eq 1) {
+                    $match = $processes[0]
+                }
+                if ($match -and $match.pid) {
+                    $resolvedPid = [int]$match.pid
+                    $source = "pid-file"
+                }
+            } catch {
+                $script:StageResults += [pscustomobject]@{
+                    stage = "old-process-pid-resolve"
+                    status = "warning"
+                    detail = "failed to read ${candidate}: $($_.Exception.Message)"
+                }
+            }
+        } else {
+            $script:StageResults += [pscustomobject]@{
+                stage = "old-process-pid-resolve"
+                status = "warning"
+                detail = "pid file not found: $candidate"
+            }
+        }
+    }
+
+    $exists = $false
+    if ($resolvedPid -gt 0) {
+        $exists = [bool](Get-Process -Id $resolvedPid -ErrorAction SilentlyContinue)
+    }
+
+    return [pscustomobject]@{
+        enabled = $resolvedPid -gt 0
+        pid = $resolvedPid
+        pidName = $OldProcessPidName
+        pidFile = $resolvedFile
+        source = $source
+        waitTimeoutMs = $ShutdownWaitTimeoutMs
+        processExistsAtPreflight = $exists
+    }
+}
+
 function Write-RunSummary {
     Write-Section "Summary"
     if ($script:StageResults.Count -eq 0) {
@@ -375,6 +455,8 @@ function New-RunReport {
             proxyAdminUrl = $ProxyAdminUrl
             proxyAdminActor = $AdminActor
             timeoutMs = $TimeoutMs
+            shutdownWaitTimeoutMs = $ShutdownWaitTimeoutMs
+            oldProcessManager = $script:OldProcessManager
             tokenStates = [pscustomobject]@{
                 oldAdmin = Mask-TokenState $OldAdminToken
                 newAdmin = Mask-TokenState $NewAdminToken
@@ -389,9 +471,11 @@ function New-RunReport {
             allowShutdownRequest = [bool]$AllowShutdownRequest
             skipShutdownRequest = [bool]$SkipShutdownRequest
             shutdownRequestCanRun = [bool]($ExecuteSteps -and $AllowShutdownRequest -and -not $SkipShutdownRequest)
+            waitsForOldProcessExit = [bool]($ExecuteSteps -and $AllowShutdownRequest -and -not $SkipShutdownRequest -and $script:OldProcessManager -and $script:OldProcessManager.enabled)
         }
         stages = $script:StageResults
         transfer = $script:TransferCliResult
+        shutdown = $script:ShutdownResult
     }
 }
 
@@ -427,6 +511,7 @@ trap {
 
 $displayRoomId = if ($RoomId) { $RoomId } else { "<ROOM_ID>" }
 $displayRolloutEpoch = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPOCH>" }
+$script:OldProcessManager = Resolve-OldProcessManager
 
 Write-Section "Mode"
 if ($ExecuteSteps) {
@@ -441,6 +526,12 @@ Write-Host "RoomId: $displayRoomId" -ForegroundColor Gray
 Write-Host "RolloutEpoch: $displayRolloutEpoch" -ForegroundColor Gray
 Write-Host "OldServerId: $OldServerId" -ForegroundColor Gray
 Write-Host "NewServerId: $NewServerId" -ForegroundColor Gray
+if ($script:OldProcessManager.enabled) {
+    Write-Host "OldProcessPid: $($script:OldProcessManager.pid) ($($script:OldProcessManager.source))" -ForegroundColor Gray
+    Write-Host "OldProcessWaitTimeoutMs: $($script:OldProcessManager.waitTimeoutMs)" -ForegroundColor Gray
+} else {
+    Write-Host "OldProcessPid: not set; shutdown request will not verify local process exit" -ForegroundColor Yellow
+}
 
 Write-Section "Preflight"
 $preflightErrors = @()
@@ -482,6 +573,18 @@ if ($ExecuteSteps -and [string]::IsNullOrWhiteSpace($RolloutEpoch)) {
 
 if ($ExecuteSteps -and -not (Test-AdminActor $AdminActor)) {
     $preflightErrors += "AdminActor must be 1-128 chars matching [A-Za-z0-9_.@-] in -ExecuteSteps mode"
+}
+
+if ($ExecuteSteps -and $AllowShutdownRequest -and $script:OldProcessManager.enabled -and -not $script:OldProcessManager.processExistsAtPreflight) {
+    $preflightErrors += "OldProcessPid $($script:OldProcessManager.pid) is not running before shutdown verification"
+}
+
+if ($ExecuteSteps -and $AllowShutdownRequest -and $script:OldProcessManager.enabled -and $ShutdownWaitTimeoutMs -le 0) {
+    $preflightErrors += "ShutdownWaitTimeoutMs must be positive when old process exit verification is enabled"
+}
+
+if ($ExecuteSteps -and $AllowShutdownRequest -and -not [string]::IsNullOrWhiteSpace($OldProcessPidFile) -and -not $script:OldProcessManager.enabled) {
+    $preflightErrors += "OldProcessPidFile was provided but no old process pid was resolved"
 }
 
 Write-Host "Token states:" -ForegroundColor Gray
@@ -709,26 +812,71 @@ $shutdownDisplayArgs = @(
 if (-not [string]::IsNullOrWhiteSpace($ServiceToken)) {
     $shutdownDisplayArgs += @("--service-token", "<service-token>")
 }
+if ($script:OldProcessManager.enabled) {
+    $shutdownDisplayArgs += @(
+        "--shutdown-wait-pid", "<old-process-pid>",
+        "--shutdown-wait-timeout-ms", [string]$ShutdownWaitTimeoutMs
+    )
+}
 Write-CommandLine $shutdownDisplayArgs
 
 if ($SkipShutdownRequest) {
     Write-Host "Shutdown request skipped by -SkipShutdownRequest." -ForegroundColor Yellow
     Add-StageResult "shutdown-safety-gate" "skipped" "SkipShutdownRequest"
+    if ($script:OldProcessManager.enabled) {
+        Add-StageResult "old-process-stop" "skipped" "shutdown request skipped"
+    }
 } elseif (-not $AllowShutdownRequest) {
     Write-Host "Shutdown request is not executed unless -AllowShutdownRequest is passed." -ForegroundColor Yellow
     Add-StageResult "shutdown-safety-gate" "skipped" "requires AllowShutdownRequest"
+    if ($script:OldProcessManager.enabled) {
+        Add-StageResult "old-process-stop" "skipped" "requires AllowShutdownRequest"
+    }
 } elseif ($ExecuteSteps) {
     $shutdownArgs = @(
         $MockClientIndex,
         "--scenario", "request-server-shutdown",
         "--http-base-url", $AuthBaseUrl,
         "--shutdown-reason", "rollout-three-process-drill:$RolloutEpoch",
-        "--timeout-ms", [string]$TimeoutMs
+        "--timeout-ms", [string]$TimeoutMs,
+        "--json-output"
     ) + (Get-MockClientServiceTokenArgs)
-    Invoke-ExternalStep -Name "old server shutdown safety gate" -FilePath "node" -Arguments $shutdownArgs
+    if ($script:OldProcessManager.enabled) {
+        $shutdownArgs += @(
+            "--shutdown-wait-pid", [string]$script:OldProcessManager.pid,
+            "--shutdown-wait-timeout-ms", [string]$ShutdownWaitTimeoutMs
+        )
+    }
+    $shutdownExecution = Invoke-ExternalJsonStep -Name "old server shutdown safety gate" -FilePath "node" -Arguments $shutdownArgs
+    $script:ShutdownResult = $shutdownExecution.json
+    if ($shutdownExecution.exitCode -ne 0 -or -not $shutdownExecution.json.ok) {
+        $errorCode = if ($shutdownExecution.json.processExit.errorCode) {
+            $shutdownExecution.json.processExit.errorCode
+        } elseif ($shutdownExecution.json.shutdown.errorCode) {
+            $shutdownExecution.json.shutdown.errorCode
+        } else {
+            "shutdown failed"
+        }
+        if ($shutdownExecution.json.shutdown.ok) {
+            Add-StageResult "shutdown-safety-gate" "ok"
+            Add-StageResult "old-process-stop" "failed" $errorCode
+        } else {
+            Add-StageResult "shutdown-safety-gate" "failed" $errorCode
+        }
+        throw "old server shutdown safety gate failed with exit code $($shutdownExecution.exitCode)"
+    }
     Add-StageResult "shutdown-safety-gate" "ok"
+    if ($script:OldProcessManager.enabled) {
+        $waitedMs = if ($shutdownExecution.json.processExit.waitedMs -ne $null) { $shutdownExecution.json.processExit.waitedMs } else { 0 }
+        Add-StageResult "old-process-stop" "ok" "pid=$($script:OldProcessManager.pid) waitedMs=$waitedMs"
+    } else {
+        Add-StageResult "old-process-stop" "skipped" "no old process pid"
+    }
 } else {
     Add-StageResult "shutdown-safety-gate" "planned" "requires ExecuteSteps and AllowShutdownRequest"
+    if ($script:OldProcessManager.enabled) {
+        Add-StageResult "old-process-stop" "planned" "pid=$($script:OldProcessManager.pid)"
+    }
 }
 
 Write-RunSummary

@@ -133,10 +133,15 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 
 `request-server-shutdown` 默认不会执行。只有同时传入 `-ExecuteSteps` 和 `-AllowShutdownRequest` 才会调用 auth-http 的 `POST /api/v1/internal/game-server/shutdown-if-drained`，该接口仍由 game-server 自身校验 `drain_mode_enabled == true`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0` 后才会触发 graceful shutdown。
 
+如果脚本同时拿到旧服进程 PID，还会把 PID 传给 mock-client，并在 shutdown 安全闸返回 `ok=true` 后等待该旧服进程退出。可以直接传 `-OldProcessPid`，也可以传 `-OldProcessPidFile` 和 `-OldProcessPidName` 从本地进程管理器 PID 文件中解析。例如 `.tmp/rollout-drill-pids.json` 中的 `processes[].name=game-server-old`。脚本只等待和验证退出，不会强杀进程；超时会让本次演练失败并保留报告。
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
   -ExecuteSteps `
   -AllowShutdownRequest `
+  -OldProcessPidFile .tmp\rollout-drill-pids.json `
+  -OldProcessPidName game-server-old `
+  -ShutdownWaitTimeoutMs 30000 `
   -RolloutEpoch rollout-20260612-a `
   -RoomId room-empty-001
 ```
@@ -162,6 +167,10 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 | `-AuthBaseUrl` | `MYSERVER_AUTH_BASE_URL` | `http://127.0.0.1:3000` |
 | `-ServiceToken` | `MYSERVER_INTERNAL_API_TOKEN` / `INTERNAL_API_TOKEN` | 空 |
 | `-TimeoutMs` | `MYSERVER_ROLLOUT_TIMEOUT_MS` | `5000` |
+| `-OldProcessPid` | `MYSERVER_OLD_PROCESS_PID` | `0`，不验证进程退出 |
+| `-OldProcessPidFile` | `MYSERVER_OLD_PROCESS_PID_FILE` | 空 |
+| `-OldProcessPidName` | `MYSERVER_OLD_PROCESS_PID_NAME` | `game-server-old` |
+| `-ShutdownWaitTimeoutMs` | `MYSERVER_SHUTDOWN_WAIT_TIMEOUT_MS` | `30000` |
 | `-AdminActor` | `MYSERVER_ADMIN_ACTOR` / `MYSERVER_PROXY_ADMIN_ACTOR` | `rollout-three-process-drill` |
 | `-ReportPath` | `MYSERVER_ROLLOUT_REPORT_PATH` | `.tmp/rollout-three-process-drill-report.json` |
 
@@ -175,6 +184,7 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
 2. 启动 old/new/proxy/auth 后执行 `-ExecuteSteps`，先不要加 `-AllowShutdownRequest`，确认 `transfer.ok=true`、`transfer.summary.stage=complete`、`proxy-complete-if-drained` stage 为 `ok`。
 3. 检查 old drain status 输出中 `ownedRoomCount=0`、`migratingRoomCount=0`、`connectionCount=0`；如开启 proxy 真实 drain 校验，`complete-if-drained` 不应返回 blocker。
 4. 需要演练停服安全闸时，再单独执行带 `-ExecuteSteps -AllowShutdownRequest` 的命令，或用 mock-client `request-server-shutdown` 场景调用；不要把 shutdown 作为默认执行路径。
+5. 需要闭环验证旧进程自动停止时，额外传 `-OldProcessPid` 或 `-OldProcessPidFile`。通过条件是 report 中 `shutdown-safety-gate=ok` 且 `old-process-stop=ok`；若只看到 `shutdown-safety-gate=ok` 但 `old-process-stop=skipped`，表示只验证了 game-server graceful shutdown 请求，没有验证部署/进程管理层。
 
 ### route metadata 缺失恢复检查
 
@@ -216,5 +226,5 @@ node tools/mock-client/src/rollout-fault-drill-cli.js `
 - 还没有把真实三进程联调纳入自动测试准入；当前只覆盖 dry-run / preflight / plan/result 归档级准入和一次人工验收记录。
 - 外部 `mybevy` redirect/reconnect 适配仍未完成。
 - route metadata 真实丢失已有 fault drill / transfer CLI 安全检查、人工恢复 runbook 和一轮真实 old/new/proxy/auth 受控验收；自动修复仍未完成。
-- 部署平台自动停止旧进程仍未完成。
+- 本地/部署编排适配层已能在 shutdown 安全闸通过后等待指定旧服 PID 退出；生产部署平台仍需要把自身实例 ID/PID 文件或 stop hook 接入该入口。
 - 同连接迁移 / L7 relay 仍是后续目标态。

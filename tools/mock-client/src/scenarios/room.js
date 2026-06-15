@@ -30,6 +30,7 @@ import {
 } from "../rollout-transfer.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
+const PROCESS_EXIT_POLL_MS = 200;
 
 /**
  * Print response and return decoded body
@@ -218,6 +219,132 @@ export async function requestServerShutdown(options) {
   return payload;
 }
 
+function isWindows() {
+  return process.platform === "win32";
+}
+
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "EPERM") {
+      return true;
+    }
+    if (isWindows() && error.code === "EINVAL") {
+      return true;
+    }
+    return false;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function waitForProcessExit(pid, timeoutMs) {
+  const normalizedPid = Number(pid);
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  const startedAt = Date.now();
+
+  if (!Number.isInteger(normalizedPid) || normalizedPid <= 0) {
+    return {
+      ok: false,
+      pid: normalizedPid || 0,
+      errorCode: "INVALID_PROCESS_ID",
+      waitedMs: 0,
+      exited: false
+    };
+  }
+
+  while (processExists(normalizedPid)) {
+    if (Date.now() >= deadline) {
+      return {
+        ok: false,
+        pid: normalizedPid,
+        errorCode: "PROCESS_EXIT_TIMEOUT",
+        waitedMs: Date.now() - startedAt,
+        exited: false
+      };
+    }
+    await sleep(Math.min(PROCESS_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+  }
+
+  return {
+    ok: true,
+    pid: normalizedPid,
+    errorCode: "",
+    waitedMs: Date.now() - startedAt,
+    exited: true
+  };
+}
+
+export async function waitForShutdownProcessExit(options, shutdownResult) {
+  const pid = Number(options.shutdownWaitPid ?? 0);
+  if (Number.isNaN(pid)) {
+    return {
+      requested: true,
+      ok: false,
+      skipped: false,
+      pid: 0,
+      errorCode: "INVALID_PROCESS_ID",
+      reason: "shutdownWaitPid must be a positive integer"
+    };
+  }
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return {
+      requested: false,
+      ok: true,
+      skipped: true,
+      reason: "no shutdownWaitPid"
+    };
+  }
+
+  if (!shutdownResult?.ok) {
+    return {
+      requested: true,
+      ok: false,
+      skipped: true,
+      pid,
+      errorCode: "SHUTDOWN_REQUEST_NOT_OK",
+      reason: "shutdown safety gate did not pass"
+    };
+  }
+
+  const timeoutMs = Number(options.shutdownWaitTimeoutMs);
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    return {
+      requested: true,
+      ok: false,
+      skipped: false,
+      pid,
+      errorCode: "INVALID_SHUTDOWN_WAIT_TIMEOUT_MS",
+      reason: "shutdownWaitTimeoutMs must be a positive integer"
+    };
+  }
+
+  return {
+    requested: true,
+    skipped: false,
+    ...(await waitForProcessExit(pid, timeoutMs))
+  };
+}
+
+function buildShutdownGateFailure(result) {
+  return {
+    requested: false,
+    ok: false,
+    skipped: true,
+    pid: 0,
+    errorCode: result?.errorCode || "SHUTDOWN_REQUEST_NOT_OK",
+    reason: "shutdown safety gate did not pass"
+  };
+}
+
 export async function runRolloutDrainStatus(options) {
   const status = await fetchRolloutDrainStatus(options);
   const summary = {
@@ -260,8 +387,28 @@ export async function runRolloutDrainStatus(options) {
 
 export async function runRequestServerShutdown(options) {
   const result = await requestServerShutdown(options);
-  console.log("requestServerShutdown:", JSON.stringify(result, null, 2));
-  return result;
+  const processExit = result.ok
+    ? await waitForShutdownProcessExit(options, result)
+    : buildShutdownGateFailure(result);
+  const envelope = {
+    ok: Boolean(result.ok && processExit.ok),
+    shutdown: result,
+    processExit
+  };
+
+  if (options.jsonOutput) {
+    console.log(JSON.stringify(envelope, null, 2));
+  } else {
+    console.log("requestServerShutdown:", JSON.stringify(result, null, 2));
+    if (processExit.requested || !result.ok) {
+      console.log("shutdownProcessExit:", JSON.stringify(processExit, null, 2));
+    }
+  }
+  if (!envelope.ok && !options.jsonOutput) {
+    throw new Error(processExit.errorCode || result.errorCode || "SHUTDOWN_REQUEST_NOT_OK");
+  }
+
+  return envelope;
 }
 
 async function setDrainMode(options, enabled) {

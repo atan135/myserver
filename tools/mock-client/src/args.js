@@ -107,6 +107,9 @@ const DEFAULT_OPTIONS = {
   // Internal API token
   serviceToken: "",
   shutdownReason: "mock-client",
+  shutdownWaitPid: 0,
+  shutdownWaitTimeoutMs: 10000,
+  jsonOutput: false,
   useServiceDiscovery: true,
   allowRedirectJoinFallback: false,
   redirectReconnectDelayMs: 0,
@@ -477,6 +480,21 @@ export function parseArgs(argv) {
         break;
       case "--shutdown-reason":
         ({ value: result.shutdownReason, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--shutdown-wait-pid": {
+        const { value, nextIndex } = collectOptionValue(argv, index);
+        result.shutdownWaitPid = Number.parseInt(value, 10);
+        index = nextIndex;
+        break;
+      }
+      case "--shutdown-wait-timeout-ms": {
+        const { value, nextIndex } = collectOptionValue(argv, index);
+        result.shutdownWaitTimeoutMs = Number.parseInt(value, 10);
+        index = nextIndex;
+        break;
+      }
+      case "--json-output":
+        result.jsonOutput = true;
         break;
     }
   }
