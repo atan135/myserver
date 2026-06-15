@@ -71,13 +71,23 @@ function parseRustMessageTypes(source) {
   const cleanSource = stripComments(source);
   const enumMatch = cleanSource.match(/pub\s+enum\s+MessageType\s*\{([\s\S]*?)\n\}/m);
   if (!enumMatch) {
-    throw new Error("MessageType enum not found in apps/game-server/src/protocol/message_type.rs");
+    throw new Error("MessageType enum not found in Rust source");
   }
 
   const values = {};
   const valuePattern = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+)\s*,/g;
   for (const valueMatch of enumMatch[1].matchAll(valuePattern)) {
     values[rustVariantToConstantName(valueMatch[1])] = Number(valueMatch[2]);
+  }
+  return values;
+}
+
+function parseRustMessageTypeFromU16(source) {
+  const cleanSource = stripComments(source);
+  const values = {};
+  const valuePattern = /(\d+)\s*=>\s*Some\(Self::([A-Za-z][A-Za-z0-9_]*)\),/g;
+  for (const valueMatch of cleanSource.matchAll(valuePattern)) {
+    values[rustVariantToConstantName(valueMatch[2])] = Number(valueMatch[1]);
   }
   return values;
 }
@@ -96,13 +106,46 @@ function compareObject(label, expected, actual) {
   return errors;
 }
 
+function compareSubset(label, expected, actual) {
+  const errors = [];
+  for (const [key, actualValue] of Object.entries(actual)) {
+    if (!(key in expected)) {
+      errors.push(`${label}.${key} is defined as ${actualValue}, but is missing from canonical game-server MessageType`);
+      continue;
+    }
+    if (expected[key] !== actualValue) {
+      errors.push(`${label}.${key} = ${actualValue}, expected ${expected[key]}`);
+    }
+  }
+  return errors;
+}
+
 function main() {
   const errors = [];
   const protoSource = readRepoFile("packages/proto/game.proto");
-  const rustSource = readRepoFile("apps/game-server/src/protocol/message_type.rs");
+  const gameServerRustSource = readRepoFile("apps/game-server/src/protocol/message_type.rs");
+  const gameProxyRustSource = readRepoFile("apps/game-proxy/src/protocol.rs");
 
-  const expectedMessageTypes = parseRustMessageTypes(rustSource);
+  const expectedMessageTypes = parseRustMessageTypes(gameServerRustSource);
   errors.push(...compareObject("MESSAGE_TYPE", expectedMessageTypes, MESSAGE_TYPE));
+  errors.push(
+    ...compareObject(
+      "game-server MessageType::from_u16",
+      expectedMessageTypes,
+      parseRustMessageTypeFromU16(gameServerRustSource)
+    )
+  );
+
+  const gameProxyMessageTypes = parseRustMessageTypes(gameProxyRustSource);
+  errors.push(...compareSubset("game-proxy MessageType", expectedMessageTypes, gameProxyMessageTypes));
+  errors.push(...compareSubset("game-proxy MessageType", MESSAGE_TYPE, gameProxyMessageTypes));
+  errors.push(
+    ...compareObject(
+      "game-proxy MessageType::from_u16",
+      gameProxyMessageTypes,
+      parseRustMessageTypeFromU16(gameProxyRustSource)
+    )
+  );
 
   for (const enumSpec of PROTO_ENUMS) {
     const expectedEnum = parseProtoEnum(protoSource, enumSpec.enumName, enumSpec.prefix);
@@ -110,14 +153,14 @@ function main() {
   }
 
   if (errors.length > 0) {
-    console.error("mock-client protocol constants drift detected:");
+    console.error("protocol constants drift detected:");
     for (const error of errors) {
       console.error(`- ${error}`);
     }
     process.exit(1);
   }
 
-  console.log("mock-client protocol constants are in sync with proto/Rust sources.");
+  console.log("protocol constants are in sync across mock-client, game-server, game-proxy, and proto enums.");
 }
 
 main();
