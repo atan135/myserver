@@ -11,7 +11,7 @@ function parseArgs(argv) {
   const args = {
     mode: "migrate",
     migrationsDir: path.resolve("db/migrations"),
-    mysqlUrl: process.env.MYSQL_URL || process.env.DATABASE_URL || ""
+    databaseUrl: process.env.DATABASE_URL || ""
   };
 
   for (const arg of argv) {
@@ -23,8 +23,8 @@ function parseArgs(argv) {
       args.mode = "list";
     } else if (arg.startsWith("--dir=")) {
       args.migrationsDir = path.resolve(arg.slice("--dir=".length));
-    } else if (arg.startsWith("--mysql-url=")) {
-      args.mysqlUrl = arg.slice("--mysql-url=".length);
+    } else if (arg.startsWith("--database-url=")) {
+      args.databaseUrl = arg.slice("--database-url=".length);
     } else if (arg === "--help" || arg === "-h") {
       args.mode = "help";
     } else {
@@ -36,13 +36,13 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  console.log(`Usage: node tools/db-migrate.js [--check|--dry-run|--list] [--dir=db/migrations] [--mysql-url=mysql://...]
+  console.log(`Usage: node tools/db-migrate.js [--check|--dry-run|--list] [--dir=db/migrations] [--database-url=postgres://...]
 
 Modes:
   --check    Validate migration names, order, duplicate versions, and checksums without DB access.
   --dry-run  Print migrations in execution order with checksums without DB access.
   --list     Alias of --dry-run.
-  default    Apply unapplied migrations to MYSQL_URL or DATABASE_URL.`);
+  default    Apply unapplied migrations to DATABASE_URL.`);
 }
 
 function readMigrations(migrationsDir) {
@@ -113,35 +113,34 @@ function printMigrations(migrations, label) {
   }
 }
 
-async function loadMysql() {
+async function loadPg() {
   try {
-    return await import("mysql2/promise");
+    const pg = await import("pg");
+    return pg.default ?? pg;
   } catch (error) {
     if (error.code === "ERR_MODULE_NOT_FOUND") {
       throw new Error(
-        "mysql2 is required for real migrations. Install workspace dependencies or run --check/--dry-run."
+        "pg is required for real migrations. Install workspace dependencies or run --check/--dry-run."
       );
     }
     throw error;
   }
 }
 
-async function applyMigrations(migrations, mysqlUrl) {
-  if (!mysqlUrl) {
-    throw new Error("MYSQL_URL or DATABASE_URL is required for real migrations");
+async function applyMigrations(migrations, databaseUrl) {
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required for real migrations");
   }
 
-  const mysql = await loadMysql();
-  const connection = await mysql.createConnection({
-    uri: mysqlUrl,
-    multipleStatements: true
-  });
+  const { Client } = await loadPg();
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
 
   try {
-    await connection.beginTransaction();
-    await ensureSchemaMigrationsTable(connection, migrations);
+    await client.query("BEGIN");
+    await ensureSchemaMigrationsTable(client, migrations);
 
-    const [rows] = await connection.query(
+    const { rows } = await client.query(
       "SELECT version, name, checksum FROM schema_migrations ORDER BY version ASC"
     );
     const applied = new Map(rows.map((row) => [row.version, row]));
@@ -162,29 +161,29 @@ async function applyMigrations(migrations, mysqlUrl) {
 
     for (const migration of pending) {
       console.log(`applying ${migration.fileName}`);
-      await connection.query(migration.sql);
-      await connection.query(
-        "INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)",
+      await client.query(migration.sql);
+      await client.query(
+        "INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
         [migration.version, migration.name, migration.checksum]
       );
     }
 
-    await connection.commit();
+    await client.query("COMMIT");
     console.log(`database migrations complete: ${pending.length} applied, ${applied.size} already applied`);
   } catch (error) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     throw error;
   } finally {
-    await connection.end();
+    await client.end();
   }
 }
 
-async function ensureSchemaMigrationsTable(connection, migrations) {
+async function ensureSchemaMigrationsTable(client, migrations) {
   const bootstrap = migrations.find((migration) => migration.version === "0001");
   if (!bootstrap) {
     throw new Error("0001_create_schema_migrations.sql is required to bootstrap migrations");
   }
-  await connection.query(bootstrap.sql);
+  await client.query(bootstrap.sql);
 }
 
 async function main() {
@@ -204,7 +203,7 @@ async function main() {
     return;
   }
 
-  await applyMigrations(migrations, args.mysqlUrl);
+  await applyMigrations(migrations, args.databaseUrl);
 }
 
 main().catch((error) => {

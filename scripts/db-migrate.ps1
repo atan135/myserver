@@ -2,7 +2,7 @@ param(
     [switch]$Check,
     [switch]$DryRun,
     [switch]$List,
-    [string]$MysqlUrl = $env:MYSQL_URL,
+    [string]$DatabaseUrl = $env:DATABASE_URL,
     [string]$EnvPath = ".env"
 )
 
@@ -44,12 +44,12 @@ if ($Check) {
     $argsList += "--list"
 }
 
-if (-not $MysqlUrl) {
-    $MysqlUrl = Read-EnvValue -Path $EnvPath -Name "MYSQL_URL"
+if (-not $DatabaseUrl) {
+    $DatabaseUrl = Read-EnvValue -Path $EnvPath -Name "DATABASE_URL"
 }
 
-if ($MysqlUrl) {
-    $argsList += "--mysql-url=$MysqlUrl"
+if ($DatabaseUrl) {
+    $argsList += "--database-url=$DatabaseUrl"
 }
 
 node tools/db-migrate.js @argsList
