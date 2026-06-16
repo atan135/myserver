@@ -94,11 +94,11 @@ export function getConfig() {
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "auth-http-001",
-    mysqlEnabled: parseBoolean(process.env.MYSQL_ENABLED, false),
-    mysqlUrl:
-      process.env.MYSQL_URL ||
-      "mysql://root:password@127.0.0.1:3306/myserver_auth",
-    mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
+    dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
+    databaseUrl:
+      process.env.DATABASE_URL ||
+      "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
+    dbPoolSize: Number.parseInt(process.env.DB_POOL_SIZE || "10", 10),
     sessionTtlSeconds: Number.parseInt(
       process.env.SESSION_TTL_SECONDS || "86400",
       10

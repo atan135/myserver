@@ -3,7 +3,7 @@ import { Inject, Injectable, NestMiddleware } from "@nestjs/common";
 import { getClientIp } from "./client-ip.js";
 import { forbidden, serviceUnavailable } from "./http-exception.js";
 import { log } from "../logger.js";
-import { AUTH_BLOCKLIST, AUTH_CONFIG, AUTH_MYSQL_STORE } from "../tokens.js";
+import { AUTH_BLOCKLIST, AUTH_CONFIG, AUTH_DB_STORE } from "../tokens.js";
 
 function logSecurity(level: string, message: string, extra: Record<string, unknown>) {
   try {
@@ -26,7 +26,7 @@ export class RedisBlocklistMiddleware implements NestMiddleware {
   constructor(
     @Inject(AUTH_CONFIG) private readonly config: any,
     @Inject(AUTH_BLOCKLIST) private readonly blocklist: any,
-    @Inject(AUTH_MYSQL_STORE) private readonly mysqlStore: any
+    @Inject(AUTH_DB_STORE) private readonly dbStore: any
   ) {}
 
   async use(req: any, _res: any, next: () => void) {
@@ -49,7 +49,7 @@ export class RedisBlocklistMiddleware implements NestMiddleware {
         clientIp,
         path: req.url
       });
-      await this.mysqlStore?.appendSecurityAudit?.({
+      await this.dbStore?.appendSecurityAudit?.({
         eventType: "blocklist_unavailable",
         targetType: "ip",
         targetValue: clientIp,
@@ -64,7 +64,7 @@ export class RedisBlocklistMiddleware implements NestMiddleware {
       clientIp,
       path: req.url
     });
-    await this.mysqlStore?.appendSecurityAudit?.({
+    await this.dbStore?.appendSecurityAudit?.({
       eventType: "ip_blocked",
       targetType: "ip",
       targetValue: clientIp,

@@ -59,10 +59,10 @@ function logSecurity(level, message, extra) {
 }
 
 export class AuthStore {
-  constructor(config, redis, mysqlStore = null, nats = noopNatsClient, blocklist = RedisBlocklistChecker.disabled()) {
+  constructor(config, redis, dbStore = null, nats = noopNatsClient, blocklist = RedisBlocklistChecker.disabled()) {
     this.config = config;
     this.redis = redis;
-    this.mysqlStore = mysqlStore;
+    this.dbStore = dbStore;
     this.nats = nats;
     this.blocklist = blocklist;
   }
@@ -87,8 +87,8 @@ export class AuthStore {
 
   async createGuestSession(guestId, clientIp = null) {
     const normalizedGuestId = guestId || `guest-${crypto.randomUUID()}`;
-    const account = this.mysqlStore
-      ? await this.mysqlStore.findOrCreateGuestPlayer(normalizedGuestId)
+    const account = this.dbStore
+      ? await this.dbStore.findOrCreateGuestPlayer(normalizedGuestId)
       : {
           playerId: `player-${crypto.randomUUID()}`,
           guestId: normalizedGuestId
@@ -99,7 +99,7 @@ export class AuthStore {
       details: { guestId: normalizedGuestId }
     });
     await this.assertPlayerNotBlocked(account.playerId, clientIp, "guest_login");
-    await this.mysqlStore?.touchPlayerLastLogin?.(account.playerId);
+    await this.dbStore?.touchPlayerLastLogin?.(account.playerId);
 
     return this.createSessionForAccount(account, {
       clientIp,
@@ -108,17 +108,17 @@ export class AuthStore {
   }
 
   async createPasswordSession(loginName, password, clientIp = null) {
-    if (!this.mysqlStore?.enabled) {
+    if (!this.dbStore?.enabled) {
       throw createAuthError("PASSWORD_LOGIN_UNAVAILABLE");
     }
 
     const normalizedLoginName = normalizeLoginName(loginName);
-    const account = await this.mysqlStore.findPasswordAccountByLoginName(
+    const account = await this.dbStore.findPasswordAccountByLoginName(
       normalizedLoginName
     );
 
     if (!account) {
-      await this.mysqlStore.appendAuthAudit({
+      await this.dbStore.appendAuthAudit({
         eventType: "password_login_failed",
         clientIp,
         details: {
@@ -135,7 +135,7 @@ export class AuthStore {
     });
 
     if (account.status !== "active") {
-      await this.mysqlStore.appendAuthAudit({
+      await this.dbStore.appendAuthAudit({
         playerId: account.playerId,
         eventType: "password_login_failed",
         clientIp,
@@ -152,7 +152,7 @@ export class AuthStore {
       await verifyPassword(password, account.passwordSalt, account.passwordHash);
 
     if (!passwordMatches) {
-      await this.mysqlStore.appendAuthAudit({
+      await this.dbStore.appendAuthAudit({
         playerId: account.playerId,
         eventType: "password_login_failed",
         clientIp,
@@ -166,7 +166,7 @@ export class AuthStore {
 
     await this.assertPlayerNotBlocked(account.playerId, clientIp, "password_login");
 
-    await this.mysqlStore.touchPlayerLastLogin(account.playerId);
+    await this.dbStore.touchPlayerLastLogin(account.playerId);
 
     return this.createSessionForAccount(account, {
       clientIp,
@@ -182,11 +182,11 @@ export class AuthStore {
     if (account.status === "banned" && account.banExpiresAt) {
       const expiresAt = new Date(account.banExpiresAt);
       if (!Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= Date.now()) {
-        const restored = await this.mysqlStore?.restoreExpiredBan?.(account.playerId);
+        const restored = await this.dbStore?.restoreExpiredBan?.(account.playerId);
         if (restored) {
           account.status = "active";
           account.banExpiresAt = null;
-          await this.mysqlStore?.appendAuthAudit?.({
+          await this.dbStore?.appendAuthAudit?.({
             playerId: account.playerId,
             eventType: "account_ban_expired",
             clientIp,
@@ -197,7 +197,7 @@ export class AuthStore {
       }
     }
 
-    await this.mysqlStore?.appendAuthAudit?.({
+    await this.dbStore?.appendAuthAudit?.({
       playerId: account.playerId,
       eventType: audit.eventType || "login_failed",
       clientIp,
@@ -211,7 +211,7 @@ export class AuthStore {
   }
 
   async assertPlayerCanIssueTicket(playerId, clientIp = null) {
-    const account = await this.mysqlStore?.findPlayerAuthStateByPlayerId?.(playerId);
+    const account = await this.dbStore?.findPlayerAuthStateByPlayerId?.(playerId);
     if (!account) {
       return;
     }
@@ -234,7 +234,7 @@ export class AuthStore {
         clientIp,
         source
       });
-      await this.mysqlStore?.appendSecurityAudit?.({
+      await this.dbStore?.appendSecurityAudit?.({
         eventType: "blocklist_unavailable",
         targetType: "player",
         targetValue: playerId,
@@ -251,7 +251,7 @@ export class AuthStore {
         clientIp,
         source
       });
-      await this.mysqlStore?.appendSecurityAudit?.({
+      await this.dbStore?.appendSecurityAudit?.({
         eventType: "player_blocked",
         targetType: "player",
         targetValue: playerId,
@@ -284,7 +284,7 @@ export class AuthStore {
 
     if (oldAccessToken) {
       await this.publishSessionKick(account.playerId, "new_login");
-      await this.mysqlStore?.appendAuthAudit({
+      await this.dbStore?.appendAuthAudit({
         playerId: account.playerId,
         eventType: "session_kicked",
         accessToken: oldAccessToken,
@@ -296,7 +296,7 @@ export class AuthStore {
     const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
     await this.markSessionActive(accessToken);
 
-    await this.mysqlStore?.appendAuthAudit({
+    await this.dbStore?.appendAuthAudit({
       playerId: account.playerId,
       guestId: account.guestId || null,
       eventType,
@@ -419,7 +419,7 @@ export class AuthStore {
       this.config.ticketTtlSeconds
     );
 
-    await this.mysqlStore?.appendAuthAudit({
+    await this.dbStore?.appendAuthAudit({
       playerId,
       eventType: "issue_ticket",
       ticket,
@@ -451,7 +451,7 @@ export class AuthStore {
       await this.redis.del(psKey);
     }
 
-    await this.mysqlStore?.appendAuthAudit({
+    await this.dbStore?.appendAuthAudit({
       playerId: sessionData.playerId,
       guestId: sessionData.guestId || null,
       eventType: "logout",
@@ -490,8 +490,8 @@ export class AuthStore {
 
     await this.redis.del(key);
 
-    if (playerId && this.mysqlStore) {
-      await this.mysqlStore.appendAuthAudit({
+    if (playerId && this.dbStore) {
+      await this.dbStore.appendAuthAudit({
         playerId,
         eventType: "revoke_ticket",
         ticket,
@@ -501,7 +501,7 @@ export class AuthStore {
         }
       });
 
-      this.mysqlStore.appendSecurityAudit?.({
+      this.dbStore.appendSecurityAudit?.({
         eventType: "ticket_revoked",
         targetType: "ticket",
         targetValue: hashTicket(ticket).slice(0, 16) + "...",

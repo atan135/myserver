@@ -1,5 +1,5 @@
 /**
- * Archive Service - 将超期 metrics 数据从 Redis 归档到 MySQL
+ * Archive Service - 将超期 metrics 数据从 Redis 归档到 PostgreSQL
  */
 import {
   aggregateMetricRecords,
@@ -41,13 +41,13 @@ const ARCHIVE_SERVICE_CONFIGS = {
 
 /**
  * 执行归档任务
- * 将 7 天前 ~ 8 天前的 Redis metrics 数据迁移到 MySQL
+ * 将 7 天前 ~ 8 天前的 Redis metrics 数据迁移到 PostgreSQL
  *
  * @param {import("ioredis").Redis} redis
- * @param {import("mysql2/promise").Pool} mysqlPool
+ * @param {import("pg").Pool} dbPool
  * @returns {Promise<{archived: number, duration_ms: number}>}
  */
-export async function runArchiveTask(redis, mysqlPool) {
+export async function runArchiveTask(redis, dbPool) {
   const startTime = Date.now();
 
   // 计算归档时间范围（7天前 ~ 8天前）
@@ -58,7 +58,7 @@ export async function runArchiveTask(redis, mysqlPool) {
   let totalArchived = 0;
 
   for (const serviceName of SERVICE_NAMES) {
-    const archived = await archiveServiceMetrics(redis, mysqlPool, serviceName, eightDaysAgo, sevenDaysAgo);
+    const archived = await archiveServiceMetrics(redis, dbPool, serviceName, eightDaysAgo, sevenDaysAgo);
     totalArchived += archived;
   }
 
@@ -71,7 +71,7 @@ export async function runArchiveTask(redis, mysqlPool) {
 /**
  * 归档单个服务的 metrics 数据
  */
-export async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromBucket, toBucket) {
+export async function archiveServiceMetrics(redis, dbPool, serviceName, fromBucket, toBucket) {
   let archived = 0;
   let cursor = "0";
   const recordsByBucket = new Map();
@@ -107,7 +107,7 @@ export async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromB
 
   for (const [bucket, records] of recordsByBucket.entries()) {
     const data = aggregateMetricRecords(records);
-    await insertArchiveRecord(mysqlPool, serviceName, bucket, data);
+    await insertArchiveRecord(dbPool, serviceName, bucket, data);
     for (const record of records) {
       await redis.del(record.key);
     }
@@ -118,9 +118,9 @@ export async function archiveServiceMetrics(redis, mysqlPool, serviceName, fromB
 }
 
 /**
- * 插入归档记录到 MySQL
+ * 插入归档记录到 PostgreSQL
  */
-async function insertArchiveRecord(mysqlPool, serviceName, bucketTime, data) {
+async function insertArchiveRecord(dbPool, serviceName, bucketTime, data) {
   const qps = parseMetricInt(data.qps);
   const latencyMs = parseMetricInt(data.latency_ms);
   const onlineValue = getOnlineValue(serviceName, data, ARCHIVE_SERVICE_CONFIGS);
@@ -134,10 +134,14 @@ async function insertArchiveRecord(mysqlPool, serviceName, bucketTime, data) {
   }
 
   try {
-    await mysqlPool.execute(
+    await dbPool.query(
       `INSERT INTO metrics_archive (service_name, bucket_time, qps, latency_ms, online_value, extra)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE qps = VALUES(qps), latency_ms = VALUES(latency_ms), online_value = VALUES(online_value), extra = VALUES(extra)`,
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+       ON CONFLICT (service_name, bucket_time)
+       DO UPDATE SET qps = EXCLUDED.qps,
+                     latency_ms = EXCLUDED.latency_ms,
+                     online_value = EXCLUDED.online_value,
+                     extra = EXCLUDED.extra`,
       [serviceName, bucketTime, qps, latencyMs, onlineValue, JSON.stringify(extra)]
     );
   } catch (error) {

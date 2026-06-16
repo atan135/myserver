@@ -127,8 +127,10 @@ export function getConfig() {
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "admin-api-001",
-    mysqlUrl: process.env.MYSQL_URL || "mysql://root:password@127.0.0.1:3306/myserver_auth",
-    mysqlPoolSize: parsePositiveInteger("MYSQL_POOL_SIZE", process.env.MYSQL_POOL_SIZE, 10),
+    databaseUrl:
+      process.env.DATABASE_URL ||
+      "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
+    dbPoolSize: parsePositiveInteger("DB_POOL_SIZE", process.env.DB_POOL_SIZE, 10),
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",
     jwtExpiresIn,
     adminSessionTtlSeconds: parsePositiveInteger(

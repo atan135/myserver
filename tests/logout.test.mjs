@@ -57,7 +57,7 @@ function createServiceContext() {
     }
   };
   const config = {
-    mysqlEnabled: false,
+    dbEnabled: false,
     ratelimitEnabled: false,
     accountLockEnabled: false,
     gameProxyHost: "127.0.0.1",

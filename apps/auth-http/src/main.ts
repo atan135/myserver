@@ -40,7 +40,7 @@ export async function bootstrap() {
     logEnableConsole: config.logEnableConsole,
     logEnableFile: config.logEnableFile,
     logDir: config.logDir,
-    mysqlEnabled: config.mysqlEnabled
+    dbEnabled: config.dbEnabled
   });
 
   return { app, config, httpServer };

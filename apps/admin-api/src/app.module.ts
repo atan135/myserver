@@ -6,7 +6,7 @@ import { AdminSessionStore } from "./auth/admin-session-store.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
-import { createMySqlPool } from "./mysql-client.js";
+import { createDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -24,9 +24,9 @@ import { HealthController } from "./health.controller.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
+  ADMIN_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
   ADMIN_METRICS,
-  ADMIN_MYSQL_POOL,
   ADMIN_NATS,
   ADMIN_REDIS,
   ADMIN_SESSION_STORE,
@@ -67,13 +67,13 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
-      provide: ADMIN_MYSQL_POOL,
+      provide: ADMIN_DB_POOL,
       inject: [ADMIN_CONFIG],
-      useFactory: (config: any) => createMySqlPool(config)
+      useFactory: (config: any) => createDbPool(config)
     },
     {
       provide: ADMIN_STORE,
-      inject: [ADMIN_MYSQL_POOL, ADMIN_REDIS, ADMIN_CONFIG],
+      inject: [ADMIN_DB_POOL, ADMIN_REDIS, ADMIN_CONFIG],
       useFactory: async (pool: any, redis: any, config: any) => {
         const adminStore = new AdminStore(pool, redis, config);
         await adminStore.ensureInitialAdmin(config);

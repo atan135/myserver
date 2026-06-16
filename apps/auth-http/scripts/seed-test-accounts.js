@@ -4,8 +4,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { getConfig } from "../src/config.js";
-import { createMySqlPool } from "../src/mysql-client.js";
-import { MySqlAuthStore } from "../src/mysql-store.js";
+import { createDbPool } from "../src/db-client.js";
+import { DbAuthStore } from "../src/db-store.js";
 import {
   assertValidLoginName,
   createPasswordSalt,
@@ -167,14 +167,14 @@ async function main() {
   const accounts = rawAccounts.map(validateSeedAccount);
 
   const config = getConfig();
-  config.mysqlEnabled = true;
+  config.dbEnabled = true;
 
-  const pool = await createMySqlPool(config);
+  const pool = await createDbPool(config);
   if (!pool) {
-    throw new Error("MySQL pool is unavailable");
+    throw new Error("database pool is unavailable");
   }
 
-  const store = new MySqlAuthStore(pool);
+  const store = new DbAuthStore(pool);
 
   try {
     for (const account of accounts) {

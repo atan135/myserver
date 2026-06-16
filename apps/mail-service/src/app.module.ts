@@ -8,17 +8,17 @@ import { MailPlayerAuthService } from "./mail-auth.js";
 import { MailsController } from "./mails/mails.controller.js";
 import { MailsService } from "./mails/mails.service.js";
 import { createMetricsCollector } from "./metrics.js";
-import { createMySqlPool } from "./mysql-client.js";
-import { MySqlMailStore } from "./mysql-store.js";
+import { createDbPool } from "./db-client.js";
+import { DbMailStore } from "./db-store.js";
 import { createNatsClient } from "./nats-client.js";
 import { PubSubClient } from "./pubsub-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { RegistryClient } from "./registry-client.js";
 import {
   MAIL_CONFIG,
+  MAIL_DB_POOL,
   MAIL_GAME_ADMIN_CLIENT,
   MAIL_METRICS,
-  MAIL_MYSQL_POOL,
   MAIL_NATS,
   MAIL_PLAYER_AUTH,
   MAIL_PUBSUB_CLIENT,
@@ -46,11 +46,11 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
-      provide: MAIL_MYSQL_POOL,
+      provide: MAIL_DB_POOL,
       inject: [MAIL_CONFIG, MAIL_NATS, MAIL_REDIS],
       useFactory: async (config: any, nats: any, redis: any) => {
         try {
-          return await createMySqlPool(config);
+          return await createDbPool(config);
         } catch (error) {
           await nats.close();
           await redis.quit();
@@ -60,8 +60,8 @@ import {
     },
     {
       provide: MAIL_STORE,
-      inject: [MAIL_MYSQL_POOL],
-      useFactory: (mysqlPool: any) => new MySqlMailStore(mysqlPool)
+      inject: [MAIL_DB_POOL],
+      useFactory: (dbPool: any) => new DbMailStore(dbPool)
     },
     {
       provide: MAIL_PUBSUB_CLIENT,

@@ -61,7 +61,7 @@ function createFakeAuthStore(redis, sessions = new Map()) {
   };
 }
 
-function createFakeMysqlStore(accounts = new Map(), enabled = true) {
+function createFakeDbStore(accounts = new Map(), enabled = true) {
   const audits = [];
   const securityAudits = [];
   const updatedPasswords = [];
@@ -98,7 +98,7 @@ function createRequest(token) {
   };
 }
 
-async function createServiceContext({ mysqlEnabled = true, mysqlStoreEnabled = true } = {}) {
+async function createServiceContext({ dbEnabled = true, dbStoreEnabled = true } = {}) {
   const passwordSalt = createPasswordSalt();
   const passwordHash = await hashPassword("OldPass123!", passwordSalt);
   const redis = createFakeRedis();
@@ -135,17 +135,17 @@ async function createServiceContext({ mysqlEnabled = true, mysqlStoreEnabled = t
     ]
   ]);
   const authStore = createFakeAuthStore(redis, sessions);
-  const mysqlStore = createFakeMysqlStore(accounts, mysqlStoreEnabled);
+  const dbStore = createFakeDbStore(accounts, dbStoreEnabled);
   const config = {
-    mysqlEnabled,
+    dbEnabled,
     ratelimitEnabled: false,
     accountLockEnabled: false,
     gameProxyHost: "127.0.0.1",
     gameProxyPort: 4000
   };
-  const service = new AuthService(config, authStore, null, mysqlStore, null);
+  const service = new AuthService(config, authStore, null, dbStore, null);
 
-  return { service, redis, authStore, mysqlStore, accounts };
+  return { service, redis, authStore, dbStore, accounts };
 }
 
 async function assertApiError(promise, status, errorCode, messagePattern = null) {
@@ -232,8 +232,8 @@ describe("AuthService.changePassword", () => {
   });
 
   test("rejects wrong old password and records security audit", async () => {
-    const { service, mysqlStore } = await createServiceContext();
-    const initialAuditCount = mysqlStore.securityAudits.length;
+    const { service, dbStore } = await createServiceContext();
+    const initialAuditCount = dbStore.securityAudits.length;
 
     await assertApiError(
       service.changePassword(createRequest("valid-token-001"), {
@@ -244,13 +244,13 @@ describe("AuthService.changePassword", () => {
       "OLD_PASSWORD_MISMATCH"
     );
 
-    assert.ok(mysqlStore.securityAudits.length > initialAuditCount);
-    const lastAudit = mysqlStore.securityAudits.at(-1);
+    assert.ok(dbStore.securityAudits.length > initialAuditCount);
+    const lastAudit = dbStore.securityAudits.at(-1);
     assert.equal(lastAudit.eventType, "change_password_failed");
   });
 
   test("succeeds with correct old password and updates hash", async () => {
-    const { service, redis, authStore, mysqlStore } = await createServiceContext();
+    const { service, redis, authStore, dbStore } = await createServiceContext();
 
     const body = await service.changePassword(createRequest("valid-token-001"), {
       oldPassword: "OldPass123!",
@@ -260,17 +260,17 @@ describe("AuthService.changePassword", () => {
     assert.equal(body.ok, true);
     assert.match(body.message, /Password changed/);
 
-    assert.ok(mysqlStore.updatedPasswords.length > 0);
-    const lastUpdate = mysqlStore.updatedPasswords.at(-1);
+    assert.ok(dbStore.updatedPasswords.length > 0);
+    const lastUpdate = dbStore.updatedPasswords.at(-1);
     assert.equal(lastUpdate.playerId, "player-001");
     assert.ok(lastUpdate.passwordSalt);
     assert.ok(lastUpdate.passwordHash);
 
-    const account = await mysqlStore.findPasswordAccountByPlayerId("player-001");
+    const account = await dbStore.findPasswordAccountByPlayerId("player-001");
     assert.ok(await verifyPassword("NewPass456!", account.passwordSalt, account.passwordHash));
     assert.ok(!(await verifyPassword("OldPass123!", account.passwordSalt, account.passwordHash)));
 
-    const passwordChangedAudit = mysqlStore.audits.find(
+    const passwordChangedAudit = dbStore.audits.find(
       (entry) => entry.eventType === "password_changed" && entry.playerId === "player-001"
     );
     assert.ok(passwordChangedAudit);
@@ -283,8 +283,8 @@ describe("AuthService.changePassword", () => {
     assert.ok(redis.deletedKeys.includes("test:player-session:player-001"));
   });
 
-  test("returns PASSWORD_CHANGE_UNAVAILABLE when MySQL is disabled", async () => {
-    const { service } = await createServiceContext({ mysqlEnabled: false, mysqlStoreEnabled: false });
+  test("returns PASSWORD_CHANGE_UNAVAILABLE when database auth store is disabled", async () => {
+    const { service } = await createServiceContext({ dbEnabled: false, dbStoreEnabled: false });
 
     await assertApiError(
       service.changePassword(createRequest("valid-token-001"), {

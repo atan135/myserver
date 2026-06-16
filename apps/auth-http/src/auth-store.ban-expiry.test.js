@@ -23,18 +23,18 @@ class FakeRedis {
   async expire() {}
 }
 
-function createStore(mysqlStore) {
+function createStore(dbStore) {
   return new AuthStore(
     { redisKeyPrefix: "", sessionTtlSeconds: 60, ticketTtlSeconds: 30, ticketSecret: "test-secret" },
     new FakeRedis(),
-    mysqlStore
+    dbStore
   );
 }
 
 test("expired banned account is restored and allowed", async () => {
   const audits = [];
   let restoredPlayerId = null;
-  const mysqlStore = {
+  const dbStore = {
     async restoreExpiredBan(playerId) {
       restoredPlayerId = playerId;
       return true;
@@ -43,7 +43,7 @@ test("expired banned account is restored and allowed", async () => {
       audits.push(entry);
     }
   };
-  const store = createStore(mysqlStore);
+  const store = createStore(dbStore);
   const account = {
     playerId: "player-1",
     status: "banned",

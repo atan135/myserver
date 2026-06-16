@@ -2,7 +2,7 @@ import { Controller, Get, HttpCode, HttpStatus, Inject } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 
 import { ApiHttpException } from "./common/http-exception.js";
-import { AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_STORE } from "./tokens.js";
+import { AUTH_CONFIG, AUTH_DB_STORE, AUTH_STORE } from "./tokens.js";
 
 @ApiTags("meta")
 @Controller()
@@ -10,13 +10,13 @@ export class MetaController {
   constructor(
     @Inject(AUTH_CONFIG) private readonly config: any,
     @Inject(AUTH_STORE) private readonly authStore: any,
-    @Inject(AUTH_MYSQL_STORE) private readonly mysqlStore: any
+    @Inject(AUTH_DB_STORE) private readonly dbStore: any
   ) {}
 
   @Get("/healthz")
   @HttpCode(HttpStatus.OK)
   async healthz() {
-    const checks = { redis: "ok", mysql: "skipped" };
+    const checks = { redis: "ok", db: "skipped" };
     let healthy = true;
 
     try {
@@ -26,12 +26,12 @@ export class MetaController {
       healthy = false;
     }
 
-    if (this.config.mysqlEnabled && this.mysqlStore?.enabled) {
+    if (this.config.dbEnabled && this.dbStore?.enabled) {
       try {
-        await this.mysqlStore.pool.execute("SELECT 1");
-        checks.mysql = "ok";
+        await this.dbStore.pool.query("SELECT 1");
+        checks.db = "ok";
       } catch {
-        checks.mysql = "error";
+        checks.db = "error";
         healthy = false;
       }
     }
@@ -41,7 +41,7 @@ export class MetaController {
         ok: false,
         service: this.config.appName,
         env: this.config.env,
-        storage: this.config.mysqlEnabled ? "redis+mysql" : "redis",
+        storage: this.config.dbEnabled ? "redis+postgresql" : "redis",
         checks
       });
     }
@@ -50,7 +50,7 @@ export class MetaController {
       ok: healthy,
       service: this.config.appName,
       env: this.config.env,
-      storage: this.config.mysqlEnabled ? "redis+mysql" : "redis",
+      storage: this.config.dbEnabled ? "redis+postgresql" : "redis",
       checks
     };
   }
@@ -63,7 +63,7 @@ export class MetaController {
       stage: "minimum-flow",
       protocol: "json",
       internalProtocol: "protobuf+tcp",
-      storage: this.config.mysqlEnabled ? "redis+mysql" : "redis",
+      storage: this.config.dbEnabled ? "redis+postgresql" : "redis",
       nextSteps: ["room-game-loop", "rate-limit", "admin-control-plane"]
     };
   }

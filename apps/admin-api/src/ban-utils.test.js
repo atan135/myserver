@@ -13,9 +13,9 @@ test("computeBanExpiresAt returns an ISO timestamp duration seconds after now", 
 test("updatePlayerStatus writes ban_expires_at for timed ban", async () => {
   let captured = null;
   const store = new AdminStore({
-    async execute(query, params) {
+    async query(query, params) {
       captured = { query, params };
-      return [{ affectedRows: 1 }];
+      return { rowCount: 1 };
     }
   });
 
@@ -24,16 +24,16 @@ test("updatePlayerStatus writes ban_expires_at for timed ban", async () => {
   });
 
   assert.equal(updated, true);
-  assert.match(captured.query, /ban_expires_at = \?/);
+  assert.match(captured.query, /ban_expires_at = \$2/);
   assert.deepEqual(captured.params, ["banned", "2026-06-11T01:00:00.000Z", "player-1"]);
 });
 
 test("updatePlayerStatus clears ban_expires_at for active or disabled", async () => {
   const calls = [];
   const store = new AdminStore({
-    async execute(query, params) {
+    async query(query, params) {
       calls.push(params);
-      return [{ affectedRows: 1 }];
+      return { rowCount: 1 };
     }
   });
 

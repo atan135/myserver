@@ -150,7 +150,7 @@ test("RolesGuard audit write failure does not change 403 result", async () => {
   const fixture = makeContext({ role: "viewer", permissions: ["gm.broadcast"] });
   const store = {
     async appendSecurityAuditLog() {
-      throw new Error("mysql unavailable");
+      throw new Error("database unavailable");
     }
   };
 

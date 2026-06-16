@@ -10,8 +10,8 @@ import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
 import {
   AUTH_CONFIG,
+  AUTH_DB_POOL,
   AUTH_METRICS,
-  AUTH_MYSQL_POOL,
   AUTH_NATS,
   AUTH_REDIS
 } from "./tokens.js";
@@ -58,7 +58,7 @@ export async function closeNestApp(app: INestApplication) {
   const metrics = app.get<any>(AUTH_METRICS, { strict: false });
   const redis = app.get<any>(AUTH_REDIS, { strict: false });
   const nats = app.get<any>(AUTH_NATS, { strict: false });
-  const mysqlPool = app.get<any>(AUTH_MYSQL_POOL, { strict: false });
+  const dbPool = app.get<any>(AUTH_DB_POOL, { strict: false });
 
   try {
     await metrics?.stop?.();
@@ -78,11 +78,11 @@ export async function closeNestApp(app: INestApplication) {
     log("error", "shutdown.redis_close_failed", { error: error.message });
   }
 
-  if (mysqlPool) {
+  if (dbPool) {
     try {
-      await mysqlPool.end();
+      await dbPool.end();
     } catch (error: any) {
-      log("error", "shutdown.mysql_close_failed", { error: error.message });
+      log("error", "shutdown.db_close_failed", { error: error.message });
     }
   }
 

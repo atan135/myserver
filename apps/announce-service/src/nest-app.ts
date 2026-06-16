@@ -10,8 +10,8 @@ import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
 import {
   ANNOUNCE_CONFIG,
+  ANNOUNCE_DB_POOL,
   ANNOUNCE_METRICS,
-  ANNOUNCE_MYSQL_POOL,
   ANNOUNCE_NATS,
   ANNOUNCE_REDIS,
   ANNOUNCE_REGISTRY
@@ -59,7 +59,7 @@ export async function closeNestApp(app: INestApplication) {
   const registryClient = app.get<any>(ANNOUNCE_REGISTRY, { strict: false });
   const nats = app.get<any>(ANNOUNCE_NATS, { strict: false });
   const redis = app.get<any>(ANNOUNCE_REDIS, { strict: false });
-  const mysqlPool = app.get<any>(ANNOUNCE_MYSQL_POOL, { strict: false });
+  const dbPool = app.get<any>(ANNOUNCE_DB_POOL, { strict: false });
 
   try {
     await metrics?.stop?.();
@@ -88,9 +88,9 @@ export async function closeNestApp(app: INestApplication) {
   }
 
   try {
-    await mysqlPool?.end?.();
+    await dbPool?.end?.();
   } catch (error: any) {
-    log("error", "shutdown.mysql_close_failed", { error: error.message });
+    log("error", "shutdown.db_close_failed", { error: error.message });
   }
 
   await app.close();

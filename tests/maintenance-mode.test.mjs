@@ -36,12 +36,12 @@ const { GameTicketController } = await import("../apps/auth-http/src/game-ticket
 function createPool(rows = []) {
   return {
     queries: [],
-    async execute(sql, params = []) {
+    async query(sql, params = []) {
       this.queries.push({ sql, params });
       if (sql.includes("FROM admin_audit_logs")) {
-        return [rows];
+        return { rows };
       }
-      return [{ affectedRows: 1 }];
+      return { rowCount: 1, rows: [] };
     }
   };
 }
@@ -173,7 +173,7 @@ function createAuthService(maintenanceStatus, authStoreOverrides = {}) {
   };
   const service = new AuthService(
     {
-      mysqlEnabled: true,
+      dbEnabled: true,
       accountLockEnabled: false,
       gameProxyHost: "127.0.0.1",
       gameProxyPort: 4000,
@@ -255,7 +255,13 @@ test("auth-http blocks new game ticket issue but leaves revoke path outside main
       revoked = true;
     }
   });
-  const controller = new GameTicketController(authStore, { trustProxy: false, trustedProxies: [] }, service);
+  const controller = new GameTicketController(
+    authStore,
+    { trustProxy: false, trustedProxies: [] },
+    { async checkPlayer() { return { blocked: false, unavailable: false }; } },
+    null,
+    service
+  );
   const req = {
     headers: { authorization: "Bearer access-token" },
     socket: { remoteAddress: "127.0.0.1" }

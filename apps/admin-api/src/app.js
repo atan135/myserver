@@ -8,8 +8,8 @@ export async function createApp() {
   const { createNestApp } = await import("./nest-app.ts");
   const {
     ADMIN_CONFIG,
+    ADMIN_DB_POOL,
     ADMIN_METRICS,
-    ADMIN_MYSQL_POOL,
     ADMIN_NATS,
     ADMIN_REDIS
   } = await import("./tokens.ts");
@@ -20,7 +20,7 @@ export async function createApp() {
     app: nestApp.getHttpAdapter().getInstance(),
     nestApp,
     config: nestApp.get(ADMIN_CONFIG),
-    pool: nestApp.get(ADMIN_MYSQL_POOL, { strict: false }),
+    pool: nestApp.get(ADMIN_DB_POOL, { strict: false }),
     redis: nestApp.get(ADMIN_REDIS, { strict: false }),
     nats: nestApp.get(ADMIN_NATS, { strict: false }),
     metrics: nestApp.get(ADMIN_METRICS, { strict: false })

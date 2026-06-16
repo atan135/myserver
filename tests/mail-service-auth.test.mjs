@@ -15,7 +15,7 @@ import {
   ticketVersionKey,
   verifyTicketSignature
 } from "../apps/mail-service/src/mail-auth.js";
-import { MySqlMailStore } from "../apps/mail-service/src/mysql-store.js";
+import { DbMailStore } from "../apps/mail-service/src/db-store.js";
 
 const TICKET_SECRET = "test-ticket-secret";
 const SERVICE_TOKEN = "test-mail-service-token";
@@ -117,7 +117,7 @@ async function loadMailControllerAndService() {
 }
 
 function createService(MailsService) {
-  const mailStore = new MySqlMailStore(null);
+  const mailStore = new DbMailStore(null);
   const pubsubClient = {
     async publishMailNotification() {}
   };

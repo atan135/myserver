@@ -6,7 +6,7 @@ import ts from "typescript";
 import { pathToFileURL } from "node:url";
 
 import "reflect-metadata";
-import { MySqlMailStore } from "../apps/mail-service/src/mysql-store.js";
+import { DbMailStore } from "../apps/mail-service/src/db-store.js";
 
 async function loadMailsService() {
   const sourcePath = path.resolve("apps/mail-service/src/mails/mails.service.ts");
@@ -54,7 +54,7 @@ async function loadMailsService() {
 
 function createService() {
   const MailsService = createService.MailsService;
-  const mailStore = new MySqlMailStore(null);
+  const mailStore = new DbMailStore(null);
   const pubsubClient = {
     publishes: [],
     failuresRemaining: 0,

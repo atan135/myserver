@@ -4,7 +4,7 @@ import http from "node:http";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { runArchiveTask } from "../services/archive.js";
-import { ADMIN_CONFIG, ADMIN_MYSQL_POOL, ADMIN_REDIS } from "../tokens.js";
+import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
 import {
   aggregateMetricRecordsDetailed,
   buildMetricPoint,
@@ -42,7 +42,7 @@ export class MonitoringService {
   constructor(
     @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_REDIS) private readonly redis: any,
-    @Inject(ADMIN_MYSQL_POOL) private readonly mysqlPool: any
+    @Inject(ADMIN_DB_POOL) private readonly dbPool: any
   ) {}
 
   async services() {
@@ -116,7 +116,7 @@ export class MonitoringService {
 
   async archive() {
     try {
-      const result = await runArchiveTask(this.redis, this.mysqlPool);
+      const result = await runArchiveTask(this.redis, this.dbPool);
       return {
         ok: true,
         archived: result.archived,

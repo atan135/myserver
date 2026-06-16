@@ -11,11 +11,7 @@ function toIsoString(value) {
   return date.toISOString();
 }
 
-function padDatePart(value, length = 2) {
-  return String(value).padStart(length, "0");
-}
-
-function toMySqlDateTime(value) {
+function toPgTimestamp(value) {
   if (!value) {
     return null;
   }
@@ -25,10 +21,7 @@ function toMySqlDateTime(value) {
     return value;
   }
 
-  return [
-    `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`,
-    `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}.${padDatePart(date.getMilliseconds(), 3)}`
-  ].join(" ");
+  return date.toISOString();
 }
 
 function deriveStatus(startTime, endTime) {
@@ -135,34 +128,34 @@ export class AnnouncementStore {
     if (this.pool) {
       let sql = "SELECT * FROM announcements WHERE 1=1";
       const params = [];
+      const addParam = (value) => {
+        params.push(value);
+        return `$${params.length}`;
+      };
 
       if (locale) {
-        sql += " AND (locale = ? OR locale = 'default')";
-        params.push(locale);
+        sql += ` AND (locale = ${addParam(locale)} OR locale = 'default')`;
       }
 
       if (targetGroup) {
         if (targetGroup === "all") {
           sql += " AND target_group = 'all'";
         } else {
-          sql += " AND (target_group = ? OR target_group = 'all')";
-          params.push(targetGroup);
+          sql += ` AND (target_group = ${addParam(targetGroup)} OR target_group = 'all')`;
         }
       }
 
       if (minPriority !== null && minPriority !== undefined) {
-        sql += " AND priority >= ?";
-        params.push(minPriority);
+        sql += ` AND priority >= ${addParam(minPriority)}`;
       }
 
       if (activeOnly) {
-        sql += " AND start_time <= NOW(3) AND end_time >= NOW(3)";
+        sql += " AND start_time <= current_timestamp AND end_time >= current_timestamp";
       }
 
-      sql += " ORDER BY priority DESC, start_time DESC LIMIT ? OFFSET ?";
-      params.push(limit, offset);
+      sql += ` ORDER BY priority DESC, start_time DESC LIMIT ${addParam(limit)} OFFSET ${addParam(offset)}`;
 
-      const [rows] = await this.pool.execute(sql, params);
+      const { rows } = await this.pool.query(sql, params);
       return rows.map((row) => normalizeAnnouncement(row));
     }
 
@@ -179,8 +172,8 @@ export class AnnouncementStore {
 
   async getAnnouncementById(announceId) {
     if (this.pool) {
-      const [rows] = await this.pool.execute(
-        "SELECT * FROM announcements WHERE announce_id = ?",
+      const { rows } = await this.pool.query(
+        "SELECT * FROM announcements WHERE announce_id = $1",
         [announceId]
       );
 
@@ -208,9 +201,9 @@ export class AnnouncementStore {
           start_time,
           end_time
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
 
-      await this.pool.execute(sql, [
+      await this.pool.query(sql, [
         announcement.announce_id,
         announcement.locale,
         announcement.title,
@@ -218,8 +211,8 @@ export class AnnouncementStore {
         announcement.priority,
         announcement.type,
         announcement.target_group,
-        toMySqlDateTime(announcement.start_time),
-        toMySqlDateTime(announcement.end_time)
+        toPgTimestamp(announcement.start_time),
+        toPgTimestamp(announcement.end_time)
       ]);
 
       return this.getAnnouncementById(announcement.announce_id);
@@ -249,25 +242,25 @@ export class AnnouncementStore {
 
     if (this.pool) {
       const sql = `UPDATE announcements
-        SET locale = ?,
-            title = ?,
-            content = ?,
-            priority = ?,
-            announce_type = ?,
-            target_group = ?,
-            start_time = ?,
-            end_time = ?
-        WHERE announce_id = ?`;
+        SET locale = $1,
+            title = $2,
+            content = $3,
+            priority = $4,
+            announce_type = $5,
+            target_group = $6,
+            start_time = $7,
+            end_time = $8
+        WHERE announce_id = $9`;
 
-      await this.pool.execute(sql, [
+      await this.pool.query(sql, [
         next.locale,
         next.title,
         next.content,
         next.priority,
         next.type,
         next.target_group,
-        toMySqlDateTime(next.start_time),
-        toMySqlDateTime(next.end_time),
+        toPgTimestamp(next.start_time),
+        toPgTimestamp(next.end_time),
         announceId
       ]);
 
@@ -284,12 +277,12 @@ export class AnnouncementStore {
 
   async deleteAnnouncement(announceId) {
     if (this.pool) {
-      const [result] = await this.pool.execute(
-        "DELETE FROM announcements WHERE announce_id = ?",
+      const result = await this.pool.query(
+        "DELETE FROM announcements WHERE announce_id = $1",
         [announceId]
       );
 
-      return result.affectedRows > 0;
+      return result.rowCount > 0;
     }
 
     return this.memory.delete(announceId);

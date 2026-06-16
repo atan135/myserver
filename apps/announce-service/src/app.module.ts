@@ -7,15 +7,15 @@ import { getConfig } from "./config.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import { HealthController } from "./health.controller.js";
 import { createMetricsCollector } from "./metrics.js";
-import { createMySqlPool } from "./mysql-client.js";
-import { AnnouncementStore } from "./mysql-store.js";
+import { createDbPool } from "./db-client.js";
+import { AnnouncementStore } from "./db-store.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { RegistryClient } from "./registry-client.js";
 import {
   ANNOUNCE_CONFIG,
+  ANNOUNCE_DB_POOL,
   ANNOUNCE_METRICS,
-  ANNOUNCE_MYSQL_POOL,
   ANNOUNCE_NATS,
   ANNOUNCE_READ_AUTH,
   ANNOUNCE_REDIS,
@@ -42,11 +42,11 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
-      provide: ANNOUNCE_MYSQL_POOL,
+      provide: ANNOUNCE_DB_POOL,
       inject: [ANNOUNCE_CONFIG, ANNOUNCE_NATS, ANNOUNCE_REDIS],
       useFactory: async (config: any, nats: any, redis: any) => {
         try {
-          return await createMySqlPool(config);
+          return await createDbPool(config);
         } catch (error) {
           await nats.close();
           await redis.quit();
@@ -56,8 +56,8 @@ import {
     },
     {
       provide: ANNOUNCE_STORE,
-      inject: [ANNOUNCE_MYSQL_POOL],
-      useFactory: (mysqlPool: any) => new AnnouncementStore(mysqlPool)
+      inject: [ANNOUNCE_DB_POOL],
+      useFactory: (dbPool: any) => new AnnouncementStore(dbPool)
     },
     {
       provide: ANNOUNCE_REGISTRY,

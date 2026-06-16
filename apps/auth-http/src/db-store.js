@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+const UNIQUE_VIOLATION = "23505";
+
 function sha256Hex(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -14,6 +16,10 @@ function toIsoString(value) {
   }
 
   return String(value);
+}
+
+function toJsonb(value) {
+  return value ? JSON.stringify(value) : null;
 }
 
 function toAuthAccount(row) {
@@ -31,7 +37,7 @@ function toAuthAccount(row) {
   };
 }
 
-export class MySqlAuthStore {
+export class DbAuthStore {
   constructor(pool) {
     this.pool = pool;
   }
@@ -48,7 +54,7 @@ export class MySqlAuthStore {
       };
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id,
               guest_id,
               login_name,
@@ -60,7 +66,7 @@ export class MySqlAuthStore {
               password_salt,
               password_hash
        FROM player_accounts
-       WHERE guest_id = ?
+       WHERE guest_id = $1
        LIMIT 1`,
       [guestId]
     );
@@ -72,7 +78,7 @@ export class MySqlAuthStore {
     const playerId = `player-${crypto.randomUUID()}`;
 
     try {
-      await this.pool.execute(
+      await this.pool.query(
         `INSERT INTO player_accounts (
            player_id,
            guest_id,
@@ -80,13 +86,12 @@ export class MySqlAuthStore {
            status,
            created_at,
            last_login_at
-         ) VALUES (?, ?, 'guest', 'active', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
+         ) VALUES ($1, $2, 'guest', 'active', current_timestamp, current_timestamp)`,
         [playerId, guestId]
       );
     } catch (err) {
-      if (err.code === "ER_DUP_ENTRY" || err.code === "ER_NO_REFERENCED_ROW_2") {
-        // Concurrent insert: another request already created this guest account
-        const [rows] = await this.pool.execute(
+      if (err.code === UNIQUE_VIOLATION) {
+        const { rows: existingRows } = await this.pool.query(
           `SELECT player_id,
                   guest_id,
                   login_name,
@@ -98,12 +103,12 @@ export class MySqlAuthStore {
                   password_salt,
                   password_hash
            FROM player_accounts
-           WHERE guest_id = ?
+           WHERE guest_id = $1
            LIMIT 1`,
           [guestId]
         );
-        if (rows.length > 0) {
-          return toAuthAccount(rows[0]);
+        if (existingRows.length > 0) {
+          return toAuthAccount(existingRows[0]);
         }
       }
       throw err;
@@ -122,7 +127,7 @@ export class MySqlAuthStore {
       return null;
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id,
               login_name,
               display_name,
@@ -133,7 +138,7 @@ export class MySqlAuthStore {
               password_salt,
               password_hash
        FROM player_accounts
-       WHERE login_name = ?
+       WHERE login_name = $1
          AND account_type = 'password'
        LIMIT 1`,
       [loginName]
@@ -143,8 +148,7 @@ export class MySqlAuthStore {
       return null;
     }
 
-    const account = rows[0];
-    return toAuthAccount(account);
+    return toAuthAccount(rows[0]);
   }
 
   async findPlayerAuthStateByPlayerId(playerId) {
@@ -152,7 +156,7 @@ export class MySqlAuthStore {
       return null;
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id,
               guest_id,
               login_name,
@@ -164,7 +168,7 @@ export class MySqlAuthStore {
               password_salt,
               password_hash
        FROM player_accounts
-       WHERE player_id = ?
+       WHERE player_id = $1
        LIMIT 1`,
       [playerId]
     );
@@ -177,17 +181,17 @@ export class MySqlAuthStore {
       return false;
     }
 
-    const [result] = await this.pool.execute(
+    const result = await this.pool.query(
       `UPDATE player_accounts
        SET status = 'active',
            ban_expires_at = NULL
-       WHERE player_id = ?
+       WHERE player_id = $1
          AND status = 'banned'
          AND ban_expires_at IS NOT NULL
-         AND ban_expires_at <= CURRENT_TIMESTAMP(3)`,
+         AND ban_expires_at <= current_timestamp`,
       [playerId]
     );
-    return result.affectedRows > 0;
+    return result.rowCount > 0;
   }
 
   async touchPlayerLastLogin(playerId) {
@@ -195,10 +199,10 @@ export class MySqlAuthStore {
       return;
     }
 
-    await this.pool.execute(
+    await this.pool.query(
       `UPDATE player_accounts
-       SET last_login_at = CURRENT_TIMESTAMP(3)
-       WHERE player_id = ?`,
+       SET last_login_at = current_timestamp
+       WHERE player_id = $1`,
       [playerId]
     );
   }
@@ -212,13 +216,13 @@ export class MySqlAuthStore {
     passwordHash
   }) {
     if (!this.enabled) {
-      throw new Error("MySQL auth store is disabled");
+      throw new Error("database auth store is disabled");
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id
        FROM player_accounts
-       WHERE login_name = ?
+       WHERE login_name = $1
        LIMIT 1`,
       [loginName]
     );
@@ -226,15 +230,15 @@ export class MySqlAuthStore {
     if (rows.length > 0) {
       const existing = rows[0];
 
-      await this.pool.execute(
+      await this.pool.query(
         `UPDATE player_accounts
-         SET display_name = ?,
+         SET display_name = $1,
              account_type = 'password',
-             status = ?,
-             password_algo = ?,
-             password_salt = ?,
-             password_hash = ?
-         WHERE player_id = ?`,
+             status = $2,
+             password_algo = $3,
+             password_salt = $4,
+             password_hash = $5
+         WHERE player_id = $6`,
         [
           displayName,
           status,
@@ -255,7 +259,7 @@ export class MySqlAuthStore {
 
     const playerId = `player-${crypto.randomUUID()}`;
 
-    await this.pool.execute(
+    await this.pool.query(
       `INSERT INTO player_accounts (
          player_id,
          login_name,
@@ -267,7 +271,7 @@ export class MySqlAuthStore {
          password_hash,
          created_at,
          last_login_at
-       ) VALUES (?, ?, ?, 'password', ?, ?, ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))`,
+       ) VALUES ($1, $2, $3, 'password', $4, $5, $6, $7, current_timestamp, current_timestamp)`,
       [
         playerId,
         loginName,
@@ -289,15 +293,15 @@ export class MySqlAuthStore {
 
   async updatePassword(playerId, { passwordSalt, passwordHash, passwordAlgo = "scrypt" }) {
     if (!this.enabled) {
-      throw new Error("MySQL auth store is disabled");
+      throw new Error("database auth store is disabled");
     }
 
-    await this.pool.execute(
+    await this.pool.query(
       `UPDATE player_accounts
-       SET password_algo = ?,
-           password_salt = ?,
-           password_hash = ?
-       WHERE player_id = ?
+       SET password_algo = $1,
+           password_salt = $2,
+           password_hash = $3
+       WHERE player_id = $4
          AND account_type = 'password'`,
       [passwordAlgo, passwordSalt, passwordHash, playerId]
     );
@@ -308,7 +312,7 @@ export class MySqlAuthStore {
       return null;
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id,
               login_name,
               display_name,
@@ -319,7 +323,7 @@ export class MySqlAuthStore {
               password_salt,
               password_hash
        FROM player_accounts
-       WHERE player_id = ?
+       WHERE player_id = $1
          AND account_type = 'password'
        LIMIT 1`,
       [playerId]
@@ -329,8 +333,7 @@ export class MySqlAuthStore {
       return null;
     }
 
-    const account = rows[0];
-    return toAuthAccount(account);
+    return toAuthAccount(rows[0]);
   }
 
   async appendAuthAudit({
@@ -346,7 +349,7 @@ export class MySqlAuthStore {
       return;
     }
 
-    await this.pool.execute(
+    await this.pool.query(
       `INSERT INTO auth_audit_logs (
          player_id,
          guest_id,
@@ -356,7 +359,7 @@ export class MySqlAuthStore {
          client_ip,
          details_json,
          created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, current_timestamp)`,
       [
         playerId,
         guestId,
@@ -364,7 +367,7 @@ export class MySqlAuthStore {
         accessToken ? sha256Hex(accessToken) : null,
         ticket ? sha256Hex(ticket) : null,
         clientIp,
-        details ? JSON.stringify(details) : null
+        toJsonb(details)
       ]
     );
   }
@@ -381,7 +384,7 @@ export class MySqlAuthStore {
       return;
     }
 
-    await this.pool.execute(
+    await this.pool.query(
       `INSERT INTO security_audit_logs (
          event_type,
          target_type,
@@ -390,14 +393,14 @@ export class MySqlAuthStore {
          severity,
          details_json,
          created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))`,
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, current_timestamp)`,
       [
         eventType,
         targetType,
         targetValue,
         clientIp,
         severity,
-        details ? JSON.stringify(details) : null
+        toJsonb(details)
       ]
     );
   }

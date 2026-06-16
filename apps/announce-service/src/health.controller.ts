@@ -14,7 +14,7 @@ export class HealthController {
       ok: true,
       service: this.config.appName,
       env: this.config.env,
-      storage: this.config.mysqlEnabled ? "mysql" : "memory"
+      storage: this.config.dbEnabled ? "postgresql" : "memory"
     };
   }
 }

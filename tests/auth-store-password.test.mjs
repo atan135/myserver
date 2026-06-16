@@ -38,13 +38,13 @@ class FakeRedis {
   }
 }
 
-test("AuthStore password login validates credentials from mysql store", async () => {
+test("AuthStore password login validates credentials from database store", async () => {
   const passwordSalt = createPasswordSalt();
   const passwordHash = await hashPassword("Passw0rd!", passwordSalt);
   const audits = [];
   const touchedPlayerIds = [];
   const redis = new FakeRedis();
-  const mysqlStore = {
+  const dbStore = {
     enabled: true,
     async findPasswordAccountByLoginName(loginName) {
       assert.equal(loginName, "test001");
@@ -73,7 +73,7 @@ test("AuthStore password login validates credentials from mysql store", async ()
       ticketSecret: "test-secret"
     },
     redis,
-    mysqlStore
+    dbStore
   );
 
   const session = await authStore.createPasswordSession(

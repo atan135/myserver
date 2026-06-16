@@ -6,6 +6,8 @@ import test from "node:test";
 
 const CONFIG_ENV_KEYS = [
   "NODE_ENV",
+  "DATABASE_URL",
+  "DB_POOL_SIZE",
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
   "ADMIN_PASSWORD",

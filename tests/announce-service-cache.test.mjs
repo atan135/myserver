@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 import "reflect-metadata";
-import { AnnouncementStore } from "../apps/announce-service/src/mysql-store.js";
+import { AnnouncementStore } from "../apps/announce-service/src/db-store.js";
 
 async function loadAnnouncementsService() {
   const sourcePath = path.resolve(

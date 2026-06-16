@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 
 import { assertValidGuestId, assertValidLoginName, createPasswordSalt, hashPassword, verifyPassword } from "../password-utils.js";
-import { AUTH_ACCOUNT_LOCKOUT, AUTH_CONFIG, AUTH_MAINTENANCE_STORE, AUTH_MYSQL_STORE, AUTH_SERVICE_DISCOVERY, AUTH_STORE } from "../tokens.js";
+import { AUTH_ACCOUNT_LOCKOUT, AUTH_CONFIG, AUTH_DB_STORE, AUTH_MAINTENANCE_STORE, AUTH_SERVICE_DISCOVERY, AUTH_STORE } from "../tokens.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest, forbidden, serviceUnavailable, unauthorized } from "../common/http-exception.js";
 import type { GuestLoginDto } from "./dto/guest-login.dto.js";
@@ -22,7 +22,7 @@ export class AuthService {
     @Inject(AUTH_CONFIG) private readonly config: any,
     @Inject(AUTH_STORE) private readonly authStore: any,
     @Inject(AUTH_ACCOUNT_LOCKOUT) private readonly accountLockout: any,
-    @Inject(AUTH_MYSQL_STORE) private readonly mysqlStore: any,
+    @Inject(AUTH_DB_STORE) private readonly dbStore: any,
     @Inject(AUTH_SERVICE_DISCOVERY) private readonly serviceDiscovery: any,
     @Inject(AUTH_MAINTENANCE_STORE) private readonly maintenanceStore: any = null
   ) {}
@@ -112,8 +112,8 @@ export class AuthService {
       throw badRequest("INVALID_PASSWORD", "password must be between 6 and 128 characters");
     }
 
-    if (!this.config.mysqlEnabled) {
-      throw badRequest("PASSWORD_LOGIN_UNAVAILABLE", "mysql auth store is disabled");
+    if (!this.config.dbEnabled) {
+      throw badRequest("PASSWORD_LOGIN_UNAVAILABLE", "database auth store is disabled");
     }
 
     await this.assertNotInMaintenance();
@@ -121,7 +121,7 @@ export class AuthService {
     if (this.config.accountLockEnabled && this.accountLockout) {
       const lockStatus = await this.accountLockout.getLockStatus(loginName);
       if (lockStatus.locked) {
-        this.mysqlStore?.appendSecurityAudit?.({
+        this.dbStore?.appendSecurityAudit?.({
           eventType: "account_locked_login_attempt",
           targetType: "account",
           targetValue: loginName,
@@ -159,7 +159,7 @@ export class AuthService {
         const { locked, attempts } = await this.accountLockout.recordFailedAttempt(loginName);
 
         if (locked) {
-          this.mysqlStore?.appendSecurityAudit?.({
+          this.dbStore?.appendSecurityAudit?.({
             eventType: "account_locked",
             targetType: "account",
             targetValue: loginName,
@@ -171,7 +171,7 @@ export class AuthService {
       }
 
       if (error.code === "INVALID_LOGIN_CREDENTIALS" || error.code === "ACCOUNT_DISABLED") {
-        this.mysqlStore?.appendSecurityAudit?.({
+        this.dbStore?.appendSecurityAudit?.({
           eventType: "login_failed",
           targetType: "account",
           targetValue: loginName,
@@ -279,8 +279,8 @@ export class AuthService {
       throw unauthorized("INVALID_ACCESS_TOKEN");
     }
 
-    if (!this.config.mysqlEnabled || !this.mysqlStore?.enabled) {
-      throw badRequest("PASSWORD_CHANGE_UNAVAILABLE", "mysql auth store is disabled");
+    if (!this.config.dbEnabled || !this.dbStore?.enabled) {
+      throw badRequest("PASSWORD_CHANGE_UNAVAILABLE", "database auth store is disabled");
     }
 
     const { oldPassword, newPassword } = body || {};
@@ -298,7 +298,7 @@ export class AuthService {
     }
 
     const clientIp = getClientIp(req, this.config);
-    const account = await this.mysqlStore.findPasswordAccountByPlayerId(session.playerId);
+    const account = await this.dbStore.findPasswordAccountByPlayerId(session.playerId);
     if (!account) {
       throw badRequest("NOT_PASSWORD_ACCOUNT", "This account does not support password change");
     }
@@ -308,7 +308,7 @@ export class AuthService {
       await verifyPassword(oldPassword, account.passwordSalt, account.passwordHash);
 
     if (!passwordMatches) {
-      this.mysqlStore.appendSecurityAudit({
+      this.dbStore.appendSecurityAudit({
         eventType: "change_password_failed",
         targetType: "account",
         targetValue: account.loginName,
@@ -322,12 +322,12 @@ export class AuthService {
     const newSalt = createPasswordSalt();
     const newHash = await hashPassword(newPassword, newSalt);
 
-    await this.mysqlStore.updatePassword(session.playerId, {
+    await this.dbStore.updatePassword(session.playerId, {
       passwordSalt: newSalt,
       passwordHash: newHash
     });
 
-    await this.mysqlStore.appendAuthAudit({
+    await this.dbStore.appendAuthAudit({
       playerId: session.playerId,
       eventType: "password_changed",
       accessToken,

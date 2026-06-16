@@ -128,7 +128,7 @@ test("JwtAuthGuard audit write failure does not change unauthorized result", asy
     {},
     {
       async appendSecurityAuditLog() {
-        throw new Error("mysql unavailable");
+        throw new Error("database unavailable");
       }
     },
     {}

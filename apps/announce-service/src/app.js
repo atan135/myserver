@@ -8,8 +8,8 @@ export async function createApp() {
   const { createNestApp, closeNestApp } = await import("./nest-app.ts");
   const {
     ANNOUNCE_CONFIG,
+    ANNOUNCE_DB_POOL,
     ANNOUNCE_METRICS,
-    ANNOUNCE_MYSQL_POOL,
     ANNOUNCE_NATS,
     ANNOUNCE_REDIS,
     ANNOUNCE_REGISTRY
@@ -23,7 +23,7 @@ export async function createApp() {
     config: nestApp.get(ANNOUNCE_CONFIG),
     redis: nestApp.get(ANNOUNCE_REDIS, { strict: false }),
     nats: nestApp.get(ANNOUNCE_NATS, { strict: false }),
-    mysqlPool: nestApp.get(ANNOUNCE_MYSQL_POOL, { strict: false }),
+    dbPool: nestApp.get(ANNOUNCE_DB_POOL, { strict: false }),
     registryClient: nestApp.get(ANNOUNCE_REGISTRY, { strict: false }),
     metrics: nestApp.get(ANNOUNCE_METRICS, { strict: false }),
     close: () => closeNestApp(nestApp)

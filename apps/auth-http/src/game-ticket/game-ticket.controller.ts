@@ -5,7 +5,7 @@ import { unauthorized, badRequest, forbidden, serviceUnavailable } from "../comm
 import { getClientIp } from "../common/client-ip.js";
 import { log } from "../logger.js";
 import { AuthService } from "../auth/auth.service.js";
-import { AUTH_BLOCKLIST, AUTH_CONFIG, AUTH_MYSQL_STORE, AUTH_STORE } from "../tokens.js";
+import { AUTH_BLOCKLIST, AUTH_CONFIG, AUTH_DB_STORE, AUTH_STORE } from "../tokens.js";
 
 function logSecurity(level: string, message: string, extra: Record<string, unknown>) {
   try {
@@ -31,7 +31,7 @@ export class GameTicketController {
     @Inject(AUTH_STORE) private readonly authStore: any,
     @Inject(AUTH_CONFIG) private readonly config: any,
     @Inject(AUTH_BLOCKLIST) private readonly blocklist: any,
-    @Inject(AUTH_MYSQL_STORE) private readonly mysqlStore: any,
+    @Inject(AUTH_DB_STORE) private readonly dbStore: any,
     private readonly authService: AuthService
   ) {}
 
@@ -68,7 +68,7 @@ export class GameTicketController {
         clientIp,
         path: req.url
       });
-      await this.mysqlStore?.appendSecurityAudit?.({
+      await this.dbStore?.appendSecurityAudit?.({
         eventType: "blocklist_unavailable",
         targetType: "player",
         targetValue: session.playerId,
@@ -84,7 +84,7 @@ export class GameTicketController {
         clientIp,
         path: req.url
       });
-      await this.mysqlStore?.appendSecurityAudit?.({
+      await this.dbStore?.appendSecurityAudit?.({
         eventType: "player_blocked",
         targetType: "player",
         targetValue: session.playerId,

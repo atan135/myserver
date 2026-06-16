@@ -11,8 +11,8 @@ import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
 import {
   ADMIN_CONFIG,
+  ADMIN_DB_POOL,
   ADMIN_METRICS,
-  ADMIN_MYSQL_POOL,
   ADMIN_NATS,
   ADMIN_REDIS
 } from "./tokens.js";
@@ -60,7 +60,7 @@ export async function closeNestApp(app: INestApplication) {
   const metrics = app.get<any>(ADMIN_METRICS, { strict: false });
   const redis = app.get<any>(ADMIN_REDIS, { strict: false });
   const nats = app.get<any>(ADMIN_NATS, { strict: false });
-  const pool = app.get<any>(ADMIN_MYSQL_POOL, { strict: false });
+  const pool = app.get<any>(ADMIN_DB_POOL, { strict: false });
 
   try {
     await metrics?.stop?.();
@@ -83,7 +83,7 @@ export async function closeNestApp(app: INestApplication) {
   try {
     await pool?.end?.();
   } catch (error: any) {
-    log("error", "shutdown.mysql_close_failed", { error: error.message });
+    log("error", "shutdown.db_close_failed", { error: error.message });
   }
 
   await app.close();

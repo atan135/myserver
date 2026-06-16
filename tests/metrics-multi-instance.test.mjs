@@ -359,15 +359,15 @@ test("archive aggregates same bucket legacy and instance keys before insert and 
   });
 
   const inserts = [];
-  const mysqlPool = {
-    async execute(sql, params) {
+  const dbPool = {
+    async query(sql, params) {
       inserts.push({ sql, params });
     }
   };
 
   const archived = await archiveServiceMetrics(
     redis,
-    mysqlPool,
+    dbPool,
     "game-server",
     1700000000,
     1700000005

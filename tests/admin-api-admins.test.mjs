@@ -9,7 +9,7 @@ process.env.TS_NODE_TRANSPILE_ONLY = "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { AdminsController } = await import("../apps/admin-api/src/admins/admins.controller.ts");
-const { ROLES_KEY } = await import("../apps/admin-api/src/auth/roles.decorator.ts");
+const { PERMISSIONS_KEY } = await import("../apps/admin-api/src/auth/roles.decorator.ts");
 const { AdminStore, verifyPassword } = await import("../apps/admin-api/src/admin-store.js");
 
 function createReq(admin = { sub: 1, username: "root", role: "admin" }) {
@@ -106,9 +106,9 @@ test("revokeTokens bumps target admin token version and writes audit log", async
   assert.equal(adminStore.auditLogs[0].details.reason, "role change");
 });
 
-test("admin token lifecycle endpoints require admin role metadata", () => {
-  assert.deepEqual(Reflect.getMetadata(ROLES_KEY, AdminsController.prototype.revokeTokens), ["admin"]);
-  assert.deepEqual(Reflect.getMetadata(ROLES_KEY, AdminsController.prototype.resetPassword), ["admin"]);
+test("admin token lifecycle endpoints require admin permission metadata", () => {
+  assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, AdminsController.prototype.revokeTokens), ["admins.revoke_tokens"]);
+  assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, AdminsController.prototype.resetPassword), ["admins.reset_password"]);
 });
 
 test("revokeTokens reports self revocation invalidates current token after response", async () => {
@@ -230,9 +230,9 @@ test("resetPassword records failed audit without password update when token vers
 test("AdminStore finds admins by id and updates password hash without storing plaintext", async () => {
   let updateParams = null;
   const pool = {
-    async execute(sql, params) {
-      if (sql.includes("FROM admin_accounts") && sql.includes("WHERE id = ?")) {
-        return [[{
+    async query(sql, params) {
+      if (sql.includes("FROM admin_accounts") && sql.includes("WHERE id = $1")) {
+        return { rows: [{
           id: 2,
           username: "ops",
           display_name: "Ops",
@@ -241,12 +241,12 @@ test("AdminStore finds admins by id and updates password hash without storing pl
           password_hash: "old-hash",
           role: "operator",
           status: "active"
-        }]];
+        }] };
       }
 
       if (sql.includes("UPDATE admin_accounts")) {
         updateParams = params;
-        return [{ affectedRows: 1 }];
+        return { rowCount: 1, rows: [] };
       }
 
       throw new Error(`unexpected query: ${sql}`);

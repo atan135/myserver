@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MySqlMailStore } from "../apps/mail-service/src/mysql-store.js";
+import { DbMailStore } from "../apps/mail-service/src/db-store.js";
 
 async function createMail(store, overrides = {}) {
   const mail = {
@@ -27,7 +27,7 @@ async function createMail(store, overrides = {}) {
 }
 
 test("mail attachment claim can only be reserved once before completion", async () => {
-  const store = new MySqlMailStore(null);
+  const store = new DbMailStore(null);
   await createMail(store);
 
   const first = await store.beginClaimAttachments("mail_001");
@@ -44,7 +44,7 @@ test("mail attachment claim can only be reserved once before completion", async 
 });
 
 test("completed mail attachment claim is idempotent for later attempts", async () => {
-  const store = new MySqlMailStore(null);
+  const store = new DbMailStore(null);
   await createMail(store);
 
   const reserved = await store.beginClaimAttachments("mail_001");
@@ -64,7 +64,7 @@ test("completed mail attachment claim is idempotent for later attempts", async (
 });
 
 test("failed mail attachment claim can be released for retry", async () => {
-  const store = new MySqlMailStore(null);
+  const store = new DbMailStore(null);
   await createMail(store);
 
   const reserved = await store.beginClaimAttachments("mail_001");
@@ -83,7 +83,7 @@ test("failed mail attachment claim can be released for retry", async () => {
 });
 
 test("mail creation writes notification outbox in memory store", async () => {
-  const store = new MySqlMailStore(null);
+  const store = new DbMailStore(null);
   await createMail(store);
 
   const outbox = await store.getMailNotificationOutboxByMailId("mail_001");
@@ -98,18 +98,18 @@ test("mail creation writes notification outbox in memory store", async () => {
 
 test("mail insert uses provided executor instead of pool", async () => {
   const pool = {
-    async execute() {
-      throw new Error("pool.execute should not be used by insertMail");
+    async query() {
+      throw new Error("pool.query should not be used by insertMail");
     }
   };
   const executor = {
     calls: [],
-    async execute(sql, params) {
+    async query(sql, params) {
       this.calls.push({ sql, params });
-      return [{ insertId: 123 }];
+      return { rows: [{ id: 123 }] };
     }
   };
-  const store = new MySqlMailStore(pool);
+  const store = new DbMailStore(pool);
 
   const mailId = await store.insertMail(executor, {
     mail_id: "mail_executor_001",
@@ -135,7 +135,7 @@ test("mail insert uses provided executor instead of pool", async () => {
 });
 
 test("mail notification outbox can be reserved, failed, retried, and marked sent", async () => {
-  const store = new MySqlMailStore(null);
+  const store = new DbMailStore(null);
   await createMail(store);
 
   const firstReserve = await store.reservePendingMailNotificationOutbox(10);

@@ -1,7 +1,7 @@
 export const ADMIN_CONFIG = Symbol("ADMIN_CONFIG");
 export const ADMIN_REDIS = Symbol("ADMIN_REDIS");
 export const ADMIN_NATS = Symbol("ADMIN_NATS");
-export const ADMIN_MYSQL_POOL = Symbol("ADMIN_MYSQL_POOL");
+export const ADMIN_DB_POOL = Symbol("ADMIN_DB_POOL");
 export const ADMIN_STORE = Symbol("ADMIN_STORE");
 export const ADMIN_SESSION_STORE = Symbol("ADMIN_SESSION_STORE");
 export const ADMIN_GAME_ADMIN_CLIENT = Symbol("ADMIN_GAME_ADMIN_CLIENT");

@@ -98,11 +98,11 @@ export function getConfig() {
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
-    mysqlEnabled: parseBoolean(process.env.MYSQL_ENABLED, false),
-    mysqlUrl:
-      process.env.MYSQL_URL ||
-      "mysql://root:password@127.0.0.1:3306/myserver_mail",
-    mysqlPoolSize: Number.parseInt(process.env.MYSQL_POOL_SIZE || "10", 10),
+    dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
+    databaseUrl:
+      process.env.DATABASE_URL ||
+      "postgres://postgres:password@127.0.0.1:5432/myserver_mail",
+    dbPoolSize: Number.parseInt(process.env.DB_POOL_SIZE || "10", 10),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",

@@ -12,7 +12,7 @@ const { MonitoringService } = await import("./monitoring.service.ts");
 
 function makeService(config = {}) {
   const redis = {};
-  const mysqlPool = {};
+  const dbPool = {};
   return new MonitoringService(
     {
       gameProxyAdminHost: "127.0.0.1",
@@ -24,7 +24,7 @@ function makeService(config = {}) {
       ...config
     },
     redis,
-    mysqlPool
+    dbPool
   );
 }
 

@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 
 const SALT_ROUNDS = 10;
 const MAINTENANCE_STATE_KEY = "maintenance:global";
+const UNIQUE_VIOLATION = "23505";
 
 function maintenanceStateKey(prefix = "") {
   return `${prefix || ""}${MAINTENANCE_STATE_KEY}`;
@@ -62,9 +63,22 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+function toJsonb(value) {
+  return value ? JSON.stringify(value) : null;
+}
+
+function nextParam(params) {
+  return `$${params.length}`;
+}
+
+function toNumericId(value) {
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) ? numeric : value;
+}
+
 function toAdmin(row) {
   return {
-    id: row.id,
+    id: toNumericId(row.id),
     username: row.username,
     displayName: row.display_name,
     role: row.role,
@@ -90,6 +104,10 @@ function toPlayer(row) {
   };
 }
 
+function readTotal(rows) {
+  return Number.parseInt(String(rows[0]?.total ?? "0"), 10);
+}
+
 export class AdminStore {
   constructor(pool, redis = null, config = {}) {
     this.pool = pool;
@@ -106,10 +124,10 @@ export class AdminStore {
   }
 
   async findAdminByUsername(username) {
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT id, username, display_name, password_algo, password_salt, password_hash, role, status
        FROM admin_accounts
-       WHERE username = ?
+       WHERE username = $1
        LIMIT 1`,
       [username]
     );
@@ -120,10 +138,10 @@ export class AdminStore {
   }
 
   async findAdminById(adminId) {
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT id, username, display_name, password_algo, password_salt, password_hash, role, status
        FROM admin_accounts
-       WHERE id = ?
+       WHERE id = $1
        LIMIT 1`,
       [adminId]
     );
@@ -140,20 +158,21 @@ export class AdminStore {
     const passwordHash = hashPassword(password);
 
     try {
-      const [result] = await this.pool.execute(
+      const { rows } = await this.pool.query(
         `INSERT INTO admin_accounts (username, display_name, password_algo, password_salt, password_hash, role, status)
-         VALUES (?, ?, 'bcrypt', ?, ?, ?, 'active')`,
+         VALUES ($1, $2, 'bcrypt', $3, $4, $5, 'active')
+         RETURNING id`,
         [username, displayName || username, passwordSalt, passwordHash, role]
       );
 
       return {
-        id: result.insertId,
+        id: toNumericId(rows[0].id),
         username,
         displayName: displayName || username,
         role
       };
     } catch (error) {
-      if (error.code === "ER_DUP_ENTRY") {
+      if (error.code === UNIQUE_VIOLATION) {
         throw new Error("ADMIN_ALREADY_EXISTS");
       }
       throw error;
@@ -175,8 +194,8 @@ export class AdminStore {
   }
 
   async updateLastLogin(adminId) {
-    await this.pool.execute(
-      `UPDATE admin_accounts SET last_login_at = CURRENT_TIMESTAMP(3) WHERE id = ?`,
+    await this.pool.query(
+      `UPDATE admin_accounts SET last_login_at = current_timestamp WHERE id = $1`,
       [adminId]
     );
   }
@@ -184,29 +203,29 @@ export class AdminStore {
   async updateAdminPassword(adminId, password) {
     const passwordSalt = crypto.randomBytes(16).toString("hex");
     const passwordHash = hashPassword(password);
-    const [result] = await this.pool.execute(
+    const result = await this.pool.query(
       `UPDATE admin_accounts
        SET password_algo = 'bcrypt',
-           password_salt = ?,
-           password_hash = ?
-       WHERE id = ?`,
+           password_salt = $1,
+           password_hash = $2
+       WHERE id = $3`,
       [passwordSalt, passwordHash, adminId]
     );
 
-    return result.affectedRows > 0;
+    return result.rowCount > 0;
   }
 
   async appendAuditLog({ adminId, adminUsername, action, targetType, targetValue, details, ip }) {
-    await this.pool.execute(
+    await this.pool.query(
       `INSERT INTO admin_audit_logs (admin_id, admin_username, action, target_type, target_value, details_json, ip)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
       [
         adminId,
         adminUsername,
         action,
         targetType || null,
         targetValue || null,
-        details ? JSON.stringify(details) : null,
+        toJsonb(details),
         ip || null
       ]
     );
@@ -220,16 +239,16 @@ export class AdminStore {
     clientIp,
     details
   }) {
-    await this.pool.execute(
+    await this.pool.query(
       `INSERT INTO security_audit_logs (event_type, target_type, target_value, severity, client_ip, details_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [
         eventType,
         targetType || null,
         targetValue || null,
         severity,
         clientIp || null,
-        details ? JSON.stringify(details) : null
+        toJsonb(details)
       ]
     );
   }
@@ -239,29 +258,31 @@ export class AdminStore {
     const params = [];
 
     if (eventType) {
-      query += ` AND event_type = ?`;
       params.push(eventType);
+      query += ` AND event_type = ${nextParam(params)}`;
     }
 
     if (targetType) {
-      query += ` AND target_type = ?`;
       params.push(targetType);
+      query += ` AND target_type = ${nextParam(params)}`;
     }
 
     if (severity) {
-      query += ` AND severity = ?`;
       params.push(severity);
+      query += ` AND severity = ${nextParam(params)}`;
     }
 
     if (clientIp) {
-      query += ` AND client_ip = ?`;
       params.push(clientIp);
+      query += ` AND client_ip = ${nextParam(params)}`;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    params.push(limit);
+    query += ` ORDER BY created_at DESC LIMIT ${nextParam(params)}`;
+    params.push(offset);
+    query += ` OFFSET ${nextParam(params)}`;
 
-    const [rows] = await this.pool.execute(query, params);
+    const { rows } = await this.pool.query(query, params);
     return rows;
   }
 
@@ -270,27 +291,27 @@ export class AdminStore {
     const params = [];
 
     if (eventType) {
-      query += ` AND event_type = ?`;
       params.push(eventType);
+      query += ` AND event_type = ${nextParam(params)}`;
     }
 
     if (targetType) {
-      query += ` AND target_type = ?`;
       params.push(targetType);
+      query += ` AND target_type = ${nextParam(params)}`;
     }
 
     if (severity) {
-      query += ` AND severity = ?`;
       params.push(severity);
+      query += ` AND severity = ${nextParam(params)}`;
     }
 
     if (clientIp) {
-      query += ` AND client_ip = ?`;
       params.push(clientIp);
+      query += ` AND client_ip = ${nextParam(params)}`;
     }
 
-    const [rows] = await this.pool.execute(query, params);
-    return rows[0].total;
+    const { rows } = await this.pool.query(query, params);
+    return readTotal(rows);
   }
 
   async getAuditLogs({ limit = 50, offset = 0, adminId, action, targetType } = {}) {
@@ -298,24 +319,26 @@ export class AdminStore {
     const params = [];
 
     if (adminId) {
-      query += ` AND admin_id = ?`;
       params.push(adminId);
+      query += ` AND admin_id = ${nextParam(params)}`;
     }
 
     if (action) {
-      query += ` AND action = ?`;
       params.push(action);
+      query += ` AND action = ${nextParam(params)}`;
     }
 
     if (targetType) {
-      query += ` AND target_type = ?`;
       params.push(targetType);
+      query += ` AND target_type = ${nextParam(params)}`;
     }
 
-    query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    params.push(limit);
+    query += ` ORDER BY created_at DESC LIMIT ${nextParam(params)}`;
+    params.push(offset);
+    query += ` OFFSET ${nextParam(params)}`;
 
-    const [rows] = await this.pool.execute(query, params);
+    const { rows } = await this.pool.query(query, params);
     return rows;
   }
 
@@ -324,22 +347,22 @@ export class AdminStore {
     const params = [];
 
     if (adminId) {
-      query += ` AND admin_id = ?`;
       params.push(adminId);
+      query += ` AND admin_id = ${nextParam(params)}`;
     }
 
     if (action) {
-      query += ` AND action = ?`;
       params.push(action);
+      query += ` AND action = ${nextParam(params)}`;
     }
 
     if (targetType) {
-      query += ` AND target_type = ?`;
       params.push(targetType);
+      query += ` AND target_type = ${nextParam(params)}`;
     }
 
-    const [rows] = await this.pool.execute(query, params);
-    return rows[0].total;
+    const { rows } = await this.pool.query(query, params);
+    return readTotal(rows);
   }
 
   // ============================================================
@@ -347,10 +370,10 @@ export class AdminStore {
   // ============================================================
 
   async findPlayerById(playerId) {
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT player_id, guest_id, login_name, display_name, account_type, status, ban_expires_at, created_at, last_login_at
        FROM player_accounts
-       WHERE player_id = ?
+       WHERE player_id = $1
        LIMIT 1`,
       [playerId]
     );
@@ -364,24 +387,26 @@ export class AdminStore {
     const params = [];
 
     if (loginName) {
-      query += ` AND login_name LIKE ?`;
       params.push(`%${loginName}%`);
+      query += ` AND login_name LIKE ${nextParam(params)}`;
     }
 
     if (guestId) {
-      query += ` AND guest_id LIKE ?`;
       params.push(`%${guestId}%`);
+      query += ` AND guest_id LIKE ${nextParam(params)}`;
     }
 
     if (status) {
-      query += ` AND status = ?`;
       params.push(status);
+      query += ` AND status = ${nextParam(params)}`;
     }
 
-    query += ` ORDER BY last_login_at DESC LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    params.push(limit);
+    query += ` ORDER BY last_login_at DESC LIMIT ${nextParam(params)}`;
+    params.push(offset);
+    query += ` OFFSET ${nextParam(params)}`;
 
-    const [rows] = await this.pool.execute(query, params);
+    const { rows } = await this.pool.query(query, params);
     return rows.map(toPlayer);
   }
 
@@ -390,31 +415,31 @@ export class AdminStore {
     const params = [];
 
     if (loginName) {
-      query += ` AND login_name LIKE ?`;
       params.push(`%${loginName}%`);
+      query += ` AND login_name LIKE ${nextParam(params)}`;
     }
 
     if (guestId) {
-      query += ` AND guest_id LIKE ?`;
       params.push(`%${guestId}%`);
+      query += ` AND guest_id LIKE ${nextParam(params)}`;
     }
 
     if (status) {
-      query += ` AND status = ?`;
       params.push(status);
+      query += ` AND status = ${nextParam(params)}`;
     }
 
-    const [rows] = await this.pool.execute(query, params);
-    return rows[0].total;
+    const { rows } = await this.pool.query(query, params);
+    return readTotal(rows);
   }
 
   async updatePlayerStatus(playerId, status, { banExpiresAt = undefined } = {}) {
     const nextBanExpiresAt = status === "banned" ? banExpiresAt ?? null : null;
-    const [result] = await this.pool.execute(
-      `UPDATE player_accounts SET status = ?, ban_expires_at = ? WHERE player_id = ?`,
+    const result = await this.pool.query(
+      `UPDATE player_accounts SET status = $1, ban_expires_at = $2 WHERE player_id = $3`,
       [status, nextBanExpiresAt, playerId]
     );
-    return result.affectedRows > 0;
+    return result.rowCount > 0;
   }
 
   // ============================================================
@@ -445,7 +470,7 @@ export class AdminStore {
       }
     }
 
-    const [rows] = await this.pool.execute(
+    const { rows } = await this.pool.query(
       `SELECT action, admin_username, details_json, created_at
        FROM admin_audit_logs
        WHERE action IN ('maintenance_enabled', 'maintenance_disabled')
@@ -458,7 +483,9 @@ export class AdminStore {
     const latest = rows[0];
     let details = {};
     try {
-      details = latest.details_json ? JSON.parse(latest.details_json) : {};
+      details = typeof latest.details_json === "string"
+        ? JSON.parse(latest.details_json)
+        : latest.details_json || {};
     } catch {
       details = {};
     }

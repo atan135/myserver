@@ -55,7 +55,15 @@ function parseJson(value) {
   return value;
 }
 
-export class MySqlMailStore {
+async function rollbackQuietly(client) {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // Keep the original transaction error visible to callers.
+  }
+}
+
+export class DbMailStore {
   constructor(pool) {
     this.pool = pool;
     this.memory = new Map();
@@ -112,31 +120,32 @@ export class MySqlMailStore {
       };
     }
 
-    const connection = await this.pool.getConnection();
+    const client = await this.pool.connect();
     try {
-      await connection.beginTransaction();
-      const mailId = await this.insertMail(connection, mail);
-      const [outboxResult] = await connection.execute(
+      await client.query("BEGIN");
+      const mailId = await this.insertMail(client, mail);
+      const outboxResult = await client.query(
         `INSERT INTO mail_notification_outbox
           (mail_id, to_player_id, payload, status, next_attempt_at)
-         VALUES (?, ?, ?, 'pending', NOW(3))`,
+         VALUES ($1, $2, $3::jsonb, 'pending', current_timestamp)
+         RETURNING id`,
         [
           mail.mail_id,
           mail.to_player_id,
           JSON.stringify(buildMailNotificationPayload(mail))
         ]
       );
-      await connection.commit();
+      await client.query("COMMIT");
 
       return {
         mailId,
-        outboxId: outboxResult.insertId
+        outboxId: outboxResult.rows[0].id
       };
     } catch (error) {
-      await connection.rollback();
+      await rollbackQuietly(client);
       throw error;
     } finally {
-      connection.release();
+      client.release();
     }
   }
 
@@ -158,13 +167,14 @@ export class MySqlMailStore {
         created_by_name,
         expires_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14)
+      RETURNING id`;
 
     const attachments = mail.attachments
       ? JSON.stringify(mail.attachments)
       : null;
 
-    const [result] = await executor.execute(sql, [
+    const result = await executor.query(sql, [
       mail.mail_id,
       mail.sender_type,
       mail.sender_id,
@@ -181,7 +191,7 @@ export class MySqlMailStore {
       mail.expires_at || null
     ]);
 
-    return result.insertId;
+    return result.rows[0].id;
   }
 
   enqueueMailNotificationOutboxMemory(entry) {
@@ -224,44 +234,44 @@ export class MySqlMailStore {
       return reserved.map((row) => this.parseOutboxRow(row));
     }
 
-    const connection = await this.pool.getConnection();
+    const client = await this.pool.connect();
     try {
-      await connection.beginTransaction();
-      const [rows] = await connection.execute(
+      await client.query("BEGIN");
+      const { rows } = await client.query(
         `SELECT *
            FROM mail_notification_outbox
           WHERE status <> 'sent'
-            AND (next_attempt_at IS NULL OR next_attempt_at <= NOW(3))
-            AND (status <> 'sending' OR locked_until IS NULL OR locked_until <= NOW(3))
+            AND (next_attempt_at IS NULL OR next_attempt_at <= current_timestamp)
+            AND (status <> 'sending' OR locked_until IS NULL OR locked_until <= current_timestamp)
           ORDER BY id ASC
-          LIMIT ?
-          FOR UPDATE`,
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED`,
         [limit]
       );
 
       if (rows.length > 0) {
         const ids = rows.map((row) => row.id);
-        await connection.query(
+        await client.query(
           `UPDATE mail_notification_outbox
               SET status = 'sending',
                   attempts = attempts + 1,
-                  locked_until = DATE_ADD(NOW(3), INTERVAL 30 SECOND)
-            WHERE id IN (?)`,
+                  locked_until = current_timestamp + interval '30 seconds'
+            WHERE id = ANY($1::bigint[])`,
           [ids]
         );
       }
 
-      await connection.commit();
+      await client.query("COMMIT");
       return rows.map((row) => this.parseOutboxRow({
         ...row,
         status: "sending",
         attempts: row.attempts + 1
       }));
     } catch (error) {
-      await connection.rollback();
+      await rollbackQuietly(client);
       throw error;
     } finally {
-      connection.release();
+      client.release();
     }
   }
 
@@ -279,15 +289,15 @@ export class MySqlMailStore {
       return true;
     }
 
-    const [result] = await this.pool.execute(
+    const result = await this.pool.query(
       `UPDATE mail_notification_outbox
           SET status = 'sent',
-              sent_at = NOW(3),
+              sent_at = current_timestamp,
               locked_until = NULL
-        WHERE id = ?`,
+        WHERE id = $1`,
       [outboxId]
     );
-    return result.affectedRows > 0;
+    return result.rowCount > 0;
   }
 
   async markMailNotificationOutboxFailed(outboxId, errorMessage) {
@@ -306,16 +316,18 @@ export class MySqlMailStore {
       return true;
     }
 
-    const [result] = await this.pool.execute(
+    const result = await this.pool.query(
       `UPDATE mail_notification_outbox
           SET status = 'failed',
-              last_error = ?,
-              next_attempt_at = DATE_ADD(NOW(3), INTERVAL LEAST(60, POW(2, GREATEST(attempts - 1, 0))) SECOND),
+              last_error = $1,
+              next_attempt_at = current_timestamp + (
+                LEAST(60, POWER(2, GREATEST(attempts - 1, 0))) * interval '1 second'
+              ),
               locked_until = NULL
-        WHERE id = ?`,
+        WHERE id = $2`,
       [String(errorMessage || "").slice(0, 512), outboxId]
     );
-    return result.affectedRows > 0;
+    return result.rowCount > 0;
   }
 
   async getMailNotificationOutboxByMailId(mailId) {
@@ -324,8 +336,8 @@ export class MySqlMailStore {
       return this.parseOutboxRow(row);
     }
 
-    const [rows] = await this.pool.execute(
-      `SELECT * FROM mail_notification_outbox WHERE mail_id = ? ORDER BY id ASC LIMIT 1`,
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mail_notification_outbox WHERE mail_id = $1 ORDER BY id ASC LIMIT 1`,
       [mailId]
     );
     return this.parseOutboxRow(rows[0]);
@@ -336,8 +348,8 @@ export class MySqlMailStore {
       return this.parseMailRow(this.memory.get(mailId));
     }
 
-    const sql = `SELECT * FROM mails WHERE mail_id = ?`;
-    const [rows] = await this.pool.execute(sql, [mailId]);
+    const sql = `SELECT * FROM mails WHERE mail_id = $1`;
+    const { rows } = await this.pool.query(sql, [mailId]);
 
     if (rows.length === 0) {
       return null;
@@ -358,18 +370,20 @@ export class MySqlMailStore {
         .map((mail) => this.parseMailRow(mail));
     }
 
-    let sql = `SELECT * FROM mails WHERE to_player_id = ?`;
+    let sql = `SELECT * FROM mails WHERE to_player_id = $1`;
     const params = [playerId];
+    const addParam = (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
 
     if (status) {
-      sql += ` AND status = ?`;
-      params.push(status);
+      sql += ` AND status = ${addParam(status)}`;
     }
 
-    sql += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    sql += ` ORDER BY created_at DESC LIMIT ${addParam(limit)} OFFSET ${addParam(offset)}`;
 
-    const [rows] = await this.pool.execute(sql, params);
+    const { rows } = await this.pool.query(sql, params);
     return rows.map((row) => this.parseMailRow(row));
   }
 
@@ -386,9 +400,9 @@ export class MySqlMailStore {
       return true;
     }
 
-    const sql = `UPDATE mails SET status = 'read', read_at = NOW(3) WHERE mail_id = ? AND status = 'unread'`;
-    const [result] = await this.pool.execute(sql, [mailId]);
-    return result.affectedRows > 0;
+    const sql = `UPDATE mails SET status = 'read', read_at = current_timestamp WHERE mail_id = $1 AND status = 'unread'`;
+    const result = await this.pool.query(sql, [mailId]);
+    return result.rowCount > 0;
   }
 
   async claimAttachments(mailId) {
@@ -418,17 +432,17 @@ export class MySqlMailStore {
 
     const updateSql = `UPDATE mails
       SET status = 'claimed',
-          read_at = COALESCE(read_at, NOW(3)),
-          claimed_at = COALESCE(claimed_at, NOW(3))
-      WHERE mail_id = ?
+          read_at = COALESCE(read_at, current_timestamp),
+          claimed_at = COALESCE(claimed_at, current_timestamp)
+      WHERE mail_id = $1
         AND status <> 'claimed'
         AND claimed_at IS NULL`;
 
-    const [updateResult] = await this.pool.execute(updateSql, [mailId]);
+    const updateResult = await this.pool.query(updateSql, [mailId]);
     const mail = await this.getMailById(mailId);
 
     return {
-      claimed: updateResult.affectedRows > 0,
+      claimed: updateResult.rowCount > 0,
       mail
     };
   }
@@ -476,18 +490,18 @@ export class MySqlMailStore {
 
     const updateSql = `UPDATE mails
       SET status = 'claiming'
-      WHERE mail_id = ?
+      WHERE mail_id = $1
         AND status <> 'claimed'
         AND status <> 'claiming'
         AND claimed_at IS NULL`;
 
-    const [updateResult] = await this.pool.execute(updateSql, [mailId]);
+    const updateResult = await this.pool.query(updateSql, [mailId]);
     const mail = await this.getMailById(mailId);
 
     return {
-      reserved: updateResult.affectedRows > 0,
+      reserved: updateResult.rowCount > 0,
       alreadyClaimed: !!mail && (mail.status === "claimed" || !!mail.claimed_at),
-      inProgress: !!mail && mail.status === "claiming" && updateResult.affectedRows === 0,
+      inProgress: !!mail && mail.status === "claiming" && updateResult.rowCount === 0,
       mail
     };
   }
@@ -519,17 +533,17 @@ export class MySqlMailStore {
 
     const updateSql = `UPDATE mails
       SET status = 'claimed',
-          read_at = COALESCE(read_at, NOW(3)),
-          claimed_at = COALESCE(claimed_at, NOW(3))
-      WHERE mail_id = ?
+          read_at = COALESCE(read_at, current_timestamp),
+          claimed_at = COALESCE(claimed_at, current_timestamp)
+      WHERE mail_id = $1
         AND status = 'claiming'
         AND claimed_at IS NULL`;
 
-    const [updateResult] = await this.pool.execute(updateSql, [mailId]);
+    const updateResult = await this.pool.query(updateSql, [mailId]);
     const mail = await this.getMailById(mailId);
 
     return {
-      claimed: updateResult.affectedRows > 0,
+      claimed: updateResult.rowCount > 0,
       mail
     };
   }
@@ -548,12 +562,12 @@ export class MySqlMailStore {
 
     const sql = `UPDATE mails
       SET status = CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END
-      WHERE mail_id = ?
+      WHERE mail_id = $1
         AND status = 'claiming'
         AND claimed_at IS NULL`;
 
-    const [result] = await this.pool.execute(sql, [mailId]);
-    return result.affectedRows > 0;
+    const result = await this.pool.query(sql, [mailId]);
+    return result.rowCount > 0;
   }
 
   async deleteMail(mailId) {
@@ -561,9 +575,9 @@ export class MySqlMailStore {
       return this.memory.delete(mailId);
     }
 
-    const sql = `DELETE FROM mails WHERE mail_id = ?`;
-    const [result] = await this.pool.execute(sql, [mailId]);
-    return result.affectedRows > 0;
+    const sql = `DELETE FROM mails WHERE mail_id = $1`;
+    const result = await this.pool.query(sql, [mailId]);
+    return result.rowCount > 0;
   }
 
   async countUnread(playerId) {
@@ -573,9 +587,9 @@ export class MySqlMailStore {
         .length;
     }
 
-    const sql = `SELECT COUNT(*) as count FROM mails WHERE to_player_id = ? AND status = 'unread'`;
-    const [rows] = await this.pool.execute(sql, [playerId]);
-    return rows[0].count;
+    const sql = `SELECT COUNT(*) AS count FROM mails WHERE to_player_id = $1 AND status = 'unread'`;
+    const { rows } = await this.pool.query(sql, [playerId]);
+    return Number.parseInt(String(rows[0].count), 10) || 0;
   }
 
   parseMailRow(row) {

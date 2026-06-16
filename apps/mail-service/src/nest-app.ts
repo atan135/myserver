@@ -10,8 +10,8 @@ import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
 import {
   MAIL_CONFIG,
+  MAIL_DB_POOL,
   MAIL_METRICS,
-  MAIL_MYSQL_POOL,
   MAIL_NATS,
   MAIL_REDIS,
   MAIL_REGISTRY
@@ -59,7 +59,7 @@ export async function closeNestApp(app: INestApplication) {
   const registryClient = app.get<any>(MAIL_REGISTRY, { strict: false });
   const nats = app.get<any>(MAIL_NATS, { strict: false });
   const redis = app.get<any>(MAIL_REDIS, { strict: false });
-  const mysqlPool = app.get<any>(MAIL_MYSQL_POOL, { strict: false });
+  const dbPool = app.get<any>(MAIL_DB_POOL, { strict: false });
 
   try {
     await metrics?.stop?.();
@@ -88,9 +88,9 @@ export async function closeNestApp(app: INestApplication) {
   }
 
   try {
-    await mysqlPool?.end?.();
+    await dbPool?.end?.();
   } catch (error: any) {
-    log("error", "shutdown.mysql_close_failed", { error: error.message });
+    log("error", "shutdown.db_close_failed", { error: error.message });
   }
 
   await app.close();

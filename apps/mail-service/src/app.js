@@ -8,8 +8,8 @@ export async function createApp() {
   const { createNestApp, closeNestApp } = await import("./nest-app.ts");
   const {
     MAIL_CONFIG,
+    MAIL_DB_POOL,
     MAIL_METRICS,
-    MAIL_MYSQL_POOL,
     MAIL_NATS,
     MAIL_REDIS,
     MAIL_REGISTRY
@@ -23,7 +23,7 @@ export async function createApp() {
     config: nestApp.get(MAIL_CONFIG),
     redis: nestApp.get(MAIL_REDIS, { strict: false }),
     nats: nestApp.get(MAIL_NATS, { strict: false }),
-    mysqlPool: nestApp.get(MAIL_MYSQL_POOL, { strict: false }),
+    dbPool: nestApp.get(MAIL_DB_POOL, { strict: false }),
     registryClient: nestApp.get(MAIL_REGISTRY, { strict: false }),
     metrics: nestApp.get(MAIL_METRICS, { strict: false }),
     close: () => closeNestApp(nestApp)

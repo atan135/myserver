@@ -5,11 +5,11 @@ import { RedisBlocklistChecker } from "./blocklist.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
-import { MySqlAuthStore } from "./mysql-store.js";
+import { DbAuthStore } from "./db-store.js";
 import { MaintenanceStore } from "./maintenance-store.js";
 import { AccountLockout, RateLimiter } from "./rate-limiter.js";
 import { ServiceDiscovery } from "./service-discovery.js";
-import { createMySqlPool } from "./mysql-client.js";
+import { createDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -24,11 +24,11 @@ import {
   AUTH_ACCOUNT_LOCKOUT,
   AUTH_BLOCKLIST,
   AUTH_CONFIG,
+  AUTH_DB_POOL,
+  AUTH_DB_STORE,
   AUTH_GAME_ADMIN_CLIENT,
   AUTH_MAINTENANCE_STORE,
   AUTH_METRICS,
-  AUTH_MYSQL_POOL,
-  AUTH_MYSQL_STORE,
   AUTH_NATS,
   AUTH_RATE_LIMITER,
   AUTH_REDIS,
@@ -55,14 +55,14 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
-      provide: AUTH_MYSQL_POOL,
+      provide: AUTH_DB_POOL,
       inject: [AUTH_CONFIG],
-      useFactory: (config: any) => createMySqlPool(config)
+      useFactory: (config: any) => createDbPool(config)
     },
     {
-      provide: AUTH_MYSQL_STORE,
-      inject: [AUTH_MYSQL_POOL],
-      useFactory: (mysqlPool: any) => new MySqlAuthStore(mysqlPool)
+      provide: AUTH_DB_STORE,
+      inject: [AUTH_DB_POOL],
+      useFactory: (dbPool: any) => new DbAuthStore(dbPool)
     },
     {
       provide: AUTH_BLOCKLIST,
@@ -71,9 +71,9 @@ import {
     },
     {
       provide: AUTH_STORE,
-      inject: [AUTH_CONFIG, AUTH_REDIS, AUTH_MYSQL_STORE, AUTH_NATS, AUTH_BLOCKLIST],
-      useFactory: (config: any, redis: any, mysqlStore: any, nats: any, blocklist: any) =>
-        new AuthStore(config, redis, mysqlStore, nats, blocklist)
+      inject: [AUTH_CONFIG, AUTH_REDIS, AUTH_DB_STORE, AUTH_NATS, AUTH_BLOCKLIST],
+      useFactory: (config: any, redis: any, dbStore: any, nats: any, blocklist: any) =>
+        new AuthStore(config, redis, dbStore, nats, blocklist)
     },
     {
       provide: AUTH_GAME_ADMIN_CLIENT,
