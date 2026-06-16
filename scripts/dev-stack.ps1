@@ -599,7 +599,7 @@ function Start-InfraIfNeeded {
     return Start-ManagedProcess -Name $Name -FilePath $executable -Arguments $Arguments -WorkingDirectory $ProjectRoot
 }
 
-function Warn-IfMysqlLooksUnavailable {
+function Warn-IfDatabaseLooksUnavailable {
     param(
         [Parameter(Mandatory=$true)]
         [string]$ServiceName,
@@ -611,26 +611,32 @@ function Warn-IfMysqlLooksUnavailable {
         [switch]$Required
     )
 
-    $mysqlEnabled = Get-EnvValue -Path $EnvPath -Name "MYSQL_ENABLED" -Default "false"
-    if (-not $Required -and $mysqlEnabled -notin @("true", "TRUE", "True", "1")) {
+    $dbEnabled = Get-EnvValue -Path $EnvPath -Name "DB_ENABLED" -Default "false"
+    if (-not $Required -and $dbEnabled -notin @("true", "TRUE", "True", "1")) {
         return
     }
 
-    $mysqlUrl = Get-EnvValue -Path $EnvPath -Name "MYSQL_URL" -Default ""
-    if (-not $mysqlUrl) {
-        Write-Warning "$ServiceName has MYSQL_ENABLED=true but MYSQL_URL is empty."
+    $databaseUrl = Get-EnvValue -Path $EnvPath -Name "DATABASE_URL" -Default ""
+    $databaseReason = if ($Required) { "requires PostgreSQL" } else { "has DB_ENABLED=true" }
+
+    if ($Required -and $dbEnabled -notin @("true", "TRUE", "True", "1")) {
+        Write-Warning "$ServiceName requires PostgreSQL but DB_ENABLED is not true."
+    }
+
+    if (-not $databaseUrl) {
+        Write-Warning "$ServiceName $databaseReason but DATABASE_URL is empty."
         return
     }
 
     try {
-        $uri = [Uri]$mysqlUrl
+        $uri = [Uri]$databaseUrl
         $hostName = if ($uri.Host) { $uri.Host } else { "127.0.0.1" }
-        $port = if ($uri.Port -gt 0) { $uri.Port } else { 3306 }
+        $port = if ($uri.Port -gt 0) { $uri.Port } else { 5432 }
         if (-not (Test-TcpPort -HostName $hostName -Port $port -TimeoutMs 500)) {
-            Write-Warning "$ServiceName has MYSQL_ENABLED=true but MySQL is not reachable at $hostName`:$port. Start MySQL separately if this service exits."
+            Write-Warning "$ServiceName $databaseReason but PostgreSQL is not reachable at $hostName`:$port. Start PostgreSQL separately if this service exits."
         }
     } catch {
-        Write-Warning "$ServiceName MYSQL_URL could not be parsed: $mysqlUrl"
+        Write-Warning "$ServiceName DATABASE_URL could not be parsed: $databaseUrl"
     }
 }
 
@@ -692,9 +698,9 @@ if ($authGameProxyPort -ne $proxyPort) {
     Write-Warning "auth-http GAME_PROXY_PORT=$authGameProxyPort but game-proxy PROXY_PORT=$proxyPort. Client login may receive the wrong game port."
 }
 
-Warn-IfMysqlLooksUnavailable -ServiceName "auth-http" -EnvPath $authEnv
-Warn-IfMysqlLooksUnavailable -ServiceName "admin-api" -EnvPath $adminApiEnv -Required
-Warn-IfMysqlLooksUnavailable -ServiceName "game-server" -EnvPath $gameEnv
+Warn-IfDatabaseLooksUnavailable -ServiceName "auth-http" -EnvPath $authEnv
+Warn-IfDatabaseLooksUnavailable -ServiceName "admin-api" -EnvPath $adminApiEnv -Required
+Warn-IfDatabaseLooksUnavailable -ServiceName "game-server" -EnvPath $gameEnv
 
 $started = @()
 $selectedServices = @()

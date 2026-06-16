@@ -13,7 +13,8 @@ param(
     [string]$InstanceId = "",
 
     [Parameter(Mandatory=$false)]
-    [switch]$MysqlEnabled,
+    [Alias("DbEnabled")]
+    [switch]$DatabaseEnabled,
 
     [Parameter(Mandatory=$false)]
     [switch]$NoWatch
@@ -26,7 +27,7 @@ $env:ANNOUNCE_PORT = "$Port"
 $env:LOG_LEVEL = "$LogLevel"
 $env:REGISTRY_ENABLED = "true"
 $env:SERVICE_NAME = "announce-service"
-$env:MYSQL_ENABLED = if ($MysqlEnabled) { "true" } else { "false" }
+$env:DB_ENABLED = if ($DatabaseEnabled) { "true" } else { "false" }
 
 if ($InstanceId) {
     $env:SERVICE_INSTANCE_ID = $InstanceId
@@ -44,7 +45,7 @@ Write-Host "  Host: $ListenHost" -ForegroundColor Gray
 Write-Host "  Port: $Port" -ForegroundColor Gray
 Write-Host "  LogLevel: $LogLevel" -ForegroundColor Gray
 Write-Host "  InstanceId: $env:SERVICE_INSTANCE_ID" -ForegroundColor Gray
-Write-Host "  MySQL Enabled: $env:MYSQL_ENABLED" -ForegroundColor Gray
+Write-Host "  Database Enabled: $env:DB_ENABLED" -ForegroundColor Gray
 Write-Host "  Watch Mode: $(-not $NoWatch)" -ForegroundColor Gray
 
 Push-Location $serviceDir

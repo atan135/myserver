@@ -9,8 +9,8 @@ npm -v
 Write-Host "Checking protoc"
 protoc --version
 
-Write-Host "Checking MariaDB client"
-mysql --version
+Write-Host "Checking PostgreSQL client"
+psql --version
 
 Write-Host "Checking Rust absolute path"
 $rustc = "$env:USERPROFILE\.cargo\bin\rustc.exe"
