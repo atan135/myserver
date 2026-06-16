@@ -21,17 +21,17 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 - `chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的独立能力服务。
 - `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/总览/整体架构.md` 和代码为准。
 - Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
-- MariaDB / MySQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
+- PostgreSQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
 
 简化拓扑：
 
 ```text
 mybevy client / mock-client
-  -> auth-http -> Redis / MySQL
+  -> auth-http -> Redis / PostgreSQL
   -> game-proxy -> game-server -> rooms / runtime / admin / configs
 
-admin-web -> admin-api -> game-server admin / Redis / MySQL
+admin-web -> admin-api -> game-server admin / Redis / PostgreSQL
 
 game-server <-> match-service
 mail-service -> Core NATS -> chat-server

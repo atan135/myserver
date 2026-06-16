@@ -20,7 +20,7 @@
 - `RoomManager + RoomRuntimePolicy + RoomLogic` 的房间运行时框架
 - CSV 配置表加载和热更新
 - 背包、属性、外观、移动同步、战斗 demo 等游戏侧服务
-- 匹配服务回调、服务注册、metrics 上报、MySQL 审计和玩家数据持久化
+- 匹配服务回调、服务注册、metrics 上报、PostgreSQL 审计和玩家数据持久化
 
 客户端正式入口优先走 `game-proxy`。`game-server` 仍保留玩家 TCP 监听口，主要用于本地调试、兼容和直接联调。
 
@@ -31,7 +31,7 @@
 启动顺序大致是：
 
 1. `dotenvy::dotenv()` 读取 `.env`
-2. `Config::from_env()` 读取端口、Redis、MySQL、CSV、日志、注册中心等配置
+2. `Config::from_env()` 读取端口、Redis、PostgreSQL、CSV、日志、注册中心等配置
 3. `init_logging(&config)` 初始化 `tracing`
 4. `ConfigTableRuntime::load(...)` 加载 CSV 配置表
 5. 按配置注册到 Redis service registry，并启动 heartbeat
@@ -39,7 +39,7 @@
 7. 初始化 `MySqlAuditStore`
 8. 启动 metrics 上报任务
 9. 调用 `server::run(...)` 启动主服务
-10. 退出时注销服务、停止任务并关闭 MySQL 连接池
+10. 退出时注销服务、停止任务并关闭 PostgreSQL 连接池
 
 对 C++ 服务端的直觉映射：
 
@@ -87,7 +87,7 @@
 - `protocol/`：包头、消息号和 Protobuf 编解码辅助
 - `session.rs`：单连接状态
 - `ticket.rs`：ticket 签名、过期校验和 hash
-- `mysql_store.rs`：连接与房间事件审计
+- `db_store.rs`：PostgreSQL 连接与房间事件审计
 - `metrics.rs`：Core NATS metrics 上报
 - `kick_subscriber.rs`：订阅 `myserver.session.kick.*`，处理并发登录、改密等踢旧连接通知
 

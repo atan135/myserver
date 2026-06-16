@@ -39,7 +39,7 @@
 | `match-service` | 内网能力服务；生产不作为客户端直连 gRPC 默认值 |
 | `announce-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | `mail-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
-| Redis / NATS / MySQL | 只允许内网服务访问 |
+| Redis / NATS / PostgreSQL | 只允许内网服务访问 |
 
 本地开发、测试环境可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题，但这些直连方式不是生产默认，也不应写入正式客户端依赖。
 
@@ -82,7 +82,7 @@
 
 | 服务 | 当前实现 | 生产目标 | 主要缺口 |
 |------|----------|----------|----------|
-| `auth-http` | 单实例可运行；使用 Redis/MySQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/MySQL | 网关层限流、统一配置、灰度和完整安全审计 |
+| `auth-http` | 单实例可运行；使用 Redis/PostgreSQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/PostgreSQL | 网关层限流、统一配置、灰度和完整安全审计 |
 | `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验；`complete-if-drained` 可选经 `auth-http` 校验旧服真实 drain status 后再结束 rollout | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay、生产部署平台 stop hook 接入 |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime、drain 基础和受控 graceful shutdown 安全闸 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
 | `chat-server` | 独立服务；当前可作为内部聊天能力 | 内网多实例服务；由服务端入口或聚合层调用，不作为生产客户端直连默认 | 协议收敛、会话路由、服务发现和横向扩展策略 |
@@ -94,7 +94,7 @@
 | `metrics-collector` | 订阅 NATS metrics 并写 Redis 快照 | 多实例或单活均可；需要幂等聚合和明确 key 归属 | 多实例聚合策略、指标保留策略 |
 | Redis | 共享协调与缓存 | 生产高可用；承载 session、ticket、注册中心、route store 或锁 | HA、持久化策略、key schema 和过期策略 |
 | NATS | metrics、session kick、邮件通知 | 生产高可用；内部事件通道 | HA、重放/持久化边界、消息幂等 |
-| MySQL/MariaDB | 账号、审计、业务持久化 | 生产高可用；承载业务真持久化数据 | 备份、迁移、读写容量和事务边界 |
+| PostgreSQL | 账号、审计、业务持久化 | 生产高可用；承载业务真持久化数据 | 备份、迁移、读写容量和事务边界 |
 
 ## 6. game-proxy 单实例与多实例边界
 
