@@ -486,17 +486,23 @@ thiserror = "2"
 - `CreateRoomAndJoin` 会把房间号、token 和玩家状态写回匹配上下文，并向玩家推送 `matched`
 - `player_left()` 会基于剩余 active 玩家数量返回 `match_should_abort`；最后一人离开时，`game-server` 会继续上报 `MatchEnd { reason: "aborted" }`
 - 监控指标已接入，包含 QPS、延迟、池子大小和 `metrics:heartbeat:match-service`
+- 运行时状态存储抽象已落地，覆盖候选人、match task、玩家状态/上下文、最近事件和按 mode 的 owner lease；默认 `MATCH_RUNTIME_STORE=memory` 保持原本单实例行为，也可配置 `MATCH_RUNTIME_STORE=redis` 使用 Redis 保存运行时快照和租约
+- 服务启动时会加载 runtime snapshot，重建内存候选池、match task、玩家状态和最近事件；恢复后会继续尝试撮合同模式候选，并对未写入房间号的 pending match task 重新发起建房补偿
+- `MatchEventStream` 建连时会补发玩家最近一次匹配事件，用于降低服务重启或客户端重连时错过 `matched` / `match_failed` 事件的影响
 
 ### 当前限制 / 后续补充点
 - `MatchEvent.token` 和 `MatchStatus.token` 已生成并回传，但当前 `game-server` 入房流程尚未消费这个 token，客户端仍主要依赖已有登录态 + `room_id` 入房
 - 文档中的“调用 game-server.CreateRoomAndJoin”在当前实现里落地为内部 local socket `CreateMatchedRoomReq`，与最初纯 gRPC 设想存在实现偏差
 - `match_timeout_secs` 仍主要由各 mode 的 `ModeConfig.match_timeout_secs` 决定；顶层 `MATCH_TIMEOUT_SECS` 更偏向默认配置入口
 - 当前仓库没有把“收到 matched 事件后继续自动 RoomJoin”做成单条现成脚本，验证时通常拆为 gRPC 探针和 mock-client 场景两段执行
+- Redis runtime store 当前作为多实例/重启恢复的第一阶段能力，采用快照状态 + per-mode lease，尚未把匹配池改造成严格中心化队列，也没有覆盖跨实例事件流广播；多实例部署时仍需继续补 CAS 状态机、事件 outbox/pubsub 和更细粒度的 pending room-create 幂等补偿
+- 匹配历史记录不在本阶段写入关系型数据库；如果后续切到 PostgreSQL，建议只承载审计/历史查询，匹配热状态仍优先使用 Redis 的短生命周期状态和租约
 
 ### 已验证的关键链路
 - `MatchStart -> try_match_mode -> GameServerClient.create_matched_room -> CreateRoomAndJoin -> MatchEventStream(matched)`
 - `MatchStart -> cleanup_timeout -> MatchEventStream(match_failed/MATCH_TIMEOUT) -> MatchStatus(idle)`
 - `PlayerJoined -> InRoom`、`PlayerLeft -> match_should_abort`、`MatchEnd -> Idle`
+- runtime store 单测覆盖内存快照恢复、pending match task 恢复和 mode owner lease 防止其他实例消费候选
 
 ---
 
@@ -511,10 +517,10 @@ thiserror = "2"
 剩余待讨论：
 
 4. **MatchService 是否需要持久化匹配记录？**
-   - 建议先不做，后续通过 MySQL 记录
+   - 运行时恢复先使用 Redis；历史匹配记录建议后续随 DB 方案迁移到 PostgreSQL 审计表，不走 MySQL 新开发
 
 5. **是否需要匹配池的动态扩缩容？**
-   - 建议先不做，单实例足够
+   - 当前先通过 Redis runtime store + per-mode lease 做多实例恢复基础，完整中心化队列和动态扩缩容仍需后续设计
 
 6. **是否需要反作弊/防恶意匹配？**
    - 建议后续单独设计

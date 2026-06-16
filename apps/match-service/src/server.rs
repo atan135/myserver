@@ -6,15 +6,23 @@ use tonic::transport::Server;
 use tracing::info;
 
 use crate::config::Config;
-use crate::matcher::new_simple_matcher;
+use crate::matcher::{new_simple_matcher, new_simple_matcher_with_runtime_store};
 use crate::proto::myserver::matchservice::{
-    match_service_server::MatchServiceServer,
-    match_internal_server::MatchInternalServer,
+    match_internal_server::MatchInternalServer, match_service_server::MatchServiceServer,
+};
+use crate::runtime_store::{
+    RedisMatchRuntimeStore, SharedMatchRuntimeStore, new_memory_match_runtime_store,
 };
 use crate::service::{MatchInternalImpl, MatchServiceImpl};
 
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let matcher = new_simple_matcher(config.clone());
+    let matcher = if uses_memory_runtime_store(&config) {
+        new_simple_matcher(config.clone())
+    } else {
+        let runtime_store = build_runtime_store(&config)?;
+        new_simple_matcher_with_runtime_store(config.clone(), runtime_store)
+    };
+    matcher.recover_runtime_state().await?;
     let cleanup_matcher = matcher.clone();
     let cleanup_interval_secs = config.match_cleanup_interval_secs.max(1);
 
@@ -34,8 +42,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let addr = config.bind_addr.parse()?;
-    let reflection = tonic_reflection::server::Builder::configure()
-        .build()?;
+    let reflection = tonic_reflection::server::Builder::configure().build()?;
 
     Server::builder()
         .add_service(reflection)
@@ -45,4 +52,21 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+fn build_runtime_store(
+    config: &Config,
+) -> Result<SharedMatchRuntimeStore, Box<dyn std::error::Error>> {
+    match config.match_runtime_store.as_str() {
+        "redis" => Ok(std::sync::Arc::new(RedisMatchRuntimeStore::new(
+            &config.redis_url,
+            config.match_runtime_key_prefix.clone(),
+        )?)),
+        "memory" | "" => Ok(new_memory_match_runtime_store()),
+        other => Err(format!("unsupported MATCH_RUNTIME_STORE: {other}").into()),
+    }
+}
+
+fn uses_memory_runtime_store(config: &Config) -> bool {
+    matches!(config.match_runtime_store.as_str(), "memory" | "")
 }

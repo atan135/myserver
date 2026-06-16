@@ -26,6 +26,10 @@ pub struct Config {
     pub registry_heartbeat_interval_secs: u64,
     pub service_name: String,
     pub service_instance_id: String,
+    pub match_runtime_store: String,
+    pub match_runtime_key_prefix: String,
+    pub match_runtime_lease_ttl_secs: u64,
+    pub match_recovery_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +125,17 @@ impl Config {
                 .unwrap_or_else(|_| "match-service".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| format!("match-service-{}", port)),
+            match_runtime_store: std::env::var("MATCH_RUNTIME_STORE")
+                .unwrap_or_else(|_| "memory".to_string()),
+            match_runtime_key_prefix: std::env::var("MATCH_RUNTIME_KEY_PREFIX")
+                .unwrap_or_else(|_| "myserver:".to_string()),
+            match_runtime_lease_ttl_secs: std::env::var("MATCH_RUNTIME_LEASE_TTL_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+            match_recovery_enabled: std::env::var("MATCH_RECOVERY_ENABLED")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(true),
         }
     }
 

@@ -9,12 +9,10 @@ use tracing::info;
 use crate::matcher::SharedSimpleMatcher;
 use crate::metrics::METRICS;
 use crate::proto::myserver::matchservice::{
-    match_service_server::MatchService,
-    match_internal_server::MatchInternal,
     CreateRoomAndJoinReq, CreateRoomAndJoinRes, MatchCancelReq, MatchCancelRes, MatchEndReq,
-    MatchEndRes, MatchEvent, MatchEventStreamReq, MatchStartReq, MatchStartRes,
-    MatchStatusReq, MatchStatusRes, PlayerJoinedReq, PlayerJoinedRes, PlayerLeftReq,
-    PlayerLeftRes,
+    MatchEndRes, MatchEvent, MatchEventStreamReq, MatchStartReq, MatchStartRes, MatchStatusReq,
+    MatchStatusRes, PlayerJoinedReq, PlayerJoinedRes, PlayerLeftReq, PlayerLeftRes,
+    match_internal_server::MatchInternal, match_service_server::MatchService,
 };
 
 /// MatchService 实现
@@ -56,13 +54,11 @@ impl MatchService for MatchServiceImpl {
         let result = self.matcher.start_match(player_id, mode).await;
 
         let response = match result {
-            Ok(match_id) => {
-                Ok(Response::new(MatchStartRes {
-                    ok: true,
-                    match_id,
-                    error_code: String::new(),
-                }))
-            }
+            Ok(match_id) => Ok(Response::new(MatchStartRes {
+                ok: true,
+                match_id,
+                error_code: String::new(),
+            })),
             Err(e) => {
                 tracing::error!(error = %e, "MatchStart failed");
                 Ok(Response::new(MatchStartRes {
@@ -90,15 +86,16 @@ impl MatchService for MatchServiceImpl {
             "MatchCancel request"
         );
 
-        let result = self.matcher.cancel_match(&req.player_id, &req.match_id).await;
+        let result = self
+            .matcher
+            .cancel_match(&req.player_id, &req.match_id)
+            .await;
 
         let response = match result {
-            Ok(()) => {
-                Ok(Response::new(MatchCancelRes {
-                    ok: true,
-                    error_code: String::new(),
-                }))
-            }
+            Ok(()) => Ok(Response::new(MatchCancelRes {
+                ok: true,
+                error_code: String::new(),
+            })),
             Err(e) => {
                 tracing::error!(error = %e, "MatchCancel failed");
                 Ok(Response::new(MatchCancelRes {
@@ -133,7 +130,8 @@ impl MatchService for MatchServiceImpl {
     }
 
     /// 客户端订阅匹配事件推送
-    type MatchEventStreamStream = Pin<Box<dyn futures_core::Stream<Item = Result<MatchEvent, Status>> + Send>>;
+    type MatchEventStreamStream =
+        Pin<Box<dyn futures_core::Stream<Item = Result<MatchEvent, Status>> + Send>>;
 
     async fn match_event_stream(
         &self,
@@ -151,6 +149,9 @@ impl MatchService for MatchServiceImpl {
         // 注册到 player_state
         let player_state = self.matcher.player_state().clone();
         player_state.register_stream(&player_id, tx).await;
+        if let Some(event) = player_state.latest_event(&player_id).await {
+            let _ = player_state.send_event(&player_id, event).await;
+        }
 
         let stream: Self::MatchEventStreamStream = Box::pin(async_stream::stream! {
             let mut stream = rx;

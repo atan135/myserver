@@ -3,6 +3,6 @@
 pub mod player_state;
 
 pub use player_state::{
-    new_player_state_store, PlayerMatchContext, PlayerMatchStatus,
-    SharedPlayerState,
+    PlayerMatchContext, PlayerMatchStatus, SharedPlayerState, new_player_state_store,
+    new_player_state_store_with_runtime_store,
 };

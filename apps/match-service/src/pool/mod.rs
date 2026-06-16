@@ -4,4 +4,4 @@ pub mod candidate;
 pub mod match_pool;
 
 pub use candidate::MatchCandidate;
-pub use match_pool::{new_match_pool, new_match_pool_with_modes, SharedMatchPool};
+pub use match_pool::{MatchTask, SharedMatchPool, new_match_pool_with_modes_and_runtime_store};
