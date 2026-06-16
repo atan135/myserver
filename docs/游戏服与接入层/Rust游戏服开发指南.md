@@ -36,7 +36,7 @@
 4. `ConfigTableRuntime::load(...)` 加载 CSV 配置表
 5. 按配置注册到 Redis service registry，并启动 heartbeat
 6. 按配置启动 CSV hot reload task
-7. 初始化 `MySqlAuditStore`
+7. 初始化 `PgAuditStore`
 8. 启动 metrics 上报任务
 9. 调用 `server::run(...)` 启动主服务
 10. 退出时注销服务、停止任务并关闭 PostgreSQL 连接池
