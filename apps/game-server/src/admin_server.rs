@@ -2255,7 +2255,7 @@ mod tests {
     use super::*;
     use crate::core::context::PlayerConnectionHandle;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
-    use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
     use crate::core::runtime::RoomManager;
     use crate::pb::GameMessagePush;
@@ -2652,7 +2652,7 @@ mod tests {
                     runtime_config,
                     connection_count,
                     PlayerRegistry::default(),
-                    PlayerManager::new(MySqlPlayerStore::new_disabled()),
+                    PlayerManager::new(PgPlayerStore::new_disabled()),
                     config_tables,
                     "game-server-test".to_string(),
                     "secret-admin-token".to_string(),

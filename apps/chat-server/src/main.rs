@@ -22,8 +22,9 @@ const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_TICKET_SECRET: &str = "default_secret_change_in_production";
 
 struct Config {
-    mysql_url: String,
-    mysql_pool_size: u32,
+    db_enabled: bool,
+    database_url: String,
+    db_pool_size: u32,
     bind_addr: String,
     heartbeat_timeout_secs: u64,
     max_body_len: usize,
@@ -52,9 +53,11 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         let config = Self {
-            mysql_url: std::env::var("MYSQL_URL")
-                .unwrap_or_else(|_| "mysql://root:password@localhost:3306/chat".to_string()),
-            mysql_pool_size: std::env::var("MYSQL_POOL_SIZE")
+            db_enabled: parse_bool_env("DB_ENABLED", false),
+            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string()
+            }),
+            db_pool_size: std::env::var("DB_POOL_SIZE")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
                 .unwrap_or(5),
@@ -138,6 +141,10 @@ fn validate_production_config(config: &Config) {
             "invalid chat-server production config: TICKET_SECRET must be set to a non-default value in production"
         );
     }
+
+    if !config.db_enabled {
+        panic!("invalid chat-server production config: DB_ENABLED must be true in production");
+    }
 }
 
 fn is_default_ticket_secret(value: &str) -> bool {
@@ -166,6 +173,12 @@ fn parse_u64_env(name: &str, default_value: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_value)
+}
+
+fn parse_bool_env(name: &str, default_value: bool) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(default_value)
 }
 
@@ -221,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(
         bind_addr = %config.bind_addr,
-        mysql_url = %config.mysql_url,
+        db_enabled = config.db_enabled,
         redis_url = %config.redis_url,
         registry_enabled = config.registry_enabled,
         "chat-server starting"
@@ -273,7 +286,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(|client| client.start_heartbeat_task());
 
-    let chat_store = chat_store::ChatStore::new(&config.mysql_url, config.mysql_pool_size).await?;
+    let chat_store =
+        chat_store::ChatStore::new(config.db_enabled, &config.database_url, config.db_pool_size)
+            .await?;
 
     // 启动 metrics 上报任务
     let metrics_nats_url = config.nats_url.clone();
@@ -355,7 +370,8 @@ mod tests {
 
     use super::*;
 
-    const TICKET_SECRET_ENV_NAMES: &[&str] = &["NODE_ENV", "APP_ENV", "TICKET_SECRET"];
+    const TICKET_SECRET_ENV_NAMES: &[&str] =
+        &["NODE_ENV", "APP_ENV", "TICKET_SECRET", "DB_ENABLED"];
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -509,6 +525,7 @@ mod tests {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::remove_var("TICKET_SECRET");
+            env::set_var("DB_ENABLED", "true");
         }
 
         let error = panic_message(catch_config_from_env());
@@ -527,6 +544,7 @@ mod tests {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("TICKET_SECRET", "replace-with-a-long-random-string");
+            env::set_var("DB_ENABLED", "true");
         }
 
         let error = panic_message(catch_config_from_env());
@@ -543,6 +561,7 @@ mod tests {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("TICKET_SECRET", "   ");
+            env::set_var("DB_ENABLED", "true");
         }
 
         let error = panic_message(catch_config_from_env());
@@ -566,6 +585,7 @@ mod tests {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("TICKET_SECRET", "prod-chat-ticket-secret-123");
+            env::set_var("DB_ENABLED", "true");
         }
 
         let config = Config::from_env();
@@ -582,6 +602,7 @@ mod tests {
             env::set_var("NODE_ENV", "development");
             env::set_var("APP_ENV", "production");
             env::remove_var("TICKET_SECRET");
+            env::set_var("DB_ENABLED", "true");
         }
 
         let error = panic_message(catch_config_from_env());

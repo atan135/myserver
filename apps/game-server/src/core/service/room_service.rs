@@ -137,7 +137,7 @@ pub async fn handle_room_join(
                 )?;
             }
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -178,7 +178,7 @@ pub async fn handle_room_join(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -237,7 +237,7 @@ pub async fn handle_room_leave(
 
     if let Some(snapshot) = leave_result.snapshot {
         services
-            .mysql_store
+            .db_store
             .append_room_event(
                 &room_id,
                 Some(&player_id),
@@ -254,7 +254,7 @@ pub async fn handle_room_leave(
             .await?;
     } else if leave_result.room_removed {
         services
-            .mysql_store
+            .db_store
             .append_room_event(
                 &room_id,
                 Some(&player_id),
@@ -318,7 +318,7 @@ pub async fn handle_room_ready(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -386,7 +386,7 @@ pub async fn handle_room_start(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -548,7 +548,7 @@ pub async fn handle_player_input(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -748,7 +748,7 @@ pub async fn handle_move_input(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -1031,7 +1031,7 @@ pub async fn handle_room_end(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -1086,7 +1086,7 @@ pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &C
 
         if let Some(snapshot) = leave_result.snapshot {
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -1150,11 +1150,11 @@ pub async fn handle_room_reconnect(
         return Ok(());
     }
 
-    // Find the room the player is offline in (via MySQL audit log or cache)
+    // Find the room the player is offline in (via PostgreSQL audit log or cache)
     // For now, client should provide room_id - we'll search for the player
     // This is a simplified implementation - in production you'd track this in Redis
     let room_id = match services
-        .mysql_store
+        .db_store
         .find_room_by_offline_player(&reconnect_player_id)
         .await
     {
@@ -1217,7 +1217,7 @@ pub async fn handle_room_reconnect(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&reconnect_player_id),
@@ -1361,7 +1361,7 @@ pub async fn handle_join_as_observer(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -1395,7 +1395,7 @@ pub async fn handle_join_as_observer(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     &room_id,
                     Some(&player_id),
@@ -1566,7 +1566,7 @@ async fn create_matched_room_impl(
     {
         Ok(snapshot) => {
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     room_id,
                     actor_player_id,
@@ -1605,7 +1605,7 @@ async fn create_matched_room_impl(
         }
         Err(error_code) => {
             services
-                .mysql_store
+                .db_store
                 .append_room_event(
                     room_id,
                     actor_player_id,
@@ -1747,9 +1747,9 @@ mod tests {
     use crate::core::config_table::ConfigTableRuntime;
     use crate::core::context::PlayerRegistry;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
-    use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::runtime::RoomManager;
-    use crate::mysql_store::MySqlAuditStore;
+    use crate::db_store::PgAuditStore;
 
     struct NoopRoomLogic;
 
@@ -1811,9 +1811,9 @@ mod tests {
             redis_url: "redis://127.0.0.1:6379".to_string(),
             redis_key_prefix: String::new(),
             nats_url: "nats://127.0.0.1:4222".to_string(),
-            mysql_enabled: false,
-            mysql_url: "mysql://root:password@127.0.0.1:3306/myserver_game".to_string(),
-            mysql_pool_size: 1,
+            db_enabled: false,
+            database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string(),
+            db_pool_size: 1,
             ticket_secret: DEFAULT_TICKET_SECRET.to_string(),
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
@@ -1852,14 +1852,14 @@ mod tests {
 
         ServiceContext {
             config,
-            mysql_store: MySqlAuditStore::new(&test_config())
+            db_store: PgAuditStore::new(&test_config())
                 .await
-                .expect("disabled mysql audit store"),
+                .expect("disabled PostgreSQL audit store"),
             room_manager,
             runtime_config: Arc::new(RwLock::new(runtime)),
             connection_count: Arc::new(AtomicU64::new(0)),
             config_tables,
-            player_manager: PlayerManager::new(MySqlPlayerStore::new_disabled()),
+            player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(

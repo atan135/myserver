@@ -15,17 +15,17 @@ use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
-use crate::core::player::{MySqlPlayerStore, PlayerManager};
+use crate::core::player::{PgPlayerStore, PlayerManager};
 use crate::core::room::{
     ConnectionCloseState, OutboundMessage, outbound_queue_error_kind_from_error,
 };
 use crate::core::runtime::RoomManager;
 use crate::core::service::{core_service, inventory_service, room_service};
+use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
 use crate::match_client::{MatchClientConfig, init_match_client};
 use crate::metrics::METRICS;
-use crate::mysql_store::MySqlAuditStore;
 use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
 use crate::session::{Session, SessionState};
@@ -371,7 +371,7 @@ impl Drop for ConnectionCountGuard {
 
 pub async fn run(
     config: &Config,
-    mysql_store: MySqlAuditStore,
+    db_store: PgAuditStore,
     config_tables: ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcp_listener = TcpListener::bind(config.bind_addr()).await?;
@@ -422,19 +422,19 @@ pub async fn run(
         shutdown_signal: Arc::new(Notify::new()),
     };
 
-    // Initialize MySqlPlayerStore for inventory persistence
-    let mysql_player_store = MySqlPlayerStore::new(config).await?;
+    // Initialize PgPlayerStore for inventory persistence
+    let db_player_store = PgPlayerStore::new(config).await?;
 
     let player_registry: PlayerRegistry = Arc::new(RwLock::new(HashMap::new()));
 
     let services = ServiceContext {
         config: config.clone(),
-        mysql_store: mysql_store.clone(),
+        db_store: db_store.clone(),
         room_manager: shared_state.room_manager.clone(),
         runtime_config: shared_state.runtime_config.clone(),
         connection_count: shared_state.connection_count.clone(),
         config_tables,
-        player_manager: PlayerManager::new(mysql_player_store),
+        player_manager: PlayerManager::new(db_player_store),
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
@@ -447,7 +447,7 @@ pub async fn run(
         local_socket_name = %config.local_socket_name,
         internal_socket_name = %config.internal_socket_name,
         redis = %config.redis_url,
-        mysql_enabled = mysql_store.enabled(),
+        db_enabled = db_store.enabled(),
         "game server listening"
     );
 
@@ -516,7 +516,7 @@ pub async fn run(
             services.clone(),
             shared_state.runtime_config.clone(),
             shared_state.connection_count.clone(),
-            mysql_store.clone(),
+            db_store.clone(),
         )
         .await;
     }
@@ -556,7 +556,7 @@ async fn run_local_socket_listener(
             services.clone(),
             runtime_config.clone(),
             connection_count.clone(),
-            services.mysql_store.clone(),
+            services.db_store.clone(),
         )
         .await;
     }
@@ -570,13 +570,13 @@ async fn spawn_connection_task<S>(
     services: ServiceContext,
     runtime_config: Arc<RwLock<RuntimeConfig>>,
     connection_count: Arc<AtomicU64>,
-    mysql_store: MySqlAuditStore,
+    db_store: PgAuditStore,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     connection_count.fetch_add(1, Ordering::Relaxed);
     info!(session_id = session_id, peer = %peer_addr, "accepted game connection");
-    mysql_store
+    db_store
         .append_connection_event(session_id, None, Some(&peer_addr), "connected", None)
         .await;
 
@@ -665,7 +665,7 @@ where
                     );
                 }
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
@@ -689,7 +689,7 @@ where
                     "server requested connection close"
                 );
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
@@ -712,7 +712,7 @@ where
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!(session_id = connection.session.id, "peer closed connection");
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
@@ -739,7 +739,7 @@ where
                     );
                 }
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
@@ -763,7 +763,7 @@ where
                     );
                 }
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         connection.session.player_id.as_deref(),
@@ -794,7 +794,7 @@ where
                 );
             }
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -818,7 +818,7 @@ where
                 "connection body read error, will cleanup"
             );
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -846,7 +846,7 @@ where
                 break;
             }
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -890,7 +890,7 @@ where
                         break;
                     }
                     services
-                        .mysql_store
+                        .db_store
                         .append_connection_event(
                             connection.session.id,
                             Some(player_id),
@@ -928,7 +928,7 @@ where
                 "packet dispatch failed, will cleanup"
             );
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -949,7 +949,7 @@ where
     if !close_event_appended {
         if let Some(close_reason) = connection.close_state.reason() {
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -1009,7 +1009,7 @@ async fn dispatch_packet(
             "authenticate before sending business messages",
         )?;
         services
-            .mysql_store
+            .db_store
             .append_connection_event(
                 connection.session.id,
                 connection.session.player_id.as_deref(),
@@ -1095,7 +1095,7 @@ async fn dispatch_packet(
                 "unknown message type",
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),

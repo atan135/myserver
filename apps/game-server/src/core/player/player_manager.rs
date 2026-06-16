@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use super::mysql_player_store::MySqlPlayerStore;
+use super::db_player_store::PgPlayerStore;
 use crate::core::inventory::{Item, ItemError, PlayerData};
 
 #[derive(Debug, Clone)]
@@ -18,12 +18,12 @@ pub struct GrantItemsOutcome {
 #[derive(Clone)]
 pub struct PlayerManager {
     players: Arc<RwLock<HashMap<String, PlayerData>>>,
-    store: MySqlPlayerStore,
+    store: PgPlayerStore,
 }
 
 impl PlayerManager {
     /// 创建新的 PlayerManager
-    pub fn new(store: MySqlPlayerStore) -> Self {
+    pub fn new(store: PgPlayerStore) -> Self {
         Self {
             players: Arc::new(RwLock::new(HashMap::new())),
             store,
@@ -174,7 +174,7 @@ impl PlayerManager {
 impl Default for PlayerManager {
     fn default() -> Self {
         // 创建一个禁用的 store（用于测试）
-        let store = MySqlPlayerStore::new_disabled();
+        let store = PgPlayerStore::new_disabled();
         Self::new(store)
     }
 }
@@ -183,8 +183,8 @@ impl Default for PlayerManager {
 mod tests {
     use super::*;
 
-    fn create_disabled_store() -> MySqlPlayerStore {
-        MySqlPlayerStore::new_disabled()
+    fn create_disabled_store() -> PgPlayerStore {
+        PgPlayerStore::new_disabled()
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ pub async fn handle_auth(
         Err(error_code) => {
             connection.queue_error(packet.header.seq, error_code, "invalid auth body")?;
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     connection.session.player_id.as_deref(),
@@ -59,7 +59,7 @@ pub async fn handle_auth(
                     },
                 )?;
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         Some(&player_id),
@@ -84,7 +84,7 @@ pub async fn handle_auth(
                     },
                 )?;
                 services
-                    .mysql_store
+                    .db_store
                     .append_connection_event(
                         connection.session.id,
                         Some(&player_id),
@@ -121,7 +121,7 @@ pub async fn handle_auth(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     Some(&player_id),
@@ -168,7 +168,7 @@ pub async fn handle_auth(
                 },
             )?;
             services
-                .mysql_store
+                .db_store
                 .append_connection_event(
                     connection.session.id,
                     None,

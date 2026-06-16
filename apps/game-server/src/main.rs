@@ -17,7 +17,7 @@ pub use proto::myserver::admin as admin_pb;
 pub use proto::myserver::game as pb;
 #[allow(dead_code)]
 mod csv_code;
-mod mysql_store;
+mod db_store;
 mod protocol;
 mod server;
 mod session;
@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use config::Config;
 use core::config_table::{ConfigTableRuntime, spawn_hot_reload_task};
-use mysql_store::MySqlAuditStore;
+use db_store::PgAuditStore;
 use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         csv_reload_enabled = config.csv_reload_enabled,
         csv_reload_interval_secs = config.csv_reload_interval_secs,
         room_cleanup_interval_secs = config.room_cleanup_interval_secs,
-        mysql_enabled = config.mysql_enabled,
+        db_enabled = config.db_enabled,
         game_addr = %config.bind_addr(),
         admin_addr = %config.admin_bind_addr(),
         local_socket_name = %config.local_socket_name,
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let mysql_store = MySqlAuditStore::new(&config).await?;
+    let db_store = PgAuditStore::new(&config).await?;
 
     // 启动 metrics 上报任务
     let metrics_nats_url = config.nats_url.clone();
@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
-    let result = server::run(&config, mysql_store.clone(), config_table_runtime.clone()).await;
+    let result = server::run(&config, db_store.clone(), config_table_runtime.clone()).await;
 
     // 关闭时注销服务
     if let Some(client) = registry_client {
@@ -220,6 +220,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = task.await;
     }
 
-    let _ = mysql_store.close().await;
+    db_store.close().await;
     result
 }

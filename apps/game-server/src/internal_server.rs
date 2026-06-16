@@ -887,10 +887,10 @@ mod tests {
     use crate::core::config_table::ConfigTableRuntime;
     use crate::core::context::PlayerRegistry;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
-    use crate::core::player::{MySqlPlayerStore, PlayerManager};
+    use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::room::MemberRole;
     use crate::core::runtime::RoomManager;
-    use crate::mysql_store::MySqlAuditStore;
+    use crate::db_store::PgAuditStore;
     use crate::protocol::{encode_packet, parse_header};
     use crate::server::{
         DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, PlayerInputAnomalyTracker,
@@ -935,9 +935,9 @@ mod tests {
             redis_url: "redis://127.0.0.1:6379".to_string(),
             redis_key_prefix: String::new(),
             nats_url: "nats://127.0.0.1:4222".to_string(),
-            mysql_enabled: false,
-            mysql_url: "mysql://root:password@127.0.0.1:3306/myserver_game".to_string(),
-            mysql_pool_size: 1,
+            db_enabled: false,
+            database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string(),
+            db_pool_size: 1,
             ticket_secret: DEFAULT_TICKET_SECRET.to_string(),
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
@@ -990,14 +990,14 @@ mod tests {
 
         ServiceContext {
             config: config.clone(),
-            mysql_store: MySqlAuditStore::new(&config)
+            db_store: PgAuditStore::new(&config)
                 .await
-                .expect("disabled mysql audit store"),
+                .expect("disabled PostgreSQL audit store"),
             room_manager,
             runtime_config: Arc::new(RwLock::new(runtime_config())),
             connection_count: Arc::new(AtomicU64::new(0)),
             config_tables,
-            player_manager: PlayerManager::new(MySqlPlayerStore::new_disabled()),
+            player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),

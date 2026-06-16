@@ -13,7 +13,7 @@ use crate::core::room::{
     OutboundSender, try_send_outbound,
 };
 use crate::core::runtime::RoomManager;
-use crate::mysql_store::MySqlAuditStore;
+use crate::db_store::PgAuditStore;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::{PlayerInputAnomalyTracker, PlayerMessageRateLimiter, RuntimeConfig};
 use crate::session::{Session, SessionState};
@@ -37,7 +37,7 @@ pub struct PlayerConnectionHandle {
 #[derive(Clone)]
 pub struct ServiceContext {
     pub config: Config,
-    pub mysql_store: MySqlAuditStore,
+    pub db_store: PgAuditStore,
     pub room_manager: SharedRoomManager,
     pub runtime_config: SharedRuntimeConfig,
     pub connection_count: Arc<AtomicU64>,

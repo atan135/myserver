@@ -29,9 +29,9 @@ pub struct Config {
     pub redis_url: String,
     pub redis_key_prefix: String,
     pub nats_url: String,
-    pub mysql_enabled: bool,
-    pub mysql_url: String,
-    pub mysql_pool_size: usize,
+    pub db_enabled: bool,
+    pub database_url: String,
+    pub db_pool_size: u32,
     pub ticket_secret: String,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
@@ -128,12 +128,14 @@ impl Config {
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
-        let mysql_enabled = parse_bool("MYSQL_ENABLED", false);
-        let mysql_url = env::var("MYSQL_URL")
-            .unwrap_or_else(|_| "mysql://root:password@127.0.0.1:3306/myserver_game".to_string());
-        let mysql_pool_size = env::var("MYSQL_POOL_SIZE")
+        let db_enabled = parse_bool("DB_ENABLED", false);
+        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string()
+        });
+        let db_pool_size = env::var("DB_POOL_SIZE")
             .ok()
-            .and_then(|value| value.parse::<usize>().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
             .unwrap_or(10);
         let ticket_secret =
             env::var("TICKET_SECRET").unwrap_or_else(|_| DEFAULT_TICKET_SECRET.to_string());
@@ -186,9 +188,9 @@ impl Config {
             redis_url,
             redis_key_prefix,
             nats_url,
-            mysql_enabled,
-            mysql_url,
-            mysql_pool_size,
+            db_enabled,
+            database_url,
+            db_pool_size,
             ticket_secret,
             heartbeat_timeout_secs,
             max_body_len,
