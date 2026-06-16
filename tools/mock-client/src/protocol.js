@@ -149,6 +149,29 @@ export function readStringList(fields, fieldNumber) {
   return [Buffer.from(value).toString("utf8")];
 }
 
+function readVarintListEntry(value) {
+  if (Buffer.isBuffer(value)) {
+    const values = [];
+    let offset = 0;
+    while (offset < value.length) {
+      const decoded = decodeVarint(value, offset);
+      values.push(Number(decoded.value));
+      offset = decoded.nextOffset;
+    }
+    return values;
+  }
+  return [Number(value)];
+}
+
+export function readInt32List(fields, fieldNumber) {
+  const value = fields.get(fieldNumber);
+  if (!value) {
+    return [];
+  }
+  const entries = Array.isArray(value) ? value : [value];
+  return entries.flatMap(readVarintListEntry);
+}
+
 export function readBool(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n) !== 0;
 }

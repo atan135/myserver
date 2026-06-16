@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
+import { decodeByMessageType } from "../tools/mock-client/src/messages.js";
+import {
+  encodeBoolField,
+  encodeInt64Field,
+  encodeUInt32Field,
+  encodeVarint
+} from "../tools/mock-client/src/protocol.js";
+
+function encodePackedInt32Field(fieldNumber, values) {
+  const payload = Buffer.concat(values.map((value) => encodeVarint(value)));
+  return Buffer.concat([
+    encodeVarint((fieldNumber << 3) | 2),
+    encodeVarint(payload.length),
+    payload
+  ]);
+}
+
+test("mock-client decodes proto3 packed repeated int32 fields", () => {
+  const itemUseBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeInt64Field(3, 25),
+    encodePackedInt32Field(4, [101, 202])
+  ]);
+
+  assert.deepEqual(decodeByMessageType(MESSAGE_TYPE.ITEM_USE_RES, itemUseBody), {
+    ok: true,
+    errorCode: "",
+    hpChange: 25,
+    newBuffIds: [101, 202]
+  });
+
+  const visualChangeBody = Buffer.concat([
+    encodeUInt32Field(1, 7),
+    encodePackedInt32Field(2, [301, 302])
+  ]);
+
+  assert.deepEqual(decodeByMessageType(MESSAGE_TYPE.VISUAL_CHANGE_PUSH, visualChangeBody), {
+    appearance: 7,
+    activeBuffIds: [301, 302]
+  });
+});

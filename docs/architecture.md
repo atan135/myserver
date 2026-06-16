@@ -310,9 +310,9 @@ Core NATS 当前承担以下职责：
 
 ### 8.4 聊天协议
 
-`chat-server` 当前有独立的聊天协议定义，未放在 `packages/proto` 下统一管理：
+`chat-server` 当前聊天协议定义已收敛到共享协议包：
 
-- `apps/chat-server/src/proto/chat.proto`
+- `packages/proto/chat.proto`
 
 ---
 

@@ -1,6 +1,6 @@
 # 项目未完成任务清单
 
-更新时间：2026-06-15 16:07:03 +08:00
+更新时间：2026-06-16 09:20:57 +08:00
 
 ## 协作流程
 
@@ -438,27 +438,32 @@
 
 ### 8. 协议生成与一致性检查
 
-- 状态：进行中
+- 状态：已完成
 - 开始时间：2026-06-15 09:33:54 +08:00
-- 结束时间：待填写
+- 结束时间：2026-06-16 09:20:57 +08:00
 - 优先级：P2
 - 范围：
   - `packages/proto`
   - `tools/mock-client`
   - 外部 `mybevy`
-  - `apps/chat-server` 本地 proto
+  - `apps/chat-server` proto 生成链路
 - 目标：
   - 建立 mock-client、mybevy、Rust、Node 之间的协议生成或一致性校验。
   - 降低手写消息号、字段和枚举漂移风险。
 - 派发说明：
   - 子任务 8.1 只扩展静态协议一致性检查，不改运行时协议行为，不启动服务，不触碰外部 `mybevy` 或 `apps/chat-server`。
   - 子任务 8.2 接入外部 `mybevy` 静态协议检查，只读取 `MYSERVER_CLIENT_ROOT` 或本地忽略文件 `local_help.txt` 指向的客户端源码，不修改外部仓库，不启动服务。
+  - 子任务 8.3 迁移 `chat-server` 本地 proto 到共享 `packages/proto`，不改聊天运行时协议字段或消息号，不启动服务。
+  - 子任务 8.4 扩展 mock-client 字段级静态校验并修正已覆盖消息的 packed repeated int32 解码，不改服务端协议字段或消息号，不启动服务。
 - 已完成上下文：
   - 根 `package.json` 已有 `check:proto`，当前指向 `npm run check:mock-client-protocol`。
   - `tools/check-mock-client-protocol.js` 已能校验 `tools/mock-client` 的 `MESSAGE_TYPE` 与 `apps/game-server/src/protocol/message_type.rs` 一致，并校验部分 movement 相关枚举与 `packages/proto/game.proto` 一致。
   - 子任务 8.1 已扩展 `tools/check-mock-client-protocol.js`：继续以 `game-server` 的 `MessageType` 为 canonical，校验 mock-client 覆盖全集；校验 `game-server` / `game-proxy` 各自 `MessageType::from_u16` 与同文件 enum 声明一致；校验 `game-proxy` 已声明的消息号在 game-server 和 mock-client 中同名同值。
   - 子任务 8.2 已接入外部客户端可选检查：优先使用 `MYSERVER_CLIENT_ROOT`，未设置时读取被 gitignore 忽略的根目录 `local_help.txt`；设置为 `C:\project\mybevy` 时校验 `project/src/myserver/protocol.rs` 的 `MessageType` 子集与 game-server canonical 同名同值，并校验 mybevy `MessageType::from_u16` 与 enum 自一致；同时静态检查 `project/build.rs` 从 `MyServer/packages/proto/game.proto` 生成 prost 绑定。
-  - 现有检查仍未覆盖 `apps/chat-server` 本地 proto、字段级模型生成或完整多语言生成链路。
+  - 子任务 8.3 已将 `apps/chat-server/src/proto/chat.proto` 迁入 `packages/proto/chat.proto`，`apps/chat-server/build.rs` 改为从共享 proto 编译并继续生成到 `apps/chat-server/src/proto/myserver.chat.rs`；`tools/check-mock-client-protocol.js` 已增加防回退检查，确认 chat proto 不再留在 chat-server 本地目录且 build 指向 `packages/proto`。
+  - 子任务 8.4 已扩展 `tools/check-mock-client-protocol.js`：解析 `packages/proto/game.proto` 与 `packages/proto/chat.proto` 的 message 字段，提取 `tools/mock-client/src/messages.js` 已手写 encoder/decoder 使用的字段号与 wire/helper 类别，检查 mock-client 已覆盖消息的字段号和基础 wire 类型不漂移。
+  - 子任务 8.4 已修正 mock-client 对 `ItemUseRes.new_buff_ids`、`VisualChangePush.active_buff_ids` 的解码，支持 proto3 默认 packed repeated int32，并新增 `tests/mock-client-protocol.test.mjs` 覆盖。
+  - 当前仍不是完整多语言生成链路；mybevy 侧字段级模型仍依赖其 build.rs 从共享 `packages/proto/game.proto` 生成 prost 绑定，未在本仓库内做外部源码修改。
 - 验收计划：
   - 扩展 `check:proto` 或新增子命令，覆盖 mock-client、game-server、game-proxy 与 `packages/proto` 的消息号/字段校验。
   - 在 `MYSERVER_CLIENT_ROOT` 可用时检查外部 `mybevy` 协议绑定；不可用时输出明确 skipped 结果。
@@ -471,21 +476,41 @@
     - `$env:MYSERVER_CLIENT_ROOT='C:\project\mybevy'; npm run check:proto`
     - `Remove-Item Env:\MYSERVER_CLIENT_ROOT -ErrorAction SilentlyContinue; npm run check:proto`
     - `local_help.txt` 本地内容：`MYSERVER_CLIENT_ROOT=C:\project\mybevy`；该文件已加入 `.gitignore`，不提交本机路径。
+  - 子任务 8.3 已通过静态与编译检查：
+    - `npm run check:proto`
+    - `cargo test`（工作目录 `apps/chat-server`，32 项通过）
+    - `rustfmt --check apps/chat-server/build.rs`
+  - 子任务 8.4 已通过静态与单测检查：
+    - `npm run check:proto`
+    - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/mock-client-protocol.test.mjs tests/server-redirect-parser.test.mjs`
+  - 2026-06-16 主 agent 验收通过，复核范围集中在 chat proto 迁移、mock-client 字段级协议校验、mock-client packed repeated int32 解码、协议文档和本清单；未发现任务 8 范围外代码改动。
+  - 2026-06-16 复核确认 `packages/proto/chat.proto` 内容与迁移前 `apps/chat-server/src/proto/chat.proto` 一致，只改变 canonical 路径和 build 输入。
+  - 2026-06-16 验收实际运行：
+    - `npm run check:proto`：通过，输出 mybevy protocol checked，并确认 protocol constants 与 mock-client field schemas 同步。
+    - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/mock-client-protocol.test.mjs tests/server-redirect-parser.test.mjs`：2 项通过。
+    - `cargo test`（工作目录 `apps/chat-server`）：32 项通过；仅有既有 unused/dead code warnings。
+    - `rustfmt --check apps/chat-server/build.rs`：通过。
+    - `git diff --check`：无 whitespace error，仅 Windows LF/CRLF 提示。
   - 未启动任何服务；本项只是源码/proto 静态读取。
-  - `git diff --check` 仅提示 `tools/check-mock-client-protocol.js` 在 Windows 工作区会显示 LF/CRLF 转换，不影响内容检查。
+  - `cargo fmt --check` 在 `apps/chat-server` 暴露既有 `chat_service.rs` / `chat_store.rs` 等格式差异，本次未做无关格式化；本次改动的 `build.rs` 已通过 `rustfmt --check`。
+  - `git diff --check` 仅提示部分文本文件在 Windows 工作区会显示 LF/CRLF 转换，不影响内容检查。
 - 运行服务/依赖：不需要启动服务；如校验外部客户端，需要设置 `MYSERVER_CLIENT_ROOT`，或在被 gitignore 忽略的根目录 `local_help.txt` 写入 `MYSERVER_CLIENT_ROOT=<client path>`。
 - 测试命令：
   - `npm run check:proto`
   - `$env:MYSERVER_CLIENT_ROOT='C:\project\mybevy'; npm run check:proto`
   - `Remove-Item Env:\MYSERVER_CLIENT_ROOT -ErrorAction SilentlyContinue; npm run check:proto`
+  - `node --test --experimental-test-isolation=none --test-concurrency=1 tests/mock-client-protocol.test.mjs tests/server-redirect-parser.test.mjs`
+  - `cargo test`（工作目录 `apps/chat-server`）
+  - `rustfmt --check apps/chat-server/build.rs`
   - `git diff --check`
 - 阻塞/回退：
   - 当前无阻塞；若新增 game-proxy 可识别消息号，必须同步 game-server canonical enum 和 mock-client 常量，否则 `npm run check:proto` 会失败。
-  - 回退时可只还原 `tools/check-mock-client-protocol.js` 的 8.1 扩展，不影响运行时服务。
+  - 8.4 字段级校验只覆盖 mock-client 已手写 encoder/decoder 的消息；未写入 mock-client 的消息仍依赖 proto/Rust 生成与消息号检查。
+  - 回退时可移除 `tools/check-mock-client-protocol.js` 的字段级检查、恢复 `tools/mock-client/src/messages.js` 的旧解码，并删除新增 `tests/mock-client-protocol.test.mjs`；服务端协议不需要回退。
 - 交给下一 subagent 的上下文：
-  - 任务 8 仍为进行中。下一步建议做 8.3：评估 `apps/chat-server` 本地 proto 迁入共享包；不要重复实现 game-proxy 或 mybevy 消息号检查。
-  - 字段级模型生成或完整多语言生成链路仍未覆盖，后续可拆为 8.4。
-- 相关提交：部分基础能力已落地于 `197039f feat(infra): 收敛协议注册与迁移基础设施`；子任务 8.1 本次提交 `64e5f9d test(proto): 扩展协议消息号一致性检查`；子任务 8.2 本次提交 `test(proto): 接入 mybevy 协议一致性检查`。
+  - 任务 8 已有实现，等待主 agent 复核 diff、确认是否接受“字段级静态校验”替代完整多语言代码生成，并按需提交。
+  - `apps/chat-server/src/proto/myserver.chat.rs` 是生成产物，迁移后内容未发生 diff；后续若调整 `packages/proto/chat.proto` 字段，需要重新生成并确认生成产物。
+- 相关提交：部分基础能力已落地于 `197039f feat(infra): 收敛协议注册与迁移基础设施`；子任务 8.1 已提交 `64e5f9d test(proto): 扩展协议消息号一致性检查`；子任务 8.2 已提交 `94fbdb4 test(proto): 接入 mybevy 协议一致性检查`；子任务 8.3/8.4 本次提交 `test(proto): 补齐协议字段一致性检查`。
 
 ### 9. DB migration 体系
 

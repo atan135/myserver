@@ -20,7 +20,7 @@
 - `packages/proto/game.proto`
 - `apps/game-server/src/protocol/message_type.rs`
 - `apps/game-proxy/src/protocol.rs`
-- `apps/chat-server/src/proto/chat.proto`
+- `packages/proto/chat.proto`
 - `apps/chat-server/src/chat_server.rs`
 
 ---

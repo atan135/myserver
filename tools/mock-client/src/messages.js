@@ -11,6 +11,7 @@ import {
   readStringList,
   readBool,
   readInt64,
+  readInt32List,
   readUInt32,
   readFloat
 } from "./protocol.js";
@@ -477,7 +478,7 @@ export function decodeByMessageType(messageType, body) {
         ok: readBool(fields, 1),
         errorCode: readString(fields, 2),
         hpChange: readInt64(fields, 3),
-        newBuffIds: fields.get(4) ? (Array.isArray(fields.get(4)) ? fields.get(4).map(f => readUInt32(decodeFieldsWithRepeated(f), 1)) : [readUInt32(decodeFieldsWithRepeated(fields.get(4)), 1)]) : []
+        newBuffIds: readInt32List(fields, 4)
       };
     case MESSAGE_TYPE.ITEM_DISCARD_RES:
       return {
@@ -522,10 +523,9 @@ export function decodeByMessageType(messageType, body) {
         final: fields.get(3) ? decodeAttrPanel(fields.get(3)) : null
       };
     case MESSAGE_TYPE.VISUAL_CHANGE_PUSH: {
-      const buffsRaw = fields.get(2);
       return {
         appearance: readUInt32(fields, 1),
-        activeBuffIds: buffsRaw ? (Array.isArray(buffsRaw) ? buffsRaw.map(f => readUInt32(decodeFieldsWithRepeated(f), 1)) : [readUInt32(decodeFieldsWithRepeated(buffsRaw), 1)]) : []
+        activeBuffIds: readInt32List(fields, 2)
       };
     }
     case MESSAGE_TYPE.GROUP_CREATE_RES:

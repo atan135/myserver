@@ -1,16 +1,19 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_files = std::fs::read_dir("src/proto")?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
-        .map(|e| e.path())
-        .collect::<Vec<_>>();
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or("failed to resolve repository root")?;
+    let proto_dir = repo_root.join("packages").join("proto");
+    let chat_proto = proto_dir.join("chat.proto");
 
-    if !proto_files.is_empty() {
-        let mut prost_build = prost_build::Config::new();
-        prost_build.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
-        // 生成到 src/proto 目录
-        std::fs::create_dir_all("src/proto").unwrap();
-        prost_build.out_dir("src/proto").compile_protos(&proto_files, &["src/proto"])?;
-    }
+    println!("cargo:rerun-if-changed={}", chat_proto.display());
+
+    let mut prost_build = prost_build::Config::new();
+    prost_build.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
+    std::fs::create_dir_all("src/proto")?;
+    prost_build
+        .out_dir("src/proto")
+        .compile_protos(&[chat_proto], &[proto_dir])?;
     Ok(())
 }
