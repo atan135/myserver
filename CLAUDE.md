@@ -9,9 +9,9 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 优先级约定：
 
 - 当前代码与配置优先于文档。
-- `docs/architecture.md` 是当前整体架构的主说明。
+- `docs/总览/整体架构.md` 是当前整体架构的主说明。
 - 专题设计以 `docs/` 下对应文档为准；部分专题文档可能描述目标态，不等于已经全部落地。
-- `docs/prompts/` 已不再使用，仅保留项目初始设计阶段的历史提示词。AI 或协作者了解项目时不需要读取该目录，也不要以其中内容作为当前设计依据。
+- `docs/历史归档/初始设计稿/` 已不再使用，仅保留项目初始设计阶段的历史提示词。AI 或协作者了解项目时不需要读取该目录，也不要以其中内容作为当前设计依据。
 
 ## 整体架构理念
 
@@ -19,7 +19,7 @@ MyServer 是一个通用游戏后端框架仓库，当前定位是多服务 mono
 - `game-proxy` 作为客户端游戏接入层，屏蔽后端 `game-server` 实例与路由细节。
 - `game-server` 是游戏逻辑核心，负责玩家鉴权、房间生命周期、帧推进、配置表热加载、内部管理接口和主要游戏运行时。
 - `chat-server`、`match-service`、`announce-service`、`mail-service` 是围绕游戏主链路拆出的独立能力服务。
-- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/architecture.md` 和代码为准。
+- `admin-api + admin-web` 组成运营后台，通过独立控制面访问审计、玩家管理、GM 入口和监控能力；具体 GM 命令是否闭环以 `docs/总览/整体架构.md` 和代码为准。
 - Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - MariaDB / MySQL 用于账号、审计、游戏事件、公告和邮件等持久化数据。
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`；个别服务仍保留本地 proto，具体以代码和协议文档为准。
@@ -90,41 +90,41 @@ docs/                 # 当前正式设计文档
 
 整体与协议：
 
-- [整体架构](./docs/architecture.md)
-- [协议设计](./docs/protocol.md)
-- [外部客户端接入说明](./docs/client-integration.md)
-- [生产拓扑与 Room 迁移设计](./docs/production-topology-and-room-migration-design.md)
+- [整体架构](./docs/总览/整体架构.md)
+- [协议设计](./docs/协议与客户端/协议设计.md)
+- [外部客户端接入说明](./docs/协议与客户端/外部客户端接入说明.md)
+- [生产拓扑与 Room 迁移设计](./docs/后台与运维/生产拓扑与Room迁移设计.md)
 
 游戏服与接入层：
 
-- 当前实现与代码阅读：[Rust 游戏服开发指南](./docs/game-server-rust-guide.md)、[帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)、[game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
-- 更新与灰度边界：[更新策略拆分](./docs/game-server-update-strategy.md)、[空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)、[空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
-- 路线图与算法/目标设计：[底层框架路线图](./docs/game-server-framework-roadmap.md)、[大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)、[网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+- 当前实现与代码阅读：[Rust 游戏服开发指南](./docs/游戏服与接入层/Rust游戏服开发指南.md)、[帧同步与房间生命周期设计](./docs/游戏服与接入层/帧同步与房间生命周期设计.md)、[game-proxy 热切换代理设计](./docs/游戏服与接入层/game-proxy热切换代理设计.md)
+- 更新与灰度边界：[更新策略拆分](./docs/游戏服与接入层/游戏服更新策略拆分.md)、[空房接管式灰度规范](./docs/游戏服与接入层/空房接管式灰度规范.md)、[空房接管式灰度任务清单](./docs/游戏服与接入层/空房接管式灰度任务清单.md)
+- 路线图与算法/目标设计：[底层框架路线图](./docs/游戏服与接入层/游戏服底层框架路线图.md)、[大世界常驻 Room 热更新设计](./docs/游戏服与接入层/大世界常驻Room热更新设计.md)、[网络延迟补偿设计](./docs/游戏服与接入层/网络延迟补偿设计.md)
 
 配置与场景：
 
-- [CSV 配置表设计](./docs/game-server-csv-config-design.md)
-- [CSV 热更现状清单](./docs/game-server-csv-hot-reload-status.md)
-- [场景地图格式设计](./docs/game-server-scene-map-format-design.md)
+- [CSV 配置表设计](./docs/配置与场景/CSV配置表设计.md)
+- [CSV 热更现状清单](./docs/配置与场景/CSV热更现状清单.md)
+- [场景地图格式设计](./docs/配置与场景/场景地图格式设计.md)
 
 具体游戏逻辑：
 
-- [背包系统设计](./docs/game-server-inventory-design.md)
-- [战斗 ECS 设计](./docs/game-server-combat-ecs-design.md)
+- [背包系统设计](./docs/游戏服与接入层/背包系统设计.md)
+- [战斗 ECS 设计](./docs/游戏服与接入层/战斗ECS设计.md)
 
 周边服务与后台：
 
-- [服务注册中心设计](./docs/service-registry-design.md)
-- [聊天与邮件系统设计](./docs/game-server-chat-design.md)
-- [匹配服务设计](./docs/match-service-design.md)
-- [管理后台设计](./docs/admin-panel.md)
-- [监控设计](./docs/monitoring-design.md)
+- [服务注册中心设计](./docs/周边服务/服务注册中心设计.md)
+- [聊天与邮件系统设计](./docs/周边服务/聊天与邮件系统设计.md)
+- [匹配服务设计](./docs/周边服务/匹配服务设计.md)
+- [管理后台设计](./docs/后台与运维/管理后台设计.md)
+- [监控设计](./docs/安全与监控/监控设计.md)
 
 安全：
 
-- [安全设计](./docs/security-design.md)
-- [限流与安全现状](./docs/rate-limit-and-security.md)
-- [游戏服务安全分层与敏感操作处理指南](./docs/game-security-operation-guide.md)
+- [安全设计](./docs/安全与监控/安全设计.md)
+- [限流与安全现状](./docs/安全与监控/限流与安全现状.md)
+- [游戏服务安全分层与敏感操作处理指南](./docs/安全与监控/游戏服务安全分层与敏感操作处理指南.md)
 
 ## 基础设定
 
@@ -150,7 +150,7 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 
 ## 开发协作约定
 
-- 修改功能前先看对应代码和专题文档，不要从 `docs/prompts/` 推断当前行为。
+- 修改功能前先看对应代码和专题文档，不要从 `docs/历史归档/初始设计稿/` 推断当前行为。
 - 若文档与代码冲突，应以代码为准，并在需要时同步修正文档。
 - 模块功能开发完成后，不要直接自动运行项目检测、集成测试、联调脚本或自动启动相关服务；先提示用户需要启动哪些服务和依赖，待用户确认后再执行测试。
 - 除非用户明确要求，不要提交 git commit 或执行 push。

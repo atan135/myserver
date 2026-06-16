@@ -6,9 +6,9 @@
 
 本文不作为整体架构或协议的主口径：
 
-- 整体服务边界以 [architecture.md](./architecture.md) 为准
-- 消息号、包头和 proto 字段以 [protocol.md](./protocol.md) 与 `packages/proto/` 为准
-- 房间运行时细节以 [game-server-frame-sync-design.md](./game-server-frame-sync-design.md) 为准
+- 整体服务边界以 [整体架构](../总览/整体架构.md) 为准
+- 消息号、包头和 proto 字段以 [协议设计](../协议与客户端/协议设计.md) 与 `packages/proto/` 为准
+- 房间运行时细节以 [帧同步与房间生命周期设计](./帧同步与房间生命周期设计.md) 为准
 
 ## 2. 当前职责
 
@@ -218,10 +218,10 @@ PLAYER_MSG_RATE_MAX=0
 
 ## 10. 保留为单独文档的原因
 
-这份文档不建议合并进 `architecture.md` 或 `protocol.md`。
+这份文档不建议合并进 `整体架构.md` 或 `协议设计.md`。
 
 原因是它的读者和内容不同：
 
-- `architecture.md` 应保持服务边界和主链路说明，避免混入 Rust 教程
-- `protocol.md` 应保持消息号、包头和字段定义，避免混入代码阅读顺序
+- `整体架构.md` 应保持服务边界和主链路说明，避免混入 Rust 教程
+- `协议设计.md` 应保持消息号、包头和字段定义，避免混入代码阅读顺序
 - 本文适合做 Rust 代码阅读入口，可选阅读，不是 AI 了解项目的必读主文档

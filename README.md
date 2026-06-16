@@ -2,7 +2,7 @@
 
 MyServer 是一个通用游戏后端框架 monorepo，当前已经形成多服务形态：登录、游戏接入、游戏逻辑、聊天、匹配、邮件、公告、管理后台、协议包、服务注册中心、联调工具和本地脚本都在同一仓库内维护。
 
-本文是面向开发者的快速入口。具体协议、接口行为、实现状态和任务拆解以 `docs/` 下专题文档与当前代码为准；`docs/prompts/` 仅保留初始设计阶段的历史提示词，不再作为当前设计依据。
+本文是面向开发者的快速入口。具体协议、接口行为、实现状态和任务拆解以 `docs/` 下专题文档与当前代码为准；`docs/历史归档/初始设计稿/` 仅保留初始设计阶段的历史提示词，不再作为当前设计依据。
 
 ## 当前架构
 
@@ -91,41 +91,41 @@ docs/                 # 当前正式设计文档
 
 整体与协议：
 
-- [整体架构](./docs/architecture.md)
-- [协议设计](./docs/protocol.md)
-- [外部客户端接入说明](./docs/client-integration.md)
-- [生产拓扑与 Room 迁移设计](./docs/production-topology-and-room-migration-design.md)
+- [整体架构](./docs/总览/整体架构.md)
+- [协议设计](./docs/协议与客户端/协议设计.md)
+- [外部客户端接入说明](./docs/协议与客户端/外部客户端接入说明.md)
+- [生产拓扑与 Room 迁移设计](./docs/后台与运维/生产拓扑与Room迁移设计.md)
 
 游戏服与接入层：
 
-- [Rust 游戏服开发指南](./docs/game-server-rust-guide.md)
-- [帧同步与房间生命周期设计](./docs/game-server-frame-sync-design.md)
-- [game-proxy 热切换代理设计](./docs/game-proxy-hot-update-design.md)
-- [更新策略拆分](./docs/game-server-update-strategy.md)
-- [空房接管式灰度规范](./docs/game-server-room-rollout-spec.md)
-- [空房接管式灰度任务清单](./docs/game-server-room-rollout-task-list.md)
-- [底层框架路线图](./docs/game-server-framework-roadmap.md)
-- [大世界常驻 Room 热更新设计](./docs/persistent-world-hot-update-design.md)
-- [网络延迟补偿设计](./docs/network-lag-compensation-design.md)
+- [Rust 游戏服开发指南](./docs/游戏服与接入层/Rust游戏服开发指南.md)
+- [帧同步与房间生命周期设计](./docs/游戏服与接入层/帧同步与房间生命周期设计.md)
+- [game-proxy 热切换代理设计](./docs/游戏服与接入层/game-proxy热切换代理设计.md)
+- [更新策略拆分](./docs/游戏服与接入层/游戏服更新策略拆分.md)
+- [空房接管式灰度规范](./docs/游戏服与接入层/空房接管式灰度规范.md)
+- [空房接管式灰度任务清单](./docs/游戏服与接入层/空房接管式灰度任务清单.md)
+- [底层框架路线图](./docs/游戏服与接入层/游戏服底层框架路线图.md)
+- [大世界常驻 Room 热更新设计](./docs/游戏服与接入层/大世界常驻Room热更新设计.md)
+- [网络延迟补偿设计](./docs/游戏服与接入层/网络延迟补偿设计.md)
 
 配置、场景与具体游戏逻辑：
 
-- [CSV 配置表设计](./docs/game-server-csv-config-design.md)
-- [CSV 热更现状清单](./docs/game-server-csv-hot-reload-status.md)
-- [场景地图格式设计](./docs/game-server-scene-map-format-design.md)
-- [背包系统设计](./docs/game-server-inventory-design.md)
-- [战斗 ECS 设计](./docs/game-server-combat-ecs-design.md)
+- [CSV 配置表设计](./docs/配置与场景/CSV配置表设计.md)
+- [CSV 热更现状清单](./docs/配置与场景/CSV热更现状清单.md)
+- [场景地图格式设计](./docs/配置与场景/场景地图格式设计.md)
+- [背包系统设计](./docs/游戏服与接入层/背包系统设计.md)
+- [战斗 ECS 设计](./docs/游戏服与接入层/战斗ECS设计.md)
 
 周边服务、后台与安全：
 
-- [服务注册中心设计](./docs/service-registry-design.md)
-- [聊天与邮件系统设计](./docs/game-server-chat-design.md)
-- [匹配服务设计](./docs/match-service-design.md)
-- [管理后台设计](./docs/admin-panel.md)
-- [监控设计](./docs/monitoring-design.md)
-- [安全设计](./docs/security-design.md)
-- [限流与安全现状](./docs/rate-limit-and-security.md)
-- [游戏服务安全分层与敏感操作处理指南](./docs/game-security-operation-guide.md)
+- [服务注册中心设计](./docs/周边服务/服务注册中心设计.md)
+- [聊天与邮件系统设计](./docs/周边服务/聊天与邮件系统设计.md)
+- [匹配服务设计](./docs/周边服务/匹配服务设计.md)
+- [管理后台设计](./docs/后台与运维/管理后台设计.md)
+- [监控设计](./docs/安全与监控/监控设计.md)
+- [安全设计](./docs/安全与监控/安全设计.md)
+- [限流与安全现状](./docs/安全与监控/限流与安全现状.md)
+- [游戏服务安全分层与敏感操作处理指南](./docs/安全与监控/游戏服务安全分层与敏感操作处理指南.md)
 
 ## 环境依赖
 
@@ -149,7 +149,7 @@ npm run check:migrations
 npm run db:migrate:dry-run
 ```
 
-`db/init.sql` 仍是本地 bootstrap 脚本。仓库已有第一阶段 migration runner、`schema_migrations` 元表和检查命令，但在数据库方案切到 PostgreSQL 前，暂不继续推进 MySQL 初始 schema 拆分、baseline、回滚或修复脚本开发；正式状态见 [数据库迁移现状](./docs/database-migration.md)。
+`db/init.sql` 仍是本地 bootstrap 脚本。仓库已有第一阶段 migration runner、`schema_migrations` 元表和检查命令，但在数据库方案切到 PostgreSQL 前，暂不继续推进 MySQL 初始 schema 拆分、baseline、回滚或修复脚本开发；正式状态见 [数据库迁移现状](./docs/数据库/数据库迁移说明.md)。
 
 ## 常用命令
 

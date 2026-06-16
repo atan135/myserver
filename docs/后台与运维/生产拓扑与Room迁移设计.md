@@ -6,11 +6,11 @@
 
 相关文档：
 
-- [整体架构](./architecture.md)
-- [外部客户端接入说明](./client-integration.md)
-- [game-proxy 热切换代理设计](./game-proxy-hot-update-design.md)
-- [空房接管式灰度规范](./game-server-room-rollout-spec.md)
-- [old/new/proxy 三进程 rollout 演练入口](./rollout-three-process-drill-runbook.md)
+- [整体架构](../总览/整体架构.md)
+- [外部客户端接入说明](../协议与客户端/外部客户端接入说明.md)
+- [game-proxy 热切换代理设计](../游戏服与接入层/game-proxy热切换代理设计.md)
+- [空房接管式灰度规范](../游戏服与接入层/空房接管式灰度规范.md)
+- [old/new/proxy 三进程 rollout 演练入口](./三进程灰度演练手册.md)
 
 当前代码与配置优先于本文。本文会区分：
 
@@ -204,7 +204,7 @@ RoomRouteRecord {
 | 连接态 | socket、KCP conv、proxy session、上游 stream、临时发送缓冲、连接 RTT | 否 |
 | 鉴权态 | ticket 原文、access token、TLS/KCP 会话密钥 | 通常否；迁移时应通过 resume 或重新鉴权验证 |
 
-payload 最小建议字段见 [空房接管式灰度规范](./game-server-room-rollout-spec.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
+payload 最小建议字段见 [空房接管式灰度规范](../游戏服与接入层/空房接管式灰度规范.md)。本文额外要求 payload 包含 schema/version 信息，便于跨版本导入时做兼容判断。
 
 当前实现状态（截至 `2026-06-15`）：`game-server` 已完成已鉴权 internal/admin 通道内的 room freeze/export/import/confirm/retire 最小闭环，适用于空房或全员离线 room 的基础 transfer 验证；`ConfirmRoomOwnershipReq/Res` 会在新服校验 room 存在、`OwnedByNew` 状态、`rollout_epoch`、checksum 和 `room_version` 后才返回成功。同时已提供 `TriggerServerRedirectReq/Res` 控制入口，可向旧服上目标 room 的当前在线成员下发 `ServerRedirectPush`。push 成功进入出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接；push 排队失败的连接计入失败数，不额外覆盖关闭原因。`GetRolloutDrainStatusReq/Res` 会返回旧服真实 `drain_mode_enabled`、`drain_mode_entered_at_ms`、`drain_mode_reason`、`drain_mode_source`、连接数、仍持有 room、迁移中 room、已 retired tombstone room、route 样本和可接管空房分类；可接管空房仅包含仍为 `Owned` / 对外视作 `OwnedByOld` 且在线成员数为 `0` 的 room，已 `Retired` room 单独计入 `retired_room_count`，不作为旧服排空阻塞项。该状态供 `auth-http` 内部接口、`tools/mock-client` 查询，也可被 `game-proxy` 的 `complete-if-drained` 在配置启用时作为结束 rollout 前的真实排空校验。`RequestServerShutdownReq/Res` 已提供旧服排空后的受控 graceful shutdown 请求入口，必须满足 `drain_mode_enabled == true`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0` 才会触发 game-server 自身 graceful shutdown 信号；`retired_room_count` 只作为观测字段，不阻塞停服。`tools/mock-client` 已具备收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq` 的验证场景，也可通过 `request-server-shutdown` 场景人工调用停服安全闸。2026-06-13 已在真实 old/new/proxy/auth 环境中人工跑通 `movement_demo` 空房迁移控制面，并用 mock-client 验证 redirect -> transfer -> proxy reconnect；尚未完成自动测试准入、mybevy 适配、L7 relay、同连接 upstream swap、真实 route metadata 丢失恢复或生产部署平台 stop hook 接入，也不代表 movement/combat/NPC/AI/timer 等完整玩法状态已经可无损迁移。
 

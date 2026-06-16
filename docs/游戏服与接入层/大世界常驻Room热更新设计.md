@@ -22,13 +22,13 @@
 - `PersistentRoomLogic` 或等价完整状态迁移 trait。
 - freeze / serialize / restore / route switch 的完整 room transfer 链路。
 
-因此本文应作为后续能力设计参考；当前实现边界以 [CSV 热更现状清单](./game-server-csv-hot-reload-status.md)、[game-proxy 热切换代理设计](./game-proxy-hot-update-design.md) 和代码为准。
+因此本文应作为后续能力设计参考；当前实现边界以 [CSV 热更现状清单](../配置与场景/CSV热更现状清单.md)、[game-proxy 热切换代理设计](./game-proxy热切换代理设计.md) 和代码为准。
 
 术语说明：
 
 - 本文讨论的是大世界持久化场景下的热更新方案
 - 与 `运行时热更新`（CSV 数据 / 运行时配置）和 `滚动重启 / 灰度发布`（实例切流）均有关联
-- 统一口径见 `docs/game-server-update-strategy.md`
+- 统一口径见 `docs/游戏服与接入层/游戏服更新策略拆分.md`
 
 ## 1. 问题背景
 
@@ -76,9 +76,9 @@
 - 原子替换表快照（`Arc<RwLock<Arc<ConfigTables>>>`）
 - 请求链路在下一次处理时读到新值
 
-当前已能直接在线生效的表以 [CSV 热更现状清单](./game-server-csv-hot-reload-status.md) 为准。伤害系数、刷怪间隔、掉落概率、区域参数等纯数值调整属于该层的目标覆盖范围；只有当业务链路在请求或 tick 中重新读取最新 `ConfigTableRuntime` 快照时，才能视为运行时生效。
+当前已能直接在线生效的表以 [CSV 热更现状清单](../配置与场景/CSV热更现状清单.md) 为准。伤害系数、刷怪间隔、掉落概率、区域参数等纯数值调整属于该层的目标覆盖范围；只有当业务链路在请求或 tick 中重新读取最新 `ConfigTableRuntime` 快照时，才能视为运行时生效。
 
-详见 `docs/game-server-csv-hot-reload-status.md`。
+详见 `docs/配置与场景/CSV热更现状清单.md`。
 
 ## 5. Layer 2：行为配置热更（需要扩展）
 
@@ -272,8 +272,8 @@ v1 → v2 → v3（当前）
 
 ## 10. 与现有文档的关系
 
-- `docs/game-server-update-strategy.md`：定义运行时热更新与滚动重启的基本拆分
-- `docs/game-server-csv-config-design.md`：Layer 1 的技术实现
-- `docs/game-server-csv-hot-reload-status.md`：Layer 1 当前各表状态
-- `docs/game-proxy-hot-update-design.md`：Layer 3 依赖的代理层基础设施
+- `docs/游戏服与接入层/游戏服更新策略拆分.md`：定义运行时热更新与滚动重启的基本拆分
+- `docs/配置与场景/CSV配置表设计.md`：Layer 1 的技术实现
+- `docs/配置与场景/CSV热更现状清单.md`：Layer 1 当前各表状态
+- `docs/游戏服与接入层/game-proxy热切换代理设计.md`：Layer 3 依赖的代理层基础设施
 - 本文档：在以上基础上，针对大世界常驻 Room 场景的完整方案
