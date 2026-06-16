@@ -24,6 +24,7 @@
 - `M2` ~ `M3`：最小 room transfer 控制流基础已推进到可调用阶段。`game-server` 已有 freeze/export/import/confirm/retire，`tools/mock-client` 已提供显式编排入口，能按顺序调用 old freeze/export、new import、new confirm ownership、proxy route upsert 和 old retire。
 - `M4`：已补齐 `ServerRedirectPush` 的可控下发入口、mock-client 监听验证入口和 mock-client 主动断线重连场景；mock-client 已在真实 old/new/proxy/auth 环境中验证 redirect -> transfer -> proxy reconnect，外部 mybevy 适配仍未完成。
 - `M5` ~ `M6`：movement_demo / combat_demo 已具备 transfer schema v1 导出导入与一致性测试；combat ECS 已在 `combat_state_json` 中迁移玩家与怪物基础 ECS 数据，`npc_state_json` 已增加 `room-transfer.npc-state.v1` 结构化运行态契约骨架，并在 combat_demo 中导出 training dummy / Monster 的 demo 级 NPC 状态且导入时与 combat ECS 交叉校验；room runtime timer/scheduler 已有结构化迁移契约骨架，combat_demo 已用 demo 级周期快照 scheduler 跑通导出、导入和继续运行；game-server 已有旧服排空后的受控 graceful shutdown 安全闸；第一阶段 old/new/proxy/auth 空房迁移控制面已人工执行通过，脚本 dry-run/execute 报告、transfer CLI envelope、故障演练模拟入口已具备；尚未完成自动测试准入、真实三进程 route metadata 丢失恢复、完整行为树恢复、真实 AI timer/path/RNG 恢复、真实独立 timer wheel / scheduler、生产部署平台 stop hook 接入和外部 mybevy 验收。`game-proxy` 已具备基于 route store 的自动收尾入口，并可在显式启用时结合旧服真实 drain status 作为结束 rollout 的阻断条件。
+- NPC / AI / 行为树 / path / RNG 的完整迁移暂不继续开发。当前只保留结构化契约骨架和 demo 级 roundtrip 事实，后续会在真实 AI 框架设计稳定后重新拆分任务。
 
 ## 1. 里程碑划分
 
@@ -397,6 +398,8 @@
 - [ ] 导出 AI 定时器、等待状态、路径状态、RNG 状态。部分完成：契约已有 `waitTimer` / `path` / `rngState` 字段占位，`combat_demo` 目前未填充真实运行态。
 - [ ] 导入后从相同运行点继续，而不是重新初始化。部分完成：`combat_demo` 会校验 `npc_state_json` 与 `combat_state_json` 中恢复出的 Monster entity id、类型、位置、血量一致，并可继续 tick；完整行为树 / AI timer / path / RNG 仍未恢复。
 
+暂停说明：完整 NPC / AI 迁移依赖后续真实行为树、AI timer、寻路和 RNG 设计。当前不继续在 demo 占位结构上扩展功能，避免在目标架构调整前固化错误契约。
+
 ### 7.5 定时器与一致性
 
 - [x] 为 room 内部 timer / scheduler 增加可导出结构契约骨架。
@@ -568,6 +571,7 @@
 8. NPC / 怪物 / 行为树迁移
 
   - 当前已完成结构化 `npc_state_json` 契约骨架和 combat_demo training dummy / Monster 示例，但完整行为树、AI timer、路径和 RNG 恢复仍未完成。
+  - 当前暂停继续实现，等待真实 AI / 行为树 / path / RNG 方案重新设计后再拆分。
 9. 自动化测试和演练脚本
 
 ## 12. 当前阶段的最低可交付版本

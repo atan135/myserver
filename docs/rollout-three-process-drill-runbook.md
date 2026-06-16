@@ -217,7 +217,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js `
 
 恢复策略见 [rollout 故障演练入口](./rollout-fault-drill-runbook.md) 的 “route metadata 缺失后的恢复策略”。在缺失 metadata 未恢复并复核前，不要继续 `old_retire`，不要执行 `complete-if-drained`。
 
-最近一次人工验收记录见 `summary/todolist.md` 第 2 项。该次验收使用 Redis、Core NATS、auth-http、old/new game-server 和 game-proxy，跑通 old freeze/export、new import/confirm ownership、proxy route upsert、old retire 和 `complete-if-drained`；未传 `-AllowShutdownRequest`，因此没有请求自动停旧服。
+最近一次人工验收记录已经沉淀到本文和 [生产拓扑与 Room 迁移设计](./production-topology-and-room-migration-design.md)：该次验收使用 Redis、Core NATS、auth-http、old/new game-server 和 game-proxy，跑通 old freeze/export、new import/confirm ownership、proxy route upsert、old retire 和 `complete-if-drained`；未传 `-AllowShutdownRequest`，因此没有请求自动停旧服。
 
 ## 仍未完成
 

@@ -95,7 +95,6 @@ docs/                 # 当前正式设计文档
 - [协议设计](./docs/protocol.md)
 - [外部客户端接入说明](./docs/client-integration.md)
 - [生产拓扑与 Room 迁移设计](./docs/production-topology-and-room-migration-design.md)
-- [文档校准状态汇总](./summary.md)
 
 游戏服与接入层：
 
@@ -142,11 +141,15 @@ docs/                 # 当前正式设计文档
 
 脚本和环境检查会优先使用 `bin/` 中的可执行文件；未找到时再回退到系统 `PATH` 或常见安装目录。
 
-数据库初始化脚本：
+数据库初始化脚本与迁移现状：
 
 ```powershell
 mysql -uroot -p < db/init.sql
+npm run check:migrations
+npm run db:migrate:dry-run
 ```
+
+`db/init.sql` 仍是本地 bootstrap 脚本。仓库已有第一阶段 migration runner、`schema_migrations` 元表和检查命令，但在数据库方案切到 PostgreSQL 前，暂不继续推进 MySQL 初始 schema 拆分、baseline、回滚或修复脚本开发；正式状态见 [数据库迁移现状](./docs/database-migration.md)。
 
 ## 常用命令
 
@@ -244,7 +247,7 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 - 玩家协议与内部控制协议尽量收敛到 `packages/proto`
 - 外部 `mybevy` 客户端和本仓库 `tools/mock-client` 都应以 `packages/proto` 为协议事实源
 - 控制机迁移、控制机 endpoint、权威快照和待处理输入使用 `packages/proto/game.proto` 中的 `Authority*` 消息，并在 Rust 侧由 `packages/authority-core` 复用基础结构
-- `chat-server` 当前仍保留独立聊天协议定义，具体见 `apps/chat-server/src/proto/chat.proto`
+- 聊天协议已收敛到 `packages/proto/chat.proto`；`apps/chat-server` 从共享 proto 编译生成 Rust 绑定
 
 ## Git 提交规则
 

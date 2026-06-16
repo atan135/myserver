@@ -260,6 +260,8 @@ Core NATS 当前承担以下职责：
 
 - `db/init.sql`
 
+当前还存在第一阶段 migration runner：`tools/db-migrate.js`、`scripts/db-migrate.ps1`、`db/migrations/0001_create_schema_migrations.sql`，以及根脚本 `check:migrations` / `db:migrate:dry-run` / `db:migrate`。由于数据库方案计划调整到 PostgreSQL，MySQL/MariaDB 下的完整初始 schema 拆分、baseline、回滚和修复脚本暂不继续推进；正式说明见 [数据库迁移现状](./database-migration.md)。
+
 ---
 
 ## 8. 协议分层
@@ -395,6 +397,7 @@ Core NATS 当前承担以下职责：
 - `docs/client-integration.md`
 - `docs/production-topology-and-room-migration-design.md`
 - `docs/protocol.md`
+- `docs/database-migration.md`
 - `docs/game-server-frame-sync-design.md`
 - `docs/service-registry-design.md`
 - `docs/match-service-design.md`
