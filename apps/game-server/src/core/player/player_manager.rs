@@ -169,6 +169,10 @@ impl PlayerManager {
         let players = self.players.read().await;
         players.contains_key(player_id)
     }
+
+    pub async fn close(&self) {
+        self.store.close().await;
+    }
 }
 
 impl Default for PlayerManager {

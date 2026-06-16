@@ -263,6 +263,10 @@ fn validate_production_config(config: &Config) {
         errors.push("GAME_INTERNAL_TOKEN must be set to a non-default value in production");
     }
 
+    if !config.db_enabled {
+        errors.push("DB_ENABLED must be true in production");
+    }
+
     if !errors.is_empty() {
         panic!(
             "invalid game-server production config: {}",
@@ -661,5 +665,22 @@ mod tests {
         let error = panic_message(catch_config_from_env());
 
         assert!(error.contains("GAME_ADMIN_AUDIT_ENABLED"));
+    }
+
+    #[test]
+    fn rejects_disabled_database_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "DB_ENABLED"]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("DB_ENABLED", "false");
+        }
+        set_custom_production_tokens();
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DB_ENABLED"));
     }
 }

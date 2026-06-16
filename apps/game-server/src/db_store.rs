@@ -153,7 +153,7 @@ impl PgAuditStore {
                     WHERE player_id = $2 AND event_type IN ('player_reconnected', 'room_left', 'room_disbanded')),
                    0
                )
-               ORDER BY created_at DESC LIMIT 1"#,
+               ORDER BY id DESC LIMIT 1"#,
         )
         .bind(player_id)
         .bind(player_id)

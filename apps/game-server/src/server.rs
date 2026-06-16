@@ -532,6 +532,8 @@ pub async fn run(
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
 
+    services.player_manager.close().await;
+
     info!("game server shutdown completed");
     Ok(())
 }
