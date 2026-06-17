@@ -24,6 +24,12 @@ function toJsonb(value) {
   return value ? JSON.stringify(value) : null;
 }
 
+function createDbError(code, message = code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function toAuthAccount(row) {
   return {
     playerId: row.player_id,
@@ -290,6 +296,61 @@ export class DbAuthStore {
       playerId,
       loginName,
       displayName
+    };
+  }
+
+  async createPasswordAccount({
+    loginName,
+    displayName = null,
+    status = "active",
+    passwordAlgo = "scrypt",
+    passwordSalt,
+    passwordHash
+  }) {
+    if (!this.enabled) {
+      throw createDbError("PASSWORD_REGISTER_UNAVAILABLE", "database auth store is disabled");
+    }
+
+    const playerId = generatePlayerId();
+
+    try {
+      await this.pool.query(
+        `INSERT INTO player_accounts (
+           player_id,
+           login_name,
+           display_name,
+           account_type,
+           status,
+           password_algo,
+           password_salt,
+           password_hash,
+           created_at,
+           last_login_at
+         ) VALUES ($1, $2, $3, 'password', $4, $5, $6, $7, current_timestamp, current_timestamp)`,
+        [
+          playerId,
+          loginName,
+          displayName,
+          status,
+          passwordAlgo,
+          passwordSalt,
+          passwordHash
+        ]
+      );
+    } catch (err) {
+      if (err.code === UNIQUE_VIOLATION) {
+        throw createDbError("LOGIN_NAME_EXISTS", "loginName already exists");
+      }
+      throw err;
+    }
+
+    return {
+      playerId,
+      loginName,
+      displayName,
+      accountType: "password",
+      status,
+      banExpiresAt: null
     };
   }
 

@@ -54,6 +54,40 @@ test("operator can update non-ban player status", async () => {
   assert.equal(store.audits.length, 1);
 });
 
+test("operator can approve pending review player", async () => {
+  const store = storeFixture();
+  store.findPlayerById = async () => ({ id: "player-1", status: "pending_review", banExpiresAt: null });
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.updateStatus(
+    "player-1",
+    { status: "active" },
+    request("operator")
+  );
+
+  assert.deepEqual(response, { ok: true, message: "Player status updated", banExpiresAt: null });
+  assert.deepEqual(store.status, { playerId: "player-1", status: "active" });
+  assert.equal(store.audits[0].details.from, "pending_review");
+  assert.equal(store.audits[0].details.to, "active");
+});
+
+test("operator can reject pending review player", async () => {
+  const store = storeFixture();
+  store.findPlayerById = async () => ({ id: "player-1", status: "pending_review", banExpiresAt: null });
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.updateStatus(
+    "player-1",
+    { status: "disabled" },
+    request("operator")
+  );
+
+  assert.deepEqual(response, { ok: true, message: "Player status updated", banExpiresAt: null });
+  assert.deepEqual(store.status, { playerId: "player-1", status: "disabled" });
+  assert.equal(store.audits[0].details.from, "pending_review");
+  assert.equal(store.audits[0].details.to, "disabled");
+});
+
 test("operator cannot ban player through status update", async () => {
   const store = storeFixture();
   const controller = new PlayersController({}, store);
@@ -72,4 +106,23 @@ test("operator cannot ban player through status update", async () => {
   );
   assert.equal(store.status, null);
   assert.equal(store.audits.length, 0);
+});
+
+test("invalid player status is rejected", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  await assert.rejects(
+    () => controller.updateStatus("player-1", { status: "reviewed" }, request("operator")),
+    (error) => {
+      assert.equal(error.getStatus(), 400);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "INVALID_STATUS",
+        message: "status must be active, disabled, banned, or pending_review"
+      });
+      return true;
+    }
+  );
+  assert.equal(store.status, null);
 });

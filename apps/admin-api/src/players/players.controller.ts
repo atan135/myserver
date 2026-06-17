@@ -8,6 +8,8 @@ import { getClientIp } from "../common/client-ip.js";
 import { badRequest, forbidden, notFound } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
 
+const PLAYER_STATUSES = ["active", "disabled", "banned", "pending_review"];
+
 function pageLimit(value: any) {
   return Math.min(Number(value) || 50, 100);
 }
@@ -70,8 +72,8 @@ export class PlayersController {
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
     const { status } = body || {};
 
-    if (!status || !["active", "disabled", "banned"].includes(status)) {
-      throw badRequest("INVALID_STATUS", "status must be active, disabled, or banned");
+    if (!status || !PLAYER_STATUSES.includes(status)) {
+      throw badRequest("INVALID_STATUS", "status must be active, disabled, banned, or pending_review");
     }
 
     if (status === "banned" && !roleHasPermission(req.admin.role, "players.ban")) {

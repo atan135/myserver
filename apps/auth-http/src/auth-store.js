@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { encodeSubjectToken } from "./nats-client.js";
 import { log } from "./logger.js";
 import { generatePlayerId } from "./global-id.js";
-import { normalizeLoginName, verifyPassword } from "./password-utils.js";
+import { createPasswordSalt, hashPassword, normalizeLoginName, verifyPassword } from "./password-utils.js";
 import { BLOCKLIST_UNAVAILABLE_ERROR, PLAYER_BLOCKED_ERROR, RedisBlocklistChecker } from "./blocklist.js";
 
 function base64UrlEncode(value) {
@@ -173,6 +173,76 @@ export class AuthStore {
       clientIp,
       eventType: "password_login"
     });
+  }
+
+  async registerPasswordAccount({
+    loginName,
+    password,
+    displayName = null,
+    requireReview = false,
+    clientIp = null
+  }) {
+    if (!this.dbStore?.enabled) {
+      throw createAuthError("PASSWORD_REGISTER_UNAVAILABLE");
+    }
+
+    const normalizedLoginName = normalizeLoginName(loginName);
+    const passwordSalt = createPasswordSalt();
+    const passwordHash = await hashPassword(password, passwordSalt);
+    const status = requireReview ? "pending_review" : "active";
+
+    let account;
+    try {
+      account = await this.dbStore.createPasswordAccount({
+        loginName: normalizedLoginName,
+        displayName,
+        status,
+        passwordAlgo: "scrypt",
+        passwordSalt,
+        passwordHash
+      });
+    } catch (error) {
+      if (error.code === "LOGIN_NAME_EXISTS") {
+        await this.dbStore.appendAuthAudit({
+          eventType: "password_register_failed",
+          clientIp,
+          details: { loginName: normalizedLoginName, reason: "login_name_exists" }
+        });
+        throw createAuthError("LOGIN_NAME_EXISTS");
+      }
+      throw error;
+    }
+
+    await this.dbStore.appendAuthAudit({
+      playerId: account.playerId,
+      eventType: "password_register",
+      clientIp,
+      details: {
+        loginName: account.loginName,
+        displayName: account.displayName || null,
+        status,
+        requireReview
+      }
+    });
+
+    if (requireReview) {
+      return {
+        account,
+        session: null,
+        pendingReview: true
+      };
+    }
+
+    const session = await this.createSessionForAccount(account, {
+      clientIp,
+      eventType: "password_register_login"
+    });
+
+    return {
+      account,
+      session,
+      pendingReview: false
+    };
   }
 
   async assertAccountLoginAllowed(account, clientIp = null, audit = {}) {

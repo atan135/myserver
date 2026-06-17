@@ -16,6 +16,17 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function parseCsv(value) {
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function parsePositiveIntegerWithFallback(value, fallback) {
   const parsed = Number.parseInt(value ?? String(fallback), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -125,11 +136,9 @@ export function getConfig() {
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
-    trustedProxies: (process.env.TRUSTED_PROXIES || "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean),
+    trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),
 
     // Rate Limiting
     ratelimitEnabled: parseBoolean(process.env.RATELIMIT_ENABLED, true),
@@ -141,6 +150,9 @@ export function getConfig() {
     accountLockMaxAttempts: Number.parseInt(process.env.ACCOUNT_LOCK_MAX_ATTEMPTS || "5", 10),
     accountLockWindowSeconds: Number.parseInt(process.env.ACCOUNT_LOCK_WINDOW_SECONDS || "900", 10),
     accountLockTtlSeconds: Number.parseInt(process.env.ACCOUNT_LOCK_TTL_SECONDS || "900", 10),
+
+    // Registration
+    registerRequireReview: parseBoolean(process.env.AUTH_REGISTER_REQUIRE_REVIEW, false),
 
     // Ticket Validation
     ticketValidateEnabled: parseBoolean(process.env.TICKET_VALIDATE_ENABLED, true),

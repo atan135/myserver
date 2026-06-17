@@ -13,6 +13,7 @@
         <el-form-item label="状态">
           <el-select v-model="filters.status" placeholder="全部" clearable>
             <el-option label="正常" value="active" />
+            <el-option label="待审核" value="pending_review" />
             <el-option label="禁用" value="disabled" />
             <el-option label="封禁" value="banned" />
           </el-select>
@@ -49,6 +50,24 @@
         </el-table-column>
         <el-table-column label="操作" width="220" v-if="canManagePlayers">
           <template #default="{ row }">
+            <el-button
+              v-if="row.status === 'pending_review' && authStore.hasPermission(P.PLAYERS_STATUS_UPDATE)"
+              type="primary"
+              size="small"
+              link
+              @click="handleApprove(row)"
+            >
+              通过
+            </el-button>
+            <el-button
+              v-if="row.status === 'pending_review' && authStore.hasPermission(P.PLAYERS_STATUS_UPDATE)"
+              type="warning"
+              size="small"
+              link
+              @click="handleReject(row)"
+            >
+              拒绝
+            </el-button>
             <el-button
               v-if="row.status === 'active' && authStore.hasPermission(P.PLAYERS_STATUS_UPDATE)"
               type="warning"
@@ -130,6 +149,8 @@ function statusType(status) {
   switch (status) {
     case "active":
       return "success";
+    case "pending_review":
+      return "warning";
     case "disabled":
       return "info";
     case "banned":
@@ -143,6 +164,8 @@ function statusLabel(status) {
   switch (status) {
     case "active":
       return "正常";
+    case "pending_review":
+      return "待审核";
     case "disabled":
       return "禁用";
     case "banned":
@@ -188,6 +211,42 @@ async function handleDisable(row) {
 
     await playerApi.updatePlayerStatus(row.player_id, "disabled");
     ElMessage.success("已禁用");
+    fetchPlayers();
+  } catch (err) {
+    if (err !== "cancel") {
+      ElMessage.error("操作失败");
+    }
+  }
+}
+
+async function handleApprove(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定通过玩家 ${row.login_name || row.guest_id || row.player_id} 的注册审核吗？`,
+      "通过审核",
+      { type: "info" }
+    );
+
+    await playerApi.updatePlayerStatus(row.player_id, "active");
+    ElMessage.success("已通过审核");
+    fetchPlayers();
+  } catch (err) {
+    if (err !== "cancel") {
+      ElMessage.error("操作失败");
+    }
+  }
+}
+
+async function handleReject(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定拒绝玩家 ${row.login_name || row.guest_id || row.player_id} 的注册审核吗？`,
+      "拒绝审核",
+      { type: "warning" }
+    );
+
+    await playerApi.updatePlayerStatus(row.player_id, "disabled");
+    ElMessage.success("已拒绝");
     fetchPlayers();
   } catch (err) {
     if (err !== "cancel") {

@@ -6,6 +6,7 @@ import { getClientIp } from "../common/client-ip.js";
 import { badRequest, forbidden, serviceUnavailable, unauthorized } from "../common/http-exception.js";
 import type { GuestLoginDto } from "./dto/guest-login.dto.js";
 import type { LoginDto } from "./dto/login.dto.js";
+import type { RegisterDto } from "./dto/register.dto.js";
 
 function getBearerToken(req: any): string | null {
   const authorization = req.headers.authorization;
@@ -187,6 +188,81 @@ export class AuthService {
     }
 
     return this.buildLoginSuccess(session);
+  }
+
+  async register(dto: RegisterDto, req: any) {
+    await this.assertNotInMaintenance();
+
+    const loginName = dto?.loginName;
+    const password = dto?.password;
+    const displayName = dto?.displayName;
+    const clientIp = getClientIp(req, this.config);
+
+    if (typeof loginName !== "string" || loginName.trim().length === 0) {
+      throw badRequest("INVALID_LOGIN_NAME", "loginName must be a non-empty string");
+    }
+
+    let normalizedLoginName;
+    try {
+      normalizedLoginName = assertValidLoginName(loginName);
+    } catch (err: any) {
+      throw badRequest("INVALID_LOGIN_NAME", err.message);
+    }
+
+    if (typeof password !== "string" || password.length === 0) {
+      throw badRequest("INVALID_PASSWORD", "password must be a non-empty string");
+    }
+
+    if (password.length < 6 || password.length > 128) {
+      throw badRequest("INVALID_PASSWORD", "password must be between 6 and 128 characters");
+    }
+
+    let normalizedDisplayName: string | null = null;
+    if (displayName !== undefined && displayName !== null) {
+      if (typeof displayName !== "string") {
+        throw badRequest("INVALID_DISPLAY_NAME", "displayName must be a string");
+      }
+      normalizedDisplayName = displayName.trim();
+      if (normalizedDisplayName.length === 0) {
+        normalizedDisplayName = null;
+      } else if (normalizedDisplayName.length > 64) {
+        throw badRequest("INVALID_DISPLAY_NAME", "displayName must be at most 64 characters");
+      }
+    }
+
+    if (!this.config.dbEnabled) {
+      throw badRequest("PASSWORD_REGISTER_UNAVAILABLE", "database auth store is disabled");
+    }
+
+    try {
+      const result = await this.authStore.registerPasswordAccount({
+        loginName: normalizedLoginName,
+        password,
+        displayName: normalizedDisplayName,
+        requireReview: Boolean(this.config.registerRequireReview),
+        clientIp
+      });
+
+      if (result.pendingReview) {
+        return {
+          ok: true,
+          playerId: result.account.playerId,
+          loginName: result.account.loginName,
+          displayName: result.account.displayName || null,
+          status: result.account.status,
+          pendingReview: true,
+          message: "Registration submitted for review"
+        };
+      }
+
+      return this.buildLoginSuccess(result.session);
+    } catch (error: any) {
+      if (error.code === "LOGIN_NAME_EXISTS") {
+        throw badRequest("LOGIN_NAME_EXISTS", "loginName already exists");
+      }
+
+      throw error;
+    }
   }
 
   async guestLogin(dto: GuestLoginDto, req: any) {

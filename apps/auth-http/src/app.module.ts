@@ -21,6 +21,7 @@ import { MetaController } from "./meta.controller.js";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware.js";
 import { RedisBlocklistMiddleware } from "./common/redis-blocklist.middleware.js";
 import { RequestContextMiddleware } from "./common/request-context.middleware.js";
+import { TlsRequiredMiddleware } from "./common/tls-required.middleware.js";
 import {
   AUTH_ACCOUNT_LOCKOUT,
   AUTH_BLOCKLIST,
@@ -123,6 +124,8 @@ import {
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RequestContextMiddleware, RedisBlocklistMiddleware, RateLimitMiddleware).forRoutes("*");
+    consumer
+      .apply(RequestContextMiddleware, TlsRequiredMiddleware, RedisBlocklistMiddleware, RateLimitMiddleware)
+      .forRoutes("*");
   }
 }

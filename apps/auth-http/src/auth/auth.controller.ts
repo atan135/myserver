@@ -5,6 +5,7 @@ import { AuthService } from "./auth.service.js";
 import { GuestLoginDto } from "./dto/guest-login.dto.js";
 import { LoginDto } from "./dto/login.dto.js";
 import { LoginResponseDto } from "./dto/login-response.dto.js";
+import { RegisterDto } from "./dto/register.dto.js";
 
 @ApiTags("auth")
 @Controller("/api/v1/auth")
@@ -18,6 +19,32 @@ export class AuthController {
   @HttpCode(HttpStatus.CREATED)
   login(@Body() dto: LoginDto, @Req() req: any, @Res({ passthrough: true }) res: any) {
     return this.authService.login(dto, req, res);
+  }
+
+  @Post("register")
+  @ApiOperation({ summary: "Register password account" })
+  @ApiBody({ type: RegisterDto })
+  @ApiCreatedResponse({
+    schema: {
+      oneOf: [
+        { $ref: "#/components/schemas/LoginResponseDto" },
+        {
+          example: {
+            ok: true,
+            playerId: "plr_1j7qv8m4x2",
+            loginName: "test001",
+            displayName: "Test Player",
+            status: "pending_review",
+            pendingReview: true,
+            message: "Registration submitted for review"
+          }
+        }
+      ]
+    }
+  })
+  @HttpCode(HttpStatus.CREATED)
+  register(@Body() dto: RegisterDto, @Req() req: any) {
+    return this.authService.register(dto, req);
   }
 
   @Post("guest-login")
