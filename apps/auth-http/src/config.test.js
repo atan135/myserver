@@ -9,6 +9,8 @@ const CONFIG_ENV_KEYS = [
   "APP_ENV",
   "AUTH_REQUIRE_TLS",
   "AUTH_REGISTER_REQUIRE_REVIEW",
+  "DISCOVERY_REQUIRED",
+  "REGISTRY_ENABLED",
   "TRUST_PROXY",
   "TRUSTED_PROXIES",
   "TICKET_SECRET",
@@ -52,6 +54,7 @@ test("auth-http keeps TLS enforcement disabled by default in development", async
 test("auth-http requires TLS by default in production", async () => {
   await withEnv({
     NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
@@ -60,9 +63,62 @@ test("auth-http requires TLS by default in production", async () => {
   });
 });
 
+test("auth-http requires registry discovery by default in production", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryRequired, true);
+  });
+});
+
+test("auth-http keeps registry discovery optional by default outside production", async () => {
+  await withEnv({ NODE_ENV: "test" }, (config) => {
+    assert.equal(config.registryDiscoveryRequired, false);
+  });
+});
+
+test("auth-http registry discovery requirement can be overridden", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    DISCOVERY_REQUIRED: "false",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryRequired, false);
+  });
+});
+
+test("auth-http rejects required discovery when registry is disabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "development",
+      REGISTRY_ENABLED: "false",
+      DISCOVERY_REQUIRED: "true"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("auth-http accepts required discovery when registry is enabled", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    REGISTRY_ENABLED: "true",
+    DISCOVERY_REQUIRED: "true"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryEnabled, true);
+    assert.equal(config.registryDiscoveryRequired, true);
+  });
+});
+
 test("auth-http requires TLS by default when APP_ENV is production", async () => {
   await withEnv({
     APP_ENV: "production",
+    REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
@@ -75,6 +131,7 @@ test("auth-http TLS enforcement can be explicitly disabled for test deployments"
   await withEnv({
     NODE_ENV: "production",
     AUTH_REQUIRE_TLS: "false",
+    DISCOVERY_REQUIRED: "false",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"

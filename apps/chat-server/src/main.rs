@@ -12,7 +12,7 @@ use std::fs;
 use std::net::SocketAddr;
 
 use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
-use service_registry::{RegistryClient, ServiceInstance};
+use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -41,6 +41,7 @@ struct Config {
     global_id_worker_id: Option<u64>,
     nats_url: String,
     registry_enabled: bool,
+    discovery_required: bool,
     registry_url: String,
     registry_heartbeat_interval_secs: u64,
     service_name: String,
@@ -93,6 +94,7 @@ impl Config {
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
+            discovery_required: parse_bool_env("DISCOVERY_REQUIRED", false),
             registry_url: std::env::var("REGISTRY_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
@@ -358,10 +360,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.public_host.clone(),
                     port,
                 )
+                .with_endpoints(vec![ServiceEndpoint {
+                    name: "tcp".to_string(),
+                    protocol: "tcp".to_string(),
+                    host: config.public_host.clone(),
+                    port,
+                    socket: String::new(),
+                    visibility: "internal".to_string(),
+                    metadata: serde_json::json!({
+                        "service_instance_id": config.service_instance_id.clone(),
+                        "online_route_ttl_secs": config.online_route_ttl_secs
+                    }),
+                    healthy: true,
+                }])
+                .with_metadata(serde_json::json!({
+                    "service_instance_id": config.service_instance_id.clone(),
+                    "online_route_ttl_secs": config.online_route_ttl_secs
+                }))
                 .with_tags(vec!["chat".to_string(), "tcp".to_string()]);
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
+                    if registry_failure_is_fatal(&config) {
+                        return Err(std::io::Error::other(e.to_string()).into());
+                    }
                 } else {
                     tracing::info!(
                         service = %config.service_name,
@@ -374,6 +396,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to create registry client");
+                if registry_failure_is_fatal(&config) {
+                    return Err(std::io::Error::other(e.to_string()).into());
+                }
                 None
             }
         }
@@ -481,6 +506,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn extract_port(bind_addr: &str) -> Result<u16, Box<dyn std::error::Error>> {
     let addr: SocketAddr = bind_addr.parse()?;
     Ok(addr.port())
+}
+
+fn registry_failure_is_fatal(config: &Config) -> bool {
+    config.discovery_required
+        || env_name_is("NODE_ENV", "production")
+        || env_name_is("APP_ENV", "production")
+        || env_name_is("NODE_ENV", "test")
+        || env_name_is("APP_ENV", "test")
+}
+
+fn env_name_is(name: &str, expected: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 #[cfg(test)]

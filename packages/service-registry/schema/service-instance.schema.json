@@ -5,12 +5,14 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "schema_version",
     "id",
     "name",
     "host",
     "port",
     "admin_port",
     "local_socket",
+    "endpoints",
     "tags",
     "weight",
     "metadata",
@@ -18,12 +20,18 @@
     "healthy"
   ],
   "properties": {
+    "schema_version": { "type": "integer", "const": 2 },
     "id": { "type": "string", "minLength": 1 },
     "name": { "type": "string", "minLength": 1 },
-    "host": { "type": "string", "minLength": 1 },
+    "host": { "type": "string" },
     "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "admin_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "local_socket": { "type": "string" },
+    "endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/serviceEndpoint" }
+    },
     "tags": {
       "type": "array",
       "items": { "type": "string" }
@@ -32,5 +40,60 @@
     "metadata": { "type": "object" },
     "registered_at": { "type": "integer", "minimum": 0 },
     "healthy": { "type": "boolean" }
+  },
+  "$defs": {
+    "serviceEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "protocol",
+        "host",
+        "port",
+        "socket",
+        "visibility",
+        "metadata",
+        "healthy"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "protocol": {
+          "type": "string",
+          "enum": ["http", "tcp", "udp", "kcp", "grpc", "local_socket"]
+        },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "socket": { "type": "string" },
+        "visibility": {
+          "type": "string",
+          "enum": ["public", "internal", "admin", "local"]
+        },
+        "metadata": { "type": "object" },
+        "healthy": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "protocol": { "const": "local_socket" },
+            "host": { "const": "" },
+            "port": { "const": 0 },
+            "socket": { "type": "string", "minLength": 1 }
+          },
+          "required": ["protocol", "host", "port", "socket"]
+        },
+        {
+          "properties": {
+            "protocol": {
+              "type": "string",
+              "enum": ["http", "tcp", "udp", "kcp", "grpc"]
+            },
+            "host": { "type": "string", "minLength": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "socket": { "const": "" }
+          },
+          "required": ["protocol", "host", "port", "socket"]
+        }
+      ]
+    }
   }
 }

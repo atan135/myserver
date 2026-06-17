@@ -27,8 +27,12 @@ impl MatchClientConfig {
         let registry_enabled = std::env::var("REGISTRY_ENABLED")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
             .unwrap_or(false);
+        let discovery_required = std::env::var("DISCOVERY_REQUIRED")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
 
         if !registry_enabled {
+            tracing::info!(source = "fallback", addr = %fallback_addr, "match-service address resolved");
             return Self {
                 addr: fallback_addr,
             };
@@ -41,21 +45,44 @@ impl MatchClientConfig {
             std::env::var("MATCH_SERVICE_NAME").unwrap_or_else(|_| "match-service".to_string());
 
         match RegistryClient::new(&registry_url, "game-server", "match-discovery").await {
-            Ok(client) => match client.discover_one(&service_name).await {
-                Ok(Some(instance)) => Self {
-                    addr: format!("http://{}:{}", instance.host, instance.port),
-                },
-                Ok(None) => Self {
-                    addr: fallback_addr,
-                },
+            Ok(client) => match client.discover_endpoint(&service_name, "grpc").await {
+                Ok(Some(endpoint)) => {
+                    let addr = format!("http://{}:{}", endpoint.host, endpoint.port);
+                    tracing::info!(source = "registry", service = %service_name, endpoint = "grpc", addr = %addr, "match-service address resolved");
+                    Self { addr }
+                }
+                Ok(None) => {
+                    if discovery_required {
+                        panic!(
+                            "required registry discovery failed: {}.grpc endpoint not found",
+                            service_name
+                        );
+                    }
+                    tracing::warn!(source = "fallback", service = %service_name, endpoint = "grpc", addr = %fallback_addr, "match-service grpc endpoint not found, using fallback");
+                    Self {
+                        addr: fallback_addr,
+                    }
+                }
                 Err(error) => {
-                    tracing::warn!(error = %error, "failed to discover match-service, using fallback");
+                    if discovery_required {
+                        panic!(
+                            "required registry discovery failed for {}.grpc: {}",
+                            service_name, error
+                        );
+                    }
+                    tracing::warn!(source = "fallback", error = %error, addr = %fallback_addr, "failed to discover match-service grpc endpoint, using fallback");
                     Self {
                         addr: fallback_addr,
                     }
                 }
             },
             Err(error) => {
+                if discovery_required {
+                    panic!(
+                        "required registry discovery failed: registry client unavailable for match-service discovery: {}",
+                        error
+                    );
+                }
                 tracing::warn!(error = %error, "failed to create registry client for match discovery, using fallback");
                 Self {
                     addr: fallback_addr,

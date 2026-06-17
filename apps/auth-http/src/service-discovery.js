@@ -1,4 +1,7 @@
-import { normalizeServiceInstance, pickServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  normalizeServiceInstance,
+  pickServiceEndpoint
+} from "../../../packages/service-registry/node/registry-schema.js";
 
 function createGameService(config) {
   return {
@@ -8,15 +11,16 @@ function createGameService(config) {
   };
 }
 
-function createServiceDescriptor(instance, protocol) {
-  if (!instance?.host || !instance?.port) {
+function createEndpointDescriptor(selection, protocolOverride = null) {
+  const endpoint = selection?.endpoint;
+  if (!endpoint?.host || !endpoint?.port) {
     return null;
   }
 
   return {
-    host: instance.host,
-    port: instance.port,
-    protocol
+    host: endpoint.host,
+    port: endpoint.port,
+    protocol: protocolOverride || endpoint.protocol
   };
 }
 
@@ -35,22 +39,39 @@ export class ServiceDiscovery {
     };
 
     if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired) {
+        throw new Error("Required registry discovery failed: REGISTRY_ENABLED=false");
+      }
       return services;
     }
 
-    const [chatInstance, mailInstance, announceInstance] = await Promise.all([
-      this.discoverOne("chat-server"),
-      this.discoverOne("mail-service"),
-      this.discoverOne("announce-service")
+    const [gameEndpoint, chatEndpoint, mailEndpoint, announceEndpoint] = await Promise.all([
+      this.discoverOneEndpoint("game-proxy", "client"),
+      this.discoverOneEndpoint("chat-server", "tcp", "client"),
+      this.discoverOneEndpoint("mail-service", "http", "client"),
+      this.discoverOneEndpoint("announce-service", "http", "client")
     ]);
 
-    services.chat = createServiceDescriptor(chatInstance, "tcp");
-    services.mail = createServiceDescriptor(mailInstance, "http");
-    services.announce = createServiceDescriptor(announceInstance, "http");
+    const discoveredGame = createEndpointDescriptor(gameEndpoint, "kcp");
+    if (discoveredGame) {
+      services.game = discoveredGame;
+    } else if (this.config.registryDiscoveryRequired) {
+      throw new Error("Required registry discovery failed: game-proxy.client endpoint not found");
+    }
+
+    services.chat = createEndpointDescriptor(chatEndpoint, "tcp");
+    services.mail = createEndpointDescriptor(mailEndpoint, "http");
+    services.announce = createEndpointDescriptor(announceEndpoint, "http");
     return services;
   }
 
-  async discoverOne(serviceName) {
+  async discoverOneEndpoint(serviceName, endpointName, legacyEndpointName = null) {
+    const instances = await this.discoverInstances(serviceName);
+    return pickServiceEndpoint(instances, endpointName) ||
+      (legacyEndpointName ? pickServiceEndpoint(instances, legacyEndpointName) : null);
+  }
+
+  async discoverInstances(serviceName) {
     const keys = await scanKeys(this.redis, `service:${serviceName}:instances:*`);
     const instances = [];
 
@@ -77,7 +98,7 @@ export class ServiceDiscovery {
       }
     }
 
-    return pickServiceInstance(instances);
+    return instances;
   }
 }
 

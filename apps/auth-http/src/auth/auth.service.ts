@@ -36,14 +36,18 @@ export class AuthService {
     return this.config.gameProxyPort;
   }
 
+  getGameProxyDescriptor(services: any = null) {
+    return services?.game || {
+      host: this.config.gameProxyHost,
+      port: this.config.gameProxyPort,
+      protocol: "kcp"
+    };
+  }
+
   async buildServicePayload() {
     if (!this.serviceDiscovery) {
       return {
-        game: {
-          host: this.config.gameProxyHost,
-          port: this.config.gameProxyPort,
-          protocol: "kcp"
-        },
+        game: this.getGameProxyDescriptor(),
         chat: null,
         mail: null,
         announce: null
@@ -55,6 +59,7 @@ export class AuthService {
 
   async buildLoginSuccess(session: any) {
     const services = await this.buildServicePayload();
+    const gameProxy = this.getGameProxyDescriptor(services);
 
     return {
       ok: true,
@@ -64,8 +69,8 @@ export class AuthService {
       accessToken: session.accessToken,
       ticket: session.gameTicket.value,
       ticketExpiresAt: session.gameTicket.expiresAt,
-      gameProxyHost: this.config.gameProxyHost,
-      gameProxyPort: this.config.gameProxyPort,
+      gameProxyHost: gameProxy.host,
+      gameProxyPort: gameProxy.port,
       services
     };
   }

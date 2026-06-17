@@ -30,6 +30,7 @@ use route_store::{
     ProxyRouteStore, RedisRouteStorePersistence, UpstreamHealthState, UpstreamOperationState,
     UpstreamRoute, run_redis_route_store_update_listener,
 };
+use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 use tokio::sync::RwLock;
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -163,14 +164,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     route_store.load_persisted_state().await?;
-    route_store
-        .set_static_routes(vec![UpstreamRoute {
-            server_id: config.upstream_server_id.clone(),
-            local_socket_name: config.upstream_local_socket_name.clone(),
-            operation_state: UpstreamOperationState::Active,
-            health_state: UpstreamHealthState::Healthy,
-        }])
-        .await;
+    if !config.registry_enabled {
+        route_store
+            .set_static_routes(vec![UpstreamRoute {
+                server_id: config.upstream_server_id.clone(),
+                local_socket_name: config.upstream_local_socket_name.clone(),
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            }])
+            .await;
+    }
     let auth_service = Arc::new(ProxyAuthService::new(
         &config.redis_url,
         config.redis_key_prefix.clone(),
@@ -190,6 +193,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let connection_count = Arc::new(AtomicU64::new(0));
     let maintenance = Arc::new(RwLock::new(false));
+
+    let registry_client: Option<RegistryClient> = if config.registry_enabled {
+        match RegistryClient::new(
+            &config.registry_url,
+            "game-proxy",
+            &config.service_instance_id,
+        )
+        .await
+        {
+            Ok(client) => {
+                let route_store_backend = match config.route_store_backend {
+                    config::RouteStoreBackend::Memory => "memory",
+                    config::RouteStoreBackend::Redis => "redis",
+                };
+                let instance = ServiceInstance::new(
+                    config.service_instance_id.clone(),
+                    "game-proxy".to_string(),
+                    config.host.clone(),
+                    config.port,
+                )
+                .with_endpoints(vec![
+                    ServiceEndpoint {
+                        name: "client".to_string(),
+                        protocol: "kcp".to_string(),
+                        host: config.host.clone(),
+                        port: config.port,
+                        socket: String::new(),
+                        visibility: "public".to_string(),
+                        metadata: serde_json::json!({
+                            "instance_id": config.service_instance_id.clone()
+                        }),
+                        healthy: true,
+                    },
+                    ServiceEndpoint {
+                        name: "client-tcp-fallback".to_string(),
+                        protocol: "tcp".to_string(),
+                        host: config.tcp_fallback_host.clone(),
+                        port: config.tcp_fallback_port,
+                        socket: String::new(),
+                        visibility: "public".to_string(),
+                        metadata: serde_json::json!({
+                            "instance_id": config.service_instance_id.clone()
+                        }),
+                        healthy: true,
+                    },
+                    ServiceEndpoint {
+                        name: "admin".to_string(),
+                        protocol: "http".to_string(),
+                        host: config.admin_host.clone(),
+                        port: config.admin_port,
+                        socket: String::new(),
+                        visibility: "admin".to_string(),
+                        metadata: serde_json::json!({
+                            "instance_id": config.service_instance_id.clone()
+                        }),
+                        healthy: true,
+                    },
+                ])
+                .with_tags(vec!["proxy".to_string(), "kcp".to_string()])
+                .with_metadata(serde_json::json!({
+                    "instance_id": config.service_instance_id.clone(),
+                    "route_store_backend": route_store_backend
+                }));
+
+                if let Err(error) = client.register(&instance).await {
+                    tracing::error!(error = %error, "failed to register game-proxy service");
+                    if registry_failure_is_fatal() {
+                        return Err(std::io::Error::other(error.to_string()).into());
+                    }
+                } else {
+                    tracing::info!(
+                        service = "game-proxy",
+                        instance = %config.service_instance_id,
+                        route_store_backend,
+                        "game-proxy service registered to registry"
+                    );
+                }
+
+                Some(client)
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "failed to create registry client");
+                if registry_failure_is_fatal() {
+                    return Err(std::io::Error::other(error.to_string()).into());
+                }
+                None
+            }
+        }
+    } else {
+        tracing::info!("service registry disabled");
+        None
+    };
+    let heartbeat_handle = registry_client
+        .as_ref()
+        .map(|client| client.start_heartbeat_task());
 
     let admin_bind_addr = config.admin_bind_addr();
     let admin_auth_config = admin_server::AdminAuthConfig::with_scoped_tokens(
@@ -247,5 +345,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         route_store_update_task.abort();
         let _ = route_store_update_task.await;
     }
+    if let Some(client) = registry_client {
+        if let Some(handle) = heartbeat_handle {
+            handle.abort();
+        }
+        if let Err(error) = client.deregister().await {
+            tracing::error!(error = %error, "failed to deregister game-proxy service");
+        } else {
+            tracing::info!(
+                service = "game-proxy",
+                instance = %config.service_instance_id,
+                "game-proxy service deregistered from registry"
+            );
+        }
+    }
     result
+}
+
+fn registry_failure_is_fatal() -> bool {
+    env_flag("DISCOVERY_REQUIRED")
+        || env_name_is("NODE_ENV", "production")
+        || env_name_is("APP_ENV", "production")
+        || env_name_is("NODE_ENV", "test")
+        || env_name_is("APP_ENV", "test")
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false)
+}
+
+fn env_name_is(name: &str, expected: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }

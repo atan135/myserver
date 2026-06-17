@@ -94,7 +94,17 @@ impl GameServerClient {
     }
 
     async fn resolve_internal_socket_name(&self) -> Result<String, MatchError> {
+        let discovery_required = std::env::var("DISCOVERY_REQUIRED")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
+
         if !self.config.registry_enabled {
+            if discovery_required {
+                return Err(MatchError::RoomCreateFailed(
+                    "required registry discovery failed: REGISTRY_ENABLED=false for game-server.internal"
+                        .to_string(),
+                ));
+            }
             return Ok(self.config.game_server_internal_socket_name.clone());
         }
 
@@ -106,31 +116,80 @@ impl GameServerClient {
         .await;
 
         let Ok(client) = client else {
+            if discovery_required {
+                return Err(MatchError::RoomCreateFailed(
+                    "required registry discovery failed: registry client unavailable for game-server.internal"
+                        .to_string(),
+                ));
+            }
+            tracing::warn!(source = "fallback", socket = %self.config.game_server_internal_socket_name, "failed to create registry client for game-server discovery, using fallback");
             return Ok(self.config.game_server_internal_socket_name.clone());
         };
 
         match client
-            .discover_one(&self.config.game_server_service_name)
+            .discover_endpoint(&self.config.game_server_service_name, "internal")
             .await
         {
-            Ok(Some(instance)) => {
-                if let Some(internal_socket) = instance
-                    .metadata
-                    .get("internal_socket")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                {
-                    return Ok(internal_socket.to_string());
+            Ok(Some(endpoint))
+                if endpoint.protocol == "local_socket" && !endpoint.socket.trim().is_empty() =>
+            {
+                tracing::info!(
+                    source = "registry",
+                    service = %self.config.game_server_service_name,
+                    endpoint = "internal",
+                    socket = %endpoint.socket,
+                    "game-server internal socket resolved"
+                );
+                Ok(endpoint.socket)
+            }
+            Ok(Some(endpoint)) => {
+                if discovery_required {
+                    return Err(MatchError::RoomCreateFailed(format!(
+                        "required registry discovery failed: {}.internal endpoint is not a local_socket endpoint",
+                        self.config.game_server_service_name
+                    )));
                 }
-
-                if !instance.local_socket.is_empty() {
-                    return Ok(derive_internal_socket_name(&instance.local_socket));
-                }
-
+                tracing::warn!(
+                    source = "fallback",
+                    service = %self.config.game_server_service_name,
+                    endpoint = "internal",
+                    protocol = %endpoint.protocol,
+                    socket = %self.config.game_server_internal_socket_name,
+                    "game-server internal endpoint is not a local socket, using fallback"
+                );
                 Ok(self.config.game_server_internal_socket_name.clone())
             }
-            Ok(None) => Ok(self.config.game_server_internal_socket_name.clone()),
-            Err(_) => Ok(self.config.game_server_internal_socket_name.clone()),
+            Ok(None) => {
+                if discovery_required {
+                    return Err(MatchError::RoomCreateFailed(format!(
+                        "required registry discovery failed: {}.internal endpoint not found",
+                        self.config.game_server_service_name
+                    )));
+                }
+                tracing::warn!(
+                    source = "fallback",
+                    service = %self.config.game_server_service_name,
+                    endpoint = "internal",
+                    socket = %self.config.game_server_internal_socket_name,
+                    "game-server internal endpoint not found, using fallback"
+                );
+                Ok(self.config.game_server_internal_socket_name.clone())
+            }
+            Err(error) => {
+                if discovery_required {
+                    return Err(MatchError::RoomCreateFailed(format!(
+                        "required registry discovery failed for {}.internal: {}",
+                        self.config.game_server_service_name, error
+                    )));
+                }
+                tracing::warn!(
+                    source = "fallback",
+                    error = %error,
+                    socket = %self.config.game_server_internal_socket_name,
+                    "failed to discover game-server internal endpoint, using fallback"
+                );
+                Ok(self.config.game_server_internal_socket_name.clone())
+            }
         }
     }
 }
@@ -229,12 +288,4 @@ fn parse_header(header: [u8; HEADER_LEN]) -> Result<(u16, usize), MatchError> {
     let msg_type = u16::from_be_bytes([header[4], header[5]]);
     let body_len = u32::from_be_bytes([header[10], header[11], header[12], header[13]]) as usize;
     Ok((msg_type, body_len))
-}
-
-fn derive_internal_socket_name(local_socket_name: &str) -> String {
-    if let Some(prefix) = local_socket_name.strip_suffix(".sock") {
-        return format!("{prefix}-internal.sock");
-    }
-
-    format!("{local_socket_name}-internal")
 }

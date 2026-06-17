@@ -84,6 +84,12 @@ function validateProductionConfig(config) {
   }
 }
 
+function validateDiscoveryConfig(config) {
+  if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
+    throw new Error("Invalid auth-http discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+}
+
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const config = {
@@ -136,6 +142,7 @@ export function getConfig() {
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isProductionEnv()),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),
@@ -169,5 +176,6 @@ export function getConfig() {
   };
 
   validateProductionConfig(config);
+  validateDiscoveryConfig(config);
   return config;
 }

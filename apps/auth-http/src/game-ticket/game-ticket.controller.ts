@@ -97,14 +97,15 @@ export class GameTicketController {
 
     const ticket = await this.authStore.issueGameTicket(session.playerId, clientIp);
     const services = await this.authService.buildServicePayload();
+    const gameProxy = this.authService.getGameProxyDescriptor(services);
 
     return {
       ok: true,
       playerId: session.playerId,
       ticket: ticket.value,
       ticketExpiresAt: ticket.expiresAt,
-      gameProxyHost: this.authService.gameProxyHost,
-      gameProxyPort: this.authService.gameProxyPort,
+      gameProxyHost: gameProxy.host,
+      gameProxyPort: gameProxy.port,
       services
     };
   }

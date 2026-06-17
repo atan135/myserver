@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import net from "node:net";
@@ -46,6 +47,30 @@ export async function cleanupRedisPrefix(redisUrl, prefix) {
   }
 }
 
+export async function cleanupRegistryInstances(redisUrl, instances) {
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+
+  try {
+    const keys = [];
+    for (const { serviceName, instanceId } of instances) {
+      keys.push(`service:${serviceName}:instances:${instanceId}`);
+      keys.push(`heartbeat:${serviceName}:${instanceId}`);
+    }
+
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
+  } finally {
+    await redis.quit();
+  }
+}
+
 function setEnvVars(nextEnv) {
   const previous = new Map();
 
@@ -72,7 +97,8 @@ export async function startAuthHttpServer({
   redisUrl,
   redisKeyPrefix,
   gameServerAdminHost = "127.0.0.1",
-  gameServerAdminPort = 7001
+  gameServerAdminPort = 7001,
+  envOverrides = {}
 }) {
   const restoreEnv = setEnvVars({
     NODE_ENV: "test",
@@ -89,7 +115,8 @@ export async function startAuthHttpServer({
     SESSION_TTL_SECONDS: "600",
     TICKET_TTL_SECONDS: "300",
     GAME_SERVER_ADMIN_HOST: gameServerAdminHost,
-    GAME_SERVER_ADMIN_PORT: String(gameServerAdminPort)
+    GAME_SERVER_ADMIN_PORT: String(gameServerAdminPort),
+    ...envOverrides
   });
 
   let context;
@@ -161,6 +188,24 @@ export function resolveCargoBin() {
   return "cargo";
 }
 
+function resolveNatsServerBin() {
+  const envBin = process.env.NATS_SERVER_BIN;
+  if (envBin) {
+    return envBin;
+  }
+
+  const localBin = path.join(
+    projectRoot,
+    "bin",
+    process.platform === "win32" ? "nats-server.exe" : "nats-server"
+  );
+  if (fs.existsSync(localBin)) {
+    return localBin;
+  }
+
+  return process.platform === "win32" ? "nats-server.exe" : "nats-server";
+}
+
 async function waitForTcpPort({ host, port, timeoutMs = 60000, onTick }) {
   const startedAt = Date.now();
 
@@ -187,6 +232,168 @@ async function waitForTcpPort({ host, port, timeoutMs = 60000, onTick }) {
   throw new Error(`timed out waiting for tcp ${host}:${port}`);
 }
 
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      child.off("close", onClose);
+      child.off("exit", onExit);
+      resolve(value);
+    };
+    const onClose = () => finish(true);
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+
+    child.once("close", onClose);
+    child.once("exit", onExit);
+  });
+}
+
+async function killProcessTree(pid, timeoutMs) {
+  if (process.platform !== "win32" || !pid) {
+    return;
+  }
+
+  const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+    stdio: "ignore"
+  });
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      killer.off("close", finish);
+      killer.off("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      killer.kill();
+      finish();
+    }, timeoutMs);
+
+    killer.once("close", finish);
+    killer.once("error", finish);
+  });
+}
+
+async function terminateChild(child, { name = "process", timeoutMs = 5000 } = {}) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    return;
+  }
+
+  const pid = child.pid;
+  const exitPromise = waitForChildExit(child, timeoutMs);
+  let killError = null;
+
+  if (process.platform === "win32") {
+    await killProcessTree(pid, timeoutMs);
+  } else {
+    try {
+      child.kill();
+    } catch (error) {
+      killError = error;
+    }
+  }
+
+  if (await exitPromise) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    return;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      child.kill();
+    } catch (error) {
+      killError ??= error;
+    }
+  } else {
+    try {
+      child.kill("SIGKILL");
+    } catch (error) {
+      killError ??= error;
+    }
+  }
+
+  if (await waitForChildExit(child, timeoutMs)) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    return;
+  }
+
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  const detail = killError ? `: ${killError.message}` : "";
+  throw new Error(`timed out terminating ${name}${pid ? ` pid ${pid}` : ""}${detail}`);
+}
+
+export async function startNatsServer({ host = "127.0.0.1", port } = {}) {
+  const stdout = [];
+  const stderr = [];
+  const natsPort = port || await findFreePort(host);
+  const binaryPath = resolveNatsServerBin();
+  let spawnError = null;
+
+  const child = spawn(binaryPath, ["-a", host, "-p", String(natsPort)], {
+    cwd: projectRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout.push(chunk.toString());
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(chunk.toString());
+  });
+
+  try {
+    await waitForTcpPort({
+      host,
+      port: natsPort,
+      onTick: () => {
+        if (spawnError) {
+          throw spawnError;
+        }
+        if (child.exitCode !== null) {
+          throw new Error(`nats-server exited early with code ${child.exitCode}`);
+        }
+      }
+    });
+  } catch (error) {
+    await terminateChild(child, { name: "nats-server" }).catch(() => {});
+    throw new Error(`${error.message}\n[nats-server stdout]\n${stdout.join("")}\n[nats-server stderr]\n${stderr.join("")}`);
+  }
+
+  return {
+    host,
+    port: natsPort,
+    url: `nats://${host}:${natsPort}`,
+    stdout,
+    stderr,
+    async close() {
+      await terminateChild(child, { name: "nats-server" });
+    }
+  };
+}
+
 async function runProcess({ command, args, cwd, env, timeoutMs = 240000 }) {
   const child = spawn(command, args, {
     cwd,
@@ -208,7 +415,7 @@ async function runProcess({ command, args, cwd, env, timeoutMs = 240000 }) {
     stderr += chunk.toString();
   });
 
-  const exitPromise = once(child, "exit");
+  const exitPromise = once(child, "close");
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -228,10 +435,7 @@ async function runProcess({ command, args, cwd, env, timeoutMs = 240000 }) {
     return { stdout, stderr };
   } catch (error) {
     clearTimeout(timer);
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-      await once(child, "exit").catch(() => {});
-    }
+    await terminateChild(child, { name: command }).catch(() => {});
     throw new Error(`${error.message}\n[stdout]\n${stdout}\n[stderr]\n${stderr}`);
   }
 }
@@ -243,7 +447,8 @@ export async function startGameServer({
   localSocketName = "myserver-game-server.sock",
   ticketSecret,
   redisUrl,
-  redisKeyPrefix
+  redisKeyPrefix,
+  envOverrides = {}
 }) {
   const stdout = [];
   const stderr = [];
@@ -267,7 +472,8 @@ export async function startGameServer({
     CARGO_TARGET_DIR: cargoTargetDir,
     TICKET_SECRET: ticketSecret,
     HEARTBEAT_TIMEOUT_SECS: "10",
-    MAX_BODY_LEN: "4096"
+    MAX_BODY_LEN: "4096",
+    ...envOverrides
   };
 
   await runProcess({
@@ -313,10 +519,7 @@ export async function startGameServer({
       }
     });
   } catch (error) {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-      await once(child, "exit").catch(() => {});
-    }
+    await terminateChild(child, { name: "game-server" }).catch(() => {});
     throw new Error(`${error.message}\n[game-server stdout]\n${stdout.join("")}\n[game-server stderr]\n${stderr.join("")}`);
   }
 
@@ -329,10 +532,7 @@ export async function startGameServer({
     stdout,
     stderr,
     async close() {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill();
-        await once(child, "exit").catch(() => {});
-      }
+      await terminateChild(child, { name: "game-server" });
     }
   };
 }
@@ -351,7 +551,10 @@ export async function runMockClientScenario({
   loginNameB,
   passwordB,
   timeoutMs = 5000,
-  maxBodyLen = 4096
+  maxBodyLen = 4096,
+  gameHost,
+  noServiceDiscovery = false,
+  processTimeoutMs = 120000
 }) {
   const args = [
     path.join(projectRoot, "tools", "mock-client", "src", "index.js"),
@@ -368,6 +571,14 @@ export async function runMockClientScenario({
     "--max-body-len",
     String(maxBodyLen)
   ];
+
+  if (gameHost) {
+    args.push("--game-host", gameHost);
+  }
+
+  if (noServiceDiscovery) {
+    args.push("--no-service-discovery");
+  }
 
   if (roomId) {
     args.push("--room-id", roomId);
@@ -416,7 +627,20 @@ export async function runMockClientScenario({
     stderr += chunk.toString();
   });
 
-  const [code] = await once(child, "exit");
+  let timer;
+  const exitPromise = once(child, "close");
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      resolve(["timeout"]);
+    }, processTimeoutMs);
+  });
+
+  const [code] = await Promise.race([exitPromise, timeoutPromise]);
+  clearTimeout(timer);
+  if (code === "timeout") {
+    await terminateChild(child, { name: `mock-client ${scenario}` }).catch(() => {});
+    throw new Error(`mock-client scenario ${scenario} timed out after ${processTimeoutMs}ms\n[stdout]\n${stdout}\n[stderr]\n${stderr}`);
+  }
   if (code !== 0) {
     throw new Error(`mock-client scenario ${scenario} failed with exit ${code}\n[stdout]\n${stdout}\n[stderr]\n${stderr}`);
   }
@@ -429,7 +653,8 @@ export async function startGameProxy({
   port,
   adminPort,
   tcpFallbackPort = port + 10000,
-  upstreamLocalSocketName = "myserver-game-server.sock"
+  upstreamLocalSocketName = "myserver-game-server.sock",
+  envOverrides = {}
 }) {
   const stdout = [];
   const stderr = [];
@@ -450,7 +675,8 @@ export async function startGameProxy({
     LOG_DIR: "logs/test-game-proxy",
     UPSTREAM_SERVER_ID: "game-server-1",
     UPSTREAM_LOCAL_SOCKET_NAME: upstreamLocalSocketName,
-    CARGO_TARGET_DIR: cargoTargetDir
+    CARGO_TARGET_DIR: cargoTargetDir,
+    ...envOverrides
   };
 
   await runProcess({
@@ -496,10 +722,7 @@ export async function startGameProxy({
       }
     });
   } catch (error) {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-      await once(child, "exit").catch(() => {});
-    }
+    await terminateChild(child, { name: "game-proxy" }).catch(() => {});
     throw new Error(error.message + "\n[game-proxy stdout]\n" + stdout.join("") + "\n[game-proxy stderr]\n" + stderr.join(""));
   }
 
@@ -511,10 +734,7 @@ export async function startGameProxy({
     stdout,
     stderr,
     async close() {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill();
-        await once(child, "exit").catch(() => {});
-      }
+      await terminateChild(child, { name: "game-proxy" });
     }
   };
 }

@@ -14,7 +14,7 @@ mod state;
 
 use std::fs;
 
-use service_registry::{RegistryClient, ServiceInstance};
+use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -96,13 +96,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.public_host.clone(),
                     config.port,
                 )
+                .with_endpoints(vec![ServiceEndpoint {
+                    name: "grpc".to_string(),
+                    protocol: "grpc".to_string(),
+                    host: config.public_host.clone(),
+                    port: config.port,
+                    socket: String::new(),
+                    visibility: "internal".to_string(),
+                    metadata: serde_json::json!({
+                        "instance_id": config.service_instance_id.clone(),
+                        "protocol": "grpc",
+                        "modes": config.modes.keys().cloned().collect::<Vec<_>>(),
+                        "runtime_store": config.match_runtime_store.clone()
+                    }),
+                    healthy: true,
+                }])
                 .with_tags(vec!["match".to_string(), "grpc".to_string()])
                 .with_metadata(serde_json::json!({
-                    "protocol": "grpc"
+                    "protocol": "grpc",
+                    "modes": config.modes.keys().cloned().collect::<Vec<_>>(),
+                    "runtime_store": config.match_runtime_store.clone()
                 }));
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
+                    if registry_failure_is_fatal() {
+                        return Err(std::io::Error::other(e.to_string()).into());
+                    }
                 } else {
                     tracing::info!(
                         service = %config.service_name,
@@ -115,6 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "failed to create registry client");
+                if registry_failure_is_fatal() {
+                    return Err(std::io::Error::other(e.to_string()).into());
+                }
                 None
             }
         }
@@ -150,4 +173,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     result
+}
+
+fn registry_failure_is_fatal() -> bool {
+    env_flag("DISCOVERY_REQUIRED")
+        || env_name_is("NODE_ENV", "production")
+        || env_name_is("APP_ENV", "production")
+        || env_name_is("NODE_ENV", "test")
+        || env_name_is("APP_ENV", "test")
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false)
+}
+
+fn env_name_is(name: &str, expected: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }

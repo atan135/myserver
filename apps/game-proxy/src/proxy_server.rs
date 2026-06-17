@@ -28,7 +28,7 @@ use crate::route_store::{
 };
 use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
-use service_registry::RegistryClient;
+use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
 const PREAUTH_MESSAGE_NOT_ALLOWED: &str = "PREAUTH_MESSAGE_NOT_ALLOWED";
@@ -220,19 +220,25 @@ pub async fn run(
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut kcp_frontend =
-        crate::transport::kcp_frontend::KcpFrontend::bind(&config.bind_addr()).await?;
-    info!(addr = %config.bind_addr(), protocol = "kcp", "game-proxy frontend listening");
-
-    let tcp_addr = config.tcp_fallback_addr();
-    let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
-    info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
-
     if config.registry_enabled {
         let registry_url = config.registry_url.clone();
         let service_name = config.upstream_service_name.clone();
         let discover_interval = config.registry_discover_interval_secs;
         let route_store_clone = route_store.clone();
+        let initial_client = RegistryClient::new(&registry_url, "proxy", "proxy-initial")
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let initial_routes =
+            discover_and_update_routes(&initial_client, &service_name, &route_store)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if initial_routes == 0 {
+            return Err(format!(
+                "required upstream discovery failed: {}.proxy-local endpoint not found",
+                service_name
+            )
+            .into());
+        }
 
         tokio::spawn(async move {
             if let Err(error) = run_upstream_discovery(
@@ -253,6 +259,14 @@ pub async fn run(
             "using static upstream config"
         );
     }
+
+    let mut kcp_frontend =
+        crate::transport::kcp_frontend::KcpFrontend::bind(&config.bind_addr()).await?;
+    info!(addr = %config.bind_addr(), protocol = "kcp", "game-proxy frontend listening");
+
+    let tcp_addr = config.tcp_fallback_addr();
+    let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
+    info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
 
     let mut next_session_id = 1u64;
     let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());
@@ -360,14 +374,35 @@ async fn run_upstream_discovery(
     route_store: ProxyRouteStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = RegistryClient::new(&registry_url, "proxy", "proxy-static").await?;
-    discover_and_update_routes(&client, &service_name, &route_store).await?;
+    let discovered = discover_and_update_routes(&client, &service_name, &route_store).await?;
+    if discovered == 0 {
+        tracing::error!(
+            service = %service_name,
+            endpoint = "proxy-local",
+            "no upstream endpoints discovered; existing routes marked unavailable"
+        );
+    }
 
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs(discover_interval_secs));
     loop {
         ticker.tick().await;
-        if let Err(error) = discover_and_update_routes(&client, &service_name, &route_store).await {
-            tracing::warn!(error = %error, "failed to discover upstream");
+        match discover_and_update_routes(&client, &service_name, &route_store).await {
+            Ok(0) => {
+                tracing::error!(
+                    service = %service_name,
+                    endpoint = "proxy-local",
+                    "no upstream endpoints discovered; existing routes marked unavailable"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                route_store.sync_discovered_routes(Vec::new()).await;
+                tracing::warn!(
+                    error = %error,
+                    "failed to discover upstream; existing routes marked unavailable"
+                );
+            }
         }
     }
 }
@@ -376,23 +411,69 @@ async fn discover_and_update_routes(
     client: &RegistryClient,
     service_name: &str,
     route_store: &ProxyRouteStore,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let routes: Vec<UpstreamRoute> = client
-        .discover(service_name)
-        .await?
-        .into_iter()
-        .map(|instance| UpstreamRoute {
-            server_id: instance.id,
-            local_socket_name: instance.local_socket,
-            operation_state: UpstreamOperationState::Active,
-            health_state: UpstreamHealthState::Healthy,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let instances = client.discover(service_name).await?;
+    let endpoint_count = instances
+        .iter()
+        .filter(|instance| {
+            instance.endpoints.iter().any(|endpoint| {
+                endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid()
+            })
         })
-        .collect();
+        .count();
+    let routes = discover_proxy_local_routes(instances);
 
     route_store.sync_discovered_routes(routes).await;
 
-    tracing::info!(service = %service_name, "upstream routes refreshed");
-    Ok(())
+    tracing::info!(
+        service = %service_name,
+        endpoint = "proxy-local",
+        endpoint_count,
+        "upstream routes refreshed"
+    );
+    Ok(endpoint_count)
+}
+
+fn discover_proxy_local_routes(instances: Vec<ServiceInstance>) -> Vec<UpstreamRoute> {
+    instances
+        .into_iter()
+        .filter_map(proxy_local_route_from_instance)
+        .collect()
+}
+
+fn proxy_local_route_from_instance(instance: ServiceInstance) -> Option<UpstreamRoute> {
+    let endpoint = instance
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid())?;
+    let local_socket_name = local_socket_endpoint_name(endpoint)?;
+    let server_id = endpoint
+        .metadata
+        .get("instance_id")
+        .or_else(|| endpoint.metadata.get("server_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&instance.id)
+        .to_string();
+
+    Some(UpstreamRoute {
+        server_id,
+        local_socket_name,
+        operation_state: UpstreamOperationState::Active,
+        health_state: UpstreamHealthState::Healthy,
+    })
+}
+
+fn local_socket_endpoint_name(endpoint: &ServiceEndpoint) -> Option<String> {
+    if endpoint.protocol != "local_socket" {
+        return None;
+    }
+    let socket = endpoint.socket.trim();
+    if socket.is_empty() {
+        None
+    } else {
+        Some(socket.to_string())
+    }
 }
 
 async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
@@ -1265,8 +1346,8 @@ fn current_unix_ms() -> u64 {
 mod tests {
     use super::{
         MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter, PREAUTH_MESSAGE_NOT_ALLOWED,
-        PreauthDecision, preauth_decision, restore_authenticated_after_local_routing_error,
-        select_route_for_packet,
+        PreauthDecision, discover_proxy_local_routes, preauth_decision,
+        restore_authenticated_after_local_routing_error, select_route_for_packet,
     };
     use crate::pb::{RoomJoinReq, RoomReconnectReq};
     use crate::protocol::{MessageType, Packet, PacketHeader};
@@ -1276,6 +1357,7 @@ mod tests {
     };
     use crate::session::{ProxySession, ProxySessionState};
     use prost::Message;
+    use service_registry::{ServiceEndpoint, ServiceInstance};
     use std::time::{Duration, Instant};
 
     fn packet(msg_type: u16) -> Packet {
@@ -1311,6 +1393,29 @@ mod tests {
             operation_state,
             health_state: UpstreamHealthState::Healthy,
         }
+    }
+
+    fn socket_endpoint(name: &str, socket: &str) -> ServiceEndpoint {
+        ServiceEndpoint {
+            name: name.to_string(),
+            protocol: "local_socket".to_string(),
+            host: String::new(),
+            port: 0,
+            socket: socket.to_string(),
+            visibility: "local".to_string(),
+            metadata: serde_json::json!({ "instance_id": "game-001" }),
+            healthy: true,
+        }
+    }
+
+    fn service_instance_with_endpoint(id: &str, endpoint: ServiceEndpoint) -> ServiceInstance {
+        ServiceInstance::new(
+            id.to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_endpoints(vec![endpoint])
     }
 
     fn room_route(
@@ -1456,6 +1561,59 @@ mod tests {
         let mut limiter = MsgRateLimiter::new(MsgRateLimitConfig::new(1000, 1), now);
         assert_eq!(limiter.check(now), MsgRateDecision::Allowed);
         assert_eq!(limiter.check(now), MsgRateDecision::Exceeded);
+    }
+
+    #[test]
+    fn discovery_routes_prefer_proxy_local_endpoint() {
+        let instance = service_instance_with_endpoint(
+            "game-001",
+            socket_endpoint("proxy-local", "proxy-local.sock"),
+        )
+        .with_local_socket("legacy.sock".to_string());
+
+        let routes = discover_proxy_local_routes(vec![instance]);
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].server_id, "game-001");
+        assert_eq!(routes[0].local_socket_name, "proxy-local.sock");
+    }
+
+    #[test]
+    fn discovery_routes_ignore_legacy_local_socket_endpoint() {
+        let instance = service_instance_with_endpoint(
+            "game-legacy",
+            socket_endpoint("local_socket", "legacy.sock"),
+        );
+
+        let routes = discover_proxy_local_routes(vec![instance]);
+
+        assert!(routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn route_discovery_refresh_keeps_existing_operation_state() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![upstream_route(
+                "game-001",
+                UpstreamOperationState::Draining,
+            )])
+            .await;
+
+        store
+            .sync_discovered_routes(vec![UpstreamRoute {
+                server_id: "game-001".to_string(),
+                local_socket_name: "new.sock".to_string(),
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            }])
+            .await;
+
+        let routes = store.list_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].local_socket_name, "new.sock");
+        assert_eq!(routes[0].operation_state, UpstreamOperationState::Draining);
+        assert_eq!(routes[0].health_state, UpstreamHealthState::Healthy);
     }
 
     #[tokio::test]
