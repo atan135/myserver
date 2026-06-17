@@ -53,24 +53,3 @@ CREATE INDEX IF NOT EXISTS idx_mail_notification_outbox_pending
   ON mail_notification_outbox (status, next_attempt_at, id);
 CREATE INDEX IF NOT EXISTS idx_mail_notification_outbox_to_player_id
   ON mail_notification_outbox (to_player_id);
-
--- Sample data for testing
-INSERT INTO mails (
-  mail_id,
-  sender_type,
-  sender_id,
-  sender_name,
-  from_player_id,
-  to_player_id,
-  title,
-  content,
-  mail_type,
-  created_by_type,
-  created_by_id,
-  created_by_name,
-  status
-)
-VALUES
-  ('mail_test_001', 'system', 'system', '系统', 'system', 'player_001', 'Welcome to MyServer', 'Welcome to the game!', 'system', 'system', 'system', '系统', 'unread'),
-  ('mail_test_002', 'system', 'system', '系统', 'system', 'player_001', 'GM Notice', 'Server maintenance at 2:00 AM.', 'notice', 'admin', 'gm001', 'GM 001', 'unread')
-ON CONFLICT (mail_id) DO NOTHING;

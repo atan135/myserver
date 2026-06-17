@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -380,6 +381,67 @@ pub async fn run(
     let internal_socket_listener =
         crate::local_socket::create_listener(&config.internal_socket_name)?;
     let redis_client = redis::Client::open(config.redis_url.clone())?;
+    let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
+    let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "GLOBAL_ID_ORIGIN_ID out of range: {}",
+                config.global_id_origin_id
+            ),
+        )
+    })?;
+    let global_id_worker_id = config
+        .global_id_worker_id
+        .map(|worker_id| {
+            u8::try_from(worker_id).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("GLOBAL_ID_WORKER_ID out of range: {worker_id}"),
+                )
+            })
+        })
+        .transpose()?;
+    let worker_lease = WorkerLease::acquire_redis(
+        &mut global_id_redis,
+        &config.redis_key_prefix,
+        global_id_origin_id,
+        global_id_worker_id,
+        &config.service_name,
+        &config.service_instance_id,
+        DEFAULT_WORKER_LEASE_TTL_SECONDS,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let worker_lease_key = worker_lease.key.clone();
+    info!(
+        origin_id = worker_lease.origin_id,
+        worker_id = worker_lease.worker_id,
+        lease_key = %worker_lease_key,
+        "global id worker lease acquired"
+    );
+    let lease_renew_client = redis_client.clone();
+    let lease_for_renewal = worker_lease.clone();
+    let lease_renew_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            match lease_renew_client.get_multiplexed_async_connection().await {
+                Ok(mut redis) => {
+                    if !lease_for_renewal
+                        .renew_redis(&mut redis)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        warn!(lease_key = %lease_for_renewal.key, "global id worker lease renewal lost ownership");
+                    }
+                }
+                Err(error) => {
+                    lease_for_renewal.deactivate();
+                    warn!(lease_key = %lease_for_renewal.key, error = %error, "global id worker lease renewal failed");
+                }
+            }
+        }
+    });
 
     // Initialize MatchClient for communicating with MatchService
     let match_client = crate::match_client::create_match_client_shared();
@@ -387,6 +449,9 @@ pub async fn run(
     if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }
+
+    let item_uid_generator =
+        crate::core::global_id::ItemUidGenerator::from_worker_lease(&worker_lease)?;
 
     let room_logic_factory: SharedRoomLogicFactory =
         Arc::new(GameRoomLogicFactory::new(config_tables.clone()));
@@ -434,6 +499,7 @@ pub async fn run(
         runtime_config: shared_state.runtime_config.clone(),
         connection_count: shared_state.connection_count.clone(),
         config_tables,
+        item_uid_generator,
         player_manager: PlayerManager::new(db_player_store),
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
@@ -459,6 +525,7 @@ pub async fn run(
         services.player_registry.clone(),
         services.player_manager.clone(),
         services.config_tables.clone(),
+        services.item_uid_generator.clone(),
         config.service_instance_id.clone(),
         config.admin_token.clone(),
         crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
@@ -531,6 +598,27 @@ pub async fn run(
     let _ = kick_task.await;
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
+    lease_renew_task.abort();
+    let _ = lease_renew_task.await;
+
+    match redis_client.get_multiplexed_async_connection().await {
+        Ok(mut redis) => {
+            if let Err(error) = worker_lease.release_redis(&mut redis).await {
+                warn!(
+                    lease_key = %worker_lease.key,
+                    error = %error,
+                    "failed to release global id worker lease"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                lease_key = %worker_lease.key,
+                error = %error,
+                "failed to connect redis for global id worker lease release"
+            );
+        }
+    }
 
     services.player_manager.close().await;
 

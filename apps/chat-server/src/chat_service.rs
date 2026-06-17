@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use tokio::sync::{mpsc, RwLock};
+use global_id::{GlobalIdError, GlobalIdGenerator};
+use tokio::sync::{RwLock, mpsc};
 
-use crate::chat_store::{ChatGroup, ChatMessage};
 use crate::chat_server::MessageType;
+use crate::chat_store::{ChatGroup, ChatMessage};
 use crate::metrics::METRICS;
-use crate::protocol::{encode_body, OutboundMessage, Packet};
 use crate::proto::chat::{
     ChatGroupReq, ChatGroupRes, ChatHistoryReq, ChatHistoryRes, ChatPrivateReq, ChatPrivateRes,
-    ChatPush, ErrorRes, GroupCreateReq, GroupCreateRes, GroupDismissReq, GroupDismissRes, GroupInfo,
-    GroupJoinReq, GroupJoinRes, GroupLeaveReq, GroupListRes,
+    ChatPush, ErrorRes, GroupCreateReq, GroupCreateRes, GroupDismissReq, GroupDismissRes,
+    GroupInfo, GroupJoinReq, GroupJoinRes, GroupLeaveReq, GroupListRes,
 };
+use crate::protocol::{OutboundMessage, Packet, encode_body};
 
 pub type ChatOutboundSender = mpsc::Sender<OutboundMessage>;
 pub type ChatSessionMap = Arc<RwLock<HashMap<String, ChatOutboundSender>>>;
@@ -20,12 +22,32 @@ pub fn new_chat_session_map() -> ChatSessionMap {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-fn generate_msg_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+static CHAT_ID_GENERATOR: OnceLock<GlobalIdGenerator> = OnceLock::new();
+
+pub fn initialize_global_id_generator(generator: GlobalIdGenerator) -> Result<(), GlobalIdError> {
+    CHAT_ID_GENERATOR.set(generator).map_err(|_| {
+        GlobalIdError::InvalidInput("chat global id generator already initialized".to_string())
+    })
 }
 
-fn generate_group_id() -> String {
-    format!("grp_{}", uuid::Uuid::new_v4())
+fn chat_id_generator() -> Result<&'static GlobalIdGenerator, Box<dyn std::error::Error>> {
+    if let Some(generator) = CHAT_ID_GENERATOR.get() {
+        return Ok(generator);
+    }
+
+    let generator = GlobalIdGenerator::from_env()?;
+    let _ = CHAT_ID_GENERATOR.set(generator);
+    Ok(CHAT_ID_GENERATOR
+        .get()
+        .expect("chat global id generator should be initialized"))
+}
+
+fn generate_msg_id() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(chat_id_generator()?.generate_string("msg")?)
+}
+
+fn generate_group_id() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(chat_id_generator()?.generate_string("grp")?)
 }
 
 fn current_unix_ms() -> i64 {
@@ -74,12 +96,22 @@ pub async fn handle_chat_private(
     };
 
     if request.target_id.is_empty() {
-        queue_error(tx, packet.header.seq, "INVALID_TARGET", "target_id is empty")?;
+        queue_error(
+            tx,
+            packet.header.seq,
+            "INVALID_TARGET",
+            "target_id is empty",
+        )?;
         return Ok(());
     }
 
     if request.target_id == player_id {
-        queue_error(tx, packet.header.seq, "CANNOT_CHAT_SELF", "cannot chat with yourself")?;
+        queue_error(
+            tx,
+            packet.header.seq,
+            "CANNOT_CHAT_SELF",
+            "cannot chat with yourself",
+        )?;
         return Ok(());
     }
 
@@ -88,7 +120,7 @@ pub async fn handle_chat_private(
         return Ok(());
     }
 
-    let msg_id = generate_msg_id();
+    let msg_id = generate_msg_id()?;
     let timestamp = current_unix_ms();
 
     let msg = ChatMessage {
@@ -111,7 +143,12 @@ pub async fn handle_chat_private(
         error_code: String::new(),
         msg_id: msg_id.clone(),
     };
-    queue_message(tx, MessageType::ChatPrivateRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::ChatPrivateRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     // 如果目标玩家在线，推送消息
     if let Some(sender) = sessions.read().await.get(&request.target_id) {
@@ -152,8 +189,16 @@ pub async fn handle_chat_group(
         return Ok(());
     }
 
-    if !chat_store.is_group_member(&request.group_id, player_id).await? {
-        queue_error(tx, packet.header.seq, "NOT_GROUP_MEMBER", "you are not a member of this group")?;
+    if !chat_store
+        .is_group_member(&request.group_id, player_id)
+        .await?
+    {
+        queue_error(
+            tx,
+            packet.header.seq,
+            "NOT_GROUP_MEMBER",
+            "you are not a member of this group",
+        )?;
         return Ok(());
     }
 
@@ -162,7 +207,7 @@ pub async fn handle_chat_group(
         return Ok(());
     }
 
-    let msg_id = generate_msg_id();
+    let msg_id = generate_msg_id()?;
     let timestamp = current_unix_ms();
 
     let msg = ChatMessage {
@@ -185,7 +230,12 @@ pub async fn handle_chat_group(
         error_code: String::new(),
         msg_id: msg_id.clone(),
     };
-    queue_message(tx, MessageType::ChatGroupRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::ChatGroupRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     // 推送给所有在线群成员
     let members = chat_store.get_group_members(&request.group_id).await?;
@@ -232,7 +282,7 @@ pub async fn handle_group_create(
         return Ok(());
     }
 
-    let group_id = generate_group_id();
+    let group_id = generate_group_id()?;
     let timestamp = current_unix_ms();
 
     let group = ChatGroup {
@@ -249,7 +299,12 @@ pub async fn handle_group_create(
             group_id: String::new(),
             error_code: "CREATE_FAILED".to_string(),
         };
-        queue_message(tx, MessageType::GroupCreateRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupCreateRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
@@ -258,7 +313,12 @@ pub async fn handle_group_create(
         group_id,
         error_code: String::new(),
     };
-    queue_message(tx, MessageType::GroupCreateRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::GroupCreateRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -291,27 +351,48 @@ pub async fn handle_group_join(
             ok: false,
             error_code: "GROUP_NOT_FOUND".to_string(),
         };
-        queue_message(tx, MessageType::GroupJoinRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupJoinRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
-    if chat_store.is_group_member(&request.group_id, player_id).await? {
+    if chat_store
+        .is_group_member(&request.group_id, player_id)
+        .await?
+    {
         let res = GroupJoinRes {
             ok: false,
             error_code: "ALREADY_MEMBER".to_string(),
         };
-        queue_message(tx, MessageType::GroupJoinRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupJoinRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
     let timestamp = current_unix_ms();
-    if let Err(e) = chat_store.add_group_member(&request.group_id, player_id, timestamp).await {
+    if let Err(e) = chat_store
+        .add_group_member(&request.group_id, player_id, timestamp)
+        .await
+    {
         tracing::warn!("failed to join group: {}", e);
         let res = GroupJoinRes {
             ok: false,
             error_code: "JOIN_FAILED".to_string(),
         };
-        queue_message(tx, MessageType::GroupJoinRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupJoinRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
@@ -319,7 +400,12 @@ pub async fn handle_group_join(
         ok: true,
         error_code: String::new(),
     };
-    queue_message(tx, MessageType::GroupJoinRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::GroupJoinRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -347,22 +433,38 @@ pub async fn handle_group_leave(
         return Ok(());
     }
 
-    if chat_store.is_group_owner(&request.group_id, player_id).await? {
+    if chat_store
+        .is_group_owner(&request.group_id, player_id)
+        .await?
+    {
         let res = crate::proto::chat::GroupLeaveRes {
             ok: false,
             error_code: "OWNER_CANNOT_LEAVE".to_string(),
         };
-        queue_message(tx, MessageType::GroupLeaveRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupLeaveRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
-    if let Err(e) = chat_store.remove_group_member(&request.group_id, player_id).await {
+    if let Err(e) = chat_store
+        .remove_group_member(&request.group_id, player_id)
+        .await
+    {
         tracing::warn!("failed to leave group: {}", e);
         let res = crate::proto::chat::GroupLeaveRes {
             ok: false,
             error_code: "LEAVE_FAILED".to_string(),
         };
-        queue_message(tx, MessageType::GroupLeaveRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupLeaveRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
@@ -370,7 +472,12 @@ pub async fn handle_group_leave(
         ok: true,
         error_code: String::new(),
     };
-    queue_message(tx, MessageType::GroupLeaveRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::GroupLeaveRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -398,12 +505,20 @@ pub async fn handle_group_dismiss(
         return Ok(());
     }
 
-    if !chat_store.is_group_owner(&request.group_id, player_id).await? {
+    if !chat_store
+        .is_group_owner(&request.group_id, player_id)
+        .await?
+    {
         let res = GroupDismissRes {
             ok: false,
             error_code: "NOT_OWNER".to_string(),
         };
-        queue_message(tx, MessageType::GroupDismissRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupDismissRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
@@ -413,7 +528,12 @@ pub async fn handle_group_dismiss(
             ok: false,
             error_code: "DISMISS_FAILED".to_string(),
         };
-        queue_message(tx, MessageType::GroupDismissRes as u16, packet.header.seq, &res)?;
+        queue_message(
+            tx,
+            MessageType::GroupDismissRes as u16,
+            packet.header.seq,
+            &res,
+        )?;
         return Ok(());
     }
 
@@ -421,7 +541,12 @@ pub async fn handle_group_dismiss(
         ok: true,
         error_code: String::new(),
     };
-    queue_message(tx, MessageType::GroupDismissRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::GroupDismissRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -448,8 +573,15 @@ pub async fn handle_group_list(
         });
     }
 
-    let res = GroupListRes { groups: group_infos };
-    queue_message(tx, MessageType::GroupListRes as u16, packet.header.seq, &res)?;
+    let res = GroupListRes {
+        groups: group_infos,
+    };
+    queue_message(
+        tx,
+        MessageType::GroupListRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -472,7 +604,11 @@ pub async fn handle_chat_history(
         }
     };
 
-    let limit = if request.limit <= 0 { 20 } else { request.limit.min(100) };
+    let limit = if request.limit <= 0 {
+        20
+    } else {
+        request.limit.min(100)
+    };
     let before_time = if request.before_time <= 0 {
         current_unix_ms()
     } else {
@@ -482,7 +618,12 @@ pub async fn handle_chat_history(
     let messages = match request.chat_type {
         1 => {
             if request.target_id.is_empty() {
-                queue_error(tx, packet.header.seq, "INVALID_TARGET", "target_id is empty")?;
+                queue_error(
+                    tx,
+                    packet.header.seq,
+                    "INVALID_TARGET",
+                    "target_id is empty",
+                )?;
                 return Ok(());
             }
             chat_store
@@ -494,8 +635,16 @@ pub async fn handle_chat_history(
                 queue_error(tx, packet.header.seq, "INVALID_GROUP", "group_id is empty")?;
                 return Ok(());
             }
-            if !chat_store.is_group_member(&request.target_id, player_id).await? {
-                queue_error(tx, packet.header.seq, "NOT_GROUP_MEMBER", "you are not a member of this group")?;
+            if !chat_store
+                .is_group_member(&request.target_id, player_id)
+                .await?
+            {
+                queue_error(
+                    tx,
+                    packet.header.seq,
+                    "NOT_GROUP_MEMBER",
+                    "you are not a member of this group",
+                )?;
                 return Ok(());
             }
             chat_store
@@ -503,7 +652,12 @@ pub async fn handle_chat_history(
                 .await?
         }
         _ => {
-            queue_error(tx, packet.header.seq, "INVALID_CHAT_TYPE", "chat_type must be 1 or 2")?;
+            queue_error(
+                tx,
+                packet.header.seq,
+                "INVALID_CHAT_TYPE",
+                "chat_type must be 1 or 2",
+            )?;
             return Ok(());
         }
     };
@@ -523,7 +677,12 @@ pub async fn handle_chat_history(
         .collect();
 
     let res = ChatHistoryRes { messages: pushes };
-    queue_message(tx, MessageType::ChatHistoryRes as u16, packet.header.seq, &res)?;
+    queue_message(
+        tx,
+        MessageType::ChatHistoryRes as u16,
+        packet.header.seq,
+        &res,
+    )?;
 
     Ok(())
 }
@@ -578,8 +737,12 @@ fn queue_message<M: prost::Message>(
     message: &M,
 ) -> Result<(), std::io::Error> {
     let body = encode_body(message);
-    tx.try_send(OutboundMessage { message_type, seq, body })
-        .map_err(|error| std::io::Error::other(format!("failed to queue outbound: {}", error)))
+    tx.try_send(OutboundMessage {
+        message_type,
+        seq,
+        body,
+    })
+    .map_err(|error| std::io::Error::other(format!("failed to queue outbound: {}", error)))
 }
 
 #[cfg(test)]

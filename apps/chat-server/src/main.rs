@@ -11,6 +11,7 @@ mod ticket;
 use std::fs;
 use std::net::SocketAddr;
 
+use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
 use service_registry::{RegistryClient, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -36,6 +37,8 @@ struct Config {
     ticket_secret: String,
     redis_url: String,
     redis_key_prefix: String,
+    global_id_origin_id: u64,
+    global_id_worker_id: Option<u64>,
     nats_url: String,
     registry_enabled: bool,
     registry_url: String,
@@ -83,6 +86,8 @@ impl Config {
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
             redis_key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_default(),
+            global_id_origin_id: parse_u64_env("GLOBAL_ID_ORIGIN_ID", 0),
+            global_id_worker_id: parse_optional_u64_env("GLOBAL_ID_WORKER_ID"),
             nats_url: std::env::var("NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
@@ -145,6 +150,21 @@ fn validate_production_config(config: &Config) {
     if !config.db_enabled {
         panic!("invalid chat-server production config: DB_ENABLED must be true in production");
     }
+
+    if config.global_id_origin_id == 0 || config.global_id_origin_id > 1023 {
+        panic!(
+            "invalid chat-server production config: GLOBAL_ID_ORIGIN_ID must be set to 1-1023 in production"
+        );
+    }
+
+    if config
+        .global_id_worker_id
+        .is_some_and(|worker_id| worker_id > 63)
+    {
+        panic!(
+            "invalid chat-server production config: GLOBAL_ID_WORKER_ID must be set to 0-63 in production"
+        );
+    }
 }
 
 fn is_default_ticket_secret(value: &str) -> bool {
@@ -174,6 +194,15 @@ fn parse_u64_env(name: &str, default_value: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default_value)
+}
+
+fn parse_optional_u64_env(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
 }
 
 fn parse_bool_env(name: &str, default_value: bool) -> bool {
@@ -236,9 +265,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind_addr = %config.bind_addr,
         db_enabled = config.db_enabled,
         redis_url = %config.redis_url,
+        global_id_origin_id = config.global_id_origin_id,
+        global_id_worker_id = ?config.global_id_worker_id,
         registry_enabled = config.registry_enabled,
         "chat-server starting"
     );
+
+    let redis_client = redis::Client::open(config.redis_url.clone())?;
+    let mut global_id_redis = redis_client.get_multiplexed_async_connection().await?;
+    let global_id_origin_id = u16::try_from(config.global_id_origin_id).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "GLOBAL_ID_ORIGIN_ID out of range: {}",
+                config.global_id_origin_id
+            ),
+        )
+    })?;
+    let global_id_worker_id = config
+        .global_id_worker_id
+        .map(|worker_id| {
+            u8::try_from(worker_id).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("GLOBAL_ID_WORKER_ID out of range: {worker_id}"),
+                )
+            })
+        })
+        .transpose()?;
+    let worker_lease = WorkerLease::acquire_redis(
+        &mut global_id_redis,
+        &config.redis_key_prefix,
+        global_id_origin_id,
+        global_id_worker_id,
+        &config.service_name,
+        &config.service_instance_id,
+        DEFAULT_WORKER_LEASE_TTL_SECONDS,
+    )
+    .await?;
+    tracing::info!(
+        origin_id = worker_lease.origin_id,
+        worker_id = worker_lease.worker_id,
+        lease_key = %worker_lease.key,
+        "global id worker lease acquired"
+    );
+    chat_service::initialize_global_id_generator(worker_lease.generator()?)?;
+    let lease_for_renewal = worker_lease.clone();
+    let lease_renew_client = redis_client.clone();
+    let lease_renew_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            match lease_renew_client.get_multiplexed_async_connection().await {
+                Ok(mut redis) => {
+                    if !lease_for_renewal
+                        .renew_redis(&mut redis)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        tracing::warn!(
+                            lease_key = %lease_for_renewal.key,
+                            "global id worker lease renewal lost ownership"
+                        );
+                    }
+                }
+                Err(error) => {
+                    lease_for_renewal.deactivate();
+                    tracing::warn!(
+                        lease_key = %lease_for_renewal.key,
+                        error = %error,
+                        "global id worker lease renewal failed"
+                    );
+                }
+            }
+        }
+    });
 
     let registry_client: Option<RegistryClient> = if config.registry_enabled {
         match RegistryClient::new(
@@ -338,6 +438,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = chat_server::run(server_config, chat_store.clone(), chat_sessions).await;
 
+    lease_renew_task.abort();
+    let _ = lease_renew_task.await;
+    match redis_client.get_multiplexed_async_connection().await {
+        Ok(mut redis) => {
+            if let Err(error) = worker_lease.release_redis(&mut redis).await {
+                tracing::error!(
+                    lease_key = %worker_lease.key,
+                    error = %error,
+                    "failed to release global id worker lease"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                lease_key = %worker_lease.key,
+                error = %error,
+                "failed to connect redis for global id worker lease release"
+            );
+        }
+    }
+
     if let Some(client) = registry_client {
         if let Some(handle) = heartbeat_handle {
             handle.abort();
@@ -370,8 +491,14 @@ mod tests {
 
     use super::*;
 
-    const TICKET_SECRET_ENV_NAMES: &[&str] =
-        &["NODE_ENV", "APP_ENV", "TICKET_SECRET", "DB_ENABLED"];
+    const TICKET_SECRET_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "TICKET_SECRET",
+        "DB_ENABLED",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
+    ];
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -423,6 +550,13 @@ mod tests {
 
     fn catch_config_from_env() -> Result<Config, Box<dyn std::any::Any + Send>> {
         panic::catch_unwind(AssertUnwindSafe(Config::from_env))
+    }
+
+    fn set_valid_production_global_id_env() {
+        unsafe {
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
+            env::set_var("GLOBAL_ID_WORKER_ID", "4");
+        }
     }
 
     #[test]
@@ -527,6 +661,7 @@ mod tests {
             env::remove_var("TICKET_SECRET");
             env::set_var("DB_ENABLED", "true");
         }
+        set_valid_production_global_id_env();
 
         let error = panic_message(catch_config_from_env());
 
@@ -546,6 +681,7 @@ mod tests {
             env::set_var("TICKET_SECRET", "replace-with-a-long-random-string");
             env::set_var("DB_ENABLED", "true");
         }
+        set_valid_production_global_id_env();
 
         let error = panic_message(catch_config_from_env());
 
@@ -563,6 +699,7 @@ mod tests {
             env::set_var("TICKET_SECRET", "   ");
             env::set_var("DB_ENABLED", "true");
         }
+        set_valid_production_global_id_env();
 
         let error = panic_message(catch_config_from_env());
 
@@ -587,6 +724,7 @@ mod tests {
             env::set_var("TICKET_SECRET", "prod-chat-ticket-secret-123");
             env::set_var("DB_ENABLED", "true");
         }
+        set_valid_production_global_id_env();
 
         let config = Config::from_env();
 
@@ -604,6 +742,7 @@ mod tests {
             env::remove_var("TICKET_SECRET");
             env::set_var("DB_ENABLED", "true");
         }
+        set_valid_production_global_id_env();
 
         let error = panic_message(catch_config_from_env());
 

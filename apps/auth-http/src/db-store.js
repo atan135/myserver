@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { generatePlayerId } from "./global-id.js";
+
 const UNIQUE_VIOLATION = "23505";
 
 function sha256Hex(value) {
@@ -49,7 +51,7 @@ export class DbAuthStore {
   async findOrCreateGuestPlayer(guestId) {
     if (!this.enabled) {
       return {
-        playerId: `player-${crypto.randomUUID()}`,
+        playerId: generatePlayerId(),
         guestId
       };
     }
@@ -75,7 +77,7 @@ export class DbAuthStore {
       return toAuthAccount(rows[0]);
     }
 
-    const playerId = `player-${crypto.randomUUID()}`;
+    const playerId = generatePlayerId();
 
     try {
       await this.pool.query(
@@ -257,7 +259,7 @@ export class DbAuthStore {
       };
     }
 
-    const playerId = `player-${crypto.randomUUID()}`;
+    const playerId = generatePlayerId();
 
     await this.pool.query(
       `INSERT INTO player_accounts (

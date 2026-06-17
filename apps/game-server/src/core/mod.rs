@@ -1,5 +1,6 @@
 pub mod config_table;
 pub mod context;
+pub mod global_id;
 pub mod inventory;
 pub mod logic;
 pub mod player;

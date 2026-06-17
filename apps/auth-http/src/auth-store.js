@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { encodeSubjectToken } from "./nats-client.js";
 import { log } from "./logger.js";
+import { generatePlayerId } from "./global-id.js";
 import { normalizeLoginName, verifyPassword } from "./password-utils.js";
 import { BLOCKLIST_UNAVAILABLE_ERROR, PLAYER_BLOCKED_ERROR, RedisBlocklistChecker } from "./blocklist.js";
 
@@ -90,7 +91,7 @@ export class AuthStore {
     const account = this.dbStore
       ? await this.dbStore.findOrCreateGuestPlayer(normalizedGuestId)
       : {
-          playerId: `player-${crypto.randomUUID()}`,
+          playerId: generatePlayerId(),
           guestId: normalizedGuestId
         };
 

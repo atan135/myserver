@@ -100,6 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_addr = %config.admin_bind_addr(),
         local_socket_name = %config.local_socket_name,
         internal_socket_name = %config.internal_socket_name,
+        global_id_origin_id = config.global_id_origin_id,
+        global_id_worker_id = config.global_id_worker_id,
         "game-server logging initialized"
     );
 

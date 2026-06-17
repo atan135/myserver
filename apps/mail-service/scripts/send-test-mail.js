@@ -1,8 +1,8 @@
 // 测试发送邮件脚本
-// 用法: node send-test-mail.js <playerId>
+// 用法: node send-test-mail.js <plr_...>
 import http from 'http';
 
-const playerId = process.argv[2] || 'player_001';
+const playerId = process.argv[2] || 'plr_1nt8s3a00020';
 
 const data = JSON.stringify({
   to_player_id: playerId,

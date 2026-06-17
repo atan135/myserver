@@ -5,6 +5,7 @@ import { AnnouncementsService } from "./announcements/announcements.service.js";
 import { AnnounceReadAuthService } from "./announce-auth.js";
 import { getConfig } from "./config.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
+import { initializeGlobalIdLease, releaseGlobalIdLease } from "./global-id.js";
 import { HealthController } from "./health.controller.js";
 import { createMetricsCollector } from "./metrics.js";
 import { createDbPool } from "./db-client.js";
@@ -15,6 +16,7 @@ import { RegistryClient } from "./registry-client.js";
 import {
   ANNOUNCE_CONFIG,
   ANNOUNCE_DB_POOL,
+  ANNOUNCE_GLOBAL_ID_LEASE,
   ANNOUNCE_METRICS,
   ANNOUNCE_NATS,
   ANNOUNCE_READ_AUTH,
@@ -42,12 +44,18 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
+      provide: ANNOUNCE_GLOBAL_ID_LEASE,
+      inject: [ANNOUNCE_CONFIG, ANNOUNCE_REDIS],
+      useFactory: (config: any, redis: any) => initializeGlobalIdLease(config, redis)
+    },
+    {
       provide: ANNOUNCE_DB_POOL,
-      inject: [ANNOUNCE_CONFIG, ANNOUNCE_NATS, ANNOUNCE_REDIS],
-      useFactory: async (config: any, nats: any, redis: any) => {
+      inject: [ANNOUNCE_CONFIG, ANNOUNCE_NATS, ANNOUNCE_REDIS, ANNOUNCE_GLOBAL_ID_LEASE],
+      useFactory: async (config: any, nats: any, redis: any, _lease: any) => {
         try {
           return await createDbPool(config);
         } catch (error) {
+          await releaseGlobalIdLease();
           await nats.close();
           await redis.quit();
           throw error;

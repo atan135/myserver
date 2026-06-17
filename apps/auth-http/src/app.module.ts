@@ -15,6 +15,7 @@ import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { GameTicketController } from "./game-ticket/game-ticket.controller.js";
+import { initializeGlobalIdLease } from "./global-id.js";
 import { InternalController } from "./internal/internal.controller.js";
 import { MetaController } from "./meta.controller.js";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware.js";
@@ -26,6 +27,7 @@ import {
   AUTH_CONFIG,
   AUTH_DB_POOL,
   AUTH_DB_STORE,
+  AUTH_GLOBAL_ID_LEASE,
   AUTH_GAME_ADMIN_CLIENT,
   AUTH_MAINTENANCE_STORE,
   AUTH_METRICS,
@@ -55,8 +57,13 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
+      provide: AUTH_GLOBAL_ID_LEASE,
+      inject: [AUTH_CONFIG, AUTH_REDIS],
+      useFactory: (config: any, redis: any) => initializeGlobalIdLease(config, redis)
+    },
+    {
       provide: AUTH_DB_POOL,
-      inject: [AUTH_CONFIG],
+      inject: [AUTH_CONFIG, AUTH_GLOBAL_ID_LEASE],
       useFactory: (config: any) => createDbPool(config)
     },
     {

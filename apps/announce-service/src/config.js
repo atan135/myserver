@@ -140,7 +140,9 @@ export function getConfig() {
     ticketSecret: process.env.TICKET_SECRET || DEFAULT_TICKET_SECRET,
     serviceName: process.env.SERVICE_NAME || "announce-service",
     serviceInstanceId:
-      process.env.SERVICE_INSTANCE_ID || "announce-001"
+      process.env.SERVICE_INSTANCE_ID || "announce-001",
+    globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
+    globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
 
   validateProductionConfig(config);

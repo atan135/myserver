@@ -17,6 +17,8 @@ export type AdminPermission =
   | "maintenance.write"
   | "monitoring.read"
   | "monitoring.archive"
+  | "id.read"
+  | "id.manage"
   | "admins.revoke_tokens"
   | "admins.reset_password";
 
@@ -26,7 +28,8 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*
     "security.read",
     "players.read",
     "maintenance.read",
-    "monitoring.read"
+    "monitoring.read",
+    "id.read"
   ],
   operator: [
     "audit.read",
@@ -35,6 +38,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*
     "players.status.update",
     "maintenance.read",
     "monitoring.read",
+    "id.read",
     "gm.broadcast",
     "gm.send_item",
     "gm.kick_player"

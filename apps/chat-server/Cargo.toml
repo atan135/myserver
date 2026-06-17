@@ -25,5 +25,5 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 service-registry = { path = "../../packages/service-registry" }
-uuid = { version = "1", features = ["v4"] }
+global-id = { path = "../../packages/global-id", features = ["redis"] }
 async-nats = { version = "0.48.0", default-features = false }

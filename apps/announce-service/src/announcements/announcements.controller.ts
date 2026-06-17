@@ -83,7 +83,7 @@ export class AnnouncementsController {
 
   @Post()
   @ApiOperation({ summary: "Create announcement" })
-  @ApiCreatedResponse({ schema: { example: { ok: true, announcement: {} } } })
+  @ApiCreatedResponse({ schema: { example: { ok: true, announcement: { announce_id: "ann_1j7qv8m4x2" } } } })
   create(@Headers() headers: Record<string, string | string[] | undefined>, @Body() body: any) {
     this.requireAdminToken(headers);
     return this.announcementsService.create(body);

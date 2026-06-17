@@ -3,6 +3,7 @@ import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { getConfig } from "./config.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import { GameAdminClient } from "./game-admin-client.js";
+import { initializeGlobalIdLease, releaseGlobalIdLease } from "./global-id.js";
 import { HealthController } from "./health.controller.js";
 import { MailPlayerAuthService } from "./mail-auth.js";
 import { MailsController } from "./mails/mails.controller.js";
@@ -17,6 +18,7 @@ import { RegistryClient } from "./registry-client.js";
 import {
   MAIL_CONFIG,
   MAIL_DB_POOL,
+  MAIL_GLOBAL_ID_LEASE,
   MAIL_GAME_ADMIN_CLIENT,
   MAIL_METRICS,
   MAIL_NATS,
@@ -46,12 +48,18 @@ import {
       useFactory: (config: any) => createNatsClient(config)
     },
     {
+      provide: MAIL_GLOBAL_ID_LEASE,
+      inject: [MAIL_CONFIG, MAIL_REDIS],
+      useFactory: (config: any, redis: any) => initializeGlobalIdLease(config, redis)
+    },
+    {
       provide: MAIL_DB_POOL,
-      inject: [MAIL_CONFIG, MAIL_NATS, MAIL_REDIS],
-      useFactory: async (config: any, nats: any, redis: any) => {
+      inject: [MAIL_CONFIG, MAIL_NATS, MAIL_REDIS, MAIL_GLOBAL_ID_LEASE],
+      useFactory: async (config: any, nats: any, redis: any, _lease: any) => {
         try {
           return await createDbPool(config);
         } catch (error) {
+          await releaseGlobalIdLease();
           await nats.close();
           await redis.quit();
           throw error;

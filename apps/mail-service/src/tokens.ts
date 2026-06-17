@@ -3,6 +3,7 @@ export const MAIL_REDIS = Symbol("MAIL_REDIS");
 export const MAIL_NATS = Symbol("MAIL_NATS");
 export const MAIL_DB_POOL = Symbol("MAIL_DB_POOL");
 export const MAIL_STORE = Symbol("MAIL_STORE");
+export const MAIL_GLOBAL_ID_LEASE = Symbol("MAIL_GLOBAL_ID_LEASE");
 export const MAIL_PUBSUB_CLIENT = Symbol("MAIL_PUBSUB_CLIENT");
 export const MAIL_GAME_ADMIN_CLIENT = Symbol("MAIL_GAME_ADMIN_CLIENT");
 export const MAIL_REGISTRY = Symbol("MAIL_REGISTRY");

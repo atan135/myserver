@@ -7,6 +7,7 @@ import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 
 import { AppModule } from "./app.module.js";
 import { HttpExceptionFilter } from "./common/http-exception.filter.js";
+import { releaseGlobalIdLease } from "./global-id.js";
 import { configureLogger, log } from "./logger.js";
 import {
   MAIL_CONFIG,
@@ -79,6 +80,12 @@ export async function closeNestApp(app: INestApplication) {
     await nats?.close?.();
   } catch (error: any) {
     log("error", "shutdown.nats_close_failed", { error: error.message });
+  }
+
+  try {
+    await releaseGlobalIdLease();
+  } catch (error: any) {
+    log("error", "shutdown.global_id_lease_release_failed", { error: error.message });
   }
 
   try {

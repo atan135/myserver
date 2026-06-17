@@ -116,7 +116,9 @@ export function getConfig() {
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
-      process.env.SERVICE_INSTANCE_ID || "mail-001"
+      process.env.SERVICE_INSTANCE_ID || "mail-001",
+    globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
+    globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
 
   validateProductionConfig(config);

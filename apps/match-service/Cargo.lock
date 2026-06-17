@@ -464,6 +464,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "global-id"
+version = "0.1.0"
+dependencies = [
+ "redis 0.32.7",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -866,8 +873,10 @@ dependencies = [
  "deadpool-redis",
  "dotenvy",
  "futures-core",
+ "global-id",
  "interprocess",
  "prost",
+ "redis 0.32.7",
  "serde",
  "serde_json",
  "service-registry",

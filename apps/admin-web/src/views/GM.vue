@@ -41,7 +41,7 @@
           </template>
           <el-form :model="sendItem" label-width="80px">
             <el-form-item label="玩家ID">
-              <el-input v-model="sendItem.playerId" placeholder="player-xxx" />
+              <el-input v-model="sendItem.playerId" placeholder="plr_..." />
             </el-form-item>
             <el-form-item label="道具ID">
               <el-input v-model="sendItem.itemId" placeholder="item-xxx" />
@@ -71,7 +71,7 @@
           </template>
           <el-form :model="kickPlayer" label-width="80px">
             <el-form-item label="玩家ID">
-              <el-input v-model="kickPlayer.playerId" placeholder="player-xxx" />
+              <el-input v-model="kickPlayer.playerId" placeholder="plr_..." />
             </el-form-item>
             <el-form-item label="原因">
               <el-input v-model="kickPlayer.reason" placeholder="原因（可选）" />
@@ -93,7 +93,7 @@
           </template>
           <el-form :model="banPlayer" label-width="80px">
             <el-form-item label="玩家ID">
-              <el-input v-model="banPlayer.playerId" placeholder="player-xxx" />
+              <el-input v-model="banPlayer.playerId" placeholder="plr_..." />
             </el-form-item>
             <el-form-item label="封禁时长">
               <el-input-number v-model="banPlayer.durationSeconds" :min="60" :max="31536000" />

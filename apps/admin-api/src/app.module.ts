@@ -18,6 +18,7 @@ import { AuditController } from "./audit/audit.controller.js";
 import { PlayersController } from "./players/players.controller.js";
 import { MaintenanceController } from "./maintenance/maintenance.controller.js";
 import { GmController } from "./gm/gm.controller.js";
+import { GlobalIdController } from "./global-id/global-id.controller.js";
 import { MonitoringController } from "./monitoring/monitoring.controller.js";
 import { MonitoringService } from "./monitoring/monitoring.service.js";
 import { HealthController } from "./health.controller.js";
@@ -44,6 +45,7 @@ import {
     PlayersController,
     MaintenanceController,
     GmController,
+    GlobalIdController,
     MonitoringController,
     HealthController
   ],

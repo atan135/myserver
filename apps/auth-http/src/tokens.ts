@@ -4,6 +4,7 @@ export const AUTH_NATS = Symbol("AUTH_NATS");
 export const AUTH_DB_POOL = Symbol("AUTH_DB_POOL");
 export const AUTH_DB_STORE = Symbol("AUTH_DB_STORE");
 export const AUTH_STORE = Symbol("AUTH_STORE");
+export const AUTH_GLOBAL_ID_LEASE = Symbol("AUTH_GLOBAL_ID_LEASE");
 export const AUTH_GAME_ADMIN_CLIENT = Symbol("AUTH_GAME_ADMIN_CLIENT");
 export const AUTH_RATE_LIMITER = Symbol("AUTH_RATE_LIMITER");
 export const AUTH_ACCOUNT_LOCKOUT = Symbol("AUTH_ACCOUNT_LOCKOUT");

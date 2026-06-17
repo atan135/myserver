@@ -29,6 +29,9 @@
             <el-menu-item v-if="authStore.hasAnyPermission(GM_MENU_PERMISSIONS)" index="/gm">
               <span>GM 命令</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasPermission(P.ID_READ)" index="/global-id">
+              <span>全局 ID</span>
+            </el-menu-item>
             <el-menu-item v-if="authStore.hasPermission(P.MONITORING_READ)" index="/monitoring">
               <span>服务监控</span>
             </el-menu-item>
@@ -63,6 +66,9 @@ const GM_MENU_PERMISSIONS = [
 const activeMenu = computed(() => {
   if (route.path.startsWith("/monitoring")) {
     return "/monitoring";
+  }
+  if (route.path.startsWith("/global-id")) {
+    return "/global-id";
   }
   return route.path;
 });

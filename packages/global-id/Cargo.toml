@@ -1,0 +1,10 @@
+[package]
+name = "global-id"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+redis = ["dep:redis"]
+
+[dependencies]
+redis = { version = "0.32", features = ["tokio-comp"], optional = true }

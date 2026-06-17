@@ -18,6 +18,7 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{
     PlayerRegistry, SharedRoomManager, SharedRuntimeConfig, ShutdownSignal,
 };
+use crate::core::global_id::ItemUidGenerator;
 use crate::core::inventory::Item;
 use crate::core::player::PlayerManager;
 use crate::core::runtime::room_manager::{
@@ -46,7 +47,6 @@ const GM_PLAYER_ID_MAX_LEN: usize = 128;
 const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
 const MAX_ADMIN_ACTOR_LEN: usize = 128;
 const DEFAULT_ADMIN_ACTOR: &str = "unknown";
-static ITEM_UID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct GmCommandRes {
@@ -225,6 +225,7 @@ pub async fn run_listener(
     player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    item_uid_generator: ItemUidGenerator,
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
@@ -238,6 +239,7 @@ pub async fn run_listener(
         let player_registry = player_registry.clone();
         let player_manager = player_manager.clone();
         let config_tables = config_tables.clone();
+        let item_uid_generator = item_uid_generator.clone();
         let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
         let audit_logger = audit_logger.clone();
@@ -252,6 +254,7 @@ pub async fn run_listener(
                 player_registry,
                 player_manager,
                 config_tables,
+                item_uid_generator,
                 owner_server_id,
                 admin_token,
                 audit_logger,
@@ -273,6 +276,7 @@ async fn handle_admin_connection(
     player_registry: PlayerRegistry,
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
+    item_uid_generator: ItemUidGenerator,
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
@@ -424,11 +428,29 @@ async fn handle_admin_connection(
                     .await?;
                     continue;
                 }
-                let items = request
+                let items = match request
                     .items
                     .iter()
-                    .map(grant_item_to_inventory_item)
-                    .collect::<Vec<_>>();
+                    .map(|item| grant_item_to_inventory_item(item, &item_uid_generator))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(items) => items,
+                    Err(error) => {
+                        warn!(error = %error, "failed to generate global item uid for GM grant");
+                        audit_then_write_error(
+                            &mut writer,
+                            &audit_logger,
+                            &auth_context,
+                            &packet,
+                            action,
+                            "GLOBAL_ID_GENERATE_FAILED",
+                            "failed to generate item uid",
+                            &target,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
 
                 let result = player_manager
                     .grant_items_with_request(
@@ -1909,31 +1931,16 @@ fn parse_item_id_value(value: serde_json::Value) -> Result<i32, Box<dyn std::err
     }
 }
 
-fn grant_item_to_inventory_item(item: &GrantItem) -> Item {
-    Item {
-        uid: next_item_uid(),
+fn grant_item_to_inventory_item(
+    item: &GrantItem,
+    item_uid_generator: &ItemUidGenerator,
+) -> std::io::Result<Item> {
+    Ok(Item {
+        uid: item_uid_generator.next()?,
         item_id: item.item_id,
         count: item.count,
         binded: item.binded,
-    }
-}
-
-fn next_item_uid() -> u64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos() as u64)
-        .unwrap_or(0);
-
-    loop {
-        let previous = ITEM_UID_COUNTER.load(Ordering::Relaxed);
-        let next = now.max(previous.saturating_add(1));
-        if ITEM_UID_COUNTER
-            .compare_exchange(previous, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return next;
-        }
-    }
+    })
 }
 
 fn current_unix_ms() -> i64 {
@@ -2654,6 +2661,7 @@ mod tests {
                     PlayerRegistry::default(),
                     PlayerManager::new(PgPlayerStore::new_disabled()),
                     config_tables,
+                    ItemUidGenerator::new_for_test(1),
                     "game-server-test".to_string(),
                     "secret-admin-token".to_string(),
                     AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),

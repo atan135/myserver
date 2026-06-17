@@ -28,6 +28,8 @@ pub struct Config {
     pub log_dir: String,
     pub redis_url: String,
     pub redis_key_prefix: String,
+    pub global_id_origin_id: u64,
+    pub global_id_worker_id: Option<u64>,
     pub nats_url: String,
     pub db_enabled: bool,
     pub database_url: String,
@@ -61,6 +63,15 @@ fn parse_bool(name: &str, default: bool) -> bool {
 
 fn parse_u64(name: &str, default: u64) -> u64 {
     parse_u64_value(env::var(name).ok(), default)
+}
+
+fn parse_optional_u64(name: &str) -> Option<u64> {
+    let raw = env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
 }
 
 fn parse_u64_value(value: Option<String>, default: u64) -> u64 {
@@ -127,6 +138,8 @@ impl Config {
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let redis_key_prefix = env::var("REDIS_KEY_PREFIX").unwrap_or_default();
+        let global_id_origin_id = parse_u64("GLOBAL_ID_ORIGIN_ID", 0);
+        let global_id_worker_id = parse_optional_u64("GLOBAL_ID_WORKER_ID");
         let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
         let db_enabled = parse_bool("DB_ENABLED", false);
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -187,6 +200,8 @@ impl Config {
             log_dir,
             redis_url,
             redis_key_prefix,
+            global_id_origin_id,
+            global_id_worker_id,
             nats_url,
             db_enabled,
             database_url,
@@ -267,6 +282,17 @@ fn validate_production_config(config: &Config) {
         errors.push("DB_ENABLED must be true in production");
     }
 
+    if config.global_id_origin_id == 0 || config.global_id_origin_id > 1023 {
+        errors.push("GLOBAL_ID_ORIGIN_ID must be set to 1-1023 in production");
+    }
+
+    if config
+        .global_id_worker_id
+        .is_some_and(|worker_id| worker_id > 63)
+    {
+        errors.push("GLOBAL_ID_WORKER_ID must be set to 0-63 in production");
+    }
+
     if !errors.is_empty() {
         panic!(
             "invalid game-server production config: {}",
@@ -335,9 +361,18 @@ mod tests {
         "GAME_ADMIN_AUDIT_PATH",
         "GAME_ADMIN_AUDIT_REQUIRE_ACTOR",
         "GAME_INTERNAL_TOKEN",
+        "DB_ENABLED",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
     ];
 
-    const OUTBOUND_QUEUE_ENV_NAMES: &[&str] = &["NODE_ENV", "APP_ENV", "OUTBOUND_QUEUE_CAPACITY"];
+    const OUTBOUND_QUEUE_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "OUTBOUND_QUEUE_CAPACITY",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
+    ];
 
     fn clear_production_env() {
         unsafe {
@@ -351,6 +386,14 @@ mod tests {
             env::set_var("TICKET_SECRET", "prod-ticket-secret-123");
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
+        }
+    }
+
+    fn set_valid_production_infra() {
+        unsafe {
+            env::set_var("DB_ENABLED", "true");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
+            env::set_var("GLOBAL_ID_WORKER_ID", "1");
         }
     }
 
@@ -443,6 +486,33 @@ mod tests {
     }
 
     #[test]
+    fn global_id_config_defaults_and_accepts_env_overrides() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(OUTBOUND_QUEUE_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("GLOBAL_ID_ORIGIN_ID");
+            env::remove_var("GLOBAL_ID_WORKER_ID");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.global_id_origin_id, 0);
+        assert_eq!(config.global_id_worker_id, None);
+
+        unsafe {
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "7");
+            env::set_var("GLOBAL_ID_WORKER_ID", "3");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.global_id_origin_id, 7);
+        assert_eq!(config.global_id_worker_id, Some(3));
+    }
+
+    #[test]
     fn rejects_default_ticket_secret_in_production() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
@@ -454,6 +524,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -473,6 +544,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -491,6 +563,7 @@ mod tests {
             env::remove_var("GAME_ADMIN_TOKEN");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -509,6 +582,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -527,6 +601,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::remove_var("GAME_INTERNAL_TOKEN");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -545,6 +620,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::set_var("GAME_INTERNAL_TOKEN", "");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -564,6 +640,7 @@ mod tests {
         unsafe {
             env::set_var("GAME_ADMIN_AUDIT_ENABLED", "true");
         }
+        set_valid_production_infra();
 
         let config = Config::from_env();
 
@@ -584,6 +661,7 @@ mod tests {
             env::set_var("GAME_ADMIN_TOKEN", "prod-game-admin-token-123");
             env::set_var("GAME_INTERNAL_TOKEN", "prod-game-internal-token-123");
         }
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -661,6 +739,7 @@ mod tests {
             env::set_var("GAME_ADMIN_AUDIT_ENABLED", "false");
         }
         set_custom_production_tokens();
+        set_valid_production_infra();
 
         let error = panic_message(catch_config_from_env());
 
@@ -670,17 +749,39 @@ mod tests {
     #[test]
     fn rejects_disabled_database_in_production() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["NODE_ENV", "APP_ENV", "DB_ENABLED"]);
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
 
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
             env::set_var("DB_ENABLED", "false");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
+            env::set_var("GLOBAL_ID_WORKER_ID", "1");
         }
         set_custom_production_tokens();
 
         let error = panic_message(catch_config_from_env());
 
         assert!(error.contains("DB_ENABLED"));
+    }
+
+    #[test]
+    fn rejects_invalid_global_id_config_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("DB_ENABLED", "true");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "0");
+            env::set_var("GLOBAL_ID_WORKER_ID", "64");
+        }
+        set_custom_production_tokens();
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GLOBAL_ID_ORIGIN_ID"));
+        assert!(error.contains("GLOBAL_ID_WORKER_ID"));
     }
 }

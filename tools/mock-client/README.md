@@ -202,6 +202,10 @@ Protobuf 风格的编解码工具：
 
 ## 使用方法
 
+### ID 格式
+
+当前服务端使用全局唯一 ID 机制。登录返回的玩家 ID 为 `plr_<base32>`；邮件、公告、聊天消息和聊天群分别使用 `mail_`、`ann_`、`msg_`、`grp_` 前缀；物品实例 `uid` 为可解码的 `uint64` 数字 ID。
+
 ### 基础用法
 
 ```bash
@@ -245,7 +249,7 @@ node tools/mock-client/src/index.js --scenario combat-dual-client \
 # 聊天测试
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
-  --chat-port 9001 --target-id <目标ID> --content "Hello!"
+  --chat-port 9001 --target-id <plr_...> --content "Hello!"
 
 # 邮件测试
 node tools/mock-client/src/index.js --scenario mail-send \
@@ -312,7 +316,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--move-frames` | movement-demo 发包帧列表，逗号分隔 | `1,2,3,4,5` |
 | `--combat-skill-id` | `combat-dual-client` 使用的技能 ID，默认 `2`(fireball) | `2` |
 | `--content` | 聊天消息内容 | `Hello from mock-client!` |
-| `--mail-id` | 邮件 ID（mail-get / mail-read / mail-claim） | 空 |
+| `--mail-id` | 邮件 ID（mail-get / mail-read / mail-claim），格式为 `mail_<base32>` | 空 |
 | `--mail-player-id` | 邮件所属玩家 ID（mail-list / mail-read / mail-claim） | 空 |
 | `--mail-to-player-id` | 邮件接收方玩家 ID（mail-send） | 空 |
 | `--mail-status` | 邮件状态筛选，如 `unread` / `read` | 空 |
@@ -328,7 +332,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--created-by-name` | 实际触发者展示名 | `mock-client` |
 | `--attachments-json` | 邮件附件 JSON；PowerShell 建议用单引号包裹 | 空 |
 | `--mail-watch-seconds` | `mail-send-and-notify` 等待通知秒数 | `15` |
-| `--announce-id` | 公告 ID（`announce-get` / `announce-update` / `announce-delete`） | 空 |
+| `--announce-id` | 公告 ID（`announce-get` / `announce-update` / `announce-delete`），格式为 `ann_<base32>` | 空 |
 | `--announce-locale` | 公告语言，如 `default` / `zh-CN` | 空 |
 | `--announce-priority` | 公告最小优先级筛选，或创建/更新时的优先级 | 空 |
 | `--announce-type` | 公告类型，如 `banner` / `popup` | 空 |
@@ -349,8 +353,8 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--warehouse-action` | 仓库操作: deposit/withdraw | `deposit` |
 | `--deposit-uid` | 存入仓库物品UID | - |
 | `--deposit-count` | 存入仓库物品数量 | - |
-| `--target-id` | 私聊目标玩家ID | - |
-| `--group-id` | 群组ID | - |
+| `--target-id` | 私聊目标玩家 ID，格式为 `plr_<base32>` | - |
+| `--group-id` | 群组 ID，格式为 `grp_<base32>` | - |
 | `--group-name` | 群组名称 | - |
 
 ### 邮件测试示例
@@ -382,7 +386,7 @@ node tools/mock-client/src/index.js --scenario mail-read \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
   --login-name test001 --password Passw0rd! \
-  --mail-id <mail_id>
+  --mail-id <mail_...>
 ```
 
 ### 公告测试示例
@@ -411,13 +415,13 @@ node tools/mock-client/src/index.js --scenario announce-create \
 # 查询单条公告
 node tools/mock-client/src/index.js --scenario announce-get \
   --announce-base-url http://127.0.0.1:9004 \
-  --announce-id <announce_id>
+  --announce-id <ann_...>
 
 # 更新公告标题或时间窗口
 node tools/mock-client/src/index.js --scenario announce-update \
   --announce-base-url http://127.0.0.1:9004 \
   --announce-admin-token dev-only-change-this-announce-admin-token \
-  --announce-id <announce_id> \
+  --announce-id <ann_...> \
   --announce-title "维护时间调整" \
   --announce-end-time 2026-04-17T20:00:00+08:00
 
@@ -425,7 +429,7 @@ node tools/mock-client/src/index.js --scenario announce-update \
 node tools/mock-client/src/index.js --scenario announce-delete \
   --announce-base-url http://127.0.0.1:9004 \
   --announce-admin-token dev-only-change-this-announce-admin-token \
-  --announce-id <announce_id>
+  --announce-id <ann_...>
 ```
 
 ### 双客户端测试

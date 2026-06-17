@@ -1,7 +1,7 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
 
 import { badGateway, badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
+import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
 import { MAIL_GAME_ADMIN_CLIENT, MAIL_PUBSUB_CLIENT, MAIL_STORE } from "../tokens.js";
 
@@ -249,7 +249,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       }
 
       const mail = {
-        mail_id: uuidv4(),
+        mail_id: generateMailId(),
         sender_type: sender.senderType,
         sender_id: sender.senderId,
         sender_name: sender.senderName,

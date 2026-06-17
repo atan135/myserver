@@ -31,7 +31,7 @@ export class AuthController {
 
   @Get("me")
   @ApiOperation({ summary: "Get current player session" })
-  @ApiOkResponse({ schema: { example: { ok: true, playerId: "player-001", guestId: null, loginName: "test001", createdAt: "2026-05-28T12:00:00.000Z" } } })
+  @ApiOkResponse({ schema: { example: { ok: true, playerId: "plr_1j7qv8m4x2", guestId: null, loginName: "test001", createdAt: "2026-05-28T12:00:00.000Z" } } })
   me(@Req() req: any) {
     return this.authService.me(req);
   }

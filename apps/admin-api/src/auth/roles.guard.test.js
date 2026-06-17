@@ -68,15 +68,20 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
     "security.read",
     "players.read",
     "maintenance.read",
-    "monitoring.read"
+    "monitoring.read",
+    "id.read"
   ]);
 
   assert.equal(roleHasPermission("viewer", "players.read"), true);
+  assert.equal(roleHasPermission("viewer", "id.read"), true);
   assert.equal(roleHasPermission("viewer", "gm.kick_player"), false);
   assert.equal(roleHasPermission("operator", "players.status.update"), true);
   assert.equal(roleHasPermission("operator", "gm.kick_player"), true);
   assert.equal(roleHasPermission("operator", "gm.ban_player"), false);
+  assert.equal(roleHasPermission("operator", "id.read"), true);
+  assert.equal(roleHasPermission("operator", "id.manage"), false);
   assert.equal(roleHasPermission("operator", "maintenance.write"), false);
+  assert.equal(roleHasPermission("admin", "id.manage"), true);
   assert.equal(roleHasPermission("admin", "admins.reset_password"), true);
   assert.equal(roleHasPermission("super_admin", "monitoring.archive"), true);
   assert.equal(roleHasPermission("unknown", "players.read"), false);

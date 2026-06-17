@@ -375,13 +375,8 @@ pub async fn handle_item_add(
         return Ok(());
     }
 
-    // 创建物品实例（使用时间戳生成唯一UID）
-    let uid = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
     let item = crate::core::inventory::Item {
-        uid,
+        uid: services.item_uid_generator.next()?,
         item_id: request.item_id,
         count: request.count,
         binded: request.binded,

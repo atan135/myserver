@@ -50,7 +50,10 @@ export async function runChatPrivate(options) {
   const client = await connectToChatServer(options);
   await authenticateChatClient(client, options, login, 1);
 
-  const targetId = options.targetId || "target-player-id";
+  if (!options.targetId) {
+    throw new Error("chat-private requires --target-id <plr_...>");
+  }
+  const targetId = options.targetId;
   await client.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, 2, encodeChatPrivateReq(targetId, options.content));
   const res = printResponse("chat.privateRes", await client.readNextPacket(options.timeoutMs));
   if (!res.ok) {
@@ -71,7 +74,10 @@ export async function runChatGroup(options) {
   const client = await connectToChatServer(options);
   await authenticateChatClient(client, options, login, 1);
 
-  const groupId = options.groupId || "grp_test";
+  if (!options.groupId) {
+    throw new Error("chat-group requires --group-id <grp_...>");
+  }
+  const groupId = options.groupId;
   await client.send(MESSAGE_TYPE.CHAT_GROUP_REQ, 2, encodeChatGroupReq(groupId, options.content));
   const res = printResponse("chat.groupRes", await client.readNextPacket(options.timeoutMs));
   if (!res.ok) {

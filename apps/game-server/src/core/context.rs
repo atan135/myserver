@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::Config;
 use crate::core::config_table::ConfigTableRuntime;
+use crate::core::global_id::ItemUidGenerator;
 use crate::core::player::PlayerManager;
 use crate::core::room::{
     ConnectionCloseState, OutboundChannel, OutboundMessage, OutboundQueueLogContext,
@@ -42,6 +43,7 @@ pub struct ServiceContext {
     pub runtime_config: SharedRuntimeConfig,
     pub connection_count: Arc<AtomicU64>,
     pub config_tables: ConfigTableRuntime,
+    pub item_uid_generator: ItemUidGenerator,
     pub player_manager: PlayerManager,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,

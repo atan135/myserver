@@ -86,4 +86,15 @@ export const monitoringApi = {
     api.post("/archive", undefined, { baseURL: "/api/admin/monitoring" })
 };
 
+export const globalIdApi = {
+  decode: (id) =>
+    api.get("/global-id/decode", { params: { id } }),
+  getOrigins: (params) =>
+    api.get("/global-id/origins", { params }),
+  getWorlds: (params) =>
+    api.get("/global-id/worlds", { params }),
+  getMergeEvents: (params) =>
+    api.get("/global-id/merge-events", { params })
+};
+
 export default api;

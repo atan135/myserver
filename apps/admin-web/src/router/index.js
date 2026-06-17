@@ -58,6 +58,12 @@ const routes = [
     name: "MonitoringDetail",
     component: () => import("../views/admin/MonitoringDetail.vue"),
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.MONITORING_READ }
+  },
+  {
+    path: "/global-id",
+    name: "GlobalId",
+    component: () => import("../views/GlobalId.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.ID_READ }
   }
 ];
 

@@ -29,7 +29,7 @@ export class LoginResponseDto {
   @ApiProperty({ example: true })
   ok: boolean;
 
-  @ApiProperty({ example: "player-4e2fe4d6-5f8e-49e7-96cf-47d52efc3264" })
+  @ApiProperty({ example: "plr_1j7qv8m4x2" })
   playerId: string;
 
   @ApiProperty({ example: "guest-device-001", nullable: true })
@@ -41,7 +41,7 @@ export class LoginResponseDto {
   @ApiProperty({ example: "a3f01b8f9e8a46ad930b7ff9b91b6c2e" })
   accessToken: string;
 
-  @ApiProperty({ example: "eyJwbGF5ZXJJZCI6InBsYXllci0xIn0.signature" })
+  @ApiProperty({ example: "eyJwbGF5ZXJJZCI6InBscl8xajdxdjhtNHgyIn0.signature" })
   ticket: string;
 
   @ApiProperty({ example: "2026-05-28T12:00:00.000Z" })

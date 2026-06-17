@@ -20,6 +20,9 @@ pub struct Config {
     pub log_enable_file: bool,
     pub log_dir: String,
     pub redis_url: String,
+    pub redis_key_prefix: String,
+    pub global_id_origin_id: u64,
+    pub global_id_worker_id: Option<u64>,
     pub nats_url: String,
     pub registry_enabled: bool,
     pub registry_url: String,
@@ -72,7 +75,7 @@ impl Config {
         let game_server_local_socket_name = std::env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
-        Self {
+        let config = Self {
             bind_addr,
             public_host: std::env::var("MATCH_PUBLIC_HOST")
                 .unwrap_or_else(|_| "127.0.0.1".to_string()),
@@ -109,6 +112,9 @@ impl Config {
             log_dir: std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string()),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            redis_key_prefix: std::env::var("REDIS_KEY_PREFIX").unwrap_or_default(),
+            global_id_origin_id: parse_u64_env("GLOBAL_ID_ORIGIN_ID", 0),
+            global_id_worker_id: parse_optional_u64_env("GLOBAL_ID_WORKER_ID"),
             nats_url: std::env::var("NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
@@ -136,7 +142,10 @@ impl Config {
             match_recovery_enabled: std::env::var("MATCH_RECOVERY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(true),
-        }
+        };
+
+        validate_production_config(&config);
+        config
     }
 
     pub fn get_mode(&self, mode: &str) -> Option<&ModeConfig> {
@@ -171,4 +180,185 @@ fn derive_internal_socket_name(local_socket_name: &str) -> String {
     }
 
     format!("{local_socket_name}-internal")
+}
+
+fn parse_u64_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_optional_u64_env(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| value.parse().ok())
+}
+
+fn is_production_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+    })
+}
+
+fn validate_production_config(config: &Config) {
+    if !is_production_env() {
+        return;
+    }
+
+    if config.global_id_origin_id == 0 || config.global_id_origin_id > 1023 {
+        panic!(
+            "invalid match-service production config: GLOBAL_ID_ORIGIN_ID must be set to 1-1023 in production"
+        );
+    }
+
+    if config
+        .global_id_worker_id
+        .is_some_and(|worker_id| worker_id > 63)
+    {
+        panic!(
+            "invalid match-service production config: GLOBAL_ID_WORKER_ID must be set to 0-63 in production"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::{Mutex, OnceLock};
+
+    use super::*;
+
+    const GLOBAL_ID_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
+    ];
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn catch_config_from_env() -> Result<Config, Box<dyn std::any::Any + Send>> {
+        panic::catch_unwind(AssertUnwindSafe(Config::from_env))
+    }
+
+    fn panic_message(result: Result<Config, Box<dyn std::any::Any + Send>>) -> String {
+        match result {
+            Ok(_) => panic!("production config should be rejected"),
+            Err(payload) => {
+                if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else if let Some(message) = payload.downcast_ref::<&str>() {
+                    message.to_string()
+                } else {
+                    panic!("panic payload should be a string");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_id_config_defaults_to_local_origin_without_explicit_worker() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::remove_var("GLOBAL_ID_ORIGIN_ID");
+            env::remove_var("GLOBAL_ID_WORKER_ID");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.global_id_origin_id, 0);
+        assert_eq!(config.global_id_worker_id, None);
+    }
+
+    #[test]
+    fn global_id_config_accepts_explicit_worker() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "7");
+            env::set_var("GLOBAL_ID_WORKER_ID", "6");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.global_id_origin_id, 7);
+        assert_eq!(config.global_id_worker_id, Some(6));
+    }
+
+    #[test]
+    fn rejects_zero_origin_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "0");
+            env::set_var("GLOBAL_ID_WORKER_ID", "6");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GLOBAL_ID_ORIGIN_ID"));
+    }
+
+    #[test]
+    fn rejects_invalid_worker_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(GLOBAL_ID_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
+            env::set_var("GLOBAL_ID_WORKER_ID", "64");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("GLOBAL_ID_WORKER_ID"));
+    }
 }

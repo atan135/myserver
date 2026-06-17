@@ -55,7 +55,7 @@ export class MailsController {
 
   @Post()
   @ApiOperation({ summary: "Send mail" })
-  @ApiCreatedResponse({ schema: { example: { ok: true, mail_id: "mail-001" } } })
+  @ApiCreatedResponse({ schema: { example: { ok: true, mail_id: "mail_1j7qv8m4x2" } } })
   create(@Headers() headers: any, @Body() body: any) {
     this.authenticateService(headers);
     return this.mailsService.create(body);

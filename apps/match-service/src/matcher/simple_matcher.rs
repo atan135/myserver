@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use global_id::GlobalIdGenerator;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
@@ -27,6 +28,7 @@ pub struct SimpleMatcher {
     config: Config,
     runtime_store: SharedMatchRuntimeStore,
     auto_create_rooms: bool,
+    room_id_generator: Arc<GlobalIdGenerator>,
 }
 
 impl SimpleMatcher {
@@ -35,6 +37,18 @@ impl SimpleMatcher {
     }
 
     pub fn with_runtime_store(config: Config, runtime_store: SharedMatchRuntimeStore) -> Self {
+        Self::with_runtime_store_and_room_id_generator(
+            config,
+            runtime_store,
+            Arc::new(GlobalIdGenerator::new(0, 0).expect("test room id generator config")),
+        )
+    }
+
+    pub fn with_runtime_store_and_room_id_generator(
+        config: Config,
+        runtime_store: SharedMatchRuntimeStore,
+        room_id_generator: Arc<GlobalIdGenerator>,
+    ) -> Self {
         let player_state = new_player_state_store_with_runtime_store(runtime_store.clone());
         let pool = new_match_pool_with_modes_and_runtime_store(
             player_state.clone(),
@@ -50,6 +64,7 @@ impl SimpleMatcher {
             config,
             runtime_store,
             auto_create_rooms: true,
+            room_id_generator,
         }
     }
 
@@ -507,7 +522,10 @@ impl SimpleMatcher {
             return Ok(());
         }
 
-        let expected_room_id = format!("room_{}", uuid::Uuid::new_v4());
+        let expected_room_id = self
+            .room_id_generator
+            .generate_string("room")
+            .map_err(|error| MatchError::Internal(error.to_string()))?;
         let room_id = match self
             .game_server_client
             .create_matched_room(match_id, &expected_room_id, player_ids, mode)
@@ -962,15 +980,27 @@ fn lease_renew_interval(ttl: Duration) -> Duration {
     Duration::from_millis(renew_ms)
 }
 
-pub fn new_simple_matcher(config: Config) -> SharedSimpleMatcher {
-    Arc::new(SimpleMatcher::new(config))
+pub fn new_simple_matcher(
+    config: Config,
+    room_id_generator: Arc<GlobalIdGenerator>,
+) -> SharedSimpleMatcher {
+    Arc::new(SimpleMatcher::with_runtime_store_and_room_id_generator(
+        config,
+        new_memory_match_runtime_store(),
+        room_id_generator,
+    ))
 }
 
 pub fn new_simple_matcher_with_runtime_store(
     config: Config,
     runtime_store: SharedMatchRuntimeStore,
+    room_id_generator: Arc<GlobalIdGenerator>,
 ) -> SharedSimpleMatcher {
-    Arc::new(SimpleMatcher::with_runtime_store(config, runtime_store))
+    Arc::new(SimpleMatcher::with_runtime_store_and_room_id_generator(
+        config,
+        runtime_store,
+        room_id_generator,
+    ))
 }
 
 #[cfg(test)]

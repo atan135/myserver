@@ -22,8 +22,8 @@
 # ========== 邮件参数 ==========
 
 # --mail-id <id>                 邮件ID（mail-get / mail-read / mail-claim 必填）
-# --mail-player-id <player_id>   收件人玩家ID（mail-list / mail-read / mail-claim）
-# --mail-to-player-id <player_id> 邮件接收方玩家ID（mail-send）
+# --mail-player-id <plr_...>     收件人玩家ID（mail-list / mail-read / mail-claim）
+# --mail-to-player-id <plr_...>  邮件接收方玩家ID（mail-send）
 # --mail-status <status>         邮件状态筛选，例如 unread / read
 # --mail-offset <n>              邮件列表偏移量（默认 0）
 # --mail-title <text>            邮件标题
@@ -180,7 +180,7 @@ node tools/mock-client/src/index.js --scenario create-matched-room --http-base-u
 
 # 16. 创建匹配房间(指定多个玩家) (CREATE_MATCHED_ROOM_MULTI)
 # --player-ids 会与当前登录玩家合并，确保请求者一定在列表中
-node tools/mock-client/src/index.js --scenario create-matched-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --player-ids test002,test003 --mode 3v3
+node tools/mock-client/src/index.js --scenario create-matched-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --login-name test001 --password Passw0rd! --player-ids plr_...,plr_... --mode 3v3
 
 # 17. 创建匹配房间并让所有玩家加入 (CREATE_MATCHED_ROOM_AND_JOIN)
 # 完整流程：创建匹配房间 -> 所有玩家 JOIN_ROOM -> 触发 player_joined 回调到 MatchService
@@ -195,28 +195,28 @@ node tools/mock-client/src/index.js --scenario create-matched-room-and-join --ht
 # ========== 聊天系统测试 (通过 --chat-port 9001) ==========
 
 # 13. 私聊消息 (CHAT_PRIVATE)
-node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <目标玩家ID> --content "Hello!"
+node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello!"
 
 # 14. 群聊消息 (CHAT_GROUP)
-node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID> --content "Hello group!"
+node tools/mock-client/src/index.js --scenario chat-group --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...> --content "Hello group!"
 
 # 15. 创建群组 (GROUP_CREATE)
 node tools/mock-client/src/index.js --scenario group-create --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-name "My Group"
 
 # 16. 加入群组 (GROUP_JOIN)
-node tools/mock-client/src/index.js --scenario group-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+node tools/mock-client/src/index.js --scenario group-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...>
 
 # 17. 离开群组 (GROUP_LEAVE)
-node tools/mock-client/src/index.js --scenario group-leave --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+node tools/mock-client/src/index.js --scenario group-leave --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...>
 
 # 18. 解散群组 (GROUP_DISMISS)
-node tools/mock-client/src/index.js --scenario group-dismiss --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <群组ID>
+node tools/mock-client/src/index.js --scenario group-dismiss --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --group-id <grp_...>
 
 # 19. 获取群组列表 (GROUP_LIST)
 node tools/mock-client/src/index.js --scenario group-list --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd!
 
 # 20. 查询聊天历史 (CHAT_HISTORY)
-node tools/mock-client/src/index.js --scenario chat-history --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <目标玩家ID> --limit 20
+node tools/mock-client/src/index.js --scenario chat-history --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <plr_...> --limit 20
 
 # 21. 双客户端群聊测试 (CHAT_TWO_CLIENT)
 # 创建群 -> 加入群 -> 发送消息 -> 接收推送
@@ -243,14 +243,14 @@ node tools/mock-client/src/index.js --scenario mail-send --http-base-url http://
 node tools/mock-client/src/index.js --scenario mail-list --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-status unread --limit 10
 
 # 查询邮件详情 (MAIL_GET)
-node tools/mock-client/src/index.js --scenario mail-get --mail-base-url http://127.0.0.1:9003 --mail-id <mail_id>
+node tools/mock-client/src/index.js --scenario mail-get --mail-base-url http://127.0.0.1:9003 --mail-id <mail_...>
 
 # 标记邮件已读 (MAIL_READ)
-node tools/mock-client/src/index.js --scenario mail-read --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_id>
+node tools/mock-client/src/index.js --scenario mail-read --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_...>
 
 # 领取邮件附件 (MAIL_CLAIM)
 # 若同一封邮件重复领取，服务端会返回幂等结果
-node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_id>
+node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --login-name test001 --password Passw0rd! --mail-id <mail_...>
 
 # 发送邮件并等待聊天服推送 MAIL_NOTIFY_PUSH (MAIL_SEND_AND_NOTIFY)
 node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
@@ -266,14 +266,14 @@ node tools/mock-client/src/index.js --scenario announce-list --announce-base-url
 node tools/mock-client/src/index.js --scenario announce-create --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-title "系统公告" --announce-content "今晚 20:00 维护" --announce-type popup --announce-priority 20 --announce-duration-seconds 3600
 
 # 查询公告详情 (ANNOUNCE_GET)
-node tools/mock-client/src/index.js --scenario announce-get --announce-base-url http://127.0.0.1:9004 --announce-id <announce_id>
+node tools/mock-client/src/index.js --scenario announce-get --announce-base-url http://127.0.0.1:9004 --announce-id <ann_...>
 
 # 更新公告 (ANNOUNCE_UPDATE)
 # 至少传一个更新字段，例如标题、正文、优先级、时间窗口
-node tools/mock-client/src/index.js --scenario announce-update --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <announce_id> --announce-title "维护时间调整" --announce-end-time 2026-04-17T20:00:00+08:00
+node tools/mock-client/src/index.js --scenario announce-update --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <ann_...> --announce-title "维护时间调整" --announce-end-time 2026-04-17T20:00:00+08:00
 
 # 删除公告 (ANNOUNCE_DELETE)
-node tools/mock-client/src/index.js --scenario announce-delete --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <announce_id>
+node tools/mock-client/src/index.js --scenario announce-delete --announce-base-url http://127.0.0.1:9004 --announce-admin-token dev-only-change-this-announce-admin-token --announce-id <ann_...>
 
 # ========== 移动同步交互测试 ==========
 
@@ -437,9 +437,9 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 #
 # --- RECEIVING FRAME BUNDLES ---
 # [clientA]: frameId=1, fps=10, inputs=1
-#   └─ [player-xxx] move: {"x":10,"y":5,"action":"tick-1"}
+#   └─ [plr_...] move: {"x":10,"y":5,"action":"tick-1"}
 # [clientA]: frameId=2, fps=10, inputs=1
-#   └─ [player-xxx] move: {"x":20,"y":10,"action":"tick-2"}
+#   └─ [plr_...] move: {"x":20,"y":10,"action":"tick-2"}
 # [clientA]: frameId=30, fps=10, SILENT [SNAPSHOT: frame=30, state=in_game, members=2]
 #
 # 关键字段说明：

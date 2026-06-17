@@ -4,10 +4,12 @@
  *   node test-mail.js                           # 运行所有测试
  *   node test-mail.js --send-system             # 发送系统邮件
  *   node test-mail.js --send-player            # 发送玩家邮件
- *   node test-mail.js --list <player_id>      # 查看玩家邮件
+ *   node test-mail.js --list <plr_...>       # 查看玩家邮件
  */
 
 const MAIL_SERVICE_URL = "http://127.0.0.1:9003";
+const TEST_PLAYER_A = "plr_1nt8s3a00020";
+const TEST_PLAYER_B = "plr_1nt8s3a00021";
 
 async function sendMail(mail) {
   const response = await fetch(`${MAIL_SERVICE_URL}/api/v1/mails`, {
@@ -63,7 +65,7 @@ async function claimAttachments(mailId, playerId) {
 async function testSendSystemMail() {
   console.log("\n=== 测试: 发送系统邮件 ===");
   const result = await sendMail({
-    to_player_id: "player_001",
+    to_player_id: TEST_PLAYER_A,
     sender_type: "system",
     sender_id: "system",
     sender_name: "系统",
@@ -81,10 +83,10 @@ async function testSendSystemMail() {
 async function testSendPlayerMail() {
   console.log("\n=== 测试: 玩家之间发送邮件 ===");
   const result = await sendMail({
-    to_player_id: "player_002",
+    to_player_id: TEST_PLAYER_B,
     sender_type: "player",
-    sender_id: "player_001",
-    sender_name: "player_001",
+    sender_id: TEST_PLAYER_A,
+    sender_name: TEST_PLAYER_A,
     title: "好友邀请",
     content: "一起来打副本吧！",
     mail_type: "player"
@@ -93,19 +95,19 @@ async function testSendPlayerMail() {
 }
 
 async function testGetMails() {
-  console.log("\n=== 测试: 获取 player_001 的邮件列表 ===");
-  await getMails("player_001");
+  console.log(`\n=== 测试: 获取 ${TEST_PLAYER_A} 的邮件列表 ===`);
+  await getMails(TEST_PLAYER_A);
 
-  console.log("\n=== 测试: 获取 player_001 的未读邮件 ===");
-  await getMails("player_001", "unread");
+  console.log(`\n=== 测试: 获取 ${TEST_PLAYER_A} 的未读邮件 ===`);
+  await getMails(TEST_PLAYER_A, "unread");
 
-  console.log("\n=== 测试: 获取 player_002 的邮件列表 ===");
-  await getMails("player_002");
+  console.log(`\n=== 测试: 获取 ${TEST_PLAYER_B} 的邮件列表 ===`);
+  await getMails(TEST_PLAYER_B);
 }
 
 async function testGetMailDetail() {
   // 先获取一封邮件的 ID
-  const mails = await getMails("player_001");
+  const mails = await getMails(TEST_PLAYER_A);
   if (mails.ok && mails.mails && mails.mails.length > 0) {
     const mailId = mails.mails[0].mail_id;
     console.log("\n=== 测试: 获取邮件详情 ===");
@@ -116,18 +118,18 @@ async function testGetMailDetail() {
 }
 
 async function testMarkAsRead() {
-  const mails = await getMails("player_001", "unread");
+  const mails = await getMails(TEST_PLAYER_A, "unread");
   if (mails.ok && mails.mails && mails.mails.length > 0) {
     const mailId = mails.mails[0].mail_id;
     console.log("\n=== 测试: 标记邮件已读 ===");
-    await markAsRead(mailId, "player_001");
+    await markAsRead(mailId, TEST_PLAYER_A);
   } else {
     console.log("\n[SKIP] 没有未读邮件可测试");
   }
 }
 
 async function testClaimAttachments() {
-  const mails = await getMails("player_001");
+  const mails = await getMails(TEST_PLAYER_A);
   if (mails.ok && mails.mails && mails.mails.length > 0) {
     const mailWithAttachments = mails.mails.find((mail) => Array.isArray(mail.attachments) && mail.attachments.length > 0);
     if (!mailWithAttachments) {
@@ -136,7 +138,7 @@ async function testClaimAttachments() {
     }
 
     console.log("\n=== 测试: 领取邮件附件 ===");
-    await claimAttachments(mailWithAttachments.mail_id, "player_001");
+    await claimAttachments(mailWithAttachments.mail_id, TEST_PLAYER_A);
   } else {
     console.log("\n[SKIP] 没有邮件可测试附件领取");
   }
@@ -186,7 +188,7 @@ async function main() {
     console.log("  node test-mail.js --all              # 运行所有测试");
     console.log("  node test-mail.js --send-system      # 发送系统邮件");
     console.log("  node test-mail.js --send-player     # 发送玩家邮件");
-    console.log("  node test-mail.js --list <player_id>  # 查看玩家邮件");
+    console.log("  node test-mail.js --list <plr_...>  # 查看玩家邮件");
   }
 }
 

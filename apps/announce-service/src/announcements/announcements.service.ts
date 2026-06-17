@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
 
 import { badRequest, notFound } from "../common/http-exception.js";
+import { generateAnnouncementId } from "../global-id.js";
 import { log } from "../logger.js";
 import { ANNOUNCE_CONFIG, ANNOUNCE_REDIS, ANNOUNCE_STORE } from "../tokens.js";
 
@@ -126,7 +126,7 @@ function normalizeCreatePayload(body: any = {}) {
   const priority = parseOptionalInteger(body.priority, "priority") ?? 0;
 
   return {
-    announce_id: uuidv4(),
+    announce_id: generateAnnouncementId(),
     locale:
       typeof body.locale === "string" && body.locale.trim().length > 0
         ? body.locale.trim()
