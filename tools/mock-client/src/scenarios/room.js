@@ -644,28 +644,30 @@ export async function runHappyPath(client, options, login) {
   await client.send(MESSAGE_TYPE.PING_REQ, 2, encodePingReq(Date.now()));
   printResponse(`${client.label}.ping`, await client.readNextPacket(options.timeoutMs));
 
-  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 3, encodeRoomJoinReq(options.roomId));
-  const roomJoin = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
-  if (!roomJoin.ok) {
-    throw new Error(`room join failed: ${roomJoin.errorCode}`);
-  }
-
-  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+  await joinRoomExpectSuccess(client, options, options.roomId, 3, "roomJoin");
 
   await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 4, encodeRoomReadyReq(true));
-  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  const readyRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_READY_RES && packet.seq === 4,
+    "roomReady"
+  );
   if (!readyRes.ok) {
     throw new Error(`room ready failed: ${readyRes.errorCode}`);
   }
 
-  const readyPush = printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+  const readyPush = await waitForRoomStatePush(client, options.timeoutMs, "ready_changed", "roomStatePush(ready)");
   if (readyPush.snapshot?.state !== "ready") {
     throw new Error("expected room state to become ready");
   }
 
   await delayBeforeFinalLeave(client, options.timeoutMs);
   await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
-  const leaveRes = printResponse(`${client.label}.roomLeave`, await client.readNextPacket(options.timeoutMs));
+  const leaveRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 5,
+    "roomLeave"
+  );
   if (!leaveRes.ok) {
     throw new Error(`room leave failed: ${leaveRes.errorCode}`);
   }
@@ -779,24 +781,13 @@ export async function runTwoClientRoom(options) {
     await authenticateClient(clientA, options, loginA, 1);
     await authenticateClient(clientB, options, loginB, 1);
 
-    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    const joinA = printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
-    if (!joinA.ok) {
-      throw new Error(`clientA room join failed: ${joinA.errorCode}`);
-    }
-    const pushA1 = printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
+    const { push: pushA1 } = await joinRoomExpectSuccess(clientA, options, options.roomId, 2, "roomJoin");
     if (pushA1.snapshot?.ownerPlayerId !== loginA.playerId) {
       throw new Error("clientA should be initial owner");
     }
 
-    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    const joinB = printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
-    if (!joinB.ok) {
-      throw new Error(`clientB room join failed: ${joinB.errorCode}`);
-    }
-
-    const pushB1 = printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
-    const pushA2 = printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+    const { push: pushB1 } = await joinRoomExpectSuccess(clientB, options, options.roomId, 2, "roomJoin");
+    const pushA2 = await waitForMessageType(clientA, options.timeoutMs, MESSAGE_TYPE.ROOM_STATE_PUSH, "roomStatePush(join2)");
     if (pushA2.snapshot?.members?.length !== 2 || pushB1.snapshot?.members?.length !== 2) {
       throw new Error("expected both clients to observe two room members");
     }
@@ -805,12 +796,16 @@ export async function runTwoClientRoom(options) {
     }
 
     await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 3, encodeRoomLeaveReq());
-    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    const leaveA = await clientA.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 3,
+      "roomLeave"
+    );
     if (!leaveA.ok) {
       throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
     }
 
-    const pushB2 = printResponse("clientB.roomStatePush(ownerTransfer)", await clientB.readNextPacket(options.timeoutMs));
+    const pushB2 = await waitForMessageType(clientB, options.timeoutMs, MESSAGE_TYPE.ROOM_STATE_PUSH, "roomStatePush(ownerTransfer)");
     if (pushB2.snapshot?.ownerPlayerId !== loginB.playerId) {
       throw new Error("expected owner to transfer to clientB");
     }
@@ -821,7 +816,11 @@ export async function runTwoClientRoom(options) {
 
     await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 3, encodeRoomLeaveReq());
-    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    const leaveB = await clientB.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 3,
+      "roomLeave"
+    );
     if (!leaveB.ok) {
       throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
     }
