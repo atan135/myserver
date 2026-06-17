@@ -53,7 +53,11 @@ async function authenticateAndJoinRoom(client, options, login, roomId) {
   }
 
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(roomId));
-  const joinRes = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
+  const joinRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 2,
+    "roomJoin"
+  );
   if (!joinRes.ok) {
     throw new Error(`${client.label} room join failed: ${joinRes.errorCode}`);
   }

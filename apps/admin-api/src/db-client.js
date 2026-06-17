@@ -89,6 +89,7 @@ const ADMIN_SCHEMA_STATEMENTS = [
     retired_at timestamptz NULL,
     metadata_json jsonb NULL
   )`,
+  `ALTER TABLE id_origins ADD COLUMN IF NOT EXISTS metadata_json jsonb NULL`,
   `CREATE TABLE IF NOT EXISTS worlds (
     world_id bigint PRIMARY KEY CHECK (world_id >= 0),
     world_key varchar(64) NOT NULL UNIQUE,
@@ -97,6 +98,7 @@ const ADMIN_SCHEMA_STATEMENTS = [
     retired_at timestamptz NULL,
     metadata_json jsonb NULL
   )`,
+  `ALTER TABLE worlds ADD COLUMN IF NOT EXISTS metadata_json jsonb NULL`,
   `CREATE INDEX IF NOT EXISTS idx_worlds_active_origin_id ON worlds (active_origin_id)`,
   `CREATE TABLE IF NOT EXISTS world_origin_memberships (
     world_id bigint NOT NULL,
@@ -116,6 +118,7 @@ const ADMIN_SCHEMA_STATEMENTS = [
     operator varchar(64) NULL,
     details_json jsonb NULL
   )`,
+  `ALTER TABLE world_merge_events ALTER COLUMN merged_at SET DEFAULT current_timestamp`,
   `CREATE INDEX IF NOT EXISTS idx_world_merge_events_target_world ON world_merge_events (target_world_id, merged_at)`,
   `CREATE INDEX IF NOT EXISTS idx_world_merge_events_active_origin ON world_merge_events (active_origin_id, merged_at)`,
   `CREATE INDEX IF NOT EXISTS idx_world_merge_events_merged_at ON world_merge_events (merged_at)`,

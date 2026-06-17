@@ -165,6 +165,10 @@ function buildMailSendBody(options, toPlayerId) {
   return body;
 }
 
+function buildServiceHeaders(options) {
+  return options.serviceToken ? { "x-service-token": options.serviceToken } : {};
+}
+
 export async function runMailSend(options) {
   const { playerId, login } = await resolveMailRecipientId(options, "mail-send");
   const mailUrl = buildMailUrl(options.mailBaseUrl, "/api/v1/mails");
@@ -178,6 +182,7 @@ export async function runMailSend(options) {
 
   const response = await requestMailJson(mailUrl, options, {
     method: "POST",
+    headers: buildServiceHeaders(options),
     body: JSON.stringify(body)
   });
 
@@ -274,6 +279,7 @@ export async function runMailSendAndNotify(options) {
 
     const response = await requestMailJson(mailUrl, options, {
       method: "POST",
+      headers: buildServiceHeaders(options),
       body: JSON.stringify(buildMailSendBody(options, login.playerId))
     });
     printMailResponse("mail.send", response);

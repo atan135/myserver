@@ -8,9 +8,9 @@
 执行状态：
 
 - 总任务开始时间：2026-06-17 12:20:39 +08:00
-- 总任务结束时间：2026-06-17 13:44:13 +08:00
+- 总任务结束时间：2026-06-17 14:22:55 +08:00
 - 验收规则：主 agent 验收时允许按需启动 server 和 mock-client 检查结果。
-- 执行说明：本轮已完成实现、静态校验、单元测试和构建检查；未执行破坏性清库，也未启动完整 server + mock-client 联调。
+- 执行说明：本轮已完成实现、静态校验、单元测试、构建检查和完整 server + mock-client 联调；未执行破坏性清库。
 
 ## 0. 基线决策
 
@@ -106,4 +106,4 @@
 - [x] admin-web 可以解码玩家 ID 和物品 UID，并查询 origin/world/merge events。（开始：2026-06-17 12:20:39 +08:00；结束：2026-06-17 13:33:24 +08:00；验证：admin-api 单测、admin-web build）
 - [x] 合服后历史 ID 不改写，合服后新 ID 使用目标世界 `active_origin_id`。（开始：2026-06-17 12:20:39 +08:00；结束：2026-06-17 13:33:24 +08:00；验证：设计文档、schema 和 admin 查询上下文）
 - [x] 快速静态与构建校验完成：`npm run check:migrations`、Node 服务 `tsc --noEmit`、admin-api 单测、admin-web build、game/chat/match Rust check、match-service 单测。（开始：2026-06-17 12:20:39 +08:00；结束：2026-06-17 13:33:24 +08:00）
-- [ ] 完整 server + mock-client 联调。（未执行：需要依赖 Redis/PostgreSQL/NATS 和本地数据状态；本轮使用单测、类型检查、构建和代码审查完成验收）
+- [x] 完整 server + mock-client 联调。（开始：2026-06-17 13:59:06 +08:00；结束：2026-06-17 14:22:55 +08:00；验证：dev-stack 启动 auth/game-proxy/game-server/chat/match/admin/announce，手动启动 mail-service；mock-client 验证 happy、inventory-add、chat-two-client、mail-send、announce-create；match_flow_probe 验证自动 room ID；admin-api live 验证 login、decode、origins、worlds、merge-events）
