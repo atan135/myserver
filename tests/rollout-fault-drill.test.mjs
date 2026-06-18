@@ -14,7 +14,7 @@ import {
   orchestrateRoomTransfer
 } from "../tools/mock-client/src/rollout-transfer.js";
 
-test("rollout fault drill cli help labels local admin defaults as manual fallback", () => {
+test("rollout fault drill cli help uses registry targets before direct endpoints", () => {
   const result = spawnSync(process.execPath, ["tools/mock-client/src/rollout-fault-drill-cli.js", "--help"], {
     cwd: process.cwd(),
     encoding: "utf8"
@@ -22,9 +22,10 @@ test("rollout fault drill cli help labels local admin defaults as manual fallbac
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /registry discovery/);
-  assert.match(result.stdout, /manual local drills/);
-  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127\.0\.0\.1/);
-  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http:\/\/127\.0\.0\.1:7101/);
+  assert.match(result.stdout, /game-server\.admin/);
+  assert.match(result.stdout, /game-proxy\.admin/);
+  assert.match(result.stdout, /pre-resolved or local debug fallback/);
+  assert.doesNotMatch(result.stdout, /127\.0\.0\.1:7101/);
 });
 
 test("rollout fault drill dry-run prints a safe plan without service calls", async () => {
@@ -51,6 +52,14 @@ test("rollout fault drill dry-run prints a safe plan without service calls", asy
 
   const routeMetadataMissing = report.drills.find((drill) => drill.name === ROLLOUT_FAULT_DRILL.ROUTE_METADATA_MISSING);
   assert.equal(routeMetadataMissing.plan.expectedErrorCode, "ROOM_ROUTE_METADATA_MISSING");
+  assert.equal(routeMetadataMissing.plan.endpoints.oldGameServerAdmin.source, "registry");
+  assert.equal(routeMetadataMissing.plan.endpoints.oldGameServerAdmin.target, "game-server.admin");
+  assert.equal(routeMetadataMissing.plan.endpoints.oldGameServerAdmin.instanceId, "game-server-old");
+  assert.equal(routeMetadataMissing.plan.endpoints.newGameServerAdmin.source, "registry");
+  assert.equal(routeMetadataMissing.plan.endpoints.newGameServerAdmin.target, "game-server.admin");
+  assert.equal(routeMetadataMissing.plan.endpoints.newGameServerAdmin.instanceId, "game-server-new");
+  assert.equal(routeMetadataMissing.plan.endpoints.gameProxyAdmin.source, "registry");
+  assert.equal(routeMetadataMissing.plan.endpoints.gameProxyAdmin.target, "game-proxy.admin");
   assert.deepEqual(routeMetadataMissing.plan.plannedCalls, [
     "old.freezeRoomForTransfer",
     "old.exportRoomTransfer",

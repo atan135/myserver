@@ -9,6 +9,11 @@ import {
   encodeRoomTransferPayloadForTest,
   orchestrateRoomTransfer
 } from "./rollout-transfer.js";
+import {
+  controlTargetPlan,
+  createDefaultRolloutTargetOptions,
+  resolveAndApplyRolloutControlTargets
+} from "./rollout-targets.js";
 
 export const ROLLOUT_FAULT_DRILL = {
   IMPORT_FAILURE: "import-failure",
@@ -200,9 +205,9 @@ function buildTransferPlan(definition, options) {
     ],
     skippedAfterExpectedFailure: definition.mustNotCompleteStages,
     endpoints: {
-      oldAdmin: `${options.oldAdminHost || "127.0.0.1"}:${options.oldAdminPort || 7500}`,
-      newAdmin: `${options.newAdminHost || "127.0.0.1"}:${options.newAdminPort || 7501}`,
-      proxyAdminUrl: options.proxyAdminUrl || "http://127.0.0.1:7101"
+      oldGameServerAdmin: controlTargetPlan(options, "oldGameServerAdmin"),
+      newGameServerAdmin: controlTargetPlan(options, "newGameServerAdmin"),
+      gameProxyAdmin: controlTargetPlan(options, "gameProxyAdmin")
     }
   };
 }
@@ -260,19 +265,19 @@ function buildDryRunReport(options, definitions) {
 function createRealTransferClients(options) {
   return {
     oldServer: new GameServerTransferClient({
-      host: options.oldAdminHost || "127.0.0.1",
-      port: options.oldAdminPort || 7500,
+      host: options.oldAdminHost,
+      port: options.oldAdminPort,
       token: options.oldAdminToken || "",
       timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
     }),
     newServer: new GameServerTransferClient({
-      host: options.newAdminHost || "127.0.0.1",
-      port: options.newAdminPort || 7501,
+      host: options.newAdminHost,
+      port: options.newAdminPort,
       token: options.newAdminToken || "",
       timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
     }),
     proxy: new ProxyAdminClient({
-      baseUrl: options.proxyAdminUrl || "http://127.0.0.1:7101",
+      baseUrl: options.proxyAdminUrl,
       token: options.proxyAdminToken || "",
       actor: options.proxyAdminActor || "rollout-fault-drill",
       timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
@@ -405,8 +410,8 @@ async function runTransferDrill(definition, options, mode) {
 
 function createOldServerClient(options) {
   return new GameServerTransferClient({
-    host: options.oldAdminHost || "127.0.0.1",
-    port: options.oldAdminPort || 7500,
+    host: options.oldAdminHost,
+    port: options.oldAdminPort,
     token: options.oldAdminToken || "",
     timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
   });
@@ -558,11 +563,24 @@ async function maybeArchive(report, options) {
 }
 
 export async function runRolloutFaultDrills(options = {}) {
+  options = {
+    ...createDefaultRolloutTargetOptions(),
+    oldServerId: "game-server-old",
+    newServerId: "game-server-new",
+    ...options
+  };
   const definitions = selectRolloutFaultDrills(options.drills || []);
   const mode = options.execute ? "execute" : options.simulate ? "simulate" : "dry-run";
 
   if (mode === "dry-run") {
     return maybeArchive(buildDryRunReport(options, definitions), options);
+  }
+
+  if (mode === "execute" && !options.resolvedControlTargets) {
+    await resolveAndApplyRolloutControlTargets(options, {
+      requireNew: definitions.some((definition) => definition.type !== "redirect"),
+      requireProxy: definitions.some((definition) => definition.type !== "redirect")
+    });
   }
 
   const results = [];

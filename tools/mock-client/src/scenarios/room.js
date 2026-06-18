@@ -28,6 +28,10 @@ import {
   ProxyAdminClient,
   orchestrateRoomTransfer
 } from "../rollout-transfer.js";
+import {
+  resolveAndApplyRolloutControlTargets,
+  validateControlTargetOptions
+} from "../rollout-targets.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 const PROCESS_EXIT_POLL_MS = 200;
@@ -543,6 +547,17 @@ async function runRoomTransferForRedirect(options, redirect) {
   if (!rolloutEpoch) {
     throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch or a redirect rollout epoch");
   }
+  const targetErrors = validateControlTargetOptions(options, { requireNew: true, requireProxy: true });
+  if (targetErrors.length > 0) {
+    throw new Error(targetErrors.join("; "));
+  }
+  if (
+    !options.resolvedControlTargets?.oldGameServerAdmin ||
+    !options.resolvedControlTargets?.newGameServerAdmin ||
+    !options.resolvedControlTargets?.gameProxyAdmin
+  ) {
+    await resolveAndApplyRolloutControlTargets(options, { requireNew: true, requireProxy: true });
+  }
 
   const oldServer = new GameServerTransferClient({
     host: options.oldAdminHost,
@@ -606,6 +621,13 @@ async function triggerRedirectForCurrentRoom(options) {
   const rolloutEpoch = options.rolloutEpoch;
   if (!rolloutEpoch) {
     throw new Error("server-redirect-transfer-reconnect requires --rollout-epoch before redirect trigger");
+  }
+  const targetErrors = validateControlTargetOptions(options, { requireNew: false, requireProxy: false });
+  if (targetErrors.length > 0) {
+    throw new Error(targetErrors.join("; "));
+  }
+  if (!options.resolvedControlTargets?.oldGameServerAdmin) {
+    await resolveAndApplyRolloutControlTargets(options, { requireNew: false, requireProxy: false });
   }
 
   const oldServer = new GameServerTransferClient({

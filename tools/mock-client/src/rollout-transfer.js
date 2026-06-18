@@ -658,7 +658,10 @@ export async function orchestrateRoomTransfer(request, clients) {
 
 export class GameServerTransferClient {
   constructor(options) {
-    this.host = options.host || "127.0.0.1";
+    if (!options.host || !options.port) {
+      throw new Error("game-server admin client requires a resolved game-server.admin host and port");
+    }
+    this.host = options.host;
     this.port = options.port;
     this.token = options.token || "";
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -800,7 +803,10 @@ export class GameServerTransferClient {
 
 export class ProxyAdminClient {
   constructor(options) {
-    this.baseUrl = (options.baseUrl || "http://127.0.0.1:7101").replace(/\/+$/, "");
+    if (!options.baseUrl) {
+      throw new Error("proxy admin client requires a resolved game-proxy.admin URL");
+    }
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token || "";
     this.actor = options.actor || "";
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;

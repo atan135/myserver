@@ -107,37 +107,43 @@ param(
     [int]$NewGamePort = $(if ($env:MYSERVER_NEW_GAME_PORT) { [int]$env:MYSERVER_NEW_GAME_PORT } else { 7001 }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("OldAdminHost")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [string]$OldAdminHost = $(if ($env:MYSERVER_OLD_GAME_ADMIN_HOST) { $env:MYSERVER_OLD_GAME_ADMIN_HOST } else { "127.0.0.1" }),
+    [string]$LocalFallbackOldAdminHost = $(if ($env:MYSERVER_OLD_GAME_ADMIN_HOST) { $env:MYSERVER_OLD_GAME_ADMIN_HOST } else { "127.0.0.1" }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("OldAdminPort")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [int]$OldAdminPort = $(if ($env:MYSERVER_OLD_GAME_ADMIN_PORT) { [int]$env:MYSERVER_OLD_GAME_ADMIN_PORT } else { 7500 }),
+    [int]$LocalFallbackOldAdminPort = $(if ($env:MYSERVER_OLD_GAME_ADMIN_PORT) { [int]$env:MYSERVER_OLD_GAME_ADMIN_PORT } else { 7500 }),
 
     [Parameter(Mandatory=$false)]
     [string]$OldAdminToken = $(if ($env:MYSERVER_OLD_GAME_ADMIN_TOKEN) { $env:MYSERVER_OLD_GAME_ADMIN_TOKEN } elseif ($env:GAME_ADMIN_TOKEN) { $env:GAME_ADMIN_TOKEN } else { "dev-only-change-this-game-admin-token" }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("NewAdminHost")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [string]$NewAdminHost = $(if ($env:MYSERVER_NEW_GAME_ADMIN_HOST) { $env:MYSERVER_NEW_GAME_ADMIN_HOST } else { "127.0.0.1" }),
+    [string]$LocalFallbackNewAdminHost = $(if ($env:MYSERVER_NEW_GAME_ADMIN_HOST) { $env:MYSERVER_NEW_GAME_ADMIN_HOST } else { "127.0.0.1" }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("NewAdminPort")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [int]$NewAdminPort = $(if ($env:MYSERVER_NEW_GAME_ADMIN_PORT) { [int]$env:MYSERVER_NEW_GAME_ADMIN_PORT } else { 7501 }),
+    [int]$LocalFallbackNewAdminPort = $(if ($env:MYSERVER_NEW_GAME_ADMIN_PORT) { [int]$env:MYSERVER_NEW_GAME_ADMIN_PORT } else { 7501 }),
 
     [Parameter(Mandatory=$false)]
     [string]$NewAdminToken = $(if ($env:MYSERVER_NEW_GAME_ADMIN_TOKEN) { $env:MYSERVER_NEW_GAME_ADMIN_TOKEN } elseif ($env:GAME_ADMIN_TOKEN) { $env:GAME_ADMIN_TOKEN } else { "dev-only-change-this-game-admin-token" }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("AuthBaseUrl")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [string]$AuthBaseUrl = $(if ($env:MYSERVER_AUTH_BASE_URL) { $env:MYSERVER_AUTH_BASE_URL } else { "http://127.0.0.1:3000" }),
+    [string]$LocalFallbackAuthBaseUrl = $(if ($env:MYSERVER_AUTH_BASE_URL) { $env:MYSERVER_AUTH_BASE_URL } else { "http://127.0.0.1:3000" }),
 
     [Parameter(Mandatory=$false)]
     [string]$ServiceToken = $(if ($env:MYSERVER_INTERNAL_API_TOKEN) { $env:MYSERVER_INTERNAL_API_TOKEN } elseif ($env:INTERNAL_API_TOKEN) { $env:INTERNAL_API_TOKEN } else { "" }),
 
     [Parameter(Mandatory=$false)]
+    [Alias("ProxyAdminUrl")]
     # Local/manual fallback only. Strict/test/production runs must use registry discovery.
-    [string]$ProxyAdminUrl = $(if ($env:MYSERVER_PROXY_ADMIN_URL) { $env:MYSERVER_PROXY_ADMIN_URL } else { "http://127.0.0.1:7101" }),
+    [string]$LocalFallbackProxyAdminUrl = $(if ($env:MYSERVER_PROXY_ADMIN_URL) { $env:MYSERVER_PROXY_ADMIN_URL } else { "http://127.0.0.1:7101" }),
 
     [Parameter(Mandatory=$false)]
     [string]$ProxyAdminToken = $(if ($env:PROXY_ADMIN_TOKEN) { $env:PROXY_ADMIN_TOKEN } else { "dev-only-change-this-proxy-admin-token" }),
@@ -610,8 +616,8 @@ function New-LocalFallbackDiscovery {
             instanceId = $OldServerId
             endpointName = "admin"
             protocol = "tcp"
-            host = $OldAdminHost
-            port = $OldAdminPort
+            host = $LocalFallbackOldAdminHost
+            port = $LocalFallbackOldAdminPort
             url = ""
             source = "local-fallback"
         }
@@ -619,8 +625,8 @@ function New-LocalFallbackDiscovery {
             instanceId = $NewServerId
             endpointName = "admin"
             protocol = "tcp"
-            host = $NewAdminHost
-            port = $NewAdminPort
+            host = $LocalFallbackNewAdminHost
+            port = $LocalFallbackNewAdminPort
             url = ""
             source = "local-fallback"
         }
@@ -628,18 +634,18 @@ function New-LocalFallbackDiscovery {
             instanceId = if ($ProxyInstanceId) { $ProxyInstanceId } else { "<local-fallback>" }
             endpointName = "admin"
             protocol = "http"
-            host = (Get-UriEndpoint $ProxyAdminUrl).host
-            port = (Get-UriEndpoint $ProxyAdminUrl).port
-            url = $ProxyAdminUrl
+            host = (Get-UriEndpoint $LocalFallbackProxyAdminUrl).host
+            port = (Get-UriEndpoint $LocalFallbackProxyAdminUrl).port
+            url = $LocalFallbackProxyAdminUrl
             source = "local-fallback"
         }
         authHttp = [pscustomobject]@{
             instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<local-fallback>" }
             endpointName = "internal"
-            protocol = if ($AuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
-            host = (Get-UriEndpoint $AuthBaseUrl).host
-            port = (Get-UriEndpoint $AuthBaseUrl).port
-            url = $AuthBaseUrl
+            protocol = if ($LocalFallbackAuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
+            host = (Get-UriEndpoint $LocalFallbackAuthBaseUrl).host
+            port = (Get-UriEndpoint $LocalFallbackAuthBaseUrl).port
+            url = $LocalFallbackAuthBaseUrl
             source = "local-fallback"
         }
         serviceCounts = [pscustomobject]@{}
@@ -656,14 +662,14 @@ function Resolve-RolloutDiscovery {
                 if (Test-DiscoveryRequired) {
                     throw "auth-http.internal endpoint not found in registry"
                 } else {
-                    $authEndpoint = Get-UriEndpoint $AuthBaseUrl
+                    $authEndpoint = Get-UriEndpoint $LocalFallbackAuthBaseUrl
                     $auth = [pscustomobject]@{
                         instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<fallback>" }
                         endpointName = "internal"
-                        protocol = if ($AuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
+                        protocol = if ($LocalFallbackAuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
                         host = $authEndpoint.host
                         port = $authEndpoint.port
-                        url = $AuthBaseUrl
+                        url = $LocalFallbackAuthBaseUrl
                         source = "fallback-auth-base-url"
                     }
                     $warnings += "auth-http.internal endpoint not found in registry; using AuthBaseUrl fallback because DiscoveryRequired=false"
@@ -993,10 +999,10 @@ function New-RunReport {
             registryFixturePath = if ($RegistryFixturePath) { Resolve-RegistryFixturePath } else { $null }
             oldGamePort = $OldGamePort
             newGamePort = $NewGamePort
-            oldAdminEndpoint = "$($OldAdminHost):$($OldAdminPort)"
-            newAdminEndpoint = "$($NewAdminHost):$($NewAdminPort)"
-            authBaseUrl = $AuthBaseUrl
-            proxyAdminUrl = $ProxyAdminUrl
+            localFallbackOldAdminEndpoint = "$($LocalFallbackOldAdminHost):$($LocalFallbackOldAdminPort)"
+            localFallbackNewAdminEndpoint = "$($LocalFallbackNewAdminHost):$($LocalFallbackNewAdminPort)"
+            localFallbackAuthBaseUrl = $LocalFallbackAuthBaseUrl
+            localFallbackProxyAdminUrl = $LocalFallbackProxyAdminUrl
             proxyAdminActor = $AdminActor
             timeoutMs = $TimeoutMs
             shutdownWaitTimeoutMs = $ShutdownWaitTimeoutMs
@@ -1268,6 +1274,7 @@ Add-StageResult "room-selection-guidance" "printed" "room=$displayRoomId"
 Write-Section "Stage 4 - Transfer Freeze/Export/Import/Confirm/Route/Retire"
 $transferArgs = @(
     $TransferCli,
+    "--resolved-control-targets",
     "--rollout-epoch", $RolloutEpoch,
     "--room-id", $RoomId,
     "--old-server-id", $OldServerId,
@@ -1286,6 +1293,7 @@ $transferArgs = @(
 $transferDryRunArgs = @(
     $TransferCli,
     "--dry-run",
+    "--resolved-control-targets",
     "--rollout-epoch", $displayRolloutEpoch,
     "--room-id", $displayRoomId,
     "--old-server-id", $OldServerId,
@@ -1304,6 +1312,7 @@ $transferDryRunArgs = @(
 $transferDisplayArgs = @(
     "node",
     "tools/mock-client/src/rollout-transfer-cli.js",
+    "--resolved-control-targets",
     "--rollout-epoch", $displayRolloutEpoch,
     "--room-id", $displayRoomId,
     "--old-server-id", $OldServerId,

@@ -93,6 +93,45 @@ const SCANNABLE_EXTENSIONS = new Set([
 
 const CONFIG_PATH_HINT_PATTERN =
   /(^|[\\/])(apps|scripts|tools|deploy|deployment|deployments|config|configs|helm|k8s|kubernetes|docker)([\\/]|$)/i;
+const SCRIPT_TARGET_SCAN_PATTERN =
+  /(^|\/)(scripts\/.*|tools\/mock-client\/src\/.*|tools\/mock-client\/help_rollout\.txt|package\.json)$/i;
+const ROLLOUT_DIRECT_TARGET_ARGS = [
+  "--old-admin-host",
+  "--old-admin-port",
+  "--new-admin-host",
+  "--new-admin-port",
+  "--proxy-admin-url"
+];
+const ROLLOUT_DIRECT_TARGET_MARKERS = [
+  "--resolved-control-targets",
+  "--local-debug-targets"
+];
+const ROLLOUT_FIXED_DEFAULT_PATTERNS = [
+  {
+    pattern: /oldAdminPort\s*:\s*(?:parseNumber\([^,\n]+,\s*)?7500\b/,
+    reason: "rollout tool default old game-server admin target must be game-server.admin plus instance id"
+  },
+  {
+    pattern: /newAdminPort\s*:\s*(?:parseNumber\([^,\n]+,\s*)?7501\b/,
+    reason: "rollout tool default new game-server admin target must be game-server.admin plus instance id"
+  },
+  {
+    pattern: /proxyAdminUrl\s*:\s*[^,\n]*127\.0\.0\.1:7101/,
+    reason: "rollout tool default game-proxy admin target must be game-proxy.admin"
+  },
+  {
+    pattern: /\|\|\s*["']http:\/\/127\.0\.0\.1:7101["']/,
+    reason: "rollout tool must not silently fall back to fixed game-proxy admin URL"
+  },
+  {
+    pattern: /\|\|\s*750[01]\b/,
+    reason: "rollout tool must not silently fall back to fixed game-server admin port"
+  },
+  {
+    pattern: /local\/manual fallback default:.*(?:127\.0\.0\.1|750[01]|7101)/,
+    reason: "help text must not describe fixed local endpoints as defaults"
+  }
+];
 
 const ALL_LEGACY_ENV_NAMES = new Set([
   ...Object.values(LEGACY_DIRECT_CONFIG_BY_SERVICE).flat(),
@@ -107,12 +146,14 @@ export function scanDiscoveryConfig(options = {}) {
   const checkedFiles = [];
   const strictFiles = [];
   const localExampleFiles = [];
+  const scriptFixedTargetViolations = [];
 
   for (const filePath of files) {
     const relativePath = toPosixRelative(rootDir, filePath);
     const text = fs.readFileSync(filePath, "utf8");
     const lines = splitLines(text);
     const assignments = parseAssignments(lines);
+    scriptFixedTargetViolations.push(...scanScriptTargetViolations(relativePath, lines));
     if (assignments.length === 0 && !isEnvLikePath(relativePath)) {
       continue;
     }
@@ -175,8 +216,10 @@ export function scanDiscoveryConfig(options = {}) {
     if (checked) {
       checkedFiles.push(relativePath);
     }
+
   }
 
+  violations.push(...scriptFixedTargetViolations);
   const uniqueCheckedFiles = uniqueSorted(checkedFiles);
   return {
     ok: violations.length === 0,
@@ -185,12 +228,14 @@ export function scanDiscoveryConfig(options = {}) {
       strictFiles: uniqueSorted(strictFiles).length,
       localExampleFiles: uniqueSorted(localExampleFiles).length,
       allowedLocalFallbacks: allowedLocalFallbacks.length,
+      scriptFixedTargetViolations: scriptFixedTargetViolations.length,
       violations: violations.length
     },
     checkedFiles: uniqueCheckedFiles,
     strictFiles: uniqueSorted(strictFiles),
     localExampleFiles: uniqueSorted(localExampleFiles),
     allowedLocalFallbacks,
+    scriptFixedTargetViolations,
     violations
   };
 }
@@ -230,6 +275,10 @@ function listCandidateFiles(rootDir) {
 }
 
 function shouldScanFile(relativePath) {
+  if (SCRIPT_TARGET_SCAN_PATTERN.test(relativePath)) {
+    return true;
+  }
+
   const baseName = path.posix.basename(relativePath);
   if (baseName.startsWith(".env")) {
     return true;
@@ -245,6 +294,100 @@ function shouldScanFile(relativePath) {
 
   const extension = path.posix.extname(lower);
   return SCANNABLE_EXTENSIONS.has(extension);
+}
+
+function scanScriptTargetViolations(relativePath, lines) {
+  if (!SCRIPT_TARGET_SCAN_PATTERN.test(relativePath)) {
+    return [];
+  }
+
+  const violations = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    for (const rule of ROLLOUT_FIXED_DEFAULT_PATTERNS) {
+      if (rule.pattern.test(line)) {
+        violations.push({
+          file: relativePath,
+          line: index + 1,
+          variable: "rollout-control-target",
+          service: "rollout-script",
+          rule: "script_fixed_control_target_default_forbidden",
+          severity: "error",
+          reason: rule.reason,
+          remediation:
+            "Use registry target semantics by default, for example instance id plus game-server.admin/game-proxy.admin. Fixed host/port examples must be explicitly marked local debug fallback."
+        });
+        break;
+      }
+    }
+  }
+
+  for (const block of commandBlocks(lines)) {
+    if (!block.text.includes("rollout-transfer-cli.js") && !block.text.includes("rollout-fault-drill-cli.js")) {
+      continue;
+    }
+    if (!ROLLOUT_DIRECT_TARGET_ARGS.some((arg) => block.text.includes(arg))) {
+      continue;
+    }
+    if (ROLLOUT_DIRECT_TARGET_MARKERS.some((arg) => block.text.includes(arg))) {
+      continue;
+    }
+
+    violations.push({
+      file: relativePath,
+      line: block.startLine,
+      variable: "rollout-control-target",
+      service: "rollout-script",
+      rule: "script_direct_control_target_requires_marker",
+      severity: "error",
+      reason:
+        "rollout CLI command examples or invocations that pass host/port/url must mark them as pre-resolved registry inputs or local debug fallback",
+      remediation:
+        "Add --resolved-control-targets when passing endpoints resolved by registry discovery, or --local-debug-targets for manual local fallback examples."
+    });
+  }
+
+  return violations;
+}
+
+function commandBlocks(lines) {
+  const blocks = [];
+  let current = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const startsBlock = /rollout-(?:transfer|fault-drill)-cli\.js/.test(line) ||
+      /^\s*\$[A-Za-z0-9_]+\s*=\s*@\(/.test(line);
+
+    if (!current && startsBlock) {
+      current = { startLine: index + 1, lines: [line] };
+      if (!continuesCommandBlock(line)) {
+        blocks.push({ startLine: current.startLine, text: current.lines.join("\n") });
+        current = null;
+      }
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    current.lines.push(line);
+    if (!continuesCommandBlock(line) && !/^\s*["'][^"']+["']\s*,?\s*$/.test(line)) {
+      blocks.push({ startLine: current.startLine, text: current.lines.join("\n") });
+      current = null;
+    }
+  }
+
+  if (current) {
+    blocks.push({ startLine: current.startLine, text: current.lines.join("\n") });
+  }
+
+  return blocks;
+}
+
+function continuesCommandBlock(line) {
+  return /[`^]\s*$/.test(line) || /^\s*\$[A-Za-z0-9_]+\s*=\s*@\(/.test(line) || !/\)\s*$/.test(line);
 }
 
 function parseAssignments(lines) {

@@ -2,6 +2,12 @@ import {
   ROLLOUT_FAULT_DRILL_DEFINITIONS,
   runRolloutFaultDrills
 } from "./rollout-fault-drill.js";
+import {
+  applyLocalDebugTargetEnvDefaults,
+  createDefaultRolloutTargetOptions,
+  resolveAndApplyRolloutControlTargets,
+  validateControlTargetOptions
+} from "./rollout-targets.js";
 
 function optionValue(argv, index) {
   return { value: argv[index + 1] || "", nextIndex: index + 1 };
@@ -29,15 +35,25 @@ Options:
   --room-id <room-id>
   --old-server-id <server-id>            default: game-server-old
   --new-server-id <server-id>            default: game-server-new
-  --old-admin-host <host>                local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
-  --old-admin-port <port>                local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
+  --old-admin-instance-id <id>           default: --old-server-id
+  --old-admin-endpoint-name <name>       default: game-server.admin
+  --old-admin-host <host>                explicit resolved/local-debug endpoint host
+  --old-admin-port <port>                explicit resolved/local-debug endpoint port
   --old-admin-token <token>              default: MYSERVER_OLD_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --new-admin-host <host>                local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
-  --new-admin-port <port>                local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
+  --new-admin-instance-id <id>           default: --new-server-id
+  --new-admin-endpoint-name <name>       default: game-server.admin
+  --new-admin-host <host>                explicit resolved/local-debug endpoint host
+  --new-admin-port <port>                explicit resolved/local-debug endpoint port
   --new-admin-token <token>              default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --proxy-admin-url <url>                local/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
+  --proxy-instance-id <id>               optional game-proxy instance id
+  --proxy-admin-endpoint-name <name>     default: game-proxy.admin
+  --proxy-admin-url <url>                explicit resolved/local-debug endpoint URL
   --proxy-admin-token <token>            default: PROXY_ADMIN_TOKEN
   --proxy-admin-actor <actor>            default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-fault-drill
+  --registry-url <url>                   default: REGISTRY_URL or REDIS_URL
+  --registry-key-prefix <prefix>         default: REGISTRY_KEY_PREFIX or REDIS_KEY_PREFIX
+  --resolved-control-targets             host/port/url inputs were already resolved from registry
+  --local-debug-targets                  allow explicit local debug host/port/url fallback inputs
   --redirect-target-host <host>          required with --execute redirect-no-reconnect
   --redirect-target-port <port>          required with --execute redirect-no-reconnect
   --redirect-target-server-id <id>       default: --new-server-id
@@ -51,7 +67,7 @@ Options:
 
 For test/staging/production rollout drills, prefer scripts/rollout-three-process-drill.ps1
 so auth-http, game-proxy admin, and game-server admin endpoints come from registry discovery.
-The 127.0.0.1 admin defaults above are only for manual local drills.`);
+Direct host/port/url inputs are accepted only when marked as pre-resolved or local debug fallback.`);
 }
 
 function parseNumber(value, fallback) {
@@ -64,14 +80,10 @@ function parseNumber(value, fallback) {
 
 function parseArgs(argv) {
   const options = {
+    ...createDefaultRolloutTargetOptions(),
     drills: [],
-    oldAdminHost: process.env.MYSERVER_OLD_GAME_ADMIN_HOST || "127.0.0.1",
-    oldAdminPort: parseNumber(process.env.MYSERVER_OLD_GAME_ADMIN_PORT, 7500),
     oldAdminToken: process.env.MYSERVER_OLD_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-    newAdminHost: process.env.MYSERVER_NEW_GAME_ADMIN_HOST || "127.0.0.1",
-    newAdminPort: parseNumber(process.env.MYSERVER_NEW_GAME_ADMIN_PORT, 7501),
     newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-    proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
     proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
     proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "rollout-fault-drill",
     oldServerId: process.env.MYSERVER_OLD_SERVER_ID || "game-server-old",
@@ -133,6 +145,12 @@ function parseArgs(argv) {
       case "--new-server-id":
         ({ value: options.newServerId, nextIndex: index } = takeValue(index));
         break;
+      case "--old-admin-instance-id":
+        ({ value: options.oldAdminInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--old-admin-endpoint-name":
+        ({ value: options.oldAdminEndpointName, nextIndex: index } = takeValue(index));
+        break;
       case "--old-admin-host":
         ({ value: options.oldAdminHost, nextIndex: index } = takeValue(index));
         break;
@@ -141,6 +159,12 @@ function parseArgs(argv) {
         break;
       case "--old-admin-token":
         ({ value: options.oldAdminToken, nextIndex: index } = takeValue(index));
+        break;
+      case "--new-admin-instance-id":
+        ({ value: options.newAdminInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--new-admin-endpoint-name":
+        ({ value: options.newAdminEndpointName, nextIndex: index } = takeValue(index));
         break;
       case "--new-admin-host":
         ({ value: options.newAdminHost, nextIndex: index } = takeValue(index));
@@ -151,6 +175,12 @@ function parseArgs(argv) {
       case "--new-admin-token":
         ({ value: options.newAdminToken, nextIndex: index } = takeValue(index));
         break;
+      case "--proxy-instance-id":
+        ({ value: options.proxyInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--proxy-admin-endpoint-name":
+        ({ value: options.proxyAdminEndpointName, nextIndex: index } = takeValue(index));
+        break;
       case "--proxy-admin-url":
         ({ value: options.proxyAdminUrl, nextIndex: index } = takeValue(index));
         break;
@@ -159,6 +189,19 @@ function parseArgs(argv) {
         break;
       case "--proxy-admin-actor":
         ({ value: options.proxyAdminActor, nextIndex: index } = takeValue(index));
+        break;
+      case "--registry-url":
+        ({ value: options.registryUrl, nextIndex: index } = takeValue(index));
+        break;
+      case "--registry-key-prefix":
+        ({ value: options.registryKeyPrefix, nextIndex: index } = takeValue(index));
+        break;
+      case "--resolved-control-targets":
+        options.resolvedControlTargetsInput = true;
+        break;
+      case "--local-debug-targets":
+        options.localDebugTargets = true;
+        applyLocalDebugTargetEnvDefaults(options);
         break;
       case "--redirect-target-host":
         ({ value: options.redirectTargetHost, nextIndex: index } = takeValue(index));
@@ -227,14 +270,20 @@ function requireExecuteOptions(options) {
   if (names.some((name) => name !== "redirect-no-reconnect")) {
     requireOption(options, "oldServerId");
     requireOption(options, "newServerId");
-    requirePort(options, "oldAdminPort");
-    requirePort(options, "newAdminPort");
   }
 
   if (names.includes("redirect-no-reconnect")) {
     requireOption(options, "redirectTargetHost");
     requireOption(options, "redirectTargetPort");
     requirePort(options, "redirectTargetPort");
+  }
+
+  const targetErrors = validateControlTargetOptions(options, {
+    requireNew: names.some((name) => name !== "redirect-no-reconnect"),
+    requireProxy: names.some((name) => name !== "redirect-no-reconnect")
+  });
+  if (targetErrors.length > 0) {
+    throw new Error(targetErrors.join("; "));
   }
 }
 
@@ -246,6 +295,13 @@ async function main() {
   }
 
   requireExecuteOptions(options);
+  if (options.execute) {
+    const names = selectedDrillNames(options);
+    await resolveAndApplyRolloutControlTargets(options, {
+      requireNew: names.some((name) => name !== "redirect-no-reconnect"),
+      requireProxy: names.some((name) => name !== "redirect-no-reconnect")
+    });
+  }
   const report = await runRolloutFaultDrills(options);
   console.log(JSON.stringify(report, null, 2));
   if (!report.ok) {

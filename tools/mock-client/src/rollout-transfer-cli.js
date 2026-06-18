@@ -4,6 +4,13 @@ import {
   ProxyAdminClient,
   orchestrateRoomTransfer
 } from "./rollout-transfer.js";
+import {
+  applyLocalDebugTargetEnvDefaults,
+  controlTargetPlan,
+  createDefaultRolloutTargetOptions,
+  resolveAndApplyRolloutControlTargets,
+  validateControlTargetOptions
+} from "./rollout-targets.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,15 +44,25 @@ Options:
   --redirect-transport <transport>        default: kcp
   --redirect-reason <reason>              default: rollout_redirect
   --redirect-retry-after-ms <ms>          default: 0
-  --old-admin-host <host>                 local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
-  --old-admin-port <port>                 local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
+  --old-admin-instance-id <id>            default: --old-server-id
+  --old-admin-endpoint-name <name>        default: game-server.admin
+  --old-admin-host <host>                 explicit resolved/local-debug endpoint host
+  --old-admin-port <port>                 explicit resolved/local-debug endpoint port
   --old-admin-token <token>               default: MYSERVER_OLD_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --new-admin-host <host>                 local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
-  --new-admin-port <port>                 local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
+  --new-admin-instance-id <id>            default: --new-server-id
+  --new-admin-endpoint-name <name>        default: game-server.admin
+  --new-admin-host <host>                 explicit resolved/local-debug endpoint host
+  --new-admin-port <port>                 explicit resolved/local-debug endpoint port
   --new-admin-token <token>               default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --proxy-admin-url <url>                 local/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
+  --proxy-instance-id <id>                optional game-proxy instance id
+  --proxy-admin-endpoint-name <name>      default: game-proxy.admin
+  --proxy-admin-url <url>                 explicit resolved/local-debug endpoint URL
   --proxy-admin-token <token>             default: PROXY_ADMIN_TOKEN
   --proxy-admin-actor <actor>             default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-transfer-cli
+  --registry-url <url>                    default: REGISTRY_URL or REDIS_URL
+  --registry-key-prefix <prefix>          default: REGISTRY_KEY_PREFIX or REDIS_KEY_PREFIX
+  --resolved-control-targets              host/port/url inputs were already resolved from registry
+  --local-debug-targets                   allow explicit local debug host/port/url fallback inputs
   --proxy-expected-room-version <n>
   --proxy-room-version <n>
   --proxy-expected-last-transfer-checksum <checksum>
@@ -55,7 +72,7 @@ Options:
 
 For test/staging/production rollout drills, prefer scripts/rollout-three-process-drill.ps1
 so auth-http, game-proxy admin, and game-server admin endpoints come from registry discovery.
-The 127.0.0.1 admin defaults above are only for manual local drills.`);
+Direct host/port/url inputs are accepted only when marked as pre-resolved or local debug fallback.`);
 }
 
 function parseNumber(value, fallback) {
@@ -70,13 +87,9 @@ function parseNumber(value, fallback) {
 
 export function parseArgs(argv) {
   const options = {
-    oldAdminHost: process.env.MYSERVER_OLD_GAME_ADMIN_HOST || "127.0.0.1",
-    oldAdminPort: parseNumber(process.env.MYSERVER_OLD_GAME_ADMIN_PORT, 7500),
+    ...createDefaultRolloutTargetOptions(),
     oldAdminToken: process.env.MYSERVER_OLD_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-    newAdminHost: process.env.MYSERVER_NEW_GAME_ADMIN_HOST || "127.0.0.1",
-    newAdminPort: parseNumber(process.env.MYSERVER_NEW_GAME_ADMIN_PORT, 7501),
     newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-    proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
     proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
     proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "rollout-transfer-cli",
     timeoutMs: 5000
@@ -117,6 +130,12 @@ export function parseArgs(argv) {
       case "--new-server-id":
         ({ value: options.newServerId, nextIndex: index } = takeValue(index));
         break;
+      case "--old-admin-instance-id":
+        ({ value: options.oldAdminInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--old-admin-endpoint-name":
+        ({ value: options.oldAdminEndpointName, nextIndex: index } = takeValue(index));
+        break;
       case "--trigger-redirect-only":
         options.triggerRedirectOnly = true;
         break;
@@ -147,6 +166,12 @@ export function parseArgs(argv) {
       case "--old-admin-token":
         ({ value: options.oldAdminToken, nextIndex: index } = takeValue(index));
         break;
+      case "--new-admin-instance-id":
+        ({ value: options.newAdminInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--new-admin-endpoint-name":
+        ({ value: options.newAdminEndpointName, nextIndex: index } = takeValue(index));
+        break;
       case "--new-admin-host":
         ({ value: options.newAdminHost, nextIndex: index } = takeValue(index));
         break;
@@ -156,6 +181,12 @@ export function parseArgs(argv) {
       case "--new-admin-token":
         ({ value: options.newAdminToken, nextIndex: index } = takeValue(index));
         break;
+      case "--proxy-instance-id":
+        ({ value: options.proxyInstanceId, nextIndex: index } = takeValue(index));
+        break;
+      case "--proxy-admin-endpoint-name":
+        ({ value: options.proxyAdminEndpointName, nextIndex: index } = takeValue(index));
+        break;
       case "--proxy-admin-url":
         ({ value: options.proxyAdminUrl, nextIndex: index } = takeValue(index));
         break;
@@ -164,6 +195,19 @@ export function parseArgs(argv) {
         break;
       case "--proxy-admin-actor":
         ({ value: options.proxyAdminActor, nextIndex: index } = takeValue(index));
+        break;
+      case "--registry-url":
+        ({ value: options.registryUrl, nextIndex: index } = takeValue(index));
+        break;
+      case "--registry-key-prefix":
+        ({ value: options.registryKeyPrefix, nextIndex: index } = takeValue(index));
+        break;
+      case "--resolved-control-targets":
+        options.resolvedControlTargetsInput = true;
+        break;
+      case "--local-debug-targets":
+        options.localDebugTargets = true;
+        applyLocalDebugTargetEnvDefaults(options);
         break;
       case "--proxy-expected-room-version":
         ({ value: options.proxyExpectedRoomVersion, nextIndex: index } = takeNumber(index, undefined));
@@ -200,18 +244,6 @@ function requiredOptionKeys(options) {
 
 function validPort(value) {
   return Number.isInteger(value) && value > 0 && value <= 65535;
-}
-
-function validateHttpUrl(value, name) {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("expected http or https");
-    }
-    return null;
-  } catch {
-    return `invalid option ${name}: expected http(s) URL`;
-  }
 }
 
 function tokenState(token) {
@@ -252,9 +284,6 @@ export function validateTransferCliOptions(options, { allowPlaceholders = false 
   }
 
   if (options.triggerRedirectOnly) {
-    if (!validPort(options.oldAdminPort)) {
-      errors.push(`invalid option --old-admin-port: expected 1-65535`);
-    }
     if (!validPort(options.redirectTargetPort)) {
       errors.push(`invalid option --redirect-target-port: expected 1-65535`);
     }
@@ -262,16 +291,6 @@ export function validateTransferCliOptions(options, { allowPlaceholders = false 
       errors.push(`invalid option --redirect-retry-after-ms: expected non-negative integer`);
     }
   } else {
-    if (!validPort(options.oldAdminPort)) {
-      errors.push(`invalid option --old-admin-port: expected 1-65535`);
-    }
-    if (!validPort(options.newAdminPort)) {
-      errors.push(`invalid option --new-admin-port: expected 1-65535`);
-    }
-    const proxyUrlError = validateHttpUrl(options.proxyAdminUrl, "--proxy-admin-url");
-    if (proxyUrlError) {
-      errors.push(proxyUrlError);
-    }
     if (options.oldServerId && options.newServerId && options.oldServerId === options.newServerId) {
       errors.push("--old-server-id and --new-server-id must be different for a transfer drill");
     }
@@ -297,6 +316,11 @@ export function validateTransferCliOptions(options, { allowPlaceholders = false 
     errors.push("invalid option --timeout-ms: expected positive integer");
   }
 
+  errors.push(...validateControlTargetOptions(options, {
+    requireNew: !options.triggerRedirectOnly,
+    requireProxy: !options.triggerRedirectOnly
+  }));
+
   if (!options.oldAdminToken) {
     warnings.push("old game-server admin token is missing");
   }
@@ -320,10 +344,6 @@ export function validateTransferCliOptions(options, { allowPlaceholders = false 
       present: Boolean(options[key])
     }))
   };
-}
-
-function endpoint(host, port) {
-  return `${host}:${port}`;
 }
 
 export function buildTransferCliDryRunPlan(options) {
@@ -352,7 +372,7 @@ export function buildTransferCliDryRunPlan(options) {
         plannedCalls: ["old.triggerServerRedirect"],
         endpoints: {
           oldGameServerAdmin: {
-            endpoint: endpoint(options.oldAdminHost, options.oldAdminPort),
+            ...controlTargetPlan(options, "oldGameServerAdmin"),
             tokenState: tokenState(options.oldAdminToken)
           }
         },
@@ -400,15 +420,15 @@ export function buildTransferCliDryRunPlan(options) {
       ],
       endpoints: {
         oldGameServerAdmin: {
-          endpoint: endpoint(options.oldAdminHost, options.oldAdminPort),
+          ...controlTargetPlan(options, "oldGameServerAdmin"),
           tokenState: tokenState(options.oldAdminToken)
         },
         newGameServerAdmin: {
-          endpoint: endpoint(options.newAdminHost, options.newAdminPort),
+          ...controlTargetPlan(options, "newGameServerAdmin"),
           tokenState: tokenState(options.newAdminToken)
         },
         gameProxyAdmin: {
-          url: options.proxyAdminUrl,
+          ...controlTargetPlan(options, "gameProxyAdmin"),
           tokenState: tokenState(options.proxyAdminToken),
           actorState: actorState(options.proxyAdminActor),
           actor: options.proxyAdminActor || "<PROXY_ADMIN_ACTOR>"
@@ -431,7 +451,10 @@ export function buildTransferCliDryRunPlan(options) {
 }
 
 export function buildTransferCliExecutionEnvelope(options, result, safetyOverrides = {}) {
-  const validation = validateTransferCliOptions(options);
+  const validation = validateTransferCliOptions({
+    ...options,
+    resolvedControlTargetsInput: options.resolvedControlTargetsInput || Boolean(options.resolvedControlTargets)
+  });
   const ok = Boolean(result?.ok);
   const mode = options.triggerRedirectOnly ? "redirect-execute" : "transfer-execute";
   const summary = options.triggerRedirectOnly
@@ -590,6 +613,22 @@ async function main() {
     const envelope = buildTransferCliExecutionEnvelope(
       options,
       invalidOptionsResult(validation),
+      { callsControlPlane: false }
+    );
+    console.log(JSON.stringify(envelope, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    await resolveAndApplyRolloutControlTargets(options, {
+      requireNew: !options.triggerRedirectOnly,
+      requireProxy: !options.triggerRedirectOnly
+    });
+  } catch (error) {
+    const envelope = buildTransferCliExecutionEnvelope(
+      options,
+      errorResult("resolve_control_targets", error),
       { callsControlPlane: false }
     );
     console.log(JSON.stringify(envelope, null, 2));

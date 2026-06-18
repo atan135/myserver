@@ -475,7 +475,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js
 node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
 ```
 
-只有显式 `--execute` 才调用已运行服务的控制面接口；固定 `127.0.0.1:7500/7501/7101` 只适合本地 manual drill，测试/线上应先通过 registry discovery 解析 endpoint 再传入。该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/rollout-fault-drill-runbook.md`。
+只有显式 `--execute` 才调用已运行服务的控制面接口；默认目标是 registry 中的 `game-server.admin` / `game-proxy.admin`，固定 `127.0.0.1:7500/7501/7101` 只适合带 `--local-debug-targets` 的本地 manual drill。测试/线上应先通过 registry discovery 解析 endpoint，或传 instance id 让 CLI 解析。该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/rollout-fault-drill-runbook.md`。
 
 ## 扩展开发
 

@@ -19,9 +19,6 @@ test("rollout transfer cli dry-run builds a safe three-process plan", () => {
     "--room-id", "room-test",
     "--old-server-id", "game-server-old",
     "--new-server-id", "game-server-new",
-    "--old-admin-port", "7500",
-    "--new-admin-port", "7501",
-    "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "ops@example.com",
     "--timeout-ms", "6000"
   ]);
@@ -42,9 +39,30 @@ test("rollout transfer cli dry-run builds a safe three-process plan", () => {
     ROOM_TRANSFER_STAGE.PROXY_ROUTE_UPSERT,
     ROOM_TRANSFER_STAGE.OLD_RETIRE
   ]);
-  assert.equal(plan.plan.endpoints.oldGameServerAdmin.endpoint, "127.0.0.1:7500");
-  assert.equal(plan.plan.endpoints.newGameServerAdmin.endpoint, "127.0.0.1:7501");
-  assert.equal(plan.plan.endpoints.gameProxyAdmin.url, "http://127.0.0.1:7101");
+  assert.deepEqual(plan.plan.endpoints.oldGameServerAdmin, {
+    source: "registry",
+    target: "game-server.admin",
+    service: "game-server",
+    endpointName: "admin",
+    endpoint_name: "admin",
+    instanceId: "game-server-old",
+    instance_id: "game-server-old",
+    tokenState: "missing"
+  });
+  assert.deepEqual(plan.plan.endpoints.newGameServerAdmin, {
+    source: "registry",
+    target: "game-server.admin",
+    service: "game-server",
+    endpointName: "admin",
+    endpoint_name: "admin",
+    instanceId: "game-server-new",
+    instance_id: "game-server-new",
+    tokenState: "missing"
+  });
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.source, "registry");
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.target, "game-proxy.admin");
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.endpointName, "admin");
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.instanceId, "");
   assert.equal(plan.plan.endpoints.gameProxyAdmin.actor, "ops@example.com");
   assert.equal(plan.plan.endpoints.gameProxyAdmin.actorState, "set");
   assert.equal(plan.plan.routeCas.proxyExpectedRoomVersion, "auto-from-existing-route");
@@ -54,7 +72,7 @@ test("rollout transfer cli dry-run builds a safe three-process plan", () => {
   assert.equal(plan.plan.timeoutMs, 6000);
 });
 
-test("rollout transfer cli help labels local admin defaults as manual fallback", () => {
+test("rollout transfer cli help uses registry targets before direct endpoints", () => {
   const result = spawnSync(process.execPath, ["tools/mock-client/src/rollout-transfer-cli.js", "--help"], {
     cwd: process.cwd(),
     encoding: "utf8"
@@ -62,9 +80,10 @@ test("rollout transfer cli help labels local admin defaults as manual fallback",
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /registry discovery/);
-  assert.match(result.stdout, /manual local drills/);
-  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127\.0\.0\.1/);
-  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http:\/\/127\.0\.0\.1:7101/);
+  assert.match(result.stdout, /game-server\.admin/);
+  assert.match(result.stdout, /game-proxy\.admin/);
+  assert.match(result.stdout, /pre-resolved or local debug fallback/);
+  assert.doesNotMatch(result.stdout, /127\.0\.0\.1:7101/);
 });
 
 test("rollout transfer cli dry-run can require existing route metadata", () => {
@@ -74,9 +93,6 @@ test("rollout transfer cli dry-run can require existing route metadata", () => {
     "--room-id", "room-test",
     "--old-server-id", "game-server-old",
     "--new-server-id", "game-server-new",
-    "--old-admin-port", "7500",
-    "--new-admin-port", "7501",
-    "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "ops@example.com",
     "--require-existing-route-metadata"
   ]);
@@ -95,9 +111,6 @@ test("rollout transfer cli rejects invalid proxy admin actor before service call
     "--room-id", "room-test",
     "--old-server-id", "game-server-old",
     "--new-server-id", "game-server-new",
-    "--old-admin-port", "7500",
-    "--new-admin-port", "7501",
-    "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "bad actor"
   ]);
 
@@ -141,9 +154,6 @@ test("rollout transfer cli execution envelope summarizes transfer result", () =>
     "--room-id", "room-test",
     "--old-server-id", "game-server-old",
     "--new-server-id", "game-server-new",
-    "--old-admin-port", "7500",
-    "--new-admin-port", "7501",
-    "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "rollout-drill"
   ]);
 
@@ -182,9 +192,6 @@ test("rollout transfer cli execution envelope reports missing route metadata", (
     "--room-id", "room-test",
     "--old-server-id", "game-server-old",
     "--new-server-id", "game-server-new",
-    "--old-admin-port", "7500",
-    "--new-admin-port", "7501",
-    "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "rollout-drill",
     "--require-existing-route-metadata"
   ]);
@@ -277,7 +284,6 @@ test("rollout transfer cli redirect dry-run builds redirect-only plan", () => {
     "--trigger-redirect-only",
     "--rollout-epoch", "rollout-test",
     "--room-id", "room-test",
-    "--old-admin-port", "7500",
     "--redirect-target-host", "127.0.0.1",
     "--redirect-target-port", "4000",
     "--redirect-target-server-id", "game-proxy",
@@ -290,6 +296,8 @@ test("rollout transfer cli redirect dry-run builds redirect-only plan", () => {
   assert.equal(plan.mode, "redirect-dry-run");
   assert.deepEqual(plan.plan.plannedCalls, ["old.triggerServerRedirect"]);
   assert.equal(plan.safety.callsControlPlane, false);
+  assert.equal(plan.plan.endpoints.oldGameServerAdmin.source, "registry");
+  assert.equal(plan.plan.endpoints.oldGameServerAdmin.target, "game-server.admin");
   assert.equal(plan.plan.redirectTarget.host, "127.0.0.1");
   assert.equal(plan.plan.redirectTarget.port, 4000);
   assert.equal(plan.plan.redirectTarget.serverId, "game-proxy");
@@ -299,11 +307,14 @@ test("rollout transfer cli redirect dry-run builds redirect-only plan", () => {
 test("rollout transfer cli rejects unsafe same-server transfer plan", () => {
   const options = parseArgs([
     "--dry-run",
+    "--resolved-control-targets",
     "--rollout-epoch", "rollout-test",
     "--room-id", "room-test",
     "--old-server-id", "game-server",
     "--new-server-id", "game-server",
+    "--old-admin-host", "127.0.0.1",
     "--old-admin-port", "7500",
+    "--new-admin-host", "127.0.0.1",
     "--new-admin-port", "7500"
   ]);
 
@@ -312,4 +323,44 @@ test("rollout transfer cli rejects unsafe same-server transfer plan", () => {
   assert.equal(plan.ok, false);
   assert(plan.validation.errors.includes("--old-server-id and --new-server-id must be different for a transfer drill"));
   assert(plan.validation.errors.includes("old and new game-server admin endpoints must be different for a three-process transfer drill"));
+});
+
+test("rollout transfer cli accepts explicit pre-resolved control endpoints only with marker", () => {
+  const unsafe = parseArgs([
+    "--dry-run",
+    "--rollout-epoch", "rollout-test",
+    "--room-id", "room-test",
+    "--old-server-id", "game-server-old",
+    "--new-server-id", "game-server-new",
+    "--old-admin-host", "127.0.0.1",
+    "--old-admin-port", "17500",
+    "--new-admin-host", "127.0.0.2",
+    "--new-admin-port", "17501",
+    "--proxy-admin-url", "http://127.0.0.3:17101"
+  ]);
+  const rejected = buildTransferCliDryRunPlan(unsafe);
+  assert.equal(rejected.ok, false);
+  assert(rejected.validation.errors.some((message) => message.includes("requires --resolved-control-targets or --local-debug-targets")));
+
+  const resolved = parseArgs([
+    "--dry-run",
+    "--resolved-control-targets",
+    "--rollout-epoch", "rollout-test",
+    "--room-id", "room-test",
+    "--old-server-id", "game-server-old",
+    "--new-server-id", "game-server-new",
+    "--old-admin-host", "127.0.0.1",
+    "--old-admin-port", "17500",
+    "--new-admin-host", "127.0.0.2",
+    "--new-admin-port", "17501",
+    "--proxy-admin-url", "http://127.0.0.3:17101"
+  ]);
+  const plan = buildTransferCliDryRunPlan(resolved);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.plan.endpoints.oldGameServerAdmin.source, "resolved-input");
+  assert.equal(plan.plan.endpoints.oldGameServerAdmin.endpoint, "127.0.0.1:17500");
+  assert.equal(plan.plan.endpoints.newGameServerAdmin.source, "resolved-input");
+  assert.equal(plan.plan.endpoints.newGameServerAdmin.endpoint, "127.0.0.2:17501");
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.source, "resolved-input");
+  assert.equal(plan.plan.endpoints.gameProxyAdmin.url, "http://127.0.0.3:17101");
 });

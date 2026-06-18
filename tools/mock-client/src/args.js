@@ -1,4 +1,8 @@
 import { SCENARIO } from "./constants.js";
+import {
+  applyLocalDebugTargetEnvDefaults,
+  createDefaultRolloutTargetOptions
+} from "./rollout-targets.js";
 
 function collectOptionValue(argv, startIndex) {
   const valueIndex = startIndex + 1;
@@ -114,15 +118,11 @@ const DEFAULT_OPTIONS = {
   allowRedirectJoinFallback: false,
   redirectReconnectDelayMs: 0,
   rolloutEpoch: "",
+  ...createDefaultRolloutTargetOptions(),
   oldServerId: "game-server-old",
   newServerId: "game-server-new",
-  oldAdminHost: "127.0.0.1",
-  oldAdminPort: 7500,
   oldAdminToken: process.env.MYSERVER_OLD_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-  newAdminHost: "127.0.0.1",
-  newAdminPort: 7501,
   newAdminToken: process.env.MYSERVER_NEW_GAME_ADMIN_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
-  proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || "http://127.0.0.1:7101",
   proxyAdminToken: process.env.PROXY_ADMIN_TOKEN || "",
   proxyAdminActor: process.env.MYSERVER_PROXY_ADMIN_ACTOR || "mock-client",
   redirectTargetHost: "",
@@ -223,6 +223,12 @@ export function parseArgs(argv) {
       case "--new-server-id":
         ({ value: result.newServerId, nextIndex: index } = collectOptionValue(argv, index));
         break;
+      case "--old-admin-instance-id":
+        ({ value: result.oldAdminInstanceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--old-admin-endpoint-name":
+        ({ value: result.oldAdminEndpointName, nextIndex: index } = collectOptionValue(argv, index));
+        break;
       case "--old-admin-host":
         ({ value: result.oldAdminHost, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -232,6 +238,12 @@ export function parseArgs(argv) {
         break;
       case "--old-admin-token":
         ({ value: result.oldAdminToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--new-admin-instance-id":
+        ({ value: result.newAdminInstanceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--new-admin-endpoint-name":
+        ({ value: result.newAdminEndpointName, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--new-admin-host":
         ({ value: result.newAdminHost, nextIndex: index } = collectOptionValue(argv, index));
@@ -243,6 +255,12 @@ export function parseArgs(argv) {
       case "--new-admin-token":
         ({ value: result.newAdminToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
+      case "--proxy-instance-id":
+        ({ value: result.proxyInstanceId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--proxy-admin-endpoint-name":
+        ({ value: result.proxyAdminEndpointName, nextIndex: index } = collectOptionValue(argv, index));
+        break;
       case "--proxy-admin-url":
         ({ value: result.proxyAdminUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -251,6 +269,19 @@ export function parseArgs(argv) {
         break;
       case "--proxy-admin-actor":
         ({ value: result.proxyAdminActor, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--registry-url":
+        ({ value: result.registryUrl, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--registry-key-prefix":
+        ({ value: result.registryKeyPrefix, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--resolved-control-targets":
+        result.resolvedControlTargetsInput = true;
+        break;
+      case "--local-debug-targets":
+        result.localDebugTargets = true;
+        applyLocalDebugTargetEnvDefaults(result);
         break;
       case "--redirect-target-host":
         ({ value: result.redirectTargetHost, nextIndex: index } = collectOptionValue(argv, index));

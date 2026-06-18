@@ -98,7 +98,10 @@ test("server redirect reconnect cli options parse policy and delayed reconnect",
     "--new-server-id", "new",
     "--policy-id", "movement_demo",
     "--redirect-reconnect-delay-ms", "1500",
+    "--resolved-control-targets",
+    "--old-admin-host", "127.0.0.10",
     "--old-admin-port", "7500",
+    "--new-admin-host", "127.0.0.11",
     "--new-admin-port", "7501",
     "--proxy-admin-url", "http://127.0.0.1:7101",
     "--proxy-admin-actor", "rollout-drill",
@@ -118,7 +121,10 @@ test("server redirect reconnect cli options parse policy and delayed reconnect",
   assert.equal(options.newServerId, "new");
   assert.equal(options.policyId, "movement_demo");
   assert.equal(options.redirectReconnectDelayMs, 1500);
+  assert.equal(options.resolvedControlTargetsInput, true);
+  assert.equal(options.oldAdminHost, "127.0.0.10");
   assert.equal(options.oldAdminPort, 7500);
+  assert.equal(options.newAdminHost, "127.0.0.11");
   assert.equal(options.newAdminPort, 7501);
   assert.equal(options.proxyAdminUrl, "http://127.0.0.1:7101");
   assert.equal(options.proxyAdminActor, "rollout-drill");

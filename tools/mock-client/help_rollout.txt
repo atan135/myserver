@@ -171,6 +171,7 @@ node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-
 # 本地 manual drill 示例；测试/线上演练应优先通过 scripts/rollout-three-process-drill.ps1
 # 从 registry discovery 解析 auth/proxy/game-server admin endpoint。
 node tools/mock-client/src/rollout-transfer-cli.js ^
+  --local-debug-targets ^
   --rollout-epoch rollout-20260611-a ^
   --room-id room-empty-001 ^
   --old-server-id game-server-old ^
@@ -184,6 +185,7 @@ node tools/mock-client/src/rollout-transfer-cli.js ^
 # 也不会自动断开旧服连接。可配合 server-redirect-listen 验证 push，或配合
 # server-redirect-reconnect 验证 mock-client 主动断线、重连 proxy、AuthReq + RoomReconnectReq/RoomJoinReq。
 node tools/mock-client/src/rollout-transfer-cli.js ^
+  --local-debug-targets ^
   --trigger-redirect-only ^
   --rollout-epoch rollout-20260611-a ^
   --room-id rollout-redirect-room ^
@@ -240,6 +242,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --drill redirect-no-reconn
 # 解析 endpoint，再把解析结果传入 CLI，或优先使用外层 rollout-three-process 脚本:
 node tools/mock-client/src/rollout-fault-drill-cli.js ^
   --execute ^
+  --local-debug-targets ^
   --drill import-failure ^
   --rollout-epoch rollout-20260612-fault ^
   --room-id room-empty-001 ^
@@ -252,6 +255,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js ^
 # redirect-no-reconnect 执行模式只触发 push，不自动重连；下面是本地 manual drill 示例:
 node tools/mock-client/src/rollout-fault-drill-cli.js ^
   --execute ^
+  --local-debug-targets ^
   --drill redirect-no-reconnect ^
   --rollout-epoch rollout-20260612-fault ^
   --room-id rollout-redirect-room ^

@@ -828,6 +828,91 @@ test("strict config scan rejects consumers using legacy direct target variables"
   }
 });
 
+test("script scan rejects rollout fixed default control targets and unmarked direct endpoints", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "tools/mock-client/src/rollout-transfer-cli.js",
+      [
+        "const options = {",
+        "  oldAdminPort: 7500,",
+        "  newAdminPort: 7501,",
+        "  proxyAdminUrl: process.env.MYSERVER_PROXY_ADMIN_URL || \"http://127.0.0.1:7101\"",
+        "};"
+      ].join("\n")
+    );
+    writeFile(
+      tempDir,
+      "tools/mock-client/help_rollout.txt",
+      [
+        "node tools/mock-client/src/rollout-transfer-cli.js ^",
+        "  --rollout-epoch rollout-test ^",
+        "  --old-admin-host 127.0.0.1 --old-admin-port 7500 ^",
+        "  --proxy-admin-url http://127.0.0.1:7101"
+      ].join("\n")
+    );
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.summary.scriptFixedTargetViolations, 4);
+    assert.deepEqual(
+      result.scriptFixedTargetViolations.map((violation) => violation.rule).sort(),
+      [
+        "script_direct_control_target_requires_marker",
+        "script_fixed_control_target_default_forbidden",
+        "script_fixed_control_target_default_forbidden",
+        "script_fixed_control_target_default_forbidden"
+      ]
+    );
+    for (const violation of result.scriptFixedTargetViolations) {
+      assert.equal(violation.service, "rollout-script");
+      assert.match(violation.remediation, /registry target semantics|--resolved-control-targets|--local-debug-targets/);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("script scan allows pre-resolved registry and local debug rollout direct endpoints", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "scripts/rollout-three-process-drill.ps1",
+      [
+        "$transferArgs = @(",
+        "  $TransferCli,",
+        "  \"--resolved-control-targets\",",
+        "  \"--old-admin-host\", $OldAdminHost,",
+        "  \"--old-admin-port\", [string]$OldAdminPort,",
+        "  \"--new-admin-host\", $NewAdminHost,",
+        "  \"--new-admin-port\", [string]$NewAdminPort,",
+        "  \"--proxy-admin-url\", $ProxyAdminUrl",
+        ")"
+      ].join("\n")
+    );
+    writeFile(
+      tempDir,
+      "tools/mock-client/help_rollout.txt",
+      [
+        "node tools/mock-client/src/rollout-transfer-cli.js ^",
+        "  --local-debug-targets ^",
+        "  --old-admin-host 127.0.0.1 --old-admin-port 7500 ^",
+        "  --proxy-admin-url http://127.0.0.1:7101"
+      ].join("\n")
+    );
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.scriptFixedTargetViolations, []);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("discovery config CLI emits machine-readable JSON and fails on violations", () => {
   const tempDir = createTempRepo();
   try {
