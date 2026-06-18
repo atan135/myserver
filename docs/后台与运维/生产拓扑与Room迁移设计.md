@@ -190,6 +190,18 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 本节只定义滚动发布和扩缩容时的旧实例退出状态机，不展开部署平台 stop hook 如何定位目标实例，也不实现具体脚本或控制面接口。
 
+### 5.6 stop hook 目标实例发现
+
+生产部署平台的 stop hook、preStop 或 shutdown hook 负责把“要停哪个实例”解析成可调用的控制面 endpoint。hook 的输入必须是稳定身份，例如环境名、service name、target instance id / server id、rollout epoch 或控制面 owner；不得把 host、port、AuthBaseUrl、ProxyAdminUrl、old/new admin host/port 作为测试、预发或线上停服路径的主要输入。
+
+hook 必须使用与 rollout drill 和控制面相同的 service registry discovery 解析目标 endpoint，例如 `game-server.admin`、`game-proxy.admin`、`auth-http.internal`。`scripts/rollout-three-process-drill.ps1` 已把 registry discovery 作为演练入口；生产 hook 应复用同一发现边界，而不是重新维护一套固定地址表。严格发现环境下，registry 不可用、目标 endpoint 不存在、heartbeat 过期、instance id 不匹配或解析结果不唯一时，hook 必须失败并阻止继续停服，等待重试或人工处理。
+
+多实例场景下，hook 必须显式指定目标实例或控制面 owner，不能从发现结果中随机挑选一个 endpoint。任何会改变实例状态的写操作，包括 drain、shutdown、deregister、route store 清理或 rollout complete，都必须携带 `targetInstanceId` 或等价选择依据，并在被调用服务侧校验该身份与当前实例一致；只给 service name 而不指定实例的写操作不允许进入测试、预发或线上流程。
+
+固定端口、`AuthBaseUrl`、`ProxyAdminUrl`、old/new admin host/port 只能作为本地开发、manual fallback 或故障排查时的显式临时参数使用。使用这些 fallback 时必须在命令、日志或审计中标明 source 不是 registry；测试、预发和线上 stop hook 禁止依赖固定端口或静态 URL 跑通停服流程。
+
+hook 每次执行后都必须写入可回放日志和审计记录，至少包含环境名、service name、target instance id / server id、rollout epoch、解析出的 endpoint、`source=registry`、执行原因、调用结果和失败原因。发生发现失败、身份不匹配或多 endpoint 歧义时，也必须记录 reason，便于复盘停服是否被正确阻断。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
