@@ -197,65 +197,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry_client: Option<RegistryClient> = if config.registry_enabled {
         match RegistryClient::new(
             &config.registry_url,
-            "game-proxy",
+            &config.service_name,
             &config.service_instance_id,
         )
         .await
         {
             Ok(client) => {
-                let route_store_backend = match config.route_store_backend {
-                    config::RouteStoreBackend::Memory => "memory",
-                    config::RouteStoreBackend::Redis => "redis",
-                };
-                let instance = ServiceInstance::new(
-                    config.service_instance_id.clone(),
-                    "game-proxy".to_string(),
-                    config.host.clone(),
-                    config.port,
-                )
-                .with_endpoints(vec![
-                    ServiceEndpoint {
-                        name: "client".to_string(),
-                        protocol: "kcp".to_string(),
-                        host: config.host.clone(),
-                        port: config.port,
-                        socket: String::new(),
-                        visibility: "public".to_string(),
-                        metadata: serde_json::json!({
-                            "instance_id": config.service_instance_id.clone()
-                        }),
-                        healthy: true,
-                    },
-                    ServiceEndpoint {
-                        name: "client-tcp-fallback".to_string(),
-                        protocol: "tcp".to_string(),
-                        host: config.tcp_fallback_host.clone(),
-                        port: config.tcp_fallback_port,
-                        socket: String::new(),
-                        visibility: "public".to_string(),
-                        metadata: serde_json::json!({
-                            "instance_id": config.service_instance_id.clone()
-                        }),
-                        healthy: true,
-                    },
-                    ServiceEndpoint {
-                        name: "admin".to_string(),
-                        protocol: "http".to_string(),
-                        host: config.admin_host.clone(),
-                        port: config.admin_port,
-                        socket: String::new(),
-                        visibility: "admin".to_string(),
-                        metadata: serde_json::json!({
-                            "instance_id": config.service_instance_id.clone()
-                        }),
-                        healthy: true,
-                    },
-                ])
-                .with_tags(vec!["proxy".to_string(), "kcp".to_string()])
-                .with_metadata(serde_json::json!({
-                    "instance_id": config.service_instance_id.clone(),
-                    "route_store_backend": route_store_backend
-                }));
+                let route_store_backend = config.route_store_backend_name();
+                let instance = build_service_instance(&config);
 
                 if let Err(error) = client.register(&instance).await {
                     tracing::error!(error = %error, "failed to register game-proxy service");
@@ -264,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     tracing::info!(
-                        service = "game-proxy",
+                        service = %config.service_name,
                         instance = %config.service_instance_id,
                         route_store_backend,
                         "game-proxy service registered to registry"
@@ -353,13 +302,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(error = %error, "failed to deregister game-proxy service");
         } else {
             tracing::info!(
-                service = "game-proxy",
+                service = %config.service_name,
                 instance = %config.service_instance_id,
                 "game-proxy service deregistered from registry"
             );
         }
     }
     result
+}
+
+fn build_service_instance(config: &Config) -> ServiceInstance {
+    ServiceInstance::new(
+        config.service_instance_id.clone(),
+        config.service_name.clone(),
+        config.host.clone(),
+        config.port,
+    )
+    .with_endpoints(vec![
+        ServiceEndpoint {
+            name: "client".to_string(),
+            protocol: "kcp".to_string(),
+            host: config.host.clone(),
+            port: config.port,
+            socket: String::new(),
+            visibility: "public".to_string(),
+            metadata: serde_json::json!({
+                "instance_id": config.service_instance_id.clone()
+            }),
+            healthy: true,
+        },
+        ServiceEndpoint {
+            name: "client-tcp-fallback".to_string(),
+            protocol: "tcp".to_string(),
+            host: config.tcp_fallback_host.clone(),
+            port: config.tcp_fallback_port,
+            socket: String::new(),
+            visibility: "public".to_string(),
+            metadata: serde_json::json!({
+                "instance_id": config.service_instance_id.clone()
+            }),
+            healthy: true,
+        },
+        ServiceEndpoint {
+            name: "admin".to_string(),
+            protocol: "http".to_string(),
+            host: config.admin_host.clone(),
+            port: config.admin_port,
+            socket: String::new(),
+            visibility: "admin".to_string(),
+            metadata: serde_json::json!({
+                "instance_id": config.service_instance_id.clone()
+            }),
+            healthy: true,
+        },
+    ])
+    .with_tags(vec!["proxy".to_string(), "kcp".to_string()])
+    .with_metadata(config.service_instance_metadata())
 }
 
 fn registry_failure_is_fatal() -> bool {
@@ -380,4 +378,95 @@ fn env_name_is(name: &str, expected: &str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RouteStoreBackend;
+    use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
+    use crate::rollout_drain_status::RolloutDrainStatusCheckConfig;
+
+    fn test_config() -> Config {
+        Config {
+            host: "127.0.0.1".to_string(),
+            port: 4000,
+            admin_host: "127.0.0.1".to_string(),
+            admin_port: 7101,
+            admin_token: "admin-token".to_string(),
+            admin_read_token: None,
+            admin_scoped_tokens: Vec::new(),
+            admin_audit_enabled: true,
+            admin_audit_path: "logs/game-proxy/admin-audit.jsonl".to_string(),
+            admin_audit_require_actor: false,
+            tcp_fallback_host: "127.0.0.1".to_string(),
+            tcp_fallback_port: 14000,
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs/game-proxy".to_string(),
+            local_socket_name: "myserver-game-proxy.sock".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            route_store_backend: RouteStoreBackend::Redis,
+            route_store_redis_url: "redis://127.0.0.1:6379".to_string(),
+            route_store_key_prefix: String::new(),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            ticket_secret: "ticket-secret".to_string(),
+            proxy_max_connections: 0,
+            proxy_max_preauth_failures: 3,
+            proxy_msg_rate_window_ms: 1000,
+            proxy_msg_rate_max: 0,
+            maintenance_cache_ttl_ms: 2000,
+            redis_blocklist_enabled: false,
+            redis_blocklist_cache_ttl_ms: 2000,
+            connection_limits: ConnectionLimitConfig {
+                ip_denylist: IpDenyList::parse_csv("").unwrap(),
+                max_connections_per_ip: 0,
+                max_connections_per_player: 0,
+            },
+            rollout_drain_status_check: RolloutDrainStatusCheckConfig {
+                enabled: false,
+                url: "http://127.0.0.1:3000/api/v1/internal/game-server/rollout-drain-status"
+                    .to_string(),
+                token: None,
+                connect_timeout_ms: 3000,
+                read_timeout_ms: 3000,
+                overall_timeout_ms: 3000,
+                max_body_bytes: 1048576,
+            },
+            registry_enabled: true,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_discover_interval_secs: 5,
+            upstream_service_name: "game-server".to_string(),
+            service_name: "edge-proxy".to_string(),
+            service_instance_id: "edge-proxy-a".to_string(),
+            service_build_version: "2026.06.18".to_string(),
+            service_zone: "zone-a".to_string(),
+            upstream_server_id: "game-server-1".to_string(),
+            upstream_local_socket_name: "myserver-game-server.sock".to_string(),
+        }
+    }
+
+    #[test]
+    fn service_instance_uses_configured_name_and_instance_metadata() {
+        let instance = build_service_instance(&test_config());
+
+        assert_eq!(instance.id, "edge-proxy-a");
+        assert_eq!(instance.name, "edge-proxy");
+        assert_eq!(instance.metadata["instance_id"], "edge-proxy-a");
+        assert_eq!(instance.metadata["route_store_backend"], "redis");
+        assert_eq!(instance.metadata["build_version"], "2026.06.18");
+        assert_eq!(instance.metadata["zone"], "zone-a");
+        assert_eq!(instance.endpoints.len(), 3);
+        assert_eq!(instance.endpoints[0].name, "client");
+        assert_eq!(instance.endpoints[0].protocol, "kcp");
+        assert_eq!(instance.endpoints[0].visibility, "public");
+        assert_eq!(instance.endpoints[1].name, "client-tcp-fallback");
+        assert_eq!(instance.endpoints[1].protocol, "tcp");
+        assert_eq!(instance.endpoints[1].visibility, "public");
+        assert_eq!(instance.endpoints[2].name, "admin");
+        assert_eq!(instance.endpoints[2].protocol, "http");
+        assert_eq!(instance.endpoints[2].visibility, "admin");
+    }
 }

@@ -72,6 +72,14 @@ fn parse_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn parse_non_empty_string(name: &str, default: &str) -> String {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 #[derive(Clone)]
 pub enum RouteStoreBackend {
     Memory,
@@ -128,7 +136,10 @@ pub struct Config {
     pub registry_url: String,
     pub registry_discover_interval_secs: u64,
     pub upstream_service_name: String,
+    pub service_name: String,
     pub service_instance_id: String,
+    pub service_build_version: String,
+    pub service_zone: String,
     // 保留旧配置用于向后兼容（当 registry 禁用时）
     pub upstream_server_id: String,
     pub upstream_local_socket_name: String,
@@ -259,8 +270,14 @@ impl Config {
             .unwrap_or(5);
         let upstream_service_name =
             env::var("UPSTREAM_SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
-        let service_instance_id =
-            env::var("SERVICE_INSTANCE_ID").unwrap_or_else(|_| format!("game-proxy-{}", port));
+        let service_name = parse_non_empty_string("SERVICE_NAME", "game-proxy");
+        let service_instance_id = env::var("SERVICE_INSTANCE_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{}-{}", service_name, port));
+        let service_build_version = parse_non_empty_string("SERVICE_BUILD_VERSION", "dev");
+        let service_zone = parse_non_empty_string("SERVICE_ZONE", "local");
 
         // 向后兼容的旧配置
         let upstream_server_id =
@@ -306,7 +323,10 @@ impl Config {
             registry_url,
             registry_discover_interval_secs,
             upstream_service_name,
+            service_name,
             service_instance_id,
+            service_build_version,
+            service_zone,
             upstream_server_id,
             upstream_local_socket_name,
         })
@@ -322,6 +342,22 @@ impl Config {
 
     pub fn tcp_fallback_addr(&self) -> String {
         format!("{}:{}", self.tcp_fallback_host, self.tcp_fallback_port)
+    }
+
+    pub fn route_store_backend_name(&self) -> &'static str {
+        match &self.route_store_backend {
+            RouteStoreBackend::Memory => "memory",
+            RouteStoreBackend::Redis => "redis",
+        }
+    }
+
+    pub fn service_instance_metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "instance_id": self.service_instance_id.clone(),
+            "route_store_backend": self.route_store_backend_name(),
+            "build_version": self.service_build_version.clone(),
+            "zone": self.service_zone.clone()
+        })
     }
 }
 
@@ -558,6 +594,16 @@ mod tests {
             env::remove_var("REGISTRY_URL");
             env::remove_var("REDIS_URL");
             env::remove_var("REDIS_KEY_PREFIX");
+        }
+    }
+
+    fn clear_service_metadata_env() {
+        unsafe {
+            env::remove_var("PROXY_PORT");
+            env::remove_var("SERVICE_NAME");
+            env::remove_var("SERVICE_INSTANCE_ID");
+            env::remove_var("SERVICE_BUILD_VERSION");
+            env::remove_var("SERVICE_ZONE");
         }
     }
 
@@ -1143,6 +1189,97 @@ mod tests {
             config.route_store_backend,
             RouteStoreBackend::Memory
         ));
+    }
+
+    #[test]
+    fn service_metadata_config_uses_defaults() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ROUTE_STORE_BACKEND",
+            "PROXY_PORT",
+            "SERVICE_NAME",
+            "SERVICE_INSTANCE_ID",
+            "SERVICE_BUILD_VERSION",
+            "SERVICE_ZONE",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_service_metadata_env();
+            env::remove_var("PROXY_ROUTE_STORE_BACKEND");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        let metadata = config.service_instance_metadata();
+
+        assert_eq!(config.service_name, "game-proxy");
+        assert_eq!(config.service_instance_id, "game-proxy-4000");
+        assert_eq!(config.service_build_version, "dev");
+        assert_eq!(config.service_zone, "local");
+        assert_eq!(config.route_store_backend_name(), "memory");
+        assert_eq!(metadata["instance_id"], "game-proxy-4000");
+        assert_eq!(metadata["route_store_backend"], "memory");
+        assert_eq!(metadata["build_version"], "dev");
+        assert_eq!(metadata["zone"], "local");
+    }
+
+    #[test]
+    fn service_metadata_config_accepts_env_overrides() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "PROXY_ROUTE_STORE_BACKEND",
+            "PROXY_PORT",
+            "SERVICE_NAME",
+            "SERVICE_INSTANCE_ID",
+            "SERVICE_BUILD_VERSION",
+            "SERVICE_ZONE",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_service_metadata_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::set_var("PROXY_PORT", "4100");
+            env::set_var("PROXY_ROUTE_STORE_BACKEND", "redis");
+            env::set_var("SERVICE_NAME", " edge-proxy ");
+            env::set_var("SERVICE_BUILD_VERSION", " 2026.06.18 ");
+            env::set_var("SERVICE_ZONE", " zone-a ");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        let metadata = config.service_instance_metadata();
+
+        assert_eq!(config.service_name, "edge-proxy");
+        assert_eq!(config.service_instance_id, "edge-proxy-4100");
+        assert_eq!(config.service_build_version, "2026.06.18");
+        assert_eq!(config.service_zone, "zone-a");
+        assert_eq!(config.route_store_backend_name(), "redis");
+        assert_eq!(metadata["instance_id"], "edge-proxy-4100");
+        assert_eq!(metadata["route_store_backend"], "redis");
+        assert_eq!(metadata["build_version"], "2026.06.18");
+        assert_eq!(metadata["zone"], "zone-a");
+
+        unsafe {
+            env::set_var("SERVICE_INSTANCE_ID", " edge-proxy-a ");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        assert_eq!(config.service_instance_id, "edge-proxy-a");
+        assert_eq!(
+            config.service_instance_metadata()["instance_id"],
+            "edge-proxy-a"
+        );
     }
 
     #[test]
