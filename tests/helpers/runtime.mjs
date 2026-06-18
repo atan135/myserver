@@ -188,6 +188,88 @@ export function resolveCargoBin() {
   return "cargo";
 }
 
+export async function startMailService({
+  host = "127.0.0.1",
+  port,
+  redisUrl,
+  redisKeyPrefix,
+  registryKeyPrefix,
+  natsUrl,
+  ticketSecret,
+  mailServiceToken,
+  serviceInstanceId,
+  envOverrides = {}
+}) {
+  const restoreEnv = setEnvVars({
+    NODE_ENV: "test",
+    APP_ENV: "test",
+    HOST: host,
+    SERVICE_BIND_HOST: host,
+    SERVICE_ADVERTISED_HOST: host,
+    MAIL_PORT: String(port),
+    LOG_LEVEL: "error",
+    LOG_ENABLE_CONSOLE: "false",
+    LOG_ENABLE_FILE: "false",
+    LOG_DIR: "logs/test-mail-service",
+    REDIS_URL: redisUrl,
+    REDIS_KEY_PREFIX: redisKeyPrefix,
+    REGISTRY_KEY_PREFIX: registryKeyPrefix ?? redisKeyPrefix,
+    NATS_URL: natsUrl,
+    DB_ENABLED: "false",
+    REGISTRY_ENABLED: "true",
+    DISCOVERY_REQUIRED: "true",
+    DISALLOW_LEGACY_DIRECT_CONFIG: "true",
+    TICKET_SECRET: ticketSecret,
+    MAIL_PLAYER_AUTH_REQUIRED: "true",
+    MAIL_SERVICE_TOKEN: mailServiceToken,
+    SERVICE_INSTANCE_ID: serviceInstanceId,
+    SERVICE_NAME: "mail-service",
+    SERVICE_ZONE: "test",
+    SERVICE_BUILD_VERSION: "test",
+    GAME_ADMIN_TOKEN: "test-only-game-admin-token",
+    GAME_ADMIN_CONNECT_TIMEOUT_MS: "1000",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "1000",
+    GAME_ADMIN_READ_TIMEOUT_MS: "1000",
+    GAME_ADMIN_MAX_RESPONSE_BYTES: "4096",
+    ...envOverrides
+  });
+
+  let context;
+
+  try {
+    const { createApp } = await import(pathToFileURL(path.join(projectRoot, "apps", "mail-service", "src", "app.js")));
+    context = await createApp();
+    const { nestApp, registryClient } = context;
+
+    await registryClient.register();
+    registryClient.startHeartbeat(1);
+
+    await nestApp.listen(context.config.port, context.config.host);
+    const httpServer = nestApp.getHttpServer();
+    const address = httpServer.address();
+    assert.ok(address && typeof address === "object", "mail-service did not expose an address");
+
+    return {
+      host,
+      port: address.port,
+      baseUrl: `http://${host}:${address.port}`,
+      redisUrl,
+      redisKeyPrefix,
+      registryKeyPrefix: context.config.registryKeyPrefix,
+      async close() {
+        await context.close();
+        restoreEnv();
+      }
+    };
+  } catch (error) {
+    if (context?.close) {
+      await context.close().catch(() => {});
+    }
+    restoreEnv();
+    throw error;
+  }
+}
+
 function resolveNatsServerBin() {
   const envBin = process.env.NATS_SERVER_BIN;
   if (envBin) {
