@@ -98,7 +98,7 @@
 
 ### 5.1 测试/线上统一启动顺序
 
-测试、预发和线上环境必须先启动基础设施，再启动会注册或消费服务发现的内部服务，最后启动玩家入口和控制面。这里的 strict discovery 指 `DISCOVERY_REQUIRED=true`，或 `NODE_ENV` / `APP_ENV` 进入测试、预发、线上等严格发现环境。
+测试、预发和线上环境必须先启动基础设施，再启动会注册或消费服务发现的内部服务，最后启动玩家入口和控制面。这里的 strict discovery 在部署侧必须显式设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`；代码侧还会把 `NODE_ENV` / `APP_ENV` 进入测试、预发、线上等严格发现环境视为 required discovery。
 
 统一启动顺序如下：
 
@@ -107,6 +107,8 @@
 3. PostgreSQL：再提供账号、审计、公告、邮件等持久化数据入口。
 4. registry-dependent services：启动 `game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service` 等内部能力服务。`game-server`、`match-service`、`chat-server` 在严格发现下需要 registry 可用并完成注册；`mail-service`、`announce-service` 当前 Node 注册失败仍主要依赖日志和后续健康检查兜底。`mail-service` 的附件发放请求依赖发现 `game-server.admin`，应在后续健康检查阶段验证。`metrics-collector` 不注册也不消费 service registry，但依赖 NATS metrics 和 Redis snapshots，应在 Redis / NATS 可用后随本批或紧随本批启动。
 5. gateway/control services：最后启动 `auth-http`、`game-proxy`、`admin-api`、`admin-web` 等入口和控制面。`game-proxy` 启动需要发现 `game-server.proxy-local`；`auth-http` 登录返回依赖发现 `game-proxy.client`；`admin-api` 控制面依赖发现 `game-server.admin` 和 `game-proxy.admin`。
+
+需要注意，`auth-http`、`admin-api`、`mail-service`、`announce-service` 等 Node 服务在严格发现配置下会拒绝 `REGISTRY_ENABLED=false`，但启动注册异常当前不能笼统表述为都会像 Rust 服务一样 fail-fast；部署 readiness 必须兜底验证自身 registry 记录和 heartbeat 可见。
 
 这样排序的原因是：registry-dependent services 需要 Redis registry 已经可写，才能发布自身 endpoint 并维持 heartbeat；gateway/control services 属于发现消费者，启动或请求时依赖上游 endpoint 已经存在；NATS 和 PostgreSQL 分别是事件通道和持久化基础设施，应在业务服务启动前就绪。
 
@@ -122,7 +124,7 @@
 
 - 健康检查/readiness 通过前，不得把实例加入 LB、DNS、网关 upstream、admin/control target 或 rollout 目标。
 - `game-server`、`match-service`、`chat-server` 等 registry-dependent services 必须先确保自身注册记录和 heartbeat 可见，再进入可被发现或可被控制面选择的状态。
-- `mail-service`、`announce-service` 等 Node 服务当前存在注册失败只打日志的现实限制；部署健康检查必须兜底校验 registry 可见性，避免出现“进程已启动但 registry 不可见”仍被加入流量的情况。
+- `auth-http`、`admin-api`、`mail-service`、`announce-service` 等 Node 服务当前存在启动注册失败不一定 fail-fast 的现实限制；部署健康检查必须兜底校验 registry 可见性，避免出现“进程已启动但 registry 不可见”仍被加入流量的情况。
 
 gateway/control services 还必须先验证必要上游 endpoint 可发现，再允许自身接流量：
 
@@ -164,7 +166,7 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 ### 5.4 测试/线上统一部署步骤
 
-测试、预发和线上必须使用同一套部署状态机，不能为不同环境维护不同流程；环境之间只允许在环境变量、实例规模、域名或入口地址上存在差异。测试环境演练应完整覆盖与线上一致的注册、健康检查、接流量、下线、注销步骤，并把这些步骤作为测试/线上准入依据。
+测试、预发和线上必须使用同一套部署状态机，不能为不同环境维护不同流程；环境之间只允许在环境变量、实例规模、域名或入口地址上存在差异。该状态机以 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true` 为准入前提，测试环境演练应完整覆盖与线上一致的注册、健康检查、接流量、下线、注销步骤，并把这些步骤作为测试/线上准入依据。
 
 统一部署步骤如下：
 
@@ -194,9 +196,9 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 生产部署平台的 stop hook、preStop 或 shutdown hook 负责把“要停哪个实例”解析成可调用的控制面 endpoint。hook 的输入必须是稳定身份，例如环境名、service name、target instance id / server id、rollout epoch 或控制面 owner；不得把 host、port、AuthBaseUrl、ProxyAdminUrl、old/new admin host/port 作为测试、预发或线上停服路径的主要输入。
 
-hook 必须使用与 rollout drill 和控制面相同的 service registry discovery 解析目标 endpoint，例如 `game-server.admin`、`game-proxy.admin`、`auth-http.internal`。`scripts/rollout-three-process-drill.ps1` 已把 registry discovery 作为演练入口；生产 hook 应复用同一发现边界，而不是重新维护一套固定地址表。严格发现环境下，registry 不可用、目标 endpoint 不存在、heartbeat 过期、instance id 不匹配或解析结果不唯一时，hook 必须失败并阻止继续停服，等待重试或人工处理。
+hook 必须使用与 rollout drill 和控制面相同的 service registry discovery 解析目标 endpoint，例如 `game-server.admin`、`game-proxy.admin`、`auth-http.internal`。`scripts/rollout-three-process-drill.ps1` 当前会通过 registry discovery 解析 old/new `game-server.admin`、`game-proxy.admin` 和 `auth-http.internal`；只有 registry disabled 或 discovery non-required 的 local/manual drill 才允许固定目标 fallback。生产 hook 应复用同一发现边界，而不是重新维护一套固定地址表。严格发现环境下，registry 不可用、目标 endpoint 不存在、heartbeat 过期、instance id 不匹配或解析结果不唯一时，hook 必须失败并阻止继续停服，等待重试或人工处理。
 
-多实例场景下，hook 必须显式指定目标实例或控制面 owner，不能从发现结果中随机挑选一个 endpoint。任何会改变实例状态的写操作，包括 drain、shutdown、deregister、route store 清理或 rollout complete，都必须携带 `targetInstanceId` 或等价选择依据，并在被调用服务侧校验该身份与当前实例一致；只给 service name 而不指定实例的写操作不允许进入测试、预发或线上流程。
+多实例场景下，hook 必须显式指定目标实例或控制面 owner，不能从发现结果中随机挑选一个 endpoint。任何会改变实例状态的写操作，包括 drain、shutdown、deregister、route store 清理或 rollout complete，都必须携带 `targetInstanceId`、server id、rollout epoch 或等价选择依据，并在被调用服务侧校验该身份与当前实例和当前 rollout 会话一致；只给 service name 而不指定实例的写操作不允许进入测试、预发或线上流程。
 
 固定端口、`AuthBaseUrl`、`ProxyAdminUrl`、old/new admin host/port 只能作为本地开发、manual fallback 或故障排查时的显式临时参数使用。使用这些 fallback 时必须在命令、日志或审计中标明 source 不是 registry；测试、预发和线上 stop hook 禁止依赖固定端口或静态 URL 跑通停服流程。
 
