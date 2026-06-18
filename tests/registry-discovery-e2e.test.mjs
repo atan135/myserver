@@ -42,6 +42,8 @@ const manualMailServiceInstanceId = randomId("manual-mail-service");
 const manualAdminApiInstanceId = randomId("manual-admin-api");
 const heartbeatExpiredGameServerInstanceId = randomId("heartbeat-expired-game-server");
 const heartbeatHealthyGameServerInstanceId = randomId("heartbeat-healthy-game-server");
+const mixedLegacyGameServerInstanceId = randomId("mixed-legacy-game-server");
+const mixedEndpointGameServerInstanceId = randomId("mixed-endpoint-game-server");
 const registryInstances = [
   { serviceName: "game-server", instanceId: gameServerInstanceId },
   { serviceName: "game-proxy", instanceId: gameProxyInstanceId }
@@ -53,7 +55,9 @@ const manualRegistryInstances = [
   { serviceName: "mail-service", instanceId: manualMailServiceInstanceId },
   { serviceName: "admin-api", instanceId: manualAdminApiInstanceId },
   { serviceName: "game-server", instanceId: heartbeatExpiredGameServerInstanceId },
-  { serviceName: "game-server", instanceId: heartbeatHealthyGameServerInstanceId }
+  { serviceName: "game-server", instanceId: heartbeatHealthyGameServerInstanceId },
+  { serviceName: "game-server", instanceId: mixedLegacyGameServerInstanceId },
+  { serviceName: "game-server", instanceId: mixedEndpointGameServerInstanceId }
 ];
 const allRegistryInstances = [...registryInstances, ...manualRegistryInstances];
 
@@ -97,6 +101,22 @@ const manualEndpoints = {
     clientPort: 19701,
     adminHost: "127.0.0.84",
     adminPort: 19751
+  },
+  mixedLegacyGameServer: {
+    host: "127.0.0.91",
+    clientPort: 20700,
+    adminPort: 20750,
+    localSocket: `mixed-legacy-game-server-${mixedLegacyGameServerInstanceId}.sock`
+  },
+  mixedEndpointGameServer: {
+    legacyHost: "127.0.0.92",
+    legacyClientPort: 20701,
+    legacyAdminPort: 20751,
+    clientHost: "127.0.0.93",
+    clientPort: 20702,
+    adminHost: "127.0.0.94",
+    adminPort: 20752,
+    internalSocket: `mixed-endpoint-game-server-${mixedEndpointGameServerInstanceId}.sock`
   }
 };
 
@@ -405,6 +425,66 @@ function createHeartbeatExpiryGameServerPayloads() {
       tags: ["game", "admin", "manual-e2e"],
       weight: 1_000_000_000,
       metadata: healthyMetadata
+    })
+  ];
+}
+
+function createMixedVersionGameServerPayloads() {
+  const legacyMetadata = endpointMetadata("game-server", mixedLegacyGameServerInstanceId, {
+    server_id: mixedLegacyGameServerInstanceId,
+    registry_shape: "legacy-v1"
+  });
+  const endpointMetadataV2 = endpointMetadata("game-server", mixedEndpointGameServerInstanceId, {
+    server_id: mixedEndpointGameServerInstanceId,
+    registry_shape: "endpoint-v2"
+  });
+
+  return [
+    {
+      id: mixedLegacyGameServerInstanceId,
+      name: "game-server",
+      host: manualEndpoints.mixedLegacyGameServer.host,
+      port: manualEndpoints.mixedLegacyGameServer.clientPort,
+      admin_port: manualEndpoints.mixedLegacyGameServer.adminPort,
+      local_socket: manualEndpoints.mixedLegacyGameServer.localSocket,
+      tags: ["game", "legacy-v1", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: legacyMetadata,
+      registered_at: Date.now(),
+      healthy: true
+    },
+    createServiceInstancePayload({
+      id: mixedEndpointGameServerInstanceId,
+      name: "game-server",
+      host: manualEndpoints.mixedEndpointGameServer.legacyHost,
+      port: manualEndpoints.mixedEndpointGameServer.legacyClientPort,
+      admin_port: manualEndpoints.mixedEndpointGameServer.legacyAdminPort,
+      endpoints: [
+        endpoint(
+          "client",
+          "tcp",
+          manualEndpoints.mixedEndpointGameServer.clientHost,
+          manualEndpoints.mixedEndpointGameServer.clientPort,
+          "internal",
+          endpointMetadataV2
+        ),
+        endpoint(
+          "admin",
+          "tcp",
+          manualEndpoints.mixedEndpointGameServer.adminHost,
+          manualEndpoints.mixedEndpointGameServer.adminPort,
+          "admin",
+          endpointMetadataV2
+        ),
+        socketEndpoint(
+          "internal",
+          manualEndpoints.mixedEndpointGameServer.internalSocket,
+          endpointMetadataV2
+        )
+      ],
+      tags: ["game", "endpoint-v2", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: endpointMetadataV2
     })
   ];
 }
@@ -822,6 +902,189 @@ test("registry consumers discover correct endpoints across multiple service inst
     );
   } finally {
     await redis.quit();
+  }
+});
+
+test("registry discovery stays compatible while v1 legacy and v2 endpoint instances are mixed", { timeout: 60000 }, async () => {
+  const mixedRegistryInstances = [
+    { serviceName: "game-server", instanceId: mixedLegacyGameServerInstanceId },
+    { serviceName: "game-server", instanceId: mixedEndpointGameServerInstanceId }
+  ];
+
+  await cleanupRegistryInstances(redisUrl, mixedRegistryInstances, registryKeyPrefix);
+  await writeRegistryPayloads(createMixedVersionGameServerPayloads(), registryKeyPrefix);
+
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    const discovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+
+    const adminEndpoints = await discovery.discoverAllEndpoints("game-server", "admin");
+    assertEndpointSelection(
+      adminEndpoints.find(({ instance }) => instance.id === mixedLegacyGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedLegacyGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedLegacyGameServer.host,
+        port: manualEndpoints.mixedLegacyGameServer.adminPort,
+        visibility: "admin"
+      }
+    );
+    assertEndpointSelection(
+      adminEndpoints.find(({ instance }) => instance.id === mixedEndpointGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedEndpointGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedEndpointGameServer.adminHost,
+        port: manualEndpoints.mixedEndpointGameServer.adminPort,
+        visibility: "admin"
+      }
+    );
+    assert.equal(
+      adminEndpoints.some(({ instance, endpoint: discoveredEndpoint }) =>
+        instance.id === mixedEndpointGameServerInstanceId &&
+        (
+          discoveredEndpoint.host === manualEndpoints.mixedEndpointGameServer.legacyHost ||
+          discoveredEndpoint.port === manualEndpoints.mixedEndpointGameServer.legacyAdminPort
+        )
+      ),
+      false,
+      "expected v2 admin discovery to prefer explicit endpoint over legacy top-level fields"
+    );
+
+    const clientEndpoints = await discovery.discoverAllEndpoints("game-server", "client");
+    assertEndpointSelection(
+      clientEndpoints.find(({ instance }) => instance.id === mixedLegacyGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedLegacyGameServerInstanceId,
+        name: "client",
+        protocol: "tcp",
+        host: manualEndpoints.mixedLegacyGameServer.host,
+        port: manualEndpoints.mixedLegacyGameServer.clientPort,
+        visibility: "public"
+      }
+    );
+    assertEndpointSelection(
+      clientEndpoints.find(({ instance }) => instance.id === mixedEndpointGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedEndpointGameServerInstanceId,
+        name: "client",
+        protocol: "tcp",
+        host: manualEndpoints.mixedEndpointGameServer.clientHost,
+        port: manualEndpoints.mixedEndpointGameServer.clientPort,
+        visibility: "internal"
+      }
+    );
+
+    const internalEndpoints = await discovery.discoverAllEndpoints("game-server", "internal");
+    assertEndpointSelection(
+      internalEndpoints.find(({ instance }) => instance.id === mixedEndpointGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedEndpointGameServerInstanceId,
+        name: "internal",
+        protocol: "local_socket",
+        host: "",
+        port: 0,
+        socket: manualEndpoints.mixedEndpointGameServer.internalSocket,
+        visibility: "local"
+      }
+    );
+
+    const localSocketEndpoints = await discovery.discoverAllEndpoints("game-server", "local_socket");
+    assertEndpointSelection(
+      localSocketEndpoints.find(({ instance }) => instance.id === mixedLegacyGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedLegacyGameServerInstanceId,
+        name: "local_socket",
+        protocol: "local_socket",
+        host: "",
+        port: 0,
+        socket: manualEndpoints.mixedLegacyGameServer.localSocket,
+        visibility: "local"
+      }
+    );
+
+    for (const discoverGameServerAdminEndpoints of [
+      discoverAuthGameServerAdminEndpoints,
+      discoverAdminApiGameServerAdminEndpoints,
+      discoverMailGameServerAdminEndpoints
+    ]) {
+      const endpoints = await discoverGameServerAdminEndpoints(redis, {
+        registryKeyPrefix,
+        discoveryCacheTtlMs: 0
+      });
+      assertFlatEndpoint(findEndpoint(endpoints, mixedLegacyGameServerInstanceId), {
+        serviceName: "game-server",
+        instanceId: mixedLegacyGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedLegacyGameServer.host,
+        port: manualEndpoints.mixedLegacyGameServer.adminPort
+      });
+      assertFlatEndpoint(findEndpoint(endpoints, mixedEndpointGameServerInstanceId), {
+        serviceName: "game-server",
+        instanceId: mixedEndpointGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedEndpointGameServer.adminHost,
+        port: manualEndpoints.mixedEndpointGameServer.adminPort
+      });
+    }
+
+    const adminApiDiscovery = createAdminApiRegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    const adminApiSnapshot = await adminApiDiscovery.refreshSnapshot("game-server", {
+      endpointName: "admin",
+      kind: "all_endpoints",
+      refreshIntervalMs: 0
+    });
+    assert.equal(adminApiSnapshot.ok, true);
+    assertEndpointSelection(
+      adminApiSnapshot.value.find(({ instance }) => instance.id === mixedLegacyGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedLegacyGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedLegacyGameServer.host,
+        port: manualEndpoints.mixedLegacyGameServer.adminPort,
+        visibility: "admin"
+      }
+    );
+    assertEndpointSelection(
+      adminApiSnapshot.value.find(({ instance }) => instance.id === mixedEndpointGameServerInstanceId),
+      {
+        serviceName: "game-server",
+        instanceId: mixedEndpointGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.mixedEndpointGameServer.adminHost,
+        port: manualEndpoints.mixedEndpointGameServer.adminPort,
+        visibility: "admin"
+      }
+    );
+    adminApiDiscovery.stop();
+  } finally {
+    await redis.quit();
+    await cleanupRegistryInstances(redisUrl, mixedRegistryInstances, registryKeyPrefix);
   }
 });
 
