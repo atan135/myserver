@@ -1,0 +1,87 @@
+{
+  "instances": {
+    "game-server": [
+      {
+        "schema_version": 2,
+        "id": "game-server-old",
+        "name": "game-server",
+        "host": "127.0.0.1",
+        "port": 7000,
+        "admin_port": 7500,
+        "local_socket": "myserver-game-server-old.sock",
+        "endpoints": [
+          {
+            "name": "admin",
+            "protocol": "tcp",
+            "host": "127.0.0.1",
+            "port": 7500,
+            "socket": "",
+            "visibility": "admin",
+            "metadata": {},
+            "healthy": true
+          }
+        ],
+        "tags": ["game", "tcp"],
+        "weight": 100,
+        "metadata": {},
+        "registered_at": 1712736000000,
+        "healthy": true
+      },
+      {
+        "schema_version": 2,
+        "id": "game-server-new",
+        "name": "game-server",
+        "host": "127.0.0.1",
+        "port": 7001,
+        "admin_port": 7501,
+        "local_socket": "myserver-game-server-new.sock",
+        "endpoints": [
+          {
+            "name": "admin",
+            "protocol": "tcp",
+            "host": "127.0.0.1",
+            "port": 7501,
+            "socket": "",
+            "visibility": "admin",
+            "metadata": {},
+            "healthy": true
+          }
+        ],
+        "tags": ["game", "tcp"],
+        "weight": 100,
+        "metadata": {},
+        "registered_at": 1712736000000,
+        "healthy": true
+      }
+    ],
+    "game-proxy": [
+      {
+        "schema_version": 2,
+        "id": "game-proxy-1",
+        "name": "game-proxy",
+        "host": "127.0.0.1",
+        "port": 4000,
+        "admin_port": 7101,
+        "local_socket": "",
+        "endpoints": [
+          {
+            "name": "admin",
+            "protocol": "http",
+            "host": "127.0.0.1",
+            "port": 7101,
+            "socket": "",
+            "visibility": "admin",
+            "metadata": {},
+            "healthy": true
+          }
+        ],
+        "tags": ["proxy", "http"],
+        "weight": 100,
+        "metadata": {},
+        "registered_at": 1712736000000,
+        "healthy": true
+      }
+    ],
+    "auth-http": []
+  }
+}

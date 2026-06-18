@@ -67,6 +67,33 @@ param(
     [string]$NewServerId = $(if ($env:MYSERVER_NEW_SERVER_ID) { $env:MYSERVER_NEW_SERVER_ID } else { "game-server-new" }),
 
     [Parameter(Mandatory=$false)]
+    [string]$ProxyInstanceId = $(if ($env:MYSERVER_PROXY_INSTANCE_ID) { $env:MYSERVER_PROXY_INSTANCE_ID } else { "" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$AuthInstanceId = $(if ($env:MYSERVER_AUTH_INSTANCE_ID) { $env:MYSERVER_AUTH_INSTANCE_ID } else { "" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$EnvironmentName = $(if ($env:MYSERVER_ENVIRONMENT_NAME) { $env:MYSERVER_ENVIRONMENT_NAME } elseif ($env:APP_ENV) { $env:APP_ENV } elseif ($env:NODE_ENV) { $env:NODE_ENV } else { "local" }),
+
+    [Parameter(Mandatory=$false)]
+    [object]$RegistryEnabled = $(if ($env:REGISTRY_ENABLED) { $env:REGISTRY_ENABLED } else { $true }),
+
+    [Parameter(Mandatory=$false)]
+    [object]$DiscoveryRequired = $(if ($env:DISCOVERY_REQUIRED) { $env:DISCOVERY_REQUIRED } else { $true }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$RegistryUrl = $(if ($env:REGISTRY_URL) { $env:REGISTRY_URL } elseif ($env:REDIS_URL) { $env:REDIS_URL } else { "redis://127.0.0.1:6379" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$RedisUrl = $(if ($env:REDIS_URL) { $env:REDIS_URL } elseif ($env:REGISTRY_URL) { $env:REGISTRY_URL } else { "redis://127.0.0.1:6379" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$RegistryKeyPrefix = $(if ($env:REGISTRY_KEY_PREFIX) { $env:REGISTRY_KEY_PREFIX } elseif ($env:REDIS_KEY_PREFIX) { $env:REDIS_KEY_PREFIX } else { "" }),
+
+    [Parameter(Mandatory=$false)]
+    [string]$RegistryFixturePath = $(if ($env:MYSERVER_REGISTRY_FIXTURE_PATH) { $env:MYSERVER_REGISTRY_FIXTURE_PATH } else { "" }),
+
+    [Parameter(Mandatory=$false)]
     [int]$OldGamePort = $(if ($env:MYSERVER_OLD_GAME_PORT) { [int]$env:MYSERVER_OLD_GAME_PORT } else { 7000 }),
 
     [Parameter(Mandatory=$false)]
@@ -136,6 +163,9 @@ $script:StageResults = @()
 $script:TransferCliResult = $null
 $script:ShutdownResult = $null
 $script:OldProcessManager = $null
+$script:Discovery = $null
+$script:RegistryEnabledValue = $false
+$script:DiscoveryRequiredValue = $false
 $script:ReportWritten = $false
 $script:StartedAt = (Get-Date).ToUniversalTime().ToString("o")
 
@@ -236,6 +266,427 @@ function Get-UriEndpoint {
     return [pscustomobject]@{
         host = $uri.Host
         port = [int]$port
+    }
+}
+
+function Test-RegistryEnabled {
+    return [bool]$script:RegistryEnabledValue
+}
+
+function Test-DiscoveryRequired {
+    return [bool]$script:DiscoveryRequiredValue
+}
+
+function ConvertTo-BooleanOption {
+    param(
+        [Parameter(Mandatory=$true)]$Value,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+    if ($Value -is [int]) {
+        return [int]$Value -ne 0
+    }
+
+    $text = [string]$Value
+    if ($text -match "^(1|true|yes|on)$") {
+        return $true
+    }
+    if ($text -match "^(0|false|no|off)$") {
+        return $false
+    }
+    throw "$Name must be a boolean value: true/false, 1/0, yes/no, on/off"
+}
+
+function Resolve-RegistryFixturePath {
+    if ([string]::IsNullOrWhiteSpace($RegistryFixturePath)) {
+        return ""
+    }
+    if ([System.IO.Path]::IsPathRooted($RegistryFixturePath)) {
+        return $RegistryFixturePath
+    }
+    return (Join-Path $ProjectRoot $RegistryFixturePath)
+}
+
+function Invoke-RegistryDiscoveryNode {
+    $fixturePath = Resolve-RegistryFixturePath
+    $schemaPath = (Join-Path $ProjectRoot "packages\service-registry\node\registry-schema.js")
+    $schemaUrl = ([Uri]$schemaPath).AbsoluteUri
+    $nodeScript = @'
+import fs from "node:fs";
+import process from "node:process";
+const { normalizeServiceInstance } = await import(process.env.MYSERVER_REGISTRY_SCHEMA_URL);
+
+const boolValue = (value) => /^(1|true|yes|on)$/i.test(String(value || ""));
+const prefix = process.env.MYSERVER_REGISTRY_KEY_PREFIX || "";
+const fixturePath = process.env.MYSERVER_REGISTRY_FIXTURE_PATH || "";
+const redisUrl = process.env.MYSERVER_REGISTRY_URL || process.env.REGISTRY_URL || process.env.REDIS_URL || "redis://127.0.0.1:6379";
+const registryEnabled = boolValue(process.env.MYSERVER_REGISTRY_ENABLED);
+
+function emit(payload) {
+  console.log(JSON.stringify(payload, null, 2));
+}
+
+function serviceKeys(serviceName) {
+  return {
+    instances: `${prefix}service:${serviceName}:instances:*`,
+    key: (instanceId) => `${prefix}service:${serviceName}:instances:${instanceId}`,
+    heartbeat: (instanceId) => `${prefix}heartbeat:${serviceName}:${instanceId}`
+  };
+}
+
+function normalizeList(values) {
+  return values.map((value) => normalizeServiceInstance(value)).filter(Boolean);
+}
+
+function fixtureInstances(payload, serviceName) {
+  if (Array.isArray(payload)) {
+    return normalizeList(payload.filter((item) => item?.name === serviceName));
+  }
+  if (Array.isArray(payload?.instances?.[serviceName])) {
+    return normalizeList(payload.instances[serviceName]);
+  }
+  if (Array.isArray(payload?.services?.[serviceName])) {
+    return normalizeList(payload.services[serviceName]);
+  }
+  return [];
+}
+
+async function readFixture() {
+  const payload = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+  return {
+    source: "fixture",
+    services: {
+      "game-server": fixtureInstances(payload, "game-server"),
+      "game-proxy": fixtureInstances(payload, "game-proxy"),
+      "auth-http": fixtureInstances(payload, "auth-http")
+    }
+  };
+}
+
+async function readRedis() {
+  const { default: Redis } = await import("ioredis");
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false
+  });
+  try {
+    await redis.connect();
+    const services = {};
+    for (const serviceName of ["game-server", "game-proxy", "auth-http"]) {
+      const keys = serviceKeys(serviceName);
+      const instanceKeys = [];
+      let cursor = "0";
+      do {
+        const [nextCursor, batch] = await redis.scan(cursor, "MATCH", keys.instances, "COUNT", 100);
+        cursor = nextCursor;
+        instanceKeys.push(...batch);
+      } while (cursor !== "0");
+
+      const instances = [];
+      for (const key of instanceKeys.sort()) {
+        const instanceId = key.split(":").at(-1);
+        if (!instanceId) continue;
+        const heartbeatExists = await redis.exists(keys.heartbeat(instanceId));
+        if (!heartbeatExists) continue;
+        const data = await redis.hget(key, "data");
+        if (!data) continue;
+        const normalized = normalizeServiceInstance(JSON.parse(data));
+        if (normalized) instances.push(normalized);
+      }
+      services[serviceName] = instances;
+    }
+    return { source: "redis", services };
+  } finally {
+    redis.disconnect();
+  }
+}
+
+function endpointMatches(endpoint, endpointName, protocols) {
+  return endpoint?.name === endpointName &&
+    protocols.includes(endpoint.protocol) &&
+    endpoint.healthy !== false &&
+    endpoint.host &&
+    endpoint.port > 0;
+}
+
+function selectInstance(instances, instanceId, serviceName) {
+  const candidates = instances.filter((instance) => instance.healthy !== false && instance.weight > 0);
+  const match = candidates.find((instance) => instance.id === instanceId);
+  if (!match) {
+    throw new Error(`${serviceName} instance not found or unhealthy: ${instanceId}`);
+  }
+  return match;
+}
+
+function selectEndpoint(instance, endpointName, protocols, label) {
+  const endpoint = instance.endpoints.find((item) => endpointMatches(item, endpointName, protocols));
+  if (!endpoint) {
+    throw new Error(`${label} endpoint not found: instance=${instance.id}, endpoint=${endpointName}, protocols=${protocols.join("|")}`);
+  }
+  return {
+    instanceId: instance.id,
+    endpointName: endpoint.name,
+    protocol: endpoint.protocol,
+    host: endpoint.host,
+    port: endpoint.port,
+    url: endpoint.protocol === "http" || endpoint.protocol === "https" ? `${endpoint.protocol}://${endpoint.host}:${endpoint.port}` : "",
+    metadata: endpoint.metadata || {}
+  };
+}
+
+function selectSingletonEndpoint(instances, requestedInstanceId, endpointName, protocols, serviceName) {
+  const candidates = instances
+    .filter((instance) => instance.healthy !== false && instance.weight > 0)
+    .flatMap((instance) => instance.endpoints
+      .filter((endpoint) => endpointMatches(endpoint, endpointName, protocols))
+      .map((endpoint) => ({ instance, endpoint })));
+
+  const filtered = requestedInstanceId
+    ? candidates.filter(({ instance }) => instance.id === requestedInstanceId)
+    : candidates;
+
+  if (filtered.length === 0) {
+    throw new Error(`${serviceName}.${endpointName} endpoint not found${requestedInstanceId ? ` for instance ${requestedInstanceId}` : ""}`);
+  }
+  if (!requestedInstanceId && filtered.length > 1) {
+    throw new Error(`${serviceName}.${endpointName} has multiple candidates; pass the instance id`);
+  }
+
+  const { instance, endpoint } = filtered[0];
+  return {
+    instanceId: instance.id,
+    endpointName: endpoint.name,
+    protocol: endpoint.protocol,
+    host: endpoint.host,
+    port: endpoint.port,
+    url: endpoint.protocol === "http" || endpoint.protocol === "https" ? `${endpoint.protocol}://${endpoint.host}:${endpoint.port}` : "",
+    metadata: endpoint.metadata || {}
+  };
+}
+
+try {
+  if (!fixturePath && !registryEnabled) {
+    throw new Error("REGISTRY_ENABLED=false");
+  }
+  const snapshot = fixturePath ? await readFixture() : await readRedis();
+  const oldInstance = selectInstance(snapshot.services["game-server"], process.env.MYSERVER_OLD_SERVER_ID, "game-server");
+  const newInstance = selectInstance(snapshot.services["game-server"], process.env.MYSERVER_NEW_SERVER_ID, "game-server");
+  const oldAdmin = selectEndpoint(oldInstance, "admin", ["tcp"], "old game-server admin");
+  const newAdmin = selectEndpoint(newInstance, "admin", ["tcp"], "new game-server admin");
+  const proxyAdmin = selectSingletonEndpoint(
+    snapshot.services["game-proxy"],
+    process.env.MYSERVER_PROXY_INSTANCE_ID || "",
+    "admin",
+    ["http", "https"],
+    "game-proxy"
+  );
+
+  let authHttp = null;
+  try {
+    authHttp = selectSingletonEndpoint(
+      snapshot.services["auth-http"],
+      process.env.MYSERVER_AUTH_INSTANCE_ID || "",
+      "http",
+      ["http", "https"],
+      "auth-http"
+    );
+  } catch {
+    authHttp = null;
+  }
+
+  emit({
+    ok: true,
+    source: snapshot.source,
+    redisUrl,
+    registryKeyPrefix: prefix,
+    oldGameServerAdmin: oldAdmin,
+    newGameServerAdmin: newAdmin,
+    gameProxyAdmin: proxyAdmin,
+    authHttp,
+    serviceCounts: Object.fromEntries(Object.entries(snapshot.services).map(([key, value]) => [key, value.length]))
+  });
+} catch (error) {
+  emit({
+    ok: false,
+    source: fixturePath ? "fixture" : "redis",
+    redisUrl,
+    registryKeyPrefix: prefix,
+    error: error.stack || error.message || String(error)
+  });
+  process.exitCode = 1;
+}
+'@
+
+    $env:MYSERVER_REGISTRY_ENABLED = if (Test-RegistryEnabled) { "true" } else { "false" }
+    $env:MYSERVER_REGISTRY_URL = if (-not [string]::IsNullOrWhiteSpace($RegistryUrl)) { $RegistryUrl } else { $RedisUrl }
+    $env:MYSERVER_REGISTRY_KEY_PREFIX = $RegistryKeyPrefix
+    $env:MYSERVER_REGISTRY_FIXTURE_PATH = $fixturePath
+    $env:MYSERVER_REGISTRY_SCHEMA_URL = $schemaUrl
+    $env:MYSERVER_OLD_SERVER_ID = $OldServerId
+    $env:MYSERVER_NEW_SERVER_ID = $NewServerId
+    $env:MYSERVER_PROXY_INSTANCE_ID = $ProxyInstanceId
+    $env:MYSERVER_AUTH_INSTANCE_ID = $AuthInstanceId
+
+    $tempScriptDir = Join-Path $ProjectRoot ".tmp"
+    if (-not (Test-Path $tempScriptDir)) {
+        New-Item -ItemType Directory -Path $tempScriptDir -Force | Out-Null
+    }
+    $tempScriptPath = Join-Path $tempScriptDir ("rollout-discovery-{0}.mjs" -f ([guid]::NewGuid().ToString("N")))
+    Set-Content -LiteralPath $tempScriptPath -Value $nodeScript -Encoding UTF8
+    try {
+        $output = & node $tempScriptPath 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
+    }
+    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        throw "registry discovery produced no output"
+    }
+
+    try {
+        $json = $text | ConvertFrom-Json
+    } catch {
+        throw "registry discovery produced invalid JSON: $text"
+    }
+
+    if ($exitCode -ne 0 -or -not $json.ok) {
+        $message = if ($json.error) { $json.error } else { "registry discovery failed with exit code $exitCode" }
+        throw $message
+    }
+
+    return $json
+}
+
+function New-LocalFallbackDiscovery {
+    return [pscustomobject]@{
+        mode = "local-fallback"
+        source = "parameters"
+        registryEnabled = [bool]$script:RegistryEnabledValue
+        discoveryRequired = [bool]$script:DiscoveryRequiredValue
+        environmentName = $EnvironmentName
+        registryUrl = if (-not [string]::IsNullOrWhiteSpace($RegistryUrl)) { $RegistryUrl } else { $RedisUrl }
+        registryKeyPrefix = $RegistryKeyPrefix
+        warnings = @("local fallback is only valid when registry is disabled or discovery is non-required")
+        oldGameServerAdmin = [pscustomobject]@{
+            instanceId = $OldServerId
+            endpointName = "admin"
+            protocol = "tcp"
+            host = $OldAdminHost
+            port = $OldAdminPort
+            url = ""
+            source = "local-fallback"
+        }
+        newGameServerAdmin = [pscustomobject]@{
+            instanceId = $NewServerId
+            endpointName = "admin"
+            protocol = "tcp"
+            host = $NewAdminHost
+            port = $NewAdminPort
+            url = ""
+            source = "local-fallback"
+        }
+        gameProxyAdmin = [pscustomobject]@{
+            instanceId = if ($ProxyInstanceId) { $ProxyInstanceId } else { "<local-fallback>" }
+            endpointName = "admin"
+            protocol = "http"
+            host = (Get-UriEndpoint $ProxyAdminUrl).host
+            port = (Get-UriEndpoint $ProxyAdminUrl).port
+            url = $ProxyAdminUrl
+            source = "local-fallback"
+        }
+        authHttp = [pscustomobject]@{
+            instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<local-fallback>" }
+            endpointName = "http"
+            protocol = "http"
+            host = (Get-UriEndpoint $AuthBaseUrl).host
+            port = (Get-UriEndpoint $AuthBaseUrl).port
+            url = $AuthBaseUrl
+            source = "local-fallback"
+        }
+        serviceCounts = [pscustomobject]@{}
+    }
+}
+
+function Resolve-RolloutDiscovery {
+    $warnings = @()
+    if (Test-RegistryEnabled) {
+        try {
+            $registryResult = Invoke-RegistryDiscoveryNode
+            $auth = $registryResult.authHttp
+            if ($null -eq $auth) {
+                if (Test-DiscoveryRequired) {
+                    throw "auth-http.http endpoint not found in registry"
+                } else {
+                    $authEndpoint = Get-UriEndpoint $AuthBaseUrl
+                    $auth = [pscustomobject]@{
+                        instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<fallback>" }
+                        endpointName = "http"
+                        protocol = if ($AuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
+                        host = $authEndpoint.host
+                        port = $authEndpoint.port
+                        url = $AuthBaseUrl
+                        source = "fallback-auth-base-url"
+                    }
+                    $warnings += "auth-http.http endpoint not found in registry; using AuthBaseUrl fallback because DiscoveryRequired=false"
+                }
+            }
+
+            return [pscustomobject]@{
+                mode = "registry"
+                source = $registryResult.source
+                registryEnabled = [bool]$script:RegistryEnabledValue
+                discoveryRequired = [bool]$script:DiscoveryRequiredValue
+                environmentName = $EnvironmentName
+                registryUrl = $registryResult.redisUrl
+                registryKeyPrefix = $registryResult.registryKeyPrefix
+                warnings = $warnings
+                oldGameServerAdmin = $registryResult.oldGameServerAdmin
+                newGameServerAdmin = $registryResult.newGameServerAdmin
+                gameProxyAdmin = $registryResult.gameProxyAdmin
+                authHttp = $auth
+                serviceCounts = $registryResult.serviceCounts
+            }
+        } catch {
+            if (Test-DiscoveryRequired) {
+                throw "Required registry discovery failed: $($_.Exception.Message)"
+            }
+            $warnings += "registry discovery failed and DiscoveryRequired=false: $($_.Exception.Message)"
+        }
+    } elseif (Test-DiscoveryRequired) {
+        throw "Required registry discovery failed: REGISTRY_ENABLED=false"
+    } else {
+        $warnings += "REGISTRY_ENABLED=false; using local fallback endpoints"
+    }
+
+    $fallback = New-LocalFallbackDiscovery
+    $fallback.warnings = @($fallback.warnings) + $warnings
+    return $fallback
+}
+
+function Write-DiscoverySummary {
+    param([Parameter(Mandatory=$true)]$Discovery)
+
+    Write-Section "Discovery"
+    Write-Host "Mode: $($Discovery.mode)" -ForegroundColor Gray
+    Write-Host "Source: $($Discovery.source)" -ForegroundColor Gray
+    Write-Host "EnvironmentName: $($Discovery.environmentName)" -ForegroundColor Gray
+    Write-Host "RegistryEnabled: $($Discovery.registryEnabled)" -ForegroundColor Gray
+    Write-Host "DiscoveryRequired: $($Discovery.discoveryRequired)" -ForegroundColor Gray
+    Write-Host "RegistryUrl: $($Discovery.registryUrl)" -ForegroundColor Gray
+    Write-Host "RegistryKeyPrefix: $($Discovery.registryKeyPrefix)" -ForegroundColor Gray
+    Write-Host "OldGameServerAdmin: $($Discovery.oldGameServerAdmin.instanceId) $($Discovery.oldGameServerAdmin.host):$($Discovery.oldGameServerAdmin.port)" -ForegroundColor Gray
+    Write-Host "NewGameServerAdmin: $($Discovery.newGameServerAdmin.instanceId) $($Discovery.newGameServerAdmin.host):$($Discovery.newGameServerAdmin.port)" -ForegroundColor Gray
+    Write-Host "GameProxyAdmin: $($Discovery.gameProxyAdmin.instanceId) $($Discovery.gameProxyAdmin.url)" -ForegroundColor Gray
+    Write-Host "AuthHttp: $($Discovery.authHttp.instanceId) $($Discovery.authHttp.url)" -ForegroundColor Gray
+    foreach ($warning in @($Discovery.warnings)) {
+        if (-not [string]::IsNullOrWhiteSpace($warning)) {
+            Write-Warning $warning
+        }
     }
 }
 
@@ -447,6 +898,14 @@ function New-RunReport {
             rolloutEpochPlaceholder = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPOCH>" }
             oldServerId = $OldServerId
             newServerId = $NewServerId
+            proxyInstanceId = if ($ProxyInstanceId) { $ProxyInstanceId } else { $null }
+            authInstanceId = if ($AuthInstanceId) { $AuthInstanceId } else { $null }
+            environmentName = $EnvironmentName
+            registryEnabled = [bool]$script:RegistryEnabledValue
+            discoveryRequired = [bool]$script:DiscoveryRequiredValue
+            registryUrl = if (-not [string]::IsNullOrWhiteSpace($RegistryUrl)) { $RegistryUrl } else { $RedisUrl }
+            registryKeyPrefix = $RegistryKeyPrefix
+            registryFixturePath = if ($RegistryFixturePath) { Resolve-RegistryFixturePath } else { $null }
             oldGamePort = $OldGamePort
             newGamePort = $NewGamePort
             oldAdminEndpoint = "$($OldAdminHost):$($OldAdminPort)"
@@ -464,6 +923,7 @@ function New-RunReport {
                 authInternalService = Mask-TokenState $ServiceToken
             }
         }
+        discovery = $script:Discovery
         safety = [pscustomobject]@{
             startsServices = $false
             executeSteps = [bool]$ExecuteSteps
@@ -512,6 +972,16 @@ trap {
 $displayRoomId = if ($RoomId) { $RoomId } else { "<ROOM_ID>" }
 $displayRolloutEpoch = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPOCH>" }
 $script:OldProcessManager = Resolve-OldProcessManager
+$script:RegistryEnabledValue = ConvertTo-BooleanOption -Value $RegistryEnabled -Name "RegistryEnabled"
+$script:DiscoveryRequiredValue = ConvertTo-BooleanOption -Value $DiscoveryRequired -Name "DiscoveryRequired"
+$script:Discovery = Resolve-RolloutDiscovery
+
+$OldAdminHost = $script:Discovery.oldGameServerAdmin.host
+$OldAdminPort = [int]$script:Discovery.oldGameServerAdmin.port
+$NewAdminHost = $script:Discovery.newGameServerAdmin.host
+$NewAdminPort = [int]$script:Discovery.newGameServerAdmin.port
+$ProxyAdminUrl = $script:Discovery.gameProxyAdmin.url
+$AuthBaseUrl = $script:Discovery.authHttp.url
 
 Write-Section "Mode"
 if ($ExecuteSteps) {
@@ -526,12 +996,16 @@ Write-Host "RoomId: $displayRoomId" -ForegroundColor Gray
 Write-Host "RolloutEpoch: $displayRolloutEpoch" -ForegroundColor Gray
 Write-Host "OldServerId: $OldServerId" -ForegroundColor Gray
 Write-Host "NewServerId: $NewServerId" -ForegroundColor Gray
+Write-Host "ProxyInstanceId: $(if ($ProxyInstanceId) { $ProxyInstanceId } else { '<auto>' })" -ForegroundColor Gray
+Write-Host "AuthInstanceId: $(if ($AuthInstanceId) { $AuthInstanceId } else { '<auto>' })" -ForegroundColor Gray
 if ($script:OldProcessManager.enabled) {
     Write-Host "OldProcessPid: $($script:OldProcessManager.pid) ($($script:OldProcessManager.source))" -ForegroundColor Gray
     Write-Host "OldProcessWaitTimeoutMs: $($script:OldProcessManager.waitTimeoutMs)" -ForegroundColor Gray
 } else {
     Write-Host "OldProcessPid: not set; shutdown request will not verify local process exit" -ForegroundColor Yellow
 }
+
+Write-DiscoverySummary $script:Discovery
 
 Write-Section "Preflight"
 $preflightErrors = @()
@@ -619,6 +1093,16 @@ if (-not $SkipPortProbe) {
     }
 } else {
     Write-Host "port probes skipped" -ForegroundColor Yellow
+}
+
+if ($script:Discovery.mode -eq "local-fallback") {
+    if ($script:RegistryEnabledValue -and $script:DiscoveryRequiredValue) {
+        $preflightErrors += "local fallback endpoints are forbidden when RegistryEnabled=true and DiscoveryRequired=true"
+    } elseif ($EnvironmentName -match "^(prod|production|staging|test|testing)$" -and $script:DiscoveryRequiredValue) {
+        $preflightErrors += "local fallback endpoints are only allowed in local discovery non-required mode"
+    } else {
+        $preflightWarnings += "using local fallback endpoints; this is only valid for registry disabled or discovery non-required local drills"
+    }
 }
 
 if ($preflightWarnings.Count -gt 0) {
