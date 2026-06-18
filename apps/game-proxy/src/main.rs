@@ -319,14 +319,14 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
     ServiceInstance::new(
         config.service_instance_id.clone(),
         config.service_name.clone(),
-        config.host.clone(),
+        config.public_host.clone(),
         config.port,
     )
     .with_endpoints(vec![
         ServiceEndpoint {
             name: "client".to_string(),
             protocol: "kcp".to_string(),
-            host: config.host.clone(),
+            host: config.public_host.clone(),
             port: config.port,
             socket: String::new(),
             visibility: "public".to_string(),
@@ -342,7 +342,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
         ServiceEndpoint {
             name: "client-tcp-fallback".to_string(),
             protocol: "tcp".to_string(),
-            host: config.tcp_fallback_host.clone(),
+            host: config.tcp_fallback_advertised_host.clone(),
             port: config.tcp_fallback_port,
             socket: String::new(),
             visibility: "public".to_string(),
@@ -358,7 +358,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
         ServiceEndpoint {
             name: "admin".to_string(),
             protocol: "http".to_string(),
-            host: config.admin_host.clone(),
+            host: config.admin_advertised_host.clone(),
             port: config.admin_port,
             socket: String::new(),
             visibility: "admin".to_string(),
@@ -390,8 +390,10 @@ mod tests {
     fn test_config() -> Config {
         Config {
             host: "127.0.0.1".to_string(),
+            public_host: "127.0.0.1".to_string(),
             port: 4000,
             admin_host: "127.0.0.1".to_string(),
+            admin_advertised_host: "127.0.0.1".to_string(),
             admin_port: 7101,
             admin_token: "admin-token".to_string(),
             admin_read_token: None,
@@ -400,6 +402,7 @@ mod tests {
             admin_audit_path: "logs/game-proxy/admin-audit.jsonl".to_string(),
             admin_audit_require_actor: false,
             tcp_fallback_host: "127.0.0.1".to_string(),
+            tcp_fallback_advertised_host: "127.0.0.1".to_string(),
             tcp_fallback_port: 14000,
             log_level: "info".to_string(),
             log_enable_console: true,
@@ -451,10 +454,18 @@ mod tests {
 
     #[test]
     fn service_instance_uses_configured_name_and_instance_metadata() {
-        let instance = build_service_instance(&test_config());
+        let mut config = test_config();
+        config.host = "0.0.0.0".to_string();
+        config.public_host = "10.0.0.40".to_string();
+        config.tcp_fallback_host = "0.0.0.0".to_string();
+        config.tcp_fallback_advertised_host = "10.0.0.42".to_string();
+        config.admin_host = "0.0.0.0".to_string();
+        config.admin_advertised_host = "10.0.0.41".to_string();
+        let instance = build_service_instance(&config);
 
         assert_eq!(instance.id, "edge-proxy-a");
         assert_eq!(instance.name, "edge-proxy");
+        assert_eq!(instance.host, "10.0.0.40");
         assert_eq!(instance.metadata["service_name"], "edge-proxy");
         assert_eq!(instance.metadata["service_instance_id"], "edge-proxy-a");
         assert_eq!(instance.metadata["instance_id"], "edge-proxy-a");
@@ -464,19 +475,25 @@ mod tests {
         assert_eq!(instance.endpoints.len(), 3);
         assert_eq!(instance.endpoints[0].name, "client");
         assert_eq!(instance.endpoints[0].protocol, "kcp");
+        assert_eq!(instance.endpoints[0].host, "10.0.0.40");
         assert_eq!(instance.endpoints[0].visibility, "public");
         assert_eq!(instance.endpoints[0].metadata["service_name"], "edge-proxy");
         assert_eq!(
             instance.endpoints[0].metadata["service_instance_id"],
             "edge-proxy-a"
         );
-        assert_eq!(instance.endpoints[0].metadata["build_version"], "2026.06.18");
+        assert_eq!(
+            instance.endpoints[0].metadata["build_version"],
+            "2026.06.18"
+        );
         assert_eq!(instance.endpoints[0].metadata["zone"], "zone-a");
         assert_eq!(instance.endpoints[1].name, "client-tcp-fallback");
         assert_eq!(instance.endpoints[1].protocol, "tcp");
+        assert_eq!(instance.endpoints[1].host, "10.0.0.42");
         assert_eq!(instance.endpoints[1].visibility, "public");
         assert_eq!(instance.endpoints[2].name, "admin");
         assert_eq!(instance.endpoints[2].protocol, "http");
+        assert_eq!(instance.endpoints[2].host, "10.0.0.41");
         assert_eq!(instance.endpoints[2].visibility, "admin");
     }
 }

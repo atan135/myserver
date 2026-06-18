@@ -79,6 +79,23 @@ test("RegistryClient registers mail-service http endpoint and metadata", async (
   });
 });
 
+test("RegistryClient publishes advertised host instead of bind host", async () => {
+  const redis = createRedisCapture();
+  const client = new RegistryClient(
+    redis,
+    createConfig({
+      host: "0.0.0.0",
+      advertisedHost: "10.10.0.23"
+    })
+  );
+
+  await client.register();
+
+  const payload = JSON.parse(redis.hashes.get("service:mail-service:instances:mail-test-001:data"));
+  assert.equal(payload.host, "10.10.0.23");
+  assert.equal(payload.endpoints[0].host, "10.10.0.23");
+});
+
 test("RegistryClient metadata marks missing service token as disabled", async () => {
   const redis = createRedisCapture();
   const client = new RegistryClient(

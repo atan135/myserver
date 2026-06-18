@@ -107,6 +107,23 @@ test("RegistryClient registers admin-api admin http endpoint and metadata", asyn
   });
 });
 
+test("RegistryClient publishes advertised host instead of bind host", async () => {
+  const redis = createRedisCapture();
+  const client = new RegistryClient(
+    redis,
+    createConfig({
+      host: "0.0.0.0",
+      advertisedHost: "10.10.0.25"
+    })
+  );
+
+  await client.register();
+
+  const payload = JSON.parse(redis.hashes.get("service:admin-api:instances:admin-api-test-001:data"));
+  assert.equal(payload.host, "10.10.0.25");
+  assert.equal(payload.endpoints[0].host, "10.10.0.25");
+});
+
 test("discoverGameServerAdminEndpoints returns healthy tcp admin endpoints for all instances", async () => {
   const redis = createRedisCapture();
   const instances = [

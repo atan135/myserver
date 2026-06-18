@@ -16,6 +16,31 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function firstNonEmptyEnv(names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function advertisedHostFromEnv(names, fallbackHost) {
+  const configured = firstNonEmptyEnv(names);
+  if (configured) {
+    return normalizeAdvertisedHost(configured);
+  }
+
+  return normalizeAdvertisedHost(fallbackHost);
+}
+
+function normalizeAdvertisedHost(host) {
+  return ["0.0.0.0", "::", "[::]"].includes(String(host).trim())
+    ? "127.0.0.1"
+    : host;
+}
+
 export const DEFAULT_ANNOUNCE_ADMIN_TOKEN =
   "dev-only-change-this-announce-admin-token";
 export const DEFAULT_ANNOUNCE_READ_TOKEN =
@@ -123,11 +148,14 @@ function validateProductionConfig(config) {
 }
 
 export function getConfig() {
+  const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const config = {
     appName: "announce-service",
     env: process.env.NODE_ENV || "development",
     appEnv: process.env.APP_ENV || "",
-    host: process.env.HOST || "127.0.0.1",
+    host: bindHost,
+    bindHost,
+    advertisedHost: advertisedHostFromEnv(["SERVICE_ADVERTISED_HOST", "SERVICE_PUBLIC_HOST", "ANNOUNCE_PUBLIC_HOST", "HOST"], bindHost),
     port: Number.parseInt(process.env.ANNOUNCE_PORT || "9004", 10),
     logLevel: process.env.LOG_LEVEL || "info",
     logEnableConsole: parseBoolean(process.env.LOG_ENABLE_CONSOLE, true),

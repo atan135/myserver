@@ -20,6 +20,10 @@ const CONFIG_ENV_KEYS = [
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
   "SERVICE_ZONE",
+  "SERVICE_BIND_HOST",
+  "SERVICE_PUBLIC_HOST",
+  "SERVICE_ADVERTISED_HOST",
+  "HOST",
   "GAME_PROXY_HOST",
   "GAME_PROXY_PORT",
   "TICKET_SECRET",
@@ -237,6 +241,34 @@ test("auth-http reads service identity and build version", async () => {
     assert.equal(config.serviceInstanceId, "auth-http-blue-001");
     assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+auth");
+  });
+});
+
+test("auth-http separates bind host from advertised registry host", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    SERVICE_BIND_HOST: "0.0.0.0",
+    SERVICE_PUBLIC_HOST: "10.0.0.10",
+    HOST: "127.0.0.9"
+  }, (config) => {
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.bindHost, "0.0.0.0");
+    assert.equal(config.advertisedHost, "10.0.0.10");
+  });
+
+  await withEnv({
+    NODE_ENV: "development",
+    SERVICE_BIND_HOST: "0.0.0.0"
+  }, (config) => {
+    assert.equal(config.advertisedHost, "127.0.0.1");
+  });
+
+  await withEnv({
+    NODE_ENV: "development",
+    HOST: "0.0.0.0"
+  }, (config) => {
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.advertisedHost, "127.0.0.1");
   });
 });
 

@@ -50,8 +50,7 @@ pub struct ModeConfig {
 
 impl Config {
     pub fn from_env() -> Self {
-        let bind_addr =
-            std::env::var("MATCH_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:9002".to_string());
+        let bind_addr = bind_addr_from_env("MATCH_BIND_ADDR", "0.0.0.0:9002");
         let port = parse_port(&bind_addr).unwrap_or(9002);
         let mut modes = HashMap::new();
         modes.insert(
@@ -82,9 +81,15 @@ impl Config {
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
         let config = Self {
-            bind_addr,
-            public_host: std::env::var("MATCH_PUBLIC_HOST")
-                .unwrap_or_else(|_| "127.0.0.1".to_string()),
+            bind_addr: bind_addr.clone(),
+            public_host: advertised_host_from_env(
+                &[
+                    "SERVICE_ADVERTISED_HOST",
+                    "SERVICE_PUBLIC_HOST",
+                    "MATCH_PUBLIC_HOST",
+                ],
+                &bind_addr,
+            ),
             port,
             match_timeout_secs: std::env::var("MATCH_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "30".to_string())
@@ -196,6 +201,47 @@ impl Config {
     }
 }
 
+fn bind_addr_from_env(bind_addr_name: &str, default: &str) -> String {
+    let bind_addr = std::env::var(bind_addr_name).unwrap_or_else(|_| default.to_string());
+    let Some(bind_host) = first_non_empty_env(&["SERVICE_BIND_HOST"]) else {
+        return bind_addr;
+    };
+
+    match bind_addr.parse::<SocketAddr>() {
+        Ok(addr) => format!("{bind_host}:{}", addr.port()),
+        Err(_) => bind_addr,
+    }
+}
+
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn advertised_host_from_env(names: &[&str], bind_addr: &str) -> String {
+    if let Some(host) = first_non_empty_env(names) {
+        return normalize_advertised_host(&host);
+    }
+
+    let bind_host = bind_addr
+        .parse::<SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    normalize_advertised_host(&bind_host)
+}
+
+fn normalize_advertised_host(host: &str) -> String {
+    if matches!(host.trim(), "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host.trim().to_string()
+    }
+}
+
 fn parse_port(bind_addr: &str) -> Option<u16> {
     let addr: SocketAddr = bind_addr.parse().ok()?;
     Some(addr.port())
@@ -304,6 +350,11 @@ mod tests {
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
+        "SERVICE_BIND_HOST",
+        "SERVICE_PUBLIC_HOST",
+        "SERVICE_ADVERTISED_HOST",
+        "MATCH_BIND_ADDR",
+        "MATCH_PUBLIC_HOST",
         "SERVICE_NAME",
         "SERVICE_INSTANCE_ID",
         "SERVICE_ZONE",
@@ -440,6 +491,36 @@ mod tests {
         assert_eq!(config.service_instance_id, "match-blue-001");
         assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.service_build_version, "2026.06.18");
+    }
+
+    #[test]
+    fn endpoint_publish_hosts_prefer_unified_env_and_never_advertise_wildcard_bind() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("SERVICE_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_PUBLIC_HOST", "10.0.0.60");
+            env::set_var("MATCH_BIND_ADDR", "127.0.0.9:9002");
+            env::set_var("MATCH_PUBLIC_HOST", "10.0.0.99");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.bind_addr, "0.0.0.0:9002");
+        assert_eq!(config.public_host, "10.0.0.60");
+
+        unsafe {
+            env::remove_var("SERVICE_PUBLIC_HOST");
+            env::remove_var("SERVICE_ADVERTISED_HOST");
+            env::remove_var("MATCH_PUBLIC_HOST");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.public_host, "127.0.0.1");
     }
 
     #[test]

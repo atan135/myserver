@@ -17,10 +17,11 @@ export class RegistryClient {
 
   async register() {
     const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
+    const endpointHost = this.config.advertisedHost || this.config.host;
     const data = createServiceInstancePayload({
       id: this.instanceId,
       name: this.serviceName,
-      host: this.config.host,
+      host: endpointHost,
       port: this.config.port,
       admin_port: 0,
       local_socket: "",
@@ -28,7 +29,7 @@ export class RegistryClient {
         {
           name: "http",
           protocol: "http",
-          host: this.config.host,
+          host: endpointHost,
           port: this.config.port,
           socket: "",
           visibility: "internal",
@@ -56,7 +57,7 @@ export class RegistryClient {
     log("info", "registry.registered", {
       service: this.serviceName,
       instance: this.instanceId,
-      host: this.config.host,
+      host: endpointHost,
       port: this.config.port
     });
   }

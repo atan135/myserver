@@ -59,6 +59,7 @@ struct Config {
 
 impl Config {
     fn from_env() -> Self {
+        let bind_addr = bind_addr_from_env("CHAT_BIND_ADDR", "0.0.0.0:9001");
         let config = Self {
             db_enabled: parse_bool_env("DB_ENABLED", false),
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -68,8 +69,7 @@ impl Config {
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
                 .unwrap_or(5),
-            bind_addr: std::env::var("CHAT_BIND_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:9001".to_string()),
+            bind_addr: bind_addr.clone(),
             heartbeat_timeout_secs: std::env::var("HEARTBEAT_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
@@ -119,8 +119,14 @@ impl Config {
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
                 .unwrap_or(60),
-            public_host: std::env::var("CHAT_PUBLIC_HOST")
-                .unwrap_or_else(|_| "127.0.0.1".to_string()),
+            public_host: advertised_host_from_env(
+                &[
+                    "SERVICE_ADVERTISED_HOST",
+                    "SERVICE_PUBLIC_HOST",
+                    "CHAT_PUBLIC_HOST",
+                ],
+                &bind_addr,
+            ),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             log_enable_console: std::env::var("LOG_ENABLE_CONSOLE")
                 .unwrap_or_else(|_| "true".to_string())
@@ -137,6 +143,47 @@ impl Config {
         validate_discovery_config(&config);
 
         config
+    }
+}
+
+fn bind_addr_from_env(bind_addr_name: &str, default: &str) -> String {
+    let bind_addr = std::env::var(bind_addr_name).unwrap_or_else(|_| default.to_string());
+    let Some(bind_host) = first_non_empty_env(&["SERVICE_BIND_HOST"]) else {
+        return bind_addr;
+    };
+
+    match bind_addr.parse::<SocketAddr>() {
+        Ok(addr) => format!("{bind_host}:{}", addr.port()),
+        Err(_) => bind_addr,
+    }
+}
+
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn advertised_host_from_env(names: &[&str], bind_addr: &str) -> String {
+    if let Some(host) = first_non_empty_env(names) {
+        return normalize_advertised_host(&host);
+    }
+
+    let bind_host = bind_addr
+        .parse::<SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    normalize_advertised_host(&bind_host)
+}
+
+fn normalize_advertised_host(host: &str) -> String {
+    if matches!(host.trim(), "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host.trim().to_string()
     }
 }
 
@@ -775,6 +822,40 @@ mod tests {
         assert_eq!(config.service_instance_id, "chat-blue-001");
         assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.service_build_version, "2026.06.18+abc123");
+    }
+
+    #[test]
+    fn endpoint_publish_hosts_prefer_unified_env_and_never_advertise_wildcard_bind() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "SERVICE_BIND_HOST",
+            "SERVICE_PUBLIC_HOST",
+            "SERVICE_ADVERTISED_HOST",
+            "CHAT_BIND_ADDR",
+            "CHAT_PUBLIC_HOST",
+        ]);
+
+        unsafe {
+            env::set_var("SERVICE_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_PUBLIC_HOST", "10.0.0.50");
+            env::set_var("CHAT_BIND_ADDR", "127.0.0.9:9001");
+            env::set_var("CHAT_PUBLIC_HOST", "10.0.0.99");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.bind_addr, "0.0.0.0:9001");
+        assert_eq!(config.public_host, "10.0.0.50");
+
+        unsafe {
+            env::remove_var("SERVICE_PUBLIC_HOST");
+            env::remove_var("SERVICE_ADVERTISED_HOST");
+            env::remove_var("CHAT_PUBLIC_HOST");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.public_host, "127.0.0.1");
     }
 
     #[test]

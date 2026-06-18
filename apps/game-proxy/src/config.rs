@@ -80,6 +80,27 @@ fn parse_non_empty_string(name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+fn parse_first_non_empty_string(names: &[&str], default: &str) -> String {
+    names
+        .iter()
+        .find_map(|name| {
+            env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn advertised_host_from_env(names: &[&str], fallback_host: &str) -> String {
+    let host = parse_first_non_empty_string(names, fallback_host);
+    if matches!(host.trim(), "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    }
+}
+
 #[derive(Clone)]
 pub enum RouteStoreBackend {
     Memory,
@@ -99,8 +120,10 @@ impl RouteStoreBackend {
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
+    pub public_host: String,
     pub port: u16,
     pub admin_host: String,
+    pub admin_advertised_host: String,
     pub admin_port: u16,
     pub admin_token: String,
     pub admin_read_token: Option<String>,
@@ -109,6 +132,7 @@ pub struct Config {
     pub admin_audit_path: String,
     pub admin_audit_require_actor: bool,
     pub tcp_fallback_host: String,
+    pub tcp_fallback_advertised_host: String,
     pub tcp_fallback_port: u16,
     pub log_level: String,
     pub log_enable_console: bool,
@@ -152,12 +176,32 @@ impl Config {
     }
 
     pub fn try_from_env() -> Result<Self, String> {
-        let host = env::var("PROXY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let host = parse_first_non_empty_string(&["SERVICE_BIND_HOST", "PROXY_HOST"], "127.0.0.1");
+        let public_host = advertised_host_from_env(
+            &[
+                "SERVICE_ADVERTISED_HOST",
+                "SERVICE_PUBLIC_HOST",
+                "PROXY_PUBLIC_HOST",
+                "PROXY_HOST",
+            ],
+            &host,
+        );
         let port = env::var("PROXY_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(4000);
-        let admin_host = env::var("PROXY_ADMIN_HOST").unwrap_or_else(|_| host.clone());
+        let admin_host =
+            parse_first_non_empty_string(&["SERVICE_ADMIN_BIND_HOST", "PROXY_ADMIN_HOST"], &host);
+        let admin_advertised_host = advertised_host_from_env(
+            &[
+                "SERVICE_ADMIN_ADVERTISED_HOST",
+                "SERVICE_ADVERTISED_HOST",
+                "SERVICE_PUBLIC_HOST",
+                "PROXY_ADMIN_PUBLIC_HOST",
+                "PROXY_ADMIN_HOST",
+            ],
+            &admin_host,
+        );
         let admin_port = env::var("PROXY_ADMIN_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
@@ -185,6 +229,16 @@ impl Config {
         let admin_audit_require_actor = parse_bool("PROXY_ADMIN_AUDIT_REQUIRE_ACTOR", false);
         let tcp_fallback_host =
             env::var("PROXY_TCP_FALLBACK_HOST").unwrap_or_else(|_| host.clone());
+        let tcp_fallback_advertised_host = advertised_host_from_env(
+            &[
+                "SERVICE_TCP_FALLBACK_ADVERTISED_HOST",
+                "SERVICE_ADVERTISED_HOST",
+                "SERVICE_PUBLIC_HOST",
+                "PROXY_TCP_FALLBACK_PUBLIC_HOST",
+                "PROXY_TCP_FALLBACK_HOST",
+            ],
+            &tcp_fallback_host,
+        );
         let tcp_fallback_port = env::var("PROXY_TCP_FALLBACK_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
@@ -291,8 +345,10 @@ impl Config {
 
         Ok(Self {
             host,
+            public_host,
             port,
             admin_host,
+            admin_advertised_host,
             admin_port,
             admin_token,
             admin_read_token,
@@ -301,6 +357,7 @@ impl Config {
             admin_audit_path,
             admin_audit_require_actor,
             tcp_fallback_host,
+            tcp_fallback_advertised_host,
             tcp_fallback_port,
             log_level,
             log_enable_console,
@@ -643,7 +700,19 @@ mod tests {
 
     fn clear_service_metadata_env() {
         unsafe {
+            env::remove_var("SERVICE_BIND_HOST");
+            env::remove_var("SERVICE_PUBLIC_HOST");
+            env::remove_var("SERVICE_ADVERTISED_HOST");
+            env::remove_var("SERVICE_ADMIN_BIND_HOST");
+            env::remove_var("SERVICE_ADMIN_ADVERTISED_HOST");
+            env::remove_var("SERVICE_TCP_FALLBACK_ADVERTISED_HOST");
+            env::remove_var("PROXY_HOST");
             env::remove_var("PROXY_PORT");
+            env::remove_var("PROXY_PUBLIC_HOST");
+            env::remove_var("PROXY_ADMIN_HOST");
+            env::remove_var("PROXY_ADMIN_PUBLIC_HOST");
+            env::remove_var("PROXY_TCP_FALLBACK_HOST");
+            env::remove_var("PROXY_TCP_FALLBACK_PUBLIC_HOST");
             env::remove_var("SERVICE_NAME");
             env::remove_var("SERVICE_INSTANCE_ID");
             env::remove_var("SERVICE_BUILD_VERSION");
@@ -1429,6 +1498,74 @@ mod tests {
             config.service_instance_metadata()["instance_id"],
             "edge-proxy-a"
         );
+    }
+
+    #[test]
+    fn endpoint_publish_hosts_prefer_unified_env_and_never_advertise_wildcard_bind() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "SERVICE_BIND_HOST",
+            "SERVICE_PUBLIC_HOST",
+            "SERVICE_ADVERTISED_HOST",
+            "SERVICE_ADMIN_BIND_HOST",
+            "SERVICE_ADMIN_ADVERTISED_HOST",
+            "SERVICE_TCP_FALLBACK_ADVERTISED_HOST",
+            "PROXY_HOST",
+            "PROXY_PUBLIC_HOST",
+            "PROXY_ADMIN_HOST",
+            "PROXY_ADMIN_PUBLIC_HOST",
+            "PROXY_TCP_FALLBACK_HOST",
+            "PROXY_TCP_FALLBACK_PUBLIC_HOST",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::set_var("SERVICE_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_PUBLIC_HOST", "10.0.0.40");
+            env::set_var("SERVICE_ADMIN_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_ADMIN_ADVERTISED_HOST", "10.0.0.41");
+            env::set_var("SERVICE_TCP_FALLBACK_ADVERTISED_HOST", "10.0.0.42");
+            env::set_var("PROXY_HOST", "127.0.0.9");
+            env::set_var("PROXY_PUBLIC_HOST", "10.0.0.99");
+            env::set_var("PROXY_ADMIN_HOST", "127.0.0.10");
+            env::set_var("PROXY_ADMIN_PUBLIC_HOST", "10.0.0.98");
+            env::set_var("PROXY_TCP_FALLBACK_HOST", "0.0.0.0");
+            env::set_var("PROXY_TCP_FALLBACK_PUBLIC_HOST", "10.0.0.97");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.public_host, "10.0.0.40");
+        assert_eq!(config.admin_host, "0.0.0.0");
+        assert_eq!(config.admin_advertised_host, "10.0.0.41");
+        assert_eq!(config.tcp_fallback_host, "0.0.0.0");
+        assert_eq!(config.tcp_fallback_advertised_host, "10.0.0.42");
+
+        unsafe {
+            env::remove_var("SERVICE_PUBLIC_HOST");
+            env::remove_var("SERVICE_ADVERTISED_HOST");
+            env::remove_var("SERVICE_ADMIN_ADVERTISED_HOST");
+            env::remove_var("SERVICE_TCP_FALLBACK_ADVERTISED_HOST");
+            env::remove_var("PROXY_PUBLIC_HOST");
+            env::remove_var("PROXY_HOST");
+            env::remove_var("PROXY_ADMIN_HOST");
+            env::remove_var("PROXY_ADMIN_PUBLIC_HOST");
+            env::remove_var("PROXY_TCP_FALLBACK_HOST");
+            env::remove_var("PROXY_TCP_FALLBACK_PUBLIC_HOST");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert_eq!(config.public_host, "127.0.0.1");
+        assert_eq!(config.admin_advertised_host, "127.0.0.1");
+        assert_eq!(config.tcp_fallback_advertised_host, "127.0.0.1");
     }
 
     #[test]

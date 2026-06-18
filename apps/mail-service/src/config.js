@@ -20,6 +20,31 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function firstNonEmptyEnv(names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function advertisedHostFromEnv(names, fallbackHost) {
+  const configured = firstNonEmptyEnv(names);
+  if (configured) {
+    return normalizeAdvertisedHost(configured);
+  }
+
+  return normalizeAdvertisedHost(fallbackHost);
+}
+
+function normalizeAdvertisedHost(host) {
+  return ["0.0.0.0", "::", "[::]"].includes(String(host).trim())
+    ? "127.0.0.1"
+    : host;
+}
+
 const DEFAULT_TICKET_SECRETS = new Set([
   "dev-only-change-this-ticket-secret",
   "replace-with-a-long-random-string",
@@ -98,10 +123,13 @@ function isWeakSecret(value) {
 
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
+  const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const config = {
     appName: "mail-service",
     env,
-    host: process.env.HOST || "127.0.0.1",
+    host: bindHost,
+    bindHost,
+    advertisedHost: advertisedHostFromEnv(["SERVICE_ADVERTISED_HOST", "SERVICE_PUBLIC_HOST", "MAIL_PUBLIC_HOST", "HOST"], bindHost),
     port: Number.parseInt(process.env.MAIL_PORT || "9003", 10),
     logLevel: process.env.LOG_LEVEL || "info",
     logEnableConsole: parseBoolean(process.env.LOG_ENABLE_CONSOLE, true),

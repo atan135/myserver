@@ -20,6 +20,11 @@ const CONFIG_ENV_NAMES = [
   "SERVICE_INSTANCE_ID",
   "SERVICE_ZONE",
   "SERVICE_BUILD_VERSION",
+  "SERVICE_BIND_HOST",
+  "SERVICE_PUBLIC_HOST",
+  "SERVICE_ADVERTISED_HOST",
+  "MAIL_PUBLIC_HOST",
+  "HOST",
   "TICKET_SECRET"
 ];
 
@@ -109,6 +114,36 @@ test("mail-service config defaults service build version to dev", async () => {
     assert.equal(config.serviceInstanceId, "mail-001");
     assert.equal(config.serviceZone, "local");
     assert.equal(config.serviceBuildVersion, "dev");
+  });
+});
+
+test("mail-service separates bind host from advertised registry host", async () => {
+  await withEnv({
+    SERVICE_BIND_HOST: "0.0.0.0",
+    SERVICE_PUBLIC_HOST: "10.0.0.12",
+    MAIL_PUBLIC_HOST: "10.0.0.99",
+    HOST: "127.0.0.9"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.bindHost, "0.0.0.0");
+    assert.equal(config.advertisedHost, "10.0.0.12");
+  });
+
+  await withEnv({
+    SERVICE_BIND_HOST: "0.0.0.0"
+  }, (getConfig) => {
+    assert.equal(getConfig().advertisedHost, "127.0.0.1");
+  });
+
+  await withEnv({
+    HOST: "0.0.0.0"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.advertisedHost, "127.0.0.1");
   });
 });
 

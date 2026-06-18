@@ -914,12 +914,14 @@ mod tests {
     fn test_config() -> Config {
         Config {
             host: "127.0.0.1".to_string(),
+            public_host: "127.0.0.1".to_string(),
             port: 7000,
             csv_dir: "csv".to_string(),
             csv_reload_enabled: false,
             csv_reload_interval_secs: 3,
             room_cleanup_interval_secs: 3600,
             admin_host: "127.0.0.1".to_string(),
+            admin_advertised_host: "127.0.0.1".to_string(),
             admin_port: 7500,
             admin_token: DEFAULT_ADMIN_TOKEN.to_string(),
             admin_audit_enabled: false,

@@ -8,12 +8,14 @@ pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
+    pub public_host: String,
     pub port: u16,
     pub csv_dir: String,
     pub csv_reload_enabled: bool,
     pub csv_reload_interval_secs: u64,
     pub room_cleanup_interval_secs: u64,
     pub admin_host: String,
+    pub admin_advertised_host: String,
     pub admin_port: u16,
     pub admin_token: String,
     pub admin_audit_enabled: bool,
@@ -120,9 +122,27 @@ fn parse_first_non_empty_string(names: &[&str], default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+fn advertised_host_from_env(names: &[&str], fallback_host: &str) -> String {
+    let host = parse_first_non_empty_string(names, fallback_host);
+    if matches!(host.trim(), "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
-        let host = env::var("GAME_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let host = parse_first_non_empty_string(&["SERVICE_BIND_HOST", "GAME_HOST"], "127.0.0.1");
+        let public_host = advertised_host_from_env(
+            &[
+                "SERVICE_ADVERTISED_HOST",
+                "SERVICE_PUBLIC_HOST",
+                "GAME_PUBLIC_HOST",
+                "GAME_HOST",
+            ],
+            &host,
+        );
         let port = env::var("GAME_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
@@ -139,7 +159,17 @@ impl Config {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(10);
-        let admin_host = env::var("ADMIN_HOST").unwrap_or_else(|_| host.clone());
+        let admin_host =
+            parse_first_non_empty_string(&["SERVICE_ADMIN_BIND_HOST", "ADMIN_HOST"], &host);
+        let admin_advertised_host = advertised_host_from_env(
+            &[
+                "SERVICE_ADMIN_ADVERTISED_HOST",
+                "SERVICE_ADVERTISED_HOST",
+                "SERVICE_PUBLIC_HOST",
+                "ADMIN_HOST",
+            ],
+            &admin_host,
+        );
         let admin_port = env::var("ADMIN_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
@@ -213,12 +243,14 @@ impl Config {
 
         let config = Self {
             host,
+            public_host,
             port,
             csv_dir,
             csv_reload_enabled,
             csv_reload_interval_secs,
             room_cleanup_interval_secs,
             admin_host,
+            admin_advertised_host,
             admin_port,
             admin_token,
             admin_audit_enabled,
@@ -463,6 +495,14 @@ mod tests {
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
+        "SERVICE_BIND_HOST",
+        "SERVICE_PUBLIC_HOST",
+        "SERVICE_ADVERTISED_HOST",
+        "SERVICE_ADMIN_BIND_HOST",
+        "SERVICE_ADMIN_ADVERTISED_HOST",
+        "GAME_HOST",
+        "GAME_PUBLIC_HOST",
+        "ADMIN_HOST",
         "GAME_PORT",
         "GAME_LOCAL_SOCKET_NAME",
         "GAME_INTERNAL_SOCKET_NAME",
@@ -716,6 +756,44 @@ mod tests {
             config.service_instance_metadata()["rollout_epoch"],
             "epoch-primary"
         );
+    }
+
+    #[test]
+    fn endpoint_publish_hosts_prefer_unified_env_and_never_advertise_wildcard_bind() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("SERVICE_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_PUBLIC_HOST", "10.0.0.30");
+            env::set_var("SERVICE_ADMIN_BIND_HOST", "0.0.0.0");
+            env::set_var("SERVICE_ADMIN_ADVERTISED_HOST", "10.0.0.31");
+            env::set_var("GAME_HOST", "127.0.0.9");
+            env::set_var("GAME_PUBLIC_HOST", "10.0.0.99");
+            env::set_var("ADMIN_HOST", "127.0.0.10");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.public_host, "10.0.0.30");
+        assert_eq!(config.admin_host, "0.0.0.0");
+        assert_eq!(config.admin_advertised_host, "10.0.0.31");
+
+        unsafe {
+            env::remove_var("SERVICE_PUBLIC_HOST");
+            env::remove_var("SERVICE_ADVERTISED_HOST");
+            env::remove_var("SERVICE_ADMIN_ADVERTISED_HOST");
+            env::remove_var("GAME_PUBLIC_HOST");
+            env::remove_var("GAME_HOST");
+            env::remove_var("ADMIN_HOST");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.public_host, "127.0.0.1");
+        assert_eq!(config.admin_advertised_host, "127.0.0.1");
     }
 
     #[test]

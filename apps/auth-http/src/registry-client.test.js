@@ -79,6 +79,23 @@ test("RegistryClient registers auth-http public http endpoint and metadata", asy
   });
 });
 
+test("RegistryClient publishes advertised host instead of bind host", async () => {
+  const redis = createRedisCapture();
+  const client = new RegistryClient(
+    redis,
+    createConfig({
+      host: "0.0.0.0",
+      advertisedHost: "10.10.0.20"
+    })
+  );
+
+  await client.register();
+
+  const payload = JSON.parse(redis.hashes.get("service:auth-http:instances:auth-http-test-001:data"));
+  assert.equal(payload.host, "10.10.0.20");
+  assert.equal(payload.endpoints[0].host, "10.10.0.20");
+});
+
 test("RegistryClient metadata falls back to dev build version", async () => {
   const redis = createRedisCapture();
   const client = new RegistryClient(

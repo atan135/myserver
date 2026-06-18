@@ -137,86 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = client
                     .with_key_prefix(config.registry_key_prefix.clone())
                     .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
-                let instance = ServiceInstance::new(
-                    config.service_instance_id.clone(),
-                    config.service_name.clone(),
-                    config.host.clone(),
-                    config.port,
-                )
-                .with_admin_port(config.admin_port)
-                .with_local_socket(config.local_socket_name.clone())
-                .with_endpoints(vec![
-                    ServiceEndpoint {
-                        name: "client".to_string(),
-                        protocol: "tcp".to_string(),
-                        host: config.host.clone(),
-                        port: config.port,
-                        socket: String::new(),
-                        visibility: "internal".to_string(),
-                        metadata: serde_json::json!({
-                            "service_name": config.service_name.clone(),
-                            "service_instance_id": config.service_instance_id.clone(),
-                            "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone(),
-                            "build_version": config.service_build_version.clone(),
-                            "zone": config.service_zone.clone()
-                        }),
-                        healthy: true,
-                    },
-                    ServiceEndpoint {
-                        name: "admin".to_string(),
-                        protocol: "http".to_string(),
-                        host: config.admin_host.clone(),
-                        port: config.admin_port,
-                        socket: String::new(),
-                        visibility: "admin".to_string(),
-                        metadata: serde_json::json!({
-                            "service_name": config.service_name.clone(),
-                            "service_instance_id": config.service_instance_id.clone(),
-                            "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone(),
-                            "build_version": config.service_build_version.clone(),
-                            "zone": config.service_zone.clone()
-                        }),
-                        healthy: true,
-                    },
-                    ServiceEndpoint {
-                        name: "internal".to_string(),
-                        protocol: "local_socket".to_string(),
-                        host: String::new(),
-                        port: 0,
-                        socket: config.internal_socket_name.clone(),
-                        visibility: "local".to_string(),
-                        metadata: serde_json::json!({
-                            "service_name": config.service_name.clone(),
-                            "service_instance_id": config.service_instance_id.clone(),
-                            "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone(),
-                            "build_version": config.service_build_version.clone(),
-                            "zone": config.service_zone.clone()
-                        }),
-                        healthy: true,
-                    },
-                    ServiceEndpoint {
-                        name: "proxy-local".to_string(),
-                        protocol: "local_socket".to_string(),
-                        host: String::new(),
-                        port: 0,
-                        socket: config.local_socket_name.clone(),
-                        visibility: "local".to_string(),
-                        metadata: serde_json::json!({
-                            "service_name": config.service_name.clone(),
-                            "service_instance_id": config.service_instance_id.clone(),
-                            "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone(),
-                            "build_version": config.service_build_version.clone(),
-                            "zone": config.service_zone.clone()
-                        }),
-                        healthy: true,
-                    },
-                ])
-                .with_tags(vec!["game".to_string(), "tcp".to_string()])
-                .with_metadata(config.service_instance_metadata());
+                let instance = build_service_instance(&config);
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
@@ -309,6 +230,70 @@ fn registry_failure_is_fatal() -> bool {
         || env_name_is("APP_ENV", "test")
 }
 
+fn build_service_instance(config: &Config) -> ServiceInstance {
+    let endpoint_metadata = serde_json::json!({
+        "service_name": config.service_name.clone(),
+        "service_instance_id": config.service_instance_id.clone(),
+        "instance_id": config.service_instance_id.clone(),
+        "server_id": config.service_instance_id.clone(),
+        "build_version": config.service_build_version.clone(),
+        "zone": config.service_zone.clone()
+    });
+
+    ServiceInstance::new(
+        config.service_instance_id.clone(),
+        config.service_name.clone(),
+        config.public_host.clone(),
+        config.port,
+    )
+    .with_admin_port(config.admin_port)
+    .with_local_socket(config.local_socket_name.clone())
+    .with_endpoints(vec![
+        ServiceEndpoint {
+            name: "client".to_string(),
+            protocol: "tcp".to_string(),
+            host: config.public_host.clone(),
+            port: config.port,
+            socket: String::new(),
+            visibility: "internal".to_string(),
+            metadata: endpoint_metadata.clone(),
+            healthy: true,
+        },
+        ServiceEndpoint {
+            name: "admin".to_string(),
+            protocol: "http".to_string(),
+            host: config.admin_advertised_host.clone(),
+            port: config.admin_port,
+            socket: String::new(),
+            visibility: "admin".to_string(),
+            metadata: endpoint_metadata.clone(),
+            healthy: true,
+        },
+        ServiceEndpoint {
+            name: "internal".to_string(),
+            protocol: "local_socket".to_string(),
+            host: String::new(),
+            port: 0,
+            socket: config.internal_socket_name.clone(),
+            visibility: "local".to_string(),
+            metadata: endpoint_metadata.clone(),
+            healthy: true,
+        },
+        ServiceEndpoint {
+            name: "proxy-local".to_string(),
+            protocol: "local_socket".to_string(),
+            host: String::new(),
+            port: 0,
+            socket: config.local_socket_name.clone(),
+            visibility: "local".to_string(),
+            metadata: endpoint_metadata,
+            healthy: true,
+        },
+    ])
+    .with_tags(vec!["game".to_string(), "tcp".to_string()])
+    .with_metadata(config.service_instance_metadata())
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
@@ -319,4 +304,76 @@ fn env_name_is(name: &str, expected: &str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            host: "0.0.0.0".to_string(),
+            public_host: "10.0.0.20".to_string(),
+            port: 7000,
+            csv_dir: "csv".to_string(),
+            csv_reload_enabled: false,
+            csv_reload_interval_secs: 3,
+            room_cleanup_interval_secs: 10,
+            admin_host: "0.0.0.0".to_string(),
+            admin_advertised_host: "10.0.0.21".to_string(),
+            admin_port: 7500,
+            admin_token: config::DEFAULT_ADMIN_TOKEN.to_string(),
+            admin_audit_enabled: true,
+            admin_audit_path: "logs/game-server/admin-audit.jsonl".to_string(),
+            admin_audit_require_actor: false,
+            internal_token: config::DEFAULT_INTERNAL_TOKEN.to_string(),
+            local_socket_name: "myserver-game-server.sock".to_string(),
+            internal_socket_name: "myserver-game-server-internal.sock".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs/game-server".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 0,
+            global_id_worker_id: None,
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            db_enabled: false,
+            database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_game".to_string(),
+            db_pool_size: 10,
+            ticket_secret: config::DEFAULT_TICKET_SECRET.to_string(),
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            outbound_queue_capacity: config::DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            player_msg_rate_window_ms: 1000,
+            player_msg_rate_max: 0,
+            input_timestamp_required: false,
+            input_timestamp_max_skew_ms: 5000,
+            input_anomaly_window_ms: 10_000,
+            input_anomaly_max: 0,
+            registry_enabled: true,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "game-server".to_string(),
+            service_instance_id: "game-server-a".to_string(),
+            service_build_version: "dev".to_string(),
+            service_zone: "local".to_string(),
+            service_rollout_epoch: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn service_instance_uses_advertised_hosts_for_registered_endpoints() {
+        let instance = build_service_instance(&test_config());
+
+        assert_eq!(instance.host, "10.0.0.20");
+        assert_eq!(instance.endpoints[0].name, "client");
+        assert_eq!(instance.endpoints[0].host, "10.0.0.20");
+        assert_eq!(instance.endpoints[1].name, "admin");
+        assert_eq!(instance.endpoints[1].host, "10.0.0.21");
+    }
 }

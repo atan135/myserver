@@ -34,7 +34,11 @@ const CONFIG_ENV_KEYS = [
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
   "SERVICE_ZONE",
-  "SERVICE_BUILD_VERSION"
+  "SERVICE_BUILD_VERSION",
+  "SERVICE_BIND_HOST",
+  "SERVICE_PUBLIC_HOST",
+  "SERVICE_ADVERTISED_HOST",
+  "HOST"
 ];
 
 async function withEnv(env, fn) {
@@ -165,6 +169,34 @@ test("admin-api service registry identity reads defaults and build version overr
     assert.equal(config.serviceInstanceId, "admin-api-blue-001");
     assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+admin");
+  });
+});
+
+test("admin-api separates bind host from advertised registry host", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    SERVICE_BIND_HOST: "0.0.0.0",
+    SERVICE_PUBLIC_HOST: "10.0.0.11",
+    HOST: "127.0.0.9"
+  }, (config) => {
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.bindHost, "0.0.0.0");
+    assert.equal(config.advertisedHost, "10.0.0.11");
+  });
+
+  await withEnv({
+    NODE_ENV: "development",
+    SERVICE_BIND_HOST: "0.0.0.0"
+  }, (config) => {
+    assert.equal(config.advertisedHost, "127.0.0.1");
+  });
+
+  await withEnv({
+    NODE_ENV: "development",
+    HOST: "0.0.0.0"
+  }, (config) => {
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.advertisedHost, "127.0.0.1");
   });
 });
 

@@ -21,7 +21,11 @@ const CONFIG_ENV_NAMES = [
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
   "SERVICE_ZONE",
-  "SERVICE_BUILD_VERSION"
+  "SERVICE_BUILD_VERSION",
+  "SERVICE_BIND_HOST",
+  "SERVICE_PUBLIC_HOST",
+  "SERVICE_ADVERTISED_HOST",
+  "ANNOUNCE_PUBLIC_HOST"
 ];
 
 async function withEnv(values, callback) {
@@ -75,6 +79,36 @@ test("announce-service config defaults service build version to dev", async () =
     assert.equal(config.serviceInstanceId, "announce-001");
     assert.equal(config.serviceZone, "local");
     assert.equal(config.serviceBuildVersion, "dev");
+  });
+});
+
+test("announce-service separates bind host from advertised registry host", async () => {
+  await withEnv({
+    SERVICE_BIND_HOST: "0.0.0.0",
+    SERVICE_PUBLIC_HOST: "10.0.0.13",
+    ANNOUNCE_PUBLIC_HOST: "10.0.0.99",
+    HOST: "127.0.0.9"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.bindHost, "0.0.0.0");
+    assert.equal(config.advertisedHost, "10.0.0.13");
+  });
+
+  await withEnv({
+    SERVICE_BIND_HOST: "0.0.0.0"
+  }, (getConfig) => {
+    assert.equal(getConfig().advertisedHost, "127.0.0.1");
+  });
+
+  await withEnv({
+    HOST: "0.0.0.0"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.host, "0.0.0.0");
+    assert.equal(config.advertisedHost, "127.0.0.1");
   });
 });
 
