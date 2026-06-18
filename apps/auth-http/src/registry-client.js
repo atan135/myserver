@@ -139,7 +139,10 @@ export class RegistryClient {
 }
 
 export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
-  const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, registryKeyPrefix);
+  const options = typeof registryKeyPrefix === "object"
+    ? registryKeyPrefix
+    : { registryKeyPrefix };
+  const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, options);
   const endpoints = discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
     .filter(({ endpoint }) =>
       endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
@@ -158,7 +161,7 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       weight: instance.weight,
       metadata: endpoint.metadata || {}
     }));
-  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+  emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
     serviceName: GAME_SERVER_SERVICE_NAME,
     endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
     source: "registry",
@@ -198,4 +201,18 @@ function logDiscovery(level, event, context = {}) {
   } catch {
     // Focused tests may instantiate registry helpers before logger bootstrap.
   }
+}
+
+function emitDiscoveryLog(options, level, event, context = {}) {
+  if (typeof options?.onDiscoveryLog !== "function") {
+    logDiscovery(level, event, context);
+    return;
+  }
+
+  const metricRecorded = recordDiscoveryMetric(context) !== null;
+  const normalized = discoveryLogContext(context);
+  if (metricRecorded) {
+    normalized.__discoveryMetricRecorded = true;
+  }
+  options.onDiscoveryLog(level, event, normalized);
 }

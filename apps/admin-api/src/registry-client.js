@@ -191,9 +191,10 @@ export class RegistryClient {
 }
 
 export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
+  const options = normalizeAdminDiscoveryOptions(registryKeyPrefix);
   const candidates = await discoverAdminEndpointCandidates(
     redis,
-    registryKeyPrefix,
+    options,
     GAME_SERVER_SERVICE_NAME,
     GAME_SERVER_ADMIN_ENDPOINT_NAME
   );
@@ -218,7 +219,7 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       source: "registry",
       reason: "discovered"
     }));
-  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+  emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
     serviceName: GAME_SERVER_SERVICE_NAME,
     endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
     source: "registry",
@@ -229,9 +230,10 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
 }
 
 export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix = "") {
+  const options = normalizeAdminDiscoveryOptions(registryKeyPrefix);
   const candidates = await discoverAdminEndpointCandidates(
     redis,
-    registryKeyPrefix,
+    options,
     GAME_PROXY_SERVICE_NAME,
     GAME_PROXY_ADMIN_ENDPOINT_NAME
   );
@@ -256,7 +258,7 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
       source: "registry",
       reason: "discovered"
     }));
-  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+  emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
     serviceName: GAME_PROXY_SERVICE_NAME,
     endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
     source: "registry",
@@ -310,7 +312,8 @@ export function normalizeAdminDiscoveryOptions(configOrOptions = "") {
   return {
     registryKeyPrefix: options.registryKeyPrefix || "",
     discoveryCacheTtlMs: options.discoveryCacheTtlMs ?? options.registryDiscoveryCacheTtlMs,
-    onParseError: options.onParseError
+    onParseError: options.onParseError,
+    onDiscoveryLog: options.onDiscoveryLog
   };
 }
 
@@ -349,4 +352,18 @@ function logDiscovery(level, event, context = {}) {
   }
 
   log(level, event, discoveryLogContext(context));
+}
+
+function emitDiscoveryLog(options, level, event, context = {}) {
+  if (typeof options?.onDiscoveryLog !== "function") {
+    logDiscovery(level, event, context);
+    return;
+  }
+
+  const metricRecorded = recordDiscoveryMetric(context) !== null;
+  const normalized = discoveryLogContext(context);
+  if (metricRecorded) {
+    normalized.__discoveryMetricRecorded = true;
+  }
+  options.onDiscoveryLog(level, event, normalized);
 }
