@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
 
-import { MESSAGE_TYPE, buildAdminAuthBody, normalizeGameAdminActor, sendRequest } from "./game-admin-client.js";
+import {
+  GameAdminClient,
+  MESSAGE_TYPE,
+  buildAdminAuthBody,
+  normalizeGameAdminActor,
+  sendRequest
+} from "./game-admin-client.js";
 
 const config = { gameAdminToken: "secret-admin-token" };
 
@@ -70,4 +76,128 @@ test("admin client rejects response larger than configured limit", async () => {
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+function createDiscoveryRedis(instances) {
+  const hashes = new Map();
+  const keys = new Set();
+
+  for (const instance of instances) {
+    hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    keys.add(`heartbeat:game-server:${instance.id}`);
+  }
+
+  return {
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      const prefix = pattern.replace("*", "");
+      return [
+        "0",
+        [...hashes.keys()]
+          .map((key) => key.slice(0, -5))
+          .filter((key) => key.startsWith(prefix))
+      ];
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    }
+  };
+}
+
+function gameServerInstance(id, host, port) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host,
+    port: 7000,
+    admin_port: port,
+    local_socket: "",
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host,
+        port,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+}
+
+test("GameAdminClient lists discovered game-server admin endpoints", async () => {
+  const client = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createDiscoveryRedis([
+      gameServerInstance("game-server-a", "10.0.0.1", 7500),
+      gameServerInstance("game-server-b", "10.0.0.2", 7501)
+    ])
+  );
+
+  const endpoints = await client.listAdminEndpoints();
+
+  assert.deepEqual(
+    endpoints.map((endpoint) => [endpoint.instanceId, endpoint.host, endpoint.port]),
+    [
+      ["game-server-a", "10.0.0.1", 7500],
+      ["game-server-b", "10.0.0.2", 7501]
+    ]
+  );
+});
+
+test("GameAdminClient requires explicit target for single-target GM commands with multiple instances", async () => {
+  const client = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createDiscoveryRedis([
+      gameServerInstance("game-server-a", "10.0.0.1", 7500),
+      gameServerInstance("game-server-b", "10.0.0.2", 7501)
+    ])
+  );
+
+  await assert.rejects(
+    client.resolveAdminEndpoint({ requireExplicitTarget: true }),
+    { code: "GAME_SERVER_ADMIN_TARGET_REQUIRED" }
+  );
+});
+
+test("GameAdminClient resolves explicit target instance", async () => {
+  const client = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createDiscoveryRedis([
+      gameServerInstance("game-server-a", "10.0.0.1", 7500),
+      gameServerInstance("game-server-b", "10.0.0.2", 7501)
+    ])
+  );
+
+  const endpoint = await client.resolveAdminEndpoint({
+    requireExplicitTarget: true,
+    targetInstanceId: "game-server-b"
+  });
+
+  assert.equal(endpoint.host, "10.0.0.2");
+  assert.equal(endpoint.port, 7501);
+});
+
+test("GameAdminClient rejects local fallback when discovery is required", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: true,
+    gameServerAdminHost: "127.0.0.1",
+    gameServerAdminPort: 7500
+  });
+
+  await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });
 });

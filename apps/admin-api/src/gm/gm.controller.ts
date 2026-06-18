@@ -16,9 +16,15 @@ const GM_BROADCAST_SUBJECT = "myserver.gm.broadcast";
 const GAME_ADMIN_ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 
 function gameServerError(error: any) {
-  return new ApiHttpException(502, {
+  const code = error?.code || "GAME_SERVER_ERROR";
+  const statusCode = code === "GAME_SERVER_ADMIN_TARGET_REQUIRED"
+    ? 400
+    : code === "GAME_SERVER_ADMIN_TARGET_NOT_FOUND"
+      ? 404
+      : 502;
+  return new ApiHttpException(statusCode, {
     ok: false,
-    error: "GAME_SERVER_ERROR",
+    error: code,
     message: error.message
   });
 }
@@ -29,6 +35,11 @@ function gameServerFailure(error: any) {
     error: error?.code || "GAME_SERVER_ERROR",
     message: error?.message || "game-server error"
   };
+}
+
+function isGameAdminTargetSelectionError(error: any) {
+  return error?.code === "GAME_SERVER_ADMIN_TARGET_REQUIRED" ||
+    error?.code === "GAME_SERVER_ADMIN_TARGET_NOT_FOUND";
 }
 
 function sessionKickPublishError(globalKick: any, legacyResult: any) {
@@ -87,6 +98,38 @@ function normalizeGameAdminActor(req: any) {
   }
 
   return undefined;
+}
+
+function normalizeTargetInstanceId(value: any) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw badRequest("INVALID_TARGET_INSTANCE_ID", "targetInstanceId must be a string");
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function createGameAdminOptions(req: any, body: any = {}) {
+  return {
+    actor: normalizeGameAdminActor(req),
+    targetInstanceId: normalizeTargetInstanceId(body?.targetInstanceId ?? body?.target_instance_id)
+  };
+}
+
+async function preflightSingleTarget(gameAdminClient: any, gameAdminOptions: any) {
+  try {
+    return await gameAdminClient.resolveAdminEndpoint({
+      ...gameAdminOptions,
+      requireExplicitTarget: true
+    });
+  } catch (error: any) {
+    if (isGameAdminTargetSelectionError(error)) {
+      throw gameServerError(error);
+    }
+    return null;
+  }
 }
 
 @ApiTags("gm")
@@ -159,7 +202,7 @@ export class GmController {
     const normalizedTitle = title.trim();
     const normalizedContent = content.trim();
     const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
-    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
+    const gameAdminOptions = createGameAdminOptions(req, body);
     const globalBroadcast = await this.publishGlobalBroadcast(
       normalizedTitle,
       normalizedContent,
@@ -233,9 +276,8 @@ export class GmController {
     }
 
     try {
-      await this.gameAdminClient.sendItem(playerId, itemId, itemCount, reason || "", {
-        actor: normalizeGameAdminActor(req)
-      });
+      const gameAdminOptions = createGameAdminOptions(req, body);
+      await this.gameAdminClient.sendItem(playerId, itemId, itemCount, reason || "", gameAdminOptions);
 
       await this.adminStore.appendAuditLog({
         adminId: req.admin.sub,
@@ -243,7 +285,7 @@ export class GmController {
         action: "gm_send_item",
         targetType: "player",
         targetValue: playerId,
-        details: { itemId, itemCount, reason },
+        details: { itemId, itemCount, reason, targetInstanceId: gameAdminOptions.targetInstanceId },
         ip: getClientIp(req, this.config)
       });
 
@@ -260,14 +302,21 @@ export class GmController {
     const { playerId, reason } = body || {};
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_kick");
-    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
+    const gameAdminOptions = createGameAdminOptions(req, body);
+    const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
 
     const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
 
     let legacyKick: any = { ok: true };
     try {
-      await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, gameAdminOptions);
+      await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
+        ...gameAdminOptions,
+        endpoint: targetEndpoint
+      });
     } catch (error: any) {
+      if (isGameAdminTargetSelectionError(error)) {
+        throw gameServerError(error);
+      }
       legacyKick = gameServerFailure(error);
     }
 
@@ -280,7 +329,8 @@ export class GmController {
       details: {
         reason: normalizedReason,
         globalKick,
-        legacyKick
+        legacyKick,
+        targetInstanceId: gameAdminOptions.targetInstanceId
       },
       ip: getClientIp(req, this.config)
     });
@@ -310,7 +360,8 @@ export class GmController {
 
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_ban");
-    const gameAdminOptions = { actor: normalizeGameAdminActor(req) };
+    const gameAdminOptions = createGameAdminOptions(req, body);
+    const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
     const player = await this.adminStore.findPlayerById(normalizedPlayerId);
     if (!player) {
       throw notFound("PLAYER_NOT_FOUND", "Player not found");
@@ -330,9 +381,15 @@ export class GmController {
         normalizedPlayerId,
         durationSeconds,
         normalizedReason,
-        gameAdminOptions
+        {
+          ...gameAdminOptions,
+          endpoint: targetEndpoint
+        }
       );
     } catch (error: any) {
+      if (isGameAdminTargetSelectionError(error)) {
+        throw gameServerError(error);
+      }
       legacyBan = gameServerFailure(error);
     }
 
@@ -349,7 +406,8 @@ export class GmController {
         banExpiresAt,
         reason: normalizedReason,
         globalKick,
-        legacyBan
+        legacyBan,
+        targetInstanceId: gameAdminOptions.targetInstanceId
       },
       ip: getClientIp(req, this.config)
     });

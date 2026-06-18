@@ -77,6 +77,18 @@ function parseDurationSeconds(value, fallbackSeconds) {
   return amount * multiplier;
 }
 
+function isStrictDiscoveryEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && ["production", "test"].includes(value.trim().toLowerCase())
+  );
+}
+
+function validateDiscoveryConfig(config) {
+  if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
+    throw new Error("Invalid admin-api discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+}
+
 function validateProductionConfig(config) {
   if (config.env !== "production") {
     return;
@@ -154,6 +166,8 @@ export function getConfig() {
     adminApiIpAllowlist: parseCsv(process.env.ADMIN_API_IP_ALLOWLIST),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
+    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
@@ -177,5 +191,6 @@ export function getConfig() {
   };
 
   validateProductionConfig(config);
+  validateDiscoveryConfig(config);
   return config;
 }

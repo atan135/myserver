@@ -28,6 +28,93 @@ function makeService(config = {}) {
   );
 }
 
+function makeMonitoringServiceWithRedis(config = {}, redis = {}) {
+  return new MonitoringService(
+    {
+      gameProxyAdminHost: "127.0.0.1",
+      gameProxyAdminPort: 0,
+      gameProxyAdminToken: "write-token",
+      gameProxyAdminReadToken: "read-token",
+      gameProxyAdminRequestTimeoutMs: 500,
+      gameProxyAdminMaxResponseBytes: 4096,
+      ...config
+    },
+    redis,
+    {}
+  );
+}
+
+function createServiceRedis(instances) {
+  const hashes = new Map();
+  const keys = new Set();
+
+  for (const instance of instances) {
+    hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    keys.add(`heartbeat:game-server:${instance.id}`);
+  }
+
+  return {
+    async get(key) {
+      if (key === "metrics:heartbeat:game-server") {
+        return String(Math.floor(Date.now() / 1000));
+      }
+      return null;
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    },
+    async hgetall() {
+      return {};
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      if (pattern === "service:game-server:instances:*") {
+        return [
+          "0",
+          [...hashes.keys()]
+            .map((key) => key.slice(0, -5))
+            .filter((key) => key.startsWith("service:game-server:instances:"))
+        ];
+      }
+      return ["0", []];
+    }
+  };
+}
+
+function gameServerInstance(id, host, port) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host,
+    port: 7000,
+    admin_port: port,
+    local_socket: "",
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host,
+        port,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+}
+
 async function withHttpServer(handler, fn) {
   const server = http.createServer(handler);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -127,4 +214,30 @@ test("rolloutDrain returns displayable critical state when proxy admin is unavai
   assert.equal(result.alert_level, "critical");
   assert.equal(result.alert_message, "控制面不可达");
   assert.equal(result.rollout, null);
+});
+
+test("services returns all discovered game-server admin endpoints", async () => {
+  const redis = createServiceRedis([
+    gameServerInstance("game-server-a", "10.0.0.1", 7500),
+    gameServerInstance("game-server-b", "10.0.0.2", 7501)
+  ]);
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.services();
+  const gameServer = result.services.find((item) => item.name === "game-server");
+
+  assert.deepEqual(
+    gameServer.endpoints.map((endpoint) => [endpoint.instance_id, endpoint.host, endpoint.port]),
+    [
+      ["game-server-a", "10.0.0.1", 7500],
+      ["game-server-b", "10.0.0.2", 7501]
+    ]
+  );
+  assert.deepEqual(
+    gameServer.instances.map((instance) => instance.instance_id),
+    ["game-server-a", "game-server-b"]
+  );
 });

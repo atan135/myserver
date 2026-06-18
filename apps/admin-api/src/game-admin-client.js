@@ -1,5 +1,7 @@
 import net from "node:net";
 
+import { discoverGameServerAdminEndpoints } from "./registry-client.js";
+
 const MAGIC = 0xcafe;
 const VERSION = 1;
 const HEADER_LEN = 14;
@@ -110,9 +112,13 @@ function createAdminError(code, message = code) {
 }
 
 async function sendRequest(config, messageType, payload, expectedType, options = {}) {
-  const socket = net.createConnection({
+  const endpoint = options.endpoint || {
     host: config.gameServerAdminHost,
     port: config.gameServerAdminPort
+  };
+  const socket = net.createConnection({
+    host: endpoint.host,
+    port: endpoint.port
   });
 
   try {
@@ -281,82 +287,179 @@ function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 10
 }
 
 export class GameAdminClient {
-  constructor(config) {
+  constructor(config, redis = null) {
     this.config = config;
+    this.redis = redis;
+  }
+
+  async listAdminEndpoints() {
+    if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired) {
+        throw createAdminError(
+          "SERVICE_DISCOVERY_REQUIRED",
+          "Required registry discovery failed: REGISTRY_ENABLED=false"
+        );
+      }
+
+      return [
+        {
+          service: "game-server",
+          instanceId: "local-fallback",
+          instance_id: "local-fallback",
+          endpointName: "admin",
+          endpoint_name: "admin",
+          protocol: "tcp",
+          host: this.config.gameServerAdminHost,
+          port: this.config.gameServerAdminPort,
+          healthy: true,
+          fallback: true
+        }
+      ];
+    }
+
+    if (!this.redis) {
+      throw createAdminError(
+        "SERVICE_DISCOVERY_UNAVAILABLE",
+        "Redis client is required for game-server admin discovery"
+      );
+    }
+
+    return discoverGameServerAdminEndpoints(this.redis);
+  }
+
+  async resolveAdminEndpoint(options = {}) {
+    if (options.endpoint) {
+      return options.endpoint;
+    }
+
+    const endpoints = await this.listAdminEndpoints();
+
+    if (endpoints.length === 0) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND",
+        "game-server admin endpoint not found in service registry"
+      );
+    }
+
+    const targetInstanceId = normalizeTargetInstanceId(options.targetInstanceId || options.target_instance_id);
+    if (targetInstanceId) {
+      const selected = endpoints.find((endpoint) => endpoint.instanceId === targetInstanceId);
+      if (!selected) {
+        throw createAdminError(
+          "GAME_SERVER_ADMIN_TARGET_NOT_FOUND",
+          `game-server admin target instance not found: ${targetInstanceId}`
+        );
+      }
+      return selected;
+    }
+
+    if (endpoints.length > 1 && options.requireExplicitTarget) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_TARGET_REQUIRED",
+        "multiple game-server admin endpoints are available; targetInstanceId is required"
+      );
+    }
+
+    return endpoints[0];
+  }
+
+  async sendToEndpoint(endpoint, messageType, payload, expectedType, options = {}) {
+    return sendRequest(
+      this.config,
+      messageType,
+      payload,
+      expectedType,
+      { ...options, endpoint }
+    );
   }
 
   async getServerStatus(options = {}) {
+    const endpoint = await this.resolveAdminEndpoint(options);
     const body = await sendRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_SERVER_STATUS_REQ,
       Buffer.alloc(0),
       MESSAGE_TYPE.ADMIN_SERVER_STATUS_RES,
-      options
+      { ...options, endpoint }
     );
     // Simplified: just return basic info, real implementation would decode protobuf
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId, endpoint };
   }
 
   async updateConfig(key, value, options = {}) {
     // Simple string-based for now, real impl would use protobuf
     const payload = Buffer.from(JSON.stringify({ key, value }));
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     await sendRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
       payload,
       MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
-      options
+      { ...options, endpoint }
     );
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId };
   }
 
   async broadcast(title, content, sender = "System", options = {}) {
     const payload = Buffer.from(JSON.stringify({ title, content, sender }));
-    await sendRequest(
-      this.config,
-      MESSAGE_TYPE.GM_BROADCAST_REQ,
-      payload,
-      MESSAGE_TYPE.GM_BROADCAST_RES,
-      options
-    );
-    return { ok: true };
+    const endpoints = options.targetInstanceId
+      ? [await this.resolveAdminEndpoint(options)]
+      : await this.listAdminEndpoints();
+    const results = [];
+
+    for (const endpoint of endpoints) {
+      await this.sendToEndpoint(endpoint, MESSAGE_TYPE.GM_BROADCAST_REQ, payload, MESSAGE_TYPE.GM_BROADCAST_RES, options);
+      results.push({ ok: true, instanceId: endpoint.instanceId });
+    }
+
+    return { ok: true, instances: results };
   }
 
   async sendItem(playerId, itemId, itemCount, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, itemId, itemCount, reason }));
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_SEND_ITEM_REQ,
       payload,
       MESSAGE_TYPE.GM_SEND_ITEM_RES,
-      options
+      { ...options, endpoint }
     );
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId };
   }
 
   async kickPlayer(playerId, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, reason }));
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
       payload,
       MESSAGE_TYPE.GM_KICK_PLAYER_RES,
-      options
+      { ...options, endpoint }
     );
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId };
   }
 
   async banPlayer(playerId, durationSeconds, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, durationSeconds, reason }));
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     await sendRequest(
       this.config,
       MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
       payload,
       MESSAGE_TYPE.GM_BAN_PLAYER_RES,
-      options
+      { ...options, endpoint }
     );
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId };
   }
 }
 
-export { MESSAGE_TYPE, buildAdminAuthBody, normalizeGameAdminActor, sendRequest };
+function normalizeTargetInstanceId(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return String(value).trim();
+}
+
+export { MESSAGE_TYPE, buildAdminAuthBody, createAdminError, normalizeGameAdminActor, sendRequest };

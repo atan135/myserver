@@ -91,8 +91,8 @@ import {
     },
     {
       provide: ADMIN_GAME_ADMIN_CLIENT,
-      inject: [ADMIN_CONFIG],
-      useFactory: (config: any) => new GameAdminClient(config)
+      inject: [ADMIN_CONFIG, ADMIN_REDIS],
+      useFactory: (config: any, redis: any) => new GameAdminClient(config, redis)
     },
     {
       provide: ADMIN_REGISTRY,

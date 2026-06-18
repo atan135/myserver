@@ -26,6 +26,9 @@ const CONFIG_ENV_KEYS = [
   "GAME_PROXY_ADMIN_READ_TOKEN",
   "GAME_PROXY_ADMIN_REQUEST_TIMEOUT_MS",
   "GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES",
+  "REGISTRY_ENABLED",
+  "DISCOVERY_REQUIRED",
+  "APP_ENV",
   "SERVICE_NAME",
   "SERVICE_BUILD_VERSION"
 ];
@@ -68,6 +71,7 @@ test("admin-api control plane security defaults stay local-development friendly"
 test("admin-api requires TLS by default in production", async () => {
   await withEnv({
     NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
     JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
@@ -154,4 +158,29 @@ test("admin-api service registry identity reads defaults and build version overr
     assert.equal(config.serviceName, "admin-api");
     assert.equal(config.serviceBuildVersion, "2026.06.18+admin");
   });
+});
+
+test("admin-api strict discovery requires registry in production", async () => {
+  await assert.rejects(
+    withEnv({
+      NODE_ENV: "production",
+      REGISTRY_ENABLED: "false",
+      JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
+      ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("admin-api DISCOVERY_REQUIRED=true rejects registry disabled", async () => {
+  await assert.rejects(
+    withEnv({
+      NODE_ENV: "development",
+      DISCOVERY_REQUIRED: "true",
+      REGISTRY_ENABLED: "false"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
 });

@@ -5,6 +5,7 @@ import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
+import { discoverGameServerAdminEndpoints } from "../registry-client.js";
 import {
   aggregateMetricRecordsDetailed,
   buildMetricPoint,
@@ -58,6 +59,7 @@ export class MonitoringService {
       let onlineValue = 0;
       let metricsData = {};
       let instances = [];
+      let adminEndpoints: any[] = [];
 
       if (lastHeartbeat) {
         const heartbeatAge = Date.now() / 1000 - parseInt(lastHeartbeat, 10);
@@ -78,6 +80,11 @@ export class MonitoringService {
         }
       }
 
+      if (serviceName === "game-server") {
+        adminEndpoints = await this.getGameServerAdminEndpoints();
+        instances = mergeGameServerAdminEndpoints(instances, adminEndpoints);
+      }
+
       services.push({
         name: serviceName,
         status,
@@ -86,7 +93,8 @@ export class MonitoringService {
         latency_ms: latencyMs,
         online_value: onlineValue,
         last_heartbeat: lastHeartbeat ? parseInt(lastHeartbeat, 10) * 1000 : null,
-        instances
+        instances,
+        endpoints: serviceName === "game-server" ? adminEndpoints : []
       });
     }
 
@@ -308,6 +316,31 @@ export class MonitoringService {
     });
   }
 
+  private async getGameServerAdminEndpoints(): Promise<any[]> {
+    if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired) {
+        return [];
+      }
+
+      return [
+        {
+          service: "game-server",
+          instanceId: "local-fallback",
+          instance_id: "local-fallback",
+          endpointName: "admin",
+          endpoint_name: "admin",
+          protocol: "tcp",
+          host: this.config.gameServerAdminHost,
+          port: this.config.gameServerAdminPort,
+          healthy: true,
+          fallback: true
+        }
+      ];
+    }
+
+    return discoverGameServerAdminEndpoints(this.redis);
+  }
+
   private async getInstanceHeartbeats(serviceName: string): Promise<Map<string, number>> {
     const heartbeats = new Map<string, number>();
     let cursor = "0";
@@ -338,6 +371,26 @@ export class MonitoringService {
 
     return heartbeats;
   }
+}
+
+function mergeGameServerAdminEndpoints(instances: any[], endpoints: any[]): any[] {
+  const byId = new Map<string, any>();
+  for (const instance of instances) {
+    byId.set(instance.instance_id, { ...instance, endpoints: [] });
+  }
+
+  for (const endpoint of endpoints) {
+    const existing = byId.get(endpoint.instance_id) || {
+      instance_id: endpoint.instance_id,
+      status: endpoint.healthy ? "online" : "offline",
+      last_heartbeat: null,
+      endpoints: []
+    };
+    existing.endpoints = [...(existing.endpoints || []), endpoint];
+    byId.set(endpoint.instance_id, existing);
+  }
+
+  return [...byId.values()].sort((a, b) => String(a.instance_id).localeCompare(String(b.instance_id)));
 }
 
 function buildRolloutDrainSnapshot(upstream: any, checkedAt: number) {

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
-import { RegistryClient } from "./registry-client.js";
+import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
 configureLogger({
   appName: "admin-api-registry-test",
@@ -22,6 +22,23 @@ function createRedisCapture() {
     keys,
     async hset(key, field, value) {
       hashes.set(`${key}:${field}`, value);
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      const prefix = pattern.replace("*", "");
+      const found = [...hashes.keys()]
+        .filter((key) => key.endsWith(":data"))
+        .map((key) => key.slice(0, -5))
+        .filter((key) => key.startsWith(prefix));
+      return ["0", found];
     },
     async setex(key, ttl, value) {
       keys.set(key, { ttl, value });
@@ -79,6 +96,117 @@ test("RegistryClient registers admin-api admin http endpoint and metadata", asyn
     ip_allowlist: ["127.0.0.1", "10.0.0.0/24"],
     build_version: "2026.06.18+admin"
   });
+});
+
+test("discoverGameServerAdminEndpoints returns healthy tcp admin endpoints for all instances", async () => {
+  const redis = createRedisCapture();
+  const instances = [
+    {
+      id: "game-server-a",
+      schema_version: 2,
+      name: "game-server",
+      host: "10.0.0.1",
+      port: 7000,
+      admin_port: 7500,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.0.1",
+          port: 7500,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    },
+    {
+      id: "game-server-b",
+      schema_version: 2,
+      name: "game-server",
+      host: "10.0.0.2",
+      port: 7000,
+      admin_port: 7500,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.0.2",
+          port: 7501,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        },
+        {
+          name: "http",
+          protocol: "http",
+          host: "10.0.0.2",
+          port: 8080,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    },
+    {
+      id: "game-server-unhealthy",
+      schema_version: 2,
+      name: "game-server",
+      host: "10.0.0.3",
+      port: 7000,
+      admin_port: 7500,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.0.3",
+          port: 7502,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: false
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    }
+  ];
+
+  for (const instance of instances) {
+    redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+  }
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(
+    endpoints.map((endpoint) => ({
+      instanceId: endpoint.instanceId,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port
+    })),
+    [
+      { instanceId: "game-server-a", protocol: "tcp", host: "10.0.0.1", port: 7500 },
+      { instanceId: "game-server-b", protocol: "tcp", host: "10.0.0.2", port: 7501 }
+    ]
+  );
 });
 
 test("RegistryClient metadata falls back to dev build version and empty allowlist", async () => {
