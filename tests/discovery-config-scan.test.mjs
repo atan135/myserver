@@ -61,7 +61,38 @@ function hasCommentedConfigAssignment(content, name) {
     .some((line) => pattern.test(line.trim()));
 }
 
-test("repository discovery config scan passes current strict overlays and local fallback examples", () => {
+function commentedConfigAssignmentContext(content, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^#\\s*${escapedName}\\s*=`);
+  const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const index = lines.findIndex((line) => pattern.test(line.trim()));
+  assert.notEqual(index, -1, `${name} should be present as a commented example`);
+
+  const start = Math.max(0, index - 12);
+  const end = Math.min(lines.length, index + 4);
+  return lines.slice(start, end).join("\n");
+}
+
+function assertCommentedLocalDebugFallback(content, name, file) {
+  assert.equal(hasActiveConfigAssignment(content, name), false, `${file} must not enable ${name}`);
+  assert.equal(
+    hasCommentedConfigAssignment(content, name),
+    true,
+    `${file} should keep ${name} as a commented local fallback example`
+  );
+
+  const context = commentedConfigAssignmentContext(content, name);
+  assert.match(context, /Local debug fallback/, `${file} ${name} should be in a local debug fallback section`);
+  assert.match(context, /Local fallback only/, `${file} ${name} should be marked local fallback only`);
+  assert.match(context, /REGISTRY_ENABLED=false/, `${file} ${name} should require registry discovery disabled`);
+  assert.match(context, /DISCOVERY_REQUIRED=false/, `${file} ${name} should require non-strict discovery`);
+  assert.match(context, /NODE_ENV=development/, `${file} ${name} should mention NODE_ENV=development`);
+  assert.match(context, /APP_ENV=local/, `${file} ${name} should mention APP_ENV=local`);
+  assert.match(context, /strict\/test\/production/i, `${file} ${name} should mention strict/test/production`);
+  assert.match(context, /registry/i, `${file} ${name} should direct strict routing to registry discovery`);
+}
+
+test("repository discovery config scan passes current strict overlays and commented local fallback examples", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
 
   assert.equal(result.ok, true);
@@ -70,19 +101,10 @@ test("repository discovery config scan passes current strict overlays and local 
   assert.ok(result.strictFiles.includes("apps/game-proxy/.env.test.example"));
   assert.ok(result.localExampleFiles.includes("apps/auth-http/.env.example"));
   assert.ok(result.localExampleFiles.includes("apps/game-server/.env.example"));
-  assert.ok(
-    result.allowedLocalFallbacks.some(
-      (item) => item.file === "apps/auth-http/.env.example" && item.variable === "GAME_PROXY_HOST"
-    )
-  );
-  assert.ok(
-    result.allowedLocalFallbacks.some(
-      (item) => item.file === "apps/game-server/.env.example" && item.variable === "MATCH_SERVICE_ADDR"
-    )
-  );
+  assert.deepEqual(result.allowedLocalFallbacks, []);
 });
 
-test("repository game-server strict templates omit MATCH_SERVICE_ADDR while local fallback remains allowed", () => {
+test("repository game-server strict templates omit MATCH_SERVICE_ADDR while commented local fallback remains non-active", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
   const gameServerStrictFiles = result.strictFiles.filter((file) =>
     file.startsWith("apps/game-server/")
@@ -101,17 +123,21 @@ test("repository game-server strict templates omit MATCH_SERVICE_ADDR while loca
     );
   }
 
-  assert.ok(
+  const gameServerExample = fs.readFileSync(path.join(projectRoot, "apps/game-server/.env.example"), "utf8");
+  assertCommentedLocalDebugFallback(
+    gameServerExample,
+    "MATCH_SERVICE_ADDR",
+    "apps/game-server/.env.example"
+  );
+  assert.equal(
     result.allowedLocalFallbacks.some(
-      (item) =>
-        item.file === "apps/game-server/.env.example" &&
-        item.variable === "MATCH_SERVICE_ADDR" &&
-        item.service === "game-server"
-    )
+      (item) => item.file === "apps/game-server/.env.example" && item.variable === "MATCH_SERVICE_ADDR"
+    ),
+    false
   );
 });
 
-test("repository auth-http strict templates omit GAME_PROXY direct config while local fallback remains allowed", () => {
+test("repository auth-http strict templates omit GAME_PROXY direct config while commented local fallback remains non-active", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
   const authHttpStrictFiles = result.strictFiles.filter((file) => file.startsWith("apps/auth-http/"));
 
@@ -130,19 +156,19 @@ test("repository auth-http strict templates omit GAME_PROXY direct config while 
     }
   }
 
+  const authHttpExample = fs.readFileSync(path.join(projectRoot, "apps/auth-http/.env.example"), "utf8");
   for (const variable of ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]) {
-    assert.ok(
+    assertCommentedLocalDebugFallback(authHttpExample, variable, "apps/auth-http/.env.example");
+    assert.equal(
       result.allowedLocalFallbacks.some(
-        (item) =>
-          item.file === "apps/auth-http/.env.example" &&
-          item.variable === variable &&
-          item.service === "auth-http"
-      )
+        (item) => item.file === "apps/auth-http/.env.example" && item.variable === variable
+      ),
+      false
     );
   }
 });
 
-test("repository control-plane strict templates omit GAME_SERVER_ADMIN direct config while local fallback remains allowed", () => {
+test("repository control-plane strict templates omit GAME_SERVER_ADMIN direct config while commented local fallback remains non-active", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
   const services = ["auth-http", "admin-api", "mail-service"];
   const variables = ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"];
@@ -166,23 +192,17 @@ test("repository control-plane strict templates omit GAME_SERVER_ADMIN direct co
     }
   }
 
-  for (const service of ["auth-http", "admin-api"]) {
+  for (const service of services) {
+    const example = fs.readFileSync(path.join(projectRoot, `apps/${service}/.env.example`), "utf8");
     for (const variable of variables) {
-      assert.ok(
+      assertCommentedLocalDebugFallback(example, variable, `apps/${service}/.env.example`);
+      assert.equal(
         result.allowedLocalFallbacks.some(
-          (item) =>
-            item.file === `apps/${service}/.env.example` &&
-            item.variable === variable &&
-            item.service === service
-        )
+          (item) => item.file === `apps/${service}/.env.example` && item.variable === variable
+        ),
+        false
       );
     }
-  }
-
-  const mailExample = fs.readFileSync(path.join(projectRoot, "apps/mail-service/.env.example"), "utf8");
-  for (const variable of variables) {
-    assert.equal(hasActiveConfigAssignment(mailExample, variable), false);
-    assert.equal(hasCommentedConfigAssignment(mailExample, variable), true);
   }
 });
 
@@ -210,8 +230,7 @@ test("repository admin-api strict templates omit GAME_PROXY_ADMIN direct config 
 
   const adminApiExample = fs.readFileSync(path.join(projectRoot, "apps/admin-api/.env.example"), "utf8");
   for (const variable of variables) {
-    assert.equal(hasActiveConfigAssignment(adminApiExample, variable), false);
-    assert.equal(hasCommentedConfigAssignment(adminApiExample, variable), true);
+    assertCommentedLocalDebugFallback(adminApiExample, variable, "apps/admin-api/.env.example");
     assert.equal(
       result.allowedLocalFallbacks.some(
         (item) =>
@@ -249,8 +268,7 @@ test("repository game-proxy strict templates omit UPSTREAM direct config while c
 
   const gameProxyExample = fs.readFileSync(path.join(projectRoot, "apps/game-proxy/.env.example"), "utf8");
   for (const variable of variables) {
-    assert.equal(hasActiveConfigAssignment(gameProxyExample, variable), false);
-    assert.equal(hasCommentedConfigAssignment(gameProxyExample, variable), true);
+    assertCommentedLocalDebugFallback(gameProxyExample, variable, "apps/game-proxy/.env.example");
     assert.equal(
       result.allowedLocalFallbacks.some(
         (item) =>
@@ -291,8 +309,7 @@ test("repository match-service strict templates omit game-server internal socket
     "utf8"
   );
   for (const variable of variables) {
-    assert.equal(hasActiveConfigAssignment(matchServiceExample, variable), false);
-    assert.equal(hasCommentedConfigAssignment(matchServiceExample, variable), true);
+    assertCommentedLocalDebugFallback(matchServiceExample, variable, "apps/match-service/.env.example");
     assert.equal(
       result.allowedLocalFallbacks.some(
         (item) =>

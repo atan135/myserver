@@ -177,8 +177,11 @@ test("admin-api env example keeps game-proxy direct endpoint as commented local 
   assert.match(example, /^# GAME_PROXY_ADMIN_HOST=127\.0\.0\.1$/m);
   assert.match(example, /^# GAME_PROXY_ADMIN_PORT=7101$/m);
   assert.match(example, /Local fallback only/);
-  assert.match(example, /Strict\/test\/production discovery ignores these two variables/);
-  assert.match(example, /game-proxy\.admin registry endpoint/);
+  assert.match(example, /REGISTRY_ENABLED=false/);
+  assert.match(example, /DISCOVERY_REQUIRED=false/);
+  assert.match(example, /NODE_ENV=development or APP_ENV=local/);
+  assert.match(example, /Strict\/test\/production\/staging discovery ignores these variables/);
+  assert.match(example, /game-proxy\.admin/);
 });
 
 test("admin-api ignores direct consumer endpoint env outside local fallback", async () => {
