@@ -152,6 +152,7 @@ test("admin-api game admin network limits read positive values", async () => {
 
 test("admin-api game-proxy admin monitoring config reads positive values", async () => {
   await withEnv({
+    NODE_ENV: "development",
     GAME_PROXY_ADMIN_HOST: "10.0.0.10",
     GAME_PROXY_ADMIN_PORT: "17101",
     GAME_PROXY_ADMIN_TOKEN: "proxy-write-token",
@@ -166,6 +167,18 @@ test("admin-api game-proxy admin monitoring config reads positive values", async
     assert.equal(config.gameProxyAdminRequestTimeoutMs, 1500);
     assert.equal(config.gameProxyAdminMaxResponseBytes, 2048);
   });
+});
+
+test("admin-api env example keeps game-proxy direct endpoint as commented local fallback only", () => {
+  const example = fs.readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+
+  assert.doesNotMatch(example, /^GAME_PROXY_ADMIN_HOST=/m);
+  assert.doesNotMatch(example, /^GAME_PROXY_ADMIN_PORT=/m);
+  assert.match(example, /^# GAME_PROXY_ADMIN_HOST=127\.0\.0\.1$/m);
+  assert.match(example, /^# GAME_PROXY_ADMIN_PORT=7101$/m);
+  assert.match(example, /Local fallback only/);
+  assert.match(example, /Strict\/test\/production discovery ignores these two variables/);
+  assert.match(example, /game-proxy\.admin registry endpoint/);
 });
 
 test("admin-api ignores direct consumer endpoint env outside local fallback", async () => {
