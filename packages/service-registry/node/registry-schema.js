@@ -28,6 +28,11 @@ export const SERVICE_ENDPOINT_FIELDS = [
 export const SERVICE_INSTANCE_SCHEMA_VERSION = 2;
 export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "local_socket"];
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
+export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 1000;
+const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
+const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
+const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
+const discoveryClientByRedis = new WeakMap();
 
 export function normalizeRegistryKeyPrefix(prefix) {
   return typeof prefix === "string" ? prefix : "";
@@ -296,6 +301,162 @@ export function pickServiceEndpoint(instances, endpointName) {
   return discoverEndpoint(instances, endpointName);
 }
 
+export class RegistryDiscoveryClient {
+  constructor(redis, options = {}) {
+    this.redis = redis;
+    this.registryKeyPrefix = normalizeRegistryKeyPrefix(options.registryKeyPrefix);
+    this.discoveryCacheTtlMs = normalizeDiscoveryCacheTtlMs(options.discoveryCacheTtlMs);
+    this.now = typeof options.now === "function" ? options.now : () => Date.now();
+    this.onParseError = typeof options.onParseError === "function" ? options.onParseError : null;
+    this.cache = new Map();
+  }
+
+  async discoverInstances(serviceName) {
+    const { value } = await this.discoverInstancesWithExpiry(serviceName);
+    return value;
+  }
+
+  async discoverInstancesWithExpiry(serviceName) {
+    const cacheKey = discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName,
+      endpointName: "",
+      kind: "instances",
+      strategy: INSTANCE_DISCOVERY_STRATEGY
+    });
+    const cached = this.getCachedEntry(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const instances = await scanServiceInstances(
+      this.redis,
+      serviceName,
+      this.registryKeyPrefix,
+      this.onParseError
+    );
+    return this.setCached(cacheKey, instances);
+  }
+
+  async discoverEndpoint(serviceName, endpointName) {
+    const cacheKey = discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName,
+      endpointName,
+      kind: "endpoint",
+      strategy: ENDPOINT_PICK_STRATEGY
+    });
+    const cached = this.getCachedEntry(cacheKey);
+    if (cached) {
+      return cached.value;
+    }
+
+    const { value: instances, expiresAt } = await this.discoverInstancesWithExpiry(serviceName);
+    const discovered = discoverEndpoint(instances, endpointName);
+    this.setCached(cacheKey, discovered, expiresAt);
+    return discovered;
+  }
+
+  async discoverRequiredEndpoint(serviceName, endpointName) {
+    const discovered = await this.discoverEndpoint(serviceName, endpointName);
+    if (discovered) {
+      return discovered;
+    }
+
+    throw new Error(`service endpoint not found: service=${serviceName}, endpoint=${endpointName}`);
+  }
+
+  async discoverAllEndpoints(serviceName, endpointName) {
+    const cacheKey = discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName,
+      endpointName,
+      kind: "all_endpoints",
+      strategy: ALL_ENDPOINTS_STRATEGY
+    });
+    const cached = this.getCachedEntry(cacheKey);
+    if (cached) {
+      return cached.value;
+    }
+
+    const { value: instances, expiresAt } = await this.discoverInstancesWithExpiry(serviceName);
+    const endpoints = discoverAllEndpoints(instances, endpointName);
+    this.setCached(cacheKey, endpoints, expiresAt);
+    return endpoints;
+  }
+
+  clearCache() {
+    this.cache.clear();
+  }
+
+  getCached(key) {
+    return this.getCachedEntry(key)?.value;
+  }
+
+  getCachedEntry(key) {
+    if (this.discoveryCacheTtlMs <= 0) {
+      return undefined;
+    }
+
+    const entry = this.cache.get(key);
+    if (!entry) {
+      return undefined;
+    }
+
+    if (entry.expiresAt <= this.now()) {
+      this.cache.delete(key);
+      return undefined;
+    }
+
+    return entry;
+  }
+
+  setCached(key, value, expiresAt = null) {
+    if (this.discoveryCacheTtlMs <= 0) {
+      return { value, expiresAt: null };
+    }
+
+    const cacheExpiresAt = expiresAt ?? this.now() + this.discoveryCacheTtlMs;
+    if (cacheExpiresAt <= this.now()) {
+      this.cache.delete(key);
+      return { value, expiresAt: null };
+    }
+
+    const entry = {
+      expiresAt: cacheExpiresAt,
+      value
+    };
+    this.cache.set(key, entry);
+    return entry;
+  }
+}
+
+export function getRegistryDiscoveryClient(redis, options = {}) {
+  let clients = discoveryClientByRedis.get(redis);
+  if (!clients) {
+    clients = new Map();
+    discoveryClientByRedis.set(redis, clients);
+  }
+
+  const registryKeyPrefix = normalizeRegistryKeyPrefix(options.registryKeyPrefix);
+  const discoveryCacheTtlMs = normalizeDiscoveryCacheTtlMs(options.discoveryCacheTtlMs);
+  const clientKey = `${registryKeyPrefix}\u0000${discoveryCacheTtlMs}`;
+  let client = clients.get(clientKey);
+  if (!client) {
+    client = new RegistryDiscoveryClient(redis, {
+      ...options,
+      registryKeyPrefix,
+      discoveryCacheTtlMs
+    });
+    clients.set(clientKey, client);
+  }
+  return client;
+}
+
+export async function discoverServiceInstances(redis, serviceName, options = {}) {
+  return getRegistryDiscoveryClient(redis, normalizeDiscoveryOptions(options)).discoverInstances(serviceName);
+}
+
 function normalizeEndpointList(endpoints, sourceSchemaVersion, legacy) {
   const explicit = Array.isArray(endpoints) ? endpoints.map(normalizeEndpoint).filter(Boolean) : [];
   if (Array.isArray(endpoints)) {
@@ -390,4 +551,76 @@ function stableHash(value) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0) / 4294967295;
+}
+
+async function scanServiceInstances(redis, serviceName, registryKeyPrefix, onParseError = null) {
+  const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
+  const instances = [];
+
+  for (const key of keys.sort()) {
+    const instanceId = key.split(":").at(-1);
+    if (!instanceId) {
+      continue;
+    }
+
+    const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
+    if (!heartbeatExists) {
+      continue;
+    }
+
+    const data = await redis.hget(key, "data");
+    if (!data) {
+      continue;
+    }
+
+    try {
+      const instance = normalizeServiceInstance(JSON.parse(data));
+      if (instance) {
+        instances.push(instance);
+      }
+    } catch (error) {
+      onParseError?.(error, { serviceName, instanceId });
+    }
+  }
+
+  return instances;
+}
+
+async function scanKeys(redis, pattern) {
+  const keys = [];
+  let cursor = "0";
+
+  do {
+    const [nextCursor, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+    cursor = nextCursor;
+    keys.push(...batch);
+  } while (cursor !== "0");
+
+  return keys;
+}
+
+function normalizeDiscoveryCacheTtlMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return DEFAULT_DISCOVERY_CACHE_TTL_MS;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DISCOVERY_CACHE_TTL_MS;
+}
+
+function normalizeDiscoveryOptions(options) {
+  if (typeof options === "string") {
+    return { registryKeyPrefix: options };
+  }
+  return options && typeof options === "object" ? options : {};
+}
+
+function discoveryCacheKey({ prefix, serviceName, endpointName, kind, strategy }) {
+  return JSON.stringify({
+    prefix: normalizeRegistryKeyPrefix(prefix),
+    service: String(serviceName ?? ""),
+    endpoint: String(endpointName ?? ""),
+    kind,
+    strategy
+  });
 }

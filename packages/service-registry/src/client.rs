@@ -1,6 +1,18 @@
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
 use redis::AsyncCommands;
+use tokio::sync::Mutex;
 
 use crate::types::{ServiceEndpoint, ServiceInstance};
+
+const DEFAULT_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(1);
+const INSTANCE_DISCOVERY_STRATEGY: &str = "healthy_instances_sorted_v1";
+const INSTANCE_PICK_STRATEGY: &str = "weighted_stable_instance_v1";
+const ENDPOINT_PICK_STRATEGY: &str = "weighted_stable_endpoint_v1";
+const ALL_ENDPOINTS_STRATEGY: &str = "all_healthy_endpoints_sorted_v1";
 
 /// 服务注册中心客户端
 pub struct RegistryClient {
@@ -10,6 +22,8 @@ pub struct RegistryClient {
     key_prefix: String,
     heartbeat_interval_secs: u64,
     heartbeat_ttl_secs: u64,
+    discovery_cache_ttl: Duration,
+    discovery_cache: Mutex<DiscoveryCache>,
 }
 
 impl RegistryClient {
@@ -30,13 +44,28 @@ impl RegistryClient {
             key_prefix: default_key_prefix(),
             heartbeat_interval_secs: 10,
             heartbeat_ttl_secs: 30,
+            discovery_cache_ttl: default_discovery_cache_ttl(),
+            discovery_cache: Mutex::new(DiscoveryCache::default()),
         })
     }
 
     /// 设置注册中心 Redis key 前缀
     pub fn with_key_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.key_prefix = prefix.into();
+        self.discovery_cache = Mutex::new(DiscoveryCache::default());
         self
+    }
+
+    /// 设置服务发现缓存 TTL。传入 0 可禁用缓存。
+    pub fn with_discovery_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.discovery_cache_ttl = ttl;
+        self.discovery_cache = Mutex::new(DiscoveryCache::default());
+        self
+    }
+
+    /// 禁用服务发现缓存。
+    pub fn without_discovery_cache(self) -> Self {
+        self.with_discovery_cache_ttl(Duration::ZERO)
     }
 
     /// 设置心跳间隔（秒）
@@ -80,6 +109,8 @@ impl RegistryClient {
             "service registered"
         );
 
+        self.clear_discovery_cache().await;
+
         Ok(())
     }
 
@@ -97,6 +128,8 @@ impl RegistryClient {
             instance = %self.instance_id,
             "service deregistered"
         );
+
+        self.clear_discovery_cache().await;
 
         Ok(())
     }
@@ -149,6 +182,15 @@ impl RegistryClient {
 
     /// 发现服务实例（查询所有健康实例）
     pub async fn discover(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+        self.discover_with_cache_expiry(service_name)
+            .await
+            .map(|(instances, _)| instances)
+    }
+
+    async fn discover_uncached(
         &self,
         service_name: &str,
     ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
@@ -206,18 +248,76 @@ impl RegistryClient {
         Ok(instances)
     }
 
+    async fn discover_with_cache_expiry(
+        &self,
+        service_name: &str,
+    ) -> Result<(Vec<ServiceInstance>, Option<Instant>), Box<dyn std::error::Error + Send + Sync>>
+    {
+        if self.discovery_cache_ttl.is_zero() {
+            return self
+                .discover_uncached(service_name)
+                .await
+                .map(|instances| (instances, None));
+        }
+
+        let cache_key = DiscoveryCacheKey::instances(
+            &self.key_prefix,
+            service_name,
+            INSTANCE_DISCOVERY_STRATEGY,
+        );
+        if let Some((DiscoveryCacheValue::Instances(instances), expires_at)) = self
+            .discovery_cache
+            .lock()
+            .await
+            .get_with_expiry(&cache_key, Instant::now())
+        {
+            return Ok((instances, Some(expires_at)));
+        }
+
+        let instances = self.discover_uncached(service_name).await?;
+        let expires_at = Instant::now() + self.discovery_cache_ttl;
+        self.put_cached_discovery_until(
+            cache_key,
+            DiscoveryCacheValue::Instances(instances.clone()),
+            Some(expires_at),
+        )
+        .await;
+        Ok((instances, Some(expires_at)))
+    }
+
     /// 发现单个健康实例（用于 proxy 路由）
     pub async fn discover_one(
         &self,
         service_name: &str,
     ) -> Result<Option<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
-        let instances = self.discover(service_name).await?;
+        let cache_key =
+            DiscoveryCacheKey::one_instance(&self.key_prefix, service_name, INSTANCE_PICK_STRATEGY);
+        if let Some(DiscoveryCacheValue::Instance(instance)) =
+            self.get_cached_discovery(&cache_key).await
+        {
+            return Ok(instance);
+        }
+
+        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
 
         if instances.is_empty() {
+            self.put_cached_discovery_until(
+                cache_key,
+                DiscoveryCacheValue::Instance(None),
+                expires_at,
+            )
+            .await;
             return Ok(None);
         }
 
-        Ok(pick_weighted_stable(&instances).cloned())
+        let picked = pick_weighted_stable(&instances).cloned();
+        self.put_cached_discovery_until(
+            cache_key,
+            DiscoveryCacheValue::Instance(picked.clone()),
+            expires_at,
+        )
+        .await;
+        Ok(picked)
     }
 
     /// 发现单个健康端点
@@ -226,8 +326,27 @@ impl RegistryClient {
         service_name: &str,
         endpoint_name: &str,
     ) -> Result<Option<ServiceEndpoint>, Box<dyn std::error::Error + Send + Sync>> {
-        let instances = self.discover(service_name).await?;
-        Ok(pick_endpoint_weighted_stable(&instances, endpoint_name).cloned())
+        let cache_key = DiscoveryCacheKey::endpoint(
+            &self.key_prefix,
+            service_name,
+            endpoint_name,
+            ENDPOINT_PICK_STRATEGY,
+        );
+        if let Some(DiscoveryCacheValue::Endpoint(endpoint)) =
+            self.get_cached_discovery(&cache_key).await
+        {
+            return Ok(endpoint);
+        }
+
+        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
+        let endpoint = pick_endpoint_weighted_stable(&instances, endpoint_name).cloned();
+        self.put_cached_discovery_until(
+            cache_key,
+            DiscoveryCacheValue::Endpoint(endpoint.clone()),
+            expires_at,
+        )
+        .await;
+        Ok(endpoint)
     }
 
     /// 发现必需健康端点，不存在时返回错误
@@ -253,11 +372,30 @@ impl RegistryClient {
         service_name: &str,
         endpoint_name: &str,
     ) -> Result<Vec<ServiceEndpoint>, Box<dyn std::error::Error + Send + Sync>> {
-        let instances = self.discover(service_name).await?;
-        Ok(all_healthy_endpoints(&instances, endpoint_name)
+        let cache_key = DiscoveryCacheKey::all_endpoints(
+            &self.key_prefix,
+            service_name,
+            endpoint_name,
+            ALL_ENDPOINTS_STRATEGY,
+        );
+        if let Some(DiscoveryCacheValue::Endpoints(endpoints)) =
+            self.get_cached_discovery(&cache_key).await
+        {
+            return Ok(endpoints);
+        }
+
+        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
+        let endpoints: Vec<_> = all_healthy_endpoints(&instances, endpoint_name)
             .into_iter()
             .cloned()
-            .collect())
+            .collect();
+        self.put_cached_discovery_until(
+            cache_key,
+            DiscoveryCacheValue::Endpoints(endpoints.clone()),
+            expires_at,
+        )
+        .await;
+        Ok(endpoints)
     }
 
     /// 获取当前实例的 Key
@@ -279,12 +417,50 @@ impl RegistryClient {
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
+
+    async fn get_cached_discovery(&self, key: &DiscoveryCacheKey) -> Option<DiscoveryCacheValue> {
+        if self.discovery_cache_ttl.is_zero() {
+            return None;
+        }
+
+        self.discovery_cache.lock().await.get(key, Instant::now())
+    }
+
+    async fn put_cached_discovery_until(
+        &self,
+        key: DiscoveryCacheKey,
+        value: DiscoveryCacheValue,
+        expires_at: Option<Instant>,
+    ) {
+        if self.discovery_cache_ttl.is_zero() {
+            return;
+        }
+
+        if let Some(expires_at) = expires_at {
+            self.discovery_cache
+                .lock()
+                .await
+                .put_until(key, value, expires_at);
+        }
+    }
+
+    async fn clear_discovery_cache(&self) {
+        self.discovery_cache.lock().await.clear();
+    }
 }
 
 fn default_key_prefix() -> String {
     std::env::var("REGISTRY_KEY_PREFIX")
         .or_else(|_| std::env::var("REDIS_KEY_PREFIX"))
         .unwrap_or_default()
+}
+
+fn default_discovery_cache_ttl() -> Duration {
+    std::env::var("REGISTRY_DISCOVERY_CACHE_TTL_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_DISCOVERY_CACHE_TTL)
 }
 
 fn registry_instance_key(prefix: &str, service_name: &str, instance_id: &str) -> String {
@@ -370,6 +546,131 @@ fn stable_hash(value: &str) -> u32 {
     hash
 }
 
+#[derive(Default)]
+struct DiscoveryCache {
+    entries: HashMap<DiscoveryCacheKey, DiscoveryCacheEntry>,
+}
+
+impl DiscoveryCache {
+    fn get(&mut self, key: &DiscoveryCacheKey, now: Instant) -> Option<DiscoveryCacheValue> {
+        self.get_with_expiry(key, now).map(|(value, _)| value)
+    }
+
+    fn get_with_expiry(
+        &mut self,
+        key: &DiscoveryCacheKey,
+        now: Instant,
+    ) -> Option<(DiscoveryCacheValue, Instant)> {
+        let entry = self.entries.get(key)?;
+        if entry.expires_at <= now {
+            self.entries.remove(key);
+            return None;
+        }
+        Some((entry.value.clone(), entry.expires_at))
+    }
+
+    #[cfg(test)]
+    fn put(
+        &mut self,
+        key: DiscoveryCacheKey,
+        value: DiscoveryCacheValue,
+        now: Instant,
+        ttl: Duration,
+    ) {
+        if ttl.is_zero() {
+            return;
+        }
+
+        self.put_until(key, value, now + ttl);
+    }
+
+    fn put_until(
+        &mut self,
+        key: DiscoveryCacheKey,
+        value: DiscoveryCacheValue,
+        expires_at: Instant,
+    ) {
+        self.entries
+            .insert(key, DiscoveryCacheEntry { expires_at, value });
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+struct DiscoveryCacheEntry {
+    expires_at: Instant,
+    value: DiscoveryCacheValue,
+}
+
+#[derive(Clone)]
+enum DiscoveryCacheValue {
+    Instances(Vec<ServiceInstance>),
+    Instance(Option<ServiceInstance>),
+    Endpoint(Option<ServiceEndpoint>),
+    Endpoints(Vec<ServiceEndpoint>),
+}
+
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+struct DiscoveryCacheKey {
+    prefix: String,
+    service_name: String,
+    endpoint_name: String,
+    kind: &'static str,
+    strategy: &'static str,
+}
+
+impl DiscoveryCacheKey {
+    fn instances(prefix: &str, service_name: &str, strategy: &'static str) -> Self {
+        Self::new(prefix, service_name, "", "instances", strategy)
+    }
+
+    fn one_instance(prefix: &str, service_name: &str, strategy: &'static str) -> Self {
+        Self::new(prefix, service_name, "", "one_instance", strategy)
+    }
+
+    fn endpoint(
+        prefix: &str,
+        service_name: &str,
+        endpoint_name: &str,
+        strategy: &'static str,
+    ) -> Self {
+        Self::new(prefix, service_name, endpoint_name, "endpoint", strategy)
+    }
+
+    fn all_endpoints(
+        prefix: &str,
+        service_name: &str,
+        endpoint_name: &str,
+        strategy: &'static str,
+    ) -> Self {
+        Self::new(
+            prefix,
+            service_name,
+            endpoint_name,
+            "all_endpoints",
+            strategy,
+        )
+    }
+
+    fn new(
+        prefix: &str,
+        service_name: &str,
+        endpoint_name: &str,
+        kind: &'static str,
+        strategy: &'static str,
+    ) -> Self {
+        Self {
+            prefix: prefix.to_string(),
+            service_name: service_name.to_string(),
+            endpoint_name: endpoint_name.to_string(),
+            kind,
+            strategy,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +743,81 @@ mod tests {
             registry_instance_scan_pattern("test:", "game-server"),
             "test:service:game-server:instances:*"
         );
+    }
+
+    #[test]
+    fn discovery_cache_returns_value_until_ttl_expires() {
+        let mut cache = DiscoveryCache::default();
+        let key =
+            DiscoveryCacheKey::endpoint("test:", "game-server", "admin", ENDPOINT_PICK_STRATEGY);
+        let now = Instant::now();
+        let endpoint = ServiceEndpoint::tcp("admin", "127.0.0.1", 7500, "admin");
+
+        cache.put(
+            key.clone(),
+            DiscoveryCacheValue::Endpoint(Some(endpoint.clone())),
+            now,
+            Duration::from_millis(50),
+        );
+
+        match cache.get(&key, now + Duration::from_millis(49)) {
+            Some(DiscoveryCacheValue::Endpoint(Some(cached))) => assert_eq!(cached, endpoint),
+            _ => panic!("expected cached endpoint before ttl expiry"),
+        }
+        assert!(cache.get(&key, now + Duration::from_millis(50)).is_none());
+    }
+
+    #[test]
+    fn discovery_cache_key_separates_services_endpoints_and_strategies() {
+        let mut cache = DiscoveryCache::default();
+        let now = Instant::now();
+        let endpoint = ServiceEndpoint::tcp("admin", "127.0.0.1", 7500, "admin");
+        let game_admin =
+            DiscoveryCacheKey::endpoint("test:", "game-server", "admin", ENDPOINT_PICK_STRATEGY);
+
+        cache.put(
+            game_admin.clone(),
+            DiscoveryCacheValue::Endpoint(Some(endpoint)),
+            now,
+            Duration::from_secs(1),
+        );
+
+        let chat_admin =
+            DiscoveryCacheKey::endpoint("test:", "chat-server", "admin", ENDPOINT_PICK_STRATEGY);
+        let game_client =
+            DiscoveryCacheKey::endpoint("test:", "game-server", "client", ENDPOINT_PICK_STRATEGY);
+        let game_admin_all_strategy = DiscoveryCacheKey::all_endpoints(
+            "test:",
+            "game-server",
+            "admin",
+            ALL_ENDPOINTS_STRATEGY,
+        );
+
+        assert!(cache.get(&chat_admin, now).is_none());
+        assert!(cache.get(&game_client, now).is_none());
+        assert!(cache.get(&game_admin_all_strategy, now).is_none());
+        assert!(matches!(
+            cache.get(&game_admin, now),
+            Some(DiscoveryCacheValue::Endpoint(Some(_)))
+        ));
+    }
+
+    #[test]
+    fn discovery_cache_can_store_required_discovery_miss() {
+        let mut cache = DiscoveryCache::default();
+        let key = DiscoveryCacheKey::endpoint("", "game-server", "admin", ENDPOINT_PICK_STRATEGY);
+        let now = Instant::now();
+
+        cache.put(
+            key.clone(),
+            DiscoveryCacheValue::Endpoint(None),
+            now,
+            Duration::from_secs(1),
+        );
+
+        assert!(matches!(
+            cache.get(&key, now),
+            Some(DiscoveryCacheValue::Endpoint(None))
+        ));
     }
 }

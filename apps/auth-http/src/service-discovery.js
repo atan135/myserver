@@ -1,8 +1,5 @@
 import {
-  discoverEndpoint,
-  normalizeServiceInstance,
-  registryHeartbeatKey,
-  registryInstanceScanPattern,
+  RegistryDiscoveryClient
 } from "../../../packages/service-registry/node/registry-schema.js";
 import { serviceUnavailable } from "./common/http-exception.js";
 
@@ -35,6 +32,13 @@ export class ServiceDiscovery {
   constructor(redis, config) {
     this.redis = redis;
     this.config = config;
+    this.registryDiscovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix: config.registryKeyPrefix || "",
+      discoveryCacheTtlMs: config.registryDiscoveryCacheTtlMs,
+      onParseError: (error) => {
+        console.error("[service-discovery] parse error:", error);
+      }
+    });
   }
 
   async discoverClientServices() {
@@ -80,54 +84,16 @@ export class ServiceDiscovery {
   }
 
   async discoverOneEndpoint(serviceName, endpointName, legacyEndpointName = null) {
-    const instances = await this.discoverInstances(serviceName);
-    return discoverEndpoint(instances, endpointName) ||
-      (legacyEndpointName ? discoverEndpoint(instances, legacyEndpointName) : null);
+    const discovered = await this.registryDiscovery.discoverEndpoint(serviceName, endpointName);
+    if (discovered || !legacyEndpointName) {
+      return discovered;
+    }
+    return this.registryDiscovery.discoverEndpoint(serviceName, legacyEndpointName);
   }
 
   async discoverInstances(serviceName) {
-    const registryKeyPrefix = this.config.registryKeyPrefix || "";
-    const keys = await scanKeys(this.redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
-    const instances = [];
-
-    for (const key of keys.sort()) {
-      const instanceId = key.split(":").at(-1);
-      const heartbeatKey = registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId);
-      const heartbeatExists = await this.redis.exists(heartbeatKey);
-      if (!heartbeatExists) {
-        continue;
-      }
-
-      const data = await this.redis.hget(key, "data");
-      if (!data) {
-        continue;
-      }
-
-      try {
-        const instance = normalizeServiceInstance(JSON.parse(data));
-        if (instance) {
-          instances.push(instance);
-        }
-      } catch (error) {
-        console.error("[service-discovery] parse error:", error);
-      }
-    }
-
-    return instances;
+    return this.registryDiscovery.discoverInstances(serviceName);
   }
-}
-
-async function scanKeys(redis, pattern) {
-  const keys = [];
-  let cursor = "0";
-
-  do {
-    const [nextCursor, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-    cursor = nextCursor;
-    keys.push(...batch);
-  } while (cursor !== "0");
-
-  return keys;
 }
 
 function requiredDiscoveryFailed(reason) {

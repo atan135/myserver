@@ -8,6 +8,7 @@ function createRedis(instancesByService) {
   const dataByKey = new Map();
   const heartbeatKeys = new Set();
   const registryKeyPrefix = instancesByService.__registryKeyPrefix || "";
+  const stats = { scanCount: 0 };
 
   for (const [serviceName, instances] of Object.entries(instancesByService)) {
     if (serviceName === "__registryKeyPrefix") {
@@ -21,7 +22,9 @@ function createRedis(instancesByService) {
   }
 
   return {
+    stats,
     async scan(_cursor, _match, pattern) {
+      stats.scanCount += 1;
       const prefix = pattern.replace("*", "");
       return ["0", [...dataByKey.keys()].filter((key) => key.startsWith(prefix))];
     },
@@ -453,4 +456,102 @@ test("ServiceDiscovery does not use game-proxy direct fallback when local fallba
     mail: null,
     announce: null
   });
+});
+
+test("ServiceDiscovery reuses registry discovery cache for repeated client service discovery", async () => {
+  const redis = createRedis({
+    "game-proxy": [
+      {
+        id: "proxy-a",
+        name: "game-proxy",
+        host: "10.0.0.1",
+        port: 4000,
+        endpoints: [
+          {
+            name: "client",
+            protocol: "kcp",
+            host: "203.0.113.10",
+            port: 4100,
+            socket: "",
+            visibility: "public",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "chat-server": [
+      {
+        id: "chat-a",
+        name: "chat-server",
+        host: "10.0.0.2",
+        port: 9001,
+        endpoints: [
+          {
+            name: "tcp",
+            protocol: "tcp",
+            host: "10.0.0.20",
+            port: 9011,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "mail-service": [
+      {
+        id: "mail-a",
+        name: "mail-service",
+        host: "10.0.0.3",
+        port: 9003,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.30",
+            port: 9013,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "announce-service": [
+      {
+        id: "announce-a",
+        name: "announce-service",
+        host: "10.0.0.4",
+        port: 9004,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.40",
+            port: 9014,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ]
+  });
+  const discovery = new ServiceDiscovery(
+    redis,
+    createConfig({
+      registryDiscoveryEnabled: true,
+      registryDiscoveryCacheTtlMs: 1000
+    })
+  );
+
+  await discovery.discoverClientServices();
+  assert.equal(redis.stats.scanCount, 4);
+
+  await discovery.discoverClientServices();
+  assert.equal(redis.stats.scanCount, 4);
 });

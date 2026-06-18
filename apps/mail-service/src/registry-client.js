@@ -2,10 +2,9 @@ import { log } from "./logger.js";
 import {
   createServiceInstancePayload,
   discoverAllEndpoints,
-  normalizeServiceInstance,
+  discoverServiceInstances as discoverRegistryServiceInstances,
   registryHeartbeatKey,
-  registryInstanceKey,
-  registryInstanceScanPattern
+  registryInstanceKey
 } from "../../../packages/service-registry/node/registry-schema.js";
 
 const GAME_SERVER_SERVICE_NAME = "game-server";
@@ -142,51 +141,18 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
 }
 
 export async function discoverServiceInstances(redis, serviceName, registryKeyPrefix = "") {
-  const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
-  const instances = [];
+  const options = typeof registryKeyPrefix === "object"
+    ? registryKeyPrefix
+    : { registryKeyPrefix };
 
-  for (const key of keys.sort()) {
-    const instanceId = key.split(":").at(-1);
-    if (!instanceId) {
-      continue;
-    }
-
-    const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
-    if (!heartbeatExists) {
-      continue;
-    }
-
-    const data = await redis.hget(key, "data");
-    if (!data) {
-      continue;
-    }
-
-    try {
-      const instance = normalizeServiceInstance(JSON.parse(data));
-      if (instance) {
-        instances.push(instance);
-      }
-    } catch (error) {
+  return discoverRegistryServiceInstances(redis, serviceName, {
+    ...options,
+    onParseError: options.onParseError || ((error, context) => {
       log("warn", "registry.discovery_parse_failed", {
-        service: serviceName,
-        instance: instanceId,
+        service: context.serviceName,
+        instance: context.instanceId,
         error: error.message
       });
-    }
-  }
-
-  return instances;
-}
-
-async function scanKeys(redis, pattern) {
-  const keys = [];
-  let cursor = "0";
-
-  do {
-    const [nextCursor, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-    cursor = nextCursor;
-    keys.push(...batch);
-  } while (cursor !== "0");
-
-  return keys;
+    })
+  });
 }
