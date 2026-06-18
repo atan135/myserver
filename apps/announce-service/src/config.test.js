@@ -156,3 +156,28 @@ test("announce-service test environment requires registry discovery by default",
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
 });
+
+test("announce-service test environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    () => withEnv({
+      APP_ENV: "test",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("announce-service production environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "production",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false",
+      ANNOUNCE_ADMIN_TOKEN: "prod-announce-admin-token-with-enough-entropy",
+      ANNOUNCE_READ_TOKEN: "prod-announce-read-token-with-enough-entropy",
+      TICKET_SECRET: "prod-ticket-secret-with-enough-entropy"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});

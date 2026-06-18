@@ -241,3 +241,27 @@ test("mail-service test environment rejects registry disabled", async () => {
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
 });
+
+test("mail-service test environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    () => withEnv({
+      APP_ENV: "test",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("mail-service production environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "production",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false",
+      TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+      MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});

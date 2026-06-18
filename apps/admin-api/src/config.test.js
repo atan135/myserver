@@ -323,3 +323,29 @@ test("admin-api test environment rejects registry disabled", async () => {
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
 });
+
+test("admin-api test environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    withEnv({
+      APP_ENV: "test",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("admin-api production environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    withEnv({
+      NODE_ENV: "production",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false",
+      JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
+      ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});

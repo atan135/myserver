@@ -141,16 +141,18 @@ test("auth-http internal service endpoint exposure can be explicitly enabled", a
   });
 });
 
-test("auth-http registry discovery requirement can be overridden", async () => {
-  await withEnv({
-    NODE_ENV: "production",
-    DISCOVERY_REQUIRED: "false",
-    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
-    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
-    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
-  }, (config) => {
-    assert.equal(config.registryDiscoveryRequired, false);
-  });
+test("auth-http production discovery requirement cannot be disabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "production",
+      DISCOVERY_REQUIRED: "false",
+      REGISTRY_ENABLED: "false",
+      TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
 });
 
 test("auth-http rejects required discovery when registry is disabled", async () => {
@@ -168,6 +170,17 @@ test("auth-http test environment rejects registry disabled", async () => {
   await assert.rejects(
     () => withEnv({
       NODE_ENV: "test",
+      REGISTRY_ENABLED: "false"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("auth-http test environment ignores DISCOVERY_REQUIRED=false override", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "test",
+      DISCOVERY_REQUIRED: "false",
       REGISTRY_ENABLED: "false"
     }, () => {}),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
@@ -256,7 +269,7 @@ test("auth-http TLS enforcement can be explicitly disabled for test deployments"
   await withEnv({
     NODE_ENV: "production",
     AUTH_REQUIRE_TLS: "false",
-    DISCOVERY_REQUIRED: "false",
+    REGISTRY_ENABLED: "true",
     TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"

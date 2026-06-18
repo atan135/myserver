@@ -194,7 +194,7 @@ export function getConfig() {
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
-  const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv());
+  const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
   const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
     registryDiscoveryRequired || !localDiscoveryFallbackEnabled

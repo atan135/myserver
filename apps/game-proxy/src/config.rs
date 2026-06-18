@@ -401,6 +401,7 @@ impl Config {
         };
 
         emit_legacy_direct_config_warnings("game-proxy", &config.legacy_direct_config_warnings);
+        config.validate_upstream_discovery()?;
         Ok(config)
     }
 
@@ -1082,6 +1083,7 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "NODE_ENV",
             "APP_ENV",
+            "REGISTRY_ENABLED",
             "PROXY_ADMIN_TOKEN",
             "PROXY_ADMIN_READ_TOKEN",
         ]);
@@ -1089,6 +1091,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
@@ -1105,6 +1108,7 @@ mod tests {
         let _env = EnvGuard::capture(&[
             "NODE_ENV",
             "APP_ENV",
+            "REGISTRY_ENABLED",
             "PROXY_ADMIN_TOKEN",
             "PROXY_ADMIN_READ_TOKEN",
         ]);
@@ -1112,6 +1116,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
             env::set_var("PROXY_ADMIN_READ_TOKEN", "prod-proxy-admin-read-token-123");
         }
@@ -1404,13 +1409,12 @@ mod tests {
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
-        let config = Config::try_from_env().unwrap();
-        let error = config.validate_upstream_discovery().unwrap_err();
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("expected disabled registry to fail strict discovery config load"),
+            Err(error) => error,
+        };
 
-        assert!(config.discovery_required());
-        assert!(!config.static_upstream_fallback_allowed());
         assert!(error.contains("REGISTRY_ENABLED=true"));
-        assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
     #[test]
@@ -1471,10 +1475,12 @@ mod tests {
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
-        let config = Config::try_from_env().unwrap();
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("expected test environment to fail without registry discovery"),
+            Err(error) => error,
+        };
 
-        assert!(config.discovery_required());
-        assert!(config.validate_upstream_discovery().is_err());
+        assert!(error.contains("REGISTRY_ENABLED=true"));
     }
 
     #[test]

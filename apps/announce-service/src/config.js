@@ -185,7 +185,7 @@ export function getConfig() {
     serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
-    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv(),
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
