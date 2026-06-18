@@ -134,6 +134,34 @@ rollout 或扩容时，新实例同样必须先完成 endpoint 注册、heartbea
 
 本节只定义部署门禁流程和边界，不定义具体健康检查接口或检查项。健康检查必须验证的具体内容由后续小节继续拆分。
 
+### 5.3 健康检查必检项
+
+健康检查需要区分 liveness 与 readiness。liveness 只表示进程、事件循环或主线程仍存活，不代表实例已经可以接入流量；readiness 失败必须阻止实例进入 LB、DNS、网关 upstream、admin/control target 或 rollout 目标，但不必立即 kill 进程。只有在启动阶段要求严格发现 fail-fast 时，readiness 失败才应触发进程退出或部署回滚。
+
+readiness 必须至少验证以下 registry 相关条件：
+
+1. Redis registry 可访问：实例能够连接 registry Redis；使用的 key prefix 与当前环境一致；能够读取/写入必要 registry key，或至少能够读取自身注册记录和依赖发现所需 key。
+2. 自己注册成功：当前进程对应的 service instance record 已存在；`endpoint name`、`protocol`、`host`、`port`、`socket`、`visibility`、`healthy` 等基本字段符合当前配置；heartbeat 未过期；`instance id` 与当前进程一致。
+3. 必要依赖 endpoint 可发现：接流量前必须按自身角色验证关键上游 endpoint 能通过 registry 发现，不能回退到本地默认 host/port 绕过 registry。
+
+必要依赖 endpoint 的最小清单：
+
+| 服务 | readiness 必须可发现 |
+|------|----------------------|
+| `game-proxy` | `game-server.proxy-local` |
+| `auth-http` | `game-proxy.client` |
+| `admin-api` | `game-server.admin`、`game-proxy.admin` |
+| `game-server` | `match-service.grpc` |
+| `match-service` | `game-server.internal` |
+| `mail-service` | `game-server.admin` |
+| `metrics-collector` | 不注册也不消费 service registry；依赖 Core NATS metrics 通道和 Redis metrics snapshots，不属于 registry endpoint 检查 |
+
+未列出的 registry 参与服务如果没有额外上游发现依赖，readiness 仍必须验证 Redis registry 可访问、自身注册记录存在和 heartbeat 未过期；`admin-web` 作为前端入口应验证 `admin-api` 入口可用，但不属于 service registry 实例。
+
+Node 服务当前可能出现注册失败只打日志的情况，因此 readiness 必须兜底验证 registry 可见性，避免“进程已启动但自身或依赖不可发现”的实例接入流量。
+
+本节只定义健康检查必须验证的内容，不定义具体接口形态，不新增自动化测试，也不要求启动任何服务。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
