@@ -1,6 +1,6 @@
 import {
+  discoverEndpoint,
   normalizeServiceInstance,
-  pickServiceEndpoint
 } from "../../../packages/service-registry/node/registry-schema.js";
 
 function createGameService(config) {
@@ -67,8 +67,8 @@ export class ServiceDiscovery {
 
   async discoverOneEndpoint(serviceName, endpointName, legacyEndpointName = null) {
     const instances = await this.discoverInstances(serviceName);
-    return pickServiceEndpoint(instances, endpointName) ||
-      (legacyEndpointName ? pickServiceEndpoint(instances, legacyEndpointName) : null);
+    return discoverEndpoint(instances, endpointName) ||
+      (legacyEndpointName ? discoverEndpoint(instances, legacyEndpointName) : null);
   }
 
   async discoverInstances(serviceName) {

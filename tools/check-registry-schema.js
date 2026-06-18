@@ -6,6 +6,8 @@ import {
   SERVICE_INSTANCE_SCHEMA_VERSION,
   createServiceInstancePayload,
   discoverAllEndpoints,
+  discoverEndpoint,
+  discoverRequiredEndpoint,
   normalizeEndpoint,
   normalizeServiceInstance,
   pickServiceEndpoint,
@@ -171,6 +173,25 @@ const endpointPicked = pickServiceEndpoint([
 if (!endpointPicked || endpointPicked.endpoint.healthy === false || endpointPicked.instance.id !== "healthy-endpoint") {
   errors.push("pickServiceEndpoint returned an unhealthy or empty endpoint");
 }
+const endpointDiscovered = discoverEndpoint([
+  { ...sample, id: "unhealthy-endpoint", endpoints: sample.endpoints.map((endpoint) => ({ ...endpoint, healthy: false })), weight: 1000 },
+  { ...sample, id: "healthy-endpoint", weight: 10 }
+], "client");
+if (!endpointDiscovered || endpointDiscovered.endpoint.healthy === false || endpointDiscovered.instance.id !== "healthy-endpoint") {
+  errors.push("discoverEndpoint returned an unhealthy or empty endpoint");
+}
+if (pickServiceEndpoint([sample], "client")?.instance.id !== discoverEndpoint([sample], "client")?.instance.id) {
+  errors.push("pickServiceEndpoint is not compatible with discoverEndpoint");
+}
+const requiredEndpoint = discoverRequiredEndpoint([sample], "client", "announce-service");
+if (!requiredEndpoint || requiredEndpoint.endpoint.name !== "client") {
+  errors.push("discoverRequiredEndpoint did not return an existing endpoint");
+}
+assertThrows(
+  () => discoverRequiredEndpoint([{ ...sample, healthy: false }], "client", "announce-service"),
+  /service endpoint not found: service=announce-service, endpoint=client/,
+  "discoverRequiredEndpoint did not include service and endpoint in missing endpoint error"
+);
 const discovered = discoverAllEndpoints([sample], "client");
 if (discovered.length !== 1 || discovered[0].endpoint.name !== "client") {
   errors.push("discoverAllEndpoints did not return the expected endpoint");
@@ -185,3 +206,17 @@ if (errors.length > 0) {
 }
 
 console.log("registry schema check passed");
+
+function assertThrows(fn, pattern, message) {
+  try {
+    fn();
+  } catch (error) {
+    if (pattern.test(error?.message ?? "")) {
+      return;
+    }
+    errors.push(`${message}: ${error?.message ?? error}`);
+    return;
+  }
+
+  errors.push(message);
+}

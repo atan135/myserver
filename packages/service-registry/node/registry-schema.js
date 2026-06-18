@@ -247,7 +247,7 @@ export function discoverAllEndpoints(instances, endpointName) {
     });
 }
 
-export function pickServiceEndpoint(instances, endpointName) {
+export function discoverEndpoint(instances, endpointName) {
   const candidates = discoverAllEndpoints(instances, endpointName);
   if (candidates.length === 0) {
     return null;
@@ -263,6 +263,21 @@ export function pickServiceEndpoint(instances, endpointName) {
     }
   }
   return best;
+}
+
+export function discoverRequiredEndpoint(instances, endpointName, serviceName = null) {
+  const discovered = discoverEndpoint(instances, endpointName);
+  if (discovered) {
+    return discovered;
+  }
+
+  throw new Error(
+    `service endpoint not found: service=${serviceName || inferServiceName(instances) || "<unknown>"}, endpoint=${endpointName}`
+  );
+}
+
+export function pickServiceEndpoint(instances, endpointName) {
+  return discoverEndpoint(instances, endpointName);
 }
 
 function normalizeEndpointList(endpoints, sourceSchemaVersion, legacy) {
@@ -341,6 +356,15 @@ function isNetworkPort(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function inferServiceName(instances) {
+  const serviceNames = instances
+    .map(normalizeServiceInstance)
+    .filter(Boolean)
+    .map((instance) => instance.name)
+    .filter(Boolean);
+  return serviceNames[0] ?? "";
 }
 
 function stableHash(value) {
