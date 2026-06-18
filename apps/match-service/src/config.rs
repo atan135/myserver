@@ -14,6 +14,8 @@ pub struct Config {
     pub match_cleanup_interval_secs: u64,
     pub game_server_service_name: String,
     pub game_server_internal_socket_name: String,
+    pub game_server_discovery_cache_ttl_secs: u64,
+    pub game_server_target_zone: String,
     pub game_internal_token: String,
     pub log_level: String,
     pub log_enable_console: bool,
@@ -99,6 +101,19 @@ impl Config {
             game_server_internal_socket_name: std::env::var("GAME_SERVER_INTERNAL_SOCKET_NAME")
                 .or_else(|_| std::env::var("GAME_INTERNAL_SOCKET_NAME"))
                 .unwrap_or_else(|_| derive_internal_socket_name(&game_server_local_socket_name)),
+            game_server_discovery_cache_ttl_secs: std::env::var(
+                "GAME_SERVER_DISCOVERY_CACHE_TTL_SECS",
+            )
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(5),
+            game_server_target_zone: std::env::var("GAME_SERVER_TARGET_ZONE")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default(),
             game_internal_token: std::env::var("GAME_INTERNAL_TOKEN")
                 .unwrap_or_else(|_| "dev-only-change-this-game-internal-token".to_string()),
             log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
