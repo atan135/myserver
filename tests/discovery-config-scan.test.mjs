@@ -225,6 +225,45 @@ test("repository admin-api strict templates omit GAME_PROXY_ADMIN direct config 
   }
 });
 
+test("repository game-proxy strict templates omit UPSTREAM direct config while commented local fallback remains non-active", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const gameProxyStrictFiles = result.strictFiles.filter((file) =>
+    file.startsWith("apps/game-proxy/")
+  );
+  const variables = ["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"];
+
+  assert.equal(result.ok, true);
+  assert.ok(gameProxyStrictFiles.includes("apps/game-proxy/.env.test.example"));
+  assert.ok(gameProxyStrictFiles.includes("apps/game-proxy/.env.production.example"));
+
+  for (const file of gameProxyStrictFiles) {
+    const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+    for (const variable of variables) {
+      assert.equal(
+        hasActiveConfigAssignment(content, variable),
+        false,
+        `${file} must not define ${variable}`
+      );
+    }
+  }
+
+  const gameProxyExample = fs.readFileSync(path.join(projectRoot, "apps/game-proxy/.env.example"), "utf8");
+  for (const variable of variables) {
+    assert.equal(hasActiveConfigAssignment(gameProxyExample, variable), false);
+    assert.equal(hasCommentedConfigAssignment(gameProxyExample, variable), true);
+    assert.equal(
+      result.allowedLocalFallbacks.some(
+        (item) =>
+          item.file === "apps/game-proxy/.env.example" &&
+          item.variable === variable &&
+          item.service === "game-proxy"
+      ),
+      false,
+      `${variable} is only a commented local fallback example in apps/game-proxy/.env.example`
+    );
+  }
+});
+
 test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging templates", () => {
   const tempDir = createTempRepo();
   try {
@@ -281,6 +320,77 @@ test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging
       assert.match(violation.reason, /match-service\.grpc/);
       assert.match(violation.remediation, /Local fallback examples/);
       assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("game-proxy UPSTREAM direct config is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "apps/game-proxy/.env.example",
+      [
+        "APP_ENV=development",
+        "REGISTRY_ENABLED=true",
+        "DISCOVERY_REQUIRED=true",
+        "# Local fallback only: uncomment only for local development when registry discovery is disabled",
+        "# and discovery is not strict. Strict/test/production/staging must use registry discovery.",
+        "# UPSTREAM_SERVER_ID=game-server-1",
+        "# UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock"
+      ].join("\n")
+    );
+
+    for (const [file, appEnv] of [
+      ["apps/game-proxy/.env.test.example", "test"],
+      ["apps/game-proxy/.env.production.example", "production"],
+      ["apps/game-proxy/.env.staging.example", "staging"]
+    ]) {
+      writeFile(
+        tempDir,
+        file,
+        [
+          `APP_ENV=${appEnv}`,
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+          "UPSTREAM_SERVER_ID=game-server-1",
+          "UPSTREAM_LOCAL_SOCKET_NAME=myserver-game-server.sock"
+        ].join("\n")
+      );
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/game-proxy/.env.production.example:UPSTREAM_LOCAL_SOCKET_NAME",
+      "apps/game-proxy/.env.production.example:UPSTREAM_SERVER_ID",
+      "apps/game-proxy/.env.staging.example:UPSTREAM_LOCAL_SOCKET_NAME",
+      "apps/game-proxy/.env.staging.example:UPSTREAM_SERVER_ID",
+      "apps/game-proxy/.env.test.example:UPSTREAM_LOCAL_SOCKET_NAME",
+      "apps/game-proxy/.env.test.example:UPSTREAM_SERVER_ID"
+    ]);
+    for (const violation of result.violations) {
+      assert.equal(violation.service, "game-proxy");
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /game-server\.proxy-local/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+    for (const variable of ["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"]) {
+      assert.equal(
+        result.allowedLocalFallbacks.some(
+          (item) =>
+            item.file === "apps/game-proxy/.env.example" &&
+            item.variable === variable &&
+            item.service === "game-proxy"
+        ),
+        false,
+        `${variable} is only a commented local fallback example in apps/game-proxy/.env.example`
+      );
     }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
