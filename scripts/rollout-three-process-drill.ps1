@@ -277,6 +277,16 @@ function Test-DiscoveryRequired {
     return [bool]$script:DiscoveryRequiredValue
 }
 
+function Test-StrictDiscoveryEnvironment {
+    $names = @($EnvironmentName, $env:APP_ENV, $env:NODE_ENV)
+    foreach ($name in $names) {
+        if ($null -ne $name -and ([string]$name).Trim() -match "^(prod|production|staging|test|testing)$") {
+            return $true
+        }
+    }
+    return $false
+}
+
 function ConvertTo-BooleanOption {
     param(
         [Parameter(Mandatory=$true)]$Value,
@@ -974,6 +984,9 @@ $displayRolloutEpoch = if ($RolloutEpoch) { $RolloutEpoch } else { "<ROLLOUT_EPO
 $script:OldProcessManager = Resolve-OldProcessManager
 $script:RegistryEnabledValue = ConvertTo-BooleanOption -Value $RegistryEnabled -Name "RegistryEnabled"
 $script:DiscoveryRequiredValue = ConvertTo-BooleanOption -Value $DiscoveryRequired -Name "DiscoveryRequired"
+if (Test-StrictDiscoveryEnvironment) {
+    $script:DiscoveryRequiredValue = $true
+}
 $script:Discovery = Resolve-RolloutDiscovery
 
 $OldAdminHost = $script:Discovery.oldGameServerAdmin.host
@@ -1098,8 +1111,8 @@ if (-not $SkipPortProbe) {
 if ($script:Discovery.mode -eq "local-fallback") {
     if ($script:RegistryEnabledValue -and $script:DiscoveryRequiredValue) {
         $preflightErrors += "local fallback endpoints are forbidden when RegistryEnabled=true and DiscoveryRequired=true"
-    } elseif ($EnvironmentName -match "^(prod|production|staging|test|testing)$" -and $script:DiscoveryRequiredValue) {
-        $preflightErrors += "local fallback endpoints are only allowed in local discovery non-required mode"
+    } elseif (Test-StrictDiscoveryEnvironment) {
+        $preflightErrors += "local fallback endpoints are forbidden when EnvironmentName, APP_ENV or NODE_ENV is production/test"
     } else {
         $preflightWarnings += "using local fallback endpoints; this is only valid for registry disabled or discovery non-required local drills"
     }
