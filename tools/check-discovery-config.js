@@ -95,6 +95,8 @@ const CONFIG_PATH_HINT_PATTERN =
   /(^|[\\/])(apps|scripts|tools|deploy|deployment|deployments|config|configs|helm|k8s|kubernetes|docker)([\\/]|$)/i;
 const SCRIPT_TARGET_SCAN_PATTERN =
   /(^|\/)(scripts\/.*|tools\/mock-client\/src\/.*|tools\/mock-client\/help_rollout\.txt|package\.json)$/i;
+const DOCUMENT_POLICY_SCAN_PATTERN =
+  /^(README\.md|AGENTS\.md|CLAUDE\.md|docs\/.*\.md|tools\/mock-client\/[^/]+\.(?:md|txt)|help[^/]*\.txt)$/i;
 const ROLLOUT_DIRECT_TARGET_ARGS = [
   "--old-admin-host",
   "--old-admin-port",
@@ -138,6 +140,13 @@ const ALL_LEGACY_ENV_NAMES = new Set([
   ...ROLLOUT_MANUAL_FALLBACK_ENV_NAMES
 ]);
 
+const DOCUMENT_STRICT_ENV_PATTERN =
+  /(^|[\s/_,.:;|()[\]`=])(test|testing|staging|stage|prod|production)(?=$|[\s/_,.:;|()[\]`=])|测试(?=环境|准入|[、/和或与]|可|应|必须|不能|不应|线上|生产)|预发|线上|生产/i;
+const DOCUMENT_DIRECT_TARGET_PATTERN =
+  /直连|直接访问|直接消费|127\.0\.0\.1|localhost|GAME_SERVER_ADMIN_HOST|GAME_PROXY_ADMIN_HOST|MATCH_SERVICE_ADDR|GAME_PROXY_HOST|host\/port|固定端口|固定地址|静态\s*(?:upstream|URL|host|port)|old\/new admin host\/port|\b(?:7000|7500|7101|9001|9002|9003|9004)\b/i;
+const DOCUMENT_ALLOWED_DIRECT_CONTEXT_PATTERN =
+  /不应|不能|不得|禁止|不允许|不作为|不以|不再|不要|不是|而不是|避免|不表示|未发现|拒绝|忽略|禁用|应通过|必须通过|要发现|发现\s+[^。；;|]*endpoint|registry|service registry|discovery|本地示例|本地默认|默认监听|默认发布|内部联调地址|fixture|样例数据|示例数据|local[- ]?only|local debug|manual (?:fallback|drill)|local\/manual fallback|local fallback only|本地[^。；;|]*(?:fallback|手工|调试)|手工[^。；;|]*fallback/i;
+
 export function scanDiscoveryConfig(options = {}) {
   const rootDir = path.resolve(options.rootDir ?? DEFAULT_ROOT_DIR);
   const files = listCandidateFiles(rootDir);
@@ -147,6 +156,8 @@ export function scanDiscoveryConfig(options = {}) {
   const strictFiles = [];
   const localExampleFiles = [];
   const scriptFixedTargetViolations = [];
+  const documentPolicyFiles = [];
+  const documentPolicyViolations = [];
 
   for (const filePath of files) {
     const relativePath = toPosixRelative(rootDir, filePath);
@@ -154,6 +165,10 @@ export function scanDiscoveryConfig(options = {}) {
     const lines = splitLines(text);
     const assignments = parseAssignments(lines);
     scriptFixedTargetViolations.push(...scanScriptTargetViolations(relativePath, lines));
+    if (DOCUMENT_POLICY_SCAN_PATTERN.test(relativePath)) {
+      documentPolicyFiles.push(relativePath);
+      documentPolicyViolations.push(...scanDocumentPolicyViolations(relativePath, lines));
+    }
     if (assignments.length === 0 && !isEnvLikePath(relativePath)) {
       continue;
     }
@@ -219,7 +234,7 @@ export function scanDiscoveryConfig(options = {}) {
 
   }
 
-  violations.push(...scriptFixedTargetViolations);
+  violations.push(...scriptFixedTargetViolations, ...documentPolicyViolations);
   const uniqueCheckedFiles = uniqueSorted(checkedFiles);
   return {
     ok: violations.length === 0,
@@ -229,6 +244,8 @@ export function scanDiscoveryConfig(options = {}) {
       localExampleFiles: uniqueSorted(localExampleFiles).length,
       allowedLocalFallbacks: allowedLocalFallbacks.length,
       scriptFixedTargetViolations: scriptFixedTargetViolations.length,
+      documentPolicyFiles: uniqueSorted(documentPolicyFiles).length,
+      documentPolicyViolations: documentPolicyViolations.length,
       violations: violations.length
     },
     checkedFiles: uniqueCheckedFiles,
@@ -236,6 +253,8 @@ export function scanDiscoveryConfig(options = {}) {
     localExampleFiles: uniqueSorted(localExampleFiles),
     allowedLocalFallbacks,
     scriptFixedTargetViolations,
+    documentPolicyFiles: uniqueSorted(documentPolicyFiles),
+    documentPolicyViolations,
     violations
   };
 }
@@ -275,6 +294,10 @@ function listCandidateFiles(rootDir) {
 }
 
 function shouldScanFile(relativePath) {
+  if (DOCUMENT_POLICY_SCAN_PATTERN.test(relativePath)) {
+    return true;
+  }
+
   if (SCRIPT_TARGET_SCAN_PATTERN.test(relativePath)) {
     return true;
   }
@@ -294,6 +317,51 @@ function shouldScanFile(relativePath) {
 
   const extension = path.posix.extname(lower);
   return SCANNABLE_EXTENSIONS.has(extension);
+}
+
+function scanDocumentPolicyViolations(relativePath, lines) {
+  if (!DOCUMENT_POLICY_SCAN_PATTERN.test(relativePath)) {
+    return [];
+  }
+
+  const violations = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = stripMarkdownLinkTargets(lines[index]);
+    for (const segment of splitDocumentPolicySegments(line)) {
+      if (!DOCUMENT_STRICT_ENV_PATTERN.test(segment) || !DOCUMENT_DIRECT_TARGET_PATTERN.test(segment)) {
+        continue;
+      }
+      if (DOCUMENT_ALLOWED_DIRECT_CONTEXT_PATTERN.test(segment)) {
+        continue;
+      }
+
+      violations.push({
+        file: relativePath,
+        line: index + 1,
+        variable: "document-internal-direct-target",
+        service: "docs",
+        rule: "document_strict_internal_direct_target_forbidden",
+        severity: "error",
+        reason:
+          "docs/help must not suggest test, staging, or production direct connections to internal services by fixed host/port",
+        remediation:
+          "Rewrite as registry endpoint or instance-id resolution for test/staging/production. Fixed host/port examples must be explicitly local debug/manual fallback and excluded from admission."
+      });
+      break;
+    }
+  }
+  return violations;
+}
+
+function stripMarkdownLinkTargets(line) {
+  return line.replace(/\]\([^)]+\)/g, "]");
+}
+
+function splitDocumentPolicySegments(line) {
+  return line
+    .split(/[。；;|]|(?:\s+但\s*)/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
 }
 
 function scanScriptTargetViolations(relativePath, lines) {

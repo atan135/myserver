@@ -913,6 +913,72 @@ test("script scan allows pre-resolved registry and local debug rollout direct en
   }
 });
 
+test("document scan rejects test production internal direct-connect guidance", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "docs/direct-targets.md",
+      [
+        "测试环境可以临时直连 `game-server:7000`、`match-service:9002` 定位问题。",
+        "生产可以直接访问 127.0.0.1:7500 调 game-server admin。",
+        "线上可用 GAME_SERVER_ADMIN_HOST / GAME_SERVER_ADMIN_PORT 固定端口访问内部服务。"
+      ].join("\n")
+    );
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.summary.documentPolicyViolations, 3);
+    assert.deepEqual(
+      result.documentPolicyViolations.map((violation) => violation.rule),
+      [
+        "document_strict_internal_direct_target_forbidden",
+        "document_strict_internal_direct_target_forbidden",
+        "document_strict_internal_direct_target_forbidden"
+      ]
+    );
+    for (const violation of result.documentPolicyViolations) {
+      assert.equal(violation.service, "docs");
+      assert.match(violation.remediation, /registry endpoint or instance-id/);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document scan allows local-only examples and negative strict guidance", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "README.md",
+      [
+        "固定 host/port 只能作为本地开发、manual fallback 或故障排查时的显式临时参数使用。",
+        "测试、预发和线上不能依赖本地默认 host/port 或 127.0.0.1:7500 跑通链路。",
+        "本地示例：mock-client 可通过 http://127.0.0.1:9003 调试 mail-service。",
+        "测试/线上必须通过 registry endpoint 或 instance id 解析 game-server.admin。"
+      ].join("\n")
+    );
+    writeFile(
+      tempDir,
+      "tools/mock-client/help.txt",
+      [
+        "# ========== 邮件系统测试 (内部联调地址；本地示例通过 --mail-base-url 9003) ==========",
+        "node tools/mock-client/src/index.js --scenario mail-list --mail-base-url http://127.0.0.1:9003"
+      ].join("\n")
+    );
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.documentPolicyViolations, []);
+    assert.deepEqual(result.documentPolicyFiles, ["README.md", "tools/mock-client/help.txt"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("discovery config CLI emits machine-readable JSON and fails on violations", () => {
   const tempDir = createTempRepo();
   try {

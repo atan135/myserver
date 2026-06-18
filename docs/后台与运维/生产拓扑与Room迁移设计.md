@@ -41,7 +41,7 @@
 | `mail-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | Redis / NATS / PostgreSQL | 只允许内网服务访问 |
 
-本地开发、测试环境可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题，但这些直连方式不是生产默认，也不应写入正式客户端依赖。
+仅本地开发或手工调试可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题。测试、预发和线上必须通过部署入口、registry endpoint 或 instance id 解析目标；固定 host/port 不进入测试或线上准入，也不应写入正式客户端依赖。
 
 ## 3. 客户端生产接入模型
 
