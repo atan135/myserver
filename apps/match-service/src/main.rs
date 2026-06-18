@@ -14,6 +14,7 @@ mod state;
 
 use std::fs;
 
+use serde_json::{Value, json};
 use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -103,20 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     port: config.port,
                     socket: String::new(),
                     visibility: "internal".to_string(),
-                    metadata: serde_json::json!({
-                        "instance_id": config.service_instance_id.clone(),
-                        "protocol": "grpc",
-                        "modes": config.modes.keys().cloned().collect::<Vec<_>>(),
-                        "runtime_store": config.match_runtime_store.clone()
-                    }),
+                    metadata: build_match_service_metadata(&config),
                     healthy: true,
                 }])
                 .with_tags(vec!["match".to_string(), "grpc".to_string()])
-                .with_metadata(serde_json::json!({
-                    "protocol": "grpc",
-                    "modes": config.modes.keys().cloned().collect::<Vec<_>>(),
-                    "runtime_store": config.match_runtime_store.clone()
-                }));
+                .with_metadata(build_match_service_metadata(&config));
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
@@ -193,4 +185,111 @@ fn env_name_is(name: &str, expected: &str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+}
+
+fn build_match_service_metadata(config: &Config) -> Value {
+    let mut modes = config.modes.keys().cloned().collect::<Vec<_>>();
+    modes.sort();
+
+    json!({
+        "instance_id": config.service_instance_id,
+        "protocol": "grpc",
+        "modes": modes,
+        "runtime_store": config.match_runtime_store,
+        "runtime_store_backend": config.match_runtime_store,
+        "build_version": config.service_build_version
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ModeConfig;
+    use std::collections::HashMap;
+
+    fn test_config() -> Config {
+        let mut modes = HashMap::new();
+        modes.insert(
+            "5v5".to_string(),
+            ModeConfig {
+                team_size: 5,
+                total_size: 10,
+                match_timeout_secs: 90,
+            },
+        );
+        modes.insert(
+            "1v1".to_string(),
+            ModeConfig {
+                team_size: 1,
+                total_size: 2,
+                match_timeout_secs: 30,
+            },
+        );
+        modes.insert(
+            "3v3".to_string(),
+            ModeConfig {
+                team_size: 3,
+                total_size: 6,
+                match_timeout_secs: 60,
+            },
+        );
+
+        Config {
+            bind_addr: "0.0.0.0:9002".to_string(),
+            public_host: "127.0.0.1".to_string(),
+            port: 9002,
+            match_timeout_secs: 30,
+            max_concurrent_matches: 1000,
+            modes,
+            match_cleanup_interval_secs: 1,
+            game_server_service_name: "game-server".to_string(),
+            game_server_internal_socket_name: "myserver-game-server-internal.sock".to_string(),
+            game_internal_token: "dev-only-change-this-game-internal-token".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 0,
+            global_id_worker_id: None,
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            registry_enabled: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "match-service".to_string(),
+            service_instance_id: "match-service-test".to_string(),
+            service_build_version: "2026.06.18-test".to_string(),
+            match_runtime_store: "redis".to_string(),
+            match_runtime_key_prefix: "myserver:".to_string(),
+            match_runtime_lease_ttl_secs: 10,
+            match_recovery_enabled: true,
+        }
+    }
+
+    #[test]
+    fn match_service_metadata_contains_sorted_modes_runtime_store_and_build_version() {
+        let config = test_config();
+
+        let metadata = build_match_service_metadata(&config);
+
+        assert_eq!(metadata["instance_id"], "match-service-test");
+        assert_eq!(metadata["protocol"], "grpc");
+        assert_eq!(metadata["modes"], json!(["1v1", "3v3", "5v5"]));
+        assert_eq!(metadata["runtime_store"], "redis");
+        assert_eq!(metadata["runtime_store_backend"], "redis");
+        assert_eq!(metadata["build_version"], "2026.06.18-test");
+    }
+
+    #[test]
+    fn match_service_endpoint_metadata_keeps_protocol_for_compatibility() {
+        let config = test_config();
+
+        let metadata = build_match_service_metadata(&config);
+
+        assert_eq!(metadata["protocol"], "grpc");
+        assert_eq!(metadata["modes"], json!(["1v1", "3v3", "5v5"]));
+        assert_eq!(metadata["runtime_store_backend"], "redis");
+        assert_eq!(metadata["build_version"], "2026.06.18-test");
+    }
 }

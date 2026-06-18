@@ -29,6 +29,7 @@ pub struct Config {
     pub registry_heartbeat_interval_secs: u64,
     pub service_name: String,
     pub service_instance_id: String,
+    pub service_build_version: String,
     pub match_runtime_store: String,
     pub match_runtime_key_prefix: String,
     pub match_runtime_lease_ttl_secs: u64,
@@ -131,6 +132,8 @@ impl Config {
                 .unwrap_or_else(|_| "match-service".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| format!("match-service-{}", port)),
+            service_build_version: std::env::var("SERVICE_BUILD_VERSION")
+                .unwrap_or_else(|_| "dev".to_string()),
             match_runtime_store: std::env::var("MATCH_RUNTIME_STORE")
                 .unwrap_or_else(|_| "memory".to_string()),
             match_runtime_key_prefix: std::env::var("MATCH_RUNTIME_KEY_PREFIX")
@@ -239,6 +242,8 @@ mod tests {
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
     ];
+    const SERVICE_BUILD_VERSION_ENV_NAMES: &[&str] =
+        &["NODE_ENV", "APP_ENV", "SERVICE_BUILD_VERSION"];
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -326,6 +331,38 @@ mod tests {
 
         assert_eq!(config.global_id_origin_id, 7);
         assert_eq!(config.global_id_worker_id, Some(6));
+    }
+
+    #[test]
+    fn service_build_version_defaults_to_dev() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::remove_var("SERVICE_BUILD_VERSION");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.service_build_version, "dev");
+    }
+
+    #[test]
+    fn service_build_version_reads_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("SERVICE_BUILD_VERSION", "2026.06.18");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.service_build_version, "2026.06.18");
     }
 
     #[test]
