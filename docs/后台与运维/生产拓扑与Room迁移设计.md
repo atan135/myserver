@@ -114,6 +114,26 @@
 
 启动完成后的下一阶段应继续做健康检查、endpoint 完整性检查、实例唯一性检查、route store 检查和接流量控制。本文本节只定义启动顺序，不实现健康检查或流量切换逻辑。
 
+### 5.2 注册后接流量门禁
+
+测试、预发和线上部署不能把“进程已启动”视为“实例可接流量”。服务进程启动后，应先完成自身 endpoint 注册，并确认 registry 中可观察到该 endpoint 和持续 heartbeat；只有后续健康检查/readiness 通过后，实例才允许进入流量目标。
+
+接流量门禁适用于所有入口和控制面：
+
+- 健康检查/readiness 通过前，不得把实例加入 LB、DNS、网关 upstream、admin/control target 或 rollout 目标。
+- `game-server`、`match-service`、`chat-server` 等 registry-dependent services 必须先确保自身注册记录和 heartbeat 可见，再进入可被发现或可被控制面选择的状态。
+- `mail-service`、`announce-service` 等 Node 服务当前存在注册失败只打日志的现实限制；部署健康检查必须兜底校验 registry 可见性，避免出现“进程已启动但 registry 不可见”仍被加入流量的情况。
+
+gateway/control services 还必须先验证必要上游 endpoint 可发现，再允许自身接流量：
+
+- `game-proxy` 依赖 `game-server.proxy-local` 可发现后，才允许加入客户端游戏入口 upstream。
+- `auth-http` 依赖 `game-proxy.client` 可发现后，才允许对外提供会返回游戏入口的登录链路。
+- `admin-api` 依赖 `game-server.admin` 和 `game-proxy.admin` 可发现后，才允许进入可执行控制命令的 target。
+
+rollout 或扩容时，新实例同样必须先完成 endpoint 注册、heartbeat 可见和 readiness 校验，才能被纳入 rollout 目标；失败实例应停留在隔离状态，由部署系统回滚、重试或人工处理，不能通过本地默认 host/port 绕过 registry 直接接流量。
+
+本节只定义部署门禁流程和边界，不定义具体健康检查接口或检查项。健康检查必须验证的具体内容由后续小节继续拆分。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
