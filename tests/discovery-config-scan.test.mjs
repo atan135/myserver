@@ -264,6 +264,60 @@ test("repository game-proxy strict templates omit UPSTREAM direct config while c
   }
 });
 
+test("repository match-service strict templates omit game-server internal socket fallback while comments remain non-active", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const matchServiceStrictFiles = result.strictFiles.filter((file) =>
+    file.startsWith("apps/match-service/")
+  );
+  const variables = ["GAME_SERVER_INTERNAL_SOCKET_NAME", "GAME_INTERNAL_SOCKET_NAME"];
+
+  assert.equal(result.ok, true);
+  assert.ok(matchServiceStrictFiles.includes("apps/match-service/.env.test.example"));
+  assert.ok(matchServiceStrictFiles.includes("apps/match-service/.env.production.example"));
+
+  for (const file of matchServiceStrictFiles) {
+    const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+    for (const variable of variables) {
+      assert.equal(
+        hasActiveConfigAssignment(content, variable),
+        false,
+        `${file} must not define ${variable}`
+      );
+    }
+  }
+
+  const matchServiceExample = fs.readFileSync(
+    path.join(projectRoot, "apps/match-service/.env.example"),
+    "utf8"
+  );
+  for (const variable of variables) {
+    assert.equal(hasActiveConfigAssignment(matchServiceExample, variable), false);
+    assert.equal(hasCommentedConfigAssignment(matchServiceExample, variable), true);
+    assert.equal(
+      result.allowedLocalFallbacks.some(
+        (item) =>
+          item.file === "apps/match-service/.env.example" &&
+          item.variable === variable &&
+          item.service === "match-service"
+      ),
+      false,
+      `${variable} is only a commented local fallback example in apps/match-service/.env.example`
+    );
+  }
+
+  const gameServerExample = fs.readFileSync(path.join(projectRoot, "apps/game-server/.env.example"), "utf8");
+  assert.equal(hasActiveConfigAssignment(gameServerExample, "GAME_INTERNAL_SOCKET_NAME"), true);
+  assert.equal(
+    result.allowedLocalFallbacks.some(
+      (item) =>
+        item.file === "apps/game-server/.env.example" &&
+        item.variable === "GAME_INTERNAL_SOCKET_NAME"
+    ),
+    false,
+    "apps/game-server/.env.example GAME_INTERNAL_SOCKET_NAME is the game-server self bind config"
+  );
+});
+
 test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging templates", () => {
   const tempDir = createTempRepo();
   try {
@@ -320,6 +374,79 @@ test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging
       assert.match(violation.reason, /match-service\.grpc/);
       assert.match(violation.remediation, /Local fallback examples/);
       assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("match-service game-server internal socket fallback is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "apps/match-service/.env.example",
+      [
+        "APP_ENV=development",
+        "REGISTRY_ENABLED=true",
+        "DISCOVERY_REQUIRED=true",
+        "GAME_SERVER_SERVICE_NAME=game-server",
+        "# Local fallback only: used only when registry discovery is disabled and discovery is not strict.",
+        "# Ignored in strict/test/production discovery; use service registry for game-server.internal endpoints there.",
+        "# GAME_SERVER_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock",
+        "# Legacy local fallback alias kept for compatibility with old local scripts only.",
+        "# GAME_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock"
+      ].join("\n")
+    );
+
+    for (const [file, appEnv] of [
+      ["apps/match-service/.env.test.example", "test"],
+      ["apps/match-service/.env.production.example", "production"],
+      ["apps/match-service/.env.staging.example", "staging"]
+    ]) {
+      writeFile(
+        tempDir,
+        file,
+        [
+          `APP_ENV=${appEnv}`,
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+          "GAME_SERVER_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock",
+          "GAME_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock"
+        ].join("\n")
+      );
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/match-service/.env.production.example:GAME_INTERNAL_SOCKET_NAME",
+      "apps/match-service/.env.production.example:GAME_SERVER_INTERNAL_SOCKET_NAME",
+      "apps/match-service/.env.staging.example:GAME_INTERNAL_SOCKET_NAME",
+      "apps/match-service/.env.staging.example:GAME_SERVER_INTERNAL_SOCKET_NAME",
+      "apps/match-service/.env.test.example:GAME_INTERNAL_SOCKET_NAME",
+      "apps/match-service/.env.test.example:GAME_SERVER_INTERNAL_SOCKET_NAME"
+    ]);
+    for (const violation of result.violations) {
+      assert.equal(violation.service, "match-service");
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /game-server\.internal|legacy internal socket alias/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+    for (const variable of ["GAME_SERVER_INTERNAL_SOCKET_NAME", "GAME_INTERNAL_SOCKET_NAME"]) {
+      assert.equal(
+        result.allowedLocalFallbacks.some(
+          (item) =>
+            item.file === "apps/match-service/.env.example" &&
+            item.variable === variable &&
+            item.service === "match-service"
+        ),
+        false,
+        `${variable} is only a commented local fallback example in apps/match-service/.env.example`
+      );
     }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
