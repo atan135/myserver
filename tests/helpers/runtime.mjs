@@ -475,6 +475,10 @@ export async function startGameServer({
     MAX_BODY_LEN: "4096",
     ...envOverrides
   };
+  const internalSocketName = cargoEnv.GAME_INTERNAL_SOCKET_NAME ||
+    (localSocketName.endsWith(".sock")
+      ? `${localSocketName.slice(0, -".sock".length)}-internal.sock`
+      : `${localSocketName}-internal`);
 
   await runProcess({
     command: cargoBin,
@@ -529,12 +533,150 @@ export async function startGameServer({
     host,
     port,
     adminPort,
+    localSocketName,
+    internalSocketName,
     stdout,
     stderr,
     async close() {
       await terminateChild(child, { name: "game-server" });
     }
   };
+}
+
+export async function startMatchService({
+  host = "127.0.0.1",
+  port,
+  redisUrl,
+  redisKeyPrefix,
+  natsUrl,
+  envOverrides = {}
+}) {
+  const stdout = [];
+  const stderr = [];
+  const cargoBin = resolveCargoBin();
+  const cargoTargetDir = path.join(projectRoot, ".tmp", "cargo-target", "integration-match");
+  let spawnError = null;
+  const cargoEnv = {
+    ...process.env,
+    MATCH_BIND_ADDR: `${host}:${port}`,
+    SERVICE_BIND_HOST: host,
+    SERVICE_PUBLIC_HOST: host,
+    LOG_LEVEL: "error",
+    LOG_ENABLE_CONSOLE: "false",
+    LOG_ENABLE_FILE: "false",
+    LOG_DIR: "logs/test-match-service",
+    REDIS_URL: redisUrl,
+    REDIS_KEY_PREFIX: redisKeyPrefix,
+    NATS_URL: natsUrl,
+    MATCH_RUNTIME_STORE: "redis",
+    MATCH_RUNTIME_KEY_PREFIX: redisKeyPrefix,
+    CARGO_TARGET_DIR: cargoTargetDir,
+    ...envOverrides
+  };
+
+  await runProcess({
+    command: cargoBin,
+    args: ["build", "--quiet"],
+    cwd: path.join(projectRoot, "apps", "match-service"),
+    env: cargoEnv
+  });
+
+  const binaryPath = path.join(
+    cargoTargetDir,
+    "debug",
+    process.platform === "win32" ? "match-service.exe" : "match-service"
+  );
+
+  const child = spawn(binaryPath, [], {
+    cwd: path.join(projectRoot, "apps", "match-service"),
+    env: cargoEnv,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.once("error", (error) => {
+    spawnError = error;
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout.push(chunk.toString());
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr.push(chunk.toString());
+  });
+
+  try {
+    await waitForTcpPort({
+      host,
+      port,
+      onTick: () => {
+        if (spawnError) {
+          throw spawnError;
+        }
+        if (child.exitCode !== null) {
+          throw new Error(`match-service exited early with code ${child.exitCode}`);
+        }
+      }
+    });
+  } catch (error) {
+    await terminateChild(child, { name: "match-service" }).catch(() => {});
+    throw new Error(`${error.message}\n[match-service stdout]\n${stdout.join("")}\n[match-service stderr]\n${stderr.join("")}`);
+  }
+
+  return {
+    host,
+    port,
+    addr: `http://${host}:${port}`,
+    stdout,
+    stderr,
+    async close() {
+      await terminateChild(child, { name: "match-service" });
+    }
+  };
+}
+
+export async function runMatchFlowProbe({
+  addr,
+  scenario = "matched",
+  mode = "1v1",
+  playerIds = [],
+  timeoutSecs = 15,
+  jsonOutput = false,
+  processTimeoutMs = 120000
+}) {
+  const cargoBin = resolveCargoBin();
+  const cargoTargetDir = path.join(projectRoot, ".tmp", "cargo-target", "integration-match");
+  const args = [
+    "run",
+    "--quiet",
+    "--example",
+    "match_flow_probe",
+    "--",
+    "--scenario",
+    scenario,
+    "--addr",
+    addr,
+    "--mode",
+    mode,
+    "--timeout-secs",
+    String(timeoutSecs)
+  ];
+
+  for (const playerId of playerIds) {
+    args.push("--player-id", playerId);
+  }
+  if (jsonOutput) {
+    args.push("--json-output");
+  }
+
+  return await runProcess({
+    command: cargoBin,
+    args,
+    cwd: path.join(projectRoot, "apps", "match-service"),
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: cargoTargetDir
+    },
+    timeoutMs: processTimeoutMs
+  });
 }
 
 export async function runMockClientScenario({

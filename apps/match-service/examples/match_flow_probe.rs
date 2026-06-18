@@ -7,9 +7,9 @@ use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use proto::myserver::matchservice::{
+    match_internal_client::MatchInternalClient, match_service_client::MatchServiceClient,
     CreateRoomAndJoinReq, MatchEndReq, MatchEvent, MatchEventStreamReq, MatchStartReq,
-    MatchStatusReq, PlayerJoinedReq, PlayerLeftReq, match_internal_client::MatchInternalClient,
-    match_service_client::MatchServiceClient,
+    MatchStatusReq, PlayerJoinedReq, PlayerLeftReq,
 };
 use tonic::transport::Channel;
 
@@ -20,14 +20,17 @@ struct Options {
     mode: String,
     timeout_secs: u64,
     player_ids: Vec<String>,
+    json_output: bool,
 }
 
 fn parse_options() -> Result<Options, String> {
     let mut scenario = "matched".to_string();
-    let mut addr = env::var("MATCH_SERVICE_ADDR").unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
+    let mut addr =
+        env::var("MATCH_SERVICE_ADDR").unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
     let mut mode = "1v1".to_string();
     let mut timeout_secs = 15_u64;
     let mut player_ids = Vec::new();
+    let mut json_output = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -38,10 +41,14 @@ fn parse_options() -> Result<Options, String> {
                     .ok_or_else(|| "--scenario requires a value".to_string())?;
             }
             "--addr" => {
-                addr = args.next().ok_or_else(|| "--addr requires a value".to_string())?;
+                addr = args
+                    .next()
+                    .ok_or_else(|| "--addr requires a value".to_string())?;
             }
             "--mode" => {
-                mode = args.next().ok_or_else(|| "--mode requires a value".to_string())?;
+                mode = args
+                    .next()
+                    .ok_or_else(|| "--mode requires a value".to_string())?;
             }
             "--timeout-secs" => {
                 let raw = args
@@ -57,9 +64,12 @@ fn parse_options() -> Result<Options, String> {
                         .ok_or_else(|| "--player-id requires a value".to_string())?,
                 );
             }
+            "--json-output" => {
+                json_output = true;
+            }
             "--help" | "-h" => {
                 return Err(
-                    "usage: cargo run --example match_flow_probe -- [--scenario matched|timeout] [--addr http://127.0.0.1:9002] [--mode 1v1] [--timeout-secs 15] [--player-id PLAYER_A --player-id PLAYER_B]"
+                    "usage: cargo run --example match_flow_probe -- [--scenario matched|timeout] [--addr http://127.0.0.1:9002] [--mode 1v1] [--timeout-secs 15] [--player-id PLAYER_A --player-id PLAYER_B] [--json-output]"
                         .to_string(),
                 );
             }
@@ -100,6 +110,7 @@ fn parse_options() -> Result<Options, String> {
         mode,
         timeout_secs,
         player_ids,
+        json_output,
     })
 }
 
@@ -263,6 +274,20 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
     }
 
     println!("match_flow_probe matched: success");
+    if options.json_output {
+        println!(
+            "MATCH_FLOW_PROBE_JSON:{}",
+            serde_json::json!({
+                "ok": true,
+                "scenario": "matched",
+                "matchId": event_a.match_id,
+                "roomId": event_a.room_id,
+                "playerIds": [player_a, player_b],
+                "mode": options.mode,
+                "statuses": [status_a.status, status_b.status]
+            })
+        );
+    }
     Ok(())
 }
 
@@ -337,15 +362,27 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
     }
 
     println!("match_flow_probe timeout: success");
+    if options.json_output {
+        println!(
+            "MATCH_FLOW_PROBE_JSON:{}",
+            serde_json::json!({
+                "ok": true,
+                "scenario": "timeout",
+                "playerIds": [player_id],
+                "mode": options.mode,
+                "event": event.event,
+                "errorCode": event.error_code,
+                "status": status.status
+            })
+        );
+    }
     Ok(())
 }
 
 async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let player_a = options.player_ids[0].clone();
     let player_b = options.player_ids[1].clone();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let match_id = format!("probe-player-left-{now}");
     let room_id = format!("room-probe-player-left-{now}");
 

@@ -21,12 +21,19 @@ import {
   cleanupRegistryInstances,
   findFreePort,
   randomId,
+  runMatchFlowProbe,
   runMockClientScenario,
   startAuthHttpServer,
   startGameProxy,
   startGameServer,
+  startMatchService,
   startNatsServer
 } from "./helpers/runtime.mjs";
+import { fetchTicket } from "../tools/mock-client/src/auth.js";
+import { TcpProtocolClient } from "../tools/mock-client/src/client.js";
+import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
+import { encodeRoomJoinReq, encodeRoomReconnectReq } from "../tools/mock-client/src/messages.js";
+import { authenticateClient } from "../tools/mock-client/src/scenarios/room.js";
 
 const redisUrl = process.env.TEST_REDIS_URL || "redis://127.0.0.1:6379";
 const ticketSecret = "test-only-ticket-secret";
@@ -35,6 +42,7 @@ const redisKeyPrefix = `test:registry:${randomId("redis")}:`;
 const registryKeyPrefix = `test:registry:${randomId("registry")}:`;
 const gameServerInstanceId = randomId("game-server");
 const gameProxyInstanceId = randomId("game-proxy");
+const matchServiceInstanceId = randomId("match-service");
 const manualGameServerInstanceId = randomId("manual-game-server");
 const manualGameProxyInstanceId = randomId("manual-game-proxy");
 const manualMatchServiceInstanceId = randomId("manual-match-service");
@@ -46,7 +54,8 @@ const mixedLegacyGameServerInstanceId = randomId("mixed-legacy-game-server");
 const mixedEndpointGameServerInstanceId = randomId("mixed-endpoint-game-server");
 const registryInstances = [
   { serviceName: "game-server", instanceId: gameServerInstanceId },
-  { serviceName: "game-proxy", instanceId: gameProxyInstanceId }
+  { serviceName: "game-proxy", instanceId: gameProxyInstanceId },
+  { serviceName: "match-service", instanceId: matchServiceInstanceId }
 ];
 const manualRegistryInstances = [
   { serviceName: "game-server", instanceId: manualGameServerInstanceId },
@@ -123,6 +132,7 @@ const manualEndpoints = {
 let authServer;
 let gameServer;
 let gameProxy;
+let matchService;
 let natsServer;
 
 async function waitFor(condition, description, timeoutMs = 30000) {
@@ -541,6 +551,14 @@ function assertFlatEndpoint(endpoint, expected) {
   assert.equal(endpoint.healthy, true);
 }
 
+function parseProbeJson(stdout) {
+  const line = stdout
+    .split(/\r?\n/)
+    .find((candidate) => candidate.startsWith("MATCH_FLOW_PROBE_JSON:"));
+  assert.ok(line, `expected match_flow_probe JSON output in stdout:\n${stdout}`);
+  return JSON.parse(line.slice("MATCH_FLOW_PROBE_JSON:".length));
+}
+
 function proxyAdminUrl(pathname, query = {}) {
   const url = new URL(`http://127.0.0.1:${gameProxy.adminPort}${pathname}`);
   for (const [key, value] of Object.entries(query)) {
@@ -587,6 +605,38 @@ before(async () => {
 
   natsServer = await startNatsServer();
 
+  const matchPort = await findFreePort();
+  matchService = await startMatchService({
+    host: "127.0.0.1",
+    port: matchPort,
+    redisUrl,
+    redisKeyPrefix,
+    natsUrl: natsServer.url,
+    envOverrides: {
+      APP_ENV: "test",
+      REGISTRY_ENABLED: "true",
+      DISCOVERY_REQUIRED: "true",
+      REGISTRY_URL: redisUrl,
+      REGISTRY_KEY_PREFIX: registryKeyPrefix,
+      SERVICE_INSTANCE_ID: matchServiceInstanceId,
+      REGISTRY_HEARTBEAT_INTERVAL: "1",
+      GAME_INTERNAL_TOKEN: "dev-only-change-this-game-internal-token"
+    }
+  });
+
+  await waitFor(async () => {
+    const instance = await readRegistryInstance("match-service", matchServiceInstanceId, registryKeyPrefix);
+    return instance.data && instance.heartbeatExists ? instance : false;
+  }, "match-service registry instance and heartbeat");
+  assert.equal(
+    await registryKeyExists("match-service", matchServiceInstanceId, registryKeyPrefix),
+    true
+  );
+  assert.equal(
+    await registryKeyExists("match-service", matchServiceInstanceId),
+    false
+  );
+
   gameServer = await startGameServer({
     host: "127.0.0.1",
     port: gamePort,
@@ -600,8 +650,13 @@ before(async () => {
       REGISTRY_URL: redisUrl,
       REGISTRY_KEY_PREFIX: registryKeyPrefix,
       NATS_URL: natsServer.url,
+      APP_ENV: "test",
+      DISCOVERY_REQUIRED: "true",
       SERVICE_INSTANCE_ID: gameServerInstanceId,
-      REGISTRY_HEARTBEAT_INTERVAL: "1"
+      REGISTRY_HEARTBEAT_INTERVAL: "1",
+      MATCH_SERVICE_NAME: "match-service",
+      MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS: "1",
+      GAME_INTERNAL_TOKEN: "dev-only-change-this-game-internal-token"
     }
   });
 
@@ -703,6 +758,9 @@ after(async () => {
   if (gameServer) {
     await gameServer.close();
   }
+  if (matchService) {
+    await matchService.close();
+  }
   if (natsServer) {
     await natsServer.close();
   }
@@ -741,6 +799,149 @@ test("auth-http discovers game-proxy.client and mock-client connects through pro
   });
 });
 
+test("M7 drills match-service create-room then players join through registry-discovered proxy", { timeout: 240000 }, async () => {
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    const discovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("match-service", "grpc"),
+      {
+        serviceName: "match-service",
+        instanceId: matchServiceInstanceId,
+        name: "grpc",
+        protocol: "grpc",
+        host: matchService.host,
+        port: matchService.port,
+        visibility: "internal"
+      }
+    );
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("game-server", "internal"),
+      {
+        serviceName: "game-server",
+        instanceId: gameServerInstanceId,
+        name: "internal",
+        protocol: "local_socket",
+        host: "",
+        port: 0,
+        socket: gameServer.internalSocketName,
+        visibility: "local"
+      }
+    );
+  } finally {
+    await redis.quit();
+  }
+
+  const baseClientOptions = {
+    httpBaseUrl: authServer.baseUrl,
+    host: gameProxy.host,
+    gameHost: gameProxy.host,
+    port: gameProxy.tcpFallbackPort,
+    timeoutMs: 10000,
+    maxBodyLen: 4096,
+    useServiceDiscovery: false
+  };
+  const loginA = await fetchTicket({ ...baseClientOptions, guestId: randomId("m7-match-a") });
+  const loginB = await fetchTicket({ ...baseClientOptions, guestId: randomId("m7-match-b") });
+
+  const probe = await runMatchFlowProbe({
+    addr: matchService.addr,
+    scenario: "matched",
+    mode: "1v1",
+    playerIds: [loginA.playerId, loginB.playerId],
+    timeoutSecs: 20,
+    jsonOutput: true,
+    processTimeoutMs: 90000
+  });
+  const matchResult = parseProbeJson(probe.stdout);
+  assert.equal(matchResult.ok, true);
+  assert.equal(matchResult.scenario, "matched");
+  assert.equal(matchResult.mode, "1v1");
+  assert.deepEqual(matchResult.playerIds, [loginA.playerId, loginB.playerId]);
+  assert.ok(matchResult.matchId);
+  assert.ok(matchResult.roomId);
+  assert.deepEqual(matchResult.statuses, ["matched", "matched"]);
+
+  const clientA = new TcpProtocolClient(baseClientOptions, "m7ClientA");
+  const clientB = new TcpProtocolClient(baseClientOptions, "m7ClientB");
+  let reconnectClientA = null;
+
+  await clientA.connect();
+  await clientB.connect();
+  try {
+    await authenticateClient(clientA, baseClientOptions, loginA, 1);
+    await authenticateClient(clientB, baseClientOptions, loginB, 1);
+
+    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(matchResult.roomId));
+    const joinA = await clientA.readUntil(
+      baseClientOptions.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 2,
+      "m7RoomJoinA"
+    );
+    assert.equal(joinA.ok, true);
+    assert.equal(joinA.roomId, matchResult.roomId);
+
+    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(matchResult.roomId));
+    const joinB = await clientB.readUntil(
+      baseClientOptions.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 2,
+      "m7RoomJoinB"
+    );
+    assert.equal(joinB.ok, true);
+    assert.equal(joinB.roomId, matchResult.roomId);
+
+    const stateB = await clientB.readUntil(
+      baseClientOptions.timeoutMs,
+      (packet, decoded) =>
+        packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH &&
+        decoded.snapshot?.roomId === matchResult.roomId &&
+        decoded.snapshot.members?.some((member) => member.playerId === loginB.playerId),
+      "m7RoomStateB"
+    );
+    assert.equal(stateB.snapshot.members.length, 2);
+
+    clientA.close();
+    await clientB.readUntil(
+      baseClientOptions.timeoutMs * 2,
+      (packet, decoded) =>
+        packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH &&
+        decoded.snapshot?.members?.some((member) => member.playerId === loginA.playerId && member.offline),
+      "m7MemberOfflineA"
+    );
+
+    reconnectClientA = new TcpProtocolClient(baseClientOptions, "m7ClientAReconnect");
+    await reconnectClientA.connect();
+    await authenticateClient(reconnectClientA, baseClientOptions, loginA, 3);
+    await reconnectClientA.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(loginA.playerId));
+    const reconnectA = await reconnectClientA.readUntil(
+      baseClientOptions.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_RECONNECT_RES && packet.seq === 4,
+      "m7RoomReconnectA"
+    );
+    assert.equal(reconnectA.ok, true);
+    assert.equal(reconnectA.roomId, matchResult.roomId);
+    assert.equal(reconnectA.snapshot?.roomId, matchResult.roomId);
+    assert.equal(
+      reconnectA.snapshot?.members?.some((member) => member.playerId === loginA.playerId && !member.offline),
+      true
+    );
+  } finally {
+    clientA.close();
+    clientB.close();
+    reconnectClientA?.close();
+  }
+});
+
 test("registry consumers discover correct endpoints across multiple service instances", { timeout: 60000 }, async () => {
   await cleanupRegistryInstances(redisUrl, manualRegistryInstances, registryKeyPrefix);
   await writeRegistryPayloads(createManualRegistryPayloads(), registryKeyPrefix);
@@ -758,8 +959,9 @@ test("registry consumers discover correct endpoints across multiple service inst
       discoveryCacheTtlMs: 0
     });
 
+    const matchGrpcEndpoints = await discovery.discoverAllEndpoints("match-service", "grpc");
     assertEndpointSelection(
-      await discovery.discoverRequiredEndpoint("match-service", "grpc"),
+      matchGrpcEndpoints.find(({ instance }) => instance.id === manualMatchServiceInstanceId),
       {
         serviceName: "match-service",
         instanceId: manualMatchServiceInstanceId,
