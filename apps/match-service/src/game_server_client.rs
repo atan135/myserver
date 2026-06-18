@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::tokio::Stream as _;
-use interprocess::local_socket::{GenericFilePath, ToFsName, tokio::Stream};
+use interprocess::local_socket::{tokio::Stream, GenericFilePath, ToFsName};
 use prost::Message;
-use service_registry::{RegistryClient, ServiceInstance, record_discovery_metric};
+use service_registry::{record_discovery_metric, RegistryClient, ServiceInstance};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -653,6 +653,55 @@ mod tests {
         }
     }
 
+    fn socket_endpoint_with_options(
+        name: &str,
+        socket: &str,
+        protocol: &str,
+        visibility: &str,
+        metadata: serde_json::Value,
+        healthy: bool,
+    ) -> service_registry::ServiceEndpoint {
+        service_registry::ServiceEndpoint {
+            name: name.to_string(),
+            protocol: protocol.to_string(),
+            host: String::new(),
+            port: 0,
+            socket: socket.to_string(),
+            visibility: visibility.to_string(),
+            metadata,
+            healthy,
+        }
+    }
+
+    fn endpoint_with_metadata(
+        socket: &str,
+        visibility: &str,
+        metadata: serde_json::Value,
+    ) -> service_registry::ServiceEndpoint {
+        socket_endpoint_with_options(
+            "internal",
+            socket,
+            "local_socket",
+            visibility,
+            metadata,
+            true,
+        )
+    }
+
+    fn service_instance_with_options(
+        id: &str,
+        endpoints: Vec<service_registry::ServiceEndpoint>,
+        healthy: bool,
+        weight: u32,
+        metadata: serde_json::Value,
+    ) -> ServiceInstance {
+        let mut instance = service_instance(id, endpoints);
+        instance.healthy = healthy;
+        instance.weight = weight;
+        instance.metadata = metadata;
+        instance
+    }
+
     fn test_config() -> Config {
         let mut modes = HashMap::new();
         modes.insert(
@@ -790,6 +839,174 @@ mod tests {
         )];
 
         assert!(internal_socket_candidates(&instances).is_empty());
+    }
+
+    #[test]
+    fn internal_socket_candidates_accept_only_healthy_internal_local_socket_endpoints() {
+        let instances = vec![
+            service_instance_with_options(
+                "game-unhealthy-instance",
+                vec![socket_endpoint(
+                    "internal",
+                    "unhealthy-instance.sock",
+                    "internal",
+                )],
+                false,
+                100,
+                serde_json::Value::Null,
+            ),
+            service_instance_with_options(
+                "game-zero-weight",
+                vec![socket_endpoint("internal", "zero-weight.sock", "internal")],
+                true,
+                0,
+                serde_json::Value::Null,
+            ),
+            service_instance(
+                "game-bad-endpoints",
+                vec![
+                    socket_endpoint("client", "client.sock", "local"),
+                    socket_endpoint("admin", "admin.sock", "internal"),
+                    socket_endpoint_with_options(
+                        "internal",
+                        "tcp.sock",
+                        "tcp",
+                        "internal",
+                        serde_json::Value::Null,
+                        true,
+                    ),
+                    socket_endpoint_with_options(
+                        "internal",
+                        "unhealthy-endpoint.sock",
+                        "local_socket",
+                        "internal",
+                        serde_json::Value::Null,
+                        false,
+                    ),
+                    socket_endpoint("internal", "public.sock", "public"),
+                    socket_endpoint("internal", "admin-visible.sock", "admin"),
+                    socket_endpoint("internal", "   ", "internal"),
+                ],
+            ),
+            service_instance(
+                "game-internal",
+                vec![socket_endpoint("internal", "internal.sock", "internal")],
+            ),
+            service_instance(
+                "game-local",
+                vec![socket_endpoint("internal", "local.sock", "local")],
+            ),
+        ];
+
+        let candidates = internal_socket_candidates(&instances);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.instance_id.as_str(), candidate.socket.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("game-internal", "internal.sock"),
+                ("game-local", "local.sock")
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_cache_uses_old_instance_until_ttl_then_selects_refreshed_instance() {
+        let now = Instant::now();
+        let mut cache = DiscoveryCache::default();
+        let old_instances = vec![service_instance(
+            "game-old",
+            vec![endpoint_with_metadata(
+                "old.sock",
+                "internal",
+                serde_json::json!({
+                    "modes": ["ranked"],
+                    "zone": "zone-a"
+                }),
+            )],
+        )];
+        let old_candidates = internal_socket_candidates(&old_instances);
+
+        cache.store(old_candidates, now, Duration::from_secs(5));
+
+        let cached_before_ttl = cache
+            .get(now + Duration::from_secs(4))
+            .expect("old candidates should remain cached inside TTL");
+        let socket_before_ttl =
+            select_socket(&cached_before_ttl, "match-switch", "ranked", "zone-a").unwrap();
+
+        assert_eq!(socket_before_ttl, "old.sock");
+
+        let switched_instances = vec![
+            service_instance_with_options(
+                "game-old",
+                vec![endpoint_with_metadata(
+                    "old.sock",
+                    "internal",
+                    serde_json::json!({
+                        "modes": ["ranked"],
+                        "zone": "zone-a"
+                    }),
+                )],
+                false,
+                100,
+                serde_json::Value::Null,
+            ),
+            service_instance(
+                "game-new-wrong-mode",
+                vec![endpoint_with_metadata(
+                    "wrong-mode.sock",
+                    "internal",
+                    serde_json::json!({
+                        "modes": ["casual"],
+                        "zone": "zone-a"
+                    }),
+                )],
+            ),
+            service_instance(
+                "game-new-wrong-zone",
+                vec![endpoint_with_metadata(
+                    "wrong-zone.sock",
+                    "internal",
+                    serde_json::json!({
+                        "modes": ["ranked"],
+                        "zone": "zone-b"
+                    }),
+                )],
+            ),
+            service_instance(
+                "game-new",
+                vec![endpoint_with_metadata(
+                    "new.sock",
+                    "local",
+                    serde_json::json!({
+                        "modes": ["ranked"],
+                        "zone": "zone-a"
+                    }),
+                )],
+            ),
+        ];
+
+        assert!(cache.get(now + Duration::from_secs(5)).is_none());
+
+        let refreshed_candidates = internal_socket_candidates(&switched_instances);
+        cache.store(
+            refreshed_candidates,
+            now + Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let cached_after_refresh = cache
+            .get(now + Duration::from_secs(6))
+            .expect("new candidates should be cached after refresh");
+        let socket_after_refresh =
+            select_socket(&cached_after_refresh, "match-switch", "ranked", "zone-a").unwrap();
+
+        assert_eq!(socket_after_refresh, "new.sock");
+        assert!(!cached_after_refresh
+            .iter()
+            .any(|candidate| candidate.socket == "old.sock"));
     }
 
     #[tokio::test]
