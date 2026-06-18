@@ -3,6 +3,19 @@ import { after, before, test } from "node:test";
 
 import Redis from "ioredis";
 
+import { discoverGameServerAdminEndpoints as discoverAuthGameServerAdminEndpoints } from "../apps/auth-http/src/registry-client.js";
+import {
+  createRegistryDiscoveryClient as createAdminApiRegistryDiscoveryClient,
+  discoverGameProxyAdminEndpoints as discoverAdminApiGameProxyAdminEndpoints,
+  discoverGameServerAdminEndpoints as discoverAdminApiGameServerAdminEndpoints
+} from "../apps/admin-api/src/registry-client.js";
+import { discoverGameServerAdminEndpoints as discoverMailGameServerAdminEndpoints } from "../apps/mail-service/src/registry-client.js";
+import {
+  createServiceInstancePayload,
+  RegistryDiscoveryClient,
+  registryHeartbeatKey,
+  registryInstanceKey
+} from "../packages/service-registry/node/registry-schema.js";
 import {
   cleanupRedisPrefix,
   cleanupRegistryInstances,
@@ -22,10 +35,54 @@ const redisKeyPrefix = `test:registry:${randomId("redis")}:`;
 const registryKeyPrefix = `test:registry:${randomId("registry")}:`;
 const gameServerInstanceId = randomId("game-server");
 const gameProxyInstanceId = randomId("game-proxy");
+const manualGameServerInstanceId = randomId("manual-game-server");
+const manualGameProxyInstanceId = randomId("manual-game-proxy");
+const manualMatchServiceInstanceId = randomId("manual-match-service");
+const manualMailServiceInstanceId = randomId("manual-mail-service");
+const manualAdminApiInstanceId = randomId("manual-admin-api");
 const registryInstances = [
   { serviceName: "game-server", instanceId: gameServerInstanceId },
   { serviceName: "game-proxy", instanceId: gameProxyInstanceId }
 ];
+const manualRegistryInstances = [
+  { serviceName: "game-server", instanceId: manualGameServerInstanceId },
+  { serviceName: "game-proxy", instanceId: manualGameProxyInstanceId },
+  { serviceName: "match-service", instanceId: manualMatchServiceInstanceId },
+  { serviceName: "mail-service", instanceId: manualMailServiceInstanceId },
+  { serviceName: "admin-api", instanceId: manualAdminApiInstanceId }
+];
+const allRegistryInstances = [...registryInstances, ...manualRegistryInstances];
+
+const manualEndpoints = {
+  gameServer: {
+    host: "127.0.0.31",
+    clientPort: 18700,
+    adminHost: "127.0.0.32",
+    adminPort: 18750,
+    internalSocket: `manual-game-server-internal-${manualGameServerInstanceId}.sock`,
+    proxyLocalSocket: `manual-game-server-proxy-${manualGameServerInstanceId}.sock`
+  },
+  gameProxy: {
+    host: "127.0.0.41",
+    clientPort: 18400,
+    tcpFallbackHost: "127.0.0.42",
+    tcpFallbackPort: 28400,
+    adminHost: "127.0.0.43",
+    adminPort: 18101
+  },
+  matchService: {
+    host: "127.0.0.51",
+    grpcPort: 19002
+  },
+  mailService: {
+    host: "127.0.0.61",
+    httpPort: 19003
+  },
+  adminApi: {
+    host: "127.0.0.71",
+    httpPort: 13001
+  }
+};
 
 let authServer;
 let gameServer;
@@ -102,8 +159,242 @@ async function registryKeyExists(serviceName, instanceId, keyPrefix = "") {
   }
 }
 
+function endpoint(name, protocol, host, port, visibility, metadata = {}) {
+  return {
+    name,
+    protocol,
+    host,
+    port,
+    socket: "",
+    visibility,
+    metadata,
+    healthy: true
+  };
+}
+
+function socketEndpoint(name, socket, metadata = {}) {
+  return {
+    name,
+    protocol: "local_socket",
+    host: "",
+    port: 0,
+    socket,
+    visibility: "local",
+    metadata,
+    healthy: true
+  };
+}
+
+function endpointMetadata(serviceName, instanceId, extra = {}) {
+  return {
+    service_name: serviceName,
+    service_instance_id: instanceId,
+    instance_id: instanceId,
+    build_version: "registry-e2e",
+    zone: "registry-e2e",
+    ...extra
+  };
+}
+
+function createManualRegistryPayloads() {
+  const gameServerMetadata = endpointMetadata("game-server", manualGameServerInstanceId, {
+    server_id: manualGameServerInstanceId
+  });
+  const gameProxyMetadata = endpointMetadata("game-proxy", manualGameProxyInstanceId);
+  const matchMetadata = endpointMetadata("match-service", manualMatchServiceInstanceId, {
+    protocol: "grpc",
+    modes: ["1v1", "5v5"],
+    runtime_store_backend: "redis"
+  });
+  const mailMetadata = endpointMetadata("mail-service", manualMailServiceInstanceId);
+  const adminApiMetadata = endpointMetadata("admin-api", manualAdminApiInstanceId);
+
+  return [
+    createServiceInstancePayload({
+      id: manualGameServerInstanceId,
+      name: "game-server",
+      host: manualEndpoints.gameServer.host,
+      port: manualEndpoints.gameServer.clientPort,
+      admin_port: manualEndpoints.gameServer.adminPort,
+      local_socket: manualEndpoints.gameServer.proxyLocalSocket,
+      endpoints: [
+        endpoint(
+          "client",
+          "tcp",
+          manualEndpoints.gameServer.host,
+          manualEndpoints.gameServer.clientPort,
+          "internal",
+          gameServerMetadata
+        ),
+        endpoint(
+          "admin",
+          "tcp",
+          manualEndpoints.gameServer.adminHost,
+          manualEndpoints.gameServer.adminPort,
+          "admin",
+          gameServerMetadata
+        ),
+        socketEndpoint(
+          "internal",
+          manualEndpoints.gameServer.internalSocket,
+          gameServerMetadata
+        ),
+        socketEndpoint(
+          "proxy-local",
+          manualEndpoints.gameServer.proxyLocalSocket,
+          gameServerMetadata
+        )
+      ],
+      tags: ["game", "tcp", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: gameServerMetadata
+    }),
+    createServiceInstancePayload({
+      id: manualGameProxyInstanceId,
+      name: "game-proxy",
+      host: manualEndpoints.gameProxy.host,
+      port: manualEndpoints.gameProxy.clientPort,
+      endpoints: [
+        endpoint(
+          "client",
+          "kcp",
+          manualEndpoints.gameProxy.host,
+          manualEndpoints.gameProxy.clientPort,
+          "public",
+          gameProxyMetadata
+        ),
+        endpoint(
+          "client-tcp-fallback",
+          "tcp",
+          manualEndpoints.gameProxy.tcpFallbackHost,
+          manualEndpoints.gameProxy.tcpFallbackPort,
+          "public",
+          gameProxyMetadata
+        ),
+        endpoint(
+          "admin",
+          "http",
+          manualEndpoints.gameProxy.adminHost,
+          manualEndpoints.gameProxy.adminPort,
+          "admin",
+          gameProxyMetadata
+        )
+      ],
+      tags: ["proxy", "kcp", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: gameProxyMetadata
+    }),
+    createServiceInstancePayload({
+      id: manualMatchServiceInstanceId,
+      name: "match-service",
+      host: manualEndpoints.matchService.host,
+      port: manualEndpoints.matchService.grpcPort,
+      endpoints: [
+        endpoint(
+          "grpc",
+          "grpc",
+          manualEndpoints.matchService.host,
+          manualEndpoints.matchService.grpcPort,
+          "internal",
+          matchMetadata
+        )
+      ],
+      tags: ["match", "grpc", "manual-e2e"],
+      metadata: matchMetadata
+    }),
+    createServiceInstancePayload({
+      id: manualMailServiceInstanceId,
+      name: "mail-service",
+      host: manualEndpoints.mailService.host,
+      port: manualEndpoints.mailService.httpPort,
+      endpoints: [
+        endpoint(
+          "http",
+          "http",
+          manualEndpoints.mailService.host,
+          manualEndpoints.mailService.httpPort,
+          "internal",
+          mailMetadata
+        )
+      ],
+      tags: ["mail", "http", "manual-e2e"],
+      metadata: mailMetadata
+    }),
+    createServiceInstancePayload({
+      id: manualAdminApiInstanceId,
+      name: "admin-api",
+      host: manualEndpoints.adminApi.host,
+      port: manualEndpoints.adminApi.httpPort,
+      endpoints: [
+        endpoint(
+          "http",
+          "http",
+          manualEndpoints.adminApi.host,
+          manualEndpoints.adminApi.httpPort,
+          "admin",
+          adminApiMetadata
+        )
+      ],
+      tags: ["admin", "http", "manual-e2e"],
+      metadata: adminApiMetadata
+    })
+  ];
+}
+
+async function writeRegistryPayloads(payloads, keyPrefix = "") {
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    for (const payload of payloads) {
+      await redis.hset(
+        registryInstanceKey(keyPrefix, payload.name, payload.id),
+        "data",
+        JSON.stringify(payload)
+      );
+      await redis.setex(registryHeartbeatKey(keyPrefix, payload.name, payload.id), 60, "1");
+    }
+  } finally {
+    await redis.quit();
+  }
+}
+
+function assertEndpointSelection(selection, expected) {
+  assert.ok(selection, `expected ${expected.serviceName}.${expected.name} endpoint selection`);
+  assert.equal(selection.instance.id, expected.instanceId);
+  assert.equal(selection.instance.name, expected.serviceName);
+  assert.equal(selection.endpoint.name, expected.name);
+  assert.equal(selection.endpoint.protocol, expected.protocol);
+  assert.equal(selection.endpoint.host, expected.host);
+  assert.equal(selection.endpoint.port, expected.port);
+  assert.equal(selection.endpoint.socket, expected.socket ?? "");
+  assert.equal(selection.endpoint.visibility, expected.visibility);
+}
+
+function findEndpoint(endpoints, instanceId) {
+  const endpoint = endpoints.find((candidate) => candidate.instanceId === instanceId);
+  assert.ok(endpoint, `expected endpoint for instance ${instanceId}`);
+  return endpoint;
+}
+
+function assertFlatEndpoint(endpoint, expected) {
+  assert.equal(endpoint.service, expected.serviceName);
+  assert.equal(endpoint.instanceId, expected.instanceId);
+  assert.equal(endpoint.instance_id, expected.instanceId);
+  assert.equal(endpoint.endpointName, expected.name);
+  assert.equal(endpoint.endpoint_name, expected.name);
+  assert.equal(endpoint.protocol, expected.protocol);
+  assert.equal(endpoint.host, expected.host);
+  assert.equal(endpoint.port, expected.port);
+  assert.equal(endpoint.healthy, true);
+}
+
 before(async () => {
-  await cleanupRegistryInstances(redisUrl, registryInstances, registryKeyPrefix);
+  await cleanupRegistryInstances(redisUrl, allRegistryInstances, registryKeyPrefix);
 
   const authPort = await findFreePort();
   const gamePort = await findFreePort();
@@ -217,7 +508,8 @@ before(async () => {
       NATS_URL: natsServer.url,
       SERVICE_INSTANCE_ID: randomId("auth-http"),
       GAME_PROXY_HOST: "127.0.0.1",
-      GAME_PROXY_PORT: String(gamePort)
+      GAME_PROXY_PORT: String(gamePort),
+      AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS: "true"
     }
   });
 });
@@ -236,7 +528,7 @@ after(async () => {
     await natsServer.close();
   }
 
-  await cleanupRegistryInstances(redisUrl, registryInstances, registryKeyPrefix);
+  await cleanupRegistryInstances(redisUrl, allRegistryInstances, registryKeyPrefix);
   await cleanupRedisPrefix(redisUrl, registryKeyPrefix);
   await cleanupRedisPrefix(redisUrl, redisKeyPrefix);
 });
@@ -268,4 +560,199 @@ test("auth-http discovers game-proxy.client and mock-client connects through pro
     timeoutMs: 10000,
     processTimeoutMs: 45000
   });
+});
+
+test("registry consumers discover correct endpoints across multiple service instances", { timeout: 60000 }, async () => {
+  await cleanupRegistryInstances(redisUrl, manualRegistryInstances, registryKeyPrefix);
+  await writeRegistryPayloads(createManualRegistryPayloads(), registryKeyPrefix);
+
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    const discovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("match-service", "grpc"),
+      {
+        serviceName: "match-service",
+        instanceId: manualMatchServiceInstanceId,
+        name: "grpc",
+        protocol: "grpc",
+        host: manualEndpoints.matchService.host,
+        port: manualEndpoints.matchService.grpcPort,
+        visibility: "internal"
+      }
+    );
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("game-server", "internal"),
+      {
+        serviceName: "game-server",
+        instanceId: manualGameServerInstanceId,
+        name: "internal",
+        protocol: "local_socket",
+        host: "",
+        port: 0,
+        socket: manualEndpoints.gameServer.internalSocket,
+        visibility: "local"
+      }
+    );
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("game-server", "proxy-local"),
+      {
+        serviceName: "game-server",
+        instanceId: manualGameServerInstanceId,
+        name: "proxy-local",
+        protocol: "local_socket",
+        host: "",
+        port: 0,
+        socket: manualEndpoints.gameServer.proxyLocalSocket,
+        visibility: "local"
+      }
+    );
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("admin-api", "http"),
+      {
+        serviceName: "admin-api",
+        instanceId: manualAdminApiInstanceId,
+        name: "http",
+        protocol: "http",
+        host: manualEndpoints.adminApi.host,
+        port: manualEndpoints.adminApi.httpPort,
+        visibility: "admin"
+      }
+    );
+    assertEndpointSelection(
+      await discovery.discoverRequiredEndpoint("mail-service", "http"),
+      {
+        serviceName: "mail-service",
+        instanceId: manualMailServiceInstanceId,
+        name: "http",
+        protocol: "http",
+        host: manualEndpoints.mailService.host,
+        port: manualEndpoints.mailService.httpPort,
+        visibility: "internal"
+      }
+    );
+
+    const proxyClientEndpoints = await discovery.discoverAllEndpoints("game-proxy", "client");
+    assert.ok(
+      proxyClientEndpoints.some(({ instance, endpoint: discoveredEndpoint }) =>
+        instance.id === gameProxyInstanceId &&
+        discoveredEndpoint.host === gameProxy.host &&
+        discoveredEndpoint.port === gameProxy.port &&
+        discoveredEndpoint.protocol === "kcp" &&
+        discoveredEndpoint.visibility === "public"
+      ),
+      "expected real game-proxy.client endpoint to remain discoverable"
+    );
+    assertEndpointSelection(
+      proxyClientEndpoints.find(({ instance }) => instance.id === manualGameProxyInstanceId),
+      {
+        serviceName: "game-proxy",
+        instanceId: manualGameProxyInstanceId,
+        name: "client",
+        protocol: "kcp",
+        host: manualEndpoints.gameProxy.host,
+        port: manualEndpoints.gameProxy.clientPort,
+        visibility: "public"
+      }
+    );
+
+    const proxyAdminEndpoints = await discoverAdminApiGameProxyAdminEndpoints(redis, registryKeyPrefix);
+    assertFlatEndpoint(findEndpoint(proxyAdminEndpoints, manualGameProxyInstanceId), {
+      serviceName: "game-proxy",
+      instanceId: manualGameProxyInstanceId,
+      name: "admin",
+      protocol: "http",
+      host: manualEndpoints.gameProxy.adminHost,
+      port: manualEndpoints.gameProxy.adminPort
+    });
+    assertFlatEndpoint(findEndpoint(proxyAdminEndpoints, gameProxyInstanceId), {
+      serviceName: "game-proxy",
+      instanceId: gameProxyInstanceId,
+      name: "admin",
+      protocol: "http",
+      host: gameProxy.host,
+      port: gameProxy.adminPort
+    });
+
+    for (const discoverGameServerAdminEndpoints of [
+      discoverAuthGameServerAdminEndpoints,
+      discoverAdminApiGameServerAdminEndpoints,
+      discoverMailGameServerAdminEndpoints
+    ]) {
+      const endpoints = await discoverGameServerAdminEndpoints(redis, registryKeyPrefix);
+      assertFlatEndpoint(findEndpoint(endpoints, manualGameServerInstanceId), {
+        serviceName: "game-server",
+        instanceId: manualGameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: manualEndpoints.gameServer.adminHost,
+        port: manualEndpoints.gameServer.adminPort
+      });
+      assertFlatEndpoint(findEndpoint(endpoints, gameServerInstanceId), {
+        serviceName: "game-server",
+        instanceId: gameServerInstanceId,
+        name: "admin",
+        protocol: "tcp",
+        host: gameServer.host,
+        port: gameServer.adminPort
+      });
+    }
+
+    const adminApiDiscovery = createAdminApiRegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    const adminApiSnapshot = await adminApiDiscovery.refreshSnapshot("game-proxy", {
+      endpointName: "admin",
+      kind: "all_endpoints",
+      refreshIntervalMs: 0
+    });
+    assert.equal(adminApiSnapshot.ok, true);
+    assert.ok(
+      adminApiSnapshot.value.some(({ instance, endpoint: discoveredEndpoint }) =>
+        instance.id === manualGameProxyInstanceId &&
+        discoveredEndpoint.name === "admin" &&
+        discoveredEndpoint.protocol === "http" &&
+        discoveredEndpoint.visibility === "admin" &&
+        discoveredEndpoint.host === manualEndpoints.gameProxy.adminHost &&
+        discoveredEndpoint.port === manualEndpoints.gameProxy.adminPort
+      ),
+      "expected admin-api discovery refresh snapshot to include manual game-proxy.admin"
+    );
+    adminApiDiscovery.stop();
+
+    const authLogin = await waitFor(async () => {
+      const payload = await fetchGuestLogin(authServer.baseUrl, randomId("registry-manual-login"));
+      return payload.services?.game?.port === manualEndpoints.gameProxy.clientPort ? payload : false;
+    }, "auth-http to discover manual game-proxy.client among multiple instances");
+    assert.deepEqual(authLogin.services.game, {
+      host: manualEndpoints.gameProxy.host,
+      port: manualEndpoints.gameProxy.clientPort,
+      protocol: "kcp"
+    });
+    assert.deepEqual(authLogin.services.mail, {
+      host: manualEndpoints.mailService.host,
+      port: manualEndpoints.mailService.httpPort,
+      protocol: "http"
+    });
+    assert.equal(authLogin.gameProxyHost, manualEndpoints.gameProxy.host);
+    assert.equal(authLogin.gameProxyPort, manualEndpoints.gameProxy.clientPort);
+
+    assert.equal(
+      await registryKeyExists("match-service", manualMatchServiceInstanceId),
+      false
+    );
+  } finally {
+    await redis.quit();
+  }
 });
