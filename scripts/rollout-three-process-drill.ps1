@@ -465,6 +465,7 @@ function selectEndpoint(instance, endpointName, protocols, label) {
     host: endpoint.host,
     port: endpoint.port,
     url: endpoint.protocol === "http" || endpoint.protocol === "https" ? `${endpoint.protocol}://${endpoint.host}:${endpoint.port}` : "",
+    source: "registry",
     metadata: endpoint.metadata || {}
   };
 }
@@ -496,6 +497,7 @@ function selectSingletonEndpoint(instances, requestedInstanceId, endpointName, p
     host: endpoint.host,
     port: endpoint.port,
     url: endpoint.protocol === "http" || endpoint.protocol === "https" ? `${endpoint.protocol}://${endpoint.host}:${endpoint.port}` : "",
+    source: "registry",
     metadata: endpoint.metadata || {}
   };
 }
@@ -911,6 +913,30 @@ function Write-RunSummary {
     }
 }
 
+function New-EndpointResolutionReport {
+    param(
+        [Parameter(Mandatory=$false)]$Endpoint,
+        [Parameter(Mandatory=$false)][AllowEmptyString()][string]$RegistrySource = ""
+    )
+
+    if ($null -eq $Endpoint) {
+        return $null
+    }
+
+    $source = if ($Endpoint.source) { $Endpoint.source } else { $script:Discovery.mode }
+    $url = if ($Endpoint.url) { $Endpoint.url } else { "" }
+    return [pscustomobject]@{
+        instanceId = $Endpoint.instanceId
+        endpointName = $Endpoint.endpointName
+        protocol = $Endpoint.protocol
+        host = $Endpoint.host
+        port = if ($null -ne $Endpoint.port) { [int]$Endpoint.port } else { $null }
+        url = $url
+        source = $source
+        registrySource = if ($source -eq "registry") { $RegistrySource } else { $null }
+    }
+}
+
 function New-ResolvedEndpointsReport {
     if ($null -eq $script:Discovery) {
         return $null
@@ -922,6 +948,19 @@ function New-ResolvedEndpointsReport {
         authHttp = $script:Discovery.authHttp.url
         gameProxyAdmin = $script:Discovery.gameProxyAdmin.url
         source = $script:Discovery.mode
+        discoverySource = $script:Discovery.source
+        endpointSources = [pscustomobject]@{
+            oldGameServerAdmin = $script:Discovery.oldGameServerAdmin.source
+            newGameServerAdmin = $script:Discovery.newGameServerAdmin.source
+            authHttp = $script:Discovery.authHttp.source
+            gameProxyAdmin = $script:Discovery.gameProxyAdmin.source
+        }
+        endpoints = [pscustomobject]@{
+            oldGameServerAdmin = New-EndpointResolutionReport -Endpoint $script:Discovery.oldGameServerAdmin -RegistrySource $script:Discovery.source
+            newGameServerAdmin = New-EndpointResolutionReport -Endpoint $script:Discovery.newGameServerAdmin -RegistrySource $script:Discovery.source
+            authHttp = New-EndpointResolutionReport -Endpoint $script:Discovery.authHttp -RegistrySource $script:Discovery.source
+            gameProxyAdmin = New-EndpointResolutionReport -Endpoint $script:Discovery.gameProxyAdmin -RegistrySource $script:Discovery.source
+        }
     }
 }
 
