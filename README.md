@@ -20,12 +20,14 @@ mail-service -> Core NATS -> chat-server
 announce-service / mail-service / game-server / game-proxy -> service registry
 ```
 
+正式玩家入口是 `auth-http` 和 `game-proxy`。`chat-server`、`match-service`、`mail-service`、`announce-service` 等服务默认作为内网能力服务部署；测试、预发和线上环境的跨服务消费者应通过 Redis service registry endpoint 发现这些服务，不应把固定端口表或静态上游配置作为内部服务直连依据。
+
 当前已经稳定落地的能力：
 
 - 多服务 monorepo 基本形态已完成。
 - 登录、access token、game ticket、游戏接入、游戏逻辑、后台、聊天、匹配、邮件、公告都有独立服务。
 - `game-server` 已有房间生命周期、帧推进、配置加载、内部管理口和部分具体游戏逻辑。
-- `game-proxy` 已支持 KCP / TCP fallback、ticket 本地校验、静态上游和基于注册中心的动态发现。
+- `game-proxy` 已支持 KCP / TCP fallback、ticket 本地校验和基于注册中心的动态发现；静态上游仅保留为 development/local 调试或定位问题的方式。
 - `chat-server`、`mail-service`、`announce-service` 当前独立部署；`game-proxy` 不负责聊天、邮件或公告转发。
 - Redis 用于 session、ticket、限流、服务注册和 metrics 快照；Core NATS 用于邮件通知、session kick 和 metrics 采集通道。
 - PostgreSQL 用于账号、审计、游戏事件、公告、邮件等持久化数据。
@@ -71,21 +73,21 @@ docs/                 # 当前正式设计文档
 
 ## 服务与端口
 
-固定入口端口以 `apps/port.txt` 为准。`admin-web:3002` 是本地 Vite 开发端口，不属于后端入口端口清单；内部服务端口主要用于本地开发默认值，部署和联调时应优先看实际配置、环境变量和服务注册中心。
+固定入口端口以 `apps/port.txt` 为准。下表只表示本地开发默认监听或外部稳定入口；测试、预发和线上环境的内部跨服务访问应通过 Redis service registry endpoint 发现目标服务，不应按表内默认端口直连。`admin-web:3002` 是本地 Vite 开发端口，不属于后端入口端口清单。
 
 | 服务 | 默认端口 | 说明 |
 |------|----------|------|
-| `auth-http` | `3000` | 登录、session、ticket |
+| `auth-http` | `3000` | 正式玩家 HTTP 登录、session、ticket 入口 |
 | `admin-api` | `3001` | 管理后台 API |
 | `admin-web` | `3002` | 本地 Vite 管理前端 |
-| `game-proxy` | `4000` | 客户端游戏接入入口 |
-| `game-server` | `7000` | 游戏服玩家协议默认端口 |
-| `game-server admin` | `7500` | 内部管理口 |
+| `game-proxy` | `4000` | 正式玩家游戏接入入口 |
+| `game-server` | `7000` | 游戏服玩家协议本地默认监听；测试/预发/线上由接入层或服务发现路由 |
+| `game-server admin` | `7500` | 内部管理口本地默认监听 |
 | `game-proxy admin` | `7101` | 代理内部管理口，代码默认值 |
-| `chat-server` | `9001` | 内部聊天服务默认值 |
-| `match-service` | `9002` | 内部匹配服务默认值 |
-| `mail-service` | `9003` | 内部邮件服务默认值 |
-| `announce-service` | `9004` | 内部公告服务默认值 |
+| `chat-server` | `9001` | 内网聊天能力服务本地默认监听 |
+| `match-service` | `9002` | 内网匹配能力服务本地默认监听 |
+| `mail-service` | `9003` | 内网邮件能力服务本地默认监听 |
+| `announce-service` | `9004` | 内网公告能力服务本地默认监听 |
 
 ## 文档导航
 
@@ -215,14 +217,14 @@ npm run test:security
 
 mock-client 房间联调：
 
-主链路应经过 `game-proxy`。本地 TCP fallback 默认是 `game-proxy` 端口加 `10000`，即 `14000`：
+主链路应经过 `game-proxy`。本地 TCP fallback 默认是 `game-proxy` 端口加 `10000`，即 `14000`；该方式仅用于 development/local 联调，不作为测试、预发或线上准入路径：
 
 ```powershell
 npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-a
 npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-b
 ```
 
-下面是绕过 `game-proxy`、直连 `game-server:7000` 的调试方式，仅用于定位游戏服协议或房间逻辑问题：
+下面是绕过 `game-proxy`、直连 `game-server:7000` 的调试方式，仅用于本地定位游戏服协议或房间逻辑问题，不作为测试、预发或线上路径：
 
 ```powershell
 npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 7000 --room-id room-a
