@@ -71,6 +71,7 @@ export async function closeNestApp(app: INestApplication) {
   }
 
   registryClient?.stopHeartbeat?.();
+  registryClient?.stopDiscoveryRefresh?.();
 
   try {
     await registryClient?.deregister?.();

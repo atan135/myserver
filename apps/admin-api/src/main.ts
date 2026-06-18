@@ -11,6 +11,7 @@ export async function bootstrap() {
   try {
     await registryClient.register();
     registryClient.startHeartbeat(10);
+    registryClient.startDiscoveryRefresh?.();
   } catch (error: any) {
     log("error", "startup.registry_failed", { error: error.message });
   }

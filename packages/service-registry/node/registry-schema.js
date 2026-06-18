@@ -29,6 +29,7 @@ export const SERVICE_INSTANCE_SCHEMA_VERSION = 2;
 export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "local_socket"];
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
 export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 1000;
+export const DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS = 5000;
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
@@ -309,6 +310,7 @@ export class RegistryDiscoveryClient {
     this.now = typeof options.now === "function" ? options.now : () => Date.now();
     this.onParseError = typeof options.onParseError === "function" ? options.onParseError : null;
     this.cache = new Map();
+    this.refreshHandles = new Map();
   }
 
   async discoverInstances(serviceName) {
@@ -385,6 +387,47 @@ export class RegistryDiscoveryClient {
     return endpoints;
   }
 
+  watch(serviceName, options = {}) {
+    return this.getOrCreateRefreshHandle(serviceName, {
+      ...options,
+      autoStart: false
+    });
+  }
+
+  startRefresh(serviceName, options = {}) {
+    const handle = this.getOrCreateRefreshHandle(serviceName, options);
+    handle.start();
+    return handle;
+  }
+
+  async refreshSnapshot(serviceName, options = {}) {
+    const handle = this.getOrCreateRefreshHandle(serviceName, {
+      ...options,
+      autoStart: false
+    });
+    return handle.refreshSnapshot();
+  }
+
+  getRefreshSnapshot(serviceName, options = {}) {
+    const key = refreshSnapshotKey(this.registryKeyPrefix, serviceName, options);
+    return this.refreshHandles.get(key)?.getSnapshot();
+  }
+
+  stop(serviceName = null, options = {}) {
+    if (serviceName) {
+      const key = refreshSnapshotKey(this.registryKeyPrefix, serviceName, options);
+      const handle = this.refreshHandles.get(key);
+      handle?.stop();
+      this.refreshHandles.delete(key);
+      return;
+    }
+
+    for (const handle of this.refreshHandles.values()) {
+      handle.stop();
+    }
+    this.refreshHandles.clear();
+  }
+
   clearCache() {
     this.cache.clear();
   }
@@ -428,6 +471,168 @@ export class RegistryDiscoveryClient {
     };
     this.cache.set(key, entry);
     return entry;
+  }
+
+  getOrCreateRefreshHandle(serviceName, options = {}) {
+    const key = refreshSnapshotKey(this.registryKeyPrefix, serviceName, options);
+    let handle = this.refreshHandles.get(key);
+    if (!handle) {
+      handle = new RegistryDiscoveryRefreshHandle(this, normalizeRefreshSpec(serviceName, options));
+      this.refreshHandles.set(key, handle);
+    }
+    return handle;
+  }
+
+  async refreshInstancesUncached(serviceName) {
+    const instances = await scanServiceInstances(
+      this.redis,
+      serviceName,
+      this.registryKeyPrefix,
+      this.onParseError
+    );
+    const expiresAt = this.discoveryCacheTtlMs > 0 ? this.now() + this.discoveryCacheTtlMs : null;
+    this.clearCacheForService(serviceName);
+    this.setCached(discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName,
+      endpointName: "",
+      kind: "instances",
+      strategy: INSTANCE_DISCOVERY_STRATEGY
+    }), instances, expiresAt);
+    return { instances, expiresAt };
+  }
+
+  async loadRefreshValue(spec) {
+    const { instances, expiresAt } = await this.refreshInstancesUncached(spec.serviceName);
+    if (spec.kind === "instances") {
+      return instances;
+    }
+
+    if (spec.kind === "endpoint") {
+      const endpoint = discoverEndpoint(instances, spec.endpointName);
+      this.setCached(discoveryCacheKey({
+        prefix: this.registryKeyPrefix,
+        serviceName: spec.serviceName,
+        endpointName: spec.endpointName,
+        kind: "endpoint",
+        strategy: ENDPOINT_PICK_STRATEGY
+      }), endpoint, expiresAt);
+      return endpoint;
+    }
+
+    const endpoints = discoverAllEndpoints(instances, spec.endpointName);
+    this.setCached(discoveryCacheKey({
+      prefix: this.registryKeyPrefix,
+      serviceName: spec.serviceName,
+      endpointName: spec.endpointName,
+      kind: "all_endpoints",
+      strategy: ALL_ENDPOINTS_STRATEGY
+    }), endpoints, expiresAt);
+    return endpoints;
+  }
+
+  clearCacheForService(serviceName) {
+    const service = String(serviceName ?? "");
+    for (const key of this.cache.keys()) {
+      const parsed = parseDiscoveryCacheKey(key);
+      if (parsed && parsed.prefix === this.registryKeyPrefix && parsed.service === service) {
+        this.cache.delete(key);
+      }
+    }
+  }
+}
+
+export class RegistryDiscoveryRefreshHandle {
+  constructor(client, spec) {
+    this.client = client;
+    this.spec = spec;
+    this.timer = null;
+    this.snapshot = null;
+    this.refreshing = null;
+  }
+
+  start() {
+    if (this.timer || this.spec.refreshIntervalMs <= 0) {
+      return this;
+    }
+
+    if (this.spec.immediate) {
+      this.refreshSnapshot().catch(() => {});
+    }
+
+    this.timer = setInterval(() => {
+      this.refreshSnapshot().catch(() => {});
+    }, this.spec.refreshIntervalMs);
+    this.timer.unref?.();
+    return this;
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  isRunning() {
+    return Boolean(this.timer);
+  }
+
+  async refreshSnapshot() {
+    if (this.refreshing) {
+      return this.refreshing;
+    }
+
+    this.refreshing = this.doRefreshSnapshot().finally(() => {
+      this.refreshing = null;
+    });
+    return this.refreshing;
+  }
+
+  getSnapshot() {
+    if (!this.snapshot) {
+      return null;
+    }
+
+    return {
+      ...this.snapshot,
+      value: cloneDiscoveryValue(this.snapshot.value),
+      error: this.snapshot.error
+    };
+  }
+
+  async doRefreshSnapshot() {
+    try {
+      const value = await this.client.loadRefreshValue(this.spec);
+      const snapshot = {
+        ok: true,
+        value: cloneDiscoveryValue(value),
+        error: null,
+        updatedAt: this.client.now(),
+        failedAt: null
+      };
+      this.snapshot = snapshot;
+      return this.getSnapshot();
+    } catch (error) {
+      const previous = this.snapshot;
+      const retainedValue = this.spec.retainStaleOnError ? previous?.value : undefined;
+      this.snapshot = {
+        ok: false,
+        value: cloneDiscoveryValue(retainedValue),
+        error,
+        updatedAt: this.spec.retainStaleOnError ? previous?.updatedAt ?? null : null,
+        failedAt: this.client.now()
+      };
+      if (!this.spec.retainStaleOnError) {
+        this.client.clearCacheForService(this.spec.serviceName);
+      }
+      this.spec.onError?.(error, {
+        serviceName: this.spec.serviceName,
+        endpointName: this.spec.endpointName,
+        kind: this.spec.kind
+      });
+      throw error;
+    }
   }
 }
 
@@ -608,11 +813,41 @@ function normalizeDiscoveryCacheTtlMs(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DISCOVERY_CACHE_TTL_MS;
 }
 
+function normalizeDiscoveryRefreshIntervalMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS;
+}
+
 function normalizeDiscoveryOptions(options) {
   if (typeof options === "string") {
     return { registryKeyPrefix: options };
   }
   return options && typeof options === "object" ? options : {};
+}
+
+function normalizeRefreshSpec(serviceName, options = {}) {
+  const endpointName = String(options.endpointName ?? "");
+  let kind = String(options.kind ?? (endpointName ? "all_endpoints" : "instances"));
+  if (!["instances", "endpoint", "all_endpoints"].includes(kind)) {
+    kind = endpointName ? "all_endpoints" : "instances";
+  }
+  if (kind !== "instances" && !endpointName) {
+    throw new Error("endpointName is required for endpoint refresh");
+  }
+
+  return {
+    serviceName: String(serviceName ?? ""),
+    endpointName,
+    kind,
+    refreshIntervalMs: normalizeDiscoveryRefreshIntervalMs(options.refreshIntervalMs),
+    immediate: options.immediate !== false,
+    retainStaleOnError: options.retainStaleOnError === true,
+    onError: typeof options.onError === "function" ? options.onError : null
+  };
 }
 
 function discoveryCacheKey({ prefix, serviceName, endpointName, kind, strategy }) {
@@ -623,4 +858,42 @@ function discoveryCacheKey({ prefix, serviceName, endpointName, kind, strategy }
     kind,
     strategy
   });
+}
+
+function parseDiscoveryCacheKey(key) {
+  try {
+    const parsed = JSON.parse(key);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function refreshSnapshotKey(prefix, serviceName, options = {}) {
+  const spec = normalizeRefreshSpec(serviceName, options);
+  return JSON.stringify({
+    prefix: normalizeRegistryKeyPrefix(prefix),
+    service: spec.serviceName,
+    endpoint: spec.endpointName,
+    kind: spec.kind
+  });
+}
+
+function cloneDiscoveryValue(value) {
+  if (value === undefined || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneDiscoveryValue(item));
+  }
+  if (typeof value === "object") {
+    return {
+      ...value,
+      instance: value.instance ? cloneDiscoveryValue(value.instance) : value.instance,
+      endpoint: value.endpoint ? cloneDiscoveryValue(value.endpoint) : value.endpoint,
+      endpoints: Array.isArray(value.endpoints) ? cloneDiscoveryValue(value.endpoints) : value.endpoints,
+      metadata: isPlainObject(value.metadata) ? { ...value.metadata } : value.metadata
+    };
+  }
+  return value;
 }

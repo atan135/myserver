@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use redis::AsyncCommands;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::types::{ServiceEndpoint, ServiceInstance};
 
@@ -24,6 +25,112 @@ pub struct RegistryClient {
     heartbeat_ttl_secs: u64,
     discovery_cache_ttl: Duration,
     discovery_cache: Mutex<DiscoveryCache>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoverySnapshot {
+    pub service_name: String,
+    pub instances: Vec<ServiceInstance>,
+    pub updated_at: Option<Instant>,
+    pub failed_at: Option<Instant>,
+    pub error: Option<String>,
+}
+
+impl DiscoverySnapshot {
+    pub fn ok(service_name: impl Into<String>, instances: Vec<ServiceInstance>) -> Self {
+        Self {
+            service_name: service_name.into(),
+            instances,
+            updated_at: Some(Instant::now()),
+            failed_at: None,
+            error: None,
+        }
+    }
+
+    pub fn failure(
+        service_name: impl Into<String>,
+        instances: Vec<ServiceInstance>,
+        updated_at: Option<Instant>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            service_name: service_name.into(),
+            instances,
+            updated_at,
+            failed_at: Some(Instant::now()),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoveryWatchConfig {
+    pub interval: Duration,
+    pub refresh_immediately: bool,
+    pub retain_stale_on_error: bool,
+}
+
+impl DiscoveryWatchConfig {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            refresh_immediately: true,
+            retain_stale_on_error: false,
+        }
+    }
+
+    pub fn retain_stale_on_error(mut self, retain: bool) -> Self {
+        self.retain_stale_on_error = retain;
+        self
+    }
+
+    pub fn refresh_immediately(mut self, refresh_immediately: bool) -> Self {
+        self.refresh_immediately = refresh_immediately;
+        self
+    }
+}
+
+impl Default for DiscoveryWatchConfig {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5))
+    }
+}
+
+pub struct DiscoveryWatch {
+    snapshot: Arc<RwLock<DiscoverySnapshot>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DiscoveryWatch {
+    pub async fn snapshot(&self) -> DiscoverySnapshot {
+        self.snapshot.read().await.clone()
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+        self.task = None;
+    }
+
+    pub async fn stop_and_wait(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for DiscoveryWatch {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
 }
 
 impl RegistryClient {
@@ -190,6 +297,73 @@ impl RegistryClient {
             .map(|(instances, _)| instances)
     }
 
+    pub async fn refresh_discovery_snapshot(
+        &self,
+        service_name: &str,
+    ) -> Result<DiscoverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+        let instances = self.refresh_discovery_instances(service_name).await?;
+        Ok(DiscoverySnapshot::ok(service_name, instances))
+    }
+
+    pub fn watch_discovery<F, Fut>(
+        self,
+        service_name: impl Into<String>,
+        config: DiscoveryWatchConfig,
+        on_refresh: F,
+    ) -> DiscoveryWatch
+    where
+        F: Fn(DiscoverySnapshot) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let service_name = service_name.into();
+        let snapshot = Arc::new(RwLock::new(DiscoverySnapshot {
+            service_name: service_name.clone(),
+            instances: Vec::new(),
+            updated_at: None,
+            failed_at: None,
+            error: None,
+        }));
+        let snapshot_for_task = Arc::clone(&snapshot);
+        let on_refresh = Arc::new(on_refresh);
+
+        let task = tokio::spawn(async move {
+            if config.refresh_immediately {
+                refresh_watch_once(
+                    &self,
+                    &service_name,
+                    config.retain_stale_on_error,
+                    &snapshot_for_task,
+                    &on_refresh,
+                )
+                .await;
+            }
+
+            let interval = if config.interval.is_zero() {
+                Duration::from_secs(1)
+            } else {
+                config.interval
+            };
+            let start = tokio::time::Instant::now() + interval;
+            let mut ticker = tokio::time::interval_at(start, interval);
+            loop {
+                ticker.tick().await;
+                refresh_watch_once(
+                    &self,
+                    &service_name,
+                    config.retain_stale_on_error,
+                    &snapshot_for_task,
+                    &on_refresh,
+                )
+                .await;
+            }
+        });
+
+        DiscoveryWatch {
+            snapshot,
+            task: Some(task),
+        }
+    }
+
     async fn discover_uncached(
         &self,
         service_name: &str,
@@ -245,6 +419,30 @@ impl RegistryClient {
         }
 
         instances.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(instances)
+    }
+
+    async fn refresh_discovery_instances(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+        let instances = self.discover_uncached(service_name).await?;
+        let expires_at = if self.discovery_cache_ttl.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + self.discovery_cache_ttl)
+        };
+        self.clear_cached_discovery_for_service(service_name).await;
+        self.put_cached_discovery_until(
+            DiscoveryCacheKey::instances(
+                &self.key_prefix,
+                service_name,
+                INSTANCE_DISCOVERY_STRATEGY,
+            ),
+            DiscoveryCacheValue::Instances(instances.clone()),
+            expires_at,
+        )
+        .await;
         Ok(instances)
     }
 
@@ -447,6 +645,46 @@ impl RegistryClient {
     async fn clear_discovery_cache(&self) {
         self.discovery_cache.lock().await.clear();
     }
+
+    async fn clear_cached_discovery_for_service(&self, service_name: &str) {
+        self.discovery_cache
+            .lock()
+            .await
+            .clear_service(&self.key_prefix, service_name);
+    }
+}
+
+async fn refresh_watch_once<F, Fut>(
+    client: &RegistryClient,
+    service_name: &str,
+    retain_stale_on_error: bool,
+    snapshot: &Arc<RwLock<DiscoverySnapshot>>,
+    on_refresh: &Arc<F>,
+) where
+    F: Fn(DiscoverySnapshot) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let next_snapshot = match client.refresh_discovery_snapshot(service_name).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if !retain_stale_on_error {
+                client.clear_cached_discovery_for_service(service_name).await;
+            }
+            let previous = snapshot.read().await.clone();
+            let instances = if retain_stale_on_error {
+                previous.instances
+            } else {
+                Vec::new()
+            };
+            DiscoverySnapshot::failure(service_name, instances, previous.updated_at, error.to_string())
+        }
+    };
+
+    {
+        let mut guard = snapshot.write().await;
+        *guard = next_snapshot.clone();
+    }
+    on_refresh(next_snapshot).await;
 }
 
 fn default_key_prefix() -> String {
@@ -596,6 +834,11 @@ impl DiscoveryCache {
 
     fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    fn clear_service(&mut self, prefix: &str, service_name: &str) {
+        self.entries
+            .retain(|key, _| key.prefix != prefix || key.service_name != service_name);
     }
 }
 
@@ -819,5 +1062,54 @@ mod tests {
             cache.get(&key, now),
             Some(DiscoveryCacheValue::Endpoint(None))
         ));
+    }
+
+    #[test]
+    fn discovery_cache_clear_service_keeps_other_services_and_prefixes() {
+        let mut cache = DiscoveryCache::default();
+        let now = Instant::now();
+        let endpoint = ServiceEndpoint::tcp("admin", "127.0.0.1", 7500, "admin");
+        let game_admin =
+            DiscoveryCacheKey::endpoint("test:", "game-server", "admin", ENDPOINT_PICK_STRATEGY);
+        let proxy_admin =
+            DiscoveryCacheKey::endpoint("test:", "game-proxy", "admin", ENDPOINT_PICK_STRATEGY);
+        let default_game_admin =
+            DiscoveryCacheKey::endpoint("", "game-server", "admin", ENDPOINT_PICK_STRATEGY);
+
+        cache.put(
+            game_admin.clone(),
+            DiscoveryCacheValue::Endpoint(Some(endpoint.clone())),
+            now,
+            Duration::from_secs(1),
+        );
+        cache.put(
+            proxy_admin.clone(),
+            DiscoveryCacheValue::Endpoint(Some(endpoint.clone())),
+            now,
+            Duration::from_secs(1),
+        );
+        cache.put(
+            default_game_admin.clone(),
+            DiscoveryCacheValue::Endpoint(Some(endpoint)),
+            now,
+            Duration::from_secs(1),
+        );
+
+        cache.clear_service("test:", "game-server");
+
+        assert!(cache.get(&game_admin, now).is_none());
+        assert!(cache.get(&proxy_admin, now).is_some());
+        assert!(cache.get(&default_game_admin, now).is_some());
+    }
+
+    #[test]
+    fn discovery_watch_config_builders_are_explicit() {
+        let config = DiscoveryWatchConfig::new(Duration::from_millis(50))
+            .retain_stale_on_error(true)
+            .refresh_immediately(false);
+
+        assert_eq!(config.interval, Duration::from_millis(50));
+        assert!(config.retain_stale_on_error);
+        assert!(!config.refresh_immediately);
     }
 }

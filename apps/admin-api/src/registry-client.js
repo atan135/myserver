@@ -1,5 +1,7 @@
 import { log } from "./logger.js";
 import {
+  DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS,
+  getRegistryDiscoveryClient,
   createServiceInstancePayload,
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
@@ -31,6 +33,8 @@ export class RegistryClient {
     this.serviceName = config.serviceName;
     this.registryKeyPrefix = config.registryKeyPrefix || "";
     this.heartbeatInterval = null;
+    this.discoveryClient = createRegistryDiscoveryClient(redis, config);
+    this.discoveryRefreshHandles = [];
   }
 
   async register() {
@@ -128,11 +132,67 @@ export class RegistryClient {
       this.heartbeatInterval = null;
     }
   }
+
+  startDiscoveryRefresh(intervalMs = this.config.registryDiscoveryRefreshIntervalMs) {
+    if (!this.config.registryDiscoveryEnabled) {
+      return [];
+    }
+
+    this.stopDiscoveryRefresh();
+
+    const refreshIntervalMs = normalizeRefreshIntervalMs(intervalMs);
+    const onError = (error, context) => {
+      log("warn", "registry.discovery_refresh_failed", {
+        service: context.serviceName,
+        endpoint: context.endpointName,
+        error: error.message
+      });
+    };
+
+    this.discoveryRefreshHandles = [
+      this.discoveryClient.startRefresh(GAME_SERVER_SERVICE_NAME, {
+        endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
+        kind: "all_endpoints",
+        refreshIntervalMs,
+        onError
+      }),
+      this.discoveryClient.startRefresh(GAME_PROXY_SERVICE_NAME, {
+        endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
+        kind: "all_endpoints",
+        refreshIntervalMs,
+        onError
+      })
+    ];
+
+    log("info", "registry.discovery_refresh_started", {
+      interval_ms: refreshIntervalMs,
+      services: [GAME_SERVER_SERVICE_NAME, GAME_PROXY_SERVICE_NAME]
+    });
+
+    return this.discoveryRefreshHandles;
+  }
+
+  stopDiscoveryRefresh() {
+    this.discoveryClient.stop(GAME_SERVER_SERVICE_NAME, {
+      endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
+      kind: "all_endpoints"
+    });
+    this.discoveryClient.stop(GAME_PROXY_SERVICE_NAME, {
+      endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
+      kind: "all_endpoints"
+    });
+    this.discoveryRefreshHandles = [];
+  }
 }
 
 export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
-  const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, registryKeyPrefix);
-  return discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
+  const candidates = await discoverAdminEndpointCandidates(
+    redis,
+    registryKeyPrefix,
+    GAME_SERVER_SERVICE_NAME,
+    GAME_SERVER_ADMIN_ENDPOINT_NAME
+  );
+  return candidates
     .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
@@ -150,8 +210,13 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
 }
 
 export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix = "") {
-  const instances = await discoverServiceInstances(redis, GAME_PROXY_SERVICE_NAME, registryKeyPrefix);
-  return discoverAllEndpoints(instances, GAME_PROXY_ADMIN_ENDPOINT_NAME)
+  const candidates = await discoverAdminEndpointCandidates(
+    redis,
+    registryKeyPrefix,
+    GAME_PROXY_SERVICE_NAME,
+    GAME_PROXY_ADMIN_ENDPOINT_NAME
+  );
+  return candidates
     .filter(({ endpoint }) => GAME_PROXY_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_PROXY_SERVICE_NAME,
@@ -169,9 +234,7 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
 }
 
 export async function discoverServiceInstances(redis, serviceName, registryKeyPrefix = "") {
-  const options = typeof registryKeyPrefix === "object"
-    ? registryKeyPrefix
-    : { registryKeyPrefix };
+  const options = normalizeAdminDiscoveryOptions(registryKeyPrefix);
 
   return discoverRegistryServiceInstances(redis, serviceName, {
     ...options,
@@ -183,4 +246,60 @@ export async function discoverServiceInstances(redis, serviceName, registryKeyPr
       });
     })
   });
+}
+
+export function createRegistryDiscoveryClient(redis, configOrOptions = {}) {
+  const options = normalizeAdminDiscoveryOptions(configOrOptions);
+  return getRegistryDiscoveryClient(redis, {
+    ...options,
+    onParseError: options.onParseError || ((error, context) => {
+      log("warn", "registry.discovery_parse_failed", {
+        service: context.serviceName,
+        instance: context.instanceId,
+        error: error.message
+      });
+    })
+  });
+}
+
+export function normalizeAdminDiscoveryOptions(configOrOptions = "") {
+  if (typeof configOrOptions === "string") {
+    return { registryKeyPrefix: configOrOptions };
+  }
+
+  const options = configOrOptions && typeof configOrOptions === "object" ? configOrOptions : {};
+  return {
+    registryKeyPrefix: options.registryKeyPrefix || "",
+    discoveryCacheTtlMs: options.discoveryCacheTtlMs ?? options.registryDiscoveryCacheTtlMs,
+    onParseError: options.onParseError
+  };
+}
+
+async function discoverAdminEndpointCandidates(redis, configOrOptions, serviceName, endpointName) {
+  const options = normalizeAdminDiscoveryOptions(configOrOptions);
+  const client = createRegistryDiscoveryClient(redis, options);
+  const snapshot = client.getRefreshSnapshot(serviceName, {
+    endpointName,
+    kind: "all_endpoints"
+  });
+
+  if (snapshot?.ok) {
+    return snapshot.value || [];
+  }
+
+  if (snapshot && !snapshot.ok) {
+    throw snapshot.error || new Error(`service discovery refresh failed: service=${serviceName}, endpoint=${endpointName}`);
+  }
+
+  const instances = await discoverServiceInstances(redis, serviceName, options);
+  return discoverAllEndpoints(instances, endpointName);
+}
+
+function normalizeRefreshIntervalMs(value) {
+  if (value === null || value === undefined || value === "") {
+    return DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS;
 }

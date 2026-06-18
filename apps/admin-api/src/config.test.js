@@ -31,6 +31,8 @@ const CONFIG_ENV_KEYS = [
   "REGISTRY_ENABLED",
   "DISCOVERY_REQUIRED",
   "REGISTRY_KEY_PREFIX",
+  "REGISTRY_DISCOVERY_CACHE_TTL_MS",
+  "REGISTRY_DISCOVERY_REFRESH_INTERVAL_MS",
   "REDIS_KEY_PREFIX",
   "APP_ENV",
   "SERVICE_NAME",
@@ -266,6 +268,24 @@ test("admin-api reads registry key prefix with Redis prefix fallback", async () 
 
   await withEnv({ REDIS_KEY_PREFIX: "redis:" }, (config) => {
     assert.equal(config.registryKeyPrefix, "redis:");
+  });
+});
+
+test("admin-api reads discovery cache ttl and refresh interval", async () => {
+  await withEnv({
+    REGISTRY_DISCOVERY_CACHE_TTL_MS: "0",
+    REGISTRY_DISCOVERY_REFRESH_INTERVAL_MS: "2500"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryCacheTtlMs, 0);
+    assert.equal(config.registryDiscoveryRefreshIntervalMs, 2500);
+  });
+
+  await withEnv({
+    REGISTRY_DISCOVERY_CACHE_TTL_MS: "-1",
+    REGISTRY_DISCOVERY_REFRESH_INTERVAL_MS: "0"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryCacheTtlMs, 1000);
+    assert.equal(config.registryDiscoveryRefreshIntervalMs, 5000);
   });
 });
 

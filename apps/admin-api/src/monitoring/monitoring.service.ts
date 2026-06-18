@@ -359,7 +359,7 @@ export class MonitoringService {
       ];
     }
 
-    return discoverGameServerAdminEndpoints(this.redis, this.config.registryKeyPrefix || "");
+    return discoverGameServerAdminEndpoints(this.redis, this.config);
   }
 
   private async getGameProxyAdminEndpoints(): Promise<any[]> {
@@ -386,7 +386,7 @@ export class MonitoringService {
       ];
     }
 
-    return discoverGameProxyAdminEndpoints(this.redis, this.config.registryKeyPrefix || "");
+    return discoverGameProxyAdminEndpoints(this.redis, this.config);
   }
 
   private async getInstanceHeartbeats(serviceName: string): Promise<Map<string, number>> {

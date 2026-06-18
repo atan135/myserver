@@ -20,6 +20,8 @@ function createRedisCapture() {
   return {
     hashes,
     keys,
+    stats: { scanCount: 0 },
+    failScan: false,
     async hset(key, field, value) {
       hashes.set(`${key}:${field}`, value);
     },
@@ -30,6 +32,10 @@ function createRedisCapture() {
       return keys.has(key) ? 1 : 0;
     },
     async scan(cursor, _match, pattern) {
+      if (this.failScan) {
+        throw new Error("SCAN_FAILED");
+      }
+      this.stats.scanCount += 1;
       if (cursor !== "0") {
         return ["0", []];
       }
@@ -373,6 +379,197 @@ test("discoverGameProxyAdminEndpoints returns healthy http admin endpoints for a
       { instanceId: "game-proxy-b", protocol: "http", host: "10.0.1.2", port: 7102 }
     ]
   );
+});
+
+test("admin discovery endpoints can be served from refresh snapshots", async () => {
+  const redis = createRedisCapture();
+  const instances = [
+    {
+      id: "game-server-a",
+      schema_version: 2,
+      name: "game-server",
+      host: "10.0.0.1",
+      port: 7000,
+      admin_port: 7500,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.0.1",
+          port: 7500,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    },
+    {
+      id: "game-server-b",
+      schema_version: 2,
+      name: "game-server",
+      host: "10.0.0.2",
+      port: 7000,
+      admin_port: 7501,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.0.2",
+          port: 7501,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    }
+  ];
+
+  for (const instance of instances) {
+    redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+  }
+
+  const client = new RegistryClient(redis, createConfig({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRefreshIntervalMs: 1000
+  }));
+  const handles = client.startDiscoveryRefresh();
+  try {
+    await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
+    const scanCountAfterRefresh = redis.stats.scanCount;
+    redis.failScan = true;
+
+    const endpoints = await discoverGameServerAdminEndpoints(redis, {
+      registryKeyPrefix: "",
+      registryDiscoveryCacheTtlMs: 1000
+    });
+
+    assert.deepEqual(
+      endpoints.map((endpoint) => [endpoint.instanceId, endpoint.host, endpoint.port]),
+      [
+        ["game-server-a", "10.0.0.1", 7500],
+        ["game-server-b", "10.0.0.2", 7501]
+      ]
+    );
+    assert.equal(redis.stats.scanCount, scanCountAfterRefresh);
+  } finally {
+    client.stopDiscoveryRefresh();
+  }
+});
+
+test("admin discovery endpoints use refresh snapshot with non-default cache ttl config", async () => {
+  const redis = createRedisCapture();
+  const instance = {
+    id: "game-server-a",
+    schema_version: 2,
+    name: "game-server",
+    host: "10.0.0.1",
+    port: 7000,
+    admin_port: 7500,
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host: "10.0.0.1",
+        port: 7500,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+  redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+
+  const config = createConfig({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryCacheTtlMs: 2500,
+    registryDiscoveryRefreshIntervalMs: 1000
+  });
+  const client = new RegistryClient(redis, config);
+  const handles = client.startDiscoveryRefresh();
+  try {
+    await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
+    const scanCountAfterRefresh = redis.stats.scanCount;
+    redis.failScan = true;
+
+    const endpoints = await discoverGameServerAdminEndpoints(redis, config);
+
+    assert.deepEqual(endpoints.map((endpoint) => endpoint.instanceId), ["game-server-a"]);
+    assert.equal(redis.stats.scanCount, scanCountAfterRefresh);
+  } finally {
+    client.stopDiscoveryRefresh();
+  }
+});
+
+test("admin discovery refresh failure does not serve stale snapshot endpoints", async () => {
+  const redis = createRedisCapture();
+  const instance = {
+    id: "game-server-a",
+    schema_version: 2,
+    name: "game-server",
+    host: "10.0.0.1",
+    port: 7000,
+    admin_port: 7500,
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host: "10.0.0.1",
+        port: 7500,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+  redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+
+  const client = new RegistryClient(redis, createConfig({
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRefreshIntervalMs: 1000
+  }));
+  const handles = client.startDiscoveryRefresh();
+  try {
+    await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
+    redis.failScan = true;
+    await assert.rejects(() => handles[0].refreshSnapshot(), /SCAN_FAILED/);
+
+    await assert.rejects(
+      () => discoverGameServerAdminEndpoints(redis, {
+        registryKeyPrefix: "",
+        registryDiscoveryCacheTtlMs: 1000
+      }),
+      /SCAN_FAILED/
+    );
+  } finally {
+    client.stopDiscoveryRefresh();
+  }
 });
 
 test("RegistryClient metadata falls back to dev build version and empty allowlist", async () => {

@@ -38,6 +38,7 @@ function createRedisCapture() {
     hashes,
     heartbeats,
     stats,
+    failScan: false,
     addInstance(prefix, serviceName, instance) {
       hashes.set(registryInstanceKey(prefix, serviceName, instance.id), JSON.stringify(instance));
       heartbeats.add(registryHeartbeatKey(prefix, serviceName, instance.id));
@@ -45,7 +46,14 @@ function createRedisCapture() {
     replaceInstance(prefix, serviceName, instance) {
       this.addInstance(prefix, serviceName, instance);
     },
+    removeInstance(prefix, serviceName, instanceId) {
+      hashes.delete(registryInstanceKey(prefix, serviceName, instanceId));
+      heartbeats.delete(registryHeartbeatKey(prefix, serviceName, instanceId));
+    },
     async scan(cursor, _match, pattern) {
+      if (this.failScan) {
+        throw new Error("SCAN_FAILED");
+      }
       stats.scanCount += 1;
       if (cursor !== "0") {
         return ["0", []];
@@ -167,3 +175,152 @@ test("RegistryDiscoveryClient can disable discovery cache", async () => {
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
   assert.equal(redis.stats.scanCount, 2);
 });
+
+test("RegistryDiscoveryClient refreshSnapshot updates watched endpoint snapshots", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+
+  let snapshot = await client.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(snapshot.value.map(({ endpoint }) => endpoint.port), [7500]);
+  assert.equal(redis.stats.scanCount, 1);
+
+  redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
+  redis.addInstance("", "game-server", createInstance("game-server", "game-b", "admin", 7502));
+  snapshot = await client.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+
+  assert.deepEqual(snapshot.value.map(({ instance, endpoint }) => [instance.id, endpoint.port]), [
+    ["game-a", 7501],
+    ["game-b", 7502]
+  ]);
+  assert.equal(redis.stats.scanCount, 2);
+});
+
+test("RegistryDiscoveryClient stop prevents further interval refreshes", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+  const handle = client.startRefresh("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints",
+    refreshIntervalMs: 10
+  });
+
+  await sleep(35);
+  assert.ok(redis.stats.scanCount > 0);
+  handle.stop();
+  const scanCountAfterStop = redis.stats.scanCount;
+  redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
+
+  await sleep(35);
+
+  assert.equal(redis.stats.scanCount, scanCountAfterStop);
+  assert.equal(handle.isRunning(), false);
+  assert.notEqual(handle.getSnapshot()?.value?.[0]?.endpoint?.port, 7501);
+});
+
+test("RegistryDiscoveryClient refresh failure clears watched snapshot by default", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+
+  await client.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+  redis.failScan = true;
+
+  await assert.rejects(
+    () => client.refreshSnapshot("game-server", {
+      endpointName: "admin",
+      kind: "all_endpoints"
+    }),
+    /SCAN_FAILED/
+  );
+
+  const snapshot = client.getRefreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+  assert.equal(snapshot.ok, false);
+  assert.equal(snapshot.value, undefined);
+  assert.equal(snapshot.error.message, "SCAN_FAILED");
+});
+
+test("RegistryDiscoveryClient can retain watched snapshot on refresh failure", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+
+  await client.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints",
+    retainStaleOnError: true
+  });
+  redis.failScan = true;
+
+  await assert.rejects(
+    () => client.refreshSnapshot("game-server", {
+      endpointName: "admin",
+      kind: "all_endpoints",
+      retainStaleOnError: true
+    }),
+    /SCAN_FAILED/
+  );
+
+  const snapshot = client.getRefreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints",
+    retainStaleOnError: true
+  });
+  assert.equal(snapshot.ok, false);
+  assert.deepEqual(snapshot.value.map(({ instance, endpoint }) => [instance.id, endpoint.port]), [
+    ["game-a", 7500]
+  ]);
+});
+
+test("RegistryDiscoveryClient refresh snapshots separate services endpoints and prefixes", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-admin-a", "admin", 7500));
+  redis.addInstance("", "game-server", createInstance("game-server", "game-client-a", "client", 7000));
+  redis.addInstance("", "game-proxy", createInstance("game-proxy", "proxy-a", "admin", 7101));
+  redis.addInstance("test:", "game-server", createInstance("game-server", "game-b", "admin", 7600));
+  const defaultClient = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+  const prefixedClient = new RegistryDiscoveryClient(redis, {
+    registryKeyPrefix: "test:",
+    discoveryCacheTtlMs: 1000
+  });
+
+  const gameAdmin = await defaultClient.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+  const gameClient = await defaultClient.refreshSnapshot("game-server", {
+    endpointName: "client",
+    kind: "all_endpoints"
+  });
+  const proxyAdmin = await defaultClient.refreshSnapshot("game-proxy", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+  const prefixedGameAdmin = await prefixedClient.refreshSnapshot("game-server", {
+    endpointName: "admin",
+    kind: "all_endpoints"
+  });
+
+  assert.deepEqual(gameAdmin.value.map(({ endpoint }) => endpoint.port), [7500]);
+  assert.deepEqual(gameClient.value.map(({ endpoint }) => endpoint.port), [7000]);
+  assert.deepEqual(proxyAdmin.value.map(({ endpoint }) => endpoint.port), [7101]);
+  assert.deepEqual(prefixedGameAdmin.value.map(({ endpoint }) => endpoint.port), [7600]);
+});
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

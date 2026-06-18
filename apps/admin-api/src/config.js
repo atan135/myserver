@@ -58,6 +58,11 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseNonNegativeIntegerWithFallback(value, fallback) {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function firstNonEmptyEnv(names) {
   for (const name of names) {
     const value = process.env[name];
@@ -246,6 +251,14 @@ export function getConfig() {
     ),
     registryDiscoveryEnabled,
     registryDiscoveryRequired,
+    registryDiscoveryCacheTtlMs: parseNonNegativeIntegerWithFallback(
+      process.env.REGISTRY_DISCOVERY_CACHE_TTL_MS,
+      1000
+    ),
+    registryDiscoveryRefreshIntervalMs: parsePositiveIntegerWithFallback(
+      process.env.REGISTRY_DISCOVERY_REFRESH_INTERVAL_MS,
+      5000
+    ),
     localDiscoveryFallbackEnabled,
     legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
