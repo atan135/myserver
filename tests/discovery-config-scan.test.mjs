@@ -100,6 +100,37 @@ test("repository game-server strict templates omit MATCH_SERVICE_ADDR while loca
   );
 });
 
+test("repository auth-http strict templates omit GAME_PROXY direct config while local fallback remains allowed", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const authHttpStrictFiles = result.strictFiles.filter((file) => file.startsWith("apps/auth-http/"));
+
+  assert.equal(result.ok, true);
+  assert.ok(authHttpStrictFiles.includes("apps/auth-http/.env.test.example"));
+  assert.ok(authHttpStrictFiles.includes("apps/auth-http/.env.production.example"));
+
+  for (const file of authHttpStrictFiles) {
+    const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+    for (const variable of ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]) {
+      assert.equal(
+        hasActiveConfigAssignment(content, variable),
+        false,
+        `${file} must not define ${variable}`
+      );
+    }
+  }
+
+  for (const variable of ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]) {
+    assert.ok(
+      result.allowedLocalFallbacks.some(
+        (item) =>
+          item.file === "apps/auth-http/.env.example" &&
+          item.variable === variable &&
+          item.service === "auth-http"
+      )
+    );
+  }
+});
+
 test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging templates", () => {
   const tempDir = createTempRepo();
   try {
@@ -154,6 +185,75 @@ test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging
       assert.equal(violation.service, "game-server");
       assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
       assert.match(violation.reason, /match-service\.grpc/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("auth-http GAME_PROXY direct config is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "apps/auth-http/.env.example",
+      [
+        "NODE_ENV=development",
+        "REGISTRY_ENABLED=true",
+        "DISCOVERY_REQUIRED=true",
+        "# Local fallback only: used only when registry discovery is disabled.",
+        "# Do not use for strict/test/production/staging discovery.",
+        "GAME_PROXY_HOST=127.0.0.1",
+        "GAME_PROXY_PORT=4000"
+      ].join("\n")
+    );
+
+    for (const [file, nodeEnv] of [
+      ["apps/auth-http/.env.test.example", "test"],
+      ["apps/auth-http/.env.production.example", "production"],
+      ["apps/auth-http/.env.staging.example", "staging"]
+    ]) {
+      writeFile(
+        tempDir,
+        file,
+        [
+          `NODE_ENV=${nodeEnv}`,
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+          "GAME_PROXY_HOST=10.0.0.30",
+          "GAME_PROXY_PORT=4000"
+        ].join("\n")
+      );
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/auth-http/.env.production.example:GAME_PROXY_HOST",
+      "apps/auth-http/.env.production.example:GAME_PROXY_PORT",
+      "apps/auth-http/.env.staging.example:GAME_PROXY_HOST",
+      "apps/auth-http/.env.staging.example:GAME_PROXY_PORT",
+      "apps/auth-http/.env.test.example:GAME_PROXY_HOST",
+      "apps/auth-http/.env.test.example:GAME_PROXY_PORT"
+    ]);
+    for (const variable of ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]) {
+      assert.ok(
+        result.allowedLocalFallbacks.some(
+          (item) =>
+            item.file === "apps/auth-http/.env.example" &&
+            item.variable === variable &&
+            item.service === "auth-http"
+        )
+      );
+    }
+    for (const violation of result.violations) {
+      assert.equal(violation.service, "auth-http");
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /game-proxy\.client/);
       assert.match(violation.remediation, /Local fallback examples/);
       assert.ok(violation.strictContext.includes("strict path/name"));
     }
