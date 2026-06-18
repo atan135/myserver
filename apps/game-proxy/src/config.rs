@@ -166,6 +166,7 @@ pub struct Config {
     pub service_instance_id: String,
     pub service_build_version: String,
     pub service_zone: String,
+    pub local_discovery_fallback_enabled: bool,
     // 保留旧配置用于向后兼容（当 registry 禁用时）
     pub upstream_server_id: String,
     pub upstream_local_socket_name: String,
@@ -319,10 +320,11 @@ impl Config {
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
         let discovery_required = discovery_required_from_env();
+        let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
         validate_legacy_direct_config(&["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"])?;
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"],
-            discovery_required,
+            discovery_required || !local_discovery_fallback_enabled,
         );
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
@@ -346,10 +348,17 @@ impl Config {
         let service_zone = parse_non_empty_string("SERVICE_ZONE", "local");
 
         // 向后兼容的旧配置
-        let upstream_server_id =
-            env::var("UPSTREAM_SERVER_ID").unwrap_or_else(|_| "game-server-1".to_string());
-        let upstream_local_socket_name = env::var("UPSTREAM_LOCAL_SOCKET_NAME")
-            .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
+        let upstream_server_id = if local_discovery_fallback_enabled {
+            env::var("UPSTREAM_SERVER_ID").unwrap_or_else(|_| "game-server-1".to_string())
+        } else {
+            "game-server-1".to_string()
+        };
+        let upstream_local_socket_name = if local_discovery_fallback_enabled {
+            env::var("UPSTREAM_LOCAL_SOCKET_NAME")
+                .unwrap_or_else(|_| "myserver-game-server.sock".to_string())
+        } else {
+            "myserver-game-server.sock".to_string()
+        };
 
         let config = Self {
             host,
@@ -397,6 +406,7 @@ impl Config {
             service_instance_id,
             service_build_version,
             service_zone,
+            local_discovery_fallback_enabled,
             upstream_server_id,
             upstream_local_socket_name,
             legacy_direct_config_warnings,
@@ -412,13 +422,19 @@ impl Config {
     }
 
     pub fn static_upstream_fallback_allowed(&self) -> bool {
-        !self.discovery_required()
+        !self.discovery_required() && self.local_discovery_fallback_enabled
     }
 
     pub fn validate_upstream_discovery(&self) -> Result<(), String> {
         if self.discovery_required() && !self.registry_enabled {
             return Err(
-                "REGISTRY_ENABLED=true is required when DISCOVERY_REQUIRED=true or NODE_ENV/APP_ENV is production/test"
+                "REGISTRY_ENABLED=true is required when DISCOVERY_REQUIRED=true or NODE_ENV/APP_ENV is production/staging/test"
+                    .to_string(),
+            );
+        }
+        if !self.registry_enabled && !self.static_upstream_fallback_allowed() {
+            return Err(
+                "REGISTRY_ENABLED=true is required when static upstream local fallback is unavailable; set NODE_ENV=development or APP_ENV=local to use local fallback"
                     .to_string(),
             );
         }
@@ -467,14 +483,33 @@ fn is_production_env() -> bool {
 fn is_strict_discovery_env() -> bool {
     ["NODE_ENV", "APP_ENV"].iter().any(|name| {
         env::var(name).ok().is_some_and(|value| {
-            let value = value.trim();
-            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod" | "staging" | "stage" | "test" | "testing"
+            )
         })
     })
 }
 
 pub fn discovery_required_from_env() -> bool {
     env_flag("DISCOVERY_REQUIRED") || is_strict_discovery_env()
+}
+
+fn is_local_discovery_fallback_env() -> bool {
+    if discovery_required_from_env() {
+        return false;
+    }
+
+    let node_env = env::var("NODE_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let app_env = env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    node_env == "development" || app_env == "local"
 }
 
 fn env_flag(name: &str) -> bool {
@@ -740,7 +775,7 @@ mod tests {
 
     fn clear_production_env() {
         unsafe {
-            env::remove_var("NODE_ENV");
+            env::set_var("NODE_ENV", "development");
             env::remove_var("APP_ENV");
         }
     }
@@ -1377,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn local_static_upstream_fallback_is_allowed_by_default() {
+    fn local_static_upstream_fallback_is_allowed_in_node_development() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(&[
             "NODE_ENV",
@@ -1396,6 +1431,7 @@ mod tests {
         unsafe {
             clear_production_env();
             clear_upstream_discovery_env();
+            env::set_var("NODE_ENV", "development");
             env::remove_var("PROXY_ADMIN_TOKEN");
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
@@ -1404,6 +1440,7 @@ mod tests {
 
         assert!(!config.registry_enabled);
         assert!(!config.discovery_required());
+        assert!(config.local_discovery_fallback_enabled);
         assert!(config.static_upstream_fallback_allowed());
         assert_eq!(config.upstream_server_id, "game-server-1");
         assert_eq!(
@@ -1411,6 +1448,93 @@ mod tests {
             "myserver-game-server.sock"
         );
         assert!(config.validate_upstream_discovery().is_ok());
+    }
+
+    #[test]
+    fn registry_disabled_static_upstream_fallback_requires_explicit_local_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
+            "REGISTRY_ENABLED",
+            "REGISTRY_KEY_PREFIX",
+            "REDIS_KEY_PREFIX",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "development");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("non-local registry-disabled static upstream fallback should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("REGISTRY_ENABLED=true is required"));
+        assert!(error.contains("NODE_ENV=development"));
+        assert!(error.contains("APP_ENV=local"));
+
+        unsafe {
+            env::remove_var("APP_ENV");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-green");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-green.sock");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("registry-disabled static upstream fallback without env should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("REGISTRY_ENABLED=true is required"));
+        assert!(error.contains("NODE_ENV=development"));
+        assert!(error.contains("APP_ENV=local"));
+    }
+
+    #[test]
+    fn app_env_local_allows_static_upstream_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("APP_ENV", "local");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.local_discovery_fallback_enabled);
+        assert!(config.static_upstream_fallback_allowed());
+        assert_eq!(config.upstream_server_id, "game-server-blue");
+        assert_eq!(config.upstream_local_socket_name, "game-blue.sock");
+        assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
     #[test]
@@ -1426,8 +1550,7 @@ mod tests {
         assert!(!active_keys.contains(&"UPSTREAM_SERVER_ID"));
         assert!(!active_keys.contains(&"UPSTREAM_LOCAL_SOCKET_NAME"));
         assert!(
-            env_example
-                .contains("Strict/test/production must use registry discovery"),
+            env_example.contains("Strict/test/production must use registry discovery"),
             ".env.example must document that strict/test/production use registry discovery"
         );
     }
@@ -1500,6 +1623,39 @@ mod tests {
             config.legacy_direct_config_warnings[1]
                 .contains("UPSTREAM_LOCAL_SOCKET_NAME is ignored")
         );
+    }
+
+    #[test]
+    fn staging_discovery_warns_when_static_upstream_env_is_set() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("APP_ENV", "staging");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.discovery_required());
+        assert!(!config.local_discovery_fallback_enabled);
+        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
     }
 
     #[test]

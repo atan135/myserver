@@ -460,6 +460,7 @@ mod tests {
             service_instance_id: "edge-proxy-a".to_string(),
             service_build_version: "2026.06.18".to_string(),
             service_zone: "zone-a".to_string(),
+            local_discovery_fallback_enabled: true,
             upstream_server_id: "game-server-1".to_string(),
             upstream_local_socket_name: "myserver-game-server.sock".to_string(),
             legacy_direct_config_warnings: Vec::new(),

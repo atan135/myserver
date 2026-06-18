@@ -74,20 +74,20 @@ function isProductionEnv() {
 }
 
 function isStrictDiscoveryEnv() {
+  const strictEnvNames = new Set(["production", "prod", "staging", "stage", "test", "testing"]);
   return [process.env.NODE_ENV, process.env.APP_ENV].some(
-    (value) => typeof value === "string" && ["production", "test"].includes(value.trim().toLowerCase())
+    (value) => typeof value === "string" && strictEnvNames.has(value.trim().toLowerCase())
   );
 }
 
 function isLocalDiscoveryFallbackEnv() {
-  if (isStrictDiscoveryEnv()) {
+  if (isStrictDiscoveryEnv() || parseBoolean(process.env.DISCOVERY_REQUIRED, false)) {
     return false;
   }
 
-  const names = [process.env.NODE_ENV, process.env.APP_ENV]
-    .map((value) => typeof value === "string" ? value.trim().toLowerCase() : "")
-    .filter(Boolean);
-  return names.length === 0 || names.some((value) => ["development", "local"].includes(value));
+  const nodeEnv = typeof process.env.NODE_ENV === "string" ? process.env.NODE_ENV.trim().toLowerCase() : "";
+  const appEnv = typeof process.env.APP_ENV === "string" ? process.env.APP_ENV.trim().toLowerCase() : "";
+  return nodeEnv === "development" || appEnv === "local";
 }
 
 function validateDiscoveryConfig(config) {

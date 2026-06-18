@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import path from "node:path";
 import test from "node:test";
 
 const CONFIG_ENV_NAMES = [
@@ -70,7 +69,7 @@ async function withCapturedWarnings(values, callback) {
 }
 
 test("mail-service base env example does not enable legacy direct game admin config by default", () => {
-  const envExample = fs.readFileSync(path.resolve(process.cwd(), ".env.example"), "utf8");
+  const envExample = fs.readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_HOST=/m);
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_PORT=/m);
@@ -151,6 +150,56 @@ test("mail-service does not warn for local fallback direct endpoint env", async 
     assert.equal(config.localDiscoveryFallbackEnabled, true);
     assert.deepEqual(config.legacyDirectConfigWarnings, []);
     assert.deepEqual(warnings, []);
+  });
+});
+
+test("mail-service allows legacy direct endpoint with APP_ENV local", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "local",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.2",
+    GAME_SERVER_ADMIN_PORT: "17500"
+  }, (getConfig, warnings) => {
+    const config = getConfig();
+
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.equal(config.gameServerAdminHost, "127.0.0.2");
+    assert.equal(config.gameServerAdminPort, 17500);
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
+  });
+});
+
+test("mail-service ignores legacy direct endpoint when APP_ENV is development without NODE_ENV development", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "development",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_SERVER_ADMIN_PORT: "17500"
+  }, (getConfig, warnings) => {
+    const config = getConfig();
+
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameServerAdminPort, 7500);
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"]
+    );
+    assert.equal(warnings.length, 2);
+  });
+});
+
+test("mail-service treats staging as strict discovery for legacy direct endpoint", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "staging",
+    REGISTRY_ENABLED: "true",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20"
+  }, (getConfig, warnings) => {
+    const config = getConfig();
+
+    assert.equal(config.registryDiscoveryRequired, true);
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(warnings.length, 1);
   });
 });
 

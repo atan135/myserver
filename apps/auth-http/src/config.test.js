@@ -263,6 +263,54 @@ test("auth-http does not warn for local fallback direct endpoint env", async () 
   });
 });
 
+test("auth-http allows legacy direct endpoints with APP_ENV local", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "local",
+    GAME_PROXY_HOST: "127.0.0.2",
+    GAME_PROXY_PORT: "4100",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.3"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.equal(config.gameProxyHost, "127.0.0.2");
+    assert.equal(config.gameProxyPort, 4100);
+    assert.equal(config.gameServerAdminHost, "127.0.0.3");
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
+  });
+});
+
+test("auth-http ignores legacy direct endpoints when APP_ENV is development without NODE_ENV development", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "development",
+    GAME_PROXY_HOST: "203.0.113.10",
+    GAME_PROXY_PORT: "4100"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameProxyHost, "127.0.0.1");
+    assert.equal(config.gameProxyPort, 4000);
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]
+    );
+    assert.equal(warnings.length, 2);
+  });
+});
+
+test("auth-http treats staging as strict discovery for legacy direct endpoints", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "staging",
+    REGISTRY_ENABLED: "true",
+    GAME_PROXY_HOST: "203.0.113.10",
+    GAME_PROXY_PORT: "4100"
+  }, (config, warnings) => {
+    assert.equal(config.registryDiscoveryRequired, true);
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameProxyHost, "127.0.0.1");
+    assert.equal(config.gameProxyPort, 4000);
+    assert.equal(warnings.length, 2);
+  });
+});
+
 test("auth-http rejects legacy direct config when migration complete switch is enabled", async () => {
   await assert.rejects(
     () => withEnv({

@@ -2,7 +2,7 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
-use service_registry::{record_discovery_metric, RegistryClient};
+use service_registry::{RegistryClient, record_discovery_metric};
 use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
@@ -61,7 +61,7 @@ impl MatchClientConfig {
         );
 
         if !registry_enabled {
-            if discovery_required {
+            if discovery_required || !local_discovery_fallback_enabled {
                 record_discovery_metric(&service_name, "grpc", "registry", "registry_disabled");
                 panic!(
                     "required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc"
@@ -96,6 +96,7 @@ impl MatchClientConfig {
             &service_name,
             &fallback_addr,
             discovery_required,
+            local_discovery_fallback_enabled,
         )
         .await
         .unwrap_or_else(|error| {
@@ -378,6 +379,7 @@ pub fn spawn_match_client_rediscovery(
                 &config.service_name,
                 &config.fallback_addr,
                 config.discovery_required,
+                config.local_discovery_fallback_enabled,
             )
             .await
             {
@@ -515,14 +517,16 @@ pub fn resolve_discovery_outcome(
     outcome: DiscoveryOutcome,
     fallback_addr: &str,
     discovery_required: bool,
+    local_discovery_fallback_enabled: bool,
 ) -> Result<ResolvedMatchServiceAddr, String> {
+    let fallback_allowed = !discovery_required && local_discovery_fallback_enabled;
     match outcome {
         DiscoveryOutcome::Found(addr) => Ok(ResolvedMatchServiceAddr {
             addr,
             source: MatchServiceAddrSource::Registry,
         }),
         DiscoveryOutcome::NotFound => {
-            if discovery_required {
+            if !fallback_allowed {
                 Err("match-service grpc endpoint not found".to_string())
             } else {
                 record_discovery_metric("match-service", "grpc", "fallback", "fallback_used");
@@ -533,7 +537,7 @@ pub fn resolve_discovery_outcome(
             }
         }
         DiscoveryOutcome::Error(error) => {
-            if discovery_required {
+            if !fallback_allowed {
                 Err(error)
             } else {
                 record_discovery_metric("match-service", "grpc", "fallback", "fallback_used");
@@ -552,6 +556,7 @@ async fn resolve_match_service_addr(
     service_name: &str,
     fallback_addr: &str,
     discovery_required: bool,
+    local_discovery_fallback_enabled: bool,
 ) -> Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>> {
     let outcome = match RegistryClient::new(registry_url, "game-server", "match-discovery").await {
         Ok(client) => match client
@@ -593,7 +598,12 @@ async fn resolve_match_service_addr(
         }
     };
 
-    match resolve_discovery_outcome(outcome, fallback_addr, discovery_required) {
+    match resolve_discovery_outcome(
+        outcome,
+        fallback_addr,
+        discovery_required,
+        local_discovery_fallback_enabled,
+    ) {
         Ok(resolved) => {
             if resolved.source == MatchServiceAddrSource::Fallback {
                 tracing::warn!(
@@ -643,28 +653,29 @@ fn validate_legacy_direct_config(names: &[&str]) {
 fn is_strict_discovery_env() -> bool {
     ["NODE_ENV", "APP_ENV"].iter().any(|name| {
         std::env::var(name).ok().is_some_and(|value| {
-            let value = value.trim();
-            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod" | "staging" | "stage" | "test" | "testing"
+            )
         })
     })
 }
 
 fn is_local_discovery_fallback_env() -> bool {
-    if is_strict_discovery_env() {
+    if is_strict_discovery_env() || env_flag("DISCOVERY_REQUIRED", false) {
         return false;
     }
 
-    let names = ["NODE_ENV", "APP_ENV"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
+    let node_env = std::env::var("NODE_ENV")
+        .ok()
         .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    let app_env = std::env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
 
-    names.is_empty()
-        || names
-            .iter()
-            .any(|value| matches!(value.as_str(), "development" | "local"))
+    node_env == "development" || app_env == "local"
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -778,10 +789,14 @@ mod tests {
                 env::remove_var(name);
             }
         }
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+        }
 
         let config = MatchClientConfig::from_env().await;
 
         assert!(!config.registry_enabled);
+        assert!(config.local_discovery_fallback_enabled);
         assert_eq!(
             config.rediscovery_interval_secs,
             DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS
@@ -799,6 +814,7 @@ mod tests {
             }
         }
         unsafe {
+            env::set_var("NODE_ENV", "development");
             env::set_var("MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS", "7");
             env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
@@ -808,6 +824,49 @@ mod tests {
 
         assert_eq!(config.rediscovery_interval_secs, 7);
         assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[tokio::test]
+    async fn app_env_local_allows_match_service_addr_fallback() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("APP_ENV", "local");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let config = MatchClientConfig::from_env().await;
+
+        assert!(config.local_discovery_fallback_enabled);
+        assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[tokio::test]
+    async fn non_local_registry_disabled_rejects_match_service_addr_fallback() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("APP_ENV", "development");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let error = tokio::spawn(async { MatchClientConfig::from_env().await })
+            .await
+            .expect_err("non-local config should reject direct match-service fallback");
+
+        assert!(error.is_panic());
     }
 
     #[tokio::test]
@@ -856,6 +915,30 @@ mod tests {
             env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
         }
 
+        assert!(!is_local_discovery_fallback_env());
+        assert!(is_strict_discovery_env());
+    }
+
+    #[test]
+    fn local_fallback_is_disabled_by_discovery_required_and_staging() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+        }
+        assert!(!is_local_discovery_fallback_env());
+
+        unsafe {
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "staging");
+        }
         assert!(!is_local_discovery_fallback_env());
         assert!(is_strict_discovery_env());
     }
@@ -933,8 +1016,12 @@ mod tests {
         let client = create_match_client_shared();
         set_shared_client(&client, "http://127.0.0.1:9002", false).await;
 
-        let missing_endpoint =
-            resolve_discovery_outcome(DiscoveryOutcome::NotFound, "http://127.0.0.1:9002", true);
+        let missing_endpoint = resolve_discovery_outcome(
+            DiscoveryOutcome::NotFound,
+            "http://127.0.0.1:9002",
+            true,
+            true,
+        );
         assert!(missing_endpoint.is_err());
         let state = shared_client_state(&client).await;
         assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:9002"));
@@ -983,6 +1070,7 @@ mod tests {
             DiscoveryOutcome::Error("redis unavailable".to_string()),
             "http://127.0.0.1:9002",
             false,
+            true,
         )
         .expect("non-strict discovery should fallback");
 
@@ -1002,6 +1090,7 @@ mod tests {
             DiscoveryOutcome::Error("redis unavailable".to_string()),
             "http://127.0.0.1:9002",
             true,
+            true,
         )
         .expect_err("strict discovery should not fallback");
 
@@ -1010,10 +1099,27 @@ mod tests {
 
     #[test]
     fn discovery_outcome_returns_error_for_strict_not_found() {
-        let error =
-            resolve_discovery_outcome(DiscoveryOutcome::NotFound, "http://127.0.0.1:9002", true)
-                .expect_err("strict discovery should not fallback");
+        let error = resolve_discovery_outcome(
+            DiscoveryOutcome::NotFound,
+            "http://127.0.0.1:9002",
+            true,
+            true,
+        )
+        .expect_err("strict discovery should not fallback");
 
         assert_eq!(error, "match-service grpc endpoint not found");
+    }
+
+    #[test]
+    fn discovery_outcome_returns_error_when_local_fallback_is_disabled() {
+        let error = resolve_discovery_outcome(
+            DiscoveryOutcome::Error("redis unavailable".to_string()),
+            "http://127.0.0.1:9002",
+            false,
+            false,
+        )
+        .expect_err("non-local discovery should not fallback");
+
+        assert_eq!(error, "redis unavailable");
     }
 }

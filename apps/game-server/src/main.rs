@@ -226,8 +226,16 @@ fn registry_failure_is_fatal() -> bool {
     env_flag("DISCOVERY_REQUIRED")
         || env_name_is("NODE_ENV", "production")
         || env_name_is("APP_ENV", "production")
+        || env_name_is("NODE_ENV", "prod")
+        || env_name_is("APP_ENV", "prod")
+        || env_name_is("NODE_ENV", "staging")
+        || env_name_is("APP_ENV", "staging")
+        || env_name_is("NODE_ENV", "stage")
+        || env_name_is("APP_ENV", "stage")
         || env_name_is("NODE_ENV", "test")
         || env_name_is("APP_ENV", "test")
+        || env_name_is("NODE_ENV", "testing")
+        || env_name_is("APP_ENV", "testing")
 }
 
 fn build_service_instance(config: &Config) -> ServiceInstance {

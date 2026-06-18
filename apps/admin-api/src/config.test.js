@@ -221,6 +221,54 @@ test("admin-api does not warn for local fallback direct endpoint env", async () 
   });
 });
 
+test("admin-api allows legacy direct endpoints with APP_ENV local", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "local",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.2",
+    GAME_SERVER_ADMIN_PORT: "17500",
+    GAME_PROXY_ADMIN_HOST: "127.0.0.3"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.equal(config.gameServerAdminHost, "127.0.0.2");
+    assert.equal(config.gameServerAdminPort, 17500);
+    assert.equal(config.gameProxyAdminHost, "127.0.0.3");
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
+  });
+});
+
+test("admin-api ignores legacy direct endpoints when APP_ENV is development without NODE_ENV development", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "development",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_PROXY_ADMIN_HOST: "203.0.113.30"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameProxyAdminHost, "127.0.0.1");
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      ["GAME_SERVER_ADMIN_HOST", "GAME_PROXY_ADMIN_HOST"]
+    );
+    assert.equal(warnings.length, 2);
+  });
+});
+
+test("admin-api treats staging as strict discovery for legacy direct endpoints", async () => {
+  await withCapturedWarnings({
+    APP_ENV: "staging",
+    REGISTRY_ENABLED: "true",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_PROXY_ADMIN_HOST: "203.0.113.30"
+  }, (config, warnings) => {
+    assert.equal(config.registryDiscoveryRequired, true);
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameProxyAdminHost, "127.0.0.1");
+    assert.equal(warnings.length, 2);
+  });
+});
+
 test("admin-api rejects legacy direct config when migration complete switch is enabled", async () => {
   await assert.rejects(
     withEnv({

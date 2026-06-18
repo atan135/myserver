@@ -311,28 +311,29 @@ fn is_production_env() -> bool {
 fn is_strict_discovery_env() -> bool {
     ["NODE_ENV", "APP_ENV"].iter().any(|name| {
         std::env::var(name).ok().is_some_and(|value| {
-            let value = value.trim();
-            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod" | "staging" | "stage" | "test" | "testing"
+            )
         })
     })
 }
 
 fn is_local_discovery_fallback_env() -> bool {
-    if is_strict_discovery_env() {
+    if is_strict_discovery_env() || parse_bool_env("DISCOVERY_REQUIRED", false) {
         return false;
     }
 
-    let names = ["NODE_ENV", "APP_ENV"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
+    let node_env = std::env::var("NODE_ENV")
+        .ok()
         .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    let app_env = std::env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
 
-    names.is_empty()
-        || names
-            .iter()
-            .any(|value| matches!(value.as_str(), "development" | "local"))
+    node_env == "development" || app_env == "local"
 }
 
 fn parse_bool_env(name: &str, default: bool) -> bool {
@@ -661,7 +662,7 @@ mod tests {
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
-            env::set_var("APP_ENV", "development");
+            env::set_var("APP_ENV", "local");
             env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
             env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
         }
@@ -670,6 +671,49 @@ mod tests {
 
         assert!(config.local_discovery_fallback_enabled);
         assert!(config.legacy_direct_config_warnings.is_empty());
+    }
+
+    #[test]
+    fn app_env_development_does_not_enable_legacy_socket_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+            env::set_var("APP_ENV", "development");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+        }
+
+        let config = Config::from_env();
+
+        assert!(!config.local_discovery_fallback_enabled);
+        assert_eq!(
+            config.game_server_internal_socket_name,
+            "myserver-game-server-internal.sock"
+        );
+        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
+    }
+
+    #[test]
+    fn staging_disables_legacy_socket_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+            env::set_var("APP_ENV", "staging");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+        }
+
+        let config = Config::from_env();
+
+        assert!(config.discovery_required);
+        assert!(!config.local_discovery_fallback_enabled);
+        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
     }
 
     #[test]
@@ -701,7 +745,7 @@ mod tests {
 
         unsafe {
             env::remove_var("NODE_ENV");
-            env::set_var("APP_ENV", "development");
+            env::set_var("APP_ENV", "local");
             env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
             env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
             env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
@@ -715,8 +759,8 @@ mod tests {
     }
 
     #[test]
-    fn test_environment_rejects_legacy_internal_socket_env_when_migration_complete_switch_is_enabled(
-    ) {
+    fn test_environment_rejects_legacy_internal_socket_env_when_migration_complete_switch_is_enabled()
+     {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
 
@@ -744,7 +788,7 @@ mod tests {
 
         unsafe {
             env::remove_var("NODE_ENV");
-            env::set_var("APP_ENV", "development");
+            env::set_var("APP_ENV", "local");
             env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
             env::remove_var("GAME_SERVER_INTERNAL_SOCKET_NAME");
             env::remove_var("GAME_INTERNAL_SOCKET_NAME");

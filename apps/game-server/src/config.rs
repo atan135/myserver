@@ -229,8 +229,10 @@ impl Config {
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
         let discovery_required = discovery_required_from_env();
-        let legacy_direct_config_warnings =
-            collect_legacy_direct_config_warnings(&["MATCH_SERVICE_ADDR"], discovery_required);
+        let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
+            &["MATCH_SERVICE_ADDR"],
+            discovery_required || !is_local_discovery_fallback_env(),
+        );
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -350,14 +352,33 @@ fn is_production_env() -> bool {
 fn is_strict_discovery_env() -> bool {
     ["NODE_ENV", "APP_ENV"].iter().any(|name| {
         env::var(name).ok().is_some_and(|value| {
-            let value = value.trim();
-            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod" | "staging" | "stage" | "test" | "testing"
+            )
         })
     })
 }
 
 fn discovery_required_from_env() -> bool {
     parse_bool("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
+}
+
+fn is_local_discovery_fallback_env() -> bool {
+    if discovery_required_from_env() {
+        return false;
+    }
+
+    let node_env = env::var("NODE_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let app_env = env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    node_env == "development" || app_env == "local"
 }
 
 fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> {
@@ -870,11 +891,31 @@ mod tests {
         assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
 
         unsafe {
-            env::set_var("APP_ENV", "development");
+            env::set_var("NODE_ENV", "development");
+            env::remove_var("APP_ENV");
         }
 
         let config = Config::from_env();
         assert!(config.legacy_direct_config_warnings.is_empty());
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "development");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
+        assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
+
+        unsafe {
+            env::set_var("APP_ENV", "staging");
+            env::set_var("REGISTRY_ENABLED", "true");
+        }
+
+        let config = Config::from_env();
+        assert!(config.discovery_required);
+        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
+        assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
     }
 
     #[test]
