@@ -11,6 +11,15 @@ import {
 const GAME_SERVER_SERVICE_NAME = "game-server";
 const GAME_SERVER_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_SERVER_ADMIN_PROTOCOLS = new Set(["tcp"]);
+const UNSAFE_ADVERTISED_HOSTS = new Set(["", "0.0.0.0", "::", "[::]"]);
+
+function publishedHostFromConfig(config) {
+  const configured = typeof config.advertisedHost === "string" && config.advertisedHost.trim()
+    ? config.advertisedHost
+    : config.host;
+  const host = String(configured ?? "").trim();
+  return UNSAFE_ADVERTISED_HOSTS.has(host) ? "127.0.0.1" : host;
+}
 
 export class RegistryClient {
   constructor(redis, config) {
@@ -24,7 +33,7 @@ export class RegistryClient {
 
   async register() {
     const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
-    const endpointHost = this.config.advertisedHost || this.config.host;
+    const endpointHost = publishedHostFromConfig(this.config);
     const data = createServiceInstancePayload({
       id: this.instanceId,
       name: this.serviceName,

@@ -124,6 +124,25 @@ test("RegistryClient publishes advertised host instead of bind host", async () =
   assert.equal(payload.endpoints[0].host, "10.10.0.25");
 });
 
+test("RegistryClient never publishes wildcard advertised host", async () => {
+  for (const advertisedHost of ["0.0.0.0", "::", "[::]", "   "]) {
+    const redis = createRedisCapture();
+    const client = new RegistryClient(
+      redis,
+      createConfig({
+        host: "0.0.0.0",
+        advertisedHost
+      })
+    );
+
+    await client.register();
+
+    const payload = JSON.parse(redis.hashes.get("service:admin-api:instances:admin-api-test-001:data"));
+    assert.equal(payload.host, "127.0.0.1");
+    assert.equal(payload.endpoints[0].host, "127.0.0.1");
+  }
+});
+
 test("discoverGameServerAdminEndpoints returns healthy tcp admin endpoints for all instances", async () => {
   const redis = createRedisCapture();
   const instances = [

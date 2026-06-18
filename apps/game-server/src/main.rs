@@ -231,6 +231,8 @@ fn registry_failure_is_fatal() -> bool {
 }
 
 fn build_service_instance(config: &Config) -> ServiceInstance {
+    let client_host = published_host(&config.public_host);
+    let admin_host = published_host(&config.admin_advertised_host);
     let endpoint_metadata = serde_json::json!({
         "service_name": config.service_name.clone(),
         "service_instance_id": config.service_instance_id.clone(),
@@ -243,7 +245,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
     ServiceInstance::new(
         config.service_instance_id.clone(),
         config.service_name.clone(),
-        config.public_host.clone(),
+        client_host.clone(),
         config.port,
     )
     .with_admin_port(config.admin_port)
@@ -252,7 +254,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
         ServiceEndpoint {
             name: "client".to_string(),
             protocol: "tcp".to_string(),
-            host: config.public_host.clone(),
+            host: client_host,
             port: config.port,
             socket: String::new(),
             visibility: "internal".to_string(),
@@ -262,7 +264,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
         ServiceEndpoint {
             name: "admin".to_string(),
             protocol: "tcp".to_string(),
-            host: config.admin_advertised_host.clone(),
+            host: admin_host,
             port: config.admin_port,
             socket: String::new(),
             visibility: "admin".to_string(),
@@ -292,6 +294,15 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
     ])
     .with_tags(vec!["game".to_string(), "tcp".to_string()])
     .with_metadata(config.service_instance_metadata())
+}
+
+fn published_host(host: &str) -> String {
+    let host = host.trim();
+    if matches!(host, "" | "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -377,5 +388,18 @@ mod tests {
         assert_eq!(instance.endpoints[1].protocol, "tcp");
         assert_eq!(instance.endpoints[1].host, "10.0.0.21");
         assert_eq!(instance.endpoints[1].port, 7500);
+    }
+
+    #[test]
+    fn service_instance_never_publishes_wildcard_network_hosts() {
+        let mut config = test_config();
+        config.public_host = "0.0.0.0".to_string();
+        config.admin_advertised_host = "::".to_string();
+
+        let instance = build_service_instance(&config);
+
+        assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints[0].host, "127.0.0.1");
+        assert_eq!(instance.endpoints[1].host, "127.0.0.1");
     }
 }

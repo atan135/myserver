@@ -92,24 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client = client
                     .with_key_prefix(config.registry_key_prefix.clone())
                     .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
-                let instance = ServiceInstance::new(
-                    config.service_instance_id.clone(),
-                    config.service_name.clone(),
-                    config.public_host.clone(),
-                    config.port,
-                )
-                .with_endpoints(vec![ServiceEndpoint {
-                    name: "grpc".to_string(),
-                    protocol: "grpc".to_string(),
-                    host: config.public_host.clone(),
-                    port: config.port,
-                    socket: String::new(),
-                    visibility: "internal".to_string(),
-                    metadata: build_match_service_metadata(&config),
-                    healthy: true,
-                }])
-                .with_tags(vec!["match".to_string(), "grpc".to_string()])
-                .with_metadata(build_match_service_metadata(&config));
+                let instance = build_service_instance(&config);
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
@@ -203,6 +186,39 @@ fn build_match_service_metadata(config: &Config) -> Value {
         "build_version": config.service_build_version,
         "zone": config.service_zone
     })
+}
+
+fn build_service_instance(config: &Config) -> ServiceInstance {
+    let public_host = published_host(&config.public_host);
+    let metadata = build_match_service_metadata(config);
+
+    ServiceInstance::new(
+        config.service_instance_id.clone(),
+        config.service_name.clone(),
+        public_host.clone(),
+        config.port,
+    )
+    .with_endpoints(vec![ServiceEndpoint {
+        name: "grpc".to_string(),
+        protocol: "grpc".to_string(),
+        host: public_host,
+        port: config.port,
+        socket: String::new(),
+        visibility: "internal".to_string(),
+        metadata: metadata.clone(),
+        healthy: true,
+    }])
+    .with_tags(vec!["match".to_string(), "grpc".to_string()])
+    .with_metadata(metadata)
+}
+
+fn published_host(host: &str) -> String {
+    let host = host.trim();
+    if matches!(host, "" | "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +320,22 @@ mod tests {
         assert_eq!(metadata["modes"], json!(["1v1", "3v3", "5v5"]));
         assert_eq!(metadata["runtime_store_backend"], "redis");
         assert_eq!(metadata["build_version"], "2026.06.18-test");
+    }
+
+    #[test]
+    fn service_instance_never_publishes_wildcard_network_hosts() {
+        let mut config = test_config();
+        config.public_host = "0.0.0.0".to_string();
+
+        let instance = build_service_instance(&config);
+
+        assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints[0].host, "127.0.0.1");
+
+        config.public_host = "::".to_string();
+        let instance = build_service_instance(&config);
+
+        assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints[0].host, "127.0.0.1");
     }
 }

@@ -303,17 +303,18 @@ fn registry_metadata(config: &Config) -> serde_json::Value {
 }
 
 fn build_service_instance(config: &Config, port: u16) -> ServiceInstance {
+    let public_host = published_host(&config.public_host);
     let metadata = registry_metadata(config);
     ServiceInstance::new(
         config.service_instance_id.clone(),
         config.service_name.clone(),
-        config.public_host.clone(),
+        public_host.clone(),
         port,
     )
     .with_endpoints(vec![ServiceEndpoint {
         name: "tcp".to_string(),
         protocol: "tcp".to_string(),
-        host: config.public_host.clone(),
+        host: public_host,
         port,
         socket: String::new(),
         visibility: "internal".to_string(),
@@ -322,6 +323,15 @@ fn build_service_instance(config: &Config, port: u16) -> ServiceInstance {
     }])
     .with_metadata(metadata)
     .with_tags(vec!["chat".to_string(), "tcp".to_string()])
+}
+
+fn published_host(host: &str) -> String {
+    let host = host.trim();
+    if matches!(host, "" | "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 fn init_logging(config: &Config) {
@@ -940,6 +950,55 @@ mod tests {
         assert_eq!(endpoint.metadata["online_route_ttl_secs"], 75);
         assert_eq!(endpoint.metadata["build_version"], "build-42");
         assert_eq!(endpoint.metadata["zone"], "zone-chat");
+    }
+
+    #[test]
+    fn service_instance_never_publishes_wildcard_network_hosts() {
+        let mut config = Config {
+            db_enabled: false,
+            database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string(),
+            db_pool_size: 5,
+            bind_addr: "0.0.0.0:9001".to_string(),
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            max_connections_per_player: 0,
+            max_connections_per_ip: 0,
+            outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            ticket_secret: "test-secret".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 1,
+            global_id_worker_id: Some(4),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            registry_enabled: true,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "chat-server".to_string(),
+            service_instance_id: "chat-a".to_string(),
+            service_zone: "zone-chat".to_string(),
+            service_build_version: "build-42".to_string(),
+            online_route_ttl_secs: 75,
+            public_host: "0.0.0.0".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs".to_string(),
+        };
+
+        let instance = build_service_instance(&config, 9001);
+
+        assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints[0].host, "127.0.0.1");
+
+        config.public_host = "::".to_string();
+        let instance = build_service_instance(&config, 9001);
+
+        assert_eq!(instance.host, "127.0.0.1");
+        assert_eq!(instance.endpoints[0].host, "127.0.0.1");
     }
 
     #[test]
