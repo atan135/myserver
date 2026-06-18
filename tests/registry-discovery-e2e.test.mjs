@@ -40,6 +40,8 @@ const manualGameProxyInstanceId = randomId("manual-game-proxy");
 const manualMatchServiceInstanceId = randomId("manual-match-service");
 const manualMailServiceInstanceId = randomId("manual-mail-service");
 const manualAdminApiInstanceId = randomId("manual-admin-api");
+const heartbeatExpiredGameServerInstanceId = randomId("heartbeat-expired-game-server");
+const heartbeatHealthyGameServerInstanceId = randomId("heartbeat-healthy-game-server");
 const registryInstances = [
   { serviceName: "game-server", instanceId: gameServerInstanceId },
   { serviceName: "game-proxy", instanceId: gameProxyInstanceId }
@@ -49,7 +51,9 @@ const manualRegistryInstances = [
   { serviceName: "game-proxy", instanceId: manualGameProxyInstanceId },
   { serviceName: "match-service", instanceId: manualMatchServiceInstanceId },
   { serviceName: "mail-service", instanceId: manualMailServiceInstanceId },
-  { serviceName: "admin-api", instanceId: manualAdminApiInstanceId }
+  { serviceName: "admin-api", instanceId: manualAdminApiInstanceId },
+  { serviceName: "game-server", instanceId: heartbeatExpiredGameServerInstanceId },
+  { serviceName: "game-server", instanceId: heartbeatHealthyGameServerInstanceId }
 ];
 const allRegistryInstances = [...registryInstances, ...manualRegistryInstances];
 
@@ -81,6 +85,18 @@ const manualEndpoints = {
   adminApi: {
     host: "127.0.0.71",
     httpPort: 13001
+  },
+  heartbeatExpiredGameServer: {
+    host: "127.0.0.81",
+    clientPort: 19700,
+    adminHost: "127.0.0.82",
+    adminPort: 19750
+  },
+  heartbeatHealthyGameServer: {
+    host: "127.0.0.83",
+    clientPort: 19701,
+    adminHost: "127.0.0.84",
+    adminPort: 19751
   }
 };
 
@@ -337,6 +353,58 @@ function createManualRegistryPayloads() {
       ],
       tags: ["admin", "http", "manual-e2e"],
       metadata: adminApiMetadata
+    })
+  ];
+}
+
+function createHeartbeatExpiryGameServerPayloads() {
+  const expiredMetadata = endpointMetadata("game-server", heartbeatExpiredGameServerInstanceId, {
+    server_id: heartbeatExpiredGameServerInstanceId
+  });
+  const healthyMetadata = endpointMetadata("game-server", heartbeatHealthyGameServerInstanceId, {
+    server_id: heartbeatHealthyGameServerInstanceId
+  });
+
+  return [
+    createServiceInstancePayload({
+      id: heartbeatExpiredGameServerInstanceId,
+      name: "game-server",
+      host: manualEndpoints.heartbeatExpiredGameServer.host,
+      port: manualEndpoints.heartbeatExpiredGameServer.clientPort,
+      admin_port: manualEndpoints.heartbeatExpiredGameServer.adminPort,
+      endpoints: [
+        endpoint(
+          "admin",
+          "tcp",
+          manualEndpoints.heartbeatExpiredGameServer.adminHost,
+          manualEndpoints.heartbeatExpiredGameServer.adminPort,
+          "admin",
+          expiredMetadata
+        )
+      ],
+      tags: ["game", "admin", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: expiredMetadata
+    }),
+    createServiceInstancePayload({
+      id: heartbeatHealthyGameServerInstanceId,
+      name: "game-server",
+      host: manualEndpoints.heartbeatHealthyGameServer.host,
+      port: manualEndpoints.heartbeatHealthyGameServer.clientPort,
+      admin_port: manualEndpoints.heartbeatHealthyGameServer.adminPort,
+      endpoints: [
+        endpoint(
+          "admin",
+          "tcp",
+          manualEndpoints.heartbeatHealthyGameServer.adminHost,
+          manualEndpoints.heartbeatHealthyGameServer.adminPort,
+          "admin",
+          healthyMetadata
+        )
+      ],
+      tags: ["game", "admin", "manual-e2e"],
+      weight: 1_000_000_000,
+      metadata: healthyMetadata
     })
   ];
 }
@@ -754,5 +822,103 @@ test("registry consumers discover correct endpoints across multiple service inst
     );
   } finally {
     await redis.quit();
+  }
+});
+
+test("registry discovery ignores instances whose heartbeat expired but keeps healthy peers", { timeout: 60000 }, async () => {
+  const heartbeatRegistryInstances = [
+    { serviceName: "game-server", instanceId: heartbeatExpiredGameServerInstanceId },
+    { serviceName: "game-server", instanceId: heartbeatHealthyGameServerInstanceId }
+  ];
+
+  await cleanupRegistryInstances(redisUrl, heartbeatRegistryInstances, registryKeyPrefix);
+  await writeRegistryPayloads(createHeartbeatExpiryGameServerPayloads(), registryKeyPrefix);
+
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    const expiredInstanceKey = registryInstanceKey(
+      registryKeyPrefix,
+      "game-server",
+      heartbeatExpiredGameServerInstanceId
+    );
+    const expiredHeartbeatKey = registryHeartbeatKey(
+      registryKeyPrefix,
+      "game-server",
+      heartbeatExpiredGameServerInstanceId
+    );
+    const healthyHeartbeatKey = registryHeartbeatKey(
+      registryKeyPrefix,
+      "game-server",
+      heartbeatHealthyGameServerInstanceId
+    );
+
+    assert.equal(await redis.del(expiredHeartbeatKey), 1);
+    assert.equal(await redis.exists(expiredInstanceKey), 1);
+    assert.equal(await redis.exists(expiredHeartbeatKey), 0);
+    assert.equal(await redis.exists(healthyHeartbeatKey), 1);
+
+    const discovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    const adminEndpoints = await discovery.discoverAllEndpoints("game-server", "admin");
+
+    assert.equal(
+      adminEndpoints.some(({ instance, endpoint: discoveredEndpoint }) =>
+        instance.id === heartbeatExpiredGameServerInstanceId ||
+        (
+          discoveredEndpoint.host === manualEndpoints.heartbeatExpiredGameServer.adminHost &&
+          discoveredEndpoint.port === manualEndpoints.heartbeatExpiredGameServer.adminPort
+        )
+      ),
+      false,
+      "expected expired-heartbeat game-server.admin endpoint to be filtered"
+    );
+    assert.ok(
+      adminEndpoints.some(({ instance, endpoint: discoveredEndpoint }) =>
+        instance.id === heartbeatHealthyGameServerInstanceId &&
+        discoveredEndpoint.host === manualEndpoints.heartbeatHealthyGameServer.adminHost &&
+        discoveredEndpoint.port === manualEndpoints.heartbeatHealthyGameServer.adminPort
+      ),
+      "expected healthy game-server.admin peer to remain discoverable"
+    );
+
+    const requiredAdminEndpoint = await discovery.discoverRequiredEndpoint("game-server", "admin");
+    assert.notEqual(requiredAdminEndpoint.instance.id, heartbeatExpiredGameServerInstanceId);
+    assert.notEqual(requiredAdminEndpoint.endpoint.host, manualEndpoints.heartbeatExpiredGameServer.adminHost);
+    assert.notEqual(requiredAdminEndpoint.endpoint.port, manualEndpoints.heartbeatExpiredGameServer.adminPort);
+
+    const consumerAdminEndpoints = await discoverAdminApiGameServerAdminEndpoints(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    assert.equal(
+      consumerAdminEndpoints.some((discoveredEndpoint) =>
+        discoveredEndpoint.instanceId === heartbeatExpiredGameServerInstanceId ||
+        (
+          discoveredEndpoint.host === manualEndpoints.heartbeatExpiredGameServer.adminHost &&
+          discoveredEndpoint.port === manualEndpoints.heartbeatExpiredGameServer.adminPort
+        )
+      ),
+      false,
+      "expected admin-api game-server admin discovery to filter expired-heartbeat instance"
+    );
+    assertFlatEndpoint(findEndpoint(consumerAdminEndpoints, heartbeatHealthyGameServerInstanceId), {
+      serviceName: "game-server",
+      instanceId: heartbeatHealthyGameServerInstanceId,
+      name: "admin",
+      protocol: "tcp",
+      host: manualEndpoints.heartbeatHealthyGameServer.adminHost,
+      port: manualEndpoints.heartbeatHealthyGameServer.adminPort
+    });
+  } finally {
+    await redis.quit();
+    await cleanupRegistryInstances(redisUrl, heartbeatRegistryInstances, registryKeyPrefix);
   }
 });
