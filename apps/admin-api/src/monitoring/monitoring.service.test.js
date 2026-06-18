@@ -207,6 +207,8 @@ test("rolloutDrain returns drained rollout warning snapshot", async () => {
     assert.equal(result.blockers.stale_room_route_count, 1);
     assert.equal(result.blockers.stale_player_route_count, 2);
     assert.equal(result.instances[0].endpoint.fallback, true);
+    assert.equal(result.instances[0].endpoint.source, "fallback");
+    assert.equal(result.instances[0].endpoint.reason, "fallback_used");
   });
 });
 

@@ -1,6 +1,7 @@
 import { log } from "./logger.js";
 import {
   createServiceInstancePayload,
+  discoveryLogContext,
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
   registryHeartbeatKey,
@@ -122,7 +123,7 @@ export class RegistryClient {
 
 export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
   const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, registryKeyPrefix);
-  return discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
+  const endpoints = discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
     .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
@@ -137,6 +138,14 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       weight: instance.weight,
       metadata: endpoint.metadata || {}
     }));
+  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+    serviceName: GAME_SERVER_SERVICE_NAME,
+    endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
+    source: "registry",
+    reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+    instance_count: endpoints.length
+  });
+  return endpoints;
 }
 
 export async function discoverServiceInstances(redis, serviceName, registryKeyPrefix = "") {
@@ -147,11 +156,22 @@ export async function discoverServiceInstances(redis, serviceName, registryKeyPr
   return discoverRegistryServiceInstances(redis, serviceName, {
     ...options,
     onParseError: options.onParseError || ((error, context) => {
-      log("warn", "registry.discovery_parse_failed", {
-        service: context.serviceName,
-        instance: context.instanceId,
-        error: error.message
+      logDiscovery("warn", "registry.discovery_parse_failed", {
+        serviceName: context.serviceName,
+        instanceId: context.instanceId,
+        source: "registry",
+        reason: "registry_error",
+        error
       });
-    })
+    }),
+    onDiscoveryLog: options.onDiscoveryLog || logDiscovery
   });
+}
+
+function logDiscovery(level, event, context = {}) {
+  try {
+    log(level, event, discoveryLogContext(context));
+  } catch {
+    // Focused tests may instantiate registry helpers before logger bootstrap.
+  }
 }

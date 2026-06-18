@@ -214,3 +214,19 @@ test("GameAdminClient rejects direct fallback when local fallback is disabled", 
 
   await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });
 });
+
+test("GameAdminClient marks optional local fallback endpoint source and reason", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: true,
+    gameServerAdminHost: "127.0.0.1",
+    gameServerAdminPort: 7500
+  });
+
+  const endpoints = await client.listAdminEndpoints();
+
+  assert.deepEqual(endpoints.map(({ source, reason, instance_id }) => ({ source, reason, instance_id })), [
+    { source: "fallback", reason: "fallback_used", instance_id: "local-fallback" }
+  ]);
+});

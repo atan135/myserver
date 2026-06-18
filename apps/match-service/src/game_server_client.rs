@@ -114,7 +114,11 @@ impl GameServerClient {
                 ));
             }
             tracing::warn!(
+                service = %self.config.game_server_service_name,
+                endpoint = "internal",
+                instance_id = "",
                 source = "fallback",
+                reason = "registry_disabled",
                 socket = %self.config.game_server_internal_socket_name,
                 "service registry disabled, using local game-server internal socket fallback"
             );
@@ -128,9 +132,11 @@ impl GameServerClient {
         {
             Ok(socket) => {
                 tracing::info!(
-                    source = "registry",
                     service = %self.config.game_server_service_name,
                     endpoint = "internal",
+                    instance_id = "",
+                    source = "registry",
+                    reason = "discovered",
                     socket = %socket,
                     match_id = %match_id,
                     mode = %mode,
@@ -143,7 +149,11 @@ impl GameServerClient {
                     return Err(error);
                 }
                 tracing::warn!(
+                    service = %self.config.game_server_service_name,
+                    endpoint = "internal",
+                    instance_id = "",
                     source = "fallback",
+                    reason = "fallback_used",
                     error = %error,
                     socket = %self.config.game_server_internal_socket_name,
                     "failed to discover game-server internal endpoint, using fallback"
@@ -222,7 +232,11 @@ impl GameServerDiscovery {
             Ok(socket) => Ok(socket),
             Err(error) if !discovery_required => {
                 tracing::warn!(
+                    service = %self.game_server_service_name,
+                    endpoint = "internal",
+                    instance_id = "",
                     source = "fallback",
+                    reason = "fallback_used",
                     error = %error,
                     socket = %self.fallback_socket_name,
                     "game-server discovery selection failed, using local fallback"

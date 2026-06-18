@@ -1,6 +1,8 @@
 import net from "node:net";
 
+import { discoveryLogContext } from "../../../packages/service-registry/node/registry-schema.js";
 import { discoverGameServerAdminEndpoints } from "./registry-client.js";
+import { log } from "./logger.js";
 
 const MAGIC = 0xcafe;
 const VERSION = 1;
@@ -315,12 +317,21 @@ export class GameAdminClient {
   async listAdminEndpoints() {
     if (!this.config.registryDiscoveryEnabled) {
       if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
+        logDiscovery("warn", "registry.discovery_fallback_forbidden", {
+          source: "registry",
+          reason: this.config.registryDiscoveryRequired ? "registry_disabled" : "fallback_forbidden"
+        });
         throw createAdminError(
           "SERVICE_DISCOVERY_REQUIRED",
           "Required registry discovery failed: REGISTRY_ENABLED=false"
         );
       }
 
+      logDiscovery("warn", "registry.discovery_fallback", {
+        source: "fallback",
+        reason: "fallback_used",
+        instanceId: "local-fallback"
+      });
       return [
         {
           service: "game-server",
@@ -332,7 +343,9 @@ export class GameAdminClient {
           host: this.config.gameServerAdminHost,
           port: this.config.gameServerAdminPort,
           healthy: true,
-          fallback: true
+          fallback: true,
+          source: "fallback",
+          reason: "fallback_used"
         }
       ];
     }
@@ -407,6 +420,18 @@ function normalizeTargetInstanceId(value) {
     return "";
   }
   return String(value).trim();
+}
+
+function logDiscovery(level, event, context = {}) {
+  try {
+    log(level, event, discoveryLogContext({
+      serviceName: "game-server",
+      endpointName: "admin",
+      ...context
+    }));
+  } catch {
+    // Focused tests may instantiate the client before logger bootstrap.
+  }
 }
 
 export {

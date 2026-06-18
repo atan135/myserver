@@ -252,17 +252,30 @@ pub async fn run(
             if let Err(error) = run_upstream_discovery(
                 registry_url,
                 registry_key_prefix,
-                service_name,
+                service_name.clone(),
                 discover_interval,
                 route_store_clone,
             )
             .await
             {
-                tracing::error!(error = %error, "upstream discovery stopped");
+                tracing::error!(
+                    service = %service_name,
+                    endpoint = "proxy-local",
+                    instance_id = "",
+                    source = "registry",
+                    reason = "registry_error",
+                    error = %error,
+                    "upstream discovery stopped"
+                );
             }
         });
     } else {
         tracing::info!(
+            service = %config.upstream_service_name,
+            endpoint = "proxy-local",
+            instance_id = %config.upstream_server_id,
+            source = "fallback",
+            reason = "fallback_used",
             upstream_server_id = %config.upstream_server_id,
             upstream_local_socket_name = %config.upstream_local_socket_name,
             "using static upstream config"
@@ -421,6 +434,10 @@ async fn refresh_routes_from_discovery_snapshot(
         route_store.sync_discovered_routes(Vec::new()).await;
         tracing::warn!(
             service = %snapshot.service_name,
+            endpoint = "proxy-local",
+            instance_id = "",
+            source = "registry",
+            reason = "registry_error",
             error = %error,
             "failed to discover upstream; existing routes marked unavailable"
         );
@@ -435,6 +452,9 @@ async fn refresh_routes_from_discovery_snapshot(
     tracing::info!(
         service = %snapshot.service_name,
         endpoint = "proxy-local",
+        instance_id = "",
+        source = "registry",
+        reason = if endpoint_count == 0 { "endpoint_missing" } else { "discovered" },
         endpoint_count,
         "upstream routes refreshed"
     );
@@ -442,6 +462,9 @@ async fn refresh_routes_from_discovery_snapshot(
         tracing::error!(
             service = %snapshot.service_name,
             endpoint = "proxy-local",
+            instance_id = "",
+            source = "registry",
+            reason = "endpoint_missing",
             "no upstream endpoints discovered; existing routes marked unavailable"
         );
     }

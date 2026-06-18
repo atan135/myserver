@@ -61,7 +61,15 @@ impl MatchClientConfig {
             if discovery_required {
                 panic!("required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc");
             }
-            tracing::info!(source = "fallback", addr = %fallback_addr, "match-service address resolved");
+            tracing::info!(
+                service = %service_name,
+                endpoint = "grpc",
+                instance_id = "",
+                source = "fallback",
+                reason = "registry_disabled",
+                addr = %fallback_addr,
+                "match-service address resolved"
+            );
             return Self {
                 addr: fallback_addr.clone(),
                 fallback_addr,
@@ -328,13 +336,24 @@ pub fn spawn_match_client_rediscovery(
     config: MatchClientConfig,
 ) -> Option<JoinHandle<()>> {
     if !config.rediscovery_enabled() {
-        tracing::info!("match-service rediscovery disabled because service registry is disabled");
+        tracing::info!(
+            service = %config.service_name,
+            endpoint = "grpc",
+            instance_id = "",
+            source = "fallback",
+            reason = "registry_disabled",
+            "match-service rediscovery disabled because service registry is disabled"
+        );
         return None;
     }
 
     let interval = Duration::from_secs(config.rediscovery_interval_secs.max(1));
     tracing::info!(
         service = %config.service_name,
+        endpoint = "grpc",
+        instance_id = "",
+        source = "registry",
+        reason = "watch_started",
         interval_secs = config.rediscovery_interval_secs,
         "match-service rediscovery task started"
     );
@@ -359,6 +378,10 @@ pub fn spawn_match_client_rediscovery(
                 Err(error) => {
                     tracing::warn!(
                         service = %config.service_name,
+                        endpoint = "grpc",
+                        instance_id = "",
+                        source = "registry",
+                        reason = "registry_error",
                         error = %error,
                         "match-service rediscovery failed; keeping existing client and retrying next tick"
                     );
@@ -506,7 +529,21 @@ async fn resolve_match_service_addr(
         {
             Ok(Some(endpoint)) => {
                 let addr = format!("http://{}:{}", endpoint.host, endpoint.port);
-                tracing::info!(source = "registry", service = %service_name, endpoint = "grpc", addr = %addr, "match-service address resolved");
+                let instance_id = endpoint
+                    .metadata
+                    .get("instance_id")
+                    .or_else(|| endpoint.metadata.get("service_instance_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                tracing::info!(
+                    service = %service_name,
+                    endpoint = "grpc",
+                    instance_id,
+                    source = "registry",
+                    reason = "discovered",
+                    addr = %addr,
+                    "match-service address resolved"
+                );
                 DiscoveryOutcome::Found(addr)
             }
             Ok(None) => DiscoveryOutcome::NotFound,
@@ -521,7 +558,15 @@ async fn resolve_match_service_addr(
     match resolve_discovery_outcome(outcome, fallback_addr, discovery_required) {
         Ok(resolved) => {
             if resolved.source == MatchServiceAddrSource::Fallback {
-                tracing::warn!(source = "fallback", service = %service_name, endpoint = "grpc", addr = %fallback_addr, "failed to discover match-service grpc endpoint, using fallback");
+                tracing::warn!(
+                    service = %service_name,
+                    endpoint = "grpc",
+                    instance_id = "",
+                    source = "fallback",
+                    reason = "fallback_used",
+                    addr = %fallback_addr,
+                    "failed to discover match-service grpc endpoint, using fallback"
+                );
             }
             Ok(resolved)
         }

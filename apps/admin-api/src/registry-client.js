@@ -3,6 +3,7 @@ import {
   DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS,
   getRegistryDiscoveryClient,
   createServiceInstancePayload,
+  discoveryLogContext,
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
   registryHeartbeatKey,
@@ -142,10 +143,12 @@ export class RegistryClient {
 
     const refreshIntervalMs = normalizeRefreshIntervalMs(intervalMs);
     const onError = (error, context) => {
-      log("warn", "registry.discovery_refresh_failed", {
-        service: context.serviceName,
-        endpoint: context.endpointName,
-        error: error.message
+      logDiscovery("warn", "registry.discovery_refresh_failed", {
+        serviceName: context.serviceName,
+        endpointName: context.endpointName,
+        source: "registry",
+        reason: "registry_error",
+        error
       });
     };
 
@@ -192,7 +195,7 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
     GAME_SERVER_SERVICE_NAME,
     GAME_SERVER_ADMIN_ENDPOINT_NAME
   );
-  return candidates
+  const endpoints = candidates
     .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
@@ -207,6 +210,14 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       weight: instance.weight,
       metadata: endpoint.metadata || {}
     }));
+  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+    serviceName: GAME_SERVER_SERVICE_NAME,
+    endpointName: GAME_SERVER_ADMIN_ENDPOINT_NAME,
+    source: "registry",
+    reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+    instance_count: endpoints.length
+  });
+  return endpoints;
 }
 
 export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix = "") {
@@ -216,7 +227,7 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
     GAME_PROXY_SERVICE_NAME,
     GAME_PROXY_ADMIN_ENDPOINT_NAME
   );
-  return candidates
+  const endpoints = candidates
     .filter(({ endpoint }) => GAME_PROXY_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_PROXY_SERVICE_NAME,
@@ -231,6 +242,14 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
       weight: instance.weight,
       metadata: endpoint.metadata || {}
     }));
+  logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+    serviceName: GAME_PROXY_SERVICE_NAME,
+    endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
+    source: "registry",
+    reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+    instance_count: endpoints.length
+  });
+  return endpoints;
 }
 
 export async function discoverServiceInstances(redis, serviceName, registryKeyPrefix = "") {
@@ -239,12 +258,15 @@ export async function discoverServiceInstances(redis, serviceName, registryKeyPr
   return discoverRegistryServiceInstances(redis, serviceName, {
     ...options,
     onParseError: options.onParseError || ((error, context) => {
-      log("warn", "registry.discovery_parse_failed", {
-        service: context.serviceName,
-        instance: context.instanceId,
-        error: error.message
+      logDiscovery("warn", "registry.discovery_parse_failed", {
+        serviceName: context.serviceName,
+        instanceId: context.instanceId,
+        source: "registry",
+        reason: "registry_error",
+        error
       });
-    })
+    }),
+    onDiscoveryLog: options.onDiscoveryLog || logDiscovery
   });
 }
 
@@ -253,12 +275,15 @@ export function createRegistryDiscoveryClient(redis, configOrOptions = {}) {
   return getRegistryDiscoveryClient(redis, {
     ...options,
     onParseError: options.onParseError || ((error, context) => {
-      log("warn", "registry.discovery_parse_failed", {
-        service: context.serviceName,
-        instance: context.instanceId,
-        error: error.message
+      logDiscovery("warn", "registry.discovery_parse_failed", {
+        serviceName: context.serviceName,
+        instanceId: context.instanceId,
+        source: "registry",
+        reason: "registry_error",
+        error
       });
-    })
+    }),
+    onDiscoveryLog: options.onDiscoveryLog || logDiscovery
   });
 }
 
@@ -302,4 +327,8 @@ function normalizeRefreshIntervalMs(value) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS;
+}
+
+function logDiscovery(level, event, context = {}) {
+  log(level, event, discoveryLogContext(context));
 }

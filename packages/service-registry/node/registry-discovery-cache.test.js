@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   RegistryDiscoveryClient,
   createServiceInstancePayload,
+  discoveryLogContext,
+  getRegistryDiscoveryClient,
   registryHeartbeatKey,
   registryInstanceKey
 } from "./registry-schema.js";
@@ -319,6 +321,115 @@ test("RegistryDiscoveryClient refresh snapshots separate services endpoints and 
   assert.deepEqual(gameClient.value.map(({ endpoint }) => endpoint.port), [7000]);
   assert.deepEqual(proxyAdmin.value.map(({ endpoint }) => endpoint.port), [7101]);
   assert.deepEqual(prefixedGameAdmin.value.map(({ endpoint }) => endpoint.port), [7600]);
+});
+
+test("discoveryLogContext normalizes discovery fields", () => {
+  assert.deepEqual(
+    discoveryLogContext({
+      serviceName: "game-server",
+      endpointName: "admin",
+      instanceId: "game-a",
+      source: "registry",
+      reason: "discovered"
+    }),
+    {
+      service: "game-server",
+      endpoint: "admin",
+      instance_id: "game-a",
+      source: "registry",
+      reason: "discovered",
+      serviceName: "game-server",
+      endpointName: "admin",
+      instanceId: "game-a"
+    }
+  );
+});
+
+test("RegistryDiscoveryClient discovery logs include unified registry context", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  const logs = [];
+  const client = new RegistryDiscoveryClient(redis, {
+    discoveryCacheTtlMs: 0,
+    onDiscoveryLog: (level, event, context) => logs.push({ level, event, context })
+  });
+
+  await client.discoverEndpoint("game-server", "admin");
+  await client.discoverEndpoint("game-server", "client");
+
+  assert.deepEqual(
+    logs.map(({ event, context }) => ({
+      event,
+      service: context.service,
+      endpoint: context.endpoint,
+      instance_id: context.instance_id,
+      source: context.source,
+      reason: context.reason
+    })),
+    [
+      {
+        event: "registry.discovery_instances",
+        service: "game-server",
+        endpoint: "",
+        instance_id: "",
+        source: "registry",
+        reason: "discovered"
+      },
+      {
+        event: "registry.discovery_endpoint",
+        service: "game-server",
+        endpoint: "admin",
+        instance_id: "game-a",
+        source: "registry",
+        reason: "discovered"
+      },
+      {
+        event: "registry.discovery_instances",
+        service: "game-server",
+        endpoint: "",
+        instance_id: "",
+        source: "registry",
+        reason: "discovered"
+      },
+      {
+        event: "registry.discovery_endpoint",
+        service: "game-server",
+        endpoint: "client",
+        instance_id: "",
+        source: "registry",
+        reason: "endpoint_missing"
+      }
+    ]
+  );
+});
+
+test("getRegistryDiscoveryClient updates callbacks on reused client", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+
+  const first = getRegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+  assert.equal((await first.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
+
+  const logs = [];
+  const reused = getRegistryDiscoveryClient(redis, {
+    discoveryCacheTtlMs: 1000,
+    onDiscoveryLog: (level, event, context) => logs.push({ level, event, context })
+  });
+
+  assert.equal(reused, first);
+  reused.clearCache();
+  await reused.discoverEndpoint("game-server", "admin");
+
+  assert.ok(
+    logs.some(({ event, context }) =>
+      event === "registry.discovery_endpoint" &&
+      context.service === "game-server" &&
+      context.endpoint === "admin" &&
+      context.instance_id === "game-a" &&
+      context.source === "registry" &&
+      context.reason === "discovered"
+    )
+  );
 });
 
 function sleep(ms) {

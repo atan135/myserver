@@ -30,6 +30,7 @@ export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", 
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
 export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 1000;
 export const DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS = 5000;
+const DISCOVERY_LOG_SOURCES = new Set(["registry", "fallback"]);
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
@@ -49,6 +50,61 @@ export function registryHeartbeatKey(prefix, serviceName, instanceId) {
 
 export function registryInstanceScanPattern(prefix, serviceName) {
   return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instances:*`;
+}
+
+export function discoveryLogContext(context = {}) {
+  const service = String(context.serviceName ?? context.service ?? "");
+  const endpoint = String(context.endpointName ?? context.endpoint ?? "");
+  const instanceId = String(context.instanceId ?? context.instance_id ?? "");
+  const source = String(context.source ?? "registry");
+  const reason = String(context.reason ?? "");
+  const normalized = {
+    service,
+    endpoint,
+    instance_id: instanceId,
+    source: DISCOVERY_LOG_SOURCES.has(source) ? source : "registry",
+    reason,
+    serviceName: service,
+    endpointName: endpoint,
+    instanceId
+  };
+
+  if (context.error !== undefined && context.error !== null) {
+    normalized.error = context.error instanceof Error
+      ? context.error.message
+      : String(context.error);
+  }
+
+  for (const [key, value] of Object.entries(context)) {
+    if (
+      value !== undefined &&
+      ![
+        "service",
+        "serviceName",
+        "endpoint",
+        "endpointName",
+        "instance_id",
+        "instanceId",
+        "source",
+        "reason",
+        "error"
+      ].includes(key)
+    ) {
+      normalized[key] = value;
+    }
+  }
+
+  return normalized;
+}
+
+export function discoveryLogContextFromSelection(serviceName, endpointName, selection, reason = "discovered") {
+  return discoveryLogContext({
+    serviceName,
+    endpointName,
+    instanceId: selection?.instance?.id || "",
+    source: "registry",
+    reason
+  });
 }
 
 export function createServiceInstancePayload({
@@ -309,8 +365,22 @@ export class RegistryDiscoveryClient {
     this.discoveryCacheTtlMs = normalizeDiscoveryCacheTtlMs(options.discoveryCacheTtlMs);
     this.now = typeof options.now === "function" ? options.now : () => Date.now();
     this.onParseError = typeof options.onParseError === "function" ? options.onParseError : null;
+    this.onDiscoveryLog = typeof options.onDiscoveryLog === "function" ? options.onDiscoveryLog : null;
     this.cache = new Map();
     this.refreshHandles = new Map();
+  }
+
+  updateCallbacks(options = {}) {
+    if (typeof options.onParseError === "function") {
+      this.onParseError = options.onParseError;
+    }
+    if (typeof options.onDiscoveryLog === "function") {
+      this.onDiscoveryLog = options.onDiscoveryLog;
+    }
+    if (typeof options.now === "function") {
+      this.now = options.now;
+    }
+    return this;
   }
 
   async discoverInstances(serviceName) {
@@ -331,13 +401,29 @@ export class RegistryDiscoveryClient {
       return cached;
     }
 
-    const instances = await scanServiceInstances(
-      this.redis,
-      serviceName,
-      this.registryKeyPrefix,
-      this.onParseError
-    );
-    return this.setCached(cacheKey, instances);
+    try {
+      const instances = await scanServiceInstances(
+        this.redis,
+        serviceName,
+        this.registryKeyPrefix,
+        this.onParseError
+      );
+      this.emitDiscoveryLog(instances.length > 0 ? "info" : "warn", "registry.discovery_instances", {
+        serviceName,
+        source: "registry",
+        reason: instances.length > 0 ? "discovered" : "no_healthy_instance",
+        instance_count: instances.length
+      });
+      return this.setCached(cacheKey, instances);
+    } catch (error) {
+      this.emitDiscoveryLog("warn", "registry.discovery_instances_failed", {
+        serviceName,
+        source: "registry",
+        reason: "registry_error",
+        error
+      });
+      throw error;
+    }
   }
 
   async discoverEndpoint(serviceName, endpointName) {
@@ -355,6 +441,13 @@ export class RegistryDiscoveryClient {
 
     const { value: instances, expiresAt } = await this.discoverInstancesWithExpiry(serviceName);
     const discovered = discoverEndpoint(instances, endpointName);
+    this.emitDiscoveryLog(discovered ? "info" : "warn", "registry.discovery_endpoint", {
+      serviceName,
+      endpointName,
+      instanceId: discovered?.instance?.id || "",
+      source: "registry",
+      reason: discovered ? "discovered" : "endpoint_missing"
+    });
     this.setCached(cacheKey, discovered, expiresAt);
     return discovered;
   }
@@ -383,6 +476,13 @@ export class RegistryDiscoveryClient {
 
     const { value: instances, expiresAt } = await this.discoverInstancesWithExpiry(serviceName);
     const endpoints = discoverAllEndpoints(instances, endpointName);
+    this.emitDiscoveryLog(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+      serviceName,
+      endpointName,
+      source: "registry",
+      reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+      instance_count: endpoints.length
+    });
     this.setCached(cacheKey, endpoints, expiresAt);
     return endpoints;
   }
@@ -540,6 +640,18 @@ export class RegistryDiscoveryClient {
       }
     }
   }
+
+  emitDiscoveryLog(level, event, context = {}) {
+    if (!this.onDiscoveryLog) {
+      return;
+    }
+
+    try {
+      this.onDiscoveryLog(level, event, discoveryLogContext(context));
+    } catch {
+      // Discovery logging must not affect discovery behavior.
+    }
+  }
 }
 
 export class RegistryDiscoveryRefreshHandle {
@@ -604,6 +716,13 @@ export class RegistryDiscoveryRefreshHandle {
   async doRefreshSnapshot() {
     try {
       const value = await this.client.loadRefreshValue(this.spec);
+      this.client.emitDiscoveryLog(discoveryValueIsEmpty(value, this.spec.kind) ? "warn" : "info", "registry.discovery_refresh", {
+        serviceName: this.spec.serviceName,
+        endpointName: this.spec.endpointName,
+        instanceId: discoveryValueInstanceId(value, this.spec.kind),
+        source: "registry",
+        reason: discoveryValueIsEmpty(value, this.spec.kind) ? refreshEmptyReason(this.spec.kind) : "discovered"
+      });
       const snapshot = {
         ok: true,
         value: cloneDiscoveryValue(value),
@@ -626,6 +745,13 @@ export class RegistryDiscoveryRefreshHandle {
       if (!this.spec.retainStaleOnError) {
         this.client.clearCacheForService(this.spec.serviceName);
       }
+      this.client.emitDiscoveryLog("warn", "registry.discovery_refresh_failed", {
+        serviceName: this.spec.serviceName,
+        endpointName: this.spec.endpointName,
+        source: "registry",
+        reason: "registry_error",
+        error
+      });
       this.spec.onError?.(error, {
         serviceName: this.spec.serviceName,
         endpointName: this.spec.endpointName,
@@ -654,6 +780,8 @@ export function getRegistryDiscoveryClient(redis, options = {}) {
       discoveryCacheTtlMs
     });
     clients.set(clientKey, client);
+  } else {
+    client.updateCallbacks(options);
   }
   return client;
 }
@@ -896,4 +1024,25 @@ function cloneDiscoveryValue(value) {
     };
   }
   return value;
+}
+
+function discoveryValueIsEmpty(value, kind) {
+  if (kind === "instances") {
+    return !Array.isArray(value) || value.length === 0;
+  }
+  if (kind === "endpoint") {
+    return !value;
+  }
+  return !Array.isArray(value) || value.length === 0;
+}
+
+function discoveryValueInstanceId(value, kind) {
+  if (kind === "endpoint") {
+    return value?.instance?.id || "";
+  }
+  return "";
+}
+
+function refreshEmptyReason(kind) {
+  return kind === "instances" ? "no_healthy_instance" : "endpoint_missing";
 }

@@ -1,8 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
 import http from "node:http";
 
+import { discoveryLogContext } from "../../../../packages/service-registry/node/registry-schema.js";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
+import { log } from "../logger.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
 import { discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "../registry-client.js";
@@ -340,9 +342,22 @@ export class MonitoringService {
   private async getGameServerAdminEndpoints(): Promise<any[]> {
     if (!this.config.registryDiscoveryEnabled) {
       if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
+        logDiscovery("warn", "registry.discovery_fallback_forbidden", {
+          serviceName: "game-server",
+          endpointName: "admin",
+          source: "registry",
+          reason: this.config.registryDiscoveryRequired ? "registry_disabled" : "fallback_forbidden"
+        });
         return [];
       }
 
+      logDiscovery("warn", "registry.discovery_fallback", {
+        serviceName: "game-server",
+        endpointName: "admin",
+        instanceId: "local-fallback",
+        source: "fallback",
+        reason: "fallback_used"
+      });
       return [
         {
           service: "game-server",
@@ -354,7 +369,9 @@ export class MonitoringService {
           host: this.config.gameServerAdminHost,
           port: this.config.gameServerAdminPort,
           healthy: true,
-          fallback: true
+          fallback: true,
+          source: "fallback",
+          reason: "fallback_used"
         }
       ];
     }
@@ -365,11 +382,24 @@ export class MonitoringService {
   private async getGameProxyAdminEndpoints(): Promise<any[]> {
     if (!this.config.registryDiscoveryEnabled) {
       if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
+        logDiscovery("warn", "registry.discovery_fallback_forbidden", {
+          serviceName: "game-proxy",
+          endpointName: "admin",
+          source: "registry",
+          reason: this.config.registryDiscoveryRequired ? "registry_disabled" : "fallback_forbidden"
+        });
         const error: any = new Error("Required registry discovery failed: REGISTRY_ENABLED=false");
         error.code = "SERVICE_DISCOVERY_REQUIRED";
         throw error;
       }
 
+      logDiscovery("warn", "registry.discovery_fallback", {
+        serviceName: "game-proxy",
+        endpointName: "admin",
+        instanceId: "local-fallback",
+        source: "fallback",
+        reason: "fallback_used"
+      });
       return [
         {
           service: "game-proxy",
@@ -381,7 +411,9 @@ export class MonitoringService {
           host: this.config.gameProxyAdminHost || "127.0.0.1",
           port: Number.parseInt(String(this.config.gameProxyAdminPort || 7101), 10),
           healthy: true,
-          fallback: true
+          fallback: true,
+          source: "fallback",
+          reason: "fallback_used"
         }
       ];
     }
@@ -682,6 +714,10 @@ function readStringSamples(source: any, ...keys: string[]) {
   return value
     .filter((item) => typeof item === "string" && item.length > 0)
     .slice(0, DEFAULT_ROLLOUT_DRAIN_SAMPLES_LIMIT);
+}
+
+function logDiscovery(level: string, event: string, context: Record<string, unknown>) {
+  log(level, event, discoveryLogContext(context));
 }
 
 function httpGetJsonBody(options: {

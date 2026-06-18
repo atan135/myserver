@@ -212,7 +212,7 @@ impl RegistryClient {
 
         tracing::info!(
             service = %self.service_name,
-            instance = %self.instance_id,
+            instance_id = %self.instance_id,
             "service registered"
         );
 
@@ -232,7 +232,7 @@ impl RegistryClient {
 
         tracing::info!(
             service = %self.service_name,
-            instance = %self.instance_id,
+            instance_id = %self.instance_id,
             "service deregistered"
         );
 
@@ -496,7 +496,21 @@ impl RegistryClient {
             return Ok(instance);
         }
 
-        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
+        let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                tracing::warn!(
+                    service = %service_name,
+                    endpoint = "",
+                    instance_id = "",
+                    source = "registry",
+                    reason = "registry_error",
+                    error = %error,
+                    "service discovery failed"
+                );
+                return Err(error);
+            }
+        };
 
         if instances.is_empty() {
             self.put_cached_discovery_until(
@@ -505,10 +519,26 @@ impl RegistryClient {
                 expires_at,
             )
             .await;
+            tracing::warn!(
+                service = %service_name,
+                endpoint = "",
+                instance_id = "",
+                source = "registry",
+                reason = "no_healthy_instance",
+                "service discovery returned no healthy instances"
+            );
             return Ok(None);
         }
 
         let picked = pick_weighted_stable(&instances).cloned();
+        tracing::info!(
+            service = %service_name,
+            endpoint = "",
+            instance_id = picked.as_ref().map(|instance| instance.id.as_str()).unwrap_or(""),
+            source = "registry",
+            reason = "discovered",
+            "service discovery selected instance"
+        );
         self.put_cached_discovery_until(
             cache_key,
             DiscoveryCacheValue::Instance(picked.clone()),
@@ -536,8 +566,42 @@ impl RegistryClient {
             return Ok(endpoint);
         }
 
-        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
-        let endpoint = pick_endpoint_weighted_stable(&instances, endpoint_name).cloned();
+        let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                tracing::warn!(
+                    service = %service_name,
+                    endpoint = %endpoint_name,
+                    instance_id = "",
+                    source = "registry",
+                    reason = "registry_error",
+                    error = %error,
+                    "service endpoint discovery failed"
+                );
+                return Err(error);
+            }
+        };
+        let selected = pick_endpoint_candidate_weighted_stable(&instances, endpoint_name);
+        if let Some((instance, _)) = selected {
+            tracing::info!(
+                service = %service_name,
+                endpoint = %endpoint_name,
+                instance_id = %instance.id,
+                source = "registry",
+                reason = "discovered",
+                "service endpoint discovery completed"
+            );
+        } else {
+            tracing::warn!(
+                service = %service_name,
+                endpoint = %endpoint_name,
+                instance_id = "",
+                source = "registry",
+                reason = "endpoint_missing",
+                "service endpoint discovery completed"
+            );
+        }
+        let endpoint = selected.map(|(_, endpoint)| endpoint.clone());
         self.put_cached_discovery_until(
             cache_key,
             DiscoveryCacheValue::Endpoint(endpoint.clone()),
@@ -582,11 +646,46 @@ impl RegistryClient {
             return Ok(endpoints);
         }
 
-        let (instances, expires_at) = self.discover_with_cache_expiry(service_name).await?;
+        let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                tracing::warn!(
+                    service = %service_name,
+                    endpoint = %endpoint_name,
+                    instance_id = "",
+                    source = "registry",
+                    reason = "registry_error",
+                    error = %error,
+                    "service endpoint list discovery failed"
+                );
+                return Err(error);
+            }
+        };
         let endpoints: Vec<_> = all_healthy_endpoints(&instances, endpoint_name)
             .into_iter()
             .cloned()
             .collect();
+        if endpoints.is_empty() {
+            tracing::warn!(
+                service = %service_name,
+                endpoint = %endpoint_name,
+                instance_id = "",
+                source = "registry",
+                reason = "endpoint_missing",
+                endpoint_count = endpoints.len(),
+                "service endpoint list discovery completed"
+            );
+        } else {
+            tracing::info!(
+                service = %service_name,
+                endpoint = %endpoint_name,
+                instance_id = "",
+                source = "registry",
+                reason = "discovered",
+                endpoint_count = endpoints.len(),
+                "service endpoint list discovery completed"
+            );
+        }
         self.put_cached_discovery_until(
             cache_key,
             DiscoveryCacheValue::Endpoints(endpoints.clone()),
@@ -725,10 +824,19 @@ fn pick_weighted_stable(instances: &[ServiceInstance]) -> Option<&ServiceInstanc
         })
 }
 
+#[cfg(test)]
 fn pick_endpoint_weighted_stable<'a>(
     instances: &'a [ServiceInstance],
     endpoint_name: &str,
 ) -> Option<&'a ServiceEndpoint> {
+    pick_endpoint_candidate_weighted_stable(instances, endpoint_name)
+        .map(|(_, endpoint)| endpoint)
+}
+
+fn pick_endpoint_candidate_weighted_stable<'a>(
+    instances: &'a [ServiceInstance],
+    endpoint_name: &str,
+) -> Option<(&'a ServiceInstance, &'a ServiceEndpoint)> {
     all_healthy_endpoint_candidates(instances, endpoint_name)
         .into_iter()
         .max_by(|(a_instance, _), (b_instance, _)| {
@@ -737,7 +845,6 @@ fn pick_endpoint_weighted_stable<'a>(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b_instance.id.cmp(&a_instance.id))
         })
-        .map(|(_, endpoint)| endpoint)
 }
 
 fn all_healthy_endpoints<'a>(

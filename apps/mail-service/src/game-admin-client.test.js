@@ -241,7 +241,9 @@ test("GameAdminClient allows local fallback when discovery is disabled and optio
       host: "127.0.0.1",
       port: 7500,
       healthy: true,
-      fallback: true
+      fallback: true,
+      source: "fallback",
+      reason: "fallback_used"
     }
   ]);
 });
