@@ -186,6 +186,45 @@ test("repository control-plane strict templates omit GAME_SERVER_ADMIN direct co
   }
 });
 
+test("repository admin-api strict templates omit GAME_PROXY_ADMIN direct config while commented local fallback remains allowed", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const adminApiStrictFiles = result.strictFiles.filter((file) =>
+    file.startsWith("apps/admin-api/")
+  );
+  const variables = ["GAME_PROXY_ADMIN_HOST", "GAME_PROXY_ADMIN_PORT"];
+
+  assert.equal(result.ok, true);
+  assert.ok(adminApiStrictFiles.includes("apps/admin-api/.env.test.example"));
+  assert.ok(adminApiStrictFiles.includes("apps/admin-api/.env.production.example"));
+
+  for (const file of adminApiStrictFiles) {
+    const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+    for (const variable of variables) {
+      assert.equal(
+        hasActiveConfigAssignment(content, variable),
+        false,
+        `${file} must not define ${variable}`
+      );
+    }
+  }
+
+  const adminApiExample = fs.readFileSync(path.join(projectRoot, "apps/admin-api/.env.example"), "utf8");
+  for (const variable of variables) {
+    assert.equal(hasActiveConfigAssignment(adminApiExample, variable), false);
+    assert.equal(hasCommentedConfigAssignment(adminApiExample, variable), true);
+    assert.equal(
+      result.allowedLocalFallbacks.some(
+        (item) =>
+          item.file === "apps/admin-api/.env.example" &&
+          item.variable === variable &&
+          item.service === "admin-api"
+      ),
+      false,
+      `${variable} is only a commented local fallback example in apps/admin-api/.env.example`
+    );
+  }
+});
+
 test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging templates", () => {
   const tempDir = createTempRepo();
   try {
@@ -395,6 +434,75 @@ test("control-plane GAME_SERVER_ADMIN direct config is forbidden in test product
           )
         );
       }
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("admin-api GAME_PROXY_ADMIN direct config is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "apps/admin-api/.env.example",
+      [
+        "NODE_ENV=development",
+        "REGISTRY_ENABLED=true",
+        "DISCOVERY_REQUIRED=true",
+        "# Local fallback only: used only when registry discovery is disabled.",
+        "# Do not use for strict/test/production/staging discovery.",
+        "GAME_PROXY_ADMIN_HOST=127.0.0.1",
+        "GAME_PROXY_ADMIN_PORT=7101"
+      ].join("\n")
+    );
+
+    for (const [file, nodeEnv] of [
+      ["apps/admin-api/.env.test.example", "test"],
+      ["apps/admin-api/.env.production.example", "production"],
+      ["apps/admin-api/.env.staging.example", "staging"]
+    ]) {
+      writeFile(
+        tempDir,
+        file,
+        [
+          `NODE_ENV=${nodeEnv}`,
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+          "GAME_PROXY_ADMIN_HOST=10.0.0.31",
+          "GAME_PROXY_ADMIN_PORT=17101"
+        ].join("\n")
+      );
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/admin-api/.env.production.example:GAME_PROXY_ADMIN_HOST",
+      "apps/admin-api/.env.production.example:GAME_PROXY_ADMIN_PORT",
+      "apps/admin-api/.env.staging.example:GAME_PROXY_ADMIN_HOST",
+      "apps/admin-api/.env.staging.example:GAME_PROXY_ADMIN_PORT",
+      "apps/admin-api/.env.test.example:GAME_PROXY_ADMIN_HOST",
+      "apps/admin-api/.env.test.example:GAME_PROXY_ADMIN_PORT"
+    ]);
+    for (const variable of ["GAME_PROXY_ADMIN_HOST", "GAME_PROXY_ADMIN_PORT"]) {
+      assert.ok(
+        result.allowedLocalFallbacks.some(
+          (item) =>
+            item.file === "apps/admin-api/.env.example" &&
+            item.variable === variable &&
+            item.service === "admin-api"
+        )
+      );
+    }
+    for (const violation of result.violations) {
+      assert.equal(violation.service, "admin-api");
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /game-proxy\.admin/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
     }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
