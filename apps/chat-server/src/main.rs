@@ -46,6 +46,7 @@ struct Config {
     registry_heartbeat_interval_secs: u64,
     service_name: String,
     service_instance_id: String,
+    service_build_version: String,
     online_route_ttl_secs: u64,
     public_host: String,
     log_level: String,
@@ -106,6 +107,8 @@ impl Config {
                 .unwrap_or_else(|_| "chat-server".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| "chat-server-001".to_string()),
+            service_build_version: std::env::var("SERVICE_BUILD_VERSION")
+                .unwrap_or_else(|_| "dev".to_string()),
             online_route_ttl_secs: std::env::var("CHAT_ONLINE_ROUTE_TTL_SECS")
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
@@ -211,6 +214,36 @@ fn parse_bool_env(name: &str, default_value: bool) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(default_value)
+}
+
+fn registry_metadata(config: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "service_instance_id": config.service_instance_id,
+        "online_route_ttl_secs": config.online_route_ttl_secs,
+        "build_version": config.service_build_version
+    })
+}
+
+fn build_service_instance(config: &Config, port: u16) -> ServiceInstance {
+    let metadata = registry_metadata(config);
+    ServiceInstance::new(
+        config.service_instance_id.clone(),
+        config.service_name.clone(),
+        config.public_host.clone(),
+        port,
+    )
+    .with_endpoints(vec![ServiceEndpoint {
+        name: "tcp".to_string(),
+        protocol: "tcp".to_string(),
+        host: config.public_host.clone(),
+        port,
+        socket: String::new(),
+        visibility: "internal".to_string(),
+        metadata: metadata.clone(),
+        healthy: true,
+    }])
+    .with_metadata(metadata)
+    .with_tags(vec!["chat".to_string(), "tcp".to_string()])
 }
 
 fn init_logging(config: &Config) {
@@ -354,30 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client =
                     client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let port = extract_port(&config.bind_addr)?;
-                let instance = ServiceInstance::new(
-                    config.service_instance_id.clone(),
-                    config.service_name.clone(),
-                    config.public_host.clone(),
-                    port,
-                )
-                .with_endpoints(vec![ServiceEndpoint {
-                    name: "tcp".to_string(),
-                    protocol: "tcp".to_string(),
-                    host: config.public_host.clone(),
-                    port,
-                    socket: String::new(),
-                    visibility: "internal".to_string(),
-                    metadata: serde_json::json!({
-                        "service_instance_id": config.service_instance_id.clone(),
-                        "online_route_ttl_secs": config.online_route_ttl_secs
-                    }),
-                    healthy: true,
-                }])
-                .with_metadata(serde_json::json!({
-                    "service_instance_id": config.service_instance_id.clone(),
-                    "online_route_ttl_secs": config.online_route_ttl_secs
-                }))
-                .with_tags(vec!["chat".to_string(), "tcp".to_string()]);
+                let instance = build_service_instance(&config, port);
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
@@ -687,6 +697,87 @@ mod tests {
 
         assert_eq!(config.max_connections_per_player, 2);
         assert_eq!(config.max_connections_per_ip, 10);
+    }
+
+    #[test]
+    fn service_build_version_defaults_to_dev() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION"]);
+
+        unsafe {
+            env::remove_var("SERVICE_BUILD_VERSION");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.service_build_version, "dev");
+    }
+
+    #[test]
+    fn service_build_version_accepts_env_value() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION"]);
+
+        unsafe {
+            env::set_var("SERVICE_BUILD_VERSION", "2026.06.18+abc123");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.service_build_version, "2026.06.18+abc123");
+    }
+
+    #[test]
+    fn service_registry_instance_and_endpoint_include_discovery_metadata() {
+        let config = Config {
+            db_enabled: false,
+            database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string(),
+            db_pool_size: 5,
+            bind_addr: "0.0.0.0:9001".to_string(),
+            heartbeat_timeout_secs: 30,
+            max_body_len: 4096,
+            msg_rate_window_ms: 1000,
+            msg_rate_max: 0,
+            max_connections_per_player: 0,
+            max_connections_per_ip: 0,
+            outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
+            ticket_secret: "test-secret".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 1,
+            global_id_worker_id: Some(4),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            registry_enabled: true,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "chat-server".to_string(),
+            service_instance_id: "chat-a".to_string(),
+            service_build_version: "build-42".to_string(),
+            online_route_ttl_secs: 75,
+            public_host: "10.0.0.8".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs".to_string(),
+        };
+
+        let instance = build_service_instance(&config, 9001);
+
+        assert_eq!(instance.metadata["service_instance_id"], "chat-a");
+        assert_eq!(instance.metadata["online_route_ttl_secs"], 75);
+        assert_eq!(instance.metadata["build_version"], "build-42");
+        assert_eq!(instance.endpoints.len(), 1);
+
+        let endpoint = &instance.endpoints[0];
+        assert_eq!(endpoint.name, "tcp");
+        assert_eq!(endpoint.protocol, "tcp");
+        assert_eq!(endpoint.host, "10.0.0.8");
+        assert_eq!(endpoint.port, 9001);
+        assert_eq!(endpoint.visibility, "internal");
+        assert_eq!(endpoint.metadata["service_instance_id"], "chat-a");
+        assert_eq!(endpoint.metadata["online_route_ttl_secs"], 75);
+        assert_eq!(endpoint.metadata["build_version"], "build-42");
     }
 
     #[test]
