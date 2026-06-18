@@ -117,6 +117,7 @@ export function getConfig() {
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "mail-001",
+    serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };

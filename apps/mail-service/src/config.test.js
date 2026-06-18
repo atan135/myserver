@@ -12,6 +12,7 @@ const CONFIG_ENV_NAMES = [
   "GAME_ADMIN_MAX_RESPONSE_BYTES",
   "MAIL_PLAYER_AUTH_REQUIRED",
   "MAIL_SERVICE_TOKEN",
+  "SERVICE_BUILD_VERSION",
   "TICKET_SECRET"
 ];
 
@@ -74,5 +75,21 @@ test("mail-service game admin network limits read positive values", async () => 
     assert.equal(config.gameAdminWriteTimeoutMs, 202);
     assert.equal(config.gameAdminReadTimeoutMs, 303);
     assert.equal(config.gameAdminMaxResponseBytes, 4097);
+  });
+});
+
+test("mail-service config reads service build version", async () => {
+  await withEnv({ SERVICE_BUILD_VERSION: "2026.06.18+abc123" }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.serviceBuildVersion, "2026.06.18+abc123");
+  });
+});
+
+test("mail-service config defaults service build version to dev", async () => {
+  await withEnv({}, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.serviceBuildVersion, "dev");
   });
 });
