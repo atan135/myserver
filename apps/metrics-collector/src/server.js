@@ -3,6 +3,7 @@ import { connect, StringCodec } from "nats";
 import { pathToFileURL } from "node:url";
 
 import { getConfig } from "./config.js";
+import { maybeRegisterService } from "./registry-client.js";
 
 const codec = StringCodec();
 const DEFAULT_INSTANCE_ID = "default";
@@ -72,6 +73,13 @@ export async function writeMetrics(redis, config, message) {
 
 async function main() {
   const config = getConfig();
+  const registryStatus = await maybeRegisterService(null, config);
+  if (registryStatus.registered === false) {
+    console.log(
+      `[metrics-collector] service registry disabled: service=${registryStatus.service}, instance=${registryStatus.instance}, build=${registryStatus.build_version}; ${registryStatus.reason}`
+    );
+  }
+
   const redis = new Redis(config.redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 3

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { TextEncoder } from "node:util";
 import { test } from "node:test";
 
+import { getConfig } from "../apps/metrics-collector/src/config.js";
+import {
+  maybeRegisterService,
+  REGISTRY_DISABLED_REASON
+} from "../apps/metrics-collector/src/registry-client.js";
 import {
   buildMetricsKey,
   isDirectRun,
@@ -88,10 +93,60 @@ class FakeRedis {
   }
 }
 
+class RegistryRedisCapture {
+  constructor() {
+    this.writes = [];
+  }
+
+  async hset(key, ...args) {
+    this.writes.push(["hset", key, ...args]);
+  }
+
+  async setex(key, ...args) {
+    this.writes.push(["setex", key, ...args]);
+  }
+
+  async set(key, ...args) {
+    this.writes.push(["set", key, ...args]);
+  }
+
+  async del(key) {
+    this.writes.push(["del", key]);
+  }
+
+  hasWrittenKeyPrefix(prefix) {
+    return this.writes.some(([, key]) => String(key).startsWith(prefix));
+  }
+}
+
 function metricsMessage(payload) {
   return {
     data: new TextEncoder().encode(JSON.stringify(payload))
   };
+}
+
+async function withEnv(overrides, callback) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 test("metrics collector writes instance scoped key and stable fallback key", async () => {
@@ -147,6 +202,54 @@ test("metrics collector writes instance scoped key and stable fallback key", asy
   assert.equal(redis.values.get("metrics:heartbeat:game-server"), "1700000002");
   assert.equal(redis.values.get("metrics:heartbeat:game-server:gs-1"), "1700000001");
   assert.equal(redis.values.get("metrics:heartbeat:game-server:default"), "1700000002");
+});
+
+test("metrics collector defaults to explicit service registry opt-out", async () => {
+  await withEnv(
+    {
+      SERVICE_REGISTRY_REGISTER: undefined,
+      SERVICE_NAME: undefined,
+      SERVICE_INSTANCE_ID: undefined,
+      SERVICE_BUILD_VERSION: undefined
+    },
+    async () => {
+      const config = getConfig();
+      const redis = new RegistryRedisCapture();
+      const status = await maybeRegisterService(redis, config);
+
+      assert.equal(config.serviceRegistryRegister, false);
+      assert.equal(config.serviceName, "metrics-collector");
+      assert.equal(config.serviceInstanceId, "metrics-collector-001");
+      assert.equal(status.registered, false);
+      assert.equal(status.reason, REGISTRY_DISABLED_REASON);
+      assert.deepEqual(redis.writes, []);
+      assert.equal(
+        redis.hasWrittenKeyPrefix("service:metrics-collector:instances:"),
+        false
+      );
+    }
+  );
+});
+
+test("metrics collector rejects service registry registration without a real endpoint", async () => {
+  const redis = new RegistryRedisCapture();
+
+  await assert.rejects(
+    () =>
+      maybeRegisterService(redis, {
+        serviceRegistryRegister: true,
+        serviceName: "metrics-collector",
+        serviceInstanceId: "metrics-collector-test-001",
+        serviceBuildVersion: "test"
+      }),
+    /SERVICE_REGISTRY_REGISTER=true is not supported/
+  );
+
+  assert.deepEqual(redis.writes, []);
+  assert.equal(
+    redis.hasWrittenKeyPrefix("service:metrics-collector:instances:"),
+    false
+  );
 });
 
 test("metrics collector direct-run detection uses file URLs across platforms", () => {
