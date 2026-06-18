@@ -34,6 +34,7 @@
     "check:mock-client-protocol": "node tools/check-mock-client-protocol.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",
+    "check:registry-outage-drill": "node tools/check-registry-outage-drill.js",
     "check:discovery-config": "node tools/check-discovery-config.js",
     "check:deployment-discovery": "node tools/check-deployment-discovery-dry-run.js",
     "check:migrations": "node tools/db-migrate.js --check",
