@@ -2,6 +2,7 @@ import {
   discoverEndpoint,
   normalizeServiceInstance,
 } from "../../../packages/service-registry/node/registry-schema.js";
+import { serviceUnavailable } from "./common/http-exception.js";
 
 function createGameService(config) {
   return {
@@ -40,7 +41,7 @@ export class ServiceDiscovery {
 
     if (!this.config.registryDiscoveryEnabled) {
       if (this.config.registryDiscoveryRequired) {
-        throw new Error("Required registry discovery failed: REGISTRY_ENABLED=false");
+        throw requiredDiscoveryFailed("REGISTRY_ENABLED=false");
       }
       return services;
     }
@@ -56,7 +57,7 @@ export class ServiceDiscovery {
     if (discoveredGame) {
       services.game = discoveredGame;
     } else if (this.config.registryDiscoveryRequired) {
-      throw new Error("Required registry discovery failed: game-proxy.client endpoint not found");
+      throw requiredDiscoveryFailed("game-proxy.client endpoint not found");
     }
 
     services.chat = createEndpointDescriptor(chatEndpoint, "tcp");
@@ -113,4 +114,11 @@ async function scanKeys(redis, pattern) {
   } while (cursor !== "0");
 
   return keys;
+}
+
+function requiredDiscoveryFailed(reason) {
+  return serviceUnavailable(
+    "SERVICE_DISCOVERY_UNAVAILABLE",
+    `Required registry discovery failed: ${reason}`
+  );
 }

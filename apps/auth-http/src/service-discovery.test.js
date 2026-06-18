@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ApiHttpException } from "./common/http-exception.js";
 import { ServiceDiscovery } from "./service-discovery.js";
 
 function createRedis(instancesByService) {
@@ -174,7 +175,16 @@ test("ServiceDiscovery throws when game-proxy.client is required but missing", a
 
   await assert.rejects(
     () => discovery.discoverClientServices(),
-    /Required registry discovery failed: game-proxy\.client endpoint not found/
+    (error) => {
+      assert.ok(error instanceof ApiHttpException);
+      assert.equal(error.getStatus(), 503);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "SERVICE_DISCOVERY_UNAVAILABLE",
+        message: "Required registry discovery failed: game-proxy.client endpoint not found"
+      });
+      return true;
+    }
   );
 });
 
@@ -189,7 +199,16 @@ test("ServiceDiscovery throws when discovery is required but registry is disable
 
   await assert.rejects(
     () => discovery.discoverClientServices(),
-    /Required registry discovery failed: REGISTRY_ENABLED=false/
+    (error) => {
+      assert.ok(error instanceof ApiHttpException);
+      assert.equal(error.getStatus(), 503);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "SERVICE_DISCOVERY_UNAVAILABLE",
+        message: "Required registry discovery failed: REGISTRY_ENABLED=false"
+      });
+      return true;
+    }
   );
 });
 

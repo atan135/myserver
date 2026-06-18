@@ -15,6 +15,8 @@ const CONFIG_ENV_KEYS = [
   "TRUSTED_PROXIES",
   "SERVICE_BUILD_VERSION",
   "SERVICE_NAME",
+  "GAME_PROXY_HOST",
+  "GAME_PROXY_PORT",
   "TICKET_SECRET",
   "GAME_ADMIN_TOKEN",
   "INTERNAL_API_TOKEN"
@@ -114,6 +116,21 @@ test("auth-http accepts required discovery when registry is enabled", async () =
   }, (config) => {
     assert.equal(config.registryDiscoveryEnabled, true);
     assert.equal(config.registryDiscoveryRequired, true);
+  });
+});
+
+test("auth-http reads game-proxy host and port as local fallback config", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    REGISTRY_ENABLED: "false",
+    DISCOVERY_REQUIRED: "false",
+    GAME_PROXY_HOST: "127.0.0.2",
+    GAME_PROXY_PORT: "4100"
+  }, (config) => {
+    assert.equal(config.registryDiscoveryEnabled, false);
+    assert.equal(config.registryDiscoveryRequired, false);
+    assert.equal(config.gameProxyHost, "127.0.0.2");
+    assert.equal(config.gameProxyPort, 4100);
   });
 });
 
