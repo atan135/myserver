@@ -185,6 +185,7 @@ export function createServiceInstancePayload({
   healthy = true
 }) {
   const payloadEndpoints = endpoints ?? legacyEndpoints({
+    name: String(name ?? ""),
     host: String(host ?? ""),
     port: toPort(port),
     admin_port: toPort(admin_port),
@@ -217,16 +218,18 @@ export function normalizeServiceInstance(instance) {
   const legacyPort = toPort(instance.port);
   const legacyAdminPort = toPort(instance.admin_port ?? 0);
   const legacyLocalSocket = String(instance.local_socket ?? "");
+  const serviceName = String(instance.name ?? "");
   const sourceSchemaVersion = sourceSchemaVersionValue(instance.schema_version);
   const normalized = {
     schema_version: normalizeSchemaVersion(sourceSchemaVersion),
     id: String(instance.id ?? ""),
-    name: String(instance.name ?? ""),
+    name: serviceName,
     host: legacyHost,
     port: legacyPort,
     admin_port: legacyAdminPort,
     local_socket: legacyLocalSocket,
     endpoints: normalizeEndpointList(instance.endpoints, sourceSchemaVersion, {
+      name: serviceName,
       host: legacyHost,
       port: legacyPort,
       admin_port: legacyAdminPort,
@@ -882,11 +885,12 @@ function sourceSchemaVersionValue(value) {
   return value === undefined || value === null ? 1 : value;
 }
 
-function legacyEndpoints({ host, port, admin_port, local_socket }) {
+function legacyEndpoints({ name, host, port, admin_port, local_socket }) {
+  const protocols = legacyEndpointProtocols(name);
   return [
     normalizeEndpoint({
       name: "client",
-      protocol: "tcp",
+      protocol: protocols.client,
       host,
       port,
       socket: "",
@@ -896,7 +900,7 @@ function legacyEndpoints({ host, port, admin_port, local_socket }) {
     }),
     normalizeEndpoint({
       name: "admin",
-      protocol: "tcp",
+      protocol: protocols.admin,
       host,
       port: admin_port,
       socket: "",
@@ -915,6 +919,20 @@ function legacyEndpoints({ host, port, admin_port, local_socket }) {
       healthy: true
     })
   ].filter(Boolean);
+}
+
+function legacyEndpointProtocols(serviceName) {
+  if (serviceName === "game-proxy") {
+    return {
+      client: "kcp",
+      admin: "http"
+    };
+  }
+
+  return {
+    client: "tcp",
+    admin: "tcp"
+  };
 }
 
 function toPort(value) {

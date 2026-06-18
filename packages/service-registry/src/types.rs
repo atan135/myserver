@@ -158,7 +158,8 @@ impl ServiceInstance {
     /// 归一化 v1/v2 字段：显式 v2 endpoints 只保留合法端点；未提供 endpoints 的 legacy
     /// payload 才从 v1 字段补齐端点。
     pub fn normalize(&mut self) {
-        let should_backfill_legacy_endpoints = self.schema_version < SERVICE_INSTANCE_SCHEMA_VERSION
+        let should_backfill_legacy_endpoints = self.schema_version
+            < SERVICE_INSTANCE_SCHEMA_VERSION
             && !self.endpoints_provided
             && self.endpoints.is_empty();
 
@@ -183,15 +184,22 @@ impl ServiceInstance {
             return;
         }
 
+        let (legacy_client_protocol, legacy_admin_protocol) = legacy_endpoint_protocols(&self.name);
+
         if !self.host.trim().is_empty() && self.port > 0 {
-            self.endpoints.push(ServiceEndpoint::tcp(
-                "client", &self.host, self.port, "public",
+            self.endpoints.push(network_endpoint(
+                "client",
+                legacy_client_protocol,
+                &self.host,
+                self.port,
+                "public",
             ));
         }
 
         if !self.host.trim().is_empty() && self.admin_port > 0 {
-            self.endpoints.push(ServiceEndpoint::tcp(
+            self.endpoints.push(network_endpoint(
                 "admin",
+                legacy_admin_protocol,
                 &self.host,
                 self.admin_port,
                 "admin",
@@ -299,9 +307,7 @@ impl ServiceEndpoint {
             return false;
         }
         if self.protocol == "local_socket" {
-            return !self.socket.trim().is_empty()
-                && self.host.trim().is_empty()
-                && self.port == 0;
+            return !self.socket.trim().is_empty() && self.host.trim().is_empty() && self.port == 0;
         }
         !self.host.trim().is_empty() && self.port > 0 && self.socket.trim().is_empty()
     }
@@ -341,6 +347,35 @@ fn is_supported_protocol(protocol: &str) -> bool {
 
 fn is_supported_visibility(visibility: &str) -> bool {
     matches!(visibility, "public" | "internal" | "admin" | "local")
+}
+
+fn network_endpoint(
+    name: &str,
+    protocol: &str,
+    host: &str,
+    port: u16,
+    visibility: &str,
+) -> ServiceEndpoint {
+    let mut endpoint = ServiceEndpoint {
+        name: name.to_string(),
+        protocol: protocol.to_string(),
+        host: host.to_string(),
+        port,
+        socket: String::new(),
+        visibility: visibility.to_string(),
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        healthy: true,
+    };
+    endpoint.normalize();
+    endpoint
+}
+
+fn legacy_endpoint_protocols(service_name: &str) -> (&'static str, &'static str) {
+    if service_name == "game-proxy" {
+        ("kcp", "http")
+    } else {
+        ("tcp", "tcp")
+    }
 }
 
 fn chrono_timestamp() -> i64 {

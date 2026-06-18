@@ -1,4 +1,4 @@
-use service_registry::{SERVICE_INSTANCE_SCHEMA_VERSION, ServiceEndpoint, ServiceInstance};
+use service_registry::{ServiceEndpoint, ServiceInstance, SERVICE_INSTANCE_SCHEMA_VERSION};
 
 fn endpoint<'a>(instance: &'a ServiceInstance, name: &str) -> Option<&'a ServiceEndpoint> {
     instance
@@ -333,4 +333,35 @@ fn missing_endpoint_is_none_after_normalization() {
     );
 
     assert!(endpoint(&instance, "admin").is_none());
+}
+
+#[test]
+fn v1_game_proxy_maps_legacy_fields_to_proxy_protocols() {
+    let json = r#"{
+        "id": "proxy-001",
+        "name": "game-proxy",
+        "host": "127.0.0.1",
+        "port": 4000,
+        "admin_port": 7101,
+        "weight": 100,
+        "metadata": {},
+        "registered_at": 1710000000,
+        "healthy": true
+    }"#;
+
+    let instance = serde_json::from_str::<ServiceInstance>(json)
+        .expect("v1 proxy instance")
+        .normalized();
+
+    let client = endpoint(&instance, "client").expect("client endpoint");
+    assert_eq!(client.protocol, "kcp");
+    assert_eq!(client.host, "127.0.0.1");
+    assert_eq!(client.port, 4000);
+    assert_eq!(client.visibility, "public");
+
+    let admin = endpoint(&instance, "admin").expect("admin endpoint");
+    assert_eq!(admin.protocol, "http");
+    assert_eq!(admin.host, "127.0.0.1");
+    assert_eq!(admin.port, 7101);
+    assert_eq!(admin.visibility, "admin");
 }

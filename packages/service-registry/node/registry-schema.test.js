@@ -85,3 +85,47 @@ test("normalizeServiceInstance applies endpoint visibility defaults", () => {
   assert.equal(instance.endpoints.find((endpoint) => endpoint.name === "client-default").visibility, "internal");
   assert.equal(instance.endpoints.find((endpoint) => endpoint.name === "socket-default").visibility, "local");
 });
+
+test("normalizeServiceInstance backfills game-proxy legacy endpoints with proxy protocols", () => {
+  const instance = normalizeServiceInstance({
+    schema_version: 1,
+    id: "proxy-legacy-001",
+    name: "game-proxy",
+    host: "127.0.0.1",
+    port: 4000,
+    admin_port: 7101,
+    local_socket: "",
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  });
+
+  assert.equal(instance.schema_version, 2);
+  assert.deepEqual(
+    instance.endpoints.map(({ name, protocol, host, port, visibility }) => ({
+      name,
+      protocol,
+      host,
+      port,
+      visibility
+    })),
+    [
+      {
+        name: "admin",
+        protocol: "http",
+        host: "127.0.0.1",
+        port: 7101,
+        visibility: "admin"
+      },
+      {
+        name: "client",
+        protocol: "kcp",
+        host: "127.0.0.1",
+        port: 4000,
+        visibility: "public"
+      }
+    ]
+  );
+});
