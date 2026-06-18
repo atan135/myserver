@@ -1833,6 +1833,9 @@ mod tests {
             registry_heartbeat_interval_secs: 10,
             service_name: "game-server".to_string(),
             service_instance_id: "game-server-test".to_string(),
+            service_build_version: "dev".to_string(),
+            service_zone: "local".to_string(),
+            service_rollout_epoch: "default".to_string(),
         }
     }
 

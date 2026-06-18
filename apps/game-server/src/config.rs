@@ -52,6 +52,9 @@ pub struct Config {
     pub registry_heartbeat_interval_secs: u64,
     pub service_name: String,
     pub service_instance_id: String,
+    pub service_build_version: String,
+    pub service_zone: String,
+    pub service_rollout_epoch: String,
 }
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -93,6 +96,26 @@ fn parse_positive_usize(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn parse_non_empty_string(name: &str, default: &str) -> String {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn parse_first_non_empty_string(names: &[&str], default: &str) -> String {
+    names
+        .iter()
+        .find_map(|name| {
+            env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| default.to_string())
 }
 
 impl Config {
@@ -177,6 +200,10 @@ impl Config {
         let service_name = env::var("SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
         let service_instance_id = env::var("SERVICE_INSTANCE_ID")
             .unwrap_or_else(|_| format!("{}-{}", service_name, port));
+        let service_build_version = parse_non_empty_string("SERVICE_BUILD_VERSION", "dev");
+        let service_zone = parse_non_empty_string("SERVICE_ZONE", "local");
+        let service_rollout_epoch =
+            parse_first_non_empty_string(&["SERVICE_ROLLOUT_EPOCH", "ROLLOUT_EPOCH"], "default");
 
         let config = Self {
             host,
@@ -223,6 +250,9 @@ impl Config {
             registry_heartbeat_interval_secs,
             service_name,
             service_instance_id,
+            service_build_version,
+            service_zone,
+            service_rollout_epoch,
         };
 
         validate_production_config(&config);
@@ -236,6 +266,18 @@ impl Config {
 
     pub fn admin_bind_addr(&self) -> String {
         format!("{}:{}", self.admin_host, self.admin_port)
+    }
+
+    pub fn service_instance_metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "internal_socket": self.internal_socket_name.clone(),
+            "instance_id": self.service_instance_id.clone(),
+            "server_id": self.service_instance_id.clone(),
+            "rollout_epoch": self.service_rollout_epoch.clone(),
+            "drain_mode": false,
+            "build_version": self.service_build_version.clone(),
+            "zone": self.service_zone.clone()
+        })
     }
 }
 
@@ -370,6 +412,22 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "OUTBOUND_QUEUE_CAPACITY",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
+    ];
+
+    const SERVICE_METADATA_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "GAME_PORT",
+        "GAME_LOCAL_SOCKET_NAME",
+        "GAME_INTERNAL_SOCKET_NAME",
+        "SERVICE_NAME",
+        "SERVICE_INSTANCE_ID",
+        "SERVICE_BUILD_VERSION",
+        "SERVICE_ZONE",
+        "SERVICE_ROLLOUT_EPOCH",
+        "ROLLOUT_EPOCH",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
     ];
@@ -510,6 +568,83 @@ mod tests {
 
         assert_eq!(config.global_id_origin_id, 7);
         assert_eq!(config.global_id_worker_id, Some(3));
+    }
+
+    #[test]
+    fn service_metadata_config_uses_stable_defaults() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("GAME_PORT");
+            env::remove_var("GAME_LOCAL_SOCKET_NAME");
+            env::remove_var("GAME_INTERNAL_SOCKET_NAME");
+            env::remove_var("SERVICE_NAME");
+            env::remove_var("SERVICE_INSTANCE_ID");
+            env::remove_var("SERVICE_BUILD_VERSION");
+            env::remove_var("SERVICE_ZONE");
+            env::remove_var("SERVICE_ROLLOUT_EPOCH");
+            env::remove_var("ROLLOUT_EPOCH");
+        }
+
+        let config = Config::from_env();
+        let metadata = config.service_instance_metadata();
+
+        assert_eq!(config.service_build_version, "dev");
+        assert_eq!(config.service_zone, "local");
+        assert_eq!(config.service_rollout_epoch, "default");
+        assert_eq!(metadata["instance_id"], "game-server-7000");
+        assert_eq!(metadata["server_id"], "game-server-7000");
+        assert_eq!(metadata["build_version"], "dev");
+        assert_eq!(metadata["zone"], "local");
+        assert_eq!(metadata["rollout_epoch"], "default");
+        assert_eq!(metadata["drain_mode"], false);
+        assert_eq!(
+            metadata["internal_socket"],
+            "myserver-game-server-internal.sock"
+        );
+    }
+
+    #[test]
+    fn service_metadata_config_accepts_env_overrides_and_rollout_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("SERVICE_INSTANCE_ID", "gs-42");
+            env::set_var("SERVICE_BUILD_VERSION", " 2026.06.18 ");
+            env::set_var("SERVICE_ZONE", " zone-a ");
+            env::remove_var("SERVICE_ROLLOUT_EPOCH");
+            env::set_var("ROLLOUT_EPOCH", " epoch-fallback ");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+        }
+
+        let config = Config::from_env();
+        let metadata = config.service_instance_metadata();
+
+        assert_eq!(config.service_build_version, "2026.06.18");
+        assert_eq!(config.service_zone, "zone-a");
+        assert_eq!(config.service_rollout_epoch, "epoch-fallback");
+        assert_eq!(metadata["instance_id"], "gs-42");
+        assert_eq!(metadata["server_id"], "gs-42");
+        assert_eq!(metadata["build_version"], "2026.06.18");
+        assert_eq!(metadata["zone"], "zone-a");
+        assert_eq!(metadata["rollout_epoch"], "epoch-fallback");
+        assert_eq!(metadata["drain_mode"], false);
+        assert_eq!(metadata["internal_socket"], "gs-42-internal.sock");
+
+        unsafe {
+            env::set_var("SERVICE_ROLLOUT_EPOCH", " epoch-primary ");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.service_rollout_epoch, "epoch-primary");
+        assert_eq!(
+            config.service_instance_metadata()["rollout_epoch"],
+            "epoch-primary"
+        );
     }
 
     #[test]

@@ -199,11 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ])
                 .with_tags(vec!["game".to_string(), "tcp".to_string()])
-                .with_metadata(serde_json::json!({
-                    "internal_socket": config.internal_socket_name.clone(),
-                    "instance_id": config.service_instance_id.clone(),
-                    "server_id": config.service_instance_id.clone()
-                }));
+                .with_metadata(config.service_instance_metadata());
 
                 if let Err(e) = client.register(&instance).await {
                     tracing::error!(error = %e, "failed to register service");
