@@ -206,6 +206,10 @@ test("discoverGameServerAdminEndpoints requires admin endpoint visibility", asyn
   assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
     { instanceId: "game-server-admin", endpointName: "admin", port: 7500 }
   ]);
+  assert.deepEqual(
+    endpoints.map(({ fallback, source, reason }) => ({ fallback, source, reason })),
+    [{ fallback: false, source: "registry", reason: "discovered" }]
+  );
 });
 
 test("discoverGameServerAdminEndpoints does not fall back to client-visible endpoints", async () => {

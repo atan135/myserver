@@ -56,7 +56,7 @@ function createGameServerInstance(id, port) {
       {
         name: "admin",
         protocol: "tcp",
-        host: "10.0.0.1",
+        host: "127.0.0.1",
         port,
         socket: "",
         visibility: "admin",
@@ -69,6 +69,54 @@ function createGameServerInstance(id, port) {
     metadata: {},
     registered_at: Date.now(),
     healthy: true
+  };
+}
+
+function encodeTestPacket(messageType, seq, body = Buffer.from("{}")) {
+  const header = Buffer.alloc(14);
+  header.writeUInt16BE(0xcafe, 0);
+  header.writeUInt8(1, 2);
+  header.writeUInt8(0, 3);
+  header.writeUInt16BE(messageType, 4);
+  header.writeUInt32BE(seq, 6);
+  header.writeUInt32BE(body.length, 10);
+  return Buffer.concat([header, body]);
+}
+
+async function createGrantCaptureServer(label) {
+  const requests = [];
+  const server = net.createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+
+      while (buffer.length >= 14) {
+        const bodyLen = buffer.readUInt32BE(10);
+        const packetLen = 14 + bodyLen;
+        if (buffer.length < packetLen) {
+          return;
+        }
+
+        const messageType = buffer.readUInt16BE(4);
+        const seq = buffer.readUInt32BE(6);
+        const body = buffer.subarray(14, packetLen);
+        buffer = buffer.subarray(packetLen);
+
+        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+          requests.push({ label, body: JSON.parse(body.toString("utf8")) });
+          socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq));
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  return {
+    port: server.address().port,
+    requests,
+    close: () => new Promise((resolve) => server.close(resolve))
   };
 }
 
@@ -195,6 +243,78 @@ test("GameAdminClient resolves explicit targetInstanceId to matching registry en
 
   assert.equal(endpoint.instanceId, "game-server-b");
   assert.equal(endpoint.port, 7502);
+});
+
+test("GameAdminClient grantMailAttachments sends grant to explicit registry target endpoint", async () => {
+  const serverA = await createGrantCaptureServer("game-server-a");
+  const serverB = await createGrantCaptureServer("game-server-b");
+
+  try {
+    const client = new GameAdminClient(
+      {
+        ...config,
+        registryDiscoveryEnabled: true,
+        registryDiscoveryRequired: true,
+        gameAdminConnectTimeoutMs: 1000,
+        gameAdminWriteTimeoutMs: 1000,
+        gameAdminReadTimeoutMs: 1000,
+        gameAdminMaxResponseBytes: 1024
+      },
+      createRedisWithGameServers([
+        createGameServerInstance("game-server-a", serverA.port),
+        createGameServerInstance("game-server-b", serverB.port)
+      ])
+    );
+
+    const result = await client.grantMailAttachments(
+      "player-1",
+      "mail_claim:mail-1",
+      [{ itemId: 1001, count: 2, binded: true }],
+      "claim mail mail-1",
+      { targetInstanceId: "game-server-b" }
+    );
+
+    assert.deepEqual(result, { ok: true, instanceId: "game-server-b" });
+    assert.equal(serverA.requests.length, 0);
+    assert.equal(serverB.requests.length, 1);
+    assert.equal(serverB.requests[0].body.requestId, "mail_claim:mail-1");
+    assert.equal(serverB.requests[0].body.playerId, "player-1");
+  } finally {
+    await Promise.all([serverA.close(), serverB.close()]);
+  }
+});
+
+test("GameAdminClient grantMailAttachments rejects ambiguous registry endpoints without explicit target", async () => {
+  const serverA = await createGrantCaptureServer("game-server-a");
+  const serverB = await createGrantCaptureServer("game-server-b");
+
+  try {
+    const client = new GameAdminClient(
+      {
+        ...config,
+        registryDiscoveryEnabled: true,
+        registryDiscoveryRequired: true
+      },
+      createRedisWithGameServers([
+        createGameServerInstance("game-server-a", serverA.port),
+        createGameServerInstance("game-server-b", serverB.port)
+      ])
+    );
+
+    await assert.rejects(
+      () => client.grantMailAttachments(
+        "player-1",
+        "mail_claim:mail-1",
+        [{ itemId: 1001, count: 2, binded: true }],
+        "claim mail mail-1"
+      ),
+      { code: "GAME_SERVER_ADMIN_TARGET_REQUIRED" }
+    );
+    assert.equal(serverA.requests.length, 0);
+    assert.equal(serverB.requests.length, 0);
+  } finally {
+    await Promise.all([serverA.close(), serverB.close()]);
+  }
 });
 
 test("GameAdminClient forbids local fallback when discovery is required", async () => {

@@ -28,6 +28,7 @@ async function loadMailsService() {
   await mkdir(path.join(outDir, "common"), { recursive: true });
   const outputText = compiled.outputText
     .replaceAll("../common/", "./common/")
+    .replaceAll("../global-id.js", "./global-id.js")
     .replaceAll("../logger.js", "./logger.js")
     .replaceAll("../tokens.js", "./tokens.js");
 
@@ -35,6 +36,11 @@ async function loadMailsService() {
   await writeFile(
     path.join(outDir, "common/http-exception.js"),
     "export * from '../../../../apps/mail-service/src/common/http-exception.ts';\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(outDir, "global-id.js"),
+    "let nextId = 1; export function generateMailId() { return `mail_generated_${nextId++}`; }\n",
     "utf8"
   );
   await writeFile(
@@ -68,8 +74,8 @@ function createService() {
   };
   const gameAdminClient = {
     grants: [],
-    async grantMailAttachments(playerId, requestId, attachments, reason) {
-      this.grants.push({ playerId, requestId, attachments, reason });
+    async grantMailAttachments(playerId, requestId, attachments, reason, options) {
+      this.grants.push({ playerId, requestId, attachments, reason, options });
       return { ok: true };
     }
   };
@@ -126,6 +132,34 @@ test("MailsService claim grants once with stable requestId and repeats idempoten
   assert.equal(gameAdminClient.grants.length, 1);
   assert.equal(gameAdminClient.grants[0].playerId, "player_001");
   assert.equal(gameAdminClient.grants[0].requestId, "mail_claim:mail_001");
+});
+
+test("MailsService claim passes camelCase targetInstanceId to game admin grant", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, gameAdminClient } = createService();
+  await createMail(mailStore);
+
+  await service.claim("mail_001", "player_001", {
+    player_id: "player_001",
+    targetInstanceId: "game-server-b"
+  });
+
+  assert.equal(gameAdminClient.grants.length, 1);
+  assert.deepEqual(gameAdminClient.grants[0].options, { targetInstanceId: "game-server-b" });
+});
+
+test("MailsService claim accepts snake_case target_instance_id for game admin grant", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, gameAdminClient } = createService();
+  await createMail(mailStore);
+
+  await service.claim("mail_001", "player_001", {
+    player_id: "player_001",
+    target_instance_id: "game-server-c"
+  });
+
+  assert.equal(gameAdminClient.grants.length, 1);
+  assert.deepEqual(gameAdminClient.grants[0].options, { targetInstanceId: "game-server-c" });
 });
 
 test("MailsService create keeps mail and outbox when notification publish fails", async () => {

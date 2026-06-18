@@ -142,7 +142,10 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
       port: endpoint.port,
       healthy: instance.healthy !== false && endpoint.healthy !== false,
       weight: instance.weight,
-      metadata: endpoint.metadata || {}
+      metadata: endpoint.metadata || {},
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
     }));
   logDiscovery(endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
     serviceName: GAME_SERVER_SERVICE_NAME,
