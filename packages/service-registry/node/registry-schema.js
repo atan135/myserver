@@ -31,6 +31,15 @@ export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "lo
 export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 1000;
 export const DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS = 5000;
 const DISCOVERY_LOG_SOURCES = new Set(["registry", "fallback"]);
+export const DISCOVERY_METRIC_KINDS = [
+  "discovery_success",
+  "discovery_failure",
+  "fallback_used",
+  "no_healthy_instance",
+  "endpoint_missing"
+];
+const DISCOVERY_METRIC_KIND_SET = new Set(DISCOVERY_METRIC_KINDS);
+const discoveryMetrics = new Map();
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
@@ -87,7 +96,8 @@ export function discoveryLogContext(context = {}) {
         "instanceId",
         "source",
         "reason",
-        "error"
+        "error",
+        "__discoveryMetricRecorded"
       ].includes(key)
     ) {
       normalized[key] = value;
@@ -105,6 +115,58 @@ export function discoveryLogContextFromSelection(serviceName, endpointName, sele
     source: "registry",
     reason
   });
+}
+
+export function recordDiscoveryMetric(context = {}) {
+  const normalized = discoveryLogContext(context);
+  const kind = discoveryMetricKind(normalized);
+  if (!kind) {
+    return null;
+  }
+
+  const labels = {
+    service: normalized.service,
+    endpoint: normalized.endpoint,
+    source: normalized.source,
+    reason: normalized.reason
+  };
+  const key = discoveryMetricKey(kind, labels);
+  const current = discoveryMetrics.get(key);
+  const count = (current?.count || 0) + 1;
+  discoveryMetrics.set(key, { kind, ...labels, count });
+  return { kind, ...labels, count };
+}
+
+export function getDiscoveryMetricsSnapshot() {
+  return [...discoveryMetrics.values()]
+    .map((entry) => ({ ...entry }))
+    .sort((a, b) =>
+      a.kind.localeCompare(b.kind) ||
+      a.service.localeCompare(b.service) ||
+      a.endpoint.localeCompare(b.endpoint) ||
+      a.source.localeCompare(b.source) ||
+      a.reason.localeCompare(b.reason)
+    );
+}
+
+export function resetDiscoveryMetrics() {
+  discoveryMetrics.clear();
+}
+
+export function collectDiscoveryMetricFields({ reset = false } = {}) {
+  const snapshot = getDiscoveryMetricsSnapshot();
+  const totals = Object.fromEntries(DISCOVERY_METRIC_KINDS.map((kind) => [kind, 0]));
+  for (const entry of snapshot) {
+    totals[entry.kind] = (totals[entry.kind] || 0) + entry.count;
+  }
+
+  if (reset) {
+    resetDiscoveryMetrics();
+  }
+
+  return Object.fromEntries(
+    DISCOVERY_METRIC_KINDS.map((kind) => [`${kind}_total`, String(totals[kind] || 0)])
+  );
 }
 
 export function createServiceInstancePayload({
@@ -642,12 +704,18 @@ export class RegistryDiscoveryClient {
   }
 
   emitDiscoveryLog(level, event, context = {}) {
+    const metricRecorded = recordDiscoveryMetric(context) !== null;
+
     if (!this.onDiscoveryLog) {
       return;
     }
 
     try {
-      this.onDiscoveryLog(level, event, discoveryLogContext(context));
+      const normalized = discoveryLogContext(context);
+      if (metricRecorded) {
+        normalized.__discoveryMetricRecorded = true;
+      }
+      this.onDiscoveryLog(level, event, normalized);
     } catch {
       // Discovery logging must not affect discovery behavior.
     }
@@ -1045,4 +1113,37 @@ function discoveryValueInstanceId(value, kind) {
 
 function refreshEmptyReason(kind) {
   return kind === "instances" ? "no_healthy_instance" : "endpoint_missing";
+}
+
+function discoveryMetricKind(context) {
+  const reason = String(context.reason || "");
+  const source = String(context.source || "registry");
+
+  if (source === "fallback" && reason === "fallback_used") {
+    return "fallback_used";
+  }
+  if (reason === "no_healthy_instance") {
+    return "no_healthy_instance";
+  }
+  if (reason === "endpoint_missing") {
+    return "endpoint_missing";
+  }
+  if (reason === "registry_error" || reason === "registry_disabled" || reason === "fallback_forbidden") {
+    return "discovery_failure";
+  }
+  if (source === "registry" && reason === "discovered") {
+    return "discovery_success";
+  }
+  return null;
+}
+
+function discoveryMetricKey(kind, labels) {
+  const normalizedKind = DISCOVERY_METRIC_KIND_SET.has(kind) ? kind : "discovery_failure";
+  return JSON.stringify({
+    kind: normalizedKind,
+    service: labels.service,
+    endpoint: labels.endpoint,
+    source: labels.source,
+    reason: labels.reason
+  });
 }

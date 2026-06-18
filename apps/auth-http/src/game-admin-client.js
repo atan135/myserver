@@ -1,7 +1,7 @@
 import net from "node:net";
 import { createRequire } from "node:module";
 
-import { discoveryLogContext } from "../../../packages/service-registry/node/registry-schema.js";
+import { discoveryLogContext, recordDiscoveryMetric } from "../../../packages/service-registry/node/registry-schema.js";
 import { discoverGameServerAdminEndpoints } from "./registry-client.js";
 import { log } from "./logger.js";
 
@@ -611,6 +611,14 @@ export class GameAdminClient {
 }
 
 function logDiscovery(level, event, context = {}) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric({
+      serviceName: "game-server",
+      endpointName: "admin",
+      ...context
+    });
+  }
+
   try {
     log(level, event, discoveryLogContext({
       serviceName: "game-server",

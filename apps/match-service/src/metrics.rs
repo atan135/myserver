@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::json;
+use service_registry::collect_discovery_metric_fields;
 use tokio::time::interval;
 use tracing::{error, info};
 
@@ -170,6 +171,8 @@ impl MetricsCollector {
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     ("pool_size".to_string(), pool_size.to_string()),
                 ];
+
+                fields.extend(collect_discovery_metric_fields(true));
 
                 for (k, v) in extra {
                     fields.push((k, v));

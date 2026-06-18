@@ -2,7 +2,7 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
-use service_registry::RegistryClient;
+use service_registry::{RegistryClient, record_discovery_metric};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,8 +59,10 @@ impl MatchClientConfig {
 
         if !registry_enabled {
             if discovery_required {
+                record_discovery_metric(&service_name, "grpc", "registry", "registry_disabled");
                 panic!("required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc");
             }
+            record_discovery_metric(&service_name, "grpc", "fallback", "fallback_used");
             tracing::info!(
                 service = %service_name,
                 endpoint = "grpc",
@@ -495,6 +497,7 @@ pub fn resolve_discovery_outcome(
             if discovery_required {
                 Err("match-service grpc endpoint not found".to_string())
             } else {
+                record_discovery_metric("match-service", "grpc", "fallback", "fallback_used");
                 Ok(ResolvedMatchServiceAddr {
                     addr: fallback_addr.to_string(),
                     source: MatchServiceAddrSource::Fallback,
@@ -505,6 +508,7 @@ pub fn resolve_discovery_outcome(
             if discovery_required {
                 Err(error)
             } else {
+                record_discovery_metric("match-service", "grpc", "fallback", "fallback_used");
                 Ok(ResolvedMatchServiceAddr {
                     addr: fallback_addr.to_string(),
                     source: MatchServiceAddrSource::Fallback,
@@ -547,12 +551,18 @@ async fn resolve_match_service_addr(
                 DiscoveryOutcome::Found(addr)
             }
             Ok(None) => DiscoveryOutcome::NotFound,
-            Err(error) => DiscoveryOutcome::Error(error.to_string()),
+            Err(error) => {
+                record_discovery_metric(service_name, "grpc", "registry", "registry_error");
+                DiscoveryOutcome::Error(error.to_string())
+            }
         },
-        Err(error) => DiscoveryOutcome::Error(format!(
-            "registry client unavailable for match-service discovery: {}",
-            error
-        )),
+        Err(error) => {
+            record_discovery_metric(service_name, "grpc", "registry", "registry_error");
+            DiscoveryOutcome::Error(format!(
+                "registry client unavailable for match-service discovery: {}",
+                error
+            ))
+        }
     };
 
     match resolve_discovery_outcome(outcome, fallback_addr, discovery_required) {
@@ -618,6 +628,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use service_registry::{get_discovery_metrics_snapshot, reset_discovery_metrics};
     use std::env;
     use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -777,6 +788,7 @@ mod tests {
 
     #[test]
     fn discovery_outcome_uses_fallback_when_not_strict() {
+        reset_discovery_metrics();
         let resolved = resolve_discovery_outcome(
             DiscoveryOutcome::Error("redis unavailable".to_string()),
             "http://127.0.0.1:9002",
@@ -786,6 +798,12 @@ mod tests {
 
         assert_eq!(resolved.addr, "http://127.0.0.1:9002");
         assert_eq!(resolved.source, MatchServiceAddrSource::Fallback);
+        assert!(get_discovery_metrics_snapshot().iter().any(|entry| {
+            entry.kind == "fallback_used"
+                && entry.service == "match-service"
+                && entry.endpoint == "grpc"
+                && entry.count == 1
+        }));
     }
 
     #[test]

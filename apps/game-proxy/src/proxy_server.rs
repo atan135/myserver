@@ -30,6 +30,7 @@ use crate::session::{ProxySession, ProxySessionState};
 use crate::upstream::connect_upstream;
 use service_registry::{
     DiscoverySnapshot, DiscoveryWatchConfig, RegistryClient, ServiceEndpoint, ServiceInstance,
+    record_discovery_metric,
 };
 
 const MAX_PROXY_BODY_LEN: usize = 1024 * 1024;
@@ -270,6 +271,12 @@ pub async fn run(
             }
         });
     } else {
+        record_discovery_metric(
+            &config.upstream_service_name,
+            "proxy-local",
+            "fallback",
+            "fallback_used",
+        );
         tracing::info!(
             service = %config.upstream_service_name,
             endpoint = "proxy-local",
@@ -432,6 +439,7 @@ async fn refresh_routes_from_discovery_snapshot(
 ) -> usize {
     if let Some(error) = snapshot.error {
         route_store.sync_discovered_routes(Vec::new()).await;
+        record_discovery_metric(&snapshot.service_name, "proxy-local", "registry", "registry_error");
         tracing::warn!(
             service = %snapshot.service_name,
             endpoint = "proxy-local",
@@ -449,6 +457,12 @@ async fn refresh_routes_from_discovery_snapshot(
 
     route_store.sync_discovered_routes(routes).await;
 
+    record_discovery_metric(
+        &snapshot.service_name,
+        "proxy-local",
+        "registry",
+        if endpoint_count == 0 { "endpoint_missing" } else { "discovered" },
+    );
     tracing::info!(
         service = %snapshot.service_name,
         endpoint = "proxy-local",

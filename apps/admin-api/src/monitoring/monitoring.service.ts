@@ -1,7 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import http from "node:http";
 
-import { discoveryLogContext } from "../../../../packages/service-registry/node/registry-schema.js";
+import { discoveryLogContext, recordDiscoveryMetric } from "../../../../packages/service-registry/node/registry-schema.js";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { log } from "../logger.js";
@@ -717,6 +717,10 @@ function readStringSamples(source: any, ...keys: string[]) {
 }
 
 function logDiscovery(level: string, event: string, context: Record<string, unknown>) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric(context);
+  }
+
   log(level, event, discoveryLogContext(context));
 }
 

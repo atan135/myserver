@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiHttpException } from "./common/http-exception.js";
+import {
+  getDiscoveryMetricsSnapshot,
+  resetDiscoveryMetrics
+} from "../../../packages/service-registry/node/registry-schema.js";
 import { ServiceDiscovery } from "./service-discovery.js";
 
 function createRedis(instancesByService) {
@@ -50,6 +54,7 @@ function createConfig(overrides = {}) {
 }
 
 test("ServiceDiscovery uses configured fallback when registry discovery is disabled", async () => {
+  resetDiscoveryMetrics();
   const discovery = new ServiceDiscovery(createRedis({}), createConfig());
 
   assert.deepEqual(await discovery.discoverClientServices(), {
@@ -62,6 +67,26 @@ test("ServiceDiscovery uses configured fallback when registry discovery is disab
     mail: null,
     announce: null
   });
+  assert.deepEqual(
+    getDiscoveryMetricsSnapshot().map(({ kind, service, endpoint, source, reason, count }) => ({
+      kind,
+      service,
+      endpoint,
+      source,
+      reason,
+      count
+    })),
+    [
+      {
+        kind: "fallback_used",
+        service: "game-proxy",
+        endpoint: "client",
+        source: "fallback",
+        reason: "fallback_used",
+        count: 1
+      }
+    ]
+  );
 });
 
 test("ServiceDiscovery discovers game-proxy.client and named service endpoints", async () => {

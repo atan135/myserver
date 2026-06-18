@@ -4,6 +4,7 @@ import {
   discoveryLogContext,
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
+  recordDiscoveryMetric,
   registryHeartbeatKey,
   registryInstanceKey
 } from "../../../packages/service-registry/node/registry-schema.js";
@@ -170,6 +171,10 @@ export async function discoverServiceInstances(redis, serviceName, registryKeyPr
 }
 
 function logDiscovery(level, event, context = {}) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric(context);
+  }
+
   try {
     log(level, event, discoveryLogContext(context));
   } catch {

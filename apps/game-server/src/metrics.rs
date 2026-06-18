@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
+use service_registry::collect_discovery_metric_fields;
 use tokio::time::interval;
 use tracing::{error, info};
 
@@ -180,6 +181,8 @@ impl MetricsCollector {
                     ("online_players".to_string(), online_players.to_string()),
                     ("room_count".to_string(), room_count.to_string()),
                 ];
+
+                fields.extend(collect_discovery_metric_fields(true));
 
                 for (k, v) in extra {
                     fields.push((k, v));

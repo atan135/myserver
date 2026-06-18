@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::tokio::Stream as _;
 use interprocess::local_socket::{GenericFilePath, ToFsName, tokio::Stream};
 use prost::Message;
-use service_registry::{RegistryClient, ServiceInstance};
+use service_registry::{RegistryClient, ServiceInstance, record_discovery_metric};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -108,6 +108,12 @@ impl GameServerClient {
 
         if !self.config.registry_enabled {
             if discovery_required || !self.config.local_discovery_fallback_enabled {
+                record_discovery_metric(
+                    &self.config.game_server_service_name,
+                    "internal",
+                    "registry",
+                    "registry_disabled",
+                );
                 return Err(MatchError::RoomCreateFailed(
                     "required registry discovery failed: REGISTRY_ENABLED=false for game-server.internal"
                         .to_string(),
@@ -121,6 +127,12 @@ impl GameServerClient {
                 reason = "registry_disabled",
                 socket = %self.config.game_server_internal_socket_name,
                 "service registry disabled, using local game-server internal socket fallback"
+            );
+            record_discovery_metric(
+                &self.config.game_server_service_name,
+                "internal",
+                "fallback",
+                "fallback_used",
             );
             return Ok(self.config.game_server_internal_socket_name.clone());
         }
@@ -148,6 +160,12 @@ impl GameServerClient {
                 if discovery_required || !self.config.local_discovery_fallback_enabled {
                     return Err(error);
                 }
+                record_discovery_metric(
+                    &self.config.game_server_service_name,
+                    "internal",
+                    "fallback",
+                    "fallback_used",
+                );
                 tracing::warn!(
                     service = %self.config.game_server_service_name,
                     endpoint = "internal",
@@ -209,6 +227,12 @@ impl GameServerDiscovery {
             .discover(&self.game_server_service_name)
             .await
             .map_err(|error| {
+                record_discovery_metric(
+                    &self.game_server_service_name,
+                    "internal",
+                    "registry",
+                    "registry_error",
+                );
                 MatchError::RoomCreateFailed(format!(
                     "required registry discovery failed for {}.internal: {}",
                     self.game_server_service_name, error
@@ -217,12 +241,24 @@ impl GameServerDiscovery {
         let candidates = internal_socket_candidates(&instances);
 
         if candidates.is_empty() {
+            record_discovery_metric(
+                &self.game_server_service_name,
+                "internal",
+                "registry",
+                "endpoint_missing",
+            );
             return Err(MatchError::RoomCreateFailed(format!(
                 "required registry discovery failed: {}.internal local_socket endpoint not found",
                 self.game_server_service_name
             )));
         }
 
+        record_discovery_metric(
+            &self.game_server_service_name,
+            "internal",
+            "registry",
+            "discovered",
+        );
         self.cache
             .lock()
             .await
@@ -231,6 +267,12 @@ impl GameServerDiscovery {
         match select_socket(&candidates, match_id, mode, &self.target_zone) {
             Ok(socket) => Ok(socket),
             Err(error) if !discovery_required => {
+                record_discovery_metric(
+                    &self.game_server_service_name,
+                    "internal",
+                    "fallback",
+                    "fallback_used",
+                );
                 tracing::warn!(
                     service = %self.game_server_service_name,
                     endpoint = "internal",
@@ -260,6 +302,12 @@ impl GameServerDiscovery {
         )
         .await
         .map_err(|error| {
+            record_discovery_metric(
+                &self.game_server_service_name,
+                "internal",
+                "registry",
+                "registry_error",
+            );
             MatchError::RoomCreateFailed(format!(
                 "required registry discovery failed: registry client unavailable for game-server.internal: {error}"
             ))
@@ -556,6 +604,7 @@ fn parse_header(header: [u8; HEADER_LEN]) -> Result<(u16, usize), MatchError> {
 mod tests {
     use super::*;
     use crate::config::ModeConfig;
+    use service_registry::{get_discovery_metrics_snapshot, reset_discovery_metrics};
     use std::collections::HashMap;
 
     fn candidate(
@@ -682,6 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_disabled_local_mode_uses_fallback_socket() {
+        reset_discovery_metrics();
         let mut config = test_config();
         config.discovery_required = false;
         config.registry_enabled = false;
@@ -694,6 +744,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(socket, "fallback.sock");
+        assert!(get_discovery_metrics_snapshot().iter().any(|entry| {
+            entry.kind == "fallback_used"
+                && entry.service == "game-server"
+                && entry.endpoint == "internal"
+                && entry.count == 1
+        }));
     }
 
     #[tokio::test]

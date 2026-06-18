@@ -1,6 +1,7 @@
 import {
   RegistryDiscoveryClient,
-  discoveryLogContext
+  discoveryLogContext,
+  recordDiscoveryMetric
 } from "../../../packages/service-registry/node/registry-schema.js";
 import { serviceUnavailable } from "./common/http-exception.js";
 import { log } from "./logger.js";
@@ -146,6 +147,10 @@ function requiredDiscoveryFailed(reason) {
 }
 
 function logDiscovery(level, event, context = {}) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric(context);
+  }
+
   try {
     log(level, event, discoveryLogContext(context));
   } catch {

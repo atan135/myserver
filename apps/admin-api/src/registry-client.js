@@ -6,6 +6,7 @@ import {
   discoveryLogContext,
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
+  recordDiscoveryMetric,
   registryHeartbeatKey,
   registryInstanceKey
 } from "../../../packages/service-registry/node/registry-schema.js";
@@ -330,5 +331,9 @@ function normalizeRefreshIntervalMs(value) {
 }
 
 function logDiscovery(level, event, context = {}) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric(context);
+  }
+
   log(level, event, discoveryLogContext(context));
 }

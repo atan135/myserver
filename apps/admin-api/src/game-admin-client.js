@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import { discoveryLogContext } from "../../../packages/service-registry/node/registry-schema.js";
+import { discoveryLogContext, recordDiscoveryMetric } from "../../../packages/service-registry/node/registry-schema.js";
 import { log } from "./logger.js";
 import { discoverGameServerAdminEndpoints } from "./registry-client.js";
 
@@ -476,6 +476,14 @@ function normalizeTargetInstanceId(value) {
 }
 
 function logDiscovery(level, event, context = {}) {
+  if (!context.__discoveryMetricRecorded) {
+    recordDiscoveryMetric({
+      serviceName: "game-server",
+      endpointName: "admin",
+      ...context
+    });
+  }
+
   log(level, event, discoveryLogContext({
     serviceName: "game-server",
     endpointName: "admin",

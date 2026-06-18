@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   RegistryDiscoveryClient,
+  collectDiscoveryMetricFields,
   createServiceInstancePayload,
   discoveryLogContext,
+  getDiscoveryMetricsSnapshot,
   getRegistryDiscoveryClient,
+  recordDiscoveryMetric,
   registryHeartbeatKey,
-  registryInstanceKey
+  registryInstanceKey,
+  resetDiscoveryMetrics
 } from "./registry-schema.js";
 
 function createInstance(serviceName, instanceId, endpointName, port) {
@@ -346,6 +350,7 @@ test("discoveryLogContext normalizes discovery fields", () => {
 });
 
 test("RegistryDiscoveryClient discovery logs include unified registry context", async () => {
+  resetDiscoveryMetrics();
   const redis = createRedisCapture();
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
   const logs = [];
@@ -401,6 +406,42 @@ test("RegistryDiscoveryClient discovery logs include unified registry context", 
       }
     ]
   );
+  assert.deepEqual(
+    getDiscoveryMetricsSnapshot().map(({ kind, service, endpoint, source, reason, count }) => ({
+      kind,
+      service,
+      endpoint,
+      source,
+      reason,
+      count
+    })),
+    [
+      {
+        kind: "discovery_success",
+        service: "game-server",
+        endpoint: "",
+        source: "registry",
+        reason: "discovered",
+        count: 2
+      },
+      {
+        kind: "discovery_success",
+        service: "game-server",
+        endpoint: "admin",
+        source: "registry",
+        reason: "discovered",
+        count: 1
+      },
+      {
+        kind: "endpoint_missing",
+        service: "game-server",
+        endpoint: "client",
+        source: "registry",
+        reason: "endpoint_missing",
+        count: 1
+      }
+    ]
+  );
 });
 
 test("getRegistryDiscoveryClient updates callbacks on reused client", async () => {
@@ -430,6 +471,40 @@ test("getRegistryDiscoveryClient updates callbacks on reused client", async () =
       context.reason === "discovered"
     )
   );
+});
+
+test("discovery metrics can record fallback and reset aggregate fields", () => {
+  resetDiscoveryMetrics();
+
+  recordDiscoveryMetric({
+    serviceName: "game-proxy",
+    endpointName: "client",
+    source: "fallback",
+    reason: "fallback_used"
+  });
+  recordDiscoveryMetric({
+    serviceName: "game-proxy",
+    endpointName: "client",
+    source: "registry",
+    reason: "registry_error"
+  });
+  recordDiscoveryMetric({
+    serviceName: "game-server",
+    endpointName: "",
+    source: "registry",
+    reason: "no_healthy_instance"
+  });
+
+  const fields = collectDiscoveryMetricFields({ reset: true });
+
+  assert.deepEqual(fields, {
+    discovery_success_total: "0",
+    discovery_failure_total: "1",
+    fallback_used_total: "1",
+    no_healthy_instance_total: "1",
+    endpoint_missing_total: "0"
+  });
+  assert.deepEqual(getDiscoveryMetricsSnapshot(), []);
 });
 
 function sleep(ms) {

@@ -7,6 +7,7 @@ use std::{
 use redis::AsyncCommands;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::discovery_metrics::record_discovery_metric;
 use crate::types::{ServiceEndpoint, ServiceInstance};
 
 const DEFAULT_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(1);
@@ -292,17 +293,50 @@ impl RegistryClient {
         &self,
         service_name: &str,
     ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
-        self.discover_with_cache_expiry(service_name)
-            .await
-            .map(|(instances, _)| instances)
+        match self.discover_with_cache_expiry(service_name).await {
+            Ok((instances, _)) => {
+                record_discovery_metric(
+                    service_name,
+                    "",
+                    "registry",
+                    if instances.is_empty() {
+                        "no_healthy_instance"
+                    } else {
+                        "discovered"
+                    },
+                );
+                Ok(instances)
+            }
+            Err(error) => {
+                record_discovery_metric(service_name, "", "registry", "registry_error");
+                Err(error)
+            }
+        }
     }
 
     pub async fn refresh_discovery_snapshot(
         &self,
         service_name: &str,
     ) -> Result<DiscoverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        let instances = self.refresh_discovery_instances(service_name).await?;
-        Ok(DiscoverySnapshot::ok(service_name, instances))
+        match self.refresh_discovery_instances(service_name).await {
+            Ok(instances) => {
+                record_discovery_metric(
+                    service_name,
+                    "",
+                    "registry",
+                    if instances.is_empty() {
+                        "no_healthy_instance"
+                    } else {
+                        "discovered"
+                    },
+                );
+                Ok(DiscoverySnapshot::ok(service_name, instances))
+            }
+            Err(error) => {
+                record_discovery_metric(service_name, "", "registry", "registry_error");
+                Err(error)
+            }
+        }
     }
 
     pub fn watch_discovery<F, Fut>(
@@ -499,6 +533,7 @@ impl RegistryClient {
         let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
             Ok(discovery) => discovery,
             Err(error) => {
+                record_discovery_metric(service_name, "", "registry", "registry_error");
                 tracing::warn!(
                     service = %service_name,
                     endpoint = "",
@@ -519,6 +554,7 @@ impl RegistryClient {
                 expires_at,
             )
             .await;
+            record_discovery_metric(service_name, "", "registry", "no_healthy_instance");
             tracing::warn!(
                 service = %service_name,
                 endpoint = "",
@@ -531,6 +567,7 @@ impl RegistryClient {
         }
 
         let picked = pick_weighted_stable(&instances).cloned();
+        record_discovery_metric(service_name, "", "registry", "discovered");
         tracing::info!(
             service = %service_name,
             endpoint = "",
@@ -569,6 +606,7 @@ impl RegistryClient {
         let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
             Ok(discovery) => discovery,
             Err(error) => {
+                record_discovery_metric(service_name, endpoint_name, "registry", "registry_error");
                 tracing::warn!(
                     service = %service_name,
                     endpoint = %endpoint_name,
@@ -583,6 +621,7 @@ impl RegistryClient {
         };
         let selected = pick_endpoint_candidate_weighted_stable(&instances, endpoint_name);
         if let Some((instance, _)) = selected {
+            record_discovery_metric(service_name, endpoint_name, "registry", "discovered");
             tracing::info!(
                 service = %service_name,
                 endpoint = %endpoint_name,
@@ -592,6 +631,10 @@ impl RegistryClient {
                 "service endpoint discovery completed"
             );
         } else {
+            if instances.is_empty() {
+                record_discovery_metric(service_name, "", "registry", "no_healthy_instance");
+            }
+            record_discovery_metric(service_name, endpoint_name, "registry", "endpoint_missing");
             tracing::warn!(
                 service = %service_name,
                 endpoint = %endpoint_name,
@@ -649,6 +692,7 @@ impl RegistryClient {
         let (instances, expires_at) = match self.discover_with_cache_expiry(service_name).await {
             Ok(discovery) => discovery,
             Err(error) => {
+                record_discovery_metric(service_name, endpoint_name, "registry", "registry_error");
                 tracing::warn!(
                     service = %service_name,
                     endpoint = %endpoint_name,
@@ -666,6 +710,10 @@ impl RegistryClient {
             .cloned()
             .collect();
         if endpoints.is_empty() {
+            if instances.is_empty() {
+                record_discovery_metric(service_name, "", "registry", "no_healthy_instance");
+            }
+            record_discovery_metric(service_name, endpoint_name, "registry", "endpoint_missing");
             tracing::warn!(
                 service = %service_name,
                 endpoint = %endpoint_name,
@@ -676,6 +724,7 @@ impl RegistryClient {
                 "service endpoint list discovery completed"
             );
         } else {
+            record_discovery_metric(service_name, endpoint_name, "registry", "discovered");
             tracing::info!(
                 service = %service_name,
                 endpoint = %endpoint_name,
