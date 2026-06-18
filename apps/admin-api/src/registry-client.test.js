@@ -71,6 +71,43 @@ function createConfig(overrides = {}) {
   };
 }
 
+function registryInstance(serviceName, id, endpoints, overrides = {}) {
+  return {
+    id,
+    schema_version: 2,
+    name: serviceName,
+    host: overrides.host || "10.0.0.1",
+    port: overrides.port ?? 7000,
+    admin_port: overrides.adminPort ?? 0,
+    local_socket: "",
+    endpoints,
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true,
+    ...overrides
+  };
+}
+
+function networkEndpoint(name, protocol, visibility, host, port) {
+  return {
+    name,
+    protocol,
+    host,
+    port,
+    socket: "",
+    visibility,
+    metadata: {},
+    healthy: true
+  };
+}
+
+function putInstance(redis, instance) {
+  redis.hashes.set(`service:${instance.name}:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`heartbeat:${instance.name}:${instance.id}`, { ttl: 30, value: "1" });
+}
+
 test("RegistryClient registers admin-api admin http endpoint and metadata", async () => {
   const redis = createRedisCapture();
   const config = createConfig();
@@ -295,6 +332,38 @@ test("discoverGameServerAdminEndpoints uses registry key prefix", async () => {
   assert.deepEqual(endpoints.map((endpoint) => endpoint.instanceId), ["game-server-prefixed"]);
 });
 
+test("discoverGameServerAdminEndpoints requires admin visibility and never falls back to client endpoints", async () => {
+  const redis = createRedisCapture();
+  putInstance(redis, registryInstance("game-server", "game-server-public-admin-name", [
+    networkEndpoint("admin", "tcp", "public", "10.0.0.10", 7000)
+  ]));
+  putInstance(redis, registryInstance("game-server", "game-server-internal-admin-name", [
+    networkEndpoint("admin", "tcp", "internal", "10.0.0.11", 7600)
+  ]));
+  putInstance(redis, registryInstance("game-server", "game-server-admin", [
+    networkEndpoint("client", "tcp", "public", "10.0.0.12", 7000),
+    networkEndpoint("admin", "tcp", "admin", "10.0.0.12", 7500)
+  ]));
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
+    { instanceId: "game-server-admin", endpointName: "admin", port: 7500 }
+  ]);
+});
+
+test("discoverGameServerAdminEndpoints returns empty when only client-visible endpoints exist", async () => {
+  const redis = createRedisCapture();
+  putInstance(redis, registryInstance("game-server", "game-server-client-only", [
+    networkEndpoint("client", "tcp", "public", "10.0.0.20", 7000),
+    networkEndpoint("admin", "tcp", "public", "10.0.0.20", 7500)
+  ]));
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints, []);
+});
+
 test("discoverGameProxyAdminEndpoints returns healthy http admin endpoints for all instances", async () => {
   const redis = createRedisCapture();
   const instances = [
@@ -379,6 +448,26 @@ test("discoverGameProxyAdminEndpoints returns healthy http admin endpoints for a
       { instanceId: "game-proxy-b", protocol: "http", host: "10.0.1.2", port: 7102 }
     ]
   );
+});
+
+test("discoverGameProxyAdminEndpoints requires admin visibility and never falls back to client endpoints", async () => {
+  const redis = createRedisCapture();
+  putInstance(redis, registryInstance("game-proxy", "game-proxy-public-admin-name", [
+    networkEndpoint("admin", "http", "public", "10.0.1.10", 4000)
+  ], { port: 4000, adminPort: 7101 }));
+  putInstance(redis, registryInstance("game-proxy", "game-proxy-internal-admin-name", [
+    networkEndpoint("admin", "http", "internal", "10.0.1.11", 7102)
+  ], { port: 4000, adminPort: 7102 }));
+  putInstance(redis, registryInstance("game-proxy", "game-proxy-admin", [
+    networkEndpoint("client", "kcp", "public", "10.0.1.12", 4000),
+    networkEndpoint("admin", "http", "admin", "10.0.1.12", 7101)
+  ], { port: 4000, adminPort: 7101 }));
+
+  const endpoints = await discoverGameProxyAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
+    { instanceId: "game-proxy-admin", endpointName: "admin", port: 7101 }
+  ]);
 });
 
 test("admin discovery endpoints can be served from refresh snapshots", async () => {

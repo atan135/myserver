@@ -365,6 +365,7 @@ fn internal_socket_candidates(instances: &[ServiceInstance]) -> Vec<GameServerEn
                     endpoint.name == "internal"
                         && endpoint.healthy
                         && endpoint.protocol == "local_socket"
+                        && matches!(endpoint.visibility.as_str(), "local" | "internal")
                         && !endpoint.socket.trim().is_empty()
                 })
                 .map(|endpoint| GameServerEndpointCandidate {
@@ -622,6 +623,36 @@ mod tests {
         }
     }
 
+    fn service_instance(
+        id: &str,
+        endpoints: Vec<service_registry::ServiceEndpoint>,
+    ) -> ServiceInstance {
+        ServiceInstance::new(
+            id.to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_endpoints(endpoints)
+    }
+
+    fn socket_endpoint(
+        name: &str,
+        socket: &str,
+        visibility: &str,
+    ) -> service_registry::ServiceEndpoint {
+        service_registry::ServiceEndpoint {
+            name: name.to_string(),
+            protocol: "local_socket".to_string(),
+            host: String::new(),
+            port: 0,
+            socket: socket.to_string(),
+            visibility: visibility.to_string(),
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
+            healthy: true,
+        }
+    }
+
     fn test_config() -> Config {
         let mut modes = HashMap::new();
         modes.insert(
@@ -711,6 +742,54 @@ mod tests {
         let socket = select_socket(&candidates, "match-123", "5v5", "zone-b").unwrap();
 
         assert_eq!(socket, "c.sock");
+    }
+
+    #[test]
+    fn internal_socket_candidates_require_internal_endpoint_name_and_visibility() {
+        let instances = vec![
+            service_instance(
+                "game-client-visible",
+                vec![
+                    socket_endpoint("client", "client.sock", "public"),
+                    socket_endpoint("internal", "public.sock", "public"),
+                    socket_endpoint("internal", "admin.sock", "admin"),
+                ],
+            ),
+            service_instance(
+                "game-internal",
+                vec![socket_endpoint("internal", "internal.sock", "internal")],
+            ),
+            service_instance(
+                "game-local",
+                vec![socket_endpoint("internal", "local.sock", "local")],
+            ),
+        ];
+
+        let candidates = internal_socket_candidates(&instances);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.instance_id.as_str(), candidate.socket.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("game-internal", "internal.sock"),
+                ("game-local", "local.sock")
+            ]
+        );
+    }
+
+    #[test]
+    fn internal_socket_candidates_do_not_fallback_to_client_visible_endpoint() {
+        let instances = vec![service_instance(
+            "game-client-only",
+            vec![
+                socket_endpoint("client", "client.sock", "public"),
+                socket_endpoint("internal", "public.sock", "public"),
+            ],
+        )];
+
+        assert!(internal_socket_candidates(&instances).is_empty());
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ import {
 const GAME_SERVER_SERVICE_NAME = "game-server";
 const GAME_SERVER_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_SERVER_ADMIN_PROTOCOLS = new Set(["tcp"]);
+const ADMIN_ENDPOINT_VISIBILITY = "admin";
 const UNSAFE_ADVERTISED_HOSTS = new Set(["", "0.0.0.0", "::", "[::]"]);
 
 function publishedHostFromConfig(config) {
@@ -50,6 +51,21 @@ export class RegistryClient {
           port: this.config.port,
           socket: "",
           visibility: "public",
+          metadata: {
+            service_name: this.serviceName,
+            service_instance_id: this.instanceId,
+            build_version: this.config.serviceBuildVersion || "dev",
+            zone: this.config.serviceZone || "local"
+          },
+          healthy: true
+        },
+        {
+          name: "internal",
+          protocol: "http",
+          host: endpointHost,
+          port: this.config.port,
+          socket: "",
+          visibility: "internal",
           metadata: {
             service_name: this.serviceName,
             service_instance_id: this.instanceId,
@@ -125,7 +141,10 @@ export class RegistryClient {
 export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
   const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, registryKeyPrefix);
   const endpoints = discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
-    .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
+    .filter(({ endpoint }) =>
+      endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
+      GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol)
+    )
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
       instanceId: instance.id,

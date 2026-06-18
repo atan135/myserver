@@ -415,8 +415,15 @@ async function readRedis() {
   }
 }
 
-function endpointMatches(endpoint, endpointName, protocols) {
+function expectedVisibility(endpointName) {
+  if (endpointName === "admin") return "admin";
+  if (endpointName === "internal") return "internal";
+  return "";
+}
+
+function endpointMatches(endpoint, endpointName, protocols, visibility = "") {
   return endpoint?.name === endpointName &&
+    (!visibility || endpoint.visibility === visibility) &&
     protocols.includes(endpoint.protocol) &&
     endpoint.healthy !== false &&
     endpoint.host &&
@@ -433,9 +440,10 @@ function selectInstance(instances, instanceId, serviceName) {
 }
 
 function selectEndpoint(instance, endpointName, protocols, label) {
-  const endpoint = instance.endpoints.find((item) => endpointMatches(item, endpointName, protocols));
+  const visibility = expectedVisibility(endpointName);
+  const endpoint = instance.endpoints.find((item) => endpointMatches(item, endpointName, protocols, visibility));
   if (!endpoint) {
-    throw new Error(`${label} endpoint not found: instance=${instance.id}, endpoint=${endpointName}, protocols=${protocols.join("|")}`);
+    throw new Error(`${label} endpoint not found: instance=${instance.id}, endpoint=${endpointName}, protocols=${protocols.join("|")}${visibility ? `, visibility=${visibility}` : ""}`);
   }
   return {
     instanceId: instance.id,
@@ -449,10 +457,11 @@ function selectEndpoint(instance, endpointName, protocols, label) {
 }
 
 function selectSingletonEndpoint(instances, requestedInstanceId, endpointName, protocols, serviceName) {
+  const visibility = expectedVisibility(endpointName);
   const candidates = instances
     .filter((instance) => instance.healthy !== false && instance.weight > 0)
     .flatMap((instance) => instance.endpoints
-      .filter((endpoint) => endpointMatches(endpoint, endpointName, protocols))
+      .filter((endpoint) => endpointMatches(endpoint, endpointName, protocols, visibility))
       .map((endpoint) => ({ instance, endpoint })));
 
   const filtered = requestedInstanceId
@@ -500,7 +509,7 @@ try {
     authHttp = selectSingletonEndpoint(
       snapshot.services["auth-http"],
       process.env.MYSERVER_AUTH_INSTANCE_ID || "",
-      "http",
+      "internal",
       ["http", "https"],
       "auth-http"
     );
@@ -611,8 +620,8 @@ function New-LocalFallbackDiscovery {
         }
         authHttp = [pscustomobject]@{
             instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<local-fallback>" }
-            endpointName = "http"
-            protocol = "http"
+            endpointName = "internal"
+            protocol = if ($AuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
             host = (Get-UriEndpoint $AuthBaseUrl).host
             port = (Get-UriEndpoint $AuthBaseUrl).port
             url = $AuthBaseUrl
@@ -630,19 +639,19 @@ function Resolve-RolloutDiscovery {
             $auth = $registryResult.authHttp
             if ($null -eq $auth) {
                 if (Test-DiscoveryRequired) {
-                    throw "auth-http.http endpoint not found in registry"
+                    throw "auth-http.internal endpoint not found in registry"
                 } else {
                     $authEndpoint = Get-UriEndpoint $AuthBaseUrl
                     $auth = [pscustomobject]@{
                         instanceId = if ($AuthInstanceId) { $AuthInstanceId } else { "<fallback>" }
-                        endpointName = "http"
+                        endpointName = "internal"
                         protocol = if ($AuthBaseUrl.StartsWith("https://")) { "https" } else { "http" }
                         host = $authEndpoint.host
                         port = $authEndpoint.port
                         url = $AuthBaseUrl
                         source = "fallback-auth-base-url"
                     }
-                    $warnings += "auth-http.http endpoint not found in registry; using AuthBaseUrl fallback because DiscoveryRequired=false"
+                    $warnings += "auth-http.internal endpoint not found in registry; using AuthBaseUrl fallback because DiscoveryRequired=false"
                 }
             }
 

@@ -14,6 +14,7 @@ import {
 const GAME_SERVER_SERVICE_NAME = "game-server";
 const GAME_SERVER_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_SERVER_ADMIN_PROTOCOLS = new Set(["tcp"]);
+const ADMIN_ENDPOINT_VISIBILITY = "admin";
 const GAME_PROXY_SERVICE_NAME = "game-proxy";
 const GAME_PROXY_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_PROXY_ADMIN_PROTOCOLS = new Set(["http"]);
@@ -197,7 +198,10 @@ export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix 
     GAME_SERVER_ADMIN_ENDPOINT_NAME
   );
   const endpoints = candidates
-    .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
+    .filter(({ endpoint }) =>
+      endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
+      GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol)
+    )
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
       instanceId: instance.id,
@@ -229,7 +233,10 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
     GAME_PROXY_ADMIN_ENDPOINT_NAME
   );
   const endpoints = candidates
-    .filter(({ endpoint }) => GAME_PROXY_ADMIN_PROTOCOLS.has(endpoint.protocol))
+    .filter(({ endpoint }) =>
+      endpoint.visibility === ADMIN_ENDPOINT_VISIBILITY &&
+      GAME_PROXY_ADMIN_PROTOCOLS.has(endpoint.protocol)
+    )
     .map(({ instance, endpoint }) => ({
       service: GAME_PROXY_SERVICE_NAME,
       instanceId: instance.id,

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
-import { RegistryClient } from "./registry-client.js";
+import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
 configureLogger({
   appName: "auth-http-registry-test",
@@ -15,11 +15,30 @@ configureLogger({
 
 function createRedisCapture() {
   const hashes = new Map();
+  const keys = new Map();
 
   return {
     hashes,
+    keys,
     async hset(key, field, value) {
       hashes.set(`${key}:${field}`, value);
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      const prefix = pattern.replace("*", "");
+      const found = [...hashes.keys()]
+        .filter((key) => key.endsWith(":data"))
+        .map((key) => key.slice(0, -5))
+        .filter((key) => key.startsWith(prefix));
+      return ["0", found];
     }
   };
 }
@@ -38,7 +57,7 @@ function createConfig(overrides = {}) {
   };
 }
 
-test("RegistryClient registers auth-http public http endpoint and metadata", async () => {
+test("RegistryClient registers auth-http public and internal http endpoints and metadata", async () => {
   const redis = createRedisCapture();
   const config = createConfig();
   const client = new RegistryClient(redis, config);
@@ -60,6 +79,21 @@ test("RegistryClient registers auth-http public http endpoint and metadata", asy
       port: 3100,
       socket: "",
       visibility: "public",
+      metadata: {
+        service_name: "auth-http",
+        service_instance_id: "auth-http-test-001",
+        build_version: "2026.06.18+auth",
+        zone: "zone-auth"
+      },
+      healthy: true
+    },
+    {
+      name: "internal",
+      protocol: "http",
+      host: "10.10.0.2",
+      port: 3100,
+      socket: "",
+      visibility: "internal",
       metadata: {
         service_name: "auth-http",
         service_instance_id: "auth-http-test-001",
@@ -94,6 +128,7 @@ test("RegistryClient publishes advertised host instead of bind host", async () =
   const payload = JSON.parse(redis.hashes.get("service:auth-http:instances:auth-http-test-001:data"));
   assert.equal(payload.host, "10.10.0.20");
   assert.equal(payload.endpoints[0].host, "10.10.0.20");
+  assert.equal(payload.endpoints[1].host, "10.10.0.20");
 });
 
 test("RegistryClient never publishes wildcard advertised host", async () => {
@@ -112,6 +147,7 @@ test("RegistryClient never publishes wildcard advertised host", async () => {
     const payload = JSON.parse(redis.hashes.get("service:auth-http:instances:auth-http-test-001:data"));
     assert.equal(payload.host, "127.0.0.1");
     assert.equal(payload.endpoints[0].host, "127.0.0.1");
+    assert.equal(payload.endpoints[1].host, "127.0.0.1");
   }
 });
 
@@ -143,4 +179,72 @@ test("RegistryClient uses registry key prefix for registration", async () => {
 
   assert.ok(redis.hashes.has("test:service:auth-http:instances:auth-http-test-001:data"));
   assert.equal(redis.hashes.has("service:auth-http:instances:auth-http-test-001:data"), false);
+});
+
+function gameServerInstance(id, endpoints) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host: "10.0.0.1",
+    port: 7000,
+    admin_port: 7500,
+    local_socket: "",
+    endpoints,
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+}
+
+function endpoint(name, visibility, port) {
+  return {
+    name,
+    protocol: "tcp",
+    host: "10.0.0.1",
+    port,
+    socket: "",
+    visibility,
+    metadata: {},
+    healthy: true
+  };
+}
+
+test("discoverGameServerAdminEndpoints requires admin endpoint visibility", async () => {
+  const redis = createRedisCapture();
+  const instances = [
+    gameServerInstance("game-server-client", [endpoint("admin", "public", 7000)]),
+    gameServerInstance("game-server-internal", [endpoint("admin", "internal", 7600)]),
+    gameServerInstance("game-server-admin", [
+      endpoint("client", "public", 7001),
+      endpoint("admin", "admin", 7500)
+    ])
+  ];
+
+  for (const instance of instances) {
+    redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+  }
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
+    { instanceId: "game-server-admin", endpointName: "admin", port: 7500 }
+  ]);
+});
+
+test("discoverGameServerAdminEndpoints does not fall back to client-visible endpoints", async () => {
+  const redis = createRedisCapture();
+  const instance = gameServerInstance("game-server-client-only", [
+    endpoint("client", "public", 7000),
+    endpoint("admin", "public", 7500)
+  ]);
+  redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints, []);
 });

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
-import { RegistryClient } from "./registry-client.js";
+import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
 configureLogger({
   appName: "mail-service-test",
@@ -15,11 +15,30 @@ configureLogger({
 
 function createRedisCapture() {
   const hashes = new Map();
+  const keys = new Map();
 
   return {
     hashes,
+    keys,
     async hset(key, field, value) {
       hashes.set(`${key}:${field}`, value);
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      const prefix = pattern.replace("*", "");
+      const found = [...hashes.keys()]
+        .filter((key) => key.endsWith(":data"))
+        .map((key) => key.slice(0, -5))
+        .filter((key) => key.startsWith(prefix));
+      return ["0", found];
     }
   };
 }
@@ -133,4 +152,72 @@ test("RegistryClient metadata marks missing service token as disabled", async ()
   assert.equal(payload.metadata.service_token_enabled, false);
   assert.equal(payload.metadata.build_version, "dev");
   assert.equal(payload.metadata.zone, "zone-mail");
+});
+
+function gameServerInstance(id, endpoints) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host: "10.0.0.1",
+    port: 7000,
+    admin_port: 7500,
+    local_socket: "",
+    endpoints,
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+}
+
+function endpoint(name, visibility, port) {
+  return {
+    name,
+    protocol: "tcp",
+    host: "10.0.0.1",
+    port,
+    socket: "",
+    visibility,
+    metadata: {},
+    healthy: true
+  };
+}
+
+test("discoverGameServerAdminEndpoints requires admin endpoint visibility", async () => {
+  const redis = createRedisCapture();
+  const instances = [
+    gameServerInstance("game-server-public-admin-name", [endpoint("admin", "public", 7000)]),
+    gameServerInstance("game-server-internal-admin-name", [endpoint("admin", "internal", 7600)]),
+    gameServerInstance("game-server-admin", [
+      endpoint("client", "public", 7001),
+      endpoint("admin", "admin", 7500)
+    ])
+  ];
+
+  for (const instance of instances) {
+    redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+  }
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
+    { instanceId: "game-server-admin", endpointName: "admin", port: 7500 }
+  ]);
+});
+
+test("discoverGameServerAdminEndpoints does not fall back to client-visible endpoints", async () => {
+  const redis = createRedisCapture();
+  const instance = gameServerInstance("game-server-client-only", [
+    endpoint("client", "public", 7000),
+    endpoint("admin", "public", 7500)
+  ]);
+  redis.hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis);
+
+  assert.deepEqual(endpoints, []);
 });
