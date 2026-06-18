@@ -1414,6 +1414,25 @@ mod tests {
     }
 
     #[test]
+    fn env_example_does_not_enable_static_upstream_fallback_by_default() {
+        let env_example = include_str!("../.env.example");
+        let active_keys = env_example
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+            .collect::<Vec<_>>();
+
+        assert!(!active_keys.contains(&"UPSTREAM_SERVER_ID"));
+        assert!(!active_keys.contains(&"UPSTREAM_LOCAL_SOCKET_NAME"));
+        assert!(
+            env_example
+                .contains("Strict/test/production must use registry discovery"),
+            ".env.example must document that strict/test/production use registry discovery"
+        );
+    }
+
+    #[test]
     fn strict_discovery_rejects_disabled_registry() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(&[
