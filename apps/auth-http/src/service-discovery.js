@@ -46,11 +46,18 @@ export class ServiceDiscovery {
       return services;
     }
 
+    const exposeInternalServiceEndpoints = this.config.authExposeInternalServiceEndpoints === true;
+    const sideServiceDiscoveryTasks = exposeInternalServiceEndpoints
+      ? [
+          this.discoverOneEndpoint("chat-server", "tcp", "client"),
+          this.discoverOneEndpoint("mail-service", "http", "client"),
+          this.discoverOneEndpoint("announce-service", "http", "client")
+        ]
+      : [Promise.resolve(null), Promise.resolve(null), Promise.resolve(null)];
+
     const [gameEndpoint, chatEndpoint, mailEndpoint, announceEndpoint] = await Promise.all([
       this.discoverOneEndpoint("game-proxy", "client"),
-      this.discoverOneEndpoint("chat-server", "tcp", "client"),
-      this.discoverOneEndpoint("mail-service", "http", "client"),
-      this.discoverOneEndpoint("announce-service", "http", "client")
+      ...sideServiceDiscoveryTasks
     ]);
 
     const discoveredGame = createEndpointDescriptor(gameEndpoint, "kcp");

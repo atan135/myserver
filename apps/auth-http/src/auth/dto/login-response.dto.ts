@@ -15,13 +15,25 @@ export class LoginServicesDto {
   @ApiProperty({ type: ClientServiceDto })
   game: ClientServiceDto;
 
-  @ApiProperty({ type: ClientServiceDto, nullable: true })
+  @ApiProperty({
+    type: ClientServiceDto,
+    nullable: true,
+    description: "Internal capability service endpoint. Production defaults to null unless explicitly exposed through registry discovery."
+  })
   chat: ClientServiceDto | null;
 
-  @ApiProperty({ type: ClientServiceDto, nullable: true })
+  @ApiProperty({
+    type: ClientServiceDto,
+    nullable: true,
+    description: "Internal capability service endpoint. Production defaults to null unless explicitly exposed through registry discovery."
+  })
   mail: ClientServiceDto | null;
 
-  @ApiProperty({ type: ClientServiceDto, nullable: true })
+  @ApiProperty({
+    type: ClientServiceDto,
+    nullable: true,
+    description: "Internal capability service endpoint. Production defaults to null unless explicitly exposed through registry discovery."
+  })
   announce: ClientServiceDto | null;
 }
 

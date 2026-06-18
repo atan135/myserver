@@ -8,6 +8,7 @@ const CONFIG_ENV_KEYS = [
   "NODE_ENV",
   "APP_ENV",
   "AUTH_REQUIRE_TLS",
+  "AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS",
   "AUTH_REGISTER_REQUIRE_REVIEW",
   "DISCOVERY_REQUIRED",
   "REGISTRY_ENABLED",
@@ -79,9 +80,40 @@ test("auth-http requires registry discovery by default in production", async () 
   });
 });
 
+test("auth-http hides internal service endpoints by default in production", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.authExposeInternalServiceEndpoints, false);
+  });
+});
+
 test("auth-http keeps registry discovery optional by default outside production", async () => {
   await withEnv({ NODE_ENV: "test" }, (config) => {
     assert.equal(config.registryDiscoveryRequired, false);
+  });
+});
+
+test("auth-http allows internal service endpoints outside production by default", async () => {
+  await withEnv({ NODE_ENV: "test" }, (config) => {
+    assert.equal(config.authExposeInternalServiceEndpoints, true);
+  });
+});
+
+test("auth-http internal service endpoint exposure can be explicitly enabled", async () => {
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
+  }, (config) => {
+    assert.equal(config.authExposeInternalServiceEndpoints, true);
   });
 });
 

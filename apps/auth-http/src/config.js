@@ -145,6 +145,10 @@ export function getConfig() {
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
     registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isProductionEnv()),
+    authExposeInternalServiceEndpoints: parseBoolean(
+      process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS,
+      !isProductionEnv()
+    ),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),

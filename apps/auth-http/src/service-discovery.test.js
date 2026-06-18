@@ -36,6 +36,7 @@ function createConfig(overrides = {}) {
     gameProxyPort: 4000,
     registryDiscoveryEnabled: false,
     registryDiscoveryRequired: false,
+    authExposeInternalServiceEndpoints: true,
     ...overrides
   };
 }
@@ -164,6 +165,109 @@ test("ServiceDiscovery discovers game-proxy.client and named service endpoints",
   });
 });
 
+test("ServiceDiscovery hides internal service endpoints when exposure is disabled", async () => {
+  const redis = createRedis({
+    "game-proxy": [
+      {
+        id: "proxy-a",
+        name: "game-proxy",
+        host: "10.0.0.1",
+        port: 4000,
+        endpoints: [
+          {
+            name: "client",
+            protocol: "kcp",
+            host: "203.0.113.10",
+            port: 4100,
+            socket: "",
+            visibility: "public",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "chat-server": [
+      {
+        id: "chat-a",
+        name: "chat-server",
+        host: "10.0.0.2",
+        port: 9001,
+        endpoints: [
+          {
+            name: "tcp",
+            protocol: "tcp",
+            host: "10.0.0.20",
+            port: 9011,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "mail-service": [
+      {
+        id: "mail-a",
+        name: "mail-service",
+        host: "10.0.0.3",
+        port: 9003,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.30",
+            port: 9013,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "announce-service": [
+      {
+        id: "announce-a",
+        name: "announce-service",
+        host: "10.0.0.4",
+        port: 9004,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.40",
+            port: 9014,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ]
+  });
+  const discovery = new ServiceDiscovery(
+    redis,
+    createConfig({
+      registryDiscoveryEnabled: true,
+      authExposeInternalServiceEndpoints: false
+    })
+  );
+
+  assert.deepEqual(await discovery.discoverClientServices(), {
+    game: {
+      host: "203.0.113.10",
+      port: 4100,
+      protocol: "kcp"
+    },
+    chat: null,
+    mail: null,
+    announce: null
+  });
+});
+
 test("ServiceDiscovery throws when game-proxy.client is required but missing", async () => {
   const discovery = new ServiceDiscovery(
     createRedis({}),
@@ -258,5 +362,28 @@ test("ServiceDiscovery falls back to legacy client endpoint for side services", 
     host: "127.0.0.1",
     port: 9003,
     protocol: "http"
+  });
+});
+
+test("ServiceDiscovery does not fabricate side service endpoints when registry discovery is disabled", async () => {
+  const discovery = new ServiceDiscovery(
+    createRedis({}),
+    createConfig({
+      registryDiscoveryEnabled: false,
+      authExposeInternalServiceEndpoints: true
+    })
+  );
+
+  const services = await discovery.discoverClientServices();
+
+  assert.deepEqual(services, {
+    game: {
+      host: "127.0.0.1",
+      port: 4000,
+      protocol: "kcp"
+    },
+    chat: null,
+    mail: null,
+    announce: null
   });
 });
