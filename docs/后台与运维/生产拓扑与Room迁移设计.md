@@ -96,6 +96,24 @@
 | NATS | metrics、session kick、邮件通知 | 生产高可用；内部事件通道 | HA、重放/持久化边界、消息幂等 |
 | PostgreSQL | 账号、审计、业务持久化 | 生产高可用；承载业务真持久化数据 | 备份、迁移、读写容量和事务边界 |
 
+### 5.1 测试/线上统一启动顺序
+
+测试、预发和线上环境必须先启动基础设施，再启动会注册或消费服务发现的内部服务，最后启动玩家入口和控制面。这里的 strict discovery 指 `DISCOVERY_REQUIRED=true`，或 `NODE_ENV` / `APP_ENV` 进入测试、预发、线上等严格发现环境。
+
+统一启动顺序如下：
+
+1. Redis registry / 业务 Redis：先提供 service registry、session、ticket、route store、metrics snapshot 等共享状态能力。
+2. NATS：再提供 metrics、session kick、邮件通知等内部事件通道。
+3. PostgreSQL：再提供账号、审计、公告、邮件等持久化数据入口。
+4. registry-dependent services：启动 `game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service` 等内部能力服务。`game-server`、`match-service`、`chat-server` 在严格发现下需要 registry 可用并完成注册；`mail-service`、`announce-service` 当前 Node 注册失败仍主要依赖日志和后续健康检查兜底。`mail-service` 的附件发放请求依赖发现 `game-server.admin`，应在后续健康检查阶段验证。`metrics-collector` 不注册也不消费 service registry，但依赖 NATS metrics 和 Redis snapshots，应在 Redis / NATS 可用后随本批或紧随本批启动。
+5. gateway/control services：最后启动 `auth-http`、`game-proxy`、`admin-api`、`admin-web` 等入口和控制面。`game-proxy` 启动需要发现 `game-server.proxy-local`；`auth-http` 登录返回依赖发现 `game-proxy.client`；`admin-api` 控制面依赖发现 `game-server.admin` 和 `game-proxy.admin`。
+
+这样排序的原因是：registry-dependent services 需要 Redis registry 已经可写，才能发布自身 endpoint 并维持 heartbeat；gateway/control services 属于发现消费者，启动或请求时依赖上游 endpoint 已经存在；NATS 和 PostgreSQL 分别是事件通道和持久化基础设施，应在业务服务启动前就绪。
+
+本地开发可以继续使用 dev-stack 或现有脚本的默认顺序，并允许在非严格发现下使用文档标注的 local fallback。测试、预发和线上不能依赖本地默认 host/port 或 `REGISTRY_ENABLED=false` 跑通链路，必须先保证基础设施可用，并启用 strict discovery。
+
+启动完成后的下一阶段应继续做健康检查、endpoint 完整性检查、实例唯一性检查、route store 检查和接流量控制。本文本节只定义启动顺序，不实现健康检查或流量切换逻辑。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
