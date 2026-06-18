@@ -184,7 +184,8 @@ impl Config {
         let admin_audit_require_actor = parse_bool("GAME_ADMIN_AUDIT_REQUIRE_ACTOR", false);
         let internal_token =
             env::var("GAME_INTERNAL_TOKEN").unwrap_or_else(|_| DEFAULT_INTERNAL_TOKEN.to_string());
-        validate_legacy_direct_config("game-server", &["MATCH_SERVICE_ADDR"]);
+        let discovery_required = discovery_required_from_env();
+        validate_legacy_direct_config("game-server", &["MATCH_SERVICE_ADDR"], discovery_required);
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
@@ -228,7 +229,6 @@ impl Config {
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
-        let discovery_required = discovery_required_from_env();
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &["MATCH_SERVICE_ADDR"],
             discovery_required || !is_local_discovery_fallback_env(),
@@ -389,18 +389,28 @@ fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> 
         .collect()
 }
 
-fn validate_legacy_direct_config(app_name: &str, names: &[&str]) {
-    if !parse_bool(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false) {
+fn validate_legacy_direct_config(app_name: &str, names: &[&str], strict_discovery: bool) {
+    let disallow_legacy_direct_config = parse_bool(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false);
+    if !disallow_legacy_direct_config && !strict_discovery {
         return;
     }
 
     let configured = collect_configured_legacy_direct_config_names(names);
-    if !configured.is_empty() {
+    if configured.is_empty() {
+        return;
+    }
+
+    if disallow_legacy_direct_config {
         panic!(
             "invalid {app_name} discovery config: {DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
             configured.join(", ")
         );
     }
+
+    panic!(
+        "invalid {app_name} discovery config: strict service discovery forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+        configured.join(", ")
+    );
 }
 
 fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool) -> Vec<String> {
@@ -872,48 +882,68 @@ mod tests {
     }
 
     #[test]
-    fn warns_when_legacy_match_service_addr_is_set_in_strict_discovery() {
+    fn rejects_legacy_match_service_addr_in_strict_discovery_envs() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        let strict_cases = [
+            ("NODE_ENV", "test"),
+            ("NODE_ENV", "testing"),
+            ("NODE_ENV", "staging"),
+            ("NODE_ENV", "prod"),
+            ("NODE_ENV", "production"),
+            ("APP_ENV", "test"),
+            ("APP_ENV", "staging"),
+            ("APP_ENV", "prod"),
+            ("APP_ENV", "production"),
+            ("APP_ENV", "testing"),
+        ];
+
+        for (name, value) in strict_cases {
+            unsafe {
+                clear_production_env();
+                set_custom_production_tokens();
+                set_valid_production_infra();
+                env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+                env::set_var(name, value);
+                env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
+            }
+
+            let error = panic_message(catch_config_from_env());
+            assert!(error.contains("strict service discovery forbids legacy direct config"));
+            assert!(error.contains("MATCH_SERVICE_ADDR"));
+        }
+
+        unsafe {
+            clear_production_env();
+            env::set_var("NODE_ENV", "development");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("strict service discovery forbids legacy direct config"));
+        assert!(error.contains("MATCH_SERVICE_ADDR"));
+    }
+
+    #[test]
+    fn warns_when_legacy_match_service_addr_is_set_outside_local_fallback() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
 
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
-            env::set_var("APP_ENV", "test");
-            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("APP_ENV", "development");
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::remove_var("REGISTRY_ENABLED");
             env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
         }
 
         let config = Config::from_env();
 
-        assert!(config.discovery_required);
-        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
-        assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
-
-        unsafe {
-            env::set_var("NODE_ENV", "development");
-            env::remove_var("APP_ENV");
-        }
-
-        let config = Config::from_env();
-        assert!(config.legacy_direct_config_warnings.is_empty());
-
-        unsafe {
-            env::remove_var("NODE_ENV");
-            env::set_var("APP_ENV", "development");
-        }
-
-        let config = Config::from_env();
-        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
-        assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
-
-        unsafe {
-            env::set_var("APP_ENV", "staging");
-            env::set_var("REGISTRY_ENABLED", "true");
-        }
-
-        let config = Config::from_env();
-        assert!(config.discovery_required);
+        assert!(!config.discovery_required);
         assert_eq!(config.legacy_direct_config_warnings.len(), 1);
         assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
     }

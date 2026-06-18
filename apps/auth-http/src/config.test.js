@@ -223,32 +223,34 @@ test("auth-http reads game-proxy host and port as local fallback config", async 
   });
 });
 
-test("auth-http ignores direct consumer endpoint env outside local fallback", async () => {
-  await withCapturedWarnings({
-    NODE_ENV: "test",
-    REGISTRY_ENABLED: "true",
-    GAME_PROXY_HOST: "203.0.113.10",
-    GAME_PROXY_PORT: "4100",
-    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
-    GAME_SERVER_ADMIN_PORT: "17500"
-  }, (config, warnings) => {
-    assert.equal(config.localDiscoveryFallbackEnabled, false);
-    assert.equal(config.gameProxyHost, "127.0.0.1");
-    assert.equal(config.gameProxyPort, 4000);
-    assert.equal(config.gameServerAdminHost, "127.0.0.1");
-    assert.equal(config.gameServerAdminPort, 7500);
-    assert.deepEqual(
-      config.legacyDirectConfigWarnings.map((warning) => warning.name),
-      [
-        "GAME_PROXY_HOST",
-        "GAME_PROXY_PORT",
-        "GAME_SERVER_ADMIN_HOST",
-        "GAME_SERVER_ADMIN_PORT"
-      ]
+test("auth-http rejects legacy direct endpoints in strict discovery environments", async () => {
+  const strictCases = [
+    { NODE_ENV: "test" },
+    { NODE_ENV: "testing" },
+    { NODE_ENV: "staging" },
+    { NODE_ENV: "prod" },
+    { NODE_ENV: "production" },
+    { APP_ENV: "test" },
+    { APP_ENV: "staging" },
+    { APP_ENV: "prod" },
+    { APP_ENV: "production" },
+    { APP_ENV: "testing" },
+    { NODE_ENV: "development", DISCOVERY_REQUIRED: "true" }
+  ];
+
+  for (const strictEnv of strictCases) {
+    await assert.rejects(
+      () => withEnv({
+        ...strictEnv,
+        REGISTRY_ENABLED: "true",
+        GAME_PROXY_HOST: "203.0.113.10",
+        GAME_PROXY_PORT: "4100",
+        GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+        GAME_SERVER_ADMIN_PORT: "17500"
+      }, () => {}),
+      /strict service discovery forbids legacy direct config: GAME_PROXY_HOST, GAME_PROXY_PORT, GAME_SERVER_ADMIN_HOST, GAME_SERVER_ADMIN_PORT/
     );
-    assert.equal(warnings.length, 4);
-    assert.match(warnings[0], /GAME_PROXY_HOST is ignored/);
-  });
+  }
 });
 
 test("auth-http does not warn for local fallback direct endpoint env", async () => {
@@ -292,21 +294,6 @@ test("auth-http ignores legacy direct endpoints when APP_ENV is development with
       config.legacyDirectConfigWarnings.map((warning) => warning.name),
       ["GAME_PROXY_HOST", "GAME_PROXY_PORT"]
     );
-    assert.equal(warnings.length, 2);
-  });
-});
-
-test("auth-http treats staging as strict discovery for legacy direct endpoints", async () => {
-  await withCapturedWarnings({
-    APP_ENV: "staging",
-    REGISTRY_ENABLED: "true",
-    GAME_PROXY_HOST: "203.0.113.10",
-    GAME_PROXY_PORT: "4100"
-  }, (config, warnings) => {
-    assert.equal(config.registryDiscoveryRequired, true);
-    assert.equal(config.localDiscoveryFallbackEnabled, false);
-    assert.equal(config.gameProxyHost, "127.0.0.1");
-    assert.equal(config.gameProxyPort, 4000);
     assert.equal(warnings.length, 2);
   });
 });

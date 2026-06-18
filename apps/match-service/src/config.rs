@@ -89,6 +89,7 @@ impl Config {
                 "GAME_SERVER_INTERNAL_SOCKET_NAME",
                 "GAME_INTERNAL_SOCKET_NAME",
             ],
+            discovery_required,
         );
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &[
@@ -369,18 +370,29 @@ fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> 
         .collect()
 }
 
-fn validate_legacy_direct_config(app_name: &str, names: &[&str]) {
-    if !parse_bool_env(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false) {
+fn validate_legacy_direct_config(app_name: &str, names: &[&str], strict_discovery: bool) {
+    let disallow_legacy_direct_config =
+        parse_bool_env(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false);
+    if !disallow_legacy_direct_config && !strict_discovery {
         return;
     }
 
     let configured = collect_configured_legacy_direct_config_names(names);
-    if !configured.is_empty() {
+    if configured.is_empty() {
+        return;
+    }
+
+    if disallow_legacy_direct_config {
         panic!(
             "invalid {app_name} discovery config: {DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
             configured.join(", ")
         );
     }
+
+    panic!(
+        "invalid {app_name} discovery config: strict service discovery forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+        configured.join(", ")
+    );
 }
 
 fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
@@ -622,36 +634,55 @@ mod tests {
     }
 
     #[test]
-    fn ignores_game_server_internal_socket_env_outside_local_fallback() {
+    fn rejects_game_server_internal_socket_env_in_strict_discovery_envs() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
 
+        let strict_cases = [
+            ("NODE_ENV", "test"),
+            ("NODE_ENV", "testing"),
+            ("NODE_ENV", "staging"),
+            ("NODE_ENV", "prod"),
+            ("NODE_ENV", "production"),
+            ("APP_ENV", "test"),
+            ("APP_ENV", "staging"),
+            ("APP_ENV", "prod"),
+            ("APP_ENV", "production"),
+            ("APP_ENV", "testing"),
+        ];
+
+        for (name, value) in strict_cases {
+            unsafe {
+                env::remove_var("NODE_ENV");
+                env::remove_var("APP_ENV");
+                env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
+                env::set_var(name, value);
+                env::set_var("REGISTRY_ENABLED", "true");
+                env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+                env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+                env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
+                env::set_var("GLOBAL_ID_WORKER_ID", "1");
+            }
+
+            let error = panic_message(catch_config_from_env());
+            assert!(error.contains("strict service discovery forbids legacy direct config"));
+            assert!(error.contains("GAME_SERVER_INTERNAL_SOCKET_NAME"));
+            assert!(error.contains("GAME_INTERNAL_SOCKET_NAME"));
+        }
+
         unsafe {
             env::remove_var("NODE_ENV");
-            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
-            env::set_var("APP_ENV", "test");
+            env::set_var("APP_ENV", "local");
+            env::set_var("DISCOVERY_REQUIRED", "true");
             env::set_var("REGISTRY_ENABLED", "true");
-            env::set_var("GAME_LOCAL_SOCKET_NAME", "custom-local.sock");
             env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
             env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
         }
 
-        let config = Config::from_env();
-
-        assert!(!config.local_discovery_fallback_enabled);
-        assert_eq!(
-            config.game_server_internal_socket_name,
-            "myserver-game-server-internal.sock"
-        );
-        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
-        assert!(
-            config.legacy_direct_config_warnings[0]
-                .contains("GAME_SERVER_INTERNAL_SOCKET_NAME is ignored")
-        );
-        assert!(
-            config.legacy_direct_config_warnings[1]
-                .contains("GAME_INTERNAL_SOCKET_NAME is ignored")
-        );
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("strict service discovery forbids legacy direct config"));
+        assert!(error.contains("GAME_SERVER_INTERNAL_SOCKET_NAME"));
+        assert!(error.contains("GAME_INTERNAL_SOCKET_NAME"));
     }
 
     #[test]
@@ -697,23 +728,29 @@ mod tests {
     }
 
     #[test]
-    fn staging_disables_legacy_socket_fallback() {
+    fn ignores_game_server_internal_socket_env_outside_local_fallback() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
 
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
-            env::set_var("APP_ENV", "staging");
-            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("APP_ENV", "development");
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::remove_var("REGISTRY_ENABLED");
             env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
         }
 
         let config = Config::from_env();
 
-        assert!(config.discovery_required);
+        assert!(!config.discovery_required);
         assert!(!config.local_discovery_fallback_enabled);
-        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
+        assert_eq!(
+            config.game_server_internal_socket_name,
+            "myserver-game-server-internal.sock"
+        );
+        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
     }
 
     #[test]

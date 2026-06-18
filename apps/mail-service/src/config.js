@@ -100,17 +100,25 @@ function collectConfiguredLegacyDirectConfigNames(envNames) {
   return envNames.filter((name) => process.env[name] !== undefined);
 }
 
-function validateLegacyDirectConfig(appName, envNames, disallowLegacyDirectConfig) {
-  if (!disallowLegacyDirectConfig) {
+function validateLegacyDirectConfig(appName, envNames, disallowLegacyDirectConfig, strictDiscovery) {
+  if (!disallowLegacyDirectConfig && !strictDiscovery) {
     return;
   }
 
   const configured = collectConfiguredLegacyDirectConfigNames(envNames);
-  if (configured.length > 0) {
+  if (configured.length === 0) {
+    return;
+  }
+
+  if (disallowLegacyDirectConfig) {
     throw new Error(
       `Invalid ${appName} discovery config: ${DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: ${configured.join(", ")}; remove these variables and use service registry endpoints instead`
     );
   }
+
+  throw new Error(
+    `Invalid ${appName} discovery config: strict service discovery forbids legacy direct config: ${configured.join(", ")}; remove these variables and use service registry endpoints instead`
+  );
 }
 
 function validateProductionConfig(config) {
@@ -179,7 +187,12 @@ export function getConfig() {
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
   const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
-  validateLegacyDirectConfig("mail-service", LEGACY_DIRECT_CONFIG_ENV_NAMES, disallowLegacyDirectConfig);
+  validateLegacyDirectConfig(
+    "mail-service",
+    LEGACY_DIRECT_CONFIG_ENV_NAMES,
+    disallowLegacyDirectConfig,
+    registryDiscoveryRequired
+  );
   const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
     registryDiscoveryRequired || !localDiscoveryFallbackEnabled

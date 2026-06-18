@@ -409,7 +409,7 @@ test("match-service game-server internal socket fallback is forbidden in test pr
         "DISCOVERY_REQUIRED=true",
         "GAME_SERVER_SERVICE_NAME=game-server",
         "# Local fallback only: used only when registry discovery is disabled and discovery is not strict.",
-        "# Ignored in strict/test/production discovery; use service registry for game-server.internal endpoints there.",
+        "# Rejected in strict/test/production discovery; use service registry for game-server.internal endpoints there.",
         "# GAME_SERVER_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock",
         "# Legacy local fallback alias kept for compatibility with old local scripts only.",
         "# GAME_INTERNAL_SOCKET_NAME=myserver-game-server-internal.sock"

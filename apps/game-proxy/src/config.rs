@@ -321,7 +321,10 @@ impl Config {
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
         let discovery_required = discovery_required_from_env();
         let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
-        validate_legacy_direct_config(&["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"])?;
+        validate_legacy_direct_config(
+            &["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"],
+            discovery_required,
+        )?;
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"],
             discovery_required || !local_discovery_fallback_enabled,
@@ -541,8 +544,9 @@ fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> 
         .collect()
 }
 
-fn validate_legacy_direct_config(names: &[&str]) -> Result<(), String> {
-    if !env_flag(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME) {
+fn validate_legacy_direct_config(names: &[&str], strict_discovery: bool) -> Result<(), String> {
+    let disallow_legacy_direct_config = env_flag(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME);
+    if !disallow_legacy_direct_config && !strict_discovery {
         return Ok(());
     }
 
@@ -551,8 +555,15 @@ fn validate_legacy_direct_config(names: &[&str]) -> Result<(), String> {
         return Ok(());
     }
 
+    if disallow_legacy_direct_config {
+        return Err(format!(
+            "{DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+            configured.join(", ")
+        ));
+    }
+
     Err(format!(
-        "{DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+        "strict service discovery forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
         configured.join(", ")
     ))
 }
@@ -1588,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_discovery_warns_when_static_upstream_env_is_set() {
+    fn strict_discovery_rejects_static_upstream_env() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(&[
             "NODE_ENV",
@@ -1602,10 +1613,46 @@ mod tests {
             "PROXY_ADMIN_READ_TOKEN",
         ]);
 
+        let strict_cases = [
+            ("NODE_ENV", "test"),
+            ("NODE_ENV", "testing"),
+            ("NODE_ENV", "staging"),
+            ("NODE_ENV", "prod"),
+            ("NODE_ENV", "production"),
+            ("APP_ENV", "test"),
+            ("APP_ENV", "staging"),
+            ("APP_ENV", "prod"),
+            ("APP_ENV", "production"),
+            ("APP_ENV", "testing"),
+        ];
+
+        for (name, value) in strict_cases {
+            unsafe {
+                clear_production_env();
+                clear_upstream_discovery_env();
+                env::set_var(name, value);
+                env::set_var("REGISTRY_ENABLED", "true");
+                env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+                env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+                env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+                env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            }
+
+            let error = match Config::try_from_env() {
+                Ok(_) => panic!("strict discovery static upstream env should be rejected"),
+                Err(error) => error,
+            };
+
+            assert!(error.contains("strict service discovery forbids legacy direct config"));
+            assert!(error.contains("UPSTREAM_SERVER_ID"));
+            assert!(error.contains("UPSTREAM_LOCAL_SOCKET_NAME"));
+        }
+
         unsafe {
             clear_production_env();
             clear_upstream_discovery_env();
-            env::set_var("APP_ENV", "test");
+            env::set_var("NODE_ENV", "development");
+            env::set_var("DISCOVERY_REQUIRED", "true");
             env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
             env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
@@ -1613,49 +1660,14 @@ mod tests {
             env::remove_var("PROXY_ADMIN_READ_TOKEN");
         }
 
-        let config = Config::try_from_env().unwrap();
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("DISCOVERY_REQUIRED=true static upstream env should be rejected"),
+            Err(error) => error,
+        };
 
-        assert!(config.discovery_required());
-        assert!(!config.static_upstream_fallback_allowed());
-        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
-        assert!(config.legacy_direct_config_warnings[0].contains("UPSTREAM_SERVER_ID is ignored"));
-        assert!(
-            config.legacy_direct_config_warnings[1]
-                .contains("UPSTREAM_LOCAL_SOCKET_NAME is ignored")
-        );
-    }
-
-    #[test]
-    fn staging_discovery_warns_when_static_upstream_env_is_set() {
-        let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&[
-            "NODE_ENV",
-            "APP_ENV",
-            "DISCOVERY_REQUIRED",
-            "DISALLOW_LEGACY_DIRECT_CONFIG",
-            "REGISTRY_ENABLED",
-            "UPSTREAM_SERVER_ID",
-            "UPSTREAM_LOCAL_SOCKET_NAME",
-            "PROXY_ADMIN_TOKEN",
-            "PROXY_ADMIN_READ_TOKEN",
-        ]);
-
-        unsafe {
-            clear_production_env();
-            clear_upstream_discovery_env();
-            env::set_var("APP_ENV", "staging");
-            env::set_var("REGISTRY_ENABLED", "true");
-            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
-            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
-            env::remove_var("PROXY_ADMIN_TOKEN");
-            env::remove_var("PROXY_ADMIN_READ_TOKEN");
-        }
-
-        let config = Config::try_from_env().unwrap();
-
-        assert!(config.discovery_required());
-        assert!(!config.local_discovery_fallback_enabled);
-        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
+        assert!(error.contains("strict service discovery forbids legacy direct config"));
+        assert!(error.contains("UPSTREAM_SERVER_ID"));
+        assert!(error.contains("UPSTREAM_LOCAL_SOCKET_NAME"));
     }
 
     #[test]

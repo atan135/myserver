@@ -74,7 +74,7 @@ test("mail-service base env example does not enable legacy direct game admin con
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_HOST=/m);
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_PORT=/m);
   assert.match(envExample, /Local fallback only/);
-  assert.match(envExample, /Ignored in strict\/test\/production discovery/);
+  assert.match(envExample, /Rejected in strict\/test\/production discovery/);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_HOST=127\.0\.0\.1$/m);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_PORT=7500$/m);
 });
@@ -119,25 +119,32 @@ test("mail-service game admin network limits read positive values", async () => 
   });
 });
 
-test("mail-service ignores direct consumer endpoint env outside local fallback", async () => {
-  await withCapturedWarnings({
-    APP_ENV: "test",
-    REGISTRY_ENABLED: "true",
-    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
-    GAME_SERVER_ADMIN_PORT: "17500"
-  }, (getConfig, warnings) => {
-    const config = getConfig();
+test("mail-service rejects legacy direct endpoint in strict discovery environments", async () => {
+  const strictCases = [
+    { NODE_ENV: "test" },
+    { NODE_ENV: "testing" },
+    { NODE_ENV: "staging" },
+    { NODE_ENV: "prod" },
+    { NODE_ENV: "production" },
+    { APP_ENV: "test" },
+    { APP_ENV: "staging" },
+    { APP_ENV: "prod" },
+    { APP_ENV: "production" },
+    { APP_ENV: "testing" },
+    { NODE_ENV: "development", DISCOVERY_REQUIRED: "true" }
+  ];
 
-    assert.equal(config.localDiscoveryFallbackEnabled, false);
-    assert.equal(config.gameServerAdminHost, "127.0.0.1");
-    assert.equal(config.gameServerAdminPort, 7500);
-    assert.deepEqual(
-      config.legacyDirectConfigWarnings.map((warning) => warning.name),
-      ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"]
+  for (const strictEnv of strictCases) {
+    await assert.rejects(
+      () => withEnv({
+        ...strictEnv,
+        REGISTRY_ENABLED: "true",
+        GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+        GAME_SERVER_ADMIN_PORT: "17500"
+      }, (getConfig) => getConfig()),
+      /strict service discovery forbids legacy direct config: GAME_SERVER_ADMIN_HOST, GAME_SERVER_ADMIN_PORT/
     );
-    assert.equal(warnings.length, 2);
-    assert.match(warnings[0], /GAME_SERVER_ADMIN_HOST is ignored/);
-  });
+  }
 });
 
 test("mail-service does not warn for local fallback direct endpoint env", async () => {
@@ -185,21 +192,6 @@ test("mail-service ignores legacy direct endpoint when APP_ENV is development wi
       ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"]
     );
     assert.equal(warnings.length, 2);
-  });
-});
-
-test("mail-service treats staging as strict discovery for legacy direct endpoint", async () => {
-  await withCapturedWarnings({
-    APP_ENV: "staging",
-    REGISTRY_ENABLED: "true",
-    GAME_SERVER_ADMIN_HOST: "203.0.113.20"
-  }, (getConfig, warnings) => {
-    const config = getConfig();
-
-    assert.equal(config.registryDiscoveryRequired, true);
-    assert.equal(config.localDiscoveryFallbackEnabled, false);
-    assert.equal(config.gameServerAdminHost, "127.0.0.1");
-    assert.equal(warnings.length, 1);
   });
 });
 
