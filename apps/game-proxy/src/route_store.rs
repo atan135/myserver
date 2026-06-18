@@ -2139,6 +2139,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_empty_list_marks_existing_upstream_unavailable_and_default_none() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![UpstreamRoute {
+                server_id: "old".to_string(),
+                local_socket_name: "old.sock".to_string(),
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            }])
+            .await;
+
+        store.sync_discovered_routes(Vec::new()).await;
+
+        let routes = store.list_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].server_id, "old");
+        assert_eq!(routes[0].health_state, UpstreamHealthState::Unavailable);
+        assert_eq!(routes[0].effective_state(), UpstreamState::Unavailable);
+        assert!(store.select_default_upstream().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_missing_bound_upstream_falls_back_to_healthy_default() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![UpstreamRoute {
+                server_id: "old".to_string(),
+                local_socket_name: "old.sock".to_string(),
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            }])
+            .await;
+        store
+            .upsert_room_route(
+                room_record("room-1", "old", RoomMigrationState::OwnedByOld, 1, ""),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .bind_room_owner("room-1", "old", Some("player-1"), false)
+            .await;
+
+        store
+            .sync_discovered_routes(vec![UpstreamRoute {
+                server_id: "new".to_string(),
+                local_socket_name: "new.sock".to_string(),
+                operation_state: UpstreamOperationState::Active,
+                health_state: UpstreamHealthState::Healthy,
+            }])
+            .await;
+
+        let routes = store.list_routes().await;
+        let old = routes
+            .iter()
+            .find(|route| route.server_id == "old")
+            .expect("old route should remain known");
+        let new = routes
+            .iter()
+            .find(|route| route.server_id == "new")
+            .expect("new route should be discovered");
+        assert_eq!(old.health_state, UpstreamHealthState::Unavailable);
+        assert_eq!(new.health_state, UpstreamHealthState::Healthy);
+
+        let default_route = store
+            .select_default_upstream()
+            .await
+            .expect("healthy default route should be selected");
+        assert_eq!(default_route.server_id, "new");
+
+        let room_route = store
+            .select_upstream_for_room("room-1")
+            .await
+            .expect("room route should fall back to healthy default");
+        assert_eq!(room_route.server_id, "new");
+
+        let player_route = store
+            .select_upstream_for_player("player-1")
+            .await
+            .expect("player route should fall back to healthy default");
+        assert_eq!(player_route.server_id, "new");
+    }
+
+    #[tokio::test]
     async fn rollout_drain_evaluation_reports_no_active_rollout() {
         let store = ProxyRouteStore::default();
 
