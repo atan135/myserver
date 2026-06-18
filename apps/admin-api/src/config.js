@@ -141,6 +141,7 @@ export function getConfig() {
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "admin-api-001",
     serviceName: process.env.SERVICE_NAME || "admin-api",
+    serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     databaseUrl:
       process.env.DATABASE_URL ||

@@ -33,6 +33,7 @@ pub struct Config {
     pub registry_heartbeat_interval_secs: u64,
     pub service_name: String,
     pub service_instance_id: String,
+    pub service_zone: String,
     pub service_build_version: String,
     pub match_runtime_store: String,
     pub match_runtime_key_prefix: String,
@@ -153,6 +154,7 @@ impl Config {
                 .unwrap_or_else(|_| "match-service".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| format!("match-service-{}", port)),
+            service_zone: std::env::var("SERVICE_ZONE").unwrap_or_else(|_| "local".to_string()),
             service_build_version: std::env::var("SERVICE_BUILD_VERSION")
                 .unwrap_or_else(|_| "dev".to_string()),
             match_runtime_store: std::env::var("MATCH_RUNTIME_STORE")
@@ -302,6 +304,9 @@ mod tests {
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
+        "SERVICE_NAME",
+        "SERVICE_INSTANCE_ID",
+        "SERVICE_ZONE",
         "SERVICE_BUILD_VERSION",
     ];
 
@@ -401,27 +406,39 @@ mod tests {
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("APP_ENV");
+            env::remove_var("SERVICE_NAME");
+            env::remove_var("SERVICE_INSTANCE_ID");
+            env::remove_var("SERVICE_ZONE");
             env::remove_var("SERVICE_BUILD_VERSION");
         }
 
         let config = Config::from_env();
 
+        assert_eq!(config.service_name, "match-service");
+        assert_eq!(config.service_instance_id, "match-service-9002");
+        assert_eq!(config.service_zone, "local");
         assert_eq!(config.service_build_version, "dev");
     }
 
     #[test]
-    fn service_build_version_reads_env() {
+    fn service_identity_reads_env() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
 
         unsafe {
             env::remove_var("NODE_ENV");
             env::remove_var("APP_ENV");
+            env::set_var("SERVICE_NAME", "match-service-blue");
+            env::set_var("SERVICE_INSTANCE_ID", "match-blue-001");
+            env::set_var("SERVICE_ZONE", "zone-a");
             env::set_var("SERVICE_BUILD_VERSION", "2026.06.18");
         }
 
         let config = Config::from_env();
 
+        assert_eq!(config.service_name, "match-service-blue");
+        assert_eq!(config.service_instance_id, "match-blue-001");
+        assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.service_build_version, "2026.06.18");
     }
 

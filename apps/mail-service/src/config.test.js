@@ -16,6 +16,9 @@ const CONFIG_ENV_NAMES = [
   "REDIS_KEY_PREFIX",
   "MAIL_PLAYER_AUTH_REQUIRED",
   "MAIL_SERVICE_TOKEN",
+  "SERVICE_NAME",
+  "SERVICE_INSTANCE_ID",
+  "SERVICE_ZONE",
   "SERVICE_BUILD_VERSION",
   "TICKET_SECRET"
 ];
@@ -82,10 +85,18 @@ test("mail-service game admin network limits read positive values", async () => 
   });
 });
 
-test("mail-service config reads service build version", async () => {
-  await withEnv({ SERVICE_BUILD_VERSION: "2026.06.18+abc123" }, (getConfig) => {
+test("mail-service config reads service identity and build version", async () => {
+  await withEnv({
+    SERVICE_NAME: "mail-service-blue",
+    SERVICE_INSTANCE_ID: "mail-blue-001",
+    SERVICE_ZONE: "zone-a",
+    SERVICE_BUILD_VERSION: "2026.06.18+abc123"
+  }, (getConfig) => {
     const config = getConfig();
 
+    assert.equal(config.serviceName, "mail-service-blue");
+    assert.equal(config.serviceInstanceId, "mail-blue-001");
+    assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+abc123");
   });
 });
@@ -94,6 +105,9 @@ test("mail-service config defaults service build version to dev", async () => {
   await withEnv({}, (getConfig) => {
     const config = getConfig();
 
+    assert.equal(config.serviceName, "mail-service");
+    assert.equal(config.serviceInstanceId, "mail-001");
+    assert.equal(config.serviceZone, "local");
     assert.equal(config.serviceBuildVersion, "dev");
   });
 });

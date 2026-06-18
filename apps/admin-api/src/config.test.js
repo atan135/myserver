@@ -32,6 +32,8 @@ const CONFIG_ENV_KEYS = [
   "REDIS_KEY_PREFIX",
   "APP_ENV",
   "SERVICE_NAME",
+  "SERVICE_INSTANCE_ID",
+  "SERVICE_ZONE",
   "SERVICE_BUILD_VERSION"
 ];
 
@@ -155,9 +157,13 @@ test("admin-api game-proxy admin monitoring config falls back on invalid limits"
 
 test("admin-api service registry identity reads defaults and build version override", async () => {
   await withEnv({
+    SERVICE_INSTANCE_ID: "admin-api-blue-001",
+    SERVICE_ZONE: "zone-a",
     SERVICE_BUILD_VERSION: "2026.06.18+admin"
   }, (config) => {
     assert.equal(config.serviceName, "admin-api");
+    assert.equal(config.serviceInstanceId, "admin-api-blue-001");
+    assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+admin");
   });
 });

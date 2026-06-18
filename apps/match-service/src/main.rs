@@ -193,12 +193,15 @@ fn build_match_service_metadata(config: &Config) -> Value {
     modes.sort();
 
     json!({
+        "service_name": config.service_name,
+        "service_instance_id": config.service_instance_id,
         "instance_id": config.service_instance_id,
         "protocol": "grpc",
         "modes": modes,
         "runtime_store": config.match_runtime_store,
         "runtime_store_backend": config.match_runtime_store,
-        "build_version": config.service_build_version
+        "build_version": config.service_build_version,
+        "zone": config.service_zone
     })
 }
 
@@ -264,6 +267,7 @@ mod tests {
             registry_heartbeat_interval_secs: 10,
             service_name: "match-service".to_string(),
             service_instance_id: "match-service-test".to_string(),
+            service_zone: "zone-match".to_string(),
             service_build_version: "2026.06.18-test".to_string(),
             match_runtime_store: "redis".to_string(),
             match_runtime_key_prefix: "myserver:".to_string(),
@@ -278,12 +282,15 @@ mod tests {
 
         let metadata = build_match_service_metadata(&config);
 
+        assert_eq!(metadata["service_name"], "match-service");
+        assert_eq!(metadata["service_instance_id"], "match-service-test");
         assert_eq!(metadata["instance_id"], "match-service-test");
         assert_eq!(metadata["protocol"], "grpc");
         assert_eq!(metadata["modes"], json!(["1v1", "3v3", "5v5"]));
         assert_eq!(metadata["runtime_store"], "redis");
         assert_eq!(metadata["runtime_store_backend"], "redis");
         assert_eq!(metadata["build_version"], "2026.06.18-test");
+        assert_eq!(metadata["zone"], "zone-match");
     }
 
     #[test]

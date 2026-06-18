@@ -119,6 +119,7 @@ export function getConfig() {
     serviceName: process.env.SERVICE_NAME || "auth-http",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "auth-http-001",
+    serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID,

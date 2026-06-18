@@ -20,6 +20,7 @@ const CONFIG_ENV_NAMES = [
   "REDIS_KEY_PREFIX",
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
+  "SERVICE_ZONE",
   "SERVICE_BUILD_VERSION"
 ];
 
@@ -50,10 +51,18 @@ async function withEnv(values, callback) {
   }
 }
 
-test("announce-service config reads service build version", async () => {
-  await withEnv({ SERVICE_BUILD_VERSION: "2026.06.18+abc123" }, (getConfig) => {
+test("announce-service config reads service identity and build version", async () => {
+  await withEnv({
+    SERVICE_NAME: "announce-service-blue",
+    SERVICE_INSTANCE_ID: "announce-blue-001",
+    SERVICE_ZONE: "zone-a",
+    SERVICE_BUILD_VERSION: "2026.06.18+abc123"
+  }, (getConfig) => {
     const config = getConfig();
 
+    assert.equal(config.serviceName, "announce-service-blue");
+    assert.equal(config.serviceInstanceId, "announce-blue-001");
+    assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+abc123");
   });
 });
@@ -62,6 +71,9 @@ test("announce-service config defaults service build version to dev", async () =
   await withEnv({}, (getConfig) => {
     const config = getConfig();
 
+    assert.equal(config.serviceName, "announce-service");
+    assert.equal(config.serviceInstanceId, "announce-001");
+    assert.equal(config.serviceZone, "local");
     assert.equal(config.serviceBuildVersion, "dev");
   });
 });

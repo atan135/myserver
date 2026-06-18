@@ -376,6 +376,8 @@ impl Config {
 
     pub fn service_instance_metadata(&self) -> serde_json::Value {
         serde_json::json!({
+            "service_name": self.service_name.clone(),
+            "service_instance_id": self.service_instance_id.clone(),
             "instance_id": self.service_instance_id.clone(),
             "route_store_backend": self.route_store_backend_name(),
             "build_version": self.service_build_version.clone(),
@@ -1366,6 +1368,8 @@ mod tests {
         assert_eq!(config.service_build_version, "dev");
         assert_eq!(config.service_zone, "local");
         assert_eq!(config.route_store_backend_name(), "memory");
+        assert_eq!(metadata["service_name"], "game-proxy");
+        assert_eq!(metadata["service_instance_id"], "game-proxy-4000");
         assert_eq!(metadata["instance_id"], "game-proxy-4000");
         assert_eq!(metadata["route_store_backend"], "memory");
         assert_eq!(metadata["build_version"], "dev");
@@ -1408,6 +1412,8 @@ mod tests {
         assert_eq!(config.service_build_version, "2026.06.18");
         assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.route_store_backend_name(), "redis");
+        assert_eq!(metadata["service_name"], "edge-proxy");
+        assert_eq!(metadata["service_instance_id"], "edge-proxy-4100");
         assert_eq!(metadata["instance_id"], "edge-proxy-4100");
         assert_eq!(metadata["route_store_backend"], "redis");
         assert_eq!(metadata["build_version"], "2026.06.18");

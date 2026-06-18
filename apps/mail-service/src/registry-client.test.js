@@ -33,6 +33,7 @@ function createConfig(overrides = {}) {
     mailPlayerAuthRequired: true,
     mailServiceToken: "test-mail-service-token",
     serviceBuildVersion: "2026.06.18+mail",
+    serviceZone: "zone-mail",
     ...overrides
   };
 }
@@ -59,14 +60,22 @@ test("RegistryClient registers mail-service http endpoint and metadata", async (
       port: 9103,
       socket: "",
       visibility: "internal",
-      metadata: {},
+      metadata: {
+        service_name: "mail-service",
+        service_instance_id: "mail-test-001",
+        build_version: "2026.06.18+mail",
+        zone: "zone-mail"
+      },
       healthy: true
     }
   ]);
   assert.deepEqual(payload.metadata, {
+    service_name: "mail-service",
+    service_instance_id: "mail-test-001",
     player_auth_required: true,
     service_token_enabled: true,
-    build_version: "2026.06.18+mail"
+    build_version: "2026.06.18+mail",
+    zone: "zone-mail"
   });
 });
 
@@ -87,4 +96,5 @@ test("RegistryClient metadata marks missing service token as disabled", async ()
   assert.equal(payload.metadata.player_auth_required, false);
   assert.equal(payload.metadata.service_token_enabled, false);
   assert.equal(payload.metadata.build_version, "dev");
+  assert.equal(payload.metadata.zone, "zone-mail");
 });

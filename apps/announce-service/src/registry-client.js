@@ -32,15 +32,23 @@ export class RegistryClient {
           port: this.config.port,
           socket: "",
           visibility: "internal",
-          metadata: {},
+          metadata: {
+            service_name: this.serviceName,
+            service_instance_id: this.instanceId,
+            build_version: this.config.serviceBuildVersion || "dev",
+            zone: this.config.serviceZone || "local"
+          },
           healthy: true
         }
       ],
       tags: ["announce", "http"],
       metadata: {
+        service_name: this.serviceName,
+        service_instance_id: this.instanceId,
         read_auth_required: this.config.announceReadAuthRequired === true,
         cache_ttl_seconds: this.config.announceCacheTtlSeconds,
-        build_version: this.config.serviceBuildVersion || "dev"
+        build_version: this.config.serviceBuildVersion || "dev",
+        zone: this.config.serviceZone || "local"
       }
     });
 

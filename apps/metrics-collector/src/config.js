@@ -18,6 +18,7 @@ export function getConfig() {
     serviceName: process.env.SERVICE_NAME || "metrics-collector",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "metrics-collector-001",
+    serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
     serviceRegistryRegister: parseBoolean(

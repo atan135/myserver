@@ -33,6 +33,7 @@ function createConfig(overrides = {}) {
     announceReadAuthRequired: true,
     announceCacheTtlSeconds: 30,
     serviceBuildVersion: "2026.06.18+announce",
+    serviceZone: "zone-announce",
     ...overrides
   };
 }
@@ -59,14 +60,22 @@ test("RegistryClient registers announce-service http endpoint and metadata", asy
       port: 9104,
       socket: "",
       visibility: "internal",
-      metadata: {},
+      metadata: {
+        service_name: "announce-service",
+        service_instance_id: "announce-test-001",
+        build_version: "2026.06.18+announce",
+        zone: "zone-announce"
+      },
       healthy: true
     }
   ]);
   assert.deepEqual(payload.metadata, {
+    service_name: "announce-service",
+    service_instance_id: "announce-test-001",
     read_auth_required: true,
     cache_ttl_seconds: 30,
-    build_version: "2026.06.18+announce"
+    build_version: "2026.06.18+announce",
+    zone: "zone-announce"
   });
 });
 
@@ -89,4 +98,5 @@ test("RegistryClient metadata falls back to dev build version", async () => {
   assert.equal(payload.metadata.read_auth_required, false);
   assert.equal(payload.metadata.cache_ttl_seconds, 45);
   assert.equal(payload.metadata.build_version, "dev");
+  assert.equal(payload.metadata.zone, "zone-announce");
 });

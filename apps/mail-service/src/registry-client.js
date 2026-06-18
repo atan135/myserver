@@ -39,15 +39,23 @@ export class RegistryClient {
           port: this.config.port,
           socket: "",
           visibility: "internal",
-          metadata: {},
+          metadata: {
+            service_name: this.serviceName,
+            service_instance_id: this.instanceId,
+            build_version: this.config.serviceBuildVersion || "dev",
+            zone: this.config.serviceZone || "local"
+          },
           healthy: true
         }
       ],
       tags: ["mail", "http"],
       metadata: {
+        service_name: this.serviceName,
+        service_instance_id: this.instanceId,
         player_auth_required: this.config.mailPlayerAuthRequired === true,
         service_token_enabled: String(this.config.mailServiceToken || "").trim().length > 0,
-        build_version: this.config.serviceBuildVersion || "dev"
+        build_version: this.config.serviceBuildVersion || "dev",
+        zone: this.config.serviceZone || "local"
       }
     });
 

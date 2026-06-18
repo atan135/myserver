@@ -18,6 +18,8 @@ const CONFIG_ENV_KEYS = [
   "TRUSTED_PROXIES",
   "SERVICE_BUILD_VERSION",
   "SERVICE_NAME",
+  "SERVICE_INSTANCE_ID",
+  "SERVICE_ZONE",
   "GAME_PROXY_HOST",
   "GAME_PROXY_PORT",
   "TICKET_SECRET",
@@ -227,9 +229,13 @@ test("auth-http reads service identity and build version", async () => {
   await withEnv({
     NODE_ENV: "development",
     SERVICE_NAME: "auth-http-blue",
+    SERVICE_INSTANCE_ID: "auth-http-blue-001",
+    SERVICE_ZONE: "zone-a",
     SERVICE_BUILD_VERSION: "2026.06.18+auth"
   }, (config) => {
     assert.equal(config.serviceName, "auth-http-blue");
+    assert.equal(config.serviceInstanceId, "auth-http-blue-001");
+    assert.equal(config.serviceZone, "zone-a");
     assert.equal(config.serviceBuildVersion, "2026.06.18+auth");
   });
 });
@@ -254,6 +260,8 @@ test("auth-http reads registry key prefix with Redis prefix fallback", async () 
 test("auth-http service identity defaults to auth-http dev build", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.serviceName, "auth-http");
+    assert.equal(config.serviceInstanceId, "auth-http-001");
+    assert.equal(config.serviceZone, "local");
     assert.equal(config.serviceBuildVersion, "dev");
   });
 });

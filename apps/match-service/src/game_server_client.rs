@@ -104,7 +104,7 @@ impl GameServerClient {
         match_id: &str,
         mode: &str,
     ) -> Result<String, MatchError> {
-        let discovery_required = discovery_required();
+        let discovery_required = self.config.discovery_required;
 
         if !self.config.registry_enabled {
             if discovery_required {
@@ -433,26 +433,6 @@ fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<Vec<S
     (!values.is_empty()).then_some(values)
 }
 
-fn discovery_required() -> bool {
-    env_flag("DISCOVERY_REQUIRED")
-        || env_name_is("NODE_ENV", "production")
-        || env_name_is("APP_ENV", "production")
-        || env_name_is("NODE_ENV", "test")
-        || env_name_is("APP_ENV", "test")
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false)
-}
-
-fn env_name_is(name: &str, expected: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
-}
-
 fn stable_hash(value: &str) -> u32 {
     let mut hash = 2_166_136_261_u32;
     for byte in value.as_bytes() {
@@ -561,8 +541,8 @@ fn parse_header(header: [u8; HEADER_LEN]) -> Result<(u16, usize), MatchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::{Mutex as StdMutex, OnceLock};
+    use crate::config::ModeConfig;
+    use std::collections::HashMap;
 
     fn candidate(
         instance_id: &str,
@@ -579,47 +559,53 @@ mod tests {
         }
     }
 
-    fn env_lock() -> &'static StdMutex<()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(()))
-    }
-
-    struct EnvGuard {
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn capture(names: &[&'static str]) -> Self {
-            Self {
-                saved: names
-                    .iter()
-                    .map(|name| (*name, env::var(name).ok()))
-                    .collect(),
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (name, value) in self.saved.drain(..) {
-                unsafe {
-                    match value {
-                        Some(value) => env::set_var(name, value),
-                        None => env::remove_var(name),
-                    }
-                }
-            }
-        }
-    }
-
     fn test_config() -> Config {
-        let mut config = Config::from_env();
-        config.registry_enabled = false;
-        config.registry_url = "redis://127.0.0.1:1".to_string();
-        config.game_server_internal_socket_name = "fallback.sock".to_string();
-        config.game_server_discovery_cache_ttl_secs = 1;
-        config.game_server_target_zone = String::new();
-        config
+        let mut modes = HashMap::new();
+        modes.insert(
+            "1v1".to_string(),
+            ModeConfig {
+                team_size: 1,
+                total_size: 2,
+                match_timeout_secs: 30,
+            },
+        );
+
+        Config {
+            bind_addr: "0.0.0.0:9002".to_string(),
+            public_host: "127.0.0.1".to_string(),
+            port: 9002,
+            match_timeout_secs: 30,
+            max_concurrent_matches: 1000,
+            modes,
+            match_cleanup_interval_secs: 1,
+            game_server_service_name: "game-server".to_string(),
+            game_server_internal_socket_name: "fallback.sock".to_string(),
+            game_server_discovery_cache_ttl_secs: 1,
+            game_server_target_zone: String::new(),
+            game_internal_token: "dev-only-change-this-game-internal-token".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 0,
+            global_id_worker_id: None,
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            registry_enabled: false,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:1".to_string(),
+            registry_key_prefix: String::new(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "match-service".to_string(),
+            service_instance_id: "match-service-test".to_string(),
+            service_zone: "local".to_string(),
+            service_build_version: "dev".to_string(),
+            match_runtime_store: "memory".to_string(),
+            match_runtime_key_prefix: "myserver:".to_string(),
+            match_runtime_lease_ttl_secs: 10,
+            match_recovery_enabled: true,
+        }
     }
 
     #[test]
@@ -664,14 +650,10 @@ mod tests {
 
     #[tokio::test]
     async fn strict_discovery_disables_registry_disabled_fallback() {
-        let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["DISCOVERY_REQUIRED", "NODE_ENV", "APP_ENV"]);
-        unsafe {
-            env::set_var("DISCOVERY_REQUIRED", "true");
-            env::remove_var("NODE_ENV");
-            env::remove_var("APP_ENV");
-        }
-        let client = GameServerClient::new(&test_config());
+        let mut config = test_config();
+        config.discovery_required = true;
+        config.registry_enabled = false;
+        let client = GameServerClient::new(&config);
 
         let error = client
             .resolve_internal_socket_name("match-1", "1v1")
@@ -684,14 +666,10 @@ mod tests {
 
     #[tokio::test]
     async fn registry_disabled_local_mode_uses_fallback_socket() {
-        let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["DISCOVERY_REQUIRED", "NODE_ENV", "APP_ENV"]);
-        unsafe {
-            env::remove_var("DISCOVERY_REQUIRED");
-            env::remove_var("NODE_ENV");
-            env::remove_var("APP_ENV");
-        }
-        let client = GameServerClient::new(&test_config());
+        let mut config = test_config();
+        config.discovery_required = false;
+        config.registry_enabled = false;
+        let client = GameServerClient::new(&config);
 
         let socket = client
             .resolve_internal_socket_name("match-1", "1v1")

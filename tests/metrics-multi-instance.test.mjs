@@ -210,6 +210,7 @@ test("metrics collector defaults to explicit service registry opt-out", async ()
       SERVICE_REGISTRY_REGISTER: undefined,
       SERVICE_NAME: undefined,
       SERVICE_INSTANCE_ID: undefined,
+      SERVICE_ZONE: undefined,
       SERVICE_BUILD_VERSION: undefined
     },
     async () => {
@@ -220,9 +221,13 @@ test("metrics collector defaults to explicit service registry opt-out", async ()
       assert.equal(config.serviceRegistryRegister, false);
       assert.equal(config.serviceName, "metrics-collector");
       assert.equal(config.serviceInstanceId, "metrics-collector-001");
+      assert.equal(config.serviceZone, "local");
       assert.equal(config.registryKeyPrefix, "");
       assert.equal(status.registered, false);
       assert.equal(status.reason, REGISTRY_DISABLED_REASON);
+      assert.equal(status.service_name, "metrics-collector");
+      assert.equal(status.service_instance_id, "metrics-collector-001");
+      assert.equal(status.zone, "local");
       assert.deepEqual(redis.writes, []);
       assert.equal(
         redis.hasWrittenKeyPrefix("service:metrics-collector:instances:"),
@@ -236,7 +241,8 @@ test("metrics collector reads registry key prefix without registering an endpoin
   await withEnv(
     {
       REGISTRY_KEY_PREFIX: "registry:",
-      REDIS_KEY_PREFIX: "redis:"
+      REDIS_KEY_PREFIX: "redis:",
+      SERVICE_ZONE: "zone-metrics"
     },
     async () => {
       const config = getConfig();
@@ -244,7 +250,9 @@ test("metrics collector reads registry key prefix without registering an endpoin
       const status = await maybeRegisterService(redis, config);
 
       assert.equal(config.registryKeyPrefix, "registry:");
+      assert.equal(config.serviceZone, "zone-metrics");
       assert.equal(status.registered, false);
+      assert.equal(status.zone, "zone-metrics");
       assert.deepEqual(redis.writes, []);
     }
   );
@@ -271,6 +279,7 @@ test("metrics collector rejects service registry registration without a real end
         serviceRegistryRegister: true,
         serviceName: "metrics-collector",
         serviceInstanceId: "metrics-collector-test-001",
+        serviceZone: "zone-metrics",
         serviceBuildVersion: "test"
       }),
     /SERVICE_REGISTRY_REGISTER=true is not supported/

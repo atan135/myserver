@@ -8,6 +8,9 @@ export async function maybeRegisterService(_redis, config) {
       reason: REGISTRY_DISABLED_REASON,
       service: config.serviceName,
       instance: config.serviceInstanceId,
+      service_name: config.serviceName,
+      service_instance_id: config.serviceInstanceId,
+      zone: config.serviceZone || "local",
       build_version: config.serviceBuildVersion || "dev"
     };
   }

@@ -60,6 +60,7 @@ function createConfig(overrides = {}) {
     adminApiRequireIpAllowlist: true,
     adminApiIpAllowlist: ["127.0.0.1", "10.0.0.0/24"],
     serviceBuildVersion: "2026.06.18+admin",
+    serviceZone: "zone-admin",
     ...overrides
   };
 }
@@ -86,15 +87,23 @@ test("RegistryClient registers admin-api admin http endpoint and metadata", asyn
       port: 3101,
       socket: "",
       visibility: "admin",
-      metadata: {},
+      metadata: {
+        service_name: "admin-api",
+        service_instance_id: "admin-api-test-001",
+        build_version: "2026.06.18+admin",
+        zone: "zone-admin"
+      },
       healthy: true
     }
   ]);
   assert.deepEqual(payload.metadata, {
+    service_name: "admin-api",
+    service_instance_id: "admin-api-test-001",
     require_tls: true,
     ip_allowlist_enabled: true,
     ip_allowlist: ["127.0.0.1", "10.0.0.0/24"],
-    build_version: "2026.06.18+admin"
+    build_version: "2026.06.18+admin",
+    zone: "zone-admin"
   });
 });
 
@@ -349,6 +358,7 @@ test("RegistryClient metadata falls back to dev build version and empty allowlis
   assert.equal(payload.metadata.ip_allowlist_enabled, false);
   assert.deepEqual(payload.metadata.ip_allowlist, []);
   assert.equal(payload.metadata.build_version, "dev");
+  assert.equal(payload.metadata.zone, "zone-admin");
 });
 
 test("RegistryClient heartbeat and deregister use registry instance keys", async () => {

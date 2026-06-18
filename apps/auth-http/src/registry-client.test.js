@@ -33,6 +33,7 @@ function createConfig(overrides = {}) {
     strictSecurity: true,
     ticketValidateEnabled: true,
     serviceBuildVersion: "2026.06.18+auth",
+    serviceZone: "zone-auth",
     ...overrides
   };
 }
@@ -59,14 +60,22 @@ test("RegistryClient registers auth-http public http endpoint and metadata", asy
       port: 3100,
       socket: "",
       visibility: "public",
-      metadata: {},
+      metadata: {
+        service_name: "auth-http",
+        service_instance_id: "auth-http-test-001",
+        build_version: "2026.06.18+auth",
+        zone: "zone-auth"
+      },
       healthy: true
     }
   ]);
   assert.deepEqual(payload.metadata, {
+    service_name: "auth-http",
+    service_instance_id: "auth-http-test-001",
     strict_security: true,
     ticket_validation_enabled: true,
-    build_version: "2026.06.18+auth"
+    build_version: "2026.06.18+auth",
+    zone: "zone-auth"
   });
 });
 
@@ -87,6 +96,7 @@ test("RegistryClient metadata falls back to dev build version", async () => {
   assert.equal(payload.metadata.strict_security, false);
   assert.equal(payload.metadata.ticket_validation_enabled, false);
   assert.equal(payload.metadata.build_version, "dev");
+  assert.equal(payload.metadata.zone, "zone-auth");
 });
 
 test("RegistryClient uses registry key prefix for registration", async () => {

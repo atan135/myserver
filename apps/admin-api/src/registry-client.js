@@ -42,18 +42,26 @@ export class RegistryClient {
           port: this.config.port,
           socket: "",
           visibility: "admin",
-          metadata: {},
+          metadata: {
+            service_name: this.serviceName,
+            service_instance_id: this.instanceId,
+            build_version: this.config.serviceBuildVersion || "dev",
+            zone: this.config.serviceZone || "local"
+          },
           healthy: true
         }
       ],
       tags: ["admin", "http", "control-plane"],
       metadata: {
+        service_name: this.serviceName,
+        service_instance_id: this.instanceId,
         require_tls: this.config.adminApiRequireTls === true,
         ip_allowlist_enabled: this.config.adminApiRequireIpAllowlist === true,
         ip_allowlist: Array.isArray(this.config.adminApiIpAllowlist)
           ? this.config.adminApiIpAllowlist
           : [],
-        build_version: this.config.serviceBuildVersion || "dev"
+        build_version: this.config.serviceBuildVersion || "dev",
+        zone: this.config.serviceZone || "local"
       }
     });
 

@@ -279,6 +279,8 @@ impl Config {
 
     pub fn service_instance_metadata(&self) -> serde_json::Value {
         serde_json::json!({
+            "service_name": self.service_name.clone(),
+            "service_instance_id": self.service_instance_id.clone(),
             "internal_socket": self.internal_socket_name.clone(),
             "instance_id": self.service_instance_id.clone(),
             "server_id": self.service_instance_id.clone(),
@@ -659,6 +661,8 @@ mod tests {
         assert_eq!(config.service_build_version, "dev");
         assert_eq!(config.service_zone, "local");
         assert_eq!(config.service_rollout_epoch, "default");
+        assert_eq!(metadata["service_name"], "game-server");
+        assert_eq!(metadata["service_instance_id"], "game-server-7000");
         assert_eq!(metadata["instance_id"], "game-server-7000");
         assert_eq!(metadata["server_id"], "game-server-7000");
         assert_eq!(metadata["build_version"], "dev");
@@ -692,6 +696,8 @@ mod tests {
         assert_eq!(config.service_build_version, "2026.06.18");
         assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.service_rollout_epoch, "epoch-fallback");
+        assert_eq!(metadata["service_name"], "game-server");
+        assert_eq!(metadata["service_instance_id"], "gs-42");
         assert_eq!(metadata["instance_id"], "gs-42");
         assert_eq!(metadata["server_id"], "gs-42");
         assert_eq!(metadata["build_version"], "2026.06.18");

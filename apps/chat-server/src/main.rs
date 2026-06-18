@@ -47,6 +47,7 @@ struct Config {
     registry_heartbeat_interval_secs: u64,
     service_name: String,
     service_instance_id: String,
+    service_zone: String,
     service_build_version: String,
     online_route_ttl_secs: u64,
     public_host: String,
@@ -111,6 +112,7 @@ impl Config {
                 .unwrap_or_else(|_| "chat-server".to_string()),
             service_instance_id: std::env::var("SERVICE_INSTANCE_ID")
                 .unwrap_or_else(|_| "chat-server-001".to_string()),
+            service_zone: std::env::var("SERVICE_ZONE").unwrap_or_else(|_| "local".to_string()),
             service_build_version: std::env::var("SERVICE_BUILD_VERSION")
                 .unwrap_or_else(|_| "dev".to_string()),
             online_route_ttl_secs: std::env::var("CHAT_ONLINE_ROUTE_TTL_SECS")
@@ -244,9 +246,12 @@ fn parse_bool_env(name: &str, default_value: bool) -> bool {
 
 fn registry_metadata(config: &Config) -> serde_json::Value {
     serde_json::json!({
+        "service_name": config.service_name,
         "service_instance_id": config.service_instance_id,
+        "instance_id": config.service_instance_id,
         "online_route_ttl_secs": config.online_route_ttl_secs,
-        "build_version": config.service_build_version
+        "build_version": config.service_build_version,
+        "zone": config.service_zone
     })
 }
 
@@ -574,6 +579,7 @@ mod tests {
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
+        "SERVICE_ZONE",
         "TICKET_SECRET",
         "DB_ENABLED",
         "GLOBAL_ID_ORIGIN_ID",
@@ -733,28 +739,41 @@ mod tests {
     #[test]
     fn service_build_version_defaults_to_dev() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION"]);
+        let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION", "SERVICE_ZONE"]);
 
         unsafe {
             env::remove_var("SERVICE_BUILD_VERSION");
+            env::remove_var("SERVICE_ZONE");
         }
 
         let config = Config::from_env();
 
         assert_eq!(config.service_build_version, "dev");
+        assert_eq!(config.service_zone, "local");
     }
 
     #[test]
-    fn service_build_version_accepts_env_value() {
+    fn service_identity_accepts_env_values() {
         let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION"]);
+        let _env = EnvGuard::capture(&[
+            "SERVICE_NAME",
+            "SERVICE_INSTANCE_ID",
+            "SERVICE_ZONE",
+            "SERVICE_BUILD_VERSION",
+        ]);
 
         unsafe {
+            env::set_var("SERVICE_NAME", "chat-server-blue");
+            env::set_var("SERVICE_INSTANCE_ID", "chat-blue-001");
+            env::set_var("SERVICE_ZONE", "zone-a");
             env::set_var("SERVICE_BUILD_VERSION", "2026.06.18+abc123");
         }
 
         let config = Config::from_env();
 
+        assert_eq!(config.service_name, "chat-server-blue");
+        assert_eq!(config.service_instance_id, "chat-blue-001");
+        assert_eq!(config.service_zone, "zone-a");
         assert_eq!(config.service_build_version, "2026.06.18+abc123");
     }
 
@@ -808,6 +827,7 @@ mod tests {
             registry_heartbeat_interval_secs: 10,
             service_name: "chat-server".to_string(),
             service_instance_id: "chat-a".to_string(),
+            service_zone: "zone-chat".to_string(),
             service_build_version: "build-42".to_string(),
             online_route_ttl_secs: 75,
             public_host: "10.0.0.8".to_string(),
@@ -819,9 +839,12 @@ mod tests {
 
         let instance = build_service_instance(&config, 9001);
 
+        assert_eq!(instance.metadata["service_name"], "chat-server");
         assert_eq!(instance.metadata["service_instance_id"], "chat-a");
+        assert_eq!(instance.metadata["instance_id"], "chat-a");
         assert_eq!(instance.metadata["online_route_ttl_secs"], 75);
         assert_eq!(instance.metadata["build_version"], "build-42");
+        assert_eq!(instance.metadata["zone"], "zone-chat");
         assert_eq!(instance.endpoints.len(), 1);
 
         let endpoint = &instance.endpoints[0];
@@ -830,9 +853,12 @@ mod tests {
         assert_eq!(endpoint.host, "10.0.0.8");
         assert_eq!(endpoint.port, 9001);
         assert_eq!(endpoint.visibility, "internal");
+        assert_eq!(endpoint.metadata["service_name"], "chat-server");
         assert_eq!(endpoint.metadata["service_instance_id"], "chat-a");
+        assert_eq!(endpoint.metadata["instance_id"], "chat-a");
         assert_eq!(endpoint.metadata["online_route_ttl_secs"], 75);
         assert_eq!(endpoint.metadata["build_version"], "build-42");
+        assert_eq!(endpoint.metadata["zone"], "zone-chat");
     }
 
     #[test]

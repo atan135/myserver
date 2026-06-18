@@ -154,8 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         socket: String::new(),
                         visibility: "internal".to_string(),
                         metadata: serde_json::json!({
+                            "service_name": config.service_name.clone(),
+                            "service_instance_id": config.service_instance_id.clone(),
                             "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone()
+                            "server_id": config.service_instance_id.clone(),
+                            "build_version": config.service_build_version.clone(),
+                            "zone": config.service_zone.clone()
                         }),
                         healthy: true,
                     },
@@ -167,8 +171,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         socket: String::new(),
                         visibility: "admin".to_string(),
                         metadata: serde_json::json!({
+                            "service_name": config.service_name.clone(),
+                            "service_instance_id": config.service_instance_id.clone(),
                             "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone()
+                            "server_id": config.service_instance_id.clone(),
+                            "build_version": config.service_build_version.clone(),
+                            "zone": config.service_zone.clone()
                         }),
                         healthy: true,
                     },
@@ -180,8 +188,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         socket: config.internal_socket_name.clone(),
                         visibility: "local".to_string(),
                         metadata: serde_json::json!({
+                            "service_name": config.service_name.clone(),
+                            "service_instance_id": config.service_instance_id.clone(),
                             "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone()
+                            "server_id": config.service_instance_id.clone(),
+                            "build_version": config.service_build_version.clone(),
+                            "zone": config.service_zone.clone()
                         }),
                         healthy: true,
                     },
@@ -193,8 +205,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         socket: config.local_socket_name.clone(),
                         visibility: "local".to_string(),
                         metadata: serde_json::json!({
+                            "service_name": config.service_name.clone(),
+                            "service_instance_id": config.service_instance_id.clone(),
                             "instance_id": config.service_instance_id.clone(),
-                            "server_id": config.service_instance_id.clone()
+                            "server_id": config.service_instance_id.clone(),
+                            "build_version": config.service_build_version.clone(),
+                            "zone": config.service_zone.clone()
                         }),
                         healthy: true,
                     },

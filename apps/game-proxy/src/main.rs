@@ -331,7 +331,11 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
             socket: String::new(),
             visibility: "public".to_string(),
             metadata: serde_json::json!({
-                "instance_id": config.service_instance_id.clone()
+                "service_name": config.service_name.clone(),
+                "service_instance_id": config.service_instance_id.clone(),
+                "instance_id": config.service_instance_id.clone(),
+                "build_version": config.service_build_version.clone(),
+                "zone": config.service_zone.clone()
             }),
             healthy: true,
         },
@@ -343,7 +347,11 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
             socket: String::new(),
             visibility: "public".to_string(),
             metadata: serde_json::json!({
-                "instance_id": config.service_instance_id.clone()
+                "service_name": config.service_name.clone(),
+                "service_instance_id": config.service_instance_id.clone(),
+                "instance_id": config.service_instance_id.clone(),
+                "build_version": config.service_build_version.clone(),
+                "zone": config.service_zone.clone()
             }),
             healthy: true,
         },
@@ -355,7 +363,11 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
             socket: String::new(),
             visibility: "admin".to_string(),
             metadata: serde_json::json!({
-                "instance_id": config.service_instance_id.clone()
+                "service_name": config.service_name.clone(),
+                "service_instance_id": config.service_instance_id.clone(),
+                "instance_id": config.service_instance_id.clone(),
+                "build_version": config.service_build_version.clone(),
+                "zone": config.service_zone.clone()
             }),
             healthy: true,
         },
@@ -443,6 +455,8 @@ mod tests {
 
         assert_eq!(instance.id, "edge-proxy-a");
         assert_eq!(instance.name, "edge-proxy");
+        assert_eq!(instance.metadata["service_name"], "edge-proxy");
+        assert_eq!(instance.metadata["service_instance_id"], "edge-proxy-a");
         assert_eq!(instance.metadata["instance_id"], "edge-proxy-a");
         assert_eq!(instance.metadata["route_store_backend"], "redis");
         assert_eq!(instance.metadata["build_version"], "2026.06.18");
@@ -451,6 +465,13 @@ mod tests {
         assert_eq!(instance.endpoints[0].name, "client");
         assert_eq!(instance.endpoints[0].protocol, "kcp");
         assert_eq!(instance.endpoints[0].visibility, "public");
+        assert_eq!(instance.endpoints[0].metadata["service_name"], "edge-proxy");
+        assert_eq!(
+            instance.endpoints[0].metadata["service_instance_id"],
+            "edge-proxy-a"
+        );
+        assert_eq!(instance.endpoints[0].metadata["build_version"], "2026.06.18");
+        assert_eq!(instance.endpoints[0].metadata["zone"], "zone-a");
         assert_eq!(instance.endpoints[1].name, "client-tcp-fallback");
         assert_eq!(instance.endpoints[1].protocol, "tcp");
         assert_eq!(instance.endpoints[1].visibility, "public");

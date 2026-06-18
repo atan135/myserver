@@ -154,6 +154,7 @@ export function getConfig() {
     serviceName: process.env.SERVICE_NAME || "announce-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "announce-001",
+    serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
     registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
