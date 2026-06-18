@@ -166,6 +166,19 @@ test("mail-service rejects legacy direct config when migration complete switch i
   );
 });
 
+test("mail-service test environment rejects legacy direct config when migration complete switch is enabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      APP_ENV: "test",
+      REGISTRY_ENABLED: "true",
+      DISCOVERY_REQUIRED: "true",
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true",
+      GAME_SERVER_ADMIN_HOST: "127.0.0.2"
+    }, (getConfig) => getConfig()),
+    /DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config: GAME_SERVER_ADMIN_HOST/
+  );
+});
+
 test("mail-service accepts migration complete switch when legacy direct config is absent", async () => {
   await withEnv({
     NODE_ENV: "development",

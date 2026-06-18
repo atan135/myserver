@@ -715,6 +715,29 @@ mod tests {
     }
 
     #[test]
+    fn test_environment_rejects_legacy_internal_socket_env_when_migration_complete_switch_is_enabled(
+    ) {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config"));
+        assert!(error.contains("GAME_SERVER_INTERNAL_SOCKET_NAME"));
+        assert!(error.contains("GAME_INTERNAL_SOCKET_NAME"));
+    }
+
+    #[test]
     fn accepts_migration_complete_switch_without_legacy_internal_socket_env() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);

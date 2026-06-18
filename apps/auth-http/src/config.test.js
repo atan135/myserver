@@ -275,6 +275,20 @@ test("auth-http rejects legacy direct config when migration complete switch is e
   );
 });
 
+test("auth-http test environment rejects legacy direct config when migration complete switch is enabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "test",
+      REGISTRY_ENABLED: "true",
+      DISCOVERY_REQUIRED: "true",
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true",
+      GAME_PROXY_HOST: "127.0.0.2",
+      GAME_SERVER_ADMIN_HOST: "127.0.0.3"
+    }, () => {}),
+    /DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config: GAME_PROXY_HOST, GAME_SERVER_ADMIN_HOST/
+  );
+});
+
 test("auth-http accepts migration complete switch when legacy direct config is absent", async () => {
   await withEnv({
     NODE_ENV: "development",

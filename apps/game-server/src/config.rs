@@ -896,6 +896,26 @@ mod tests {
     }
 
     #[test]
+    fn test_environment_rejects_legacy_direct_config_when_migration_complete_switch_is_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config"));
+        assert!(error.contains("MATCH_SERVICE_ADDR"));
+    }
+
+    #[test]
     fn accepts_migration_complete_switch_without_legacy_direct_config() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
