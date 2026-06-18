@@ -2,8 +2,9 @@
 //!
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
-use service_registry::{RegistryClient, record_discovery_metric};
+use service_registry::{record_discovery_metric, RegistryClient};
 use std::error::Error;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -395,36 +396,22 @@ pub fn spawn_match_client_rediscovery(
                 }
             };
 
-            let current_state = current_match_client_state(&client).await;
-            let reconnect = should_rebuild_match_client(
-                current_state.addr.as_deref(),
-                current_state.reconnect_required,
+            match rebuild_match_client_if_needed_with_connector(
+                &client,
+                &config,
                 &discovered_addr,
-            );
-            if !reconnect {
-                tracing::debug!(
-                    addr = %discovered_addr,
-                    "match-service rediscovery kept existing client"
-                );
-                continue;
-            }
-
-            tracing::info!(
-                previous_addr = current_state.addr.as_deref().unwrap_or("<none>"),
-                reconnect_required = current_state.reconnect_required,
-                addr = %discovered_addr,
-                "match-service rediscovery rebuilding client"
-            );
-
-            let reconnect_config = MatchClientConfig {
-                addr: discovered_addr.clone(),
-                ..config.clone()
-            };
-            match MatchClient::new(reconnect_config).await {
-                Ok(new_client) => {
-                    let mut guard = client.lock().await;
-                    *guard = Some(new_client);
+                MatchClient::new,
+            )
+            .await
+            {
+                Ok(true) => {
                     tracing::info!(addr = %discovered_addr, "match-service rediscovery reconnected");
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        addr = %discovered_addr,
+                        "match-service rediscovery kept existing client"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -436,6 +423,43 @@ pub fn spawn_match_client_rediscovery(
             }
         }
     }))
+}
+
+async fn rebuild_match_client_if_needed_with_connector<Connect, ConnectFuture>(
+    client: &SharedMatchClient,
+    config: &MatchClientConfig,
+    discovered_addr: &str,
+    connect: Connect,
+) -> Result<bool, Box<dyn Error + Send + Sync>>
+where
+    Connect: FnOnce(MatchClientConfig) -> ConnectFuture,
+    ConnectFuture: Future<Output = Result<MatchClient, Box<dyn Error + Send + Sync>>>,
+{
+    let current_state = current_match_client_state(client).await;
+    let reconnect = should_rebuild_match_client(
+        current_state.addr.as_deref(),
+        current_state.reconnect_required,
+        discovered_addr,
+    );
+    if !reconnect {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        previous_addr = current_state.addr.as_deref().unwrap_or("<none>"),
+        reconnect_required = current_state.reconnect_required,
+        addr = %discovered_addr,
+        "match-service rediscovery rebuilding client"
+    );
+
+    let reconnect_config = MatchClientConfig {
+        addr: discovered_addr.to_string(),
+        ..config.clone()
+    };
+    let new_client = connect(reconnect_config).await?;
+    let mut guard = client.lock().await;
+    *guard = Some(new_client);
+    Ok(true)
 }
 
 struct MatchClientState {
@@ -663,6 +687,47 @@ mod tests {
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
+    fn test_config(addr: &str) -> MatchClientConfig {
+        MatchClientConfig {
+            addr: addr.to_string(),
+            fallback_addr: "http://127.0.0.1:9002".to_string(),
+            local_discovery_fallback_enabled: false,
+            registry_enabled: true,
+            discovery_required: true,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
+            service_name: "match-service".to_string(),
+            rediscovery_interval_secs: 1,
+        }
+    }
+
+    fn test_match_client(addr: &str, reconnect_required: bool) -> MatchClient {
+        let channel = tonic::transport::Endpoint::from_shared(addr.to_string())
+            .expect("test endpoint should be valid")
+            .connect_lazy();
+
+        MatchClient {
+            inner: MatchInternalClient::new(channel),
+            addr: addr.to_string(),
+            reconnect_required,
+        }
+    }
+
+    async fn test_connect_match_client(
+        config: MatchClientConfig,
+    ) -> Result<MatchClient, Box<dyn Error + Send + Sync>> {
+        Ok(test_match_client(&config.addr, false))
+    }
+
+    async fn set_shared_client(client: &SharedMatchClient, addr: &str, reconnect_required: bool) {
+        let mut guard = client.lock().await;
+        *guard = Some(test_match_client(addr, reconnect_required));
+    }
+
+    async fn shared_client_state(client: &SharedMatchClient) -> MatchClientState {
+        current_match_client_state(client).await
+    }
+
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,
     }
@@ -821,6 +886,72 @@ mod tests {
             true,
             "http://127.0.0.1:9002"
         ));
+    }
+
+    #[tokio::test]
+    async fn rediscovery_rebuilds_client_when_registry_endpoint_changes() {
+        let client = create_match_client_shared();
+        set_shared_client(&client, "http://127.0.0.1:9002", false).await;
+
+        let rebuilt = rebuild_match_client_if_needed_with_connector(
+            &client,
+            &test_config("http://127.0.0.1:9002"),
+            "http://127.0.0.1:19002",
+            test_connect_match_client,
+        )
+        .await
+        .expect("endpoint change should reconnect");
+
+        assert!(rebuilt);
+        let state = shared_client_state(&client).await;
+        assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:19002"));
+        assert!(!state.reconnect_required);
+    }
+
+    #[tokio::test]
+    async fn rediscovery_rebuilds_client_when_same_endpoint_requires_reconnect() {
+        let client = create_match_client_shared();
+        set_shared_client(&client, "http://127.0.0.1:9002", true).await;
+
+        let rebuilt = rebuild_match_client_if_needed_with_connector(
+            &client,
+            &test_config("http://127.0.0.1:9002"),
+            "http://127.0.0.1:9002",
+            test_connect_match_client,
+        )
+        .await
+        .expect("reconnect_required should reconnect even when addr is unchanged");
+
+        assert!(rebuilt);
+        let state = shared_client_state(&client).await;
+        assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:9002"));
+        assert!(!state.reconnect_required);
+    }
+
+    #[tokio::test]
+    async fn rediscovery_keeps_existing_client_until_registry_recovers_with_new_endpoint() {
+        let client = create_match_client_shared();
+        set_shared_client(&client, "http://127.0.0.1:9002", false).await;
+
+        let missing_endpoint =
+            resolve_discovery_outcome(DiscoveryOutcome::NotFound, "http://127.0.0.1:9002", true);
+        assert!(missing_endpoint.is_err());
+        let state = shared_client_state(&client).await;
+        assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:9002"));
+        assert!(!state.reconnect_required);
+
+        let rebuilt = rebuild_match_client_if_needed_with_connector(
+            &client,
+            &test_config("http://127.0.0.1:9002"),
+            "http://127.0.0.1:19002",
+            test_connect_match_client,
+        )
+        .await
+        .expect("client should reconnect after registry recovers");
+
+        assert!(rebuilt);
+        let state = shared_client_state(&client).await;
+        assert_eq!(state.addr.as_deref(), Some("http://127.0.0.1:19002"));
     }
 
     #[test]
