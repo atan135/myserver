@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectRegistryLifecycleMetricFields,
+  getRegistryLifecycleMetricsSnapshot,
+  recordRegistryLifecycleMetric,
   SERVICE_ENDPOINT_VISIBILITIES,
   normalizeEndpoint,
   normalizeServiceInstance,
+  resetRegistryLifecycleMetrics,
   validateServiceEndpoint
 } from "./registry-schema.js";
 
@@ -128,4 +132,68 @@ test("normalizeServiceInstance backfills game-proxy legacy endpoints with proxy 
       }
     ]
   );
+});
+
+test("registry lifecycle metrics aggregate failure events by operation labels", () => {
+  resetRegistryLifecycleMetrics();
+
+  assert.equal(recordRegistryLifecycleMetric("unknown_kind", { serviceName: "admin-api" }), null);
+  assert.deepEqual(recordRegistryLifecycleMetric("register_failed", {
+    serviceName: "admin-api",
+    endpointName: "http",
+    instanceId: "admin-api-001",
+    reason: "redis_error",
+    error: new Error("SET_FAILED")
+  }), {
+    kind: "register_failed",
+    service: "admin-api",
+    endpoint: "http",
+    instance_id: "admin-api-001",
+    source: "registry",
+    reason: "redis_error",
+    count: 1
+  });
+  recordRegistryLifecycleMetric("register_failed", {
+    service: "admin-api",
+    endpoint: "http",
+    instance_id: "admin-api-001",
+    reason: "redis_error"
+  });
+  recordRegistryLifecycleMetric("heartbeat_failed", {
+    serviceName: "admin-api",
+    instanceId: "admin-api-001",
+    reason: "redis_error"
+  });
+
+  assert.deepEqual(getRegistryLifecycleMetricsSnapshot(), [
+    {
+      kind: "heartbeat_failed",
+      service: "admin-api",
+      endpoint: "",
+      instance_id: "admin-api-001",
+      source: "registry",
+      reason: "redis_error",
+      count: 1
+    },
+    {
+      kind: "register_failed",
+      service: "admin-api",
+      endpoint: "http",
+      instance_id: "admin-api-001",
+      source: "registry",
+      reason: "redis_error",
+      count: 2
+    }
+  ]);
+  assert.deepEqual(collectRegistryLifecycleMetricFields(), {
+    register_failed_total: "2",
+    heartbeat_failed_total: "1",
+    deregister_failed_total: "0"
+  });
+  assert.deepEqual(collectRegistryLifecycleMetricFields({ reset: true }), {
+    register_failed_total: "2",
+    heartbeat_failed_total: "1",
+    deregister_failed_total: "0"
+  });
+  assert.deepEqual(getRegistryLifecycleMetricsSnapshot(), []);
 });

@@ -4,6 +4,7 @@ import http from "node:http";
 import {
   discoveryLogContext,
   getDiscoveryMetricsSnapshot,
+  getRegistryLifecycleMetricsSnapshot,
   normalizeServiceInstance,
   recordDiscoveryMetric,
   registryHeartbeatKey,
@@ -72,6 +73,12 @@ const DISCOVERY_ALERT_SEVERITY_RANK: Record<string, number> = {
   warning: 1,
   critical: 2
 };
+
+const REGISTRY_LIFECYCLE_METRIC_ALERTS = [
+  { kind: "register_failed", field: "register_failed_total" },
+  { kind: "heartbeat_failed", field: "heartbeat_failed_total" },
+  { kind: "deregister_failed", field: "deregister_failed_total" }
+];
 
 const WINDOW_SECONDS: Record<string, number> = {
   "1m": 60,
@@ -200,6 +207,8 @@ export class MonitoringService {
     }
 
     alerts.push(...buildDiscoveryMetricAlerts());
+    alerts.push(...buildRegistryLifecycleMetricAlerts());
+    alerts.push(...(await this.buildRegistryLifecycleMetricAlertsFromRedis()));
     const dedupedAlerts = dedupeDiscoveryAlerts(alerts);
     const alertLevel = aggregateDiscoveryAlertLevel(dedupedAlerts);
 
@@ -380,6 +389,80 @@ export class MonitoringService {
       ...aggregated.data,
       instances: aggregated.instances
     };
+  }
+
+  private async getLatestMetricRecords(serviceName: string): Promise<any[]> {
+    let cursor = "0";
+    let latestBucket = 0;
+    const latestKeys = [];
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", `metrics:${serviceName}:*`, "COUNT", 100);
+      cursor = nextCursor;
+
+      for (const key of keys) {
+        const parsed = parseMetricKey(serviceName, key);
+        if (!parsed) {
+          continue;
+        }
+
+        if (parsed.bucket > latestBucket) {
+          latestKeys.length = 0;
+          latestBucket = parsed.bucket;
+          latestKeys.push({ key, ...parsed });
+        } else if (parsed.bucket === latestBucket) {
+          latestKeys.push({ key, ...parsed });
+        }
+      }
+    } while (cursor !== "0");
+
+    const records = [];
+    for (const item of latestKeys) {
+      const data = await this.redis.hgetall(item.key);
+      if (data && Object.keys(data).length > 0) {
+        records.push({ ...item, data });
+      }
+    }
+
+    return records;
+  }
+
+  private async buildRegistryLifecycleMetricAlertsFromRedis(): Promise<any[]> {
+    const alerts = [];
+
+    for (const serviceName of SERVICE_NAMES) {
+      try {
+        const records = await this.getLatestMetricRecords(serviceName);
+        for (const record of records) {
+          const instanceId = record.instanceId || record.data?.instance_id || "";
+          for (const spec of REGISTRY_LIFECYCLE_METRIC_ALERTS) {
+            const count = parseMetricInt(record.data?.[spec.field]);
+            if (count <= 0) {
+              continue;
+            }
+            alerts.push({
+              kind: spec.kind,
+              service: serviceName,
+              endpoint: "",
+              instance_id: instanceId,
+              severity: "critical",
+              message: registryLifecycleMetricMessage({
+                kind: spec.kind,
+                service: serviceName,
+                instance_id: instanceId
+              }),
+              source: "metrics",
+              reason: "reported_total",
+              count
+            });
+          }
+        }
+      } catch {
+        // Registry dashboard should still render if latest metrics are unavailable.
+      }
+    }
+
+    return alerts;
   }
 
   private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number): Promise<any[]> {
@@ -739,6 +822,38 @@ function buildDiscoveryMetricAlerts(): any[] {
   } catch {
     return [];
   }
+}
+
+function buildRegistryLifecycleMetricAlerts(): any[] {
+  try {
+    return getRegistryLifecycleMetricsSnapshot()
+      .filter((metric: any) => ["register_failed", "heartbeat_failed", "deregister_failed"].includes(metric.kind))
+      .map((metric: any) => ({
+        kind: metric.kind,
+        service: metric.service || "",
+        endpoint: metric.endpoint || "",
+        instance_id: metric.instance_id || "",
+        severity: "critical",
+        message: registryLifecycleMetricMessage(metric),
+        source: metric.source || "registry",
+        reason: metric.reason || "",
+        count: metric.count || 0
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function registryLifecycleMetricMessage(metric: any): string {
+  const service = metric.service || "unknown-service";
+  const instance = metric.instance_id ? `/${metric.instance_id}` : "";
+  if (metric.kind === "register_failed") {
+    return `${service}${instance} 注册失败`;
+  }
+  if (metric.kind === "heartbeat_failed") {
+    return `${service}${instance} heartbeat 续期失败`;
+  }
+  return `${service}${instance} deregister 失败`;
 }
 
 function discoveryMetricSeverity(metric: any): string {

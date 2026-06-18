@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  getRegistryLifecycleMetricsSnapshot,
+  resetRegistryLifecycleMetrics,
+  validateServiceInstance
+} from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
 import { RegistryClient, discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
@@ -54,6 +58,26 @@ function createRedisCapture() {
       keys.delete(key);
     }
   };
+}
+
+function createFailingRedis(operation) {
+  const redis = createRedisCapture();
+  if (operation === "hset") {
+    redis.hset = async () => {
+      throw new Error("HSET_FAILED");
+    };
+  }
+  if (operation === "setex") {
+    redis.setex = async () => {
+      throw new Error("SETEX_FAILED");
+    };
+  }
+  if (operation === "del") {
+    redis.del = async () => {
+      throw new Error("DEL_FAILED");
+    };
+  }
+  return redis;
 }
 
 function createConfig(overrides = {}) {
@@ -689,6 +713,7 @@ test("RegistryClient heartbeat and deregister use registry instance keys", async
 
   await client.register();
   client.startHeartbeat(60);
+  await new Promise((resolve) => setImmediate(resolve));
   client.stopHeartbeat();
 
   assert.deepEqual(redis.keys.get("heartbeat:admin-api:admin-api-test-001"), {
@@ -700,4 +725,64 @@ test("RegistryClient heartbeat and deregister use registry instance keys", async
 
   assert.equal(redis.hashes.has("service:admin-api:instances:admin-api-test-001:data"), false);
   assert.equal(redis.keys.has("heartbeat:admin-api:admin-api-test-001"), false);
+});
+
+test("RegistryClient records lifecycle metrics for register heartbeat and deregister failures", async () => {
+  resetRegistryLifecycleMetrics();
+
+  await assert.rejects(
+    () => new RegistryClient(createFailingRedis("hset"), createConfig()).register(),
+    /HSET_FAILED/
+  );
+
+  const heartbeatRedis = createFailingRedis("setex");
+  const heartbeatClient = new RegistryClient(heartbeatRedis, createConfig());
+  heartbeatClient.startHeartbeat(60);
+  await new Promise((resolve) => setImmediate(resolve));
+  heartbeatClient.stopHeartbeat();
+
+  const deregisterRedis = createFailingRedis("del");
+  await assert.rejects(
+    () => new RegistryClient(deregisterRedis, createConfig()).deregister(),
+    /DEL_FAILED/
+  );
+
+  assert.deepEqual(
+    getRegistryLifecycleMetricsSnapshot().map(({ kind, service, endpoint, instance_id, reason, count }) => ({
+      kind,
+      service,
+      endpoint,
+      instance_id,
+      reason,
+      count
+    })),
+    [
+      {
+        kind: "deregister_failed",
+        service: "admin-api",
+        endpoint: "",
+        instance_id: "admin-api-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "heartbeat_failed",
+        service: "admin-api",
+        endpoint: "",
+        instance_id: "admin-api-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "register_failed",
+        service: "admin-api",
+        endpoint: "http",
+        instance_id: "admin-api-test-001",
+        reason: "redis_error",
+        count: 1
+      }
+    ]
+  );
+
+  resetRegistryLifecycleMetrics();
 });

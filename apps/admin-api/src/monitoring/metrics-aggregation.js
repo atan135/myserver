@@ -6,7 +6,10 @@ const SUM_FIELDS = new Set([
   "online_players",
   "connections",
   "pool_size",
-  "room_count"
+  "room_count",
+  "register_failed_total",
+  "heartbeat_failed_total",
+  "deregister_failed_total"
 ]);
 
 const MAX_FIELDS = new Set(["latency_ms"]);

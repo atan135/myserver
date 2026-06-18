@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  getRegistryLifecycleMetricsSnapshot,
+  resetRegistryLifecycleMetrics,
+  validateServiceInstance
+} from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
 import { RegistryClient } from "./registry-client.js";
 
@@ -15,13 +19,42 @@ configureLogger({
 
 function createRedisCapture() {
   const hashes = new Map();
+  const keys = new Map();
 
   return {
     hashes,
+    keys,
     async hset(key, field, value) {
       hashes.set(`${key}:${field}`, value);
+    },
+    async setex(key, ttl, value) {
+      keys.set(key, { ttl, value });
+    },
+    async del(key) {
+      hashes.delete(`${key}:data`);
+      keys.delete(key);
     }
   };
+}
+
+function createFailingRedis(operation) {
+  const redis = createRedisCapture();
+  if (operation === "hset") {
+    redis.hset = async () => {
+      throw new Error("HSET_FAILED");
+    };
+  }
+  if (operation === "setex") {
+    redis.setex = async () => {
+      throw new Error("SETEX_FAILED");
+    };
+  }
+  if (operation === "del") {
+    redis.del = async () => {
+      throw new Error("DEL_FAILED");
+    };
+  }
+  return redis;
 }
 
 function createConfig(overrides = {}) {
@@ -135,4 +168,62 @@ test("RegistryClient metadata falls back to dev build version", async () => {
   assert.equal(payload.metadata.cache_ttl_seconds, 45);
   assert.equal(payload.metadata.build_version, "dev");
   assert.equal(payload.metadata.zone, "zone-announce");
+});
+
+test("RegistryClient records lifecycle metrics for register heartbeat and deregister failures", async () => {
+  resetRegistryLifecycleMetrics();
+
+  await assert.rejects(
+    () => new RegistryClient(createFailingRedis("hset"), createConfig()).register(),
+    /HSET_FAILED/
+  );
+
+  const heartbeatClient = new RegistryClient(createFailingRedis("setex"), createConfig());
+  heartbeatClient.startHeartbeat(60);
+  await new Promise((resolve) => setImmediate(resolve));
+  heartbeatClient.stopHeartbeat();
+
+  await assert.rejects(
+    () => new RegistryClient(createFailingRedis("del"), createConfig()).deregister(),
+    /DEL_FAILED/
+  );
+
+  assert.deepEqual(
+    getRegistryLifecycleMetricsSnapshot().map(({ kind, service, endpoint, instance_id, reason, count }) => ({
+      kind,
+      service,
+      endpoint,
+      instance_id,
+      reason,
+      count
+    })),
+    [
+      {
+        kind: "deregister_failed",
+        service: "announce-service",
+        endpoint: "",
+        instance_id: "announce-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "heartbeat_failed",
+        service: "announce-service",
+        endpoint: "",
+        instance_id: "announce-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "register_failed",
+        service: "announce-service",
+        endpoint: "http",
+        instance_id: "announce-test-001",
+        reason: "redis_error",
+        count: 1
+      }
+    ]
+  );
+
+  resetRegistryLifecycleMetrics();
 });

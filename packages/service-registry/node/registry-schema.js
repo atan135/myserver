@@ -40,6 +40,13 @@ export const DISCOVERY_METRIC_KINDS = [
 ];
 const DISCOVERY_METRIC_KIND_SET = new Set(DISCOVERY_METRIC_KINDS);
 const discoveryMetrics = new Map();
+export const REGISTRY_LIFECYCLE_METRIC_KINDS = [
+  "register_failed",
+  "heartbeat_failed",
+  "deregister_failed"
+];
+const REGISTRY_LIFECYCLE_METRIC_KIND_SET = new Set(REGISTRY_LIFECYCLE_METRIC_KINDS);
+const registryLifecycleMetrics = new Map();
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
@@ -166,6 +173,105 @@ export function collectDiscoveryMetricFields({ reset = false } = {}) {
 
   return Object.fromEntries(
     DISCOVERY_METRIC_KINDS.map((kind) => [`${kind}_total`, String(totals[kind] || 0)])
+  );
+}
+
+export function registryLifecycleLogContext(context = {}) {
+  const service = String(context.serviceName ?? context.service ?? "");
+  const endpoint = String(context.endpointName ?? context.endpoint ?? "");
+  const instanceId = String(context.instanceId ?? context.instance_id ?? "");
+  const source = String(context.source ?? "registry");
+  const reason = String(context.reason ?? "");
+  const normalized = {
+    service,
+    endpoint,
+    instance_id: instanceId,
+    source,
+    reason,
+    serviceName: service,
+    endpointName: endpoint,
+    instanceId
+  };
+
+  if (context.error !== undefined && context.error !== null) {
+    normalized.error = context.error instanceof Error
+      ? context.error.message
+      : String(context.error);
+  }
+
+  for (const [key, value] of Object.entries(context)) {
+    if (
+      value !== undefined &&
+      ![
+        "service",
+        "serviceName",
+        "endpoint",
+        "endpointName",
+        "instance_id",
+        "instanceId",
+        "source",
+        "reason",
+        "error"
+      ].includes(key)
+    ) {
+      normalized[key] = value;
+    }
+  }
+
+  return normalized;
+}
+
+export function recordRegistryLifecycleMetric(kind, context = {}) {
+  const normalizedKind = String(kind || "");
+  if (!REGISTRY_LIFECYCLE_METRIC_KIND_SET.has(normalizedKind)) {
+    return null;
+  }
+
+  const normalized = registryLifecycleLogContext(context);
+  const labels = {
+    service: normalized.service,
+    endpoint: normalized.endpoint,
+    instance_id: normalized.instance_id,
+    source: normalized.source || "registry",
+    reason: normalized.reason
+  };
+  const key = registryLifecycleMetricKey(normalizedKind, labels);
+  const current = registryLifecycleMetrics.get(key);
+  const count = (current?.count || 0) + 1;
+  registryLifecycleMetrics.set(key, { kind: normalizedKind, ...labels, count });
+  return { kind: normalizedKind, ...labels, count };
+}
+
+export function getRegistryLifecycleMetricsSnapshot() {
+  return [...registryLifecycleMetrics.values()]
+    .map((entry) => ({ ...entry }))
+    .sort((a, b) =>
+      a.kind.localeCompare(b.kind) ||
+      a.service.localeCompare(b.service) ||
+      a.endpoint.localeCompare(b.endpoint) ||
+      a.instance_id.localeCompare(b.instance_id) ||
+      a.source.localeCompare(b.source) ||
+      a.reason.localeCompare(b.reason)
+    );
+}
+
+export function resetRegistryLifecycleMetrics() {
+  registryLifecycleMetrics.clear();
+}
+
+export function collectRegistryLifecycleMetricFields({ reset = false } = {}) {
+  const snapshot = getRegistryLifecycleMetricsSnapshot();
+  const totals = Object.fromEntries(REGISTRY_LIFECYCLE_METRIC_KINDS.map((kind) => [kind, 0]));
+  for (const entry of snapshot) {
+    totals[entry.kind] = (totals[entry.kind] || 0) + entry.count;
+  }
+
+  if (reset) {
+    resetRegistryLifecycleMetrics();
+  }
+
+  return Object.fromEntries(
+    REGISTRY_LIFECYCLE_METRIC_KINDS.map((kind) => [`${kind}_total`, String(totals[kind] || 0)])
   );
 }
 
@@ -1164,6 +1270,17 @@ function discoveryMetricKey(kind, labels) {
     kind: normalizedKind,
     service: labels.service,
     endpoint: labels.endpoint,
+    source: labels.source,
+    reason: labels.reason
+  });
+}
+
+function registryLifecycleMetricKey(kind, labels) {
+  return JSON.stringify({
+    kind,
+    service: labels.service,
+    endpoint: labels.endpoint,
+    instance_id: labels.instance_id,
     source: labels.source,
     reason: labels.reason
   });

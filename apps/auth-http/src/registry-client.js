@@ -5,6 +5,7 @@ import {
   discoverAllEndpoints,
   discoverServiceInstances as discoverRegistryServiceInstances,
   recordDiscoveryMetric,
+  recordRegistryLifecycleMetric,
   registryHeartbeatKey,
   registryInstanceKey
 } from "../../../packages/service-registry/node/registry-schema.js";
@@ -86,7 +87,16 @@ export class RegistryClient {
       }
     });
 
-    await this.redis.hset(key, "data", JSON.stringify(data));
+    try {
+      await this.redis.hset(key, "data", JSON.stringify(data));
+    } catch (error) {
+      this.recordLifecycleFailure("register_failed", {
+        endpointName: "http",
+        reason: "redis_error",
+        error
+      });
+      throw error;
+    }
     log("info", "registry.registered", {
       service: this.serviceName,
       instance: this.instanceId,
@@ -99,8 +109,16 @@ export class RegistryClient {
     const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
 
-    await this.redis.del(key);
-    await this.redis.del(heartbeatKey);
+    try {
+      await this.redis.del(key);
+      await this.redis.del(heartbeatKey);
+    } catch (error) {
+      this.recordLifecycleFailure("deregister_failed", {
+        reason: "redis_error",
+        error
+      });
+      throw error;
+    }
 
     log("info", "registry.deregistered", {
       service: this.serviceName,
@@ -112,12 +130,26 @@ export class RegistryClient {
     const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const ttl = 30;
 
-    this.redis.setex(heartbeatKey, ttl, "1");
+    Promise.resolve()
+      .then(() => this.redis.setex(heartbeatKey, ttl, "1"))
+      .catch((error) => {
+        this.recordLifecycleFailure("heartbeat_failed", {
+          reason: "redis_error",
+          error
+        });
+        log("error", "registry.heartbeat_failed", {
+          error: error.message
+        });
+      });
 
     this.heartbeatInterval = setInterval(async () => {
       try {
         await this.redis.setex(heartbeatKey, ttl, "1");
       } catch (error) {
+        this.recordLifecycleFailure("heartbeat_failed", {
+          reason: "redis_error",
+          error
+        });
         log("error", "registry.heartbeat_failed", {
           error: error.message
         });
@@ -135,6 +167,15 @@ export class RegistryClient {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
+  }
+
+  recordLifecycleFailure(kind, context = {}) {
+    recordRegistryLifecycleMetric(kind, {
+      serviceName: this.serviceName,
+      instanceId: this.instanceId,
+      source: "registry",
+      ...context
+    });
   }
 }
 

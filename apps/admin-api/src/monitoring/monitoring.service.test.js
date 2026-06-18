@@ -9,7 +9,12 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { MonitoringService } = await import("./monitoring.service.ts");
-const { recordDiscoveryMetric, resetDiscoveryMetrics } = await import("../../../../packages/service-registry/node/registry-schema.js");
+const {
+  recordDiscoveryMetric,
+  recordRegistryLifecycleMetric,
+  resetDiscoveryMetrics,
+  resetRegistryLifecycleMetrics
+} = await import("../../../../packages/service-registry/node/registry-schema.js");
 
 function makeService(config = {}) {
   const redis = {};
@@ -66,6 +71,12 @@ function createServiceRedis(instances, options = {}) {
     }
   }
 
+  for (const entry of options.metricEntries || []) {
+    hashes.set(entry.key, Object.fromEntries(
+      Object.entries(entry.data || {}).map(([key, value]) => [key, String(value)])
+    ));
+  }
+
   return {
     async get(key) {
       if (key === "metrics:heartbeat:game-server") {
@@ -76,8 +87,9 @@ function createServiceRedis(instances, options = {}) {
     async hget(key, field) {
       return hashes.get(`${key}:${field}`) || null;
     },
-    async hgetall() {
-      return {};
+    async hgetall(key) {
+      const value = hashes.get(key);
+      return value && typeof value === "object" ? value : {};
     },
     async exists(key) {
       return keys.has(key) ? 1 : 0;
@@ -99,6 +111,14 @@ function createServiceRedis(instances, options = {}) {
           [...hashes.keys()]
             .map((key) => key.slice(0, -5))
             .filter((key) => key.startsWith(prefix))
+        ];
+      }
+      if (pattern.startsWith("metrics:")) {
+        const prefix = pattern.replace("*", "");
+        return [
+          "0",
+          [...hashes.keys()]
+            .filter((key) => typeof key === "string" && key.startsWith(prefix))
         ];
       }
       return ["0", []];
@@ -500,6 +520,7 @@ test("services returns all discovered game-server and game-proxy admin endpoints
 
 test("registry returns all configured services with empty status for missing instances", async () => {
   resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
   const redis = createServiceRedis([]);
   const service = makeMonitoringServiceWithRedis(
     { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
@@ -532,6 +553,7 @@ test("registry returns all configured services with empty status for missing ins
 
 test("registry returns instance heartbeat ttl and endpoint fields", async () => {
   resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
   const redis = createServiceRedis(
     [
       gameServerInstance("game-server-a", "10.0.0.1", 7500)
@@ -587,6 +609,7 @@ test("registry returns instance heartbeat ttl and endpoint fields", async () => 
 
 test("registry tolerates redis clients without ttl support", async () => {
   resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
   const redis = createServiceRedisWithoutTtl([
     gameProxyInstance("game-proxy-a", "10.0.1.1", 7101)
   ]);
@@ -605,6 +628,7 @@ test("registry tolerates redis clients without ttl support", async () => {
 
 test("registry returns discovery alerts for missing endpoints, schema parse failures, and fallback metrics", async () => {
   resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
   recordDiscoveryMetric({
     serviceName: "game-server",
     endpointName: "admin",
@@ -684,4 +708,96 @@ test("registry returns discovery alerts for missing endpoints, schema parse fail
   assert.ok(chatServer.alerts.some((alert) => alert.kind === "endpoint_missing" && alert.endpoint === "tcp"));
 
   resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
+});
+
+test("registry returns lifecycle alerts for register heartbeat and deregister failures", async () => {
+  resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
+  recordRegistryLifecycleMetric("register_failed", {
+    serviceName: "admin-api",
+    endpointName: "http",
+    instanceId: "admin-api-a",
+    reason: "redis_error"
+  });
+  recordRegistryLifecycleMetric("heartbeat_failed", {
+    serviceName: "admin-api",
+    instanceId: "admin-api-a",
+    reason: "redis_error"
+  });
+  recordRegistryLifecycleMetric("deregister_failed", {
+    serviceName: "admin-api",
+    instanceId: "admin-api-a",
+    reason: "redis_error"
+  });
+
+  const redis = createServiceRedis([]);
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+
+  assert.equal(result.alert_level, "critical");
+  assert.ok(result.alerts.some((alert) =>
+    alert.kind === "register_failed" &&
+    alert.service === "admin-api" &&
+    alert.endpoint === "http" &&
+    alert.instance_id === "admin-api-a" &&
+    alert.count === 1
+  ));
+  assert.ok(result.alerts.some((alert) => alert.kind === "heartbeat_failed" && alert.service === "admin-api"));
+  assert.ok(result.alerts.some((alert) => alert.kind === "deregister_failed" && alert.service === "admin-api"));
+
+  resetRegistryLifecycleMetrics();
+});
+
+test("registry returns lifecycle alerts from latest Redis metrics by instance", async () => {
+  resetDiscoveryMetrics();
+  resetRegistryLifecycleMetrics();
+
+  const bucket = Math.floor(Date.now() / 1000);
+  const redis = createServiceRedis([], {
+    metricEntries: [
+      {
+        key: `metrics:auth-http:auth-http-a:${bucket}`,
+        data: {
+          qps: 0,
+          latency_ms: 0,
+          register_failed_total: 2,
+          heartbeat_failed_total: 3,
+          deregister_failed_total: 1
+        }
+      }
+    ]
+  });
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+
+  assert.ok(result.alerts.some((alert) =>
+    alert.kind === "register_failed" &&
+    alert.service === "auth-http" &&
+    alert.instance_id === "auth-http-a" &&
+    alert.source === "metrics" &&
+    alert.count === 2
+  ));
+  assert.ok(result.alerts.some((alert) =>
+    alert.kind === "heartbeat_failed" &&
+    alert.service === "auth-http" &&
+    alert.instance_id === "auth-http-a" &&
+    alert.source === "metrics" &&
+    alert.count === 3
+  ));
+  assert.ok(result.alerts.some((alert) =>
+    alert.kind === "deregister_failed" &&
+    alert.service === "auth-http" &&
+    alert.instance_id === "auth-http-a" &&
+    alert.source === "metrics" &&
+    alert.count === 1
+  ));
 });

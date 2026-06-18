@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  getRegistryLifecycleMetricsSnapshot,
+  resetRegistryLifecycleMetrics,
+  validateServiceInstance
+} from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
 import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
@@ -39,8 +43,35 @@ function createRedisCapture() {
         .map((key) => key.slice(0, -5))
         .filter((key) => key.startsWith(prefix));
       return ["0", found];
+    },
+    async setex(key, ttl, value) {
+      keys.set(key, { ttl, value });
+    },
+    async del(key) {
+      hashes.delete(`${key}:data`);
+      keys.delete(key);
     }
   };
+}
+
+function createFailingRedis(operation) {
+  const redis = createRedisCapture();
+  if (operation === "hset") {
+    redis.hset = async () => {
+      throw new Error("HSET_FAILED");
+    };
+  }
+  if (operation === "setex") {
+    redis.setex = async () => {
+      throw new Error("SETEX_FAILED");
+    };
+  }
+  if (operation === "del") {
+    redis.del = async () => {
+      throw new Error("DEL_FAILED");
+    };
+  }
+  return redis;
 }
 
 function createConfig(overrides = {}) {
@@ -224,4 +255,62 @@ test("discoverGameServerAdminEndpoints does not fall back to client-visible endp
   const endpoints = await discoverGameServerAdminEndpoints(redis);
 
   assert.deepEqual(endpoints, []);
+});
+
+test("RegistryClient records lifecycle metrics for register heartbeat and deregister failures", async () => {
+  resetRegistryLifecycleMetrics();
+
+  await assert.rejects(
+    () => new RegistryClient(createFailingRedis("hset"), createConfig()).register(),
+    /HSET_FAILED/
+  );
+
+  const heartbeatClient = new RegistryClient(createFailingRedis("setex"), createConfig());
+  heartbeatClient.startHeartbeat(60);
+  await new Promise((resolve) => setImmediate(resolve));
+  heartbeatClient.stopHeartbeat();
+
+  await assert.rejects(
+    () => new RegistryClient(createFailingRedis("del"), createConfig()).deregister(),
+    /DEL_FAILED/
+  );
+
+  assert.deepEqual(
+    getRegistryLifecycleMetricsSnapshot().map(({ kind, service, endpoint, instance_id, reason, count }) => ({
+      kind,
+      service,
+      endpoint,
+      instance_id,
+      reason,
+      count
+    })),
+    [
+      {
+        kind: "deregister_failed",
+        service: "mail-service",
+        endpoint: "",
+        instance_id: "mail-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "heartbeat_failed",
+        service: "mail-service",
+        endpoint: "",
+        instance_id: "mail-test-001",
+        reason: "redis_error",
+        count: 1
+      },
+      {
+        kind: "register_failed",
+        service: "mail-service",
+        endpoint: "http",
+        instance_id: "mail-test-001",
+        reason: "redis_error",
+        count: 1
+      }
+    ]
+  );
+
+  resetRegistryLifecycleMetrics();
 });
