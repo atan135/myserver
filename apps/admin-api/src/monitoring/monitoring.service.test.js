@@ -9,6 +9,7 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { MonitoringService } = await import("./monitoring.service.ts");
+const { recordDiscoveryMetric, resetDiscoveryMetrics } = await import("../../../../packages/service-registry/node/registry-schema.js");
 
 function makeService(config = {}) {
   const redis = {};
@@ -56,6 +57,13 @@ function createServiceRedis(instances, options = {}) {
   for (const instance of instances) {
     hashes.set(`service:${instance.name}:instances:${instance.id}:data`, JSON.stringify(instance));
     keys.add(`heartbeat:${instance.name}:${instance.id}`);
+  }
+
+  for (const entry of options.rawEntries || []) {
+    hashes.set(`${entry.key}:data`, entry.data);
+    if (entry.heartbeatKey) {
+      keys.add(entry.heartbeatKey);
+    }
   }
 
   return {
@@ -491,6 +499,7 @@ test("services returns all discovered game-server and game-proxy admin endpoints
 });
 
 test("registry returns all configured services with empty status for missing instances", async () => {
+  resetDiscoveryMetrics();
   const redis = createServiceRedis([]);
   const service = makeMonitoringServiceWithRedis(
     { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
@@ -517,9 +526,12 @@ test("registry returns all configured services with empty status for missing ins
   assert.equal(result.services.find((item) => item.name === "game-server").status, "missing");
   assert.equal(result.services.find((item) => item.name === "game-server").instance_count, 0);
   assert.deepEqual(result.services.find((item) => item.name === "game-server").instances, []);
+  assert.equal(result.alert_level, "critical");
+  assert.ok(result.alerts.some((alert) => alert.kind === "no_healthy_instance" && alert.service === "game-server"));
 });
 
 test("registry returns instance heartbeat ttl and endpoint fields", async () => {
+  resetDiscoveryMetrics();
   const redis = createServiceRedis(
     [
       gameServerInstance("game-server-a", "10.0.0.1", 7500)
@@ -574,6 +586,7 @@ test("registry returns instance heartbeat ttl and endpoint fields", async () => 
 });
 
 test("registry tolerates redis clients without ttl support", async () => {
+  resetDiscoveryMetrics();
   const redis = createServiceRedisWithoutTtl([
     gameProxyInstance("game-proxy-a", "10.0.1.1", 7101)
   ]);
@@ -588,4 +601,87 @@ test("registry tolerates redis clients without ttl support", async () => {
   assert.equal(instance.instance_id, "game-proxy-a");
   assert.equal(instance.heartbeat_ttl_seconds, null);
   assert.equal(instance.heartbeat_status, "unknown");
+});
+
+test("registry returns discovery alerts for missing endpoints, schema parse failures, and fallback metrics", async () => {
+  resetDiscoveryMetrics();
+  recordDiscoveryMetric({
+    serviceName: "game-server",
+    endpointName: "admin",
+    source: "fallback",
+    reason: "fallback_used"
+  });
+  recordDiscoveryMetric({
+    serviceName: "chat-server",
+    endpointName: "tcp",
+    source: "registry",
+    reason: "endpoint_missing"
+  });
+  recordDiscoveryMetric({
+    serviceName: "mail-service",
+    endpointName: "http",
+    source: "registry",
+    reason: "registry_error"
+  });
+
+  const redis = createServiceRedis(
+    [
+      {
+        schema_version: 2,
+        id: "chat-server-a",
+        name: "chat-server",
+        host: "10.0.2.1",
+        port: 9001,
+        admin_port: 0,
+        local_socket: "",
+        endpoints: [
+          {
+            name: "other",
+            protocol: "tcp",
+            host: "10.0.2.1",
+            port: 9001,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ],
+        tags: [],
+        weight: 100,
+        metadata: {},
+        registered_at: 1,
+        healthy: true
+      }
+    ],
+    {
+      rawEntries: [
+        {
+          key: "service:mail-service:instances:bad-json",
+          data: "{broken",
+          heartbeatKey: "heartbeat:mail-service:bad-json"
+        }
+      ]
+    }
+  );
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+  const chatServer = result.services.find((item) => item.name === "chat-server");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.alert_level, "critical");
+  assert.ok(result.alerts.some((alert) => alert.kind === "endpoint_missing" && alert.service === "chat-server"));
+  assert.ok(result.alerts.some((alert) => alert.kind === "schema_parse_failed" && alert.service === "mail-service"));
+  assert.ok(result.alerts.some((alert) => alert.kind === "fallback_used" && alert.service === "game-server"));
+  assert.ok(result.alerts.some((alert) => alert.kind === "discovery_failure" && alert.service === "mail-service"));
+  assert.equal(
+    result.alerts.filter((alert) => alert.kind === "endpoint_missing" && alert.service === "chat-server" && alert.endpoint === "tcp").length,
+    1
+  );
+  assert.ok(chatServer.alerts.some((alert) => alert.kind === "endpoint_missing" && alert.endpoint === "tcp"));
+
+  resetDiscoveryMetrics();
 });

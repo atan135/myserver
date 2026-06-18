@@ -3,8 +3,11 @@ import http from "node:http";
 
 import {
   discoveryLogContext,
+  getDiscoveryMetricsSnapshot,
+  normalizeServiceInstance,
   recordDiscoveryMetric,
-  registryHeartbeatKey
+  registryHeartbeatKey,
+  registryInstanceScanPattern
 } from "../../../../packages/service-registry/node/registry-schema.js";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
@@ -40,6 +43,35 @@ const SERVICE_CONFIGS: Record<string, { onlineField: string | null }> = {
 const SERVICE_NAMES = Object.keys(SERVICE_CONFIGS);
 const HEARTBEAT_TTL = 30;
 const DEFAULT_ROLLOUT_DRAIN_SAMPLES_LIMIT = 5;
+
+const EXPECTED_REGISTRY_ENDPOINTS: Record<string, Array<{ name: string; protocol: string; visibility: string }>> = {
+  "auth-http": [
+    { name: "http", protocol: "http", visibility: "public" },
+    { name: "internal", protocol: "http", visibility: "internal" }
+  ],
+  "game-server": [
+    { name: "client", protocol: "tcp", visibility: "internal" },
+    { name: "admin", protocol: "tcp", visibility: "admin" },
+    { name: "internal", protocol: "local_socket", visibility: "local" },
+    { name: "proxy-local", protocol: "local_socket", visibility: "local" }
+  ],
+  "game-proxy": [
+    { name: "client", protocol: "kcp", visibility: "public" },
+    { name: "client-tcp-fallback", protocol: "tcp", visibility: "public" },
+    { name: "admin", protocol: "http", visibility: "admin" }
+  ],
+  "chat-server": [{ name: "tcp", protocol: "tcp", visibility: "internal" }],
+  "match-service": [{ name: "grpc", protocol: "grpc", visibility: "internal" }],
+  "announce-service": [{ name: "http", protocol: "http", visibility: "internal" }],
+  "mail-service": [{ name: "http", protocol: "http", visibility: "internal" }],
+  "admin-api": [{ name: "http", protocol: "http", visibility: "admin" }]
+};
+
+const DISCOVERY_ALERT_SEVERITY_RANK: Record<string, number> = {
+  info: 0,
+  warning: 1,
+  critical: 2
+};
 
 const WINDOW_SECONDS: Record<string, number> = {
   "1m": 60,
@@ -117,9 +149,11 @@ export class MonitoringService {
   async registry() {
     const checkedAt = Date.now();
     const services = [];
+    const alerts = [];
 
     for (const serviceName of SERVICE_NAMES) {
       const instances = await discoverServiceInstances(this.redis, serviceName, this.config.registryKeyPrefix || "");
+      const schemaParseFailures = await this.findRegistrySchemaParseFailures(serviceName);
       const normalizedInstances = [];
 
       for (const instance of instances) {
@@ -152,18 +186,29 @@ export class MonitoringService {
       }
 
       const healthyInstances = normalizedInstances.filter((instance) => instance.healthy && instance.heartbeat_status === "alive");
-      services.push({
+      const service: any = {
         name: serviceName,
         instance_count: normalizedInstances.length,
         healthy_instance_count: healthyInstances.length,
         status: normalizedInstances.length === 0 ? "missing" : healthyInstances.length > 0 ? "healthy" : "unhealthy",
-        instances: normalizedInstances
-      });
+        instances: normalizedInstances,
+        alerts: []
+      };
+      service.alerts = buildServiceDiscoveryAlerts(service, schemaParseFailures);
+      alerts.push(...service.alerts);
+      services.push(service);
     }
+
+    alerts.push(...buildDiscoveryMetricAlerts());
+    const dedupedAlerts = dedupeDiscoveryAlerts(alerts);
+    const alertLevel = aggregateDiscoveryAlertLevel(dedupedAlerts);
 
     return {
       ok: true,
       checked_at: checkedAt,
+      alert_level: alertLevel,
+      alert_message: discoveryAlertMessage(alertLevel, dedupedAlerts),
+      alerts: dedupedAlerts,
       services
     };
   }
@@ -549,6 +594,237 @@ export class MonitoringService {
       };
     }
   }
+
+  private async findRegistrySchemaParseFailures(serviceName: string): Promise<any[]> {
+    const failures = [];
+
+    try {
+      const keys = await this.scanRedisKeys(registryInstanceScanPattern(this.config.registryKeyPrefix || "", serviceName));
+      for (const key of keys.sort()) {
+        const instanceId = key.split(":").at(-1) || "";
+
+        try {
+          const data = await this.redis.hget(key, "data");
+          if (!data) {
+            continue;
+          }
+          const normalized = normalizeServiceInstance(JSON.parse(data));
+          if (!normalized) {
+            failures.push({
+              service: serviceName,
+              instance_id: instanceId,
+              key,
+              reason: "invalid_schema"
+            });
+          }
+        } catch (error: any) {
+          failures.push({
+            service: serviceName,
+            instance_id: instanceId,
+            key,
+            reason: "parse_failed",
+            error: error.message || String(error)
+          });
+        }
+      }
+    } catch (error: any) {
+      failures.push({
+        service: serviceName,
+        instance_id: "",
+        reason: "scan_failed",
+        error: error.message || String(error)
+      });
+    }
+
+    return failures;
+  }
+
+  private async scanRedisKeys(pattern: string): Promise<string[]> {
+    const keys = [];
+    let cursor = "0";
+
+    do {
+      const [nextCursor, batch] = await this.redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== "0");
+
+    return keys;
+  }
+}
+
+function buildServiceDiscoveryAlerts(service: any, schemaParseFailures: any[]): any[] {
+  const alerts = [];
+
+  if (service.instance_count === 0 || service.healthy_instance_count === 0) {
+    alerts.push({
+      kind: "no_healthy_instance",
+      service: service.name,
+      endpoint: "",
+      instance_id: "",
+      severity: "critical",
+      message: service.instance_count === 0
+        ? `${service.name} 没有注册实例`
+        : `${service.name} 没有健康实例`
+    });
+  }
+
+  for (const instance of service.instances) {
+    if (!Array.isArray(instance.endpoints) || instance.endpoints.length === 0) {
+      alerts.push({
+        kind: "endpoint_missing",
+        service: service.name,
+        endpoint: "",
+        instance_id: instance.instance_id,
+        severity: "critical",
+        message: `${service.name}/${instance.instance_id} 未注册 endpoint`
+      });
+    }
+  }
+
+  for (const expected of EXPECTED_REGISTRY_ENDPOINTS[service.name] || []) {
+    const hasEndpoint = service.instances.some((instance: any) =>
+      Array.isArray(instance.endpoints) &&
+      instance.endpoints.some((endpoint: any) =>
+        endpoint.name === expected.name &&
+        endpoint.protocol === expected.protocol &&
+        endpoint.visibility === expected.visibility &&
+        endpoint.healthy !== false
+      )
+    );
+
+    if (service.instance_count > 0 && !hasEndpoint) {
+      alerts.push({
+        kind: "endpoint_missing",
+        service: service.name,
+        endpoint: expected.name,
+        instance_id: "",
+        severity: "warning",
+        message: `${service.name}.${expected.name} endpoint 缺失或不健康`
+      });
+    }
+  }
+
+  for (const failure of schemaParseFailures) {
+    alerts.push({
+      kind: "schema_parse_failed",
+      service: failure.service || service.name,
+      endpoint: "",
+      instance_id: failure.instance_id || "",
+      severity: "warning",
+      message: `${failure.service || service.name} registry schema 解析失败${failure.instance_id ? `：${failure.instance_id}` : ""}`,
+      reason: failure.reason,
+      error: failure.error || ""
+    });
+  }
+
+  return alerts;
+}
+
+function buildDiscoveryMetricAlerts(): any[] {
+  try {
+    return getDiscoveryMetricsSnapshot()
+      .filter((metric: any) => ["discovery_failure", "fallback_used", "no_healthy_instance", "endpoint_missing"].includes(metric.kind))
+      .map((metric: any) => ({
+        kind: metric.kind,
+        service: metric.service || "",
+        endpoint: metric.endpoint || "",
+        instance_id: "",
+        severity: discoveryMetricSeverity(metric),
+        message: discoveryMetricMessage(metric),
+        source: metric.source || "registry",
+        reason: metric.reason || "",
+        count: metric.count || 0
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function discoveryMetricSeverity(metric: any): string {
+  if (metric.kind === "fallback_used") {
+    return "warning";
+  }
+  if (metric.kind === "endpoint_missing") {
+    return "warning";
+  }
+  return "critical";
+}
+
+function discoveryMetricMessage(metric: any): string {
+  const service = metric.service || "unknown-service";
+  const endpoint = metric.endpoint ? `.${metric.endpoint}` : "";
+  if (metric.kind === "fallback_used") {
+    return `${service}${endpoint} 使用本地 fallback`;
+  }
+  if (metric.kind === "endpoint_missing") {
+    return `${service}${endpoint} endpoint 发现缺失`;
+  }
+  if (metric.kind === "no_healthy_instance") {
+    return `${service} 未发现健康实例`;
+  }
+  return `${service}${endpoint} 服务发现失败`;
+}
+
+function dedupeDiscoveryAlerts(alerts: any[]): any[] {
+  const byKey = new Map<string, any>();
+
+  for (const alert of alerts) {
+    const normalized = {
+      kind: String(alert.kind || "discovery_failure"),
+      service: String(alert.service || ""),
+      endpoint: String(alert.endpoint || ""),
+      instance_id: String(alert.instance_id || ""),
+      severity: ["info", "warning", "critical"].includes(alert.severity) ? alert.severity : "warning",
+      message: String(alert.message || "服务发现告警"),
+      ...(alert.source ? { source: alert.source } : {}),
+      ...(alert.reason ? { reason: alert.reason } : {}),
+      ...(alert.count ? { count: alert.count } : {}),
+      ...(alert.error ? { error: alert.error } : {})
+    };
+    const key = [
+      normalized.kind,
+      normalized.service,
+      normalized.endpoint,
+      normalized.instance_id,
+    ].join("|");
+    const existing = byKey.get(key);
+
+    if (!existing || DISCOVERY_ALERT_SEVERITY_RANK[normalized.severity] > DISCOVERY_ALERT_SEVERITY_RANK[existing.severity]) {
+      byKey.set(key, normalized);
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) =>
+    DISCOVERY_ALERT_SEVERITY_RANK[b.severity] - DISCOVERY_ALERT_SEVERITY_RANK[a.severity] ||
+    a.service.localeCompare(b.service) ||
+    a.kind.localeCompare(b.kind) ||
+    a.endpoint.localeCompare(b.endpoint) ||
+    a.instance_id.localeCompare(b.instance_id)
+  );
+}
+
+function aggregateDiscoveryAlertLevel(alerts: any[]): string {
+  if (alerts.some((alert) => alert.severity === "critical")) {
+    return "critical";
+  }
+  if (alerts.some((alert) => alert.severity === "warning")) {
+    return "warning";
+  }
+  return "info";
+}
+
+function discoveryAlertMessage(level: string, alerts: any[]): string {
+  if (alerts.length === 0) {
+    return "服务发现正常";
+  }
+
+  const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
+  const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
+  if (level === "critical") {
+    return `服务发现存在 ${criticalCount} 个严重告警${warningCount ? `，${warningCount} 个警告` : ""}`;
+  }
+  return `服务发现存在 ${warningCount} 个警告`;
 }
 
 function mergeGameServerAdminEndpoints(instances: any[], endpoints: any[]): any[] {

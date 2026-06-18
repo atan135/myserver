@@ -123,9 +123,36 @@
               <span class="registry-title">Registry 服务发现</span>
               <span class="registry-subtitle">实例、Endpoint 与 Heartbeat TTL</span>
             </div>
-            <span class="registry-updated">更新 {{ formatTimestamp(registry.data?.checked_at) }}</span>
+            <div class="registry-header-right">
+              <el-tag :type="registryAlertTagType" size="small">{{ registryAlertText }}</el-tag>
+              <span class="registry-updated">更新 {{ formatTimestamp(registry.data?.checked_at) }}</span>
+            </div>
           </div>
         </template>
+
+        <el-alert
+          v-if="registryAlerts.length"
+          class="registry-alert"
+          :type="registryAlertType"
+          :title="registry.data.alert_message"
+          :closable="false"
+          show-icon
+        >
+          <div class="registry-alert-list">
+            <div
+              v-for="alert in visibleRegistryAlerts"
+              :key="registryAlertKey(alert)"
+              class="registry-alert-item"
+            >
+              <el-tag :type="discoveryAlertTagType(alert)" size="small">{{ discoveryAlertSeverityText(alert) }}</el-tag>
+              <span class="registry-alert-message">{{ alert.message }}</span>
+              <span v-if="alert.count" class="registry-alert-count">x{{ alert.count }}</span>
+            </div>
+            <div v-if="registryAlerts.length > visibleRegistryAlerts.length" class="registry-alert-more">
+              还有 {{ registryAlerts.length - visibleRegistryAlerts.length }} 条告警
+            </div>
+          </div>
+        </el-alert>
 
         <el-table
           :data="registryServices"
@@ -198,6 +225,14 @@
           <el-table-column label="Endpoint 摘要" min-width="260">
             <template #default="{ row }">
               <span class="registry-summary">{{ endpointSummary(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="告警" width="90">
+            <template #default="{ row }">
+              <el-tag v-if="row.alerts?.length" :type="serviceAlertTagType(row)" size="small">
+                {{ row.alerts.length }}
+              </el-tag>
+              <span v-else class="empty-text">--</span>
             </template>
           </el-table-column>
           <el-table-column label="最后注册" width="150">
@@ -335,6 +370,37 @@ const hasRolloutSamples = computed(() => {
 });
 
 const registryServices = computed(() => registry.data?.services || []);
+const registryAlerts = computed(() => registry.data?.alerts || []);
+const visibleRegistryAlerts = computed(() => registryAlerts.value.slice(0, 5));
+
+const registryAlertType = computed(() => {
+  if (registry.data?.alert_level === "critical") {
+    return "error";
+  }
+  if (registry.data?.alert_level === "warning") {
+    return "warning";
+  }
+  return "info";
+});
+
+const registryAlertTagType = computed(() => {
+  if (registry.data?.alert_level === "critical") {
+    return "danger";
+  }
+  if (registry.data?.alert_level === "warning") {
+    return "warning";
+  }
+  return "success";
+});
+
+const registryAlertText = computed(() => {
+  const labels = {
+    critical: "严重告警",
+    warning: "发现警告",
+    info: "正常"
+  };
+  return labels[registry.data?.alert_level] || "未知";
+});
 
 function rolloutInstanceTagType(instance) {
   if (instance.alert_level === "critical") {
@@ -386,12 +452,27 @@ async function fetchRegistry() {
     const response = await monitoringApi.getRegistry();
     registry.data = {
       checked_at: response.data?.checked_at || Date.now(),
+      alert_level: response.data?.alert_level || "info",
+      alert_message: response.data?.alert_message || "服务发现正常",
+      alerts: Array.isArray(response.data?.alerts) ? response.data.alerts : [],
       services: Array.isArray(response.data?.services) ? response.data.services : []
     };
   } catch (error) {
     console.error("Failed to fetch registry:", error);
     registry.data = {
       checked_at: Date.now(),
+      alert_level: "critical",
+      alert_message: "Registry 状态获取失败",
+      alerts: [
+        {
+          kind: "discovery_failure",
+          service: "admin-api",
+          endpoint: "registry",
+          instance_id: "",
+          severity: "critical",
+          message: error.response?.data?.message || error.message || "Registry 状态获取失败"
+        }
+      ],
       services: []
     };
   } finally {
@@ -497,6 +578,40 @@ function registryServiceTagType(service) {
     return "info";
   }
   return "danger";
+}
+
+function discoveryAlertTagType(alert) {
+  if (alert.severity === "critical") {
+    return "danger";
+  }
+  if (alert.severity === "warning") {
+    return "warning";
+  }
+  return "info";
+}
+
+function discoveryAlertSeverityText(alert) {
+  const labels = {
+    critical: "严重",
+    warning: "警告",
+    info: "提示"
+  };
+  return labels[alert.severity] || "告警";
+}
+
+function serviceAlertTagType(service) {
+  const alerts = service.alerts || [];
+  if (alerts.some((alert) => alert.severity === "critical")) {
+    return "danger";
+  }
+  if (alerts.some((alert) => alert.severity === "warning")) {
+    return "warning";
+  }
+  return "info";
+}
+
+function registryAlertKey(alert) {
+  return [alert.kind, alert.service, alert.endpoint, alert.instance_id, alert.reason].join(":");
 }
 
 function formatEndpoint(endpoint) {
@@ -632,6 +747,13 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
+.registry-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .rollout-title,
 .registry-title {
   font-weight: 600;
@@ -694,6 +816,35 @@ onUnmounted(() => {
 
 .registry-table {
   width: 100%;
+}
+
+.registry-alert {
+  margin-bottom: 12px;
+}
+
+.registry-alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.registry-alert-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.registry-alert-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.registry-alert-count,
+.registry-alert-more {
+  color: #909399;
+  font-size: 12px;
 }
 
 .registry-instances {
