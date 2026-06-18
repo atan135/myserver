@@ -162,6 +162,22 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 本节只定义健康检查必须验证的内容，不定义具体接口形态，不新增自动化测试，也不要求启动任何服务。
 
+### 5.4 测试/线上统一部署步骤
+
+测试、预发和线上必须使用同一套部署状态机，不能为不同环境维护不同流程；环境之间只允许在环境变量、实例规模、域名或入口地址上存在差异。测试环境演练应完整覆盖与线上一致的注册、健康检查、接流量、下线、注销步骤，并把这些步骤作为测试/线上准入依据。
+
+统一部署步骤如下：
+
+1. 注册：进程按 5.1 顺序启动后，先向 Redis service registry 发布自身 endpoint，并开始维持 heartbeat。发布内容必须与当前环境配置一致，包括 service name、endpoint name、protocol、host、port、socket、visibility 和 instance id 等基础字段。
+2. 健康检查：部署系统或控制面按 5.3 的 readiness 必检项确认 registry 可访问、自身注册记录存在、heartbeat 未过期，并确认必要依赖 endpoint 可发现。readiness 通过前，实例只能停留在隔离状态，不能被入口、控制面或 rollout 选择。
+3. 接流量：readiness 通过后，实例才允许进入对应流量目标，包括 LB、DNS、gateway upstream、admin/control target 或 rollout target。接流量动作应以 registry 和控制面观察到的健康状态为准，不能因为进程存活就直接加入目标。
+4. 下线：实例退出服务前，先从接新流量路径移除，或进入 drain 状态；随后等待现有连接、房间、后台任务、异步通知或控制面操作达到安全收敛。该步骤只定义下线状态边界，滚动发布中的旧实例 drain 和 route store 清理细节由后续滚动发布流程单独定义。
+5. 注销：安全收敛后停止 heartbeat，执行 deregister，并确认 registry 中该实例不再可被发现。注销完成前，部署系统不得把同一实例视为已完全退出。
+
+本地 dev-stack 可以继续保留简化启动顺序和非严格发现下的 local fallback，用于单机开发和快速联调；但 dev-stack 的简化流程不能作为测试、预发或线上准入依据。任何测试/预发/线上演练都必须覆盖上述完整状态机，避免出现本地默认 host/port、静态 upstream 或手工绕过 registry 的部署路径。
+
+本节只定义统一部署流程和状态边界，不实现脚本、健康检查接口、LB/DNS/gateway 更新接口或服务启动逻辑。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
