@@ -290,13 +290,16 @@ export function normalizeEndpoint(endpoint) {
     return null;
   }
 
+  const protocol = String(endpoint.protocol ?? "");
+  const socket = String(endpoint.socket ?? "");
+  const visibility = String(endpoint.visibility ?? "");
   const normalized = {
     name: String(endpoint.name ?? ""),
-    protocol: String(endpoint.protocol ?? ""),
+    protocol,
     host: String(endpoint.host ?? ""),
     port: toPort(endpoint.port ?? 0),
-    socket: String(endpoint.socket ?? ""),
-    visibility: String(endpoint.visibility ?? "internal"),
+    socket,
+    visibility: visibility || (socket ? "local" : "internal"),
     metadata: isPlainObject(endpoint.metadata) ? endpoint.metadata : {},
     healthy: endpoint.healthy !== false
   };

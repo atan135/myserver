@@ -82,6 +82,173 @@ fn v2_endpoint_normalization_keeps_valid_endpoints_without_legacy_backfill() {
 }
 
 #[test]
+fn endpoint_normalization_accepts_supported_visibilities() {
+    let json = r#"{
+        "schema_version": 2,
+        "id": "visibility-001",
+        "name": "visibility-service",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "endpoints": [
+            {
+                "name": "public-http",
+                "protocol": "http",
+                "host": "127.0.0.1",
+                "port": 9000,
+                "socket": "",
+                "visibility": "public",
+                "metadata": {},
+                "healthy": true
+            },
+            {
+                "name": "internal-grpc",
+                "protocol": "grpc",
+                "host": "127.0.0.1",
+                "port": 9001,
+                "socket": "",
+                "visibility": "internal",
+                "metadata": {},
+                "healthy": true
+            },
+            {
+                "name": "admin-tcp",
+                "protocol": "tcp",
+                "host": "127.0.0.1",
+                "port": 9002,
+                "socket": "",
+                "visibility": "admin",
+                "metadata": {},
+                "healthy": true
+            },
+            {
+                "name": "local-socket",
+                "protocol": "local_socket",
+                "host": "",
+                "port": 0,
+                "socket": "visibility.sock",
+                "visibility": "local",
+                "metadata": {},
+                "healthy": true
+            }
+        ],
+        "healthy": true
+    }"#;
+
+    let instance = serde_json::from_str::<ServiceInstance>(json)
+        .expect("visibility instance")
+        .normalized();
+
+    assert_eq!(
+        endpoint(&instance, "public-http")
+            .expect("public endpoint")
+            .visibility,
+        "public"
+    );
+    assert_eq!(
+        endpoint(&instance, "internal-grpc")
+            .expect("internal endpoint")
+            .visibility,
+        "internal"
+    );
+    assert_eq!(
+        endpoint(&instance, "admin-tcp")
+            .expect("admin endpoint")
+            .visibility,
+        "admin"
+    );
+    assert_eq!(
+        endpoint(&instance, "local-socket")
+            .expect("local endpoint")
+            .visibility,
+        "local"
+    );
+}
+
+#[test]
+fn invalid_endpoint_visibility_is_rejected_by_validation() {
+    let invalid = ServiceEndpoint::tcp("private-http", "127.0.0.1", 9000, "private");
+    assert!(!invalid.is_valid());
+
+    let json = r#"{
+        "schema_version": 2,
+        "id": "invalid-visibility-001",
+        "name": "invalid-visibility-service",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "endpoints": [
+            {
+                "name": "private-http",
+                "protocol": "http",
+                "host": "127.0.0.1",
+                "port": 9000,
+                "socket": "",
+                "visibility": "private",
+                "metadata": {},
+                "healthy": true
+            }
+        ],
+        "healthy": true
+    }"#;
+
+    let instance = serde_json::from_str::<ServiceInstance>(json)
+        .expect("invalid visibility instance")
+        .normalized();
+
+    assert!(endpoint(&instance, "private-http").is_none());
+}
+
+#[test]
+fn empty_endpoint_visibility_uses_protocol_default() {
+    let json = r#"{
+        "schema_version": 2,
+        "id": "default-visibility-001",
+        "name": "default-visibility-service",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "endpoints": [
+            {
+                "name": "tcp-default",
+                "protocol": "tcp",
+                "host": "127.0.0.1",
+                "port": 9000,
+                "socket": "",
+                "visibility": "",
+                "metadata": {},
+                "healthy": true
+            },
+            {
+                "name": "socket-default",
+                "protocol": "local_socket",
+                "host": "",
+                "port": 0,
+                "socket": "default.sock",
+                "visibility": "",
+                "metadata": {},
+                "healthy": true
+            }
+        ],
+        "healthy": true
+    }"#;
+
+    let instance = serde_json::from_str::<ServiceInstance>(json)
+        .expect("default visibility instance")
+        .normalized();
+
+    assert_eq!(
+        endpoint(&instance, "tcp-default")
+            .expect("tcp endpoint")
+            .visibility,
+        "internal"
+    );
+    assert_eq!(
+        endpoint(&instance, "socket-default")
+            .expect("socket endpoint")
+            .visibility,
+        "local"
+    );
+}
+
+#[test]
 fn v2_explicit_empty_endpoints_does_not_use_legacy_backfill() {
     let json = r#"{
         "schema_version": 2,
