@@ -26,6 +26,8 @@ const CONFIG_ENV_KEYS = [
   "HOST",
   "GAME_PROXY_HOST",
   "GAME_PROXY_PORT",
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT",
   "TICKET_SECRET",
   "GAME_ADMIN_TOKEN",
   "INTERNAL_API_TOKEN"
@@ -181,6 +183,23 @@ test("auth-http reads game-proxy host and port as local fallback config", async 
     assert.equal(config.registryDiscoveryRequired, false);
     assert.equal(config.gameProxyHost, "127.0.0.2");
     assert.equal(config.gameProxyPort, 4100);
+  });
+});
+
+test("auth-http ignores direct consumer endpoint env outside local fallback", async () => {
+  await withEnv({
+    NODE_ENV: "test",
+    REGISTRY_ENABLED: "true",
+    GAME_PROXY_HOST: "203.0.113.10",
+    GAME_PROXY_PORT: "4100",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_SERVER_ADMIN_PORT: "17500"
+  }, (config) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameProxyHost, "127.0.0.1");
+    assert.equal(config.gameProxyPort, 4000);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameServerAdminPort, 7500);
   });
 });
 

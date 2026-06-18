@@ -14,6 +14,7 @@ pub struct Config {
     pub match_cleanup_interval_secs: u64,
     pub game_server_service_name: String,
     pub game_server_internal_socket_name: String,
+    pub local_discovery_fallback_enabled: bool,
     pub game_server_discovery_cache_ttl_secs: u64,
     pub game_server_target_zone: String,
     pub game_internal_token: String,
@@ -77,8 +78,13 @@ impl Config {
                 match_timeout_secs: 90,
             },
         );
-        let game_server_local_socket_name = std::env::var("GAME_LOCAL_SOCKET_NAME")
-            .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
+        let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
+        let game_server_local_socket_name = if local_discovery_fallback_enabled {
+            std::env::var("GAME_LOCAL_SOCKET_NAME")
+                .unwrap_or_else(|_| "myserver-game-server.sock".to_string())
+        } else {
+            "myserver-game-server.sock".to_string()
+        };
 
         let config = Self {
             bind_addr: bind_addr.clone(),
@@ -106,9 +112,14 @@ impl Config {
                 .unwrap_or(1),
             game_server_service_name: std::env::var("GAME_SERVER_SERVICE_NAME")
                 .unwrap_or_else(|_| "game-server".to_string()),
-            game_server_internal_socket_name: std::env::var("GAME_SERVER_INTERNAL_SOCKET_NAME")
-                .or_else(|_| std::env::var("GAME_INTERNAL_SOCKET_NAME"))
-                .unwrap_or_else(|_| derive_internal_socket_name(&game_server_local_socket_name)),
+            game_server_internal_socket_name: if local_discovery_fallback_enabled {
+                std::env::var("GAME_SERVER_INTERNAL_SOCKET_NAME")
+                    .or_else(|_| std::env::var("GAME_INTERNAL_SOCKET_NAME"))
+                    .unwrap_or_else(|_| derive_internal_socket_name(&game_server_local_socket_name))
+            } else {
+                derive_internal_socket_name(&game_server_local_socket_name)
+            },
+            local_discovery_fallback_enabled,
             game_server_discovery_cache_ttl_secs: std::env::var(
                 "GAME_SERVER_DISCOVERY_CACHE_TTL_SECS",
             )
@@ -286,6 +297,24 @@ fn is_strict_discovery_env() -> bool {
     })
 }
 
+fn is_local_discovery_fallback_env() -> bool {
+    if is_strict_discovery_env() {
+        return false;
+    }
+
+    let names = ["NODE_ENV", "APP_ENV"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    names.is_empty()
+        || names
+            .iter()
+            .any(|value| matches!(value.as_str(), "development" | "local"))
+}
+
 fn parse_bool_env(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
@@ -355,6 +384,9 @@ mod tests {
         "SERVICE_ADVERTISED_HOST",
         "MATCH_BIND_ADDR",
         "MATCH_PUBLIC_HOST",
+        "GAME_LOCAL_SOCKET_NAME",
+        "GAME_SERVER_INTERNAL_SOCKET_NAME",
+        "GAME_INTERNAL_SOCKET_NAME",
         "SERVICE_NAME",
         "SERVICE_INSTANCE_ID",
         "SERVICE_ZONE",
@@ -521,6 +553,29 @@ mod tests {
         let config = Config::from_env();
 
         assert_eq!(config.public_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn ignores_game_server_internal_socket_env_outside_local_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("GAME_LOCAL_SOCKET_NAME", "custom-local.sock");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+        }
+
+        let config = Config::from_env();
+
+        assert!(!config.local_discovery_fallback_enabled);
+        assert_eq!(
+            config.game_server_internal_socket_name,
+            "myserver-game-server-internal.sock"
+        );
     }
 
     #[test]

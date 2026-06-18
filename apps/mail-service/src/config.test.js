@@ -10,6 +10,8 @@ const CONFIG_ENV_NAMES = [
   "GAME_ADMIN_WRITE_TIMEOUT_MS",
   "GAME_ADMIN_READ_TIMEOUT_MS",
   "GAME_ADMIN_MAX_RESPONSE_BYTES",
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT",
   "REGISTRY_ENABLED",
   "DISCOVERY_REQUIRED",
   "REGISTRY_KEY_PREFIX",
@@ -87,6 +89,21 @@ test("mail-service game admin network limits read positive values", async () => 
     assert.equal(config.gameAdminWriteTimeoutMs, 202);
     assert.equal(config.gameAdminReadTimeoutMs, 303);
     assert.equal(config.gameAdminMaxResponseBytes, 4097);
+  });
+});
+
+test("mail-service ignores direct consumer endpoint env outside local fallback", async () => {
+  await withEnv({
+    APP_ENV: "test",
+    REGISTRY_ENABLED: "true",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_SERVER_ADMIN_PORT: "17500"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameServerAdminPort, 7500);
   });
 });
 

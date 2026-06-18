@@ -173,8 +173,8 @@ export class MonitoringService {
           blocked_player_samples: []
         },
         upstream: {
-          host: this.config.gameProxyAdminHost,
-          port: this.config.gameProxyAdminPort
+          host: this.config.localDiscoveryFallbackEnabled ? this.config.gameProxyAdminHost : null,
+          port: this.config.localDiscoveryFallbackEnabled ? this.config.gameProxyAdminPort : null
         },
         instances: []
       };
@@ -339,7 +339,7 @@ export class MonitoringService {
 
   private async getGameServerAdminEndpoints(): Promise<any[]> {
     if (!this.config.registryDiscoveryEnabled) {
-      if (this.config.registryDiscoveryRequired) {
+      if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
         return [];
       }
 
@@ -364,7 +364,7 @@ export class MonitoringService {
 
   private async getGameProxyAdminEndpoints(): Promise<any[]> {
     if (!this.config.registryDiscoveryEnabled) {
-      if (this.config.registryDiscoveryRequired) {
+      if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
         const error: any = new Error("Required registry discovery failed: REGISTRY_ENABLED=false");
         error.code = "SERVICE_DISCOVERY_REQUIRED";
         throw error;

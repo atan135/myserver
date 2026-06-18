@@ -40,6 +40,7 @@ function createConfig(overrides = {}) {
     gameProxyPort: 4000,
     registryDiscoveryEnabled: false,
     registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: true,
     authExposeInternalServiceEndpoints: true,
     ...overrides
   };
@@ -428,6 +429,26 @@ test("ServiceDiscovery does not fabricate side service endpoints when registry d
       port: 4000,
       protocol: "kcp"
     },
+    chat: null,
+    mail: null,
+    announce: null
+  });
+});
+
+test("ServiceDiscovery does not use game-proxy direct fallback when local fallback is disabled", async () => {
+  const discovery = new ServiceDiscovery(
+    createRedis({}),
+    createConfig({
+      gameProxyHost: "203.0.113.10",
+      gameProxyPort: 4100,
+      registryDiscoveryEnabled: false,
+      registryDiscoveryRequired: false,
+      localDiscoveryFallbackEnabled: false
+    })
+  );
+
+  assert.deepEqual(await discovery.discoverClientServices(), {
+    game: null,
     chat: null,
     mail: null,
     announce: null

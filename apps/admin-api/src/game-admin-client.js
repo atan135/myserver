@@ -294,7 +294,7 @@ export class GameAdminClient {
 
   async listAdminEndpoints() {
     if (!this.config.registryDiscoveryEnabled) {
-      if (this.config.registryDiscoveryRequired) {
+      if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
         throw createAdminError(
           "SERVICE_DISCOVERY_REQUIRED",
           "Required registry discovery failed: REGISTRY_ENABLED=false"

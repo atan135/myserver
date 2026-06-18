@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decodeRequestServerShutdownRes, decodeRolloutDrainStatusRes } from "./game-admin-client.js";
+import {
+  GameAdminClient,
+  decodeRequestServerShutdownRes,
+  decodeRolloutDrainStatusRes
+} from "./game-admin-client.js";
 
 function varint(value) {
   let remaining = BigInt(value);
@@ -102,4 +106,96 @@ test("decodeRequestServerShutdownRes exposes shutdown safety gate fields", () =>
     drainModeEnabled: true,
     retiredRoomCount: 3
   });
+});
+
+function createDiscoveryRedis(instances) {
+  const hashes = new Map();
+  const keys = new Set();
+
+  for (const instance of instances) {
+    hashes.set(`service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+    keys.add(`heartbeat:game-server:${instance.id}`);
+  }
+
+  return {
+    async scan(cursor, _match, pattern) {
+      if (cursor !== "0") {
+        return ["0", []];
+      }
+      const prefix = pattern.replace("*", "");
+      return [
+        "0",
+        [...hashes.keys()]
+          .map((key) => key.slice(0, -5))
+          .filter((key) => key.startsWith(prefix))
+      ];
+    },
+    async exists(key) {
+      return keys.has(key) ? 1 : 0;
+    },
+    async hget(key, field) {
+      return hashes.get(`${key}:${field}`) || null;
+    }
+  };
+}
+
+function gameServerInstance(id, host, port) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host,
+    port: 7000,
+    admin_port: port,
+    local_socket: "",
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host,
+        port,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+}
+
+test("auth GameAdminClient lists discovered game-server admin endpoints", async () => {
+  const client = new GameAdminClient(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createDiscoveryRedis([
+      gameServerInstance("game-server-a", "10.0.0.1", 7500),
+      gameServerInstance("game-server-b", "10.0.0.2", 7501)
+    ])
+  );
+
+  const endpoints = await client.listAdminEndpoints();
+
+  assert.deepEqual(
+    endpoints.map((endpoint) => [endpoint.instanceId, endpoint.host, endpoint.port]),
+    [
+      ["game-server-a", "10.0.0.1", 7500],
+      ["game-server-b", "10.0.0.2", 7501]
+    ]
+  );
+});
+
+test("auth GameAdminClient rejects direct fallback when local fallback is disabled", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: false,
+    gameServerAdminHost: "203.0.113.20",
+    gameServerAdminPort: 17500
+  });
+
+  await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });
 });

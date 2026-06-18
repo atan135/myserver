@@ -7,6 +7,10 @@ import {
 import { serviceUnavailable } from "./common/http-exception.js";
 
 function createGameService(config) {
+  if (!config.localDiscoveryFallbackEnabled) {
+    return null;
+  }
+
   return {
     host: config.gameProxyHost,
     port: config.gameProxyPort,

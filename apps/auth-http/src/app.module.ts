@@ -87,8 +87,8 @@ import {
     },
     {
       provide: AUTH_GAME_ADMIN_CLIENT,
-      inject: [AUTH_CONFIG],
-      useFactory: (config: any) => new GameAdminClient(config)
+      inject: [AUTH_CONFIG, AUTH_REDIS],
+      useFactory: (config: any, redis: any) => new GameAdminClient(config, redis)
     },
     {
       provide: AUTH_RATE_LIMITER,

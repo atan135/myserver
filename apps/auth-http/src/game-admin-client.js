@@ -1,6 +1,8 @@
 import net from "node:net";
 import { createRequire } from "node:module";
 
+import { discoverGameServerAdminEndpoints } from "./registry-client.js";
+
 const require = createRequire(import.meta.url);
 const {
   ServerStatusReq,
@@ -293,10 +295,14 @@ export function decodeRequestServerShutdownRes(body) {
   };
 }
 
-async function sendAdminRequest(config, messageType, payload, expectedType, decodeMessage) {
-  const socket = net.createConnection({
+async function sendAdminRequest(config, messageType, payload, expectedType, decodeMessage, endpoint = null) {
+  const target = endpoint || {
     host: config.gameServerAdminHost,
     port: config.gameServerAdminPort
+  };
+  const socket = net.createConnection({
+    host: target.host,
+    port: target.port
   });
 
   try {
@@ -468,11 +474,64 @@ function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 10
 }
 
 export class GameAdminClient {
-  constructor(config) {
+  constructor(config, redis = null) {
     this.config = config;
+    this.redis = redis;
+  }
+
+  async listAdminEndpoints() {
+    if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired || !this.config.localDiscoveryFallbackEnabled) {
+        throw createAdminError(
+          "SERVICE_DISCOVERY_REQUIRED",
+          "Required registry discovery failed: REGISTRY_ENABLED=false"
+        );
+      }
+
+      return [
+        {
+          service: "game-server",
+          instanceId: "local-fallback",
+          instance_id: "local-fallback",
+          endpointName: "admin",
+          endpoint_name: "admin",
+          protocol: "tcp",
+          host: this.config.gameServerAdminHost,
+          port: this.config.gameServerAdminPort,
+          healthy: true,
+          fallback: true
+        }
+      ];
+    }
+
+    if (!this.redis) {
+      throw createAdminError(
+        "SERVICE_DISCOVERY_UNAVAILABLE",
+        "Redis client is required for game-server admin discovery"
+      );
+    }
+
+    return discoverGameServerAdminEndpoints(this.redis, this.config.registryKeyPrefix || "");
+  }
+
+  async resolveAdminEndpoint(options = {}) {
+    if (options.endpoint) {
+      return options.endpoint;
+    }
+
+    const endpoints = await this.listAdminEndpoints();
+    if (endpoints.length === 0) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND",
+        "game-server admin endpoint not found in service registry"
+      );
+    }
+
+    return endpoints[0];
   }
 
   async getServerStatus() {
+    const endpoint = await this.resolveAdminEndpoint();
     return sendAdminRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_SERVER_STATUS_REQ,
@@ -487,7 +546,8 @@ export class GameAdminClient {
           maxBodyLen: message.getMaxBodyLen(),
           heartbeatTimeoutSecs: message.getHeartbeatTimeoutSecs()
         };
-      }
+      },
+      endpoint
     );
   }
 
@@ -507,27 +567,32 @@ export class GameAdminClient {
           ok: message.getOk(),
           errorCode: message.getErrorCode()
         };
-      }
+      },
+      await this.resolveAdminEndpoint()
     );
   }
 
   async getRolloutDrainStatus() {
+    const endpoint = await this.resolveAdminEndpoint();
     return sendAdminRequest(
       this.config,
       MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_REQ,
       { serializeBinary: () => Buffer.alloc(0) },
       MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_RES,
-      decodeRolloutDrainStatusRes
+      decodeRolloutDrainStatusRes,
+      endpoint
     );
   }
 
   async requestServerShutdown(reason = "") {
+    const endpoint = await this.resolveAdminEndpoint();
     return sendAdminRequest(
       this.config,
       MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ,
       { serializeBinary: () => encodeRequestServerShutdownReq(reason) },
       MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES,
-      decodeRequestServerShutdownRes
+      decodeRequestServerShutdownRes,
+      endpoint
     );
   }
 }

@@ -107,7 +107,7 @@ impl GameServerClient {
         let discovery_required = self.config.discovery_required;
 
         if !self.config.registry_enabled {
-            if discovery_required {
+            if discovery_required || !self.config.local_discovery_fallback_enabled {
                 return Err(MatchError::RoomCreateFailed(
                     "required registry discovery failed: REGISTRY_ENABLED=false for game-server.internal"
                         .to_string(),
@@ -139,7 +139,7 @@ impl GameServerClient {
                 Ok(socket)
             }
             Err(error) => {
-                if discovery_required {
+                if discovery_required || !self.config.local_discovery_fallback_enabled {
                     return Err(error);
                 }
                 tracing::warn!(
@@ -580,6 +580,7 @@ mod tests {
             match_cleanup_interval_secs: 1,
             game_server_service_name: "game-server".to_string(),
             game_server_internal_socket_name: "fallback.sock".to_string(),
+            local_discovery_fallback_enabled: true,
             game_server_discovery_cache_ttl_secs: 1,
             game_server_target_zone: String::new(),
             game_internal_token: "dev-only-change-this-game-internal-token".to_string(),
@@ -669,6 +670,7 @@ mod tests {
         let mut config = test_config();
         config.discovery_required = false;
         config.registry_enabled = false;
+        config.local_discovery_fallback_enabled = true;
         let client = GameServerClient::new(&config);
 
         let socket = client
@@ -677,5 +679,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(socket, "fallback.sock");
+    }
+
+    #[tokio::test]
+    async fn registry_disabled_rejects_fallback_when_local_fallback_is_disabled() {
+        let mut config = test_config();
+        config.discovery_required = false;
+        config.registry_enabled = false;
+        config.local_discovery_fallback_enabled = false;
+        config.game_server_internal_socket_name = "custom-internal.sock".to_string();
+        let client = GameServerClient::new(&config);
+
+        let error = client
+            .resolve_internal_socket_name("match-1", "1v1")
+            .await
+            .expect_err("non-local config should reject direct fallback")
+            .to_string();
+
+        assert!(error.contains("REGISTRY_ENABLED=false"));
     }
 }

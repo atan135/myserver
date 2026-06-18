@@ -20,6 +20,8 @@ const CONFIG_ENV_KEYS = [
   "GAME_ADMIN_WRITE_TIMEOUT_MS",
   "GAME_ADMIN_READ_TIMEOUT_MS",
   "GAME_ADMIN_MAX_RESPONSE_BYTES",
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT",
   "GAME_PROXY_ADMIN_HOST",
   "GAME_PROXY_ADMIN_PORT",
   "GAME_PROXY_ADMIN_TOKEN",
@@ -146,6 +148,23 @@ test("admin-api game-proxy admin monitoring config reads positive values", async
     assert.equal(config.gameProxyAdminReadToken, "proxy-read-token");
     assert.equal(config.gameProxyAdminRequestTimeoutMs, 1500);
     assert.equal(config.gameProxyAdminMaxResponseBytes, 2048);
+  });
+});
+
+test("admin-api ignores direct consumer endpoint env outside local fallback", async () => {
+  await withEnv({
+    NODE_ENV: "test",
+    REGISTRY_ENABLED: "true",
+    GAME_SERVER_ADMIN_HOST: "203.0.113.20",
+    GAME_SERVER_ADMIN_PORT: "17500",
+    GAME_PROXY_ADMIN_HOST: "203.0.113.30",
+    GAME_PROXY_ADMIN_PORT: "17101"
+  }, (config) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, false);
+    assert.equal(config.gameServerAdminHost, "127.0.0.1");
+    assert.equal(config.gameServerAdminPort, 7500);
+    assert.equal(config.gameProxyAdminHost, "127.0.0.1");
+    assert.equal(config.gameProxyAdminPort, 7101);
   });
 });
 

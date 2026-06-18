@@ -74,6 +74,17 @@ function isStrictDiscoveryEnv() {
   );
 }
 
+function isLocalDiscoveryFallbackEnv() {
+  if (isStrictDiscoveryEnv()) {
+    return false;
+  }
+
+  const names = [process.env.NODE_ENV, process.env.APP_ENV]
+    .map((value) => typeof value === "string" ? value.trim().toLowerCase() : "")
+    .filter(Boolean);
+  return names.length === 0 || names.some((value) => ["development", "local"].includes(value));
+}
+
 function validateDiscoveryConfig(config) {
   if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
     throw new Error("Invalid mail-service discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
@@ -124,6 +135,7 @@ function isWeakSecret(value) {
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
+  const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const config = {
     appName: "mail-service",
     env,
@@ -144,10 +156,16 @@ export function getConfig() {
       process.env.DATABASE_URL ||
       "postgres://postgres:password@127.0.0.1:5432/myserver_mail",
     dbPoolSize: Number.parseInt(process.env.DB_POOL_SIZE || "10", 10),
-    gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
-    gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
+    gameServerAdminHost: localDiscoveryFallbackEnabled
+      ? process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1"
+      : "127.0.0.1",
+    gameServerAdminPort: Number.parseInt(
+      localDiscoveryFallbackEnabled ? process.env.GAME_SERVER_ADMIN_PORT || "7500" : "7500",
+      10
+    ),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
     registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    localDiscoveryFallbackEnabled,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),

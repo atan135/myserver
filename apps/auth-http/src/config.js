@@ -88,6 +88,17 @@ function isStrictDiscoveryEnv() {
   );
 }
 
+function isLocalDiscoveryFallbackEnv() {
+  if (isStrictDiscoveryEnv()) {
+    return false;
+  }
+
+  const names = [process.env.NODE_ENV, process.env.APP_ENV]
+    .map((value) => typeof value === "string" ? value.trim().toLowerCase() : "")
+    .filter(Boolean);
+  return names.length === 0 || names.some((value) => ["development", "local"].includes(value));
+}
+
 function validateProductionConfig(config) {
   if (!isProductionEnv()) {
     return;
@@ -124,6 +135,7 @@ function validateDiscoveryConfig(config) {
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
+  const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const config = {
     appName: "auth-http",
     env,
@@ -166,9 +178,11 @@ export function getConfig() {
       process.env.TICKET_TTL_SECONDS || "900",
       10
     ),
-    gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
+    gameServerAdminHost: localDiscoveryFallbackEnabled
+      ? process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1"
+      : "127.0.0.1",
     gameServerAdminPort: Number.parseInt(
-      process.env.GAME_SERVER_ADMIN_PORT || "7500",
+      localDiscoveryFallbackEnabled ? process.env.GAME_SERVER_ADMIN_PORT || "7500" : "7500",
       10
     ),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
@@ -177,10 +191,16 @@ export function getConfig() {
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
-    gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
-    gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
+    gameProxyHost: localDiscoveryFallbackEnabled
+      ? process.env.GAME_PROXY_HOST || "127.0.0.1"
+      : "127.0.0.1",
+    gameProxyPort: Number.parseInt(
+      localDiscoveryFallbackEnabled ? process.env.GAME_PROXY_PORT || "4000" : "4000",
+      10
+    ),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
     registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    localDiscoveryFallbackEnabled,
     authExposeInternalServiceEndpoints: parseBoolean(
       process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS,
       !isProductionEnv()

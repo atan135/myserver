@@ -37,7 +37,15 @@ export class AuthService {
   }
 
   getGameProxyDescriptor(services: any = null) {
-    return services?.game || {
+    if (services && Object.prototype.hasOwnProperty.call(services, "game")) {
+      return services.game || null;
+    }
+
+    if (!this.config.localDiscoveryFallbackEnabled) {
+      return null;
+    }
+
+    return {
       host: this.config.gameProxyHost,
       port: this.config.gameProxyPort,
       protocol: "kcp"
@@ -60,6 +68,9 @@ export class AuthService {
   async buildLoginSuccess(session: any) {
     const services = await this.buildServicePayload();
     const gameProxy = this.getGameProxyDescriptor(services);
+    if (!gameProxy) {
+      throw serviceUnavailable("SERVICE_DISCOVERY_UNAVAILABLE", "game-proxy client endpoint is unavailable");
+    }
 
     return {
       ok: true,

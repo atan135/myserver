@@ -108,6 +108,17 @@ function isStrictDiscoveryEnv() {
   );
 }
 
+function isLocalDiscoveryFallbackEnv() {
+  if (isStrictDiscoveryEnv()) {
+    return false;
+  }
+
+  const names = [process.env.NODE_ENV, process.env.APP_ENV]
+    .map((value) => typeof value === "string" ? value.trim().toLowerCase() : "")
+    .filter(Boolean);
+  return names.length === 0 || names.some((value) => ["development", "local"].includes(value));
+}
+
 function validateDiscoveryConfig(config) {
   if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
     throw new Error("Invalid admin-api discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
@@ -151,6 +162,7 @@ export function getConfig() {
   const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "8h";
   const jwtExpiresInSeconds = parseDurationSeconds(jwtExpiresIn, 28800);
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
+  const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const config = {
     appName: "admin-api",
     env,
@@ -194,17 +206,28 @@ export function getConfig() {
     adminApiRequireTls: parseBoolean(process.env.ADMIN_API_REQUIRE_TLS, env === "production"),
     adminApiRequireIpAllowlist: parseBoolean(process.env.ADMIN_API_REQUIRE_IP_ALLOWLIST, false),
     adminApiIpAllowlist: parseCsv(process.env.ADMIN_API_IP_ALLOWLIST),
-    gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
-    gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
+    gameServerAdminHost: localDiscoveryFallbackEnabled
+      ? process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1"
+      : "127.0.0.1",
+    gameServerAdminPort: Number.parseInt(
+      localDiscoveryFallbackEnabled ? process.env.GAME_SERVER_ADMIN_PORT || "7500" : "7500",
+      10
+    ),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
     registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    localDiscoveryFallbackEnabled,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
     gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
-    gameProxyAdminHost: process.env.GAME_PROXY_ADMIN_HOST || "127.0.0.1",
-    gameProxyAdminPort: Number.parseInt(process.env.GAME_PROXY_ADMIN_PORT || "7101", 10),
+    gameProxyAdminHost: localDiscoveryFallbackEnabled
+      ? process.env.GAME_PROXY_ADMIN_HOST || "127.0.0.1"
+      : "127.0.0.1",
+    gameProxyAdminPort: Number.parseInt(
+      localDiscoveryFallbackEnabled ? process.env.GAME_PROXY_ADMIN_PORT || "7101" : "7101",
+      10
+    ),
     gameProxyAdminToken: process.env.GAME_PROXY_ADMIN_TOKEN || "dev-only-change-this-proxy-admin-token",
     gameProxyAdminReadToken: process.env.GAME_PROXY_ADMIN_READ_TOKEN || "",
     gameProxyAdminRequestTimeoutMs: parsePositiveIntegerWithFallback(

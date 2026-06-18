@@ -248,6 +248,7 @@ mod tests {
             match_cleanup_interval_secs: 1,
             game_server_service_name: "game-server".to_string(),
             game_server_internal_socket_name: "myserver-game-server-internal.sock".to_string(),
+            local_discovery_fallback_enabled: true,
             game_server_discovery_cache_ttl_secs: 5,
             game_server_target_zone: String::new(),
             game_internal_token: "dev-only-change-this-game-internal-token".to_string(),

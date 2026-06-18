@@ -24,6 +24,7 @@ pub struct MatchClientConfig {
     /// MatchService 地址
     pub addr: String,
     pub fallback_addr: String,
+    pub local_discovery_fallback_enabled: bool,
     pub registry_enabled: bool,
     pub discovery_required: bool,
     pub registry_url: String,
@@ -34,10 +35,15 @@ pub struct MatchClientConfig {
 
 impl MatchClientConfig {
     pub async fn from_env() -> Self {
-        let fallback_addr = std::env::var("MATCH_SERVICE_ADDR")
-            .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
+        let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
+        let fallback_addr = if local_discovery_fallback_enabled {
+            std::env::var("MATCH_SERVICE_ADDR")
+                .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string())
+        } else {
+            "http://127.0.0.1:9002".to_string()
+        };
         let registry_enabled = env_flag("REGISTRY_ENABLED", false);
-        let discovery_required = env_flag("DISCOVERY_REQUIRED", false);
+        let discovery_required = env_flag("DISCOVERY_REQUIRED", false) || is_strict_discovery_env();
         let registry_url = std::env::var("REGISTRY_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -52,10 +58,14 @@ impl MatchClientConfig {
         );
 
         if !registry_enabled {
+            if discovery_required {
+                panic!("required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc");
+            }
             tracing::info!(source = "fallback", addr = %fallback_addr, "match-service address resolved");
             return Self {
                 addr: fallback_addr.clone(),
                 fallback_addr,
+                local_discovery_fallback_enabled,
                 registry_enabled,
                 discovery_required,
                 registry_url,
@@ -84,6 +94,7 @@ impl MatchClientConfig {
         Self {
             addr,
             fallback_addr,
+            local_discovery_fallback_enabled,
             registry_enabled,
             discovery_required,
             registry_url,
@@ -524,6 +535,33 @@ fn env_flag(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn is_strict_discovery_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        std::env::var(name).ok().is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+        })
+    })
+}
+
+fn is_local_discovery_fallback_env() -> bool {
+    if is_strict_discovery_env() {
+        return false;
+    }
+
+    let names = ["NODE_ENV", "APP_ENV"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    names.is_empty()
+        || names
+            .iter()
+            .any(|value| matches!(value.as_str(), "development" | "local"))
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -575,6 +613,8 @@ mod tests {
         "MATCH_SERVICE_ADDR",
         "MATCH_SERVICE_NAME",
         "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+        "NODE_ENV",
+        "APP_ENV",
         "REGISTRY_ENABLED",
         "DISCOVERY_REQUIRED",
         "REGISTRY_URL",
@@ -622,6 +662,25 @@ mod tests {
     }
 
     #[test]
+    fn local_fallback_is_disabled_in_test_environment() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "false");
+            env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
+        }
+
+        assert!(!is_local_discovery_fallback_env());
+        assert!(is_strict_discovery_env());
+    }
+
+    #[test]
     fn rebuild_decision_updates_on_missing_or_changed_client() {
         assert!(should_rebuild_match_client(
             None,
@@ -654,6 +713,7 @@ mod tests {
         let config = MatchClientConfig {
             addr: "http://127.0.0.1:9002".to_string(),
             fallback_addr: "http://127.0.0.1:9002".to_string(),
+            local_discovery_fallback_enabled: true,
             registry_enabled: false,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),

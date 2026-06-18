@@ -261,7 +261,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
         },
         ServiceEndpoint {
             name: "admin".to_string(),
-            protocol: "http".to_string(),
+            protocol: "tcp".to_string(),
             host: config.admin_advertised_host.clone(),
             port: config.admin_port,
             socket: String::new(),
@@ -374,6 +374,8 @@ mod tests {
         assert_eq!(instance.endpoints[0].name, "client");
         assert_eq!(instance.endpoints[0].host, "10.0.0.20");
         assert_eq!(instance.endpoints[1].name, "admin");
+        assert_eq!(instance.endpoints[1].protocol, "tcp");
         assert_eq!(instance.endpoints[1].host, "10.0.0.21");
+        assert_eq!(instance.endpoints[1].port, 7500);
     }
 }

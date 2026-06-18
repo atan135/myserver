@@ -195,8 +195,21 @@ test("GameAdminClient rejects local fallback when discovery is required", async 
   const client = new GameAdminClient({
     registryDiscoveryEnabled: false,
     registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: true,
     gameServerAdminHost: "127.0.0.1",
     gameServerAdminPort: 7500
+  });
+
+  await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });
+});
+
+test("GameAdminClient rejects direct fallback when local fallback is disabled", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: false,
+    gameServerAdminHost: "203.0.113.20",
+    gameServerAdminPort: 17500
   });
 
   await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });

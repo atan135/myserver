@@ -13,32 +13,36 @@ const { MonitoringService } = await import("./monitoring.service.ts");
 function makeService(config = {}) {
   const redis = {};
   const dbPool = {};
+  const baseConfig = {
+    gameProxyAdminHost: "127.0.0.1",
+    gameProxyAdminPort: 0,
+    gameProxyAdminToken: "write-token",
+    gameProxyAdminReadToken: "read-token",
+    gameProxyAdminRequestTimeoutMs: 500,
+    gameProxyAdminMaxResponseBytes: 4096,
+    localDiscoveryFallbackEnabled: true,
+    ...config
+  };
   return new MonitoringService(
-    {
-      gameProxyAdminHost: "127.0.0.1",
-      gameProxyAdminPort: 0,
-      gameProxyAdminToken: "write-token",
-      gameProxyAdminReadToken: "read-token",
-      gameProxyAdminRequestTimeoutMs: 500,
-      gameProxyAdminMaxResponseBytes: 4096,
-      ...config
-    },
+    baseConfig,
     redis,
     dbPool
   );
 }
 
 function makeMonitoringServiceWithRedis(config = {}, redis = {}) {
+  const baseConfig = {
+    gameProxyAdminHost: "127.0.0.1",
+    gameProxyAdminPort: 0,
+    gameProxyAdminToken: "write-token",
+    gameProxyAdminReadToken: "read-token",
+    gameProxyAdminRequestTimeoutMs: 500,
+    gameProxyAdminMaxResponseBytes: 4096,
+    localDiscoveryFallbackEnabled: true,
+    ...config
+  };
   return new MonitoringService(
-    {
-      gameProxyAdminHost: "127.0.0.1",
-      gameProxyAdminPort: 0,
-      gameProxyAdminToken: "write-token",
-      gameProxyAdminReadToken: "read-token",
-      gameProxyAdminRequestTimeoutMs: 500,
-      gameProxyAdminMaxResponseBytes: 4096,
-      ...config
-    },
+    baseConfig,
     redis,
     {}
   );
@@ -349,6 +353,23 @@ test("rolloutDrain rejects local fallback when discovery is required", async () 
   assert.equal(result.ok, false);
   assert.equal(result.status, "error");
   assert.equal(result.error, "SERVICE_DISCOVERY_REQUIRED");
+});
+
+test("rolloutDrain rejects direct proxy fallback when local fallback is disabled", async () => {
+  const service = makeService({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: false,
+    gameProxyAdminHost: "203.0.113.30",
+    gameProxyAdminPort: 17101
+  });
+  const result = await service.rolloutDrain();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "SERVICE_DISCOVERY_REQUIRED");
+  assert.equal(result.upstream.host, null);
+  assert.equal(result.upstream.port, null);
 });
 
 test("services returns all discovered game-server admin endpoints", async () => {
