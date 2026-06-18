@@ -1,10 +1,19 @@
 import { createNestApp, closeNestApp } from "./nest-app.js";
-import { ADMIN_CONFIG } from "./tokens.js";
+import { log } from "./logger.js";
+import { ADMIN_CONFIG, ADMIN_REGISTRY } from "./tokens.js";
 
 export async function bootstrap() {
   const app = await createNestApp();
   const config = app.get<any>(ADMIN_CONFIG);
   const httpServer = await app.listen(config.port, config.host);
+  const registryClient = app.get<any>(ADMIN_REGISTRY, { strict: false });
+
+  try {
+    await registryClient.register();
+    registryClient.startHeartbeat(10);
+  } catch (error: any) {
+    log("error", "startup.registry_failed", { error: error.message });
+  }
 
   const shutdown = async (signal: string) => {
     console.log(`Shutdown signal: ${signal}`);

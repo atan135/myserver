@@ -14,7 +14,8 @@ import {
   ADMIN_DB_POOL,
   ADMIN_METRICS,
   ADMIN_NATS,
-  ADMIN_REDIS
+  ADMIN_REDIS,
+  ADMIN_REGISTRY
 } from "./tokens.js";
 
 export async function createNestApp() {
@@ -58,6 +59,7 @@ export async function createNestApp() {
 
 export async function closeNestApp(app: INestApplication) {
   const metrics = app.get<any>(ADMIN_METRICS, { strict: false });
+  const registryClient = app.get<any>(ADMIN_REGISTRY, { strict: false });
   const redis = app.get<any>(ADMIN_REDIS, { strict: false });
   const nats = app.get<any>(ADMIN_NATS, { strict: false });
   const pool = app.get<any>(ADMIN_DB_POOL, { strict: false });
@@ -66,6 +68,14 @@ export async function closeNestApp(app: INestApplication) {
     await metrics?.stop?.();
   } catch (error: any) {
     log("error", "shutdown.metrics_stop_failed", { error: error.message });
+  }
+
+  registryClient?.stopHeartbeat?.();
+
+  try {
+    await registryClient?.deregister?.();
+  } catch (error: any) {
+    log("error", "shutdown.deregister_failed", { error: error.message });
   }
 
   try {

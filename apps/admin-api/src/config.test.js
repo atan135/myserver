@@ -25,7 +25,9 @@ const CONFIG_ENV_KEYS = [
   "GAME_PROXY_ADMIN_TOKEN",
   "GAME_PROXY_ADMIN_READ_TOKEN",
   "GAME_PROXY_ADMIN_REQUEST_TIMEOUT_MS",
-  "GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES"
+  "GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES",
+  "SERVICE_NAME",
+  "SERVICE_BUILD_VERSION"
 ];
 
 async function withEnv(env, fn) {
@@ -142,5 +144,14 @@ test("admin-api game-proxy admin monitoring config falls back on invalid limits"
   }, (config) => {
     assert.equal(config.gameProxyAdminRequestTimeoutMs, 3000);
     assert.equal(config.gameProxyAdminMaxResponseBytes, 1048576);
+  });
+});
+
+test("admin-api service registry identity reads defaults and build version override", async () => {
+  await withEnv({
+    SERVICE_BUILD_VERSION: "2026.06.18+admin"
+  }, (config) => {
+    assert.equal(config.serviceName, "admin-api");
+    assert.equal(config.serviceBuildVersion, "2026.06.18+admin");
   });
 });

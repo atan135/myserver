@@ -6,6 +6,7 @@ import { AdminSessionStore } from "./auth/admin-session-store.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
+import { RegistryClient } from "./registry-client.js";
 import { createDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
@@ -30,6 +31,7 @@ import {
   ADMIN_METRICS,
   ADMIN_NATS,
   ADMIN_REDIS,
+  ADMIN_REGISTRY,
   ADMIN_SESSION_STORE,
   ADMIN_STORE
 } from "./tokens.js";
@@ -91,6 +93,11 @@ import {
       provide: ADMIN_GAME_ADMIN_CLIENT,
       inject: [ADMIN_CONFIG],
       useFactory: (config: any) => new GameAdminClient(config)
+    },
+    {
+      provide: ADMIN_REGISTRY,
+      inject: [ADMIN_REDIS, ADMIN_CONFIG],
+      useFactory: (redis: any, config: any) => new RegistryClient(redis, config)
     },
     {
       provide: ADMIN_METRICS,

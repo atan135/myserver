@@ -127,6 +127,8 @@ export function getConfig() {
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "admin-api-001",
+    serviceName: process.env.SERVICE_NAME || "admin-api",
+    serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     databaseUrl:
       process.env.DATABASE_URL ||
       "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",

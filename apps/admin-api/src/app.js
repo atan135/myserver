@@ -11,7 +11,8 @@ export async function createApp() {
     ADMIN_DB_POOL,
     ADMIN_METRICS,
     ADMIN_NATS,
-    ADMIN_REDIS
+    ADMIN_REDIS,
+    ADMIN_REGISTRY
   } = await import("./tokens.ts");
 
   const nestApp = await createNestApp();
@@ -23,6 +24,7 @@ export async function createApp() {
     pool: nestApp.get(ADMIN_DB_POOL, { strict: false }),
     redis: nestApp.get(ADMIN_REDIS, { strict: false }),
     nats: nestApp.get(ADMIN_NATS, { strict: false }),
+    registryClient: nestApp.get(ADMIN_REGISTRY, { strict: false }),
     metrics: nestApp.get(ADMIN_METRICS, { strict: false })
   };
 }
