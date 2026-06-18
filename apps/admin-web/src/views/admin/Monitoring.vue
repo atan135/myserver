@@ -93,6 +93,22 @@
             </div>
           </div>
 
+          <div v-if="rolloutDrain.data.instances.length" class="rollout-instances">
+            <div
+              v-for="instance in rolloutDrain.data.instances"
+              :key="instance.instance_id || `${instance.endpoint.host}:${instance.endpoint.port}`"
+              class="rollout-instance"
+            >
+              <div class="rollout-instance-main">
+                <span class="instance-name">{{ instance.instance_id || "unknown" }}</span>
+                <span class="instance-endpoint">{{ instance.endpoint.host }}:{{ instance.endpoint.port }}</span>
+              </div>
+              <el-tag :type="rolloutInstanceTagType(instance)" size="small">
+                {{ instance.status }}
+              </el-tag>
+            </div>
+          </div>
+
           <div v-if="rolloutDrain.data.error" class="rollout-error">
             {{ rolloutDrain.data.error }}：{{ rolloutDrain.data.message }}
           </div>
@@ -222,6 +238,16 @@ const hasRolloutSamples = computed(() => {
   return Boolean(blockers?.blocked_room_samples?.length || blockers?.blocked_player_samples?.length);
 });
 
+function rolloutInstanceTagType(instance) {
+  if (instance.alert_level === "critical") {
+    return "danger";
+  }
+  if (instance.alert_level === "warning") {
+    return "warning";
+  }
+  return "info";
+}
+
 async function fetchServices() {
   try {
     const response = await monitoringApi.getServices();
@@ -268,6 +294,7 @@ function normalizeRolloutDrain(data) {
     error: data?.error || "",
     message: data?.message || "",
     rollout: data?.rollout || null,
+    instances: Array.isArray(data?.instances) ? data.instances : [],
     blockers: {
       blocked_room_count: blockers.blocked_room_count || 0,
       blocked_player_count: blockers.blocked_player_count || 0,
@@ -372,7 +399,9 @@ onUnmounted(() => {
 .rollout-summary,
 .rollout-meta,
 .blocker-grid,
-.sample-row {
+.sample-row,
+.rollout-instance,
+.rollout-instance-main {
   display: flex;
   align-items: center;
 }
@@ -435,6 +464,36 @@ onUnmounted(() => {
 
 .rollout-updated,
 .rollout-placeholder {
+  color: #909399;
+  font-size: 13px;
+}
+
+.rollout-instances {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rollout-instance {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.rollout-instance-main {
+  gap: 10px;
+  min-width: 0;
+}
+
+.instance-name {
+  font-weight: 600;
+  color: #303133;
+}
+
+.instance-endpoint {
   color: #909399;
   font-size: 13px;
 }

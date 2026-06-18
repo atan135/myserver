@@ -5,7 +5,7 @@ import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
-import { discoverGameServerAdminEndpoints } from "../registry-client.js";
+import { discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "../registry-client.js";
 import {
   aggregateMetricRecordsDetailed,
   buildMetricPoint,
@@ -83,6 +83,9 @@ export class MonitoringService {
       if (serviceName === "game-server") {
         adminEndpoints = await this.getGameServerAdminEndpoints();
         instances = mergeGameServerAdminEndpoints(instances, adminEndpoints);
+      } else if (serviceName === "game-proxy") {
+        adminEndpoints = await this.getGameProxyAdminEndpoints();
+        instances = mergeGameServerAdminEndpoints(instances, adminEndpoints);
       }
 
       services.push({
@@ -94,7 +97,7 @@ export class MonitoringService {
         online_value: onlineValue,
         last_heartbeat: lastHeartbeat ? parseInt(lastHeartbeat, 10) * 1000 : null,
         instances,
-        endpoints: serviceName === "game-server" ? adminEndpoints : []
+        endpoints: ["game-server", "game-proxy"].includes(serviceName) ? adminEndpoints : []
       });
     }
 
@@ -144,8 +147,8 @@ export class MonitoringService {
     const checkedAt = Date.now();
 
     try {
-      const upstream = await this.fetchProxyRollout();
-      return buildRolloutDrainSnapshot(upstream, checkedAt);
+      const upstreams = await this.fetchProxyRollouts();
+      return buildAggregatedRolloutDrainSnapshot(upstreams, checkedAt);
     } catch (error: any) {
       return {
         ok: false,
@@ -172,14 +175,13 @@ export class MonitoringService {
         upstream: {
           host: this.config.gameProxyAdminHost,
           port: this.config.gameProxyAdminPort
-        }
+        },
+        instances: []
       };
     }
   }
 
-  private async fetchProxyRollout(): Promise<any> {
-    const host = this.config.gameProxyAdminHost || "127.0.0.1";
-    const port = Number.parseInt(String(this.config.gameProxyAdminPort || 7101), 10);
+  private async fetchProxyRollouts(): Promise<any[]> {
     const timeoutMs = Number.parseInt(String(this.config.gameProxyAdminRequestTimeoutMs || 3000), 10);
     const maxResponseBytes = Number.parseInt(String(this.config.gameProxyAdminMaxResponseBytes || 1048576), 10);
     const token = this.config.gameProxyAdminReadToken || this.config.gameProxyAdminToken;
@@ -190,22 +192,41 @@ export class MonitoringService {
       throw error;
     }
 
-    const body = await httpGetJsonBody({
-      host,
-      port,
-      path: "/rollout",
-      token,
-      timeoutMs,
-      maxResponseBytes
-    });
-
-    try {
-      return JSON.parse(body);
-    } catch (error: any) {
-      const parseError: any = new Error(`invalid proxy admin rollout JSON: ${error.message}`);
-      parseError.code = "PROXY_ADMIN_INVALID_JSON";
-      throw parseError;
+    const endpoints = await this.getGameProxyAdminEndpoints();
+    if (endpoints.length === 0) {
+      const error: any = new Error("game-proxy admin endpoint not found in service registry");
+      error.code = "GAME_PROXY_ADMIN_ENDPOINT_NOT_FOUND";
+      throw error;
     }
+
+    const results = [];
+    for (const endpoint of endpoints) {
+      try {
+        const body = await httpGetJsonBody({
+          host: endpoint.host,
+          port: endpoint.port,
+          path: "/rollout",
+          token,
+          timeoutMs,
+          maxResponseBytes
+        });
+
+        try {
+          results.push({ endpoint, upstream: JSON.parse(body) });
+        } catch (error: any) {
+          const parseError: any = new Error(`invalid proxy admin rollout JSON: ${error.message}`);
+          parseError.code = "PROXY_ADMIN_INVALID_JSON";
+          throw parseError;
+        }
+      } catch (error: any) {
+        results.push({
+          endpoint,
+          error: error.code || "PROXY_ADMIN_UNAVAILABLE",
+          message: error.message || "failed to query game-proxy admin rollout status"
+        });
+      }
+    }
+    return results;
   }
 
   private async getLatestMetrics(serviceName: string): Promise<any | null> {
@@ -341,6 +362,33 @@ export class MonitoringService {
     return discoverGameServerAdminEndpoints(this.redis);
   }
 
+  private async getGameProxyAdminEndpoints(): Promise<any[]> {
+    if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired) {
+        const error: any = new Error("Required registry discovery failed: REGISTRY_ENABLED=false");
+        error.code = "SERVICE_DISCOVERY_REQUIRED";
+        throw error;
+      }
+
+      return [
+        {
+          service: "game-proxy",
+          instanceId: "local-fallback",
+          instance_id: "local-fallback",
+          endpointName: "admin",
+          endpoint_name: "admin",
+          protocol: "http",
+          host: this.config.gameProxyAdminHost || "127.0.0.1",
+          port: Number.parseInt(String(this.config.gameProxyAdminPort || 7101), 10),
+          healthy: true,
+          fallback: true
+        }
+      ];
+    }
+
+    return discoverGameProxyAdminEndpoints(this.redis);
+  }
+
   private async getInstanceHeartbeats(serviceName: string): Promise<Map<string, number>> {
     const heartbeats = new Map<string, number>();
     let cursor = "0";
@@ -391,6 +439,83 @@ function mergeGameServerAdminEndpoints(instances: any[], endpoints: any[]): any[
   }
 
   return [...byId.values()].sort((a, b) => String(a.instance_id).localeCompare(String(b.instance_id)));
+}
+
+function buildAggregatedRolloutDrainSnapshot(results: any[], checkedAt: number) {
+  const instances = results.map((result) => {
+    const endpoint = result.endpoint || {};
+    if (result.error) {
+      return {
+        instance_id: endpoint.instance_id || endpoint.instanceId || "",
+        endpoint,
+        ok: false,
+        status: "error",
+        alert_level: "critical",
+        alert_message: "控制面不可达",
+        error: result.error,
+        message: result.message,
+        active: false,
+        drained: false,
+        rollout: null,
+        drain_evaluation: null,
+        blockers: emptyRolloutBlockers()
+      };
+    }
+
+    const snapshot = buildRolloutDrainSnapshot(result.upstream, checkedAt);
+    return {
+      instance_id: endpoint.instance_id || endpoint.instanceId || "",
+      endpoint,
+      ...snapshot
+    };
+  });
+
+  const failed = instances.filter((instance) => instance.ok === false);
+  const active = instances.some((instance) => instance.active);
+  const interrupted = instances.some((instance) => instance.status === "interrupted");
+  const blocked = instances.some((instance) => instance.status === "blocked");
+  const drained = active && failed.length === 0 && instances.filter((instance) => instance.active).every((instance) => instance.drained);
+  const blockers = mergeRolloutBlockers(instances.map((instance) => instance.blockers || emptyRolloutBlockers()));
+  const rollout = pickAggregateRollout(instances);
+
+  let ok = failed.length === 0;
+  let status = "empty";
+  let alertLevel = "info";
+  let alertMessage = "当前没有进行中的 rollout";
+
+  if (failed.length > 0) {
+    status = "error";
+    alertLevel = "critical";
+    alertMessage = `${failed.length}/${instances.length} 个 game-proxy 控制面不可达`;
+  } else if (interrupted) {
+    status = "interrupted";
+    alertLevel = "critical";
+    alertMessage = "至少一个 game-proxy rollout 已中断，需要人工复查";
+  } else if (blocked) {
+    status = "blocked";
+    alertLevel = "warning";
+    alertMessage = "至少一个 game-proxy 仍有旧服房间/玩家/迁移中阻塞";
+  } else if (drained) {
+    status = "drained";
+    alertLevel = "warning";
+    alertMessage = "所有 active game-proxy 已排空可收尾";
+  }
+
+  return {
+    ok,
+    source: "game-proxy",
+    checked_at: checkedAt,
+    updated_at: checkedAt,
+    active,
+    status,
+    alert_level: alertLevel,
+    alert_message: alertMessage,
+    drained,
+    rollout,
+    drain_evaluation: null,
+    blockers,
+    instances
+  };
 }
 
 function buildRolloutDrainSnapshot(upstream: any, checkedAt: number) {
@@ -481,6 +606,50 @@ function emptyRolloutBlockers() {
     stale_player_route_count: 0,
     blocked_room_samples: [],
     blocked_player_samples: []
+  };
+}
+
+function mergeRolloutBlockers(blockersList: any[]) {
+  const merged = emptyRolloutBlockers();
+  for (const blockers of blockersList) {
+    merged.blocked_room_count += readNumber(blockers, "blocked_room_count", "blockedRoomCount");
+    merged.blocked_player_count += readNumber(blockers, "blocked_player_count", "blockedPlayerCount");
+    merged.stale_room_route_count += readNumber(blockers, "stale_room_route_count", "staleRoomRouteCount");
+    merged.stale_player_route_count += readNumber(blockers, "stale_player_route_count", "stalePlayerRouteCount");
+    merged.blocked_room_samples.push(...readStringSamples(blockers, "blocked_room_samples", "blockedRoomSamples"));
+    merged.blocked_player_samples.push(...readStringSamples(blockers, "blocked_player_samples", "blockedPlayerSamples"));
+  }
+  merged.blocked_room_samples = merged.blocked_room_samples.slice(0, DEFAULT_ROLLOUT_DRAIN_SAMPLES_LIMIT);
+  merged.blocked_player_samples = merged.blocked_player_samples.slice(0, DEFAULT_ROLLOUT_DRAIN_SAMPLES_LIMIT);
+  return merged;
+}
+
+function pickAggregateRollout(instances: any[]) {
+  const rollouts = instances.map((instance) => instance.rollout).filter(Boolean);
+  if (rollouts.length === 0) {
+    return null;
+  }
+
+  const first = rollouts[0];
+  const same = rollouts.every(
+    (rollout) =>
+      rollout.epoch === first.epoch &&
+      rollout.old_server === first.old_server &&
+      rollout.new_server === first.new_server &&
+      rollout.state === first.state
+  );
+
+  if (same) {
+    return first;
+  }
+
+  const startedAtValues = rollouts.map((rollout) => readNumber(rollout, "started_at")).filter((value) => value > 0);
+  return {
+    epoch: "mixed",
+    old_server: "mixed",
+    new_server: "mixed",
+    state: "Mixed",
+    started_at: startedAtValues.length > 0 ? Math.min(...startedAtValues) : 0
   };
 }
 

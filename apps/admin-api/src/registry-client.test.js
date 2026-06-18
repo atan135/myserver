@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { validateServiceInstance } from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
-import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
+import { RegistryClient, discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
 configureLogger({
   appName: "admin-api-registry-test",
@@ -205,6 +205,92 @@ test("discoverGameServerAdminEndpoints returns healthy tcp admin endpoints for a
     [
       { instanceId: "game-server-a", protocol: "tcp", host: "10.0.0.1", port: 7500 },
       { instanceId: "game-server-b", protocol: "tcp", host: "10.0.0.2", port: 7501 }
+    ]
+  );
+});
+
+test("discoverGameProxyAdminEndpoints returns healthy http admin endpoints for all instances", async () => {
+  const redis = createRedisCapture();
+  const instances = [
+    {
+      id: "game-proxy-a",
+      schema_version: 2,
+      name: "game-proxy",
+      host: "10.0.1.1",
+      port: 4000,
+      admin_port: 7101,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "http",
+          host: "10.0.1.1",
+          port: 7101,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    },
+    {
+      id: "game-proxy-b",
+      schema_version: 2,
+      name: "game-proxy",
+      host: "10.0.1.2",
+      port: 4000,
+      admin_port: 7102,
+      endpoints: [
+        {
+          name: "admin",
+          protocol: "http",
+          host: "10.0.1.2",
+          port: 7102,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        },
+        {
+          name: "admin",
+          protocol: "tcp",
+          host: "10.0.1.2",
+          port: 17102,
+          socket: "",
+          visibility: "admin",
+          metadata: {},
+          healthy: true
+        }
+      ],
+      tags: [],
+      weight: 100,
+      metadata: {},
+      registered_at: 1,
+      healthy: true
+    }
+  ];
+
+  for (const instance of instances) {
+    redis.hashes.set(`service:game-proxy:instances:${instance.id}:data`, JSON.stringify(instance));
+    redis.keys.set(`heartbeat:game-proxy:${instance.id}`, { ttl: 30, value: "1" });
+  }
+
+  const endpoints = await discoverGameProxyAdminEndpoints(redis);
+
+  assert.deepEqual(
+    endpoints.map((endpoint) => ({
+      instanceId: endpoint.instanceId,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port
+    })),
+    [
+      { instanceId: "game-proxy-a", protocol: "http", host: "10.0.1.1", port: 7101 },
+      { instanceId: "game-proxy-b", protocol: "http", host: "10.0.1.2", port: 7102 }
     ]
   );
 });

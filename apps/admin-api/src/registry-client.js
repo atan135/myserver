@@ -8,6 +8,9 @@ import {
 const GAME_SERVER_SERVICE_NAME = "game-server";
 const GAME_SERVER_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_SERVER_ADMIN_PROTOCOLS = new Set(["tcp"]);
+const GAME_PROXY_SERVICE_NAME = "game-proxy";
+const GAME_PROXY_ADMIN_ENDPOINT_NAME = "admin";
+const GAME_PROXY_ADMIN_PROTOCOLS = new Set(["http"]);
 
 export class RegistryClient {
   constructor(redis, config) {
@@ -112,6 +115,25 @@ export async function discoverGameServerAdminEndpoints(redis) {
     .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
       service: GAME_SERVER_SERVICE_NAME,
+      instanceId: instance.id,
+      instance_id: instance.id,
+      endpointName: endpoint.name,
+      endpoint_name: endpoint.name,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port,
+      healthy: instance.healthy !== false && endpoint.healthy !== false,
+      weight: instance.weight,
+      metadata: endpoint.metadata || {}
+    }));
+}
+
+export async function discoverGameProxyAdminEndpoints(redis) {
+  const instances = await discoverServiceInstances(redis, GAME_PROXY_SERVICE_NAME);
+  return discoverAllEndpoints(instances, GAME_PROXY_ADMIN_ENDPOINT_NAME)
+    .filter(({ endpoint }) => GAME_PROXY_ADMIN_PROTOCOLS.has(endpoint.protocol))
+    .map(({ instance, endpoint }) => ({
+      service: GAME_PROXY_SERVICE_NAME,
       instanceId: instance.id,
       instance_id: instance.id,
       endpointName: endpoint.name,
