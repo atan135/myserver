@@ -33,6 +33,7 @@
     "rollout:fault-drill": "npm run rollout-fault-drill --workspace mock-client --",
     "check:mock-client-protocol": "node tools/check-mock-client-protocol.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
+    "check:discovery-config": "node tools/check-discovery-config.js",
     "check:migrations": "node tools/db-migrate.js --check",
     "db:migrate": "powershell -ExecutionPolicy Bypass -File scripts/db-migrate.ps1",
     "db:migrate:dry-run": "powershell -ExecutionPolicy Bypass -File scripts/db-migrate.ps1 -DryRun",
