@@ -541,6 +541,37 @@ function assertFlatEndpoint(endpoint, expected) {
   assert.equal(endpoint.healthy, true);
 }
 
+function proxyAdminUrl(pathname, query = {}) {
+  const url = new URL(`http://127.0.0.1:${gameProxy.adminPort}${pathname}`);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+  return url;
+}
+
+async function fetchProxyAdmin(pathname, { method = "GET", query } = {}) {
+  const response = await fetch(proxyAdminUrl(pathname, query), {
+    method,
+    headers: {
+      authorization: `Bearer ${proxyAdminToken}`,
+      "X-Admin-Actor": "registry-e2e@example.com"
+    }
+  });
+  const contentType = response.headers.get("content-type") || "";
+  const body = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
+
+  assert.equal(
+    response.ok,
+    true,
+    `proxy admin ${method} ${pathname} failed with ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`
+  );
+  return body;
+}
+
 before(async () => {
   await cleanupRegistryInstances(redisUrl, allRegistryInstances, registryKeyPrefix);
 
@@ -900,6 +931,194 @@ test("registry consumers discover correct endpoints across multiple service inst
       await registryKeyExists("match-service", manualMatchServiceInstanceId),
       false
     );
+  } finally {
+    await redis.quit();
+  }
+});
+
+test("game-proxy keeps route-store bindings while discovering multiple upstreams and proxies", { timeout: 90000 }, async () => {
+  const roomId = randomId("multi-upstream-room");
+  const playerId = randomId("multi-upstream-player");
+
+  await cleanupRegistryInstances(redisUrl, manualRegistryInstances, registryKeyPrefix);
+  await writeRegistryPayloads(createManualRegistryPayloads(), registryKeyPrefix);
+
+  const instances = await waitFor(async () => {
+    const payload = await fetchProxyAdmin("/instances");
+    const discovered = payload.instances || [];
+    const real = discovered.find((instance) => instance.server_id === gameServerInstanceId);
+    const manual = discovered.find((instance) => instance.server_id === manualGameServerInstanceId);
+
+    if (
+      real?.health_state === "Healthy" &&
+      real?.operation_state === "Active" &&
+      manual?.health_state === "Healthy" &&
+      manual?.operation_state === "Active" &&
+      manual?.local_socket_name === manualEndpoints.gameServer.proxyLocalSocket
+    ) {
+      return discovered;
+    }
+    return false;
+  }, "game-proxy to discover multiple healthy game-server upstreams");
+
+  assert.ok(instances.length >= 2);
+  assert.equal(
+    instances.filter((instance) => instance.health_state === "Healthy").length >= 2,
+    true
+  );
+
+  const status = await fetchProxyAdmin("/status");
+  assert.equal(status.ok, true);
+  assert.equal(status.active_upstream, gameServerInstanceId);
+
+  await fetchProxyAdmin("/room-route/upsert", {
+    method: "POST",
+    query: {
+      room_id: roomId,
+      owner_server_id: manualGameServerInstanceId,
+      migration_state: "OwnedByNew",
+      member_count: 2,
+      online_member_count: 1,
+      room_version: 1,
+      last_transfer_checksum: "checksum-1"
+    }
+  });
+  await fetchProxyAdmin("/player-route/upsert", {
+    method: "POST",
+    query: {
+      player_id: playerId,
+      current_room_id: roomId,
+      preferred_server_id: manualGameServerInstanceId
+    }
+  });
+
+  const roomRoutes = await fetchProxyAdmin("/room-routes");
+  assert.deepEqual(
+    roomRoutes.routes.find((route) => route.room_id === roomId),
+    {
+      room_id: roomId,
+      owner_server_id: manualGameServerInstanceId,
+      migration_state: "OwnedByNew",
+      member_count: 2,
+      online_member_count: 1,
+      empty_since_ms: null,
+      room_version: 1,
+      rollout_epoch: "",
+      last_transfer_checksum: "checksum-1",
+      updated_at_ms: roomRoutes.routes.find((route) => route.room_id === roomId).updated_at_ms
+    }
+  );
+
+  const playerRoutes = await fetchProxyAdmin("/player-routes");
+  assert.deepEqual(
+    playerRoutes.routes.find((route) => route.player_id === playerId),
+    {
+      player_id: playerId,
+      current_room_id: roomId,
+      preferred_server_id: manualGameServerInstanceId,
+      rollout_epoch: "",
+      updated_at_ms: playerRoutes.routes.find((route) => route.player_id === playerId).updated_at_ms
+    }
+  );
+
+  await waitFor(async () => {
+    const payload = await fetchProxyAdmin("/instances");
+    const manual = payload.instances?.find((instance) => instance.server_id === manualGameServerInstanceId);
+    return manual?.health_state === "Healthy" ? payload : false;
+  }, "game-proxy discovery refresh after route binding");
+
+  const roomRoutesAfterRefresh = await fetchProxyAdmin("/room-routes");
+  assert.equal(
+    roomRoutesAfterRefresh.routes.find((route) => route.room_id === roomId)?.owner_server_id,
+    manualGameServerInstanceId
+  );
+  const playerRoutesAfterRefresh = await fetchProxyAdmin("/player-routes");
+  const playerRouteAfterRefresh = playerRoutesAfterRefresh.routes.find((route) => route.player_id === playerId);
+  assert.equal(playerRouteAfterRefresh?.current_room_id, roomId);
+  assert.equal(playerRouteAfterRefresh?.preferred_server_id, manualGameServerInstanceId);
+
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    const discovery = new RegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+
+    const proxyClientEndpoints = await discovery.discoverAllEndpoints("game-proxy", "client");
+    assertEndpointSelection(
+      proxyClientEndpoints.find(({ instance }) => instance.id === gameProxyInstanceId),
+      {
+        serviceName: "game-proxy",
+        instanceId: gameProxyInstanceId,
+        name: "client",
+        protocol: "kcp",
+        host: gameProxy.host,
+        port: gameProxy.port,
+        visibility: "public"
+      }
+    );
+    assertEndpointSelection(
+      proxyClientEndpoints.find(({ instance }) => instance.id === manualGameProxyInstanceId),
+      {
+        serviceName: "game-proxy",
+        instanceId: manualGameProxyInstanceId,
+        name: "client",
+        protocol: "kcp",
+        host: manualEndpoints.gameProxy.host,
+        port: manualEndpoints.gameProxy.clientPort,
+        visibility: "public"
+      }
+    );
+
+    const proxyAdminEndpoints = await discoverAdminApiGameProxyAdminEndpoints(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    assertFlatEndpoint(findEndpoint(proxyAdminEndpoints, gameProxyInstanceId), {
+      serviceName: "game-proxy",
+      instanceId: gameProxyInstanceId,
+      name: "admin",
+      protocol: "http",
+      host: gameProxy.host,
+      port: gameProxy.adminPort
+    });
+    assertFlatEndpoint(findEndpoint(proxyAdminEndpoints, manualGameProxyInstanceId), {
+      serviceName: "game-proxy",
+      instanceId: manualGameProxyInstanceId,
+      name: "admin",
+      protocol: "http",
+      host: manualEndpoints.gameProxy.adminHost,
+      port: manualEndpoints.gameProxy.adminPort
+    });
+
+    const adminApiDiscovery = createAdminApiRegistryDiscoveryClient(redis, {
+      registryKeyPrefix,
+      discoveryCacheTtlMs: 0
+    });
+    try {
+      const snapshot = await adminApiDiscovery.refreshSnapshot("game-proxy", {
+        endpointName: "admin",
+        kind: "all_endpoints",
+        refreshIntervalMs: 0
+      });
+      assert.equal(snapshot.ok, true);
+      assert.equal(
+        snapshot.value.some(({ instance }) => instance.id === gameProxyInstanceId),
+        true
+      );
+      assert.equal(
+        snapshot.value.some(({ instance }) => instance.id === manualGameProxyInstanceId),
+        true
+      );
+    } finally {
+      adminApiDiscovery.stop();
+    }
   } finally {
     await redis.quit();
   }
