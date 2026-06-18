@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 src/config.test.js src/registry-client.test.js",
     "db:init": "node scripts/init-db.js"
   },
   "dependencies": {

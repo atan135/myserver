@@ -19,8 +19,24 @@ export class RegistryClient {
       port: this.config.port,
       admin_port: 0,
       local_socket: "",
+      endpoints: [
+        {
+          name: "http",
+          protocol: "http",
+          host: this.config.host,
+          port: this.config.port,
+          socket: "",
+          visibility: "internal",
+          metadata: {},
+          healthy: true
+        }
+      ],
       tags: ["announce", "http"],
-      metadata: {}
+      metadata: {
+        read_auth_required: this.config.announceReadAuthRequired === true,
+        cache_ttl_seconds: this.config.announceCacheTtlSeconds,
+        build_version: this.config.serviceBuildVersion || "dev"
+      }
     });
 
     await this.redis.hset(key, "data", JSON.stringify(data));
