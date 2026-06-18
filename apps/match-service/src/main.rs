@@ -324,6 +324,21 @@ mod tests {
     }
 
     #[test]
+    fn service_instance_registers_grpc_endpoint_as_internal() {
+        let config = test_config();
+
+        let instance = build_service_instance(&config);
+
+        assert_eq!(instance.endpoints.len(), 1);
+        let endpoint = &instance.endpoints[0];
+        assert_eq!(endpoint.name, "grpc");
+        assert_eq!(endpoint.protocol, "grpc");
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 9002);
+        assert_eq!(endpoint.visibility, "internal");
+    }
+
+    #[test]
     fn service_instance_never_publishes_wildcard_network_hosts() {
         let mut config = test_config();
         config.public_host = "0.0.0.0".to_string();

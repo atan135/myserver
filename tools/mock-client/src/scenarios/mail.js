@@ -16,6 +16,10 @@ async function fetchMailLogin(options, suffix) {
 }
 
 function buildMailUrl(baseUrl, pathname, query = {}) {
+  if (!baseUrl) {
+    throw new Error("mail scenarios are internal integration flows; pass --mail-base-url or enable non-production auth internal endpoint exposure");
+  }
+
   const url = new URL(pathname, baseUrl);
 
   for (const [key, value] of Object.entries(query)) {

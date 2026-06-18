@@ -123,13 +123,22 @@ test("auth-http requires registry discovery by default in test", async () => {
   });
 });
 
-test("auth-http allows internal service endpoints outside production by default", async () => {
+test("auth-http hides internal service endpoints outside production by default", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
+    assert.equal(config.authExposeInternalServiceEndpoints, false);
+  });
+});
+
+test("auth-http internal service endpoint exposure can be explicitly enabled outside production", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS: "true"
+  }, (config) => {
     assert.equal(config.authExposeInternalServiceEndpoints, true);
   });
 });
 
-test("auth-http internal service endpoint exposure can be explicitly enabled", async () => {
+test("auth-http rejects internal service endpoint exposure in production", async () => {
   await withEnv({
     NODE_ENV: "production",
     REGISTRY_ENABLED: "true",
@@ -138,7 +147,7 @@ test("auth-http internal service endpoint exposure can be explicitly enabled", a
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
     INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy"
   }, (config) => {
-    assert.equal(config.authExposeInternalServiceEndpoints, true);
+    assert.equal(config.authExposeInternalServiceEndpoints, false);
   });
 });
 

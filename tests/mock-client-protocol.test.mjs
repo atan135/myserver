@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { parseArgs } from "../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
 import { decodeByMessageType } from "../tools/mock-client/src/messages.js";
+import { runAnnounceGet } from "../tools/mock-client/src/scenarios/announce.js";
+import { connectToChatServer } from "../tools/mock-client/src/scenarios/chat.js";
+import { runMailGet } from "../tools/mock-client/src/scenarios/mail.js";
 import {
   encodeBoolField,
   encodeInt64Field,
@@ -18,6 +22,34 @@ function encodePackedInt32Field(fieldNumber, values) {
     payload
   ]);
 }
+
+test("mock-client defaults to public player entrypoints only", () => {
+  const options = parseArgs([]);
+
+  assert.equal(options.httpBaseUrl, "http://127.0.0.1:3000");
+  assert.equal(options.host, "127.0.0.1");
+  assert.equal(options.port, 14000);
+  assert.equal(options.chatPort, 0);
+  assert.equal(options.mailBaseUrl, "");
+  assert.equal(options.announceBaseUrl, "");
+});
+
+test("mock-client internal side-service scenarios require explicit endpoints", async () => {
+  await assert.rejects(
+    () => connectToChatServer(parseArgs([])),
+    /chat scenarios are internal integration flows/
+  );
+
+  await assert.rejects(
+    () => runMailGet({ ...parseArgs([]), mailId: "mail-test" }),
+    /mail scenarios are internal integration flows/
+  );
+
+  await assert.rejects(
+    () => runAnnounceGet({ ...parseArgs([]), announceId: "ann-test" }),
+    /announce scenarios are internal integration flows/
+  );
+});
 
 test("mock-client decodes proto3 packed repeated int32 fields", () => {
   const itemUseBody = Buffer.concat([

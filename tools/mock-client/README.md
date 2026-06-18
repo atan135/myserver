@@ -2,7 +2,7 @@
 
 ## 概述
 
-Mock Client 是一个用于测试 MyServer 游戏后端框架的测试工具。它模拟游戏客户端，通过 TCP 协议与 `game-server`、`chat-server` 通信，并通过 HTTP 调用 `auth-http`、`mail-service` 与 `announce-service`，验证服务器功能的正确性。
+Mock Client 是一个用于测试 MyServer 游戏后端框架的联调工具。默认模拟玩家客户端只接触 `auth-http` 和 `game-proxy` 玩家入口；`chat-server`、`mail-service`、`announce-service` 场景是内部联调路径，必须显式传入对应内部地址。
 
 ## 项目结构
 
@@ -237,7 +237,7 @@ node tools/mock-client/src/index.js --scenario movement-reconnect-recovery \
 # 全员掉线后 TTL 内双重连
 node tools/mock-client/src/index.js --scenario reconnect-all-disconnected \
   --http-base-url http://127.0.0.1:3000 \
-  --host 127.0.0.1 --port 7000 \
+  --host 127.0.0.1 \
   --room-id room-reconnect-all
 
 # combat_demo 双客户端联调
@@ -293,13 +293,13 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 |------|------|--------|
 | `--scenario` | 测试场景名称 | `happy` |
 | `--http-base-url` | 认证服务地址 | `http://127.0.0.1:3000` |
-| `--announce-base-url` | 公告服务地址 | `http://127.0.0.1:9004` |
-| `--mail-base-url` | 邮件服务地址 | `http://127.0.0.1:9003` |
-| `--host` | 游戏服务器地址 | `127.0.0.1` |
+| `--announce-base-url` | 公告服务地址，内部联调场景必须显式传入 | 空 |
+| `--mail-base-url` | 邮件服务地址，内部联调场景必须显式传入 | 空 |
+| `--host` | 玩家入口地址 | `127.0.0.1` |
 | `--game-host` | 游戏 TCP 服务器地址；未传时使用 `--host` | 空 |
-| `--port` | 游戏服务器端口 | `7000` |
+| `--port` | 玩家 TCP 入口端口，默认走 `game-proxy` TCP fallback | `14000` |
 | `--chat-host` | 聊天 TCP 服务器地址；未传时使用 `--host` | 空 |
-| `--chat-port` | 聊天服务器端口 | `9001` |
+| `--chat-port` | 聊天服务器端口，内部联调场景必须显式传入 | `0` |
 | `--room-id` | 房间ID | `room-default` |
 | `--login-name` | 登录用户名 | - |
 | `--password` | 登录密码 | - |

@@ -30,6 +30,10 @@ export async function authenticateChatClient(client, options, login, seq = 1) {
  * Connect to chat server
  */
 export async function connectToChatServer(options) {
+  if (!Number.isInteger(options.chatPort) || options.chatPort <= 0) {
+    throw new Error("chat scenarios are internal integration flows; pass --chat-port or enable non-production auth internal endpoint exposure");
+  }
+
   const chatOptions = {
     ...options,
     gameHost: options.chatHost || options.host,

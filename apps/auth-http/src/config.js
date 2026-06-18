@@ -253,10 +253,9 @@ export function getConfig() {
     localDiscoveryFallbackEnabled,
     disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
-    authExposeInternalServiceEndpoints: parseBoolean(
-      process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS,
-      !isProductionEnv()
-    ),
+    authExposeInternalServiceEndpoints:
+      !isProductionEnv() &&
+      parseBoolean(process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS, false),
     authRequireTls: parseBoolean(process.env.AUTH_REQUIRE_TLS, isProductionEnv()),
     trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
     trustedProxies: parseCsv(process.env.TRUSTED_PROXIES),

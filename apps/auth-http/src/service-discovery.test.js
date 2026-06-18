@@ -48,7 +48,7 @@ function createConfig(overrides = {}) {
     registryDiscoveryEnabled: false,
     registryDiscoveryRequired: false,
     localDiscoveryFallbackEnabled: true,
-    authExposeInternalServiceEndpoints: true,
+    authExposeInternalServiceEndpoints: false,
     ...overrides
   };
 }
@@ -89,7 +89,7 @@ test("ServiceDiscovery uses configured fallback when registry discovery is disab
   );
 });
 
-test("ServiceDiscovery discovers game-proxy.client and named service endpoints", async () => {
+test("ServiceDiscovery discovers only game-proxy.client by default", async () => {
   const redis = createRedis({
     "game-proxy": [
       {
@@ -173,6 +173,109 @@ test("ServiceDiscovery discovers game-proxy.client and named service endpoints",
     ]
   });
   const discovery = new ServiceDiscovery(redis, createConfig({ registryDiscoveryEnabled: true }));
+
+  assert.deepEqual(await discovery.discoverClientServices(), {
+    game: {
+      host: "203.0.113.10",
+      port: 4100,
+      protocol: "kcp"
+    },
+    chat: null,
+    mail: null,
+    announce: null
+  });
+});
+
+test("ServiceDiscovery can expose named internal service endpoints only when explicitly enabled", async () => {
+  const redis = createRedis({
+    "game-proxy": [
+      {
+        id: "proxy-a",
+        name: "game-proxy",
+        host: "10.0.0.1",
+        port: 4000,
+        endpoints: [
+          {
+            name: "client",
+            protocol: "kcp",
+            host: "203.0.113.10",
+            port: 4100,
+            socket: "",
+            visibility: "public",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "chat-server": [
+      {
+        id: "chat-a",
+        name: "chat-server",
+        host: "10.0.0.2",
+        port: 9001,
+        endpoints: [
+          {
+            name: "tcp",
+            protocol: "tcp",
+            host: "10.0.0.20",
+            port: 9011,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "mail-service": [
+      {
+        id: "mail-a",
+        name: "mail-service",
+        host: "10.0.0.3",
+        port: 9003,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.30",
+            port: 9013,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ],
+    "announce-service": [
+      {
+        id: "announce-a",
+        name: "announce-service",
+        host: "10.0.0.4",
+        port: 9004,
+        endpoints: [
+          {
+            name: "http",
+            protocol: "http",
+            host: "10.0.0.40",
+            port: 9014,
+            socket: "",
+            visibility: "internal",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ]
+  });
+  const discovery = new ServiceDiscovery(
+    redis,
+    createConfig({
+      registryDiscoveryEnabled: true,
+      authExposeInternalServiceEndpoints: true
+    })
+  );
 
   assert.deepEqual(await discovery.discoverClientServices(), {
     game: {
@@ -429,7 +532,13 @@ test("ServiceDiscovery falls back to legacy client endpoint for side services", 
       }
     ]
   });
-  const discovery = new ServiceDiscovery(redis, createConfig({ registryDiscoveryEnabled: true }));
+  const discovery = new ServiceDiscovery(
+    redis,
+    createConfig({
+      registryDiscoveryEnabled: true,
+      authExposeInternalServiceEndpoints: true
+    })
+  );
 
   const services = await discovery.discoverClientServices();
 
@@ -570,6 +679,7 @@ test("ServiceDiscovery reuses registry discovery cache for repeated client servi
     redis,
     createConfig({
       registryDiscoveryEnabled: true,
+      authExposeInternalServiceEndpoints: true,
       registryDiscoveryCacheTtlMs: 1000
     })
   );

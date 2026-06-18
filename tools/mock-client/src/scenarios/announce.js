@@ -1,4 +1,8 @@
 function buildAnnounceUrl(baseUrl, pathname, query = {}) {
+  if (!baseUrl) {
+    throw new Error("announce scenarios are internal integration flows; pass --announce-base-url or enable non-production auth internal endpoint exposure");
+  }
+
   const url = new URL(pathname, baseUrl);
 
   for (const [key, value] of Object.entries(query)) {
