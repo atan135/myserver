@@ -178,6 +178,18 @@ Node 服务当前可能出现注册失败只打日志的情况，因此 readines
 
 本节只定义统一部署流程和状态边界，不实现脚本、健康检查接口、LB/DNS/gateway 更新接口或服务启动逻辑。
 
+### 5.5 滚动发布下线流程
+
+滚动发布、缩容或实例替换时，旧实例的正常退出必须走显式下线流程，不能只依赖进程退出或 registry TTL 过期。下线流程至少包含以下阶段：
+
+1. 移出接新流量：先从 LB、DNS、gateway upstream、admin/control target 或 rollout target 中移除旧实例；如果不能立即移除，必须把旧实例标记为 drain 或不可新建业务，禁止新连接、新房间、新匹配分配或新的控制面写操作继续选中旧实例。
+2. 等待业务收敛：等待旧实例现有连接、房间、匹配分配、邮件附件发放、异步通知和控制面操作达到安全收敛。`game-server` 必须结合已有 drain status 和受控 graceful shutdown 安全闸确认旧服已进入 drain，且连接、仍持有 room、迁移中 room 等阻塞项已经清零后，才能进入停服请求。
+3. 停止 heartbeat 并注销：业务收敛后停止 registry heartbeat，并执行 deregister，随后确认 registry 中该实例不再可被发现。异常退出时 TTL 可以作为最终摘除兜底，但 TTL 不能作为正常滚动发布下线的主路径。
+4. 清理或降级 route store：移除或标记旧实例对应的 upstream、room route、player route 和 rollout target，确保新请求不会继续被导向旧实例。若 route store 清理失败，必须降级为旧实例不可接新流量、不可选，并保留故障状态供重试或人工处理，不能因为清理失败而重新放开旧实例。
+5. 完成验证：确认旧实例在 registry 中不可发现，route store 不再把新连接、新建房、重连、匹配或控制面请求导向旧实例，并保留 drain、deregister、route store 更新或降级结果的日志和审计记录。
+
+本节只定义滚动发布和扩缩容时的旧实例退出状态机，不展开部署平台 stop hook 如何定位目标实例，也不实现具体脚本或控制面接口。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
