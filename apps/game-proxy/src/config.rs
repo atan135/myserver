@@ -332,6 +332,24 @@ impl Config {
         })
     }
 
+    pub fn discovery_required(&self) -> bool {
+        discovery_required_from_env()
+    }
+
+    pub fn static_upstream_fallback_allowed(&self) -> bool {
+        !self.discovery_required()
+    }
+
+    pub fn validate_upstream_discovery(&self) -> Result<(), String> {
+        if self.discovery_required() && !self.registry_enabled {
+            return Err(
+                "REGISTRY_ENABLED=true is required when DISCOVERY_REQUIRED=true or NODE_ENV/APP_ENV is production/test"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -367,6 +385,25 @@ fn is_production_env() -> bool {
             .ok()
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
     })
+}
+
+fn is_strict_discovery_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        env::var(name).ok().is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+        })
+    })
+}
+
+pub fn discovery_required_from_env() -> bool {
+    env_flag("DISCOVERY_REQUIRED") || is_strict_discovery_env()
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false)
 }
 
 fn validate_admin_tokens(admin_token: &str, admin_read_token: Option<&str>) -> Result<(), String> {
@@ -604,6 +641,15 @@ mod tests {
             env::remove_var("SERVICE_INSTANCE_ID");
             env::remove_var("SERVICE_BUILD_VERSION");
             env::remove_var("SERVICE_ZONE");
+        }
+    }
+
+    fn clear_upstream_discovery_env() {
+        unsafe {
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::remove_var("REGISTRY_ENABLED");
+            env::remove_var("UPSTREAM_SERVER_ID");
+            env::remove_var("UPSTREAM_LOCAL_SOCKET_NAME");
         }
     }
 
@@ -1189,6 +1235,96 @@ mod tests {
             config.route_store_backend,
             RouteStoreBackend::Memory
         ));
+    }
+
+    #[test]
+    fn local_static_upstream_fallback_is_allowed_by_default() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(!config.registry_enabled);
+        assert!(!config.discovery_required());
+        assert!(config.static_upstream_fallback_allowed());
+        assert_eq!(config.upstream_server_id, "game-server-1");
+        assert_eq!(
+            config.upstream_local_socket_name,
+            "myserver-game-server.sock"
+        );
+        assert!(config.validate_upstream_discovery().is_ok());
+    }
+
+    #[test]
+    fn strict_discovery_rejects_disabled_registry() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "REGISTRY_ENABLED",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("REGISTRY_ENABLED", "false");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        let error = config.validate_upstream_discovery().unwrap_err();
+
+        assert!(config.discovery_required());
+        assert!(!config.static_upstream_fallback_allowed());
+        assert!(error.contains("REGISTRY_ENABLED=true"));
+    }
+
+    #[test]
+    fn test_environment_requires_registry_for_discovery() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "REGISTRY_ENABLED",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_upstream_discovery_env();
+            env::set_var("APP_ENV", "test");
+            env::remove_var("NODE_ENV");
+            env::set_var("REGISTRY_ENABLED", "false");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.discovery_required());
+        assert!(config.validate_upstream_discovery().is_err());
     }
 
     #[test]

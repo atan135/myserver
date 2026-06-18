@@ -86,6 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let config = Config::from_env();
     init_logging(&config);
+    config
+        .validate_upstream_discovery()
+        .map_err(std::io::Error::other)?;
 
     // 启动 metrics 上报任务
     let metrics_nats_url = config.nats_url.clone();
@@ -164,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     route_store.load_persisted_state().await?;
-    if !config.registry_enabled {
+    if !config.registry_enabled && config.static_upstream_fallback_allowed() {
         route_store
             .set_static_routes(vec![UpstreamRoute {
                 server_id: config.upstream_server_id.clone(),
@@ -231,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        tracing::info!("service registry disabled");
+        tracing::info!("service registry disabled; using local static upstream fallback");
         None
     };
     let heartbeat_handle = registry_client
@@ -361,23 +364,7 @@ fn build_service_instance(config: &Config) -> ServiceInstance {
 }
 
 fn registry_failure_is_fatal() -> bool {
-    env_flag("DISCOVERY_REQUIRED")
-        || env_name_is("NODE_ENV", "production")
-        || env_name_is("APP_ENV", "production")
-        || env_name_is("NODE_ENV", "test")
-        || env_name_is("APP_ENV", "test")
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false)
-}
-
-fn env_name_is(name: &str, expected: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+    config::discovery_required_from_env()
 }
 
 #[cfg(test)]

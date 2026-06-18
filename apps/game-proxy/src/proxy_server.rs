@@ -220,6 +220,10 @@ pub async fn run(
     connection_count: SharedConnectionCount,
     maintenance: SharedMaintenanceFlag,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    config
+        .validate_upstream_discovery()
+        .map_err(std::io::Error::other)?;
+
     if config.registry_enabled {
         let registry_url = config.registry_url.clone();
         let service_name = config.upstream_service_name.clone();
@@ -442,10 +446,9 @@ fn discover_proxy_local_routes(instances: Vec<ServiceInstance>) -> Vec<UpstreamR
 }
 
 fn proxy_local_route_from_instance(instance: ServiceInstance) -> Option<UpstreamRoute> {
-    let endpoint = instance
-        .endpoints
-        .iter()
-        .find(|endpoint| endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid())?;
+    let endpoint = instance.endpoints.iter().find(|endpoint| {
+        endpoint.name == "proxy-local" && endpoint.healthy && endpoint.is_valid()
+    })?;
     let local_socket_name = local_socket_endpoint_name(endpoint)?;
     let server_id = endpoint
         .metadata
@@ -1584,6 +1587,24 @@ mod tests {
             "game-legacy",
             socket_endpoint("local_socket", "legacy.sock"),
         );
+
+        let routes = discover_proxy_local_routes(vec![instance]);
+
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn discovery_routes_require_proxy_local_endpoint() {
+        let instance = ServiceInstance::new(
+            "game-internal-only".to_string(),
+            "game-server".to_string(),
+            "127.0.0.1".to_string(),
+            7000,
+        )
+        .with_endpoints(vec![socket_endpoint(
+            "internal-proxy",
+            "internal-proxy.sock",
+        )]);
 
         let routes = discover_proxy_local_routes(vec![instance]);
 
