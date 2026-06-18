@@ -30,6 +30,12 @@ const DEFAULT_GAME_PROXY_ADMIN_TOKENS = new Set([
 const DEFAULT_INITIAL_ADMIN_PASSWORDS = new Set([
   "AdminPass123!"
 ]);
+const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT",
+  "GAME_PROXY_ADMIN_HOST",
+  "GAME_PROXY_ADMIN_PORT"
+];
 
 function parseCsv(value) {
   if (typeof value !== "string") return [];
@@ -157,12 +163,37 @@ function validateProductionConfig(config) {
   }
 }
 
+function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
+  if (!strictDiscovery) {
+    return [];
+  }
+
+  return envNames
+    .filter((name) => process.env[name] !== undefined)
+    .map((name) => ({
+      name,
+      message: `${name} is ignored while strict service discovery is active; use service registry endpoints instead`
+    }));
+}
+
+function emitLegacyDirectConfigWarnings(appName, warnings) {
+  for (const warning of warnings) {
+    console.warn(`[${appName}] ${warning.message}`);
+  }
+}
+
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "8h";
   const jwtExpiresInSeconds = parseDurationSeconds(jwtExpiresIn, 28800);
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
+  const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
+  const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv());
+  const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
+    LEGACY_DIRECT_CONFIG_ENV_NAMES,
+    registryDiscoveryRequired || !localDiscoveryFallbackEnabled
+  );
   const config = {
     appName: "admin-api",
     env,
@@ -213,9 +244,10 @@ export function getConfig() {
       localDiscoveryFallbackEnabled ? process.env.GAME_SERVER_ADMIN_PORT || "7500" : "7500",
       10
     ),
-    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
-    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    registryDiscoveryEnabled,
+    registryDiscoveryRequired,
     localDiscoveryFallbackEnabled,
+    legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
@@ -243,6 +275,7 @@ export function getConfig() {
     initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator"
   };
 
+  emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);
   validateProductionConfig(config);
   validateDiscoveryConfig(config);
   return config;

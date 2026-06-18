@@ -52,6 +52,20 @@ async function withEnv(values, callback) {
   }
 }
 
+async function withCapturedWarnings(values, callback) {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.join(" "));
+  };
+
+  try {
+    return await withEnv(values, (getConfig) => callback(getConfig, warnings));
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 test("mail-service config reads optional game admin actor", async () => {
   await withEnv({ GAME_ADMIN_ACTOR: "mail-ops" }, (getConfig) => {
     const config = getConfig();
@@ -93,17 +107,36 @@ test("mail-service game admin network limits read positive values", async () => 
 });
 
 test("mail-service ignores direct consumer endpoint env outside local fallback", async () => {
-  await withEnv({
+  await withCapturedWarnings({
     APP_ENV: "test",
     REGISTRY_ENABLED: "true",
     GAME_SERVER_ADMIN_HOST: "203.0.113.20",
     GAME_SERVER_ADMIN_PORT: "17500"
-  }, (getConfig) => {
+  }, (getConfig, warnings) => {
     const config = getConfig();
 
     assert.equal(config.localDiscoveryFallbackEnabled, false);
     assert.equal(config.gameServerAdminHost, "127.0.0.1");
     assert.equal(config.gameServerAdminPort, 7500);
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"]
+    );
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0], /GAME_SERVER_ADMIN_HOST is ignored/);
+  });
+});
+
+test("mail-service does not warn for local fallback direct endpoint env", async () => {
+  await withCapturedWarnings({
+    NODE_ENV: "development",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.2"
+  }, (getConfig, warnings) => {
+    const config = getConfig();
+
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
   });
 });
 

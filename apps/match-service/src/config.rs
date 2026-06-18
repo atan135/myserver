@@ -40,6 +40,7 @@ pub struct Config {
     pub match_runtime_key_prefix: String,
     pub match_runtime_lease_ttl_secs: u64,
     pub match_recovery_enabled: bool,
+    pub legacy_direct_config_warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +80,14 @@ impl Config {
             },
         );
         let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
+        let discovery_required = discovery_required_from_env();
+        let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
+            &[
+                "GAME_SERVER_INTERNAL_SOCKET_NAME",
+                "GAME_INTERNAL_SOCKET_NAME",
+            ],
+            discovery_required || !local_discovery_fallback_enabled,
+        );
         let game_server_local_socket_name = if local_discovery_fallback_enabled {
             std::env::var("GAME_LOCAL_SOCKET_NAME")
                 .unwrap_or_else(|_| "myserver-game-server.sock".to_string())
@@ -155,7 +164,7 @@ impl Config {
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
-            discovery_required: discovery_required_from_env(),
+            discovery_required,
             registry_url: std::env::var("REGISTRY_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
@@ -184,8 +193,10 @@ impl Config {
             match_recovery_enabled: std::env::var("MATCH_RECOVERY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(true),
+            legacy_direct_config_warnings,
         };
 
+        emit_legacy_direct_config_warnings("match-service", &config.legacy_direct_config_warnings);
         validate_production_config(&config);
         validate_discovery_config(&config);
         config
@@ -323,6 +334,28 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 
 fn discovery_required_from_env() -> bool {
     parse_bool_env("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
+}
+
+fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool) -> Vec<String> {
+    if !strict_discovery {
+        return Vec::new();
+    }
+
+    names
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .map(|name| {
+            format!(
+                "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
+            )
+        })
+        .collect()
+}
+
+fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
+    for warning in warnings {
+        tracing::warn!(service = app_name, warning = %warning, "legacy direct discovery config ignored");
+    }
 }
 
 fn validate_discovery_config(config: &Config) {
@@ -576,6 +609,33 @@ mod tests {
             config.game_server_internal_socket_name,
             "myserver-game-server-internal.sock"
         );
+        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
+        assert!(
+            config.legacy_direct_config_warnings[0]
+                .contains("GAME_SERVER_INTERNAL_SOCKET_NAME is ignored")
+        );
+        assert!(
+            config.legacy_direct_config_warnings[1]
+                .contains("GAME_INTERNAL_SOCKET_NAME is ignored")
+        );
+    }
+
+    #[test]
+    fn local_fallback_legacy_socket_envs_do_not_warn() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "development");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+        }
+
+        let config = Config::from_env();
+
+        assert!(config.local_discovery_fallback_enabled);
+        assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
     #[test]

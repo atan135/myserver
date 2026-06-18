@@ -60,6 +60,20 @@ async function withEnv(env, fn) {
   }
 }
 
+async function withCapturedWarnings(env, fn) {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.join(" "));
+  };
+
+  try {
+    return await withEnv(env, (config) => fn(config, warnings));
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 test("auth-http keeps TLS enforcement disabled by default in development", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.authRequireTls, false);
@@ -187,19 +201,42 @@ test("auth-http reads game-proxy host and port as local fallback config", async 
 });
 
 test("auth-http ignores direct consumer endpoint env outside local fallback", async () => {
-  await withEnv({
+  await withCapturedWarnings({
     NODE_ENV: "test",
     REGISTRY_ENABLED: "true",
     GAME_PROXY_HOST: "203.0.113.10",
     GAME_PROXY_PORT: "4100",
     GAME_SERVER_ADMIN_HOST: "203.0.113.20",
     GAME_SERVER_ADMIN_PORT: "17500"
-  }, (config) => {
+  }, (config, warnings) => {
     assert.equal(config.localDiscoveryFallbackEnabled, false);
     assert.equal(config.gameProxyHost, "127.0.0.1");
     assert.equal(config.gameProxyPort, 4000);
     assert.equal(config.gameServerAdminHost, "127.0.0.1");
     assert.equal(config.gameServerAdminPort, 7500);
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      [
+        "GAME_PROXY_HOST",
+        "GAME_PROXY_PORT",
+        "GAME_SERVER_ADMIN_HOST",
+        "GAME_SERVER_ADMIN_PORT"
+      ]
+    );
+    assert.equal(warnings.length, 4);
+    assert.match(warnings[0], /GAME_PROXY_HOST is ignored/);
+  });
+});
+
+test("auth-http does not warn for local fallback direct endpoint env", async () => {
+  await withCapturedWarnings({
+    NODE_ENV: "development",
+    GAME_PROXY_HOST: "127.0.0.2",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.3"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
   });
 });
 

@@ -168,6 +168,7 @@ pub struct Config {
     // 保留旧配置用于向后兼容（当 registry 禁用时）
     pub upstream_server_id: String,
     pub upstream_local_socket_name: String,
+    pub legacy_direct_config_warnings: Vec<String>,
 }
 
 impl Config {
@@ -316,6 +317,11 @@ impl Config {
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
+        let discovery_required = discovery_required_from_env();
+        let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
+            &["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"],
+            discovery_required,
+        );
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -343,7 +349,7 @@ impl Config {
         let upstream_local_socket_name = env::var("UPSTREAM_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
 
-        Ok(Self {
+        let config = Self {
             host,
             public_host,
             port,
@@ -391,7 +397,11 @@ impl Config {
             service_zone,
             upstream_server_id,
             upstream_local_socket_name,
-        })
+            legacy_direct_config_warnings,
+        };
+
+        emit_legacy_direct_config_warnings("game-proxy", &config.legacy_direct_config_warnings);
+        Ok(config)
     }
 
     pub fn discovery_required(&self) -> bool {
@@ -468,6 +478,28 @@ fn env_flag(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(false)
+}
+
+fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool) -> Vec<String> {
+    if !strict_discovery {
+        return Vec::new();
+    }
+
+    names
+        .iter()
+        .filter(|name| env::var_os(name).is_some())
+        .map(|name| {
+            format!(
+                "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
+            )
+        })
+        .collect()
+}
+
+fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
+    for warning in warnings {
+        tracing::warn!(service = app_name, warning = %warning, "legacy direct discovery config ignored");
+    }
 }
 
 fn validate_admin_tokens(admin_token: &str, admin_read_token: Option<&str>) -> Result<(), String> {
@@ -1357,6 +1389,8 @@ mod tests {
             "APP_ENV",
             "DISCOVERY_REQUIRED",
             "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
             "PROXY_ADMIN_TOKEN",
             "PROXY_ADMIN_READ_TOKEN",
         ]);
@@ -1376,6 +1410,44 @@ mod tests {
         assert!(config.discovery_required());
         assert!(!config.static_upstream_fallback_allowed());
         assert!(error.contains("REGISTRY_ENABLED=true"));
+        assert!(config.legacy_direct_config_warnings.is_empty());
+    }
+
+    #[test]
+    fn strict_discovery_warns_when_static_upstream_env_is_set() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.discovery_required());
+        assert!(!config.static_upstream_fallback_allowed());
+        assert_eq!(config.legacy_direct_config_warnings.len(), 2);
+        assert!(config.legacy_direct_config_warnings[0].contains("UPSTREAM_SERVER_ID is ignored"));
+        assert!(
+            config.legacy_direct_config_warnings[1]
+                .contains("UPSTREAM_LOCAL_SOCKET_NAME is ignored")
+        );
     }
 
     #[test]

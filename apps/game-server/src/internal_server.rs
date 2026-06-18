@@ -964,6 +964,7 @@ mod tests {
             service_build_version: "dev".to_string(),
             service_zone: "local".to_string(),
             service_rollout_epoch: "default".to_string(),
+            legacy_direct_config_warnings: Vec::new(),
         }
     }
 

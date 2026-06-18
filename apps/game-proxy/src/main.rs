@@ -462,6 +462,7 @@ mod tests {
             service_zone: "zone-a".to_string(),
             upstream_server_id: "game-server-1".to_string(),
             upstream_local_socket_name: "myserver-game-server.sock".to_string(),
+            legacy_direct_config_warnings: Vec::new(),
         }
     }
 

@@ -59,6 +59,7 @@ pub struct Config {
     pub service_build_version: String,
     pub service_zone: String,
     pub service_rollout_epoch: String,
+    pub legacy_direct_config_warnings: Vec<String>,
 }
 
 fn parse_bool(name: &str, default: bool) -> bool {
@@ -226,6 +227,8 @@ impl Config {
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
         let discovery_required = discovery_required_from_env();
+        let legacy_direct_config_warnings =
+            collect_legacy_direct_config_warnings(&["MATCH_SERVICE_ADDR"], discovery_required);
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -293,8 +296,10 @@ impl Config {
             service_build_version,
             service_zone,
             service_rollout_epoch,
+            legacy_direct_config_warnings,
         };
 
+        emit_legacy_direct_config_warnings("game-server", &config.legacy_direct_config_warnings);
         validate_production_config(&config);
         validate_discovery_config(&config);
 
@@ -351,6 +356,28 @@ fn is_strict_discovery_env() -> bool {
 
 fn discovery_required_from_env() -> bool {
     parse_bool("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
+}
+
+fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool) -> Vec<String> {
+    if !strict_discovery {
+        return Vec::new();
+    }
+
+    names
+        .iter()
+        .filter(|name| env::var_os(name).is_some())
+        .map(|name| {
+            format!(
+                "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
+            )
+        })
+        .collect()
+}
+
+fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
+    for warning in warnings {
+        tracing::warn!(service = app_name, warning = %warning, "legacy direct discovery config ignored");
+    }
 }
 
 fn validate_discovery_config(config: &Config) {
@@ -506,6 +533,7 @@ mod tests {
         "GAME_PORT",
         "GAME_LOCAL_SOCKET_NAME",
         "GAME_INTERNAL_SOCKET_NAME",
+        "MATCH_SERVICE_ADDR",
         "SERVICE_NAME",
         "SERVICE_INSTANCE_ID",
         "SERVICE_BUILD_VERSION",
@@ -794,6 +822,32 @@ mod tests {
 
         assert_eq!(config.public_host, "127.0.0.1");
         assert_eq!(config.admin_advertised_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn warns_when_legacy_match_service_addr_is_set_in_strict_discovery() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "test");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
+        }
+
+        let config = Config::from_env();
+
+        assert!(config.discovery_required);
+        assert_eq!(config.legacy_direct_config_warnings.len(), 1);
+        assert!(config.legacy_direct_config_warnings[0].contains("MATCH_SERVICE_ADDR is ignored"));
+
+        unsafe {
+            env::set_var("APP_ENV", "development");
+        }
+
+        let config = Config::from_env();
+        assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
     #[test]

@@ -61,6 +61,10 @@ const DEFAULT_MAIL_SERVICE_TOKENS = new Set([
   "default",
   "password"
 ]);
+const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT"
+];
 
 function isProductionEnv() {
   return [process.env.NODE_ENV, process.env.APP_ENV].some(
@@ -132,10 +136,35 @@ function isWeakSecret(value) {
   return normalized.length > 0 && normalized.split("").every((ch) => ch === normalized[0]);
 }
 
+function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
+  if (!strictDiscovery) {
+    return [];
+  }
+
+  return envNames
+    .filter((name) => process.env[name] !== undefined)
+    .map((name) => ({
+      name,
+      message: `${name} is ignored while strict service discovery is active; use service registry endpoints instead`
+    }));
+}
+
+function emitLegacyDirectConfigWarnings(appName, warnings) {
+  for (const warning of warnings) {
+    console.warn(`[${appName}] ${warning.message}`);
+  }
+}
+
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const bindHost = firstNonEmptyEnv(["SERVICE_BIND_HOST", "HOST"]) || "127.0.0.1";
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
+  const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
+  const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv());
+  const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
+    LEGACY_DIRECT_CONFIG_ENV_NAMES,
+    registryDiscoveryRequired || !localDiscoveryFallbackEnabled
+  );
   const config = {
     appName: "mail-service",
     env,
@@ -163,9 +192,10 @@ export function getConfig() {
       localDiscoveryFallbackEnabled ? process.env.GAME_SERVER_ADMIN_PORT || "7500" : "7500",
       10
     ),
-    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
-    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
+    registryDiscoveryEnabled,
+    registryDiscoveryRequired,
     localDiscoveryFallbackEnabled,
+    legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
@@ -184,6 +214,7 @@ export function getConfig() {
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
 
+  emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);
   validateProductionConfig(config);
   validateDiscoveryConfig(config);
   return config;

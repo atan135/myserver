@@ -70,6 +70,20 @@ async function withEnv(env, fn) {
   }
 }
 
+async function withCapturedWarnings(env, fn) {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.join(" "));
+  };
+
+  try {
+    return await withEnv(env, (config) => fn(config, warnings));
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
 test("admin-api control plane security defaults stay local-development friendly", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.adminApiRequireTls, false);
@@ -152,19 +166,42 @@ test("admin-api game-proxy admin monitoring config reads positive values", async
 });
 
 test("admin-api ignores direct consumer endpoint env outside local fallback", async () => {
-  await withEnv({
+  await withCapturedWarnings({
     NODE_ENV: "test",
     REGISTRY_ENABLED: "true",
     GAME_SERVER_ADMIN_HOST: "203.0.113.20",
     GAME_SERVER_ADMIN_PORT: "17500",
     GAME_PROXY_ADMIN_HOST: "203.0.113.30",
     GAME_PROXY_ADMIN_PORT: "17101"
-  }, (config) => {
+  }, (config, warnings) => {
     assert.equal(config.localDiscoveryFallbackEnabled, false);
     assert.equal(config.gameServerAdminHost, "127.0.0.1");
     assert.equal(config.gameServerAdminPort, 7500);
     assert.equal(config.gameProxyAdminHost, "127.0.0.1");
     assert.equal(config.gameProxyAdminPort, 7101);
+    assert.deepEqual(
+      config.legacyDirectConfigWarnings.map((warning) => warning.name),
+      [
+        "GAME_SERVER_ADMIN_HOST",
+        "GAME_SERVER_ADMIN_PORT",
+        "GAME_PROXY_ADMIN_HOST",
+        "GAME_PROXY_ADMIN_PORT"
+      ]
+    );
+    assert.equal(warnings.length, 4);
+    assert.match(warnings[0], /GAME_SERVER_ADMIN_HOST is ignored/);
+  });
+});
+
+test("admin-api does not warn for local fallback direct endpoint env", async () => {
+  await withCapturedWarnings({
+    NODE_ENV: "development",
+    GAME_SERVER_ADMIN_HOST: "127.0.0.2",
+    GAME_PROXY_ADMIN_HOST: "127.0.0.3"
+  }, (config, warnings) => {
+    assert.equal(config.localDiscoveryFallbackEnabled, true);
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
+    assert.deepEqual(warnings, []);
   });
 });
 

@@ -606,6 +606,7 @@ mod tests {
             match_runtime_key_prefix: "myserver:".to_string(),
             match_runtime_lease_ttl_secs: 10,
             match_recovery_enabled: true,
+            legacy_direct_config_warnings: Vec::new(),
         }
     }
 
