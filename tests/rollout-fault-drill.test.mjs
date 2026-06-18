@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -12,6 +13,19 @@ import {
   encodeRoomTransferPayloadForTest,
   orchestrateRoomTransfer
 } from "../tools/mock-client/src/rollout-transfer.js";
+
+test("rollout fault drill cli help labels local admin defaults as manual fallback", () => {
+  const result = spawnSync(process.execPath, ["tools/mock-client/src/rollout-fault-drill-cli.js", "--help"], {
+    cwd: process.cwd(),
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /registry discovery/);
+  assert.match(result.stdout, /manual local drills/);
+  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127\.0\.0\.1/);
+  assert.match(result.stdout, /local\/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http:\/\/127\.0\.0\.1:7101/);
+});
 
 test("rollout fault drill dry-run prints a safe plan without service calls", async () => {
   const report = await runRolloutFaultDrills({

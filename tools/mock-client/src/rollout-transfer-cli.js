@@ -37,13 +37,13 @@ Options:
   --redirect-transport <transport>        default: kcp
   --redirect-reason <reason>              default: rollout_redirect
   --redirect-retry-after-ms <ms>          default: 0
-  --old-admin-host <host>                 default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
-  --old-admin-port <port>                 default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
+  --old-admin-host <host>                 local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
+  --old-admin-port <port>                 local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
   --old-admin-token <token>               default: MYSERVER_OLD_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --new-admin-host <host>                 default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
-  --new-admin-port <port>                 default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
+  --new-admin-host <host>                 local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
+  --new-admin-port <port>                 local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
   --new-admin-token <token>               default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --proxy-admin-url <url>                 default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
+  --proxy-admin-url <url>                 local/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
   --proxy-admin-token <token>             default: PROXY_ADMIN_TOKEN
   --proxy-admin-actor <actor>             default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-transfer-cli
   --proxy-expected-room-version <n>
@@ -51,7 +51,11 @@ Options:
   --proxy-expected-last-transfer-checksum <checksum>
   --require-existing-route-metadata       fail before /room-route/upsert if proxy has no room route
   --timeout-ms <ms>                       default: 5000
-  -h, --help`);
+  -h, --help
+
+For test/staging/production rollout drills, prefer scripts/rollout-three-process-drill.ps1
+so auth-http, game-proxy admin, and game-server admin endpoints come from registry discovery.
+The 127.0.0.1 admin defaults above are only for manual local drills.`);
 }
 
 function parseNumber(value, fallback) {

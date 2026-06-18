@@ -246,19 +246,19 @@ node tools/mock-client/src/index.js --scenario combat-dual-client \
   --room-id room-combat-demo --policy-id combat_demo \
   --combat-skill-id 2
 
-# 聊天测试
+# 聊天测试（9001 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario chat-private \
   --http-base-url http://127.0.0.1:3000 \
   --chat-port 9001 --target-id <plr_...> --content "Hello!"
 
-# 邮件测试
+# 邮件测试（9003 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario mail-send \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
   --login-name test001 --password Passw0rd! \
   --mail-title "系统奖励" --mail-content "请查收附件"
 
-# 邮件通知联调
+# 邮件通知联调（9003/9001 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario mail-send-and-notify \
   --http-base-url http://127.0.0.1:3000 \
   --mail-base-url http://127.0.0.1:9003 \
@@ -266,11 +266,11 @@ node tools/mock-client/src/index.js --scenario mail-send-and-notify \
   --login-name test001 --password Passw0rd! \
   --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
 
-# 公告列表
+# 公告列表（9004 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario announce-list \
   --announce-base-url http://127.0.0.1:9004
 
-# 创建公告
+# 创建公告（9004 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario announce-create \
   --announce-base-url http://127.0.0.1:9004 \
   --announce-admin-token dev-only-change-this-announce-admin-token \
@@ -461,7 +461,7 @@ powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
   -RoomId room-empty-001
 ```
 
-该脚本默认 dry-run，不启动服务、不调用写接口；确认 old/new game-server、game-proxy 和 auth-http 已运行后，才传 `-ExecuteSteps`。详细流程见 `docs/rollout-three-process-drill-runbook.md`。
+该脚本默认 dry-run，不启动服务、不调用写接口；它会优先通过 registry discovery 解析 auth-http、game-proxy admin 和 game-server admin endpoint。确认 old/new game-server、game-proxy 和 auth-http 已运行并注册后，才传 `-ExecuteSteps`。详细流程见 `docs/rollout-three-process-drill-runbook.md`。
 
 故障演练入口使用 `tools/mock-client/src/rollout-fault-drill-cli.js`。默认同样是 dry-run，只输出 JSON 计划，不访问服务：
 
@@ -475,7 +475,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js
 node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
 ```
 
-只有显式 `--execute` 才调用已运行服务的控制面接口；该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/rollout-fault-drill-runbook.md`。
+只有显式 `--execute` 才调用已运行服务的控制面接口；固定 `127.0.0.1:7500/7501/7101` 只适合本地 manual drill，测试/线上应先通过 registry discovery 解析 endpoint 再传入。该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/rollout-fault-drill-runbook.md`。
 
 ## 扩展开发
 

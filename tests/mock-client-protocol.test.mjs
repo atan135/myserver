@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import { parseArgs } from "../tools/mock-client/src/args.js";
@@ -32,6 +33,27 @@ test("mock-client defaults to public player entrypoints only", () => {
   assert.equal(options.chatPort, 0);
   assert.equal(options.mailBaseUrl, "");
   assert.equal(options.announceBaseUrl, "");
+});
+
+test("mock-client rollout player examples stay on proxy TCP fallback", () => {
+  const rolloutHelp = fs.readFileSync("tools/mock-client/help_rollout.txt", "utf8");
+
+  assert.equal(rolloutHelp.includes("--port 7000"), false);
+  assert.match(rolloutHelp, /--port 14000/);
+  assert.match(rolloutHelp, /registry discovery/);
+  assert.match(rolloutHelp, /本地 manual drill/);
+});
+
+test("mock-client side-service help marks local internal endpoints", () => {
+  const help = fs.readFileSync("tools/mock-client/help.txt", "utf8");
+  const readme = fs.readFileSync("tools/mock-client/README.md", "utf8");
+
+  assert.match(help, /内部联调地址；本地示例通过 --chat-port 9001/);
+  assert.match(help, /内部联调地址；本地示例通过 --mail-base-url 9003/);
+  assert.match(help, /内部联调地址；本地示例通过 --announce-base-url 9004/);
+  assert.match(readme, /9001 是本地内部联调地址示例/);
+  assert.match(readme, /9003 是本地内部联调地址示例/);
+  assert.match(readme, /9004 是本地内部联调地址示例/);
 });
 
 test("mock-client internal side-service scenarios require explicit endpoints", async () => {

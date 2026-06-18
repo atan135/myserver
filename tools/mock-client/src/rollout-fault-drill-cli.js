@@ -29,13 +29,13 @@ Options:
   --room-id <room-id>
   --old-server-id <server-id>            default: game-server-old
   --new-server-id <server-id>            default: game-server-new
-  --old-admin-host <host>                default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
-  --old-admin-port <port>                default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
+  --old-admin-host <host>                local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_HOST or 127.0.0.1
+  --old-admin-port <port>                local/manual fallback default: MYSERVER_OLD_GAME_ADMIN_PORT or 7500
   --old-admin-token <token>              default: MYSERVER_OLD_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --new-admin-host <host>                default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
-  --new-admin-port <port>                default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
+  --new-admin-host <host>                local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_HOST or 127.0.0.1
+  --new-admin-port <port>                local/manual fallback default: MYSERVER_NEW_GAME_ADMIN_PORT or 7501
   --new-admin-token <token>              default: MYSERVER_NEW_GAME_ADMIN_TOKEN or GAME_ADMIN_TOKEN
-  --proxy-admin-url <url>                default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
+  --proxy-admin-url <url>                local/manual fallback default: MYSERVER_PROXY_ADMIN_URL or http://127.0.0.1:7101
   --proxy-admin-token <token>            default: PROXY_ADMIN_TOKEN
   --proxy-admin-actor <actor>            default: MYSERVER_PROXY_ADMIN_ACTOR or rollout-fault-drill
   --redirect-target-host <host>          required with --execute redirect-no-reconnect
@@ -47,7 +47,11 @@ Options:
   --timeout-ms <ms>                      default: 5000
   --archive-dir <dir>                    write JSON report as rollout-fault-drill-<time>.json
   --archive-file <file>                  write JSON report to a specific file
-  -h, --help`);
+  -h, --help
+
+For test/staging/production rollout drills, prefer scripts/rollout-three-process-drill.ps1
+so auth-http, game-proxy admin, and game-server admin endpoints come from registry discovery.
+The 127.0.0.1 admin defaults above are only for manual local drills.`);
 }
 
 function parseNumber(value, fallback) {

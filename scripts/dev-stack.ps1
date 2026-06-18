@@ -48,9 +48,11 @@ param(
     [switch]$WithMetricsCollector,
 
     [Parameter(Mandatory=$false)]
+    # Local dev stack bind port only. Test/production endpoint discovery must use registry data.
     [int]$GamePort = 7000,
 
     [Parameter(Mandatory=$false)]
+    # Local dev stack admin bind port only. Do not use this as a service discovery fallback.
     [int]$GameAdminPort = 7500,
 
     [Parameter(Mandatory=$false)]
@@ -670,6 +672,8 @@ $adminApiEnv = Join-Path $ProjectRoot "apps\admin-api\.env"
 $gameEnv = Join-Path $ProjectRoot "apps\game-server\.env"
 $proxyEnv = Join-Path $ProjectRoot "apps\game-proxy\.env"
 
+# dev-stack is a manual local launcher. These ports are startup/probe defaults for local processes,
+# not test/production service discovery inputs.
 $authPort = [int](Get-EnvValue -Path $authEnv -Name "PORT" -Default "3000")
 $adminApiPort = [int](Get-EnvValue -Path $adminApiEnv -Name "PORT" -Default "3001")
 $adminWebHost = "127.0.0.1"
@@ -889,7 +893,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Dev stack started." -ForegroundColor Green
+    Write-Host "Local dev stack started. Endpoints below are local bind/probe defaults, not registry discovery output." -ForegroundColor Green
     if (-not $NoAuth) {
         Write-Host "  auth-http: http://127.0.0.1:$authPort" -ForegroundColor Gray
     }

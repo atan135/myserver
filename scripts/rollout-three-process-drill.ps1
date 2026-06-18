@@ -4,13 +4,18 @@ Preflight and step runner for a first-stage old/new/proxy rollout drill.
 
 .DESCRIPTION
 This script does not start Redis, auth-http, game-server, or game-proxy.
-By default it runs in dry-run mode: it checks local tools, probes the expected
-ports, prints the manual service preparation commands, and prints the rollout
+By default it runs in dry-run mode: it checks local tools, resolves control
+endpoints through service registry discovery, probes the resolved endpoints,
+prints the manual local service preparation commands, and prints the rollout
 steps that would be executed.
 
 Use -ExecuteSteps only after the old game-server, new game-server, game-proxy,
-and auth-http are already running and configured for this drill. The shutdown
-safety-gate request is still skipped unless -AllowShutdownRequest is passed.
+and auth-http are already running, registered, and configured for this drill.
+Fixed 127.0.0.1 ports are only a local/manual fallback when registry discovery
+is explicitly non-required; strict, test, and production paths must discover
+auth-http, game-proxy admin, and game-server admin endpoints from the registry.
+The shutdown safety-gate request is still skipped unless -AllowShutdownRequest
+is passed.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
@@ -94,36 +99,44 @@ param(
     [string]$RegistryFixturePath = $(if ($env:MYSERVER_REGISTRY_FIXTURE_PATH) { $env:MYSERVER_REGISTRY_FIXTURE_PATH } else { "" }),
 
     [Parameter(Mandatory=$false)]
+    # Manual local startup hint only; player/control endpoints are resolved by registry discovery.
     [int]$OldGamePort = $(if ($env:MYSERVER_OLD_GAME_PORT) { [int]$env:MYSERVER_OLD_GAME_PORT } else { 7000 }),
 
     [Parameter(Mandatory=$false)]
+    # Manual local startup hint only; player/control endpoints are resolved by registry discovery.
     [int]$NewGamePort = $(if ($env:MYSERVER_NEW_GAME_PORT) { [int]$env:MYSERVER_NEW_GAME_PORT } else { 7001 }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [string]$OldAdminHost = $(if ($env:MYSERVER_OLD_GAME_ADMIN_HOST) { $env:MYSERVER_OLD_GAME_ADMIN_HOST } else { "127.0.0.1" }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [int]$OldAdminPort = $(if ($env:MYSERVER_OLD_GAME_ADMIN_PORT) { [int]$env:MYSERVER_OLD_GAME_ADMIN_PORT } else { 7500 }),
 
     [Parameter(Mandatory=$false)]
     [string]$OldAdminToken = $(if ($env:MYSERVER_OLD_GAME_ADMIN_TOKEN) { $env:MYSERVER_OLD_GAME_ADMIN_TOKEN } elseif ($env:GAME_ADMIN_TOKEN) { $env:GAME_ADMIN_TOKEN } else { "dev-only-change-this-game-admin-token" }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [string]$NewAdminHost = $(if ($env:MYSERVER_NEW_GAME_ADMIN_HOST) { $env:MYSERVER_NEW_GAME_ADMIN_HOST } else { "127.0.0.1" }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [int]$NewAdminPort = $(if ($env:MYSERVER_NEW_GAME_ADMIN_PORT) { [int]$env:MYSERVER_NEW_GAME_ADMIN_PORT } else { 7501 }),
 
     [Parameter(Mandatory=$false)]
     [string]$NewAdminToken = $(if ($env:MYSERVER_NEW_GAME_ADMIN_TOKEN) { $env:MYSERVER_NEW_GAME_ADMIN_TOKEN } elseif ($env:GAME_ADMIN_TOKEN) { $env:GAME_ADMIN_TOKEN } else { "dev-only-change-this-game-admin-token" }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [string]$AuthBaseUrl = $(if ($env:MYSERVER_AUTH_BASE_URL) { $env:MYSERVER_AUTH_BASE_URL } else { "http://127.0.0.1:3000" }),
 
     [Parameter(Mandatory=$false)]
     [string]$ServiceToken = $(if ($env:MYSERVER_INTERNAL_API_TOKEN) { $env:MYSERVER_INTERNAL_API_TOKEN } elseif ($env:INTERNAL_API_TOKEN) { $env:INTERNAL_API_TOKEN } else { "" }),
 
     [Parameter(Mandatory=$false)]
+    # Local/manual fallback only. Strict/test/production runs must use registry discovery.
     [string]$ProxyAdminUrl = $(if ($env:MYSERVER_PROXY_ADMIN_URL) { $env:MYSERVER_PROXY_ADMIN_URL } else { "http://127.0.0.1:7101" }),
 
     [Parameter(Mandatory=$false)]
@@ -898,6 +911,20 @@ function Write-RunSummary {
     }
 }
 
+function New-ResolvedEndpointsReport {
+    if ($null -eq $script:Discovery) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        oldGameServerAdmin = "$($script:Discovery.oldGameServerAdmin.host):$($script:Discovery.oldGameServerAdmin.port)"
+        newGameServerAdmin = "$($script:Discovery.newGameServerAdmin.host):$($script:Discovery.newGameServerAdmin.port)"
+        authHttp = $script:Discovery.authHttp.url
+        gameProxyAdmin = $script:Discovery.gameProxyAdmin.url
+        source = $script:Discovery.mode
+    }
+}
+
 function New-RunReport {
     $mode = if ($ExecuteSteps) { "execute" } else { "dry-run" }
     $roomValue = if ($RoomId) { $RoomId } else { $null }
@@ -942,6 +969,7 @@ function New-RunReport {
                 authInternalService = Mask-TokenState $ServiceToken
             }
         }
+        resolvedEndpoints = New-ResolvedEndpointsReport
         discovery = $script:Discovery
         safety = [pscustomobject]@{
             startsServices = $false
@@ -1143,6 +1171,7 @@ if ($preflightErrors.Count -gt 0) {
 
 Write-Section "Stage 0 - Manual Service Preparation"
 Write-Host "This script never starts services. If needed, start dependencies and these processes in separate terminals." -ForegroundColor Yellow
+Write-Host "The commands below are local/manual startup hints only; execute/test/production control endpoints come from the Discovery section." -ForegroundColor Yellow
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-auth.ps1")
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $OldServerId, "-Port", [string]$OldGamePort, "-AdminPort", [string]$OldAdminPort)
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $NewServerId, "-Port", [string]$NewGamePort, "-AdminPort", [string]$NewAdminPort)

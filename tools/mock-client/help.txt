@@ -192,7 +192,7 @@ node tools/mock-client/src/index.js --scenario create-matched-room --http-base-u
 #   --mode         匹配模式 (可选，默认 1v1)
 node tools/mock-client/src/index.js --scenario create-matched-room-and-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --login-name test001 --password Passw0rd! --mode 3v3
 
-# ========== 聊天系统测试 (通过 --chat-port 9001) ==========
+# ========== 聊天系统测试 (内部联调地址；本地示例通过 --chat-port 9001) ==========
 
 # 13. 私聊消息 (CHAT_PRIVATE)
 node tools/mock-client/src/index.js --scenario chat-private --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --target-id <plr_...> --content "Hello!"
@@ -230,7 +230,7 @@ node tools/mock-client/src/index.js --scenario chat-private-two-client --http-ba
 # 开启两个客户端，通过命令行互相发送消息
 node tools/mock-client/src/index.js --scenario chat-interactive --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --chat-port 9001 --room-id test-room
 
-# ========== 邮件系统测试 (通过 --mail-base-url 9003) ==========
+# ========== 邮件系统测试 (内部联调地址；本地示例通过 --mail-base-url 9003) ==========
 
 # 发送系统邮件 (MAIL_SEND)
 # 默认会发给当前登录玩家；也可以通过 --mail-to-player-id 指定其他玩家
@@ -255,7 +255,7 @@ node tools/mock-client/src/index.js --scenario mail-claim --http-base-url http:/
 # 发送邮件并等待聊天服推送 MAIL_NOTIFY_PUSH (MAIL_SEND_AND_NOTIFY)
 node tools/mock-client/src/index.js --scenario mail-send-and-notify --http-base-url http://127.0.0.1:3000 --mail-base-url http://127.0.0.1:9003 --host 127.0.0.1 --chat-port 9001 --login-name test001 --password Passw0rd! --mail-title "通知测试" --mail-content "测试聊天服邮件通知"
 
-# ========== 公告系统测试 (通过 --announce-base-url 9004) ==========
+# ========== 公告系统测试 (内部联调地址；本地示例通过 --announce-base-url 9004) ==========
 
 # 获取公告列表 (ANNOUNCE_LIST)
 # 默认仅返回当前激活中的公告；可用 --announce-active-only false 查看全部
