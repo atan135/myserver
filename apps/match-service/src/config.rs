@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
+
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
@@ -81,6 +83,13 @@ impl Config {
         );
         let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
         let discovery_required = discovery_required_from_env();
+        validate_legacy_direct_config(
+            "match-service",
+            &[
+                "GAME_SERVER_INTERNAL_SOCKET_NAME",
+                "GAME_INTERNAL_SOCKET_NAME",
+            ],
+        );
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &[
                 "GAME_SERVER_INTERNAL_SOCKET_NAME",
@@ -341,15 +350,36 @@ fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool)
         return Vec::new();
     }
 
-    names
-        .iter()
-        .filter(|name| std::env::var_os(name).is_some())
+    collect_configured_legacy_direct_config_names(names)
+        .into_iter()
         .map(|name| {
             format!(
                 "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
             )
         })
         .collect()
+}
+
+fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn validate_legacy_direct_config(app_name: &str, names: &[&str]) {
+    if !parse_bool_env(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false) {
+        return;
+    }
+
+    let configured = collect_configured_legacy_direct_config_names(names);
+    if !configured.is_empty() {
+        panic!(
+            "invalid {app_name} discovery config: {DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+            configured.join(", ")
+        );
+    }
 }
 
 fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
@@ -399,6 +429,7 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
@@ -409,6 +440,7 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
@@ -595,6 +627,7 @@ mod tests {
 
         unsafe {
             env::remove_var("NODE_ENV");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("APP_ENV", "test");
             env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("GAME_LOCAL_SOCKET_NAME", "custom-local.sock");
@@ -627,6 +660,7 @@ mod tests {
 
         unsafe {
             env::remove_var("NODE_ENV");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("APP_ENV", "development");
             env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
             env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
@@ -635,6 +669,44 @@ mod tests {
         let config = Config::from_env();
 
         assert!(config.local_discovery_fallback_enabled);
+        assert!(config.legacy_direct_config_warnings.is_empty());
+    }
+
+    #[test]
+    fn rejects_legacy_internal_socket_env_when_migration_complete_switch_is_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "development");
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("GAME_SERVER_INTERNAL_SOCKET_NAME", "custom-internal.sock");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "legacy-internal.sock");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config"));
+        assert!(error.contains("GAME_SERVER_INTERNAL_SOCKET_NAME"));
+        assert!(error.contains("GAME_INTERNAL_SOCKET_NAME"));
+    }
+
+    #[test]
+    fn accepts_migration_complete_switch_without_legacy_internal_socket_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "development");
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::remove_var("GAME_SERVER_INTERNAL_SOCKET_NAME");
+            env::remove_var("GAME_INTERNAL_SOCKET_NAME");
+        }
+
+        let config = Config::from_env();
+
         assert!(config.legacy_direct_config_warnings.is_empty());
     }
 

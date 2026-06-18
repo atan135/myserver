@@ -75,6 +75,7 @@ const DEFAULT_GAME_ADMIN_TOKENS = new Set([
 ]);
 
 const DEFAULT_AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS = 2000;
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME = "DISALLOW_LEGACY_DIRECT_CONFIG";
 const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_PROXY_HOST",
   "GAME_PROXY_PORT",
@@ -138,13 +139,29 @@ function validateDiscoveryConfig(config) {
   }
 }
 
+function collectConfiguredLegacyDirectConfigNames(envNames) {
+  return envNames.filter((name) => process.env[name] !== undefined);
+}
+
+function validateLegacyDirectConfig(appName, envNames, disallowLegacyDirectConfig) {
+  if (!disallowLegacyDirectConfig) {
+    return;
+  }
+
+  const configured = collectConfiguredLegacyDirectConfigNames(envNames);
+  if (configured.length > 0) {
+    throw new Error(
+      `Invalid ${appName} discovery config: ${DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: ${configured.join(", ")}; remove these variables and use service registry endpoints instead`
+    );
+  }
+}
+
 function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
   if (!strictDiscovery) {
     return [];
   }
 
-  return envNames
-    .filter((name) => process.env[name] !== undefined)
+  return collectConfiguredLegacyDirectConfigNames(envNames)
     .map((name) => ({
       name,
       message: `${name} is ignored while strict service discovery is active; use service registry endpoints instead`
@@ -163,6 +180,8 @@ export function getConfig() {
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
+  const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
+  validateLegacyDirectConfig("auth-http", LEGACY_DIRECT_CONFIG_ENV_NAMES, disallowLegacyDirectConfig);
   const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
     registryDiscoveryRequired || !localDiscoveryFallbackEnabled
@@ -232,6 +251,7 @@ export function getConfig() {
     registryDiscoveryEnabled,
     registryDiscoveryRequired,
     localDiscoveryFallbackEnabled,
+    disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
     authExposeInternalServiceEndpoints: parseBoolean(
       process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS,

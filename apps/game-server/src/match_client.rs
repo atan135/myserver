@@ -18,6 +18,7 @@ use crate::proto::myserver::matchservice::{
 
 /// MatchClient 配置
 pub const DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS: u64 = 30;
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchClientConfig {
@@ -35,6 +36,7 @@ pub struct MatchClientConfig {
 
 impl MatchClientConfig {
     pub async fn from_env() -> Self {
+        validate_legacy_direct_config(&["MATCH_SERVICE_ADDR"]);
         let local_discovery_fallback_enabled = is_local_discovery_fallback_env();
         let fallback_addr = if local_discovery_fallback_enabled {
             std::env::var("MATCH_SERVICE_ADDR")
@@ -60,7 +62,9 @@ impl MatchClientConfig {
         if !registry_enabled {
             if discovery_required {
                 record_discovery_metric(&service_name, "grpc", "registry", "registry_disabled");
-                panic!("required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc");
+                panic!(
+                    "required registry discovery failed: REGISTRY_ENABLED=false for match-service.grpc"
+                );
             }
             record_discovery_metric(&service_name, "grpc", "fallback", "fallback_used");
             tracing::info!(
@@ -590,6 +594,28 @@ fn env_flag(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn validate_legacy_direct_config(names: &[&str]) {
+    if !env_flag(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false) {
+        return;
+    }
+
+    let configured = configured_legacy_direct_config_names(names);
+    if !configured.is_empty() {
+        panic!(
+            "invalid game-server match client discovery config: {DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+            configured.join(", ")
+        );
+    }
+}
+
 fn is_strict_discovery_env() -> bool {
     ["NODE_ENV", "APP_ENV"].iter().any(|name| {
         std::env::var(name).ok().is_some_and(|value| {
@@ -667,6 +693,7 @@ mod tests {
 
     const MATCH_CLIENT_ENV_NAMES: &[&str] = &[
         "MATCH_SERVICE_ADDR",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "MATCH_SERVICE_NAME",
         "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
         "NODE_ENV",
@@ -708,6 +735,7 @@ mod tests {
         }
         unsafe {
             env::set_var("MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS", "7");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
         }
 
@@ -715,6 +743,36 @@ mod tests {
 
         assert_eq!(config.rediscovery_interval_secs, 7);
         assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[tokio::test]
+    async fn config_rejects_match_service_addr_when_migration_complete_switch_is_enabled() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let error = tokio::spawn(async { MatchClientConfig::from_env().await })
+            .await
+            .expect_err("legacy direct config should panic in migration complete mode");
+
+        assert!(error.is_panic());
+        let payload = error.into_panic();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(message.contains(
+            "DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config: MATCH_SERVICE_ADDR"
+        ));
     }
 
     #[test]
@@ -729,6 +787,7 @@ mod tests {
         unsafe {
             env::set_var("APP_ENV", "test");
             env::set_var("REGISTRY_ENABLED", "false");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
         }
 

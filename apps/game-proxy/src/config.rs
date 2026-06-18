@@ -13,6 +13,7 @@ const DEFAULT_MAINTENANCE_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_BLOCKLIST_CACHE_TTL_MS: u64 = 2000;
 const DEFAULT_PROXY_MSG_RATE_WINDOW_MS: u64 = 1000;
 const DEFAULT_PROXY_ADMIN_AUDIT_PATH: &str = "logs/game-proxy/admin-audit.jsonl";
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdminPermissionScope {
@@ -318,6 +319,7 @@ impl Config {
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
         let discovery_required = discovery_required_from_env();
+        validate_legacy_direct_config(&["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"])?;
         let legacy_direct_config_warnings = collect_legacy_direct_config_warnings(
             &["UPSTREAM_SERVER_ID", "UPSTREAM_LOCAL_SOCKET_NAME"],
             discovery_required,
@@ -486,15 +488,38 @@ fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool)
         return Vec::new();
     }
 
-    names
-        .iter()
-        .filter(|name| env::var_os(name).is_some())
+    collect_configured_legacy_direct_config_names(names)
+        .into_iter()
         .map(|name| {
             format!(
                 "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
             )
         })
         .collect()
+}
+
+fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| env::var_os(name).is_some())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn validate_legacy_direct_config(names: &[&str]) -> Result<(), String> {
+    if !env_flag(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME) {
+        return Ok(());
+    }
+
+    let configured = collect_configured_legacy_direct_config_names(names);
+    if configured.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+        configured.join(", ")
+    ))
 }
 
 fn emit_legacy_direct_config_warnings(app_name: &str, warnings: &[String]) {
@@ -756,6 +781,7 @@ mod tests {
     fn clear_upstream_discovery_env() {
         unsafe {
             env::remove_var("DISCOVERY_REQUIRED");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::remove_var("REGISTRY_ENABLED");
             env::remove_var("UPSTREAM_SERVER_ID");
             env::remove_var("UPSTREAM_LOCAL_SOCKET_NAME");
@@ -1357,6 +1383,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
             "REGISTRY_ENABLED",
             "REGISTRY_KEY_PREFIX",
             "REDIS_KEY_PREFIX",
@@ -1393,6 +1420,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
             "REGISTRY_ENABLED",
             "UPSTREAM_SERVER_ID",
             "UPSTREAM_LOCAL_SOCKET_NAME",
@@ -1424,6 +1452,7 @@ mod tests {
             "NODE_ENV",
             "APP_ENV",
             "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
             "REGISTRY_ENABLED",
             "UPSTREAM_SERVER_ID",
             "UPSTREAM_LOCAL_SOCKET_NAME",
@@ -1452,6 +1481,69 @@ mod tests {
             config.legacy_direct_config_warnings[1]
                 .contains("UPSTREAM_LOCAL_SOCKET_NAME is ignored")
         );
+    }
+
+    #[test]
+    fn rejects_static_upstream_env_when_migration_complete_switch_is_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("UPSTREAM_SERVER_ID", "game-server-blue");
+            env::set_var("UPSTREAM_LOCAL_SOCKET_NAME", "game-blue.sock");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("legacy static upstream env should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config"));
+        assert!(error.contains("UPSTREAM_SERVER_ID"));
+        assert!(error.contains("UPSTREAM_LOCAL_SOCKET_NAME"));
+    }
+
+    #[test]
+    fn accepts_migration_complete_switch_without_static_upstream_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "DISCOVERY_REQUIRED",
+            "DISALLOW_LEGACY_DIRECT_CONFIG",
+            "REGISTRY_ENABLED",
+            "UPSTREAM_SERVER_ID",
+            "UPSTREAM_LOCAL_SOCKET_NAME",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            clear_upstream_discovery_env();
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+        }
+
+        let config = Config::try_from_env().unwrap();
+
+        assert!(config.legacy_direct_config_warnings.is_empty());
     }
 
     #[test]

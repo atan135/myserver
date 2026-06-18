@@ -14,6 +14,7 @@ const CONFIG_ENV_NAMES = [
   "GAME_SERVER_ADMIN_PORT",
   "REGISTRY_ENABLED",
   "DISCOVERY_REQUIRED",
+  "DISALLOW_LEGACY_DIRECT_CONFIG",
   "REGISTRY_KEY_PREFIX",
   "REDIS_KEY_PREFIX",
   "MAIL_PLAYER_AUTH_REQUIRED",
@@ -137,6 +138,30 @@ test("mail-service does not warn for local fallback direct endpoint env", async 
     assert.equal(config.localDiscoveryFallbackEnabled, true);
     assert.deepEqual(config.legacyDirectConfigWarnings, []);
     assert.deepEqual(warnings, []);
+  });
+});
+
+test("mail-service rejects legacy direct config when migration complete switch is enabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "development",
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true",
+      GAME_SERVER_ADMIN_HOST: "127.0.0.2",
+      GAME_SERVER_ADMIN_PORT: "17500"
+    }, (getConfig) => getConfig()),
+    /DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config: GAME_SERVER_ADMIN_HOST, GAME_SERVER_ADMIN_PORT/
+  );
+});
+
+test("mail-service accepts migration complete switch when legacy direct config is absent", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.disallowLegacyDirectConfig, true);
+    assert.deepEqual(config.legacyDirectConfigWarnings, []);
   });
 });
 

@@ -4,6 +4,7 @@ pub const DEFAULT_TICKET_SECRET: &str = "dev-only-change-this-ticket-secret";
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-game-admin-token";
 pub const DEFAULT_INTERNAL_TOKEN: &str = "dev-only-change-this-game-internal-token";
 pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 
 #[derive(Clone)]
 pub struct Config {
@@ -183,6 +184,7 @@ impl Config {
         let admin_audit_require_actor = parse_bool("GAME_ADMIN_AUDIT_REQUIRE_ACTOR", false);
         let internal_token =
             env::var("GAME_INTERNAL_TOKEN").unwrap_or_else(|_| DEFAULT_INTERNAL_TOKEN.to_string());
+        validate_legacy_direct_config("game-server", &["MATCH_SERVICE_ADDR"]);
         let local_socket_name = env::var("GAME_LOCAL_SOCKET_NAME")
             .unwrap_or_else(|_| "myserver-game-server.sock".to_string());
         let internal_socket_name = env::var("GAME_INTERNAL_SOCKET_NAME")
@@ -358,14 +360,35 @@ fn discovery_required_from_env() -> bool {
     parse_bool("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
 }
 
+fn collect_configured_legacy_direct_config_names(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| env::var_os(name).is_some())
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn validate_legacy_direct_config(app_name: &str, names: &[&str]) {
+    if !parse_bool(DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME, false) {
+        return;
+    }
+
+    let configured = collect_configured_legacy_direct_config_names(names);
+    if !configured.is_empty() {
+        panic!(
+            "invalid {app_name} discovery config: {DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: {}; remove these variables and use service registry endpoints instead",
+            configured.join(", ")
+        );
+    }
+}
+
 fn collect_legacy_direct_config_warnings(names: &[&str], strict_discovery: bool) -> Vec<String> {
     if !strict_discovery {
         return Vec::new();
     }
 
-    names
-        .iter()
-        .filter(|name| env::var_os(name).is_some())
+    collect_configured_legacy_direct_config_names(names)
+        .into_iter()
         .map(|name| {
             format!(
                 "{name} is ignored while strict service discovery is active; use service registry endpoints instead"
@@ -489,6 +512,7 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
@@ -507,6 +531,7 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
@@ -519,6 +544,7 @@ mod tests {
         "NODE_ENV",
         "APP_ENV",
         "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
         "REGISTRY_ENABLED",
         "REGISTRY_KEY_PREFIX",
         "REDIS_KEY_PREFIX",
@@ -831,6 +857,7 @@ mod tests {
 
         unsafe {
             env::remove_var("NODE_ENV");
+            env::remove_var("DISALLOW_LEGACY_DIRECT_CONFIG");
             env::set_var("APP_ENV", "test");
             env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("MATCH_SERVICE_ADDR", "http://203.0.113.40:19002");
@@ -847,6 +874,42 @@ mod tests {
         }
 
         let config = Config::from_env();
+        assert!(config.legacy_direct_config_warnings.is_empty());
+    }
+
+    #[test]
+    fn rejects_legacy_direct_config_when_migration_complete_switch_is_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISALLOW_LEGACY_DIRECT_CONFIG=true forbids legacy direct config"));
+        assert!(error.contains("MATCH_SERVICE_ADDR"));
+    }
+
+    #[test]
+    fn accepts_migration_complete_switch_without_legacy_direct_config() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("DISALLOW_LEGACY_DIRECT_CONFIG", "true");
+            env::set_var("GAME_INTERNAL_SOCKET_NAME", "gs-42-internal.sock");
+            env::remove_var("MATCH_SERVICE_ADDR");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.internal_socket_name, "gs-42-internal.sock");
         assert!(config.legacy_direct_config_warnings.is_empty());
     }
 

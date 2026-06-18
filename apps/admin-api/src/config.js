@@ -30,6 +30,7 @@ const DEFAULT_GAME_PROXY_ADMIN_TOKENS = new Set([
 const DEFAULT_INITIAL_ADMIN_PASSWORDS = new Set([
   "AdminPass123!"
 ]);
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME = "DISALLOW_LEGACY_DIRECT_CONFIG";
 const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_SERVER_ADMIN_HOST",
   "GAME_SERVER_ADMIN_PORT",
@@ -136,6 +137,23 @@ function validateDiscoveryConfig(config) {
   }
 }
 
+function collectConfiguredLegacyDirectConfigNames(envNames) {
+  return envNames.filter((name) => process.env[name] !== undefined);
+}
+
+function validateLegacyDirectConfig(appName, envNames, disallowLegacyDirectConfig) {
+  if (!disallowLegacyDirectConfig) {
+    return;
+  }
+
+  const configured = collectConfiguredLegacyDirectConfigNames(envNames);
+  if (configured.length > 0) {
+    throw new Error(
+      `Invalid ${appName} discovery config: ${DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: ${configured.join(", ")}; remove these variables and use service registry endpoints instead`
+    );
+  }
+}
+
 function validateProductionConfig(config) {
   if (config.env !== "production") {
     return;
@@ -173,8 +191,7 @@ function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
     return [];
   }
 
-  return envNames
-    .filter((name) => process.env[name] !== undefined)
+  return collectConfiguredLegacyDirectConfigNames(envNames)
     .map((name) => ({
       name,
       message: `${name} is ignored while strict service discovery is active; use service registry endpoints instead`
@@ -195,6 +212,8 @@ export function getConfig() {
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
+  const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
+  validateLegacyDirectConfig("admin-api", LEGACY_DIRECT_CONFIG_ENV_NAMES, disallowLegacyDirectConfig);
   const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
     registryDiscoveryRequired || !localDiscoveryFallbackEnabled
@@ -260,6 +279,7 @@ export function getConfig() {
       5000
     ),
     localDiscoveryFallbackEnabled,
+    disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),

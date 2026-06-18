@@ -61,6 +61,7 @@ const DEFAULT_MAIL_SERVICE_TOKENS = new Set([
   "default",
   "password"
 ]);
+const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME = "DISALLOW_LEGACY_DIRECT_CONFIG";
 const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_SERVER_ADMIN_HOST",
   "GAME_SERVER_ADMIN_PORT"
@@ -92,6 +93,23 @@ function isLocalDiscoveryFallbackEnv() {
 function validateDiscoveryConfig(config) {
   if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
     throw new Error("Invalid mail-service discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+}
+
+function collectConfiguredLegacyDirectConfigNames(envNames) {
+  return envNames.filter((name) => process.env[name] !== undefined);
+}
+
+function validateLegacyDirectConfig(appName, envNames, disallowLegacyDirectConfig) {
+  if (!disallowLegacyDirectConfig) {
+    return;
+  }
+
+  const configured = collectConfiguredLegacyDirectConfigNames(envNames);
+  if (configured.length > 0) {
+    throw new Error(
+      `Invalid ${appName} discovery config: ${DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME}=true forbids legacy direct config: ${configured.join(", ")}; remove these variables and use service registry endpoints instead`
+    );
   }
 }
 
@@ -141,8 +159,7 @@ function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
     return [];
   }
 
-  return envNames
-    .filter((name) => process.env[name] !== undefined)
+  return collectConfiguredLegacyDirectConfigNames(envNames)
     .map((name) => ({
       name,
       message: `${name} is ignored while strict service discovery is active; use service registry endpoints instead`
@@ -161,6 +178,8 @@ export function getConfig() {
   const localDiscoveryFallbackEnabled = isLocalDiscoveryFallbackEnv();
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
+  const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
+  validateLegacyDirectConfig("mail-service", LEGACY_DIRECT_CONFIG_ENV_NAMES, disallowLegacyDirectConfig);
   const legacyDirectConfigWarnings = collectLegacyDirectConfigWarnings(
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
     registryDiscoveryRequired || !localDiscoveryFallbackEnabled
@@ -195,6 +214,7 @@ export function getConfig() {
     registryDiscoveryEnabled,
     registryDiscoveryRequired,
     localDiscoveryFallbackEnabled,
+    disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
