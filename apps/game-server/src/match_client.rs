@@ -3,8 +3,11 @@
 //! GameServer 通过此客户端调用 MatchService 的内部接口
 
 use service_registry::RegistryClient;
+use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 
 use crate::proto::myserver::matchservice::match_internal_client::MatchInternalClient;
@@ -14,87 +17,85 @@ use crate::proto::myserver::matchservice::{
 };
 
 /// MatchClient 配置
-#[derive(Clone)]
+pub const DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS: u64 = 30;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchClientConfig {
     /// MatchService 地址
     pub addr: String,
+    pub fallback_addr: String,
+    pub registry_enabled: bool,
+    pub discovery_required: bool,
+    pub registry_url: String,
+    pub service_name: String,
+    pub rediscovery_interval_secs: u64,
 }
 
 impl MatchClientConfig {
     pub async fn from_env() -> Self {
         let fallback_addr = std::env::var("MATCH_SERVICE_ADDR")
             .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
-        let registry_enabled = std::env::var("REGISTRY_ENABLED")
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-            .unwrap_or(false);
-        let discovery_required = std::env::var("DISCOVERY_REQUIRED")
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
-            .unwrap_or(false);
-
-        if !registry_enabled {
-            tracing::info!(source = "fallback", addr = %fallback_addr, "match-service address resolved");
-            return Self {
-                addr: fallback_addr,
-            };
-        }
-
+        let registry_enabled = env_flag("REGISTRY_ENABLED", false);
+        let discovery_required = env_flag("DISCOVERY_REQUIRED", false);
         let registry_url = std::env::var("REGISTRY_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let service_name =
             std::env::var("MATCH_SERVICE_NAME").unwrap_or_else(|_| "match-service".to_string());
+        let rediscovery_interval_secs = env_u64(
+            "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+            DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS,
+        );
 
-        match RegistryClient::new(&registry_url, "game-server", "match-discovery").await {
-            Ok(client) => match client.discover_endpoint(&service_name, "grpc").await {
-                Ok(Some(endpoint)) => {
-                    let addr = format!("http://{}:{}", endpoint.host, endpoint.port);
-                    tracing::info!(source = "registry", service = %service_name, endpoint = "grpc", addr = %addr, "match-service address resolved");
-                    Self { addr }
-                }
-                Ok(None) => {
-                    if discovery_required {
-                        panic!(
-                            "required registry discovery failed: {}.grpc endpoint not found",
-                            service_name
-                        );
-                    }
-                    tracing::warn!(source = "fallback", service = %service_name, endpoint = "grpc", addr = %fallback_addr, "match-service grpc endpoint not found, using fallback");
-                    Self {
-                        addr: fallback_addr,
-                    }
-                }
-                Err(error) => {
-                    if discovery_required {
-                        panic!(
-                            "required registry discovery failed for {}.grpc: {}",
-                            service_name, error
-                        );
-                    }
-                    tracing::warn!(source = "fallback", error = %error, addr = %fallback_addr, "failed to discover match-service grpc endpoint, using fallback");
-                    Self {
-                        addr: fallback_addr,
-                    }
-                }
-            },
-            Err(error) => {
-                if discovery_required {
-                    panic!(
-                        "required registry discovery failed: registry client unavailable for match-service discovery: {}",
-                        error
-                    );
-                }
-                tracing::warn!(error = %error, "failed to create registry client for match discovery, using fallback");
-                Self {
-                    addr: fallback_addr,
-                }
-            }
+        if !registry_enabled {
+            tracing::info!(source = "fallback", addr = %fallback_addr, "match-service address resolved");
+            return Self {
+                addr: fallback_addr.clone(),
+                fallback_addr,
+                registry_enabled,
+                discovery_required,
+                registry_url,
+                service_name,
+                rediscovery_interval_secs,
+            };
         }
+
+        let addr = resolve_match_service_addr(
+            &registry_url,
+            &service_name,
+            &fallback_addr,
+            discovery_required,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "required registry discovery failed for {}.grpc: {}",
+                service_name, error
+            )
+        })
+        .addr;
+
+        Self {
+            addr,
+            fallback_addr,
+            registry_enabled,
+            discovery_required,
+            registry_url,
+            service_name,
+            rediscovery_interval_secs,
+        }
+    }
+
+    pub fn rediscovery_enabled(&self) -> bool {
+        self.registry_enabled
     }
 }
 
 /// MatchClient
 pub struct MatchClient {
     inner: MatchInternalClient<Channel>,
+    addr: String,
+    reconnect_required: bool,
 }
 
 impl MatchClient {
@@ -102,8 +103,7 @@ impl MatchClient {
     pub async fn new(
         config: MatchClientConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let addr: Box<str> = config.addr.clone().into_boxed_str();
-        let channel = tonic::transport::Endpoint::from_static(Box::leak(addr))
+        let channel = tonic::transport::Endpoint::from_shared(config.addr.clone())?
             .connect()
             .await?;
 
@@ -111,7 +111,19 @@ impl MatchClient {
 
         tracing::info!(addr = %config.addr, "connected to match-service");
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            addr: config.addr,
+            reconnect_required: false,
+        })
+    }
+
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    pub fn reconnect_required(&self) -> bool {
+        self.reconnect_required
     }
 
     /// 通知 MatchService 房间已创建
@@ -129,7 +141,14 @@ impl MatchClient {
             mode: mode.to_string(),
         };
 
-        let resp = self.inner.create_room_and_join(req).await?;
+        let resp = self
+            .inner
+            .create_room_and_join(req)
+            .await
+            .map_err(|error| {
+                self.reconnect_required = true;
+                error
+            })?;
         let res: CreateRoomAndJoinRes = resp.into_inner();
 
         if res.ok {
@@ -164,7 +183,10 @@ impl MatchClient {
             room_id: room_id.to_string(),
         };
 
-        let resp = self.inner.player_joined(req).await?;
+        let resp = self.inner.player_joined(req).await.map_err(|error| {
+            self.reconnect_required = true;
+            error
+        })?;
         let res: PlayerJoinedRes = resp.into_inner();
 
         if res.ok {
@@ -199,7 +221,10 @@ impl MatchClient {
             reason: reason.to_string(),
         };
 
-        let resp = self.inner.player_left(req).await?;
+        let resp = self.inner.player_left(req).await.map_err(|error| {
+            self.reconnect_required = true;
+            error
+        })?;
         let res: PlayerLeftRes = resp.into_inner();
 
         if res.ok {
@@ -235,7 +260,10 @@ impl MatchClient {
             reason: reason.to_string(),
         };
 
-        let resp = self.inner.match_end(req).await?;
+        let resp = self.inner.match_end(req).await.map_err(|error| {
+            self.reconnect_required = true;
+            error
+        })?;
         let res: MatchEndRes = resp.into_inner();
 
         if res.ok {
@@ -275,4 +303,390 @@ pub async fn init_match_client(
     let mut guard = client.lock().await;
     *guard = Some(new_client);
     Ok(())
+}
+
+pub fn spawn_match_client_rediscovery(
+    client: SharedMatchClient,
+    config: MatchClientConfig,
+) -> Option<JoinHandle<()>> {
+    if !config.rediscovery_enabled() {
+        tracing::info!("match-service rediscovery disabled because service registry is disabled");
+        return None;
+    }
+
+    let interval = Duration::from_secs(config.rediscovery_interval_secs.max(1));
+    tracing::info!(
+        service = %config.service_name,
+        interval_secs = config.rediscovery_interval_secs,
+        "match-service rediscovery task started"
+    );
+
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            ticker.tick().await;
+
+            let discovered_addr = match resolve_match_service_addr(
+                &config.registry_url,
+                &config.service_name,
+                &config.fallback_addr,
+                config.discovery_required,
+            )
+            .await
+            {
+                Ok(resolved) => resolved.addr,
+                Err(error) => {
+                    tracing::warn!(
+                        service = %config.service_name,
+                        error = %error,
+                        "match-service rediscovery failed; keeping existing client and retrying next tick"
+                    );
+                    continue;
+                }
+            };
+
+            let current_state = current_match_client_state(&client).await;
+            let reconnect = should_rebuild_match_client(
+                current_state.addr.as_deref(),
+                current_state.reconnect_required,
+                &discovered_addr,
+            );
+            if !reconnect {
+                tracing::debug!(
+                    addr = %discovered_addr,
+                    "match-service rediscovery kept existing client"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                previous_addr = current_state.addr.as_deref().unwrap_or("<none>"),
+                reconnect_required = current_state.reconnect_required,
+                addr = %discovered_addr,
+                "match-service rediscovery rebuilding client"
+            );
+
+            let reconnect_config = MatchClientConfig {
+                addr: discovered_addr.clone(),
+                ..config.clone()
+            };
+            match MatchClient::new(reconnect_config).await {
+                Ok(new_client) => {
+                    let mut guard = client.lock().await;
+                    *guard = Some(new_client);
+                    tracing::info!(addr = %discovered_addr, "match-service rediscovery reconnected");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        addr = %discovered_addr,
+                        error = %error,
+                        "match-service rediscovery reconnect failed; keeping existing client"
+                    );
+                }
+            }
+        }
+    }))
+}
+
+struct MatchClientState {
+    addr: Option<String>,
+    reconnect_required: bool,
+}
+
+async fn current_match_client_state(client: &SharedMatchClient) -> MatchClientState {
+    let guard = client.lock().await;
+    MatchClientState {
+        addr: guard.as_ref().map(|client| client.addr().to_string()),
+        reconnect_required: guard
+            .as_ref()
+            .is_some_and(|client| client.reconnect_required()),
+    }
+}
+
+pub fn should_rebuild_match_client(
+    current_addr: Option<&str>,
+    reconnect_required: bool,
+    discovered_addr: &str,
+) -> bool {
+    if reconnect_required {
+        return true;
+    }
+
+    match current_addr {
+        Some(current_addr) => current_addr != discovered_addr,
+        None => true,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryOutcome {
+    Found(String),
+    NotFound,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchServiceAddrSource {
+    Registry,
+    Fallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMatchServiceAddr {
+    pub addr: String,
+    pub source: MatchServiceAddrSource,
+}
+
+pub fn resolve_discovery_outcome(
+    outcome: DiscoveryOutcome,
+    fallback_addr: &str,
+    discovery_required: bool,
+) -> Result<ResolvedMatchServiceAddr, String> {
+    match outcome {
+        DiscoveryOutcome::Found(addr) => Ok(ResolvedMatchServiceAddr {
+            addr,
+            source: MatchServiceAddrSource::Registry,
+        }),
+        DiscoveryOutcome::NotFound => {
+            if discovery_required {
+                Err("match-service grpc endpoint not found".to_string())
+            } else {
+                Ok(ResolvedMatchServiceAddr {
+                    addr: fallback_addr.to_string(),
+                    source: MatchServiceAddrSource::Fallback,
+                })
+            }
+        }
+        DiscoveryOutcome::Error(error) => {
+            if discovery_required {
+                Err(error)
+            } else {
+                Ok(ResolvedMatchServiceAddr {
+                    addr: fallback_addr.to_string(),
+                    source: MatchServiceAddrSource::Fallback,
+                })
+            }
+        }
+    }
+}
+
+async fn resolve_match_service_addr(
+    registry_url: &str,
+    service_name: &str,
+    fallback_addr: &str,
+    discovery_required: bool,
+) -> Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>> {
+    let outcome = match RegistryClient::new(registry_url, "game-server", "match-discovery").await {
+        Ok(client) => match client.discover_endpoint(service_name, "grpc").await {
+            Ok(Some(endpoint)) => {
+                let addr = format!("http://{}:{}", endpoint.host, endpoint.port);
+                tracing::info!(source = "registry", service = %service_name, endpoint = "grpc", addr = %addr, "match-service address resolved");
+                DiscoveryOutcome::Found(addr)
+            }
+            Ok(None) => DiscoveryOutcome::NotFound,
+            Err(error) => DiscoveryOutcome::Error(error.to_string()),
+        },
+        Err(error) => DiscoveryOutcome::Error(format!(
+            "registry client unavailable for match-service discovery: {}",
+            error
+        )),
+    };
+
+    match resolve_discovery_outcome(outcome, fallback_addr, discovery_required) {
+        Ok(resolved) => {
+            if resolved.source == MatchServiceAddrSource::Fallback {
+                tracing::warn!(source = "fallback", service = %service_name, endpoint = "grpc", addr = %fallback_addr, "failed to discover match-service grpc endpoint, using fallback");
+            }
+            Ok(resolved)
+        }
+        Err(error) => Err(std::io::Error::other(error).into()),
+    }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    fn env_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    const MATCH_CLIENT_ENV_NAMES: &[&str] = &[
+        "MATCH_SERVICE_ADDR",
+        "MATCH_SERVICE_NAME",
+        "MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS",
+        "REGISTRY_ENABLED",
+        "DISCOVERY_REQUIRED",
+        "REGISTRY_URL",
+        "REDIS_URL",
+    ];
+
+    #[tokio::test]
+    async fn config_uses_default_rediscovery_interval() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+
+        let config = MatchClientConfig::from_env().await;
+
+        assert!(!config.registry_enabled);
+        assert_eq!(
+            config.rediscovery_interval_secs,
+            DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS
+        );
+        assert_eq!(config.addr, "http://127.0.0.1:9002");
+    }
+
+    #[tokio::test]
+    async fn config_reads_rediscovery_interval() {
+        let _lock = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(MATCH_CLIENT_ENV_NAMES);
+        for name in MATCH_CLIENT_ENV_NAMES {
+            unsafe {
+                env::remove_var(name);
+            }
+        }
+        unsafe {
+            env::set_var("MATCH_SERVICE_REDISCOVERY_INTERVAL_SECS", "7");
+            env::set_var("MATCH_SERVICE_ADDR", "http://127.0.0.1:19002");
+        }
+
+        let config = MatchClientConfig::from_env().await;
+
+        assert_eq!(config.rediscovery_interval_secs, 7);
+        assert_eq!(config.addr, "http://127.0.0.1:19002");
+    }
+
+    #[test]
+    fn rebuild_decision_updates_on_missing_or_changed_client() {
+        assert!(should_rebuild_match_client(
+            None,
+            false,
+            "http://127.0.0.1:9002"
+        ));
+        assert!(should_rebuild_match_client(
+            Some("http://127.0.0.1:9002"),
+            false,
+            "http://127.0.0.1:19002"
+        ));
+        assert!(!should_rebuild_match_client(
+            Some("http://127.0.0.1:9002"),
+            false,
+            "http://127.0.0.1:9002"
+        ));
+    }
+
+    #[test]
+    fn rebuild_decision_updates_when_existing_client_is_marked_for_reconnect() {
+        assert!(should_rebuild_match_client(
+            Some("http://127.0.0.1:9002"),
+            true,
+            "http://127.0.0.1:9002"
+        ));
+    }
+
+    #[test]
+    fn rediscovery_only_enabled_with_registry() {
+        let config = MatchClientConfig {
+            addr: "http://127.0.0.1:9002".to_string(),
+            fallback_addr: "http://127.0.0.1:9002".to_string(),
+            registry_enabled: false,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:6379".to_string(),
+            service_name: "match-service".to_string(),
+            rediscovery_interval_secs: DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS,
+        };
+        assert!(!config.rediscovery_enabled());
+
+        let config = MatchClientConfig {
+            registry_enabled: true,
+            ..config
+        };
+        assert!(config.rediscovery_enabled());
+    }
+
+    #[test]
+    fn discovery_outcome_uses_fallback_when_not_strict() {
+        let resolved = resolve_discovery_outcome(
+            DiscoveryOutcome::Error("redis unavailable".to_string()),
+            "http://127.0.0.1:9002",
+            false,
+        )
+        .expect("non-strict discovery should fallback");
+
+        assert_eq!(resolved.addr, "http://127.0.0.1:9002");
+        assert_eq!(resolved.source, MatchServiceAddrSource::Fallback);
+    }
+
+    #[test]
+    fn discovery_outcome_returns_error_when_strict() {
+        let error = resolve_discovery_outcome(
+            DiscoveryOutcome::Error("redis unavailable".to_string()),
+            "http://127.0.0.1:9002",
+            true,
+        )
+        .expect_err("strict discovery should not fallback");
+
+        assert_eq!(error, "redis unavailable");
+    }
+
+    #[test]
+    fn discovery_outcome_returns_error_for_strict_not_found() {
+        let error =
+            resolve_discovery_outcome(DiscoveryOutcome::NotFound, "http://127.0.0.1:9002", true)
+                .expect_err("strict discovery should not fallback");
+
+        assert_eq!(error, "match-service grpc endpoint not found");
+    }
 }

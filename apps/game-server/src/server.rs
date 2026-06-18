@@ -25,7 +25,7 @@ use crate::core::service::{core_service, inventory_service, room_service};
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
-use crate::match_client::{MatchClientConfig, init_match_client};
+use crate::match_client::{MatchClientConfig, init_match_client, spawn_match_client_rediscovery};
 use crate::metrics::METRICS;
 use crate::pb::SessionKickPush;
 use crate::protocol::{HEADER_LEN, MessageType, Packet, encode_packet, parse_header};
@@ -449,6 +449,8 @@ pub async fn run(
     if let Err(e) = init_match_client(&match_client, match_client_config.clone()).await {
         tracing::error!(error = %e, "failed to connect to match-service, match notifications will be disabled");
     }
+    let match_client_rediscovery_task =
+        spawn_match_client_rediscovery(match_client.clone(), match_client_config.clone());
 
     let item_uid_generator =
         crate::core::global_id::ItemUidGenerator::from_worker_lease(&worker_lease)?;
@@ -598,6 +600,10 @@ pub async fn run(
     let _ = kick_task.await;
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
+    if let Some(task) = match_client_rediscovery_task {
+        task.abort();
+        let _ = task.await;
+    }
     lease_renew_task.abort();
     let _ = lease_renew_task.await;
 
