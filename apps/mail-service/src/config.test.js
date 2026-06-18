@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 const CONFIG_ENV_NAMES = [
@@ -66,6 +68,17 @@ async function withCapturedWarnings(values, callback) {
     console.warn = originalWarn;
   }
 }
+
+test("mail-service base env example does not enable legacy direct game admin config by default", () => {
+  const envExample = fs.readFileSync(path.resolve(process.cwd(), ".env.example"), "utf8");
+
+  assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_HOST=/m);
+  assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_PORT=/m);
+  assert.match(envExample, /Local fallback only/);
+  assert.match(envExample, /Ignored in strict\/test\/production discovery/);
+  assert.match(envExample, /^# GAME_SERVER_ADMIN_HOST=127\.0\.0\.1$/m);
+  assert.match(envExample, /^# GAME_SERVER_ADMIN_PORT=7500$/m);
+});
 
 test("mail-service config reads optional game admin actor", async () => {
   await withEnv({ GAME_ADMIN_ACTOR: "mail-ops" }, (getConfig) => {
