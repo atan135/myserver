@@ -116,6 +116,98 @@
         <div v-else class="rollout-placeholder">等待控制面状态...</div>
       </el-card>
 
+      <el-card class="registry-card" v-loading="registry.loading">
+        <template #header>
+          <div class="registry-header">
+            <div>
+              <span class="registry-title">Registry 服务发现</span>
+              <span class="registry-subtitle">实例、Endpoint 与 Heartbeat TTL</span>
+            </div>
+            <span class="registry-updated">更新 {{ formatTimestamp(registry.data?.checked_at) }}</span>
+          </div>
+        </template>
+
+        <el-table
+          :data="registryServices"
+          class="registry-table"
+          row-key="name"
+          size="small"
+          empty-text="暂无 registry 数据"
+        >
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="registry-instances">
+                <el-table
+                  :data="row.instances"
+                  row-key="instance_id"
+                  size="small"
+                  empty-text="暂无健康 registry 实例"
+                >
+                  <el-table-column prop="instance_id" label="Instance" min-width="180" show-overflow-tooltip />
+                  <el-table-column label="Heartbeat TTL" width="130">
+                    <template #default="{ row: instance }">
+                      <span>{{ formatHeartbeatTtl(instance) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100">
+                    <template #default="{ row: instance }">
+                      <el-tag :type="heartbeatTagType(instance)" size="small">
+                        {{ heartbeatStatusText(instance) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最后注册" width="150">
+                    <template #default="{ row: instance }">
+                      {{ formatDateTime(instance.last_registered_at || instance.registered_at) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Endpoints" min-width="320">
+                    <template #default="{ row: instance }">
+                      <div class="endpoint-list">
+                        <div
+                          v-for="endpoint in instance.endpoints"
+                          :key="`${endpoint.name}:${endpoint.protocol}:${endpoint.host}:${endpoint.port}:${endpoint.socket}`"
+                          class="endpoint-item"
+                        >
+                          <span class="endpoint-name">{{ endpoint.name }}</span>
+                          <span class="endpoint-protocol">{{ endpoint.protocol }}</span>
+                          <span class="endpoint-address">{{ formatEndpoint(endpoint) }}</span>
+                          <span class="endpoint-visibility">{{ endpoint.visibility }}</span>
+                        </div>
+                        <span v-if="!instance.endpoints.length" class="empty-text">--</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="name" label="服务" min-width="160" show-overflow-tooltip />
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag :type="registryServiceTagType(row)" size="small">
+                {{ registryServiceStatusText(row) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="实例" width="120">
+            <template #default="{ row }">
+              {{ row.healthy_instance_count }}/{{ row.instance_count }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Endpoint 摘要" min-width="260">
+            <template #default="{ row }">
+              <span class="registry-summary">{{ endpointSummary(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="最后注册" width="150">
+            <template #default="{ row }">
+              {{ formatDateTime(lastRegisteredAt(row)) }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
       <div class="services-grid">
         <el-card
           v-for="service in services"
@@ -181,6 +273,10 @@ const rolloutDrain = reactive({
   data: null,
   status: "loading"
 });
+const registry = reactive({
+  loading: false,
+  data: null
+});
 let pollTimer = null;
 
 const SERVICE_ONLINE_LABELS = {
@@ -238,6 +334,8 @@ const hasRolloutSamples = computed(() => {
   return Boolean(blockers?.blocked_room_samples?.length || blockers?.blocked_player_samples?.length);
 });
 
+const registryServices = computed(() => registry.data?.services || []);
+
 function rolloutInstanceTagType(instance) {
   if (instance.alert_level === "critical") {
     return "danger";
@@ -282,6 +380,25 @@ async function fetchRolloutDrain() {
   }
 }
 
+async function fetchRegistry() {
+  registry.loading = !registry.data;
+  try {
+    const response = await monitoringApi.getRegistry();
+    registry.data = {
+      checked_at: response.data?.checked_at || Date.now(),
+      services: Array.isArray(response.data?.services) ? response.data.services : []
+    };
+  } catch (error) {
+    console.error("Failed to fetch registry:", error);
+    registry.data = {
+      checked_at: Date.now(),
+      services: []
+    };
+  } finally {
+    registry.loading = false;
+  }
+}
+
 function normalizeRolloutDrain(data) {
   const blockers = data?.blockers || {};
   return {
@@ -318,9 +435,102 @@ function formatTimestamp(timestamp) {
   });
 }
 
+function formatDateTime(timestamp) {
+  if (!timestamp) {
+    return "--";
+  }
+
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+function formatHeartbeatTtl(instance) {
+  const ttl = instance.heartbeat_ttl_seconds;
+  if (ttl === null || ttl === undefined) {
+    return "unknown";
+  }
+  if (ttl > 0) {
+    return `${ttl}s`;
+  }
+  return instance.heartbeat_status || "missing";
+}
+
+function heartbeatStatusText(instance) {
+  const labels = {
+    alive: "正常",
+    missing: "缺失",
+    no_expire: "无过期",
+    unknown: "未知"
+  };
+  return labels[instance.heartbeat_status] || instance.heartbeat_status || "未知";
+}
+
+function heartbeatTagType(instance) {
+  if (instance.heartbeat_status === "alive" && instance.healthy !== false) {
+    return "success";
+  }
+  if (instance.heartbeat_status === "unknown" || instance.heartbeat_status === "no_expire") {
+    return "warning";
+  }
+  return "danger";
+}
+
+function registryServiceStatusText(service) {
+  const labels = {
+    healthy: "正常",
+    unhealthy: "异常",
+    missing: "未注册"
+  };
+  return labels[service.status] || service.status || "未知";
+}
+
+function registryServiceTagType(service) {
+  if (service.status === "healthy") {
+    return "success";
+  }
+  if (service.status === "missing") {
+    return "info";
+  }
+  return "danger";
+}
+
+function formatEndpoint(endpoint) {
+  if (endpoint.socket) {
+    return endpoint.socket;
+  }
+  if (endpoint.host || endpoint.port) {
+    return `${endpoint.host || "--"}:${endpoint.port || "--"}`;
+  }
+  return "--";
+}
+
+function endpointSummary(service) {
+  const endpoints = service.instances.flatMap((instance) => instance.endpoints || []);
+  if (!endpoints.length) {
+    return "--";
+  }
+  return endpoints
+    .slice(0, 3)
+    .map((endpoint) => `${endpoint.name}/${endpoint.protocol} ${formatEndpoint(endpoint)}`)
+    .join("，") + (endpoints.length > 3 ? ` 等 ${endpoints.length} 个` : "");
+}
+
+function lastRegisteredAt(service) {
+  const values = service.instances
+    .map((instance) => instance.last_registered_at || instance.registered_at)
+    .filter(Boolean);
+  return values.length ? Math.max(...values) : null;
+}
+
 function fetchMonitoringOverview() {
   fetchServices();
   fetchRolloutDrain();
+  fetchRegistry();
 }
 
 function goToDetail(serviceName) {
@@ -381,6 +591,10 @@ onUnmounted(() => {
   border-left: 4px solid #909399;
 }
 
+.registry-card {
+  margin-bottom: 16px;
+}
+
 .rollout-card-blocked,
 .rollout-card-drained {
   border-left-color: #e6a23c;
@@ -396,6 +610,7 @@ onUnmounted(() => {
 }
 
 .rollout-header,
+.registry-header,
 .rollout-summary,
 .rollout-meta,
 .blocker-grid,
@@ -411,12 +626,20 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.rollout-title {
+.registry-header {
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rollout-title,
+.registry-title {
   font-weight: 600;
   font-size: 15px;
 }
 
-.rollout-subtitle {
+.rollout-subtitle,
+.registry-subtitle {
   margin-left: 8px;
   color: #909399;
   font-size: 13px;
@@ -463,9 +686,57 @@ onUnmounted(() => {
 }
 
 .rollout-updated,
+.registry-updated,
 .rollout-placeholder {
   color: #909399;
   font-size: 13px;
+}
+
+.registry-table {
+  width: 100%;
+}
+
+.registry-instances {
+  padding: 8px 16px;
+  background: #fafafa;
+}
+
+.endpoint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.endpoint-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #606266;
+  line-height: 20px;
+}
+
+.endpoint-name,
+.endpoint-protocol,
+.endpoint-visibility {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #f0f2f5;
+  color: #606266;
+  font-size: 12px;
+}
+
+.endpoint-address,
+.registry-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #303133;
+}
+
+.empty-text {
+  color: #909399;
 }
 
 .rollout-instances {

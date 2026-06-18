@@ -19,6 +19,12 @@ export class MonitoringController {
     return this.monitoringService.services();
   }
 
+  @Get("registry")
+  @Permissions("monitoring.read")
+  registry() {
+    return this.monitoringService.registry();
+  }
+
   @Get("services/:name/metrics")
   @Permissions("monitoring.read")
   metrics(@Param("name") name: string, @Query("window") window = "5m") {

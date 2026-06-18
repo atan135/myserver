@@ -48,9 +48,10 @@ function makeMonitoringServiceWithRedis(config = {}, redis = {}) {
   );
 }
 
-function createServiceRedis(instances) {
+function createServiceRedis(instances, options = {}) {
   const hashes = new Map();
   const keys = new Set();
+  const ttls = new Map(Object.entries(options.ttls || {}));
 
   for (const instance of instances) {
     hashes.set(`service:${instance.name}:instances:${instance.id}:data`, JSON.stringify(instance));
@@ -73,6 +74,12 @@ function createServiceRedis(instances) {
     async exists(key) {
       return keys.has(key) ? 1 : 0;
     },
+    async ttl(key) {
+      if (ttls.has(key)) {
+        return ttls.get(key);
+      }
+      return keys.has(key) ? 30 : -2;
+    },
     async scan(cursor, _match, pattern) {
       if (cursor !== "0") {
         return ["0", []];
@@ -89,6 +96,12 @@ function createServiceRedis(instances) {
       return ["0", []];
     }
   };
+}
+
+function createServiceRedisWithoutTtl(instances) {
+  const redis = createServiceRedis(instances);
+  delete redis.ttl;
+  return redis;
 }
 
 function gameServerInstance(id, host, port) {
@@ -475,4 +488,104 @@ test("services returns all discovered game-server and game-proxy admin endpoints
       ["game-proxy-b", "online", [7102]]
     ]
   );
+});
+
+test("registry returns all configured services with empty status for missing instances", async () => {
+  const redis = createServiceRedis([]);
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+
+  assert.equal(result.ok, true);
+  assert.ok(result.checked_at > 0);
+  assert.deepEqual(
+    result.services.map((item) => item.name),
+    [
+      "auth-http",
+      "game-server",
+      "game-proxy",
+      "chat-server",
+      "match-service",
+      "announce-service",
+      "mail-service",
+      "admin-api"
+    ]
+  );
+  assert.equal(result.services.find((item) => item.name === "game-server").status, "missing");
+  assert.equal(result.services.find((item) => item.name === "game-server").instance_count, 0);
+  assert.deepEqual(result.services.find((item) => item.name === "game-server").instances, []);
+});
+
+test("registry returns instance heartbeat ttl and endpoint fields", async () => {
+  const redis = createServiceRedis(
+    [
+      gameServerInstance("game-server-a", "10.0.0.1", 7500)
+    ],
+    {
+      ttls: {
+        "heartbeat:game-server:game-server-a": 24
+      }
+    }
+  );
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+  const gameServer = result.services.find((item) => item.name === "game-server");
+  const instance = gameServer.instances[0];
+  const endpoint = instance.endpoints[0];
+
+  assert.equal(gameServer.instance_count, 1);
+  assert.equal(gameServer.healthy_instance_count, 1);
+  assert.equal(gameServer.status, "healthy");
+  assert.equal(instance.instance_id, "game-server-a");
+  assert.equal(instance.healthy, true);
+  assert.equal(instance.registered_at, 1);
+  assert.equal(instance.last_registered_at, 1);
+  assert.equal(instance.heartbeat_ttl_seconds, 24);
+  assert.equal(instance.heartbeat_status, "alive");
+  assert.deepEqual(
+    {
+      name: endpoint.name,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port,
+      socket: endpoint.socket,
+      visibility: endpoint.visibility,
+      healthy: endpoint.healthy,
+      metadata: endpoint.metadata
+    },
+    {
+      name: "admin",
+      protocol: "tcp",
+      host: "10.0.0.1",
+      port: 7500,
+      socket: "",
+      visibility: "admin",
+      healthy: true,
+      metadata: {}
+    }
+  );
+});
+
+test("registry tolerates redis clients without ttl support", async () => {
+  const redis = createServiceRedisWithoutTtl([
+    gameProxyInstance("game-proxy-a", "10.0.1.1", 7101)
+  ]);
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+  const instance = result.services.find((item) => item.name === "game-proxy").instances[0];
+
+  assert.equal(instance.instance_id, "game-proxy-a");
+  assert.equal(instance.heartbeat_ttl_seconds, null);
+  assert.equal(instance.heartbeat_status, "unknown");
 });

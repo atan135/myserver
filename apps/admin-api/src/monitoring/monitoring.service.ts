@@ -1,13 +1,21 @@
 import { Inject, Injectable } from "@nestjs/common";
 import http from "node:http";
 
-import { discoveryLogContext, recordDiscoveryMetric } from "../../../../packages/service-registry/node/registry-schema.js";
+import {
+  discoveryLogContext,
+  recordDiscoveryMetric,
+  registryHeartbeatKey
+} from "../../../../packages/service-registry/node/registry-schema.js";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { log } from "../logger.js";
 import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
-import { discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "../registry-client.js";
+import {
+  discoverGameProxyAdminEndpoints,
+  discoverGameServerAdminEndpoints,
+  discoverServiceInstances
+} from "../registry-client.js";
 import {
   aggregateMetricRecordsDetailed,
   buildMetricPoint,
@@ -104,6 +112,60 @@ export class MonitoringService {
     }
 
     return { services };
+  }
+
+  async registry() {
+    const checkedAt = Date.now();
+    const services = [];
+
+    for (const serviceName of SERVICE_NAMES) {
+      const instances = await discoverServiceInstances(this.redis, serviceName, this.config.registryKeyPrefix || "");
+      const normalizedInstances = [];
+
+      for (const instance of instances) {
+        const heartbeat = await this.getRegistryHeartbeatStatus(serviceName, instance.id);
+        normalizedInstances.push({
+          instance_id: instance.id,
+          service: instance.name,
+          healthy: instance.healthy !== false,
+          status: instance.healthy !== false && heartbeat.status === "alive" ? "healthy" : "missing",
+          registered_at: instance.registered_at || null,
+          last_registered_at: instance.registered_at || null,
+          heartbeat_ttl_seconds: heartbeat.ttl_seconds,
+          heartbeat_status: heartbeat.status,
+          tags: Array.isArray(instance.tags) ? instance.tags : [],
+          metadata: instance.metadata || {},
+          weight: instance.weight,
+          endpoints: Array.isArray(instance.endpoints)
+            ? instance.endpoints.map((endpoint: any) => ({
+                name: endpoint.name,
+                protocol: endpoint.protocol,
+                host: endpoint.host,
+                port: endpoint.port,
+                socket: endpoint.socket,
+                visibility: endpoint.visibility,
+                healthy: endpoint.healthy !== false,
+                metadata: endpoint.metadata || {}
+              }))
+            : []
+        });
+      }
+
+      const healthyInstances = normalizedInstances.filter((instance) => instance.healthy && instance.heartbeat_status === "alive");
+      services.push({
+        name: serviceName,
+        instance_count: normalizedInstances.length,
+        healthy_instance_count: healthyInstances.length,
+        status: normalizedInstances.length === 0 ? "missing" : healthyInstances.length > 0 ? "healthy" : "unhealthy",
+        instances: normalizedInstances
+      });
+    }
+
+    return {
+      ok: true,
+      checked_at: checkedAt,
+      services
+    };
   }
 
   async metrics(name: string, window = "5m") {
@@ -450,6 +512,42 @@ export class MonitoringService {
     } while (cursor !== "0");
 
     return heartbeats;
+  }
+
+  private async getRegistryHeartbeatStatus(serviceName: string, instanceId: string): Promise<any> {
+    if (typeof this.redis.ttl !== "function") {
+      return {
+        ttl_seconds: null,
+        status: "unknown"
+      };
+    }
+
+    try {
+      const key = registryHeartbeatKey(this.config.registryKeyPrefix || "", serviceName, instanceId);
+      const ttl = await this.redis.ttl(key);
+      const ttlSeconds = Number.isFinite(Number(ttl)) ? Number(ttl) : null;
+      let status = "unknown";
+
+      if (ttlSeconds === null) {
+        status = "unknown";
+      } else if (ttlSeconds > 0) {
+        status = "alive";
+      } else if (ttlSeconds === -1) {
+        status = "no_expire";
+      } else {
+        status = "missing";
+      }
+
+      return {
+        ttl_seconds: ttlSeconds && ttlSeconds > 0 ? ttlSeconds : ttlSeconds,
+        status
+      };
+    } catch {
+      return {
+        ttl_seconds: null,
+        status: "unknown"
+      };
+    }
   }
 }
 
