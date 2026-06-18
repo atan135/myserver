@@ -374,10 +374,12 @@ test("rolloutDrain rejects direct proxy fallback when local fallback is disabled
   assert.equal(result.upstream.port, null);
 });
 
-test("services returns all discovered game-server admin endpoints", async () => {
+test("services returns all discovered game-server and game-proxy admin endpoints", async () => {
   const redis = createServiceRedis([
     gameServerInstance("game-server-a", "10.0.0.1", 7500),
-    gameServerInstance("game-server-b", "10.0.0.2", 7501)
+    gameServerInstance("game-server-b", "10.0.0.2", 7501),
+    gameProxyInstance("game-proxy-a", "10.0.1.1", 7101),
+    gameProxyInstance("game-proxy-b", "10.0.1.2", 7102)
   ]);
   const service = makeMonitoringServiceWithRedis(
     { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
@@ -386,16 +388,91 @@ test("services returns all discovered game-server admin endpoints", async () => 
 
   const result = await service.services();
   const gameServer = result.services.find((item) => item.name === "game-server");
+  const gameProxy = result.services.find((item) => item.name === "game-proxy");
 
   assert.deepEqual(
-    gameServer.endpoints.map((endpoint) => [endpoint.instance_id, endpoint.host, endpoint.port]),
+    gameServer.endpoints.map(({ instance_id, host, port, protocol, source, fallback, reason }) => ({
+      instance_id,
+      host,
+      port,
+      protocol,
+      source,
+      fallback,
+      reason
+    })),
     [
-      ["game-server-a", "10.0.0.1", 7500],
-      ["game-server-b", "10.0.0.2", 7501]
+      {
+        instance_id: "game-server-a",
+        host: "10.0.0.1",
+        port: 7500,
+        protocol: "tcp",
+        source: "registry",
+        fallback: false,
+        reason: "discovered"
+      },
+      {
+        instance_id: "game-server-b",
+        host: "10.0.0.2",
+        port: 7501,
+        protocol: "tcp",
+        source: "registry",
+        fallback: false,
+        reason: "discovered"
+      }
     ]
   );
   assert.deepEqual(
-    gameServer.instances.map((instance) => instance.instance_id),
-    ["game-server-a", "game-server-b"]
+    gameServer.instances.map((instance) => [
+      instance.instance_id,
+      instance.status,
+      instance.endpoints.map((endpoint) => endpoint.port)
+    ]),
+    [
+      ["game-server-a", "online", [7500]],
+      ["game-server-b", "online", [7501]]
+    ]
+  );
+
+  assert.deepEqual(
+    gameProxy.endpoints.map(({ instance_id, host, port, protocol, source, fallback, reason }) => ({
+      instance_id,
+      host,
+      port,
+      protocol,
+      source,
+      fallback,
+      reason
+    })),
+    [
+      {
+        instance_id: "game-proxy-a",
+        host: "10.0.1.1",
+        port: 7101,
+        protocol: "http",
+        source: "registry",
+        fallback: false,
+        reason: "discovered"
+      },
+      {
+        instance_id: "game-proxy-b",
+        host: "10.0.1.2",
+        port: 7102,
+        protocol: "http",
+        source: "registry",
+        fallback: false,
+        reason: "discovered"
+      }
+    ]
+  );
+  assert.deepEqual(
+    gameProxy.instances.map((instance) => [
+      instance.instance_id,
+      instance.status,
+      instance.endpoints.map((endpoint) => endpoint.port)
+    ]),
+    [
+      ["game-proxy-a", "online", [7101]],
+      ["game-proxy-b", "online", [7102]]
+    ]
   );
 });
