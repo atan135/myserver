@@ -75,6 +75,18 @@ function buildAnnounceAdminHeaders(options) {
   };
 }
 
+function buildAnnounceReadHeaders(options) {
+  if (options.serviceToken) {
+    return { "x-service-token": options.serviceToken };
+  }
+
+  if (options.ticket) {
+    return { "x-game-ticket": options.ticket };
+  }
+
+  return {};
+}
+
 function requireAnnounceId(options) {
   if (!options.announceId) {
     throw new Error("--announce-id is required");
@@ -202,7 +214,9 @@ export async function runAnnounceList(options) {
   );
 
   console.log(`announce-base-url: ${options.announceBaseUrl}`);
-  const response = await requestAnnounceJson(announceUrl, options);
+  const response = await requestAnnounceJson(announceUrl, options, {
+    headers: buildAnnounceReadHeaders(options)
+  });
   printAnnounceResponse("announce.list", response);
   const payload = assertAnnounceOk("announce.list", response);
   console.log(`announcement count: ${payload.announcements?.length || 0}`);
@@ -218,7 +232,9 @@ export async function runAnnounceGet(options) {
   console.log(`announce-base-url: ${options.announceBaseUrl}`);
   console.log(`announce_id: ${announceId}`);
 
-  const response = await requestAnnounceJson(announceUrl, options);
+  const response = await requestAnnounceJson(announceUrl, options, {
+    headers: buildAnnounceReadHeaders(options)
+  });
   printAnnounceResponse("announce.get", response);
   assertAnnounceOk("announce.get", response);
 }

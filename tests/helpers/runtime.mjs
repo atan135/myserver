@@ -270,6 +270,85 @@ export async function startMailService({
   }
 }
 
+export async function startAnnounceService({
+  host = "127.0.0.1",
+  port,
+  redisUrl,
+  redisKeyPrefix,
+  registryKeyPrefix,
+  natsUrl,
+  ticketSecret,
+  announceAdminToken,
+  announceReadToken,
+  serviceInstanceId,
+  envOverrides = {}
+}) {
+  const restoreEnv = setEnvVars({
+    NODE_ENV: "test",
+    APP_ENV: "test",
+    HOST: host,
+    SERVICE_BIND_HOST: host,
+    SERVICE_ADVERTISED_HOST: host,
+    ANNOUNCE_PORT: String(port),
+    LOG_LEVEL: "error",
+    LOG_ENABLE_CONSOLE: "false",
+    LOG_ENABLE_FILE: "false",
+    LOG_DIR: "logs/test-announce-service",
+    REDIS_URL: redisUrl,
+    REDIS_KEY_PREFIX: redisKeyPrefix,
+    REGISTRY_KEY_PREFIX: registryKeyPrefix ?? redisKeyPrefix,
+    NATS_URL: natsUrl,
+    DB_ENABLED: "false",
+    REGISTRY_ENABLED: "true",
+    DISCOVERY_REQUIRED: "true",
+    DISALLOW_LEGACY_DIRECT_CONFIG: "true",
+    TICKET_SECRET: ticketSecret,
+    ANNOUNCE_READ_AUTH_REQUIRED: "true",
+    ANNOUNCE_ADMIN_TOKEN: announceAdminToken,
+    ANNOUNCE_READ_TOKEN: announceReadToken,
+    SERVICE_INSTANCE_ID: serviceInstanceId,
+    SERVICE_NAME: "announce-service",
+    SERVICE_ZONE: "test",
+    SERVICE_BUILD_VERSION: "test",
+    ...envOverrides
+  });
+
+  let context;
+
+  try {
+    const { createApp } = await import(pathToFileURL(path.join(projectRoot, "apps", "announce-service", "src", "app.js")));
+    context = await createApp();
+    const { nestApp, registryClient } = context;
+
+    await registryClient.register();
+    registryClient.startHeartbeat(1);
+
+    await nestApp.listen(context.config.port, context.config.host);
+    const httpServer = nestApp.getHttpServer();
+    const address = httpServer.address();
+    assert.ok(address && typeof address === "object", "announce-service did not expose an address");
+
+    return {
+      host,
+      port: address.port,
+      baseUrl: `http://${host}:${address.port}`,
+      redisUrl,
+      redisKeyPrefix,
+      registryKeyPrefix: context.config.registryKeyPrefix,
+      async close() {
+        await context.close();
+        restoreEnv();
+      }
+    };
+  } catch (error) {
+    if (context?.close) {
+      await context.close().catch(() => {});
+    }
+    restoreEnv();
+    throw error;
+  }
+}
+
 function resolveNatsServerBin() {
   const envBin = process.env.NATS_SERVER_BIN;
   if (envBin) {
