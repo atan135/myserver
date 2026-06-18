@@ -50,6 +50,17 @@ function hasActiveConfigAssignment(content, name) {
     });
 }
 
+function hasCommentedConfigAssignment(content, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^#\\s*${escapedName}\\s*=`);
+
+  return content
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .some((line) => pattern.test(line.trim()));
+}
+
 test("repository discovery config scan passes current strict overlays and local fallback examples", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
 
@@ -128,6 +139,50 @@ test("repository auth-http strict templates omit GAME_PROXY direct config while 
           item.service === "auth-http"
       )
     );
+  }
+});
+
+test("repository control-plane strict templates omit GAME_SERVER_ADMIN direct config while local fallback remains allowed", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const services = ["auth-http", "admin-api", "mail-service"];
+  const variables = ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"];
+
+  assert.equal(result.ok, true);
+
+  for (const service of services) {
+    const strictFiles = result.strictFiles.filter((file) => file.startsWith(`apps/${service}/`));
+    assert.ok(strictFiles.includes(`apps/${service}/.env.test.example`));
+    assert.ok(strictFiles.includes(`apps/${service}/.env.production.example`));
+
+    for (const file of strictFiles) {
+      const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+      for (const variable of variables) {
+        assert.equal(
+          hasActiveConfigAssignment(content, variable),
+          false,
+          `${file} must not define ${variable}`
+        );
+      }
+    }
+  }
+
+  for (const service of ["auth-http", "admin-api"]) {
+    for (const variable of variables) {
+      assert.ok(
+        result.allowedLocalFallbacks.some(
+          (item) =>
+            item.file === `apps/${service}/.env.example` &&
+            item.variable === variable &&
+            item.service === service
+        )
+      );
+    }
+  }
+
+  const mailExample = fs.readFileSync(path.join(projectRoot, "apps/mail-service/.env.example"), "utf8");
+  for (const variable of variables) {
+    assert.equal(hasActiveConfigAssignment(mailExample, variable), false);
+    assert.equal(hasCommentedConfigAssignment(mailExample, variable), true);
   }
 });
 
@@ -256,6 +311,90 @@ test("auth-http GAME_PROXY direct config is forbidden in test production and sta
       assert.match(violation.reason, /game-proxy\.client/);
       assert.match(violation.remediation, /Local fallback examples/);
       assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("control-plane GAME_SERVER_ADMIN direct config is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    for (const service of ["auth-http", "admin-api", "mail-service"]) {
+      writeFile(
+        tempDir,
+        `apps/${service}/.env.example`,
+        [
+          "NODE_ENV=development",
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "# Local fallback only: used only when registry discovery is disabled.",
+          "# Do not use for strict/test/production/staging discovery.",
+          "GAME_SERVER_ADMIN_HOST=127.0.0.1",
+          "GAME_SERVER_ADMIN_PORT=7500"
+        ].join("\n")
+      );
+
+      for (const [fileSuffix, nodeEnv] of [
+        [".env.test.example", "test"],
+        [".env.production.example", "production"],
+        [".env.staging.example", "staging"]
+      ]) {
+        writeFile(
+          tempDir,
+          `apps/${service}/${fileSuffix}`,
+          [
+            `NODE_ENV=${nodeEnv}`,
+            "REGISTRY_ENABLED=true",
+            "DISCOVERY_REQUIRED=true",
+            "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+            "GAME_SERVER_ADMIN_HOST=10.0.0.20",
+            "GAME_SERVER_ADMIN_PORT=17500"
+          ].join("\n")
+        );
+      }
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/admin-api/.env.production.example:GAME_SERVER_ADMIN_HOST",
+      "apps/admin-api/.env.production.example:GAME_SERVER_ADMIN_PORT",
+      "apps/admin-api/.env.staging.example:GAME_SERVER_ADMIN_HOST",
+      "apps/admin-api/.env.staging.example:GAME_SERVER_ADMIN_PORT",
+      "apps/admin-api/.env.test.example:GAME_SERVER_ADMIN_HOST",
+      "apps/admin-api/.env.test.example:GAME_SERVER_ADMIN_PORT",
+      "apps/auth-http/.env.production.example:GAME_SERVER_ADMIN_HOST",
+      "apps/auth-http/.env.production.example:GAME_SERVER_ADMIN_PORT",
+      "apps/auth-http/.env.staging.example:GAME_SERVER_ADMIN_HOST",
+      "apps/auth-http/.env.staging.example:GAME_SERVER_ADMIN_PORT",
+      "apps/auth-http/.env.test.example:GAME_SERVER_ADMIN_HOST",
+      "apps/auth-http/.env.test.example:GAME_SERVER_ADMIN_PORT",
+      "apps/mail-service/.env.production.example:GAME_SERVER_ADMIN_HOST",
+      "apps/mail-service/.env.production.example:GAME_SERVER_ADMIN_PORT",
+      "apps/mail-service/.env.staging.example:GAME_SERVER_ADMIN_HOST",
+      "apps/mail-service/.env.staging.example:GAME_SERVER_ADMIN_PORT",
+      "apps/mail-service/.env.test.example:GAME_SERVER_ADMIN_HOST",
+      "apps/mail-service/.env.test.example:GAME_SERVER_ADMIN_PORT"
+    ]);
+    for (const violation of result.violations) {
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /game-server\.admin/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+    for (const service of ["auth-http", "admin-api", "mail-service"]) {
+      for (const variable of ["GAME_SERVER_ADMIN_HOST", "GAME_SERVER_ADMIN_PORT"]) {
+        assert.ok(
+          result.allowedLocalFallbacks.some(
+            (item) =>
+              item.file === `apps/${service}/.env.example` &&
+              item.variable === variable &&
+              item.service === service
+          )
+        );
+      }
     }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
