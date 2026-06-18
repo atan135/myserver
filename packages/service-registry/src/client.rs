@@ -7,6 +7,7 @@ pub struct RegistryClient {
     redis: redis::Client,
     instance_id: String,
     service_name: String,
+    key_prefix: String,
     heartbeat_interval_secs: u64,
     heartbeat_ttl_secs: u64,
 }
@@ -26,9 +27,16 @@ impl RegistryClient {
             redis,
             instance_id: instance_id.to_string(),
             service_name: service_name.to_string(),
+            key_prefix: default_key_prefix(),
             heartbeat_interval_secs: 10,
             heartbeat_ttl_secs: 30,
         })
+    }
+
+    /// 设置注册中心 Redis key 前缀
+    pub fn with_key_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.key_prefix = prefix.into();
+        self
     }
 
     /// 设置心跳间隔（秒）
@@ -112,9 +120,10 @@ impl RegistryClient {
         let redis = self.redis.clone();
         let instance_id = self.instance_id.clone();
         let service_name = self.service_name.clone();
+        let key_prefix = self.key_prefix.clone();
 
         tokio::spawn(async move {
-            let heartbeat_key = format!("heartbeat:{}:{}", service_name, instance_id);
+            let heartbeat_key = registry_heartbeat_key(&key_prefix, &service_name, &instance_id);
             let ttl = heartbeat_ttl;
             let interval = heartbeat_interval;
 
@@ -144,7 +153,7 @@ impl RegistryClient {
         service_name: &str,
     ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let pattern = format!("service:{}:instances:*", service_name);
+        let pattern = registry_instance_scan_pattern(&self.key_prefix, service_name);
 
         // 使用 SCAN 而不是 KEYS（生产环境更安全）
         let mut cursor = 0_isize;
@@ -172,7 +181,7 @@ impl RegistryClient {
 
         for key in keys {
             let instance_id = key.split(':').last().unwrap_or("");
-            let heartbeat_key = format!("heartbeat:{}:{}", service_name, instance_id);
+            let heartbeat_key = registry_heartbeat_key(&self.key_prefix, service_name, instance_id);
 
             // 检查心跳是否存在
             let exists: bool = conn.exists(&heartbeat_key).await?;
@@ -253,15 +262,12 @@ impl RegistryClient {
 
     /// 获取当前实例的 Key
     fn instance_key(&self) -> String {
-        format!(
-            "service:{}:instances:{}",
-            self.service_name, self.instance_id
-        )
+        registry_instance_key(&self.key_prefix, &self.service_name, &self.instance_id)
     }
 
     /// 获取心跳 Key
     fn heartbeat_key(&self) -> String {
-        format!("heartbeat:{}:{}", self.service_name, self.instance_id)
+        registry_heartbeat_key(&self.key_prefix, &self.service_name, &self.instance_id)
     }
 
     /// 获取服务名称
@@ -273,6 +279,24 @@ impl RegistryClient {
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
+}
+
+fn default_key_prefix() -> String {
+    std::env::var("REGISTRY_KEY_PREFIX")
+        .or_else(|_| std::env::var("REDIS_KEY_PREFIX"))
+        .unwrap_or_default()
+}
+
+fn registry_instance_key(prefix: &str, service_name: &str, instance_id: &str) -> String {
+    format!("{prefix}service:{service_name}:instances:{instance_id}")
+}
+
+fn registry_heartbeat_key(prefix: &str, service_name: &str, instance_id: &str) -> String {
+    format!("{prefix}heartbeat:{service_name}:{instance_id}")
+}
+
+fn registry_instance_scan_pattern(prefix: &str, service_name: &str) -> String {
+    format!("{prefix}service:{service_name}:instances:*")
 }
 
 fn pick_weighted_stable(instances: &[ServiceInstance]) -> Option<&ServiceInstance> {
@@ -402,5 +426,21 @@ mod tests {
         instance.endpoints[0].healthy = false;
 
         assert!(pick_endpoint_weighted_stable(&[instance], "client").is_none());
+    }
+
+    #[test]
+    fn registry_keys_include_configured_prefix() {
+        assert_eq!(
+            registry_instance_key("test:", "game-server", "game-a"),
+            "test:service:game-server:instances:game-a"
+        );
+        assert_eq!(
+            registry_heartbeat_key("test:", "game-server", "game-a"),
+            "test:heartbeat:game-server:game-a"
+        );
+        assert_eq!(
+            registry_instance_scan_pattern("test:", "game-server"),
+            "test:service:game-server:instances:*"
+        );
     }
 }

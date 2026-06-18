@@ -220,6 +220,7 @@ test("metrics collector defaults to explicit service registry opt-out", async ()
       assert.equal(config.serviceRegistryRegister, false);
       assert.equal(config.serviceName, "metrics-collector");
       assert.equal(config.serviceInstanceId, "metrics-collector-001");
+      assert.equal(config.registryKeyPrefix, "");
       assert.equal(status.registered, false);
       assert.equal(status.reason, REGISTRY_DISABLED_REASON);
       assert.deepEqual(redis.writes, []);
@@ -227,6 +228,36 @@ test("metrics collector defaults to explicit service registry opt-out", async ()
         redis.hasWrittenKeyPrefix("service:metrics-collector:instances:"),
         false
       );
+    }
+  );
+});
+
+test("metrics collector reads registry key prefix without registering an endpoint", async () => {
+  await withEnv(
+    {
+      REGISTRY_KEY_PREFIX: "registry:",
+      REDIS_KEY_PREFIX: "redis:"
+    },
+    async () => {
+      const config = getConfig();
+      const redis = new RegistryRedisCapture();
+      const status = await maybeRegisterService(redis, config);
+
+      assert.equal(config.registryKeyPrefix, "registry:");
+      assert.equal(status.registered, false);
+      assert.deepEqual(redis.writes, []);
+    }
+  );
+
+  await withEnv(
+    {
+      REGISTRY_KEY_PREFIX: undefined,
+      REDIS_KEY_PREFIX: "redis:"
+    },
+    async () => {
+      const config = getConfig();
+
+      assert.equal(config.registryKeyPrefix, "redis:");
     }
   );
 });

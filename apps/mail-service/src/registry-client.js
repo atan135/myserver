@@ -2,7 +2,10 @@ import { log } from "./logger.js";
 import {
   createServiceInstancePayload,
   discoverAllEndpoints,
-  normalizeServiceInstance
+  normalizeServiceInstance,
+  registryHeartbeatKey,
+  registryInstanceKey,
+  registryInstanceScanPattern
 } from "../../../packages/service-registry/node/registry-schema.js";
 
 const GAME_SERVER_SERVICE_NAME = "game-server";
@@ -15,11 +18,12 @@ export class RegistryClient {
     this.config = config;
     this.instanceId = config.serviceInstanceId;
     this.serviceName = config.serviceName;
+    this.registryKeyPrefix = config.registryKeyPrefix || "";
     this.heartbeatInterval = null;
   }
 
   async register() {
-    const key = `service:${this.serviceName}:instances:${this.instanceId}`;
+    const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const data = createServiceInstancePayload({
       id: this.instanceId,
       name: this.serviceName,
@@ -57,8 +61,8 @@ export class RegistryClient {
   }
 
   async deregister() {
-    const key = `service:${this.serviceName}:instances:${this.instanceId}`;
-    const heartbeatKey = `heartbeat:${this.serviceName}:${this.instanceId}`;
+    const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
+    const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
 
     await this.redis.del(key);
     await this.redis.del(heartbeatKey);
@@ -70,7 +74,7 @@ export class RegistryClient {
   }
 
   startHeartbeat(intervalSeconds = 10) {
-    const heartbeatKey = `heartbeat:${this.serviceName}:${this.instanceId}`;
+    const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const ttl = 30;
 
     // 立即发送一次心跳
@@ -100,8 +104,8 @@ export class RegistryClient {
   }
 }
 
-export async function discoverGameServerAdminEndpoints(redis) {
-  const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME);
+export async function discoverGameServerAdminEndpoints(redis, registryKeyPrefix = "") {
+  const instances = await discoverServiceInstances(redis, GAME_SERVER_SERVICE_NAME, registryKeyPrefix);
   return discoverAllEndpoints(instances, GAME_SERVER_ADMIN_ENDPOINT_NAME)
     .filter(({ endpoint }) => GAME_SERVER_ADMIN_PROTOCOLS.has(endpoint.protocol))
     .map(({ instance, endpoint }) => ({
@@ -119,8 +123,8 @@ export async function discoverGameServerAdminEndpoints(redis) {
     }));
 }
 
-export async function discoverServiceInstances(redis, serviceName) {
-  const keys = await scanKeys(redis, `service:${serviceName}:instances:*`);
+export async function discoverServiceInstances(redis, serviceName, registryKeyPrefix = "") {
+  const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
   const instances = [];
 
   for (const key of keys.sort()) {
@@ -129,7 +133,7 @@ export async function discoverServiceInstances(redis, serviceName) {
       continue;
     }
 
-    const heartbeatExists = await redis.exists(`heartbeat:${serviceName}:${instanceId}`);
+    const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
     if (!heartbeatExists) {
       continue;
     }

@@ -48,7 +48,9 @@ pub struct Config {
     pub input_anomaly_max: u64,
     // Service Registry
     pub registry_enabled: bool,
+    pub discovery_required: bool,
     pub registry_url: String,
+    pub registry_key_prefix: String,
     pub registry_heartbeat_interval_secs: u64,
     pub service_name: String,
     pub service_instance_id: String,
@@ -193,9 +195,13 @@ impl Config {
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
+        let discovery_required = discovery_required_from_env();
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let registry_key_prefix = env::var("REGISTRY_KEY_PREFIX")
+            .or_else(|_| env::var("REDIS_KEY_PREFIX"))
+            .unwrap_or_default();
         let registry_heartbeat_interval_secs = parse_u64("REGISTRY_HEARTBEAT_INTERVAL", 10);
         let service_name = env::var("SERVICE_NAME").unwrap_or_else(|_| "game-server".to_string());
         let service_instance_id = env::var("SERVICE_INSTANCE_ID")
@@ -246,7 +252,9 @@ impl Config {
             input_anomaly_window_ms,
             input_anomaly_max,
             registry_enabled,
+            discovery_required,
             registry_url,
+            registry_key_prefix,
             registry_heartbeat_interval_secs,
             service_name,
             service_instance_id,
@@ -256,6 +264,7 @@ impl Config {
         };
 
         validate_production_config(&config);
+        validate_discovery_config(&config);
 
         config
     }
@@ -295,6 +304,27 @@ fn is_production_env() -> bool {
             .ok()
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
     })
+}
+
+fn is_strict_discovery_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        env::var(name).ok().is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+        })
+    })
+}
+
+fn discovery_required_from_env() -> bool {
+    parse_bool("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
+}
+
+fn validate_discovery_config(config: &Config) {
+    if config.discovery_required && !config.registry_enabled {
+        panic!(
+            "invalid game-server discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"
+        );
+    }
 }
 
 fn validate_production_config(config: &Config) {
@@ -397,6 +427,10 @@ mod tests {
     const SECURITY_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
         "APP_ENV",
+        "DISCOVERY_REQUIRED",
+        "REGISTRY_ENABLED",
+        "REGISTRY_KEY_PREFIX",
+        "REDIS_KEY_PREFIX",
         "TICKET_SECRET",
         "GAME_ADMIN_TOKEN",
         "GAME_ADMIN_AUDIT_ENABLED",
@@ -411,6 +445,10 @@ mod tests {
     const OUTBOUND_QUEUE_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
         "APP_ENV",
+        "DISCOVERY_REQUIRED",
+        "REGISTRY_ENABLED",
+        "REGISTRY_KEY_PREFIX",
+        "REDIS_KEY_PREFIX",
         "OUTBOUND_QUEUE_CAPACITY",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
@@ -419,6 +457,10 @@ mod tests {
     const SERVICE_METADATA_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
         "APP_ENV",
+        "DISCOVERY_REQUIRED",
+        "REGISTRY_ENABLED",
+        "REGISTRY_KEY_PREFIX",
+        "REDIS_KEY_PREFIX",
         "GAME_PORT",
         "GAME_LOCAL_SOCKET_NAME",
         "GAME_INTERNAL_SOCKET_NAME",
@@ -449,6 +491,7 @@ mod tests {
 
     fn set_valid_production_infra() {
         unsafe {
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("DB_ENABLED", "true");
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "1");
@@ -568,6 +611,28 @@ mod tests {
 
         assert_eq!(config.global_id_origin_id, 7);
         assert_eq!(config.global_id_worker_id, Some(3));
+    }
+
+    #[test]
+    fn registry_key_prefix_prefers_registry_specific_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SERVICE_METADATA_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("REGISTRY_KEY_PREFIX", "registry:");
+            env::set_var("REDIS_KEY_PREFIX", "redis:");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.registry_key_prefix, "registry:");
+
+        unsafe {
+            env::remove_var("REGISTRY_KEY_PREFIX");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.registry_key_prefix, "redis:");
     }
 
     #[test]
@@ -820,6 +885,39 @@ mod tests {
         assert_eq!(config.ticket_secret, DEFAULT_TICKET_SECRET);
         assert_eq!(config.admin_token, DEFAULT_ADMIN_TOKEN);
         assert_eq!(config.internal_token, DEFAULT_INTERNAL_TOKEN);
+    }
+
+    #[test]
+    fn required_discovery_rejects_registry_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("REGISTRY_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"));
+    }
+
+    #[test]
+    fn test_environment_requires_registry_discovery() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("APP_ENV", "test");
+            env::remove_var("NODE_ENV");
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::set_var("REGISTRY_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"));
     }
 
     #[test]

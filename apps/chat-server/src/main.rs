@@ -43,6 +43,7 @@ struct Config {
     registry_enabled: bool,
     discovery_required: bool,
     registry_url: String,
+    registry_key_prefix: String,
     registry_heartbeat_interval_secs: u64,
     service_name: String,
     service_instance_id: String,
@@ -95,10 +96,13 @@ impl Config {
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
-            discovery_required: parse_bool_env("DISCOVERY_REQUIRED", false),
+            discovery_required: discovery_required_from_env(),
             registry_url: std::env::var("REGISTRY_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            registry_key_prefix: std::env::var("REGISTRY_KEY_PREFIX")
+                .or_else(|_| std::env::var("REDIS_KEY_PREFIX"))
+                .unwrap_or_default(),
             registry_heartbeat_interval_secs: std::env::var("REGISTRY_HEARTBEAT_INTERVAL")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
@@ -128,6 +132,7 @@ impl Config {
         };
 
         validate_production_config(&config);
+        validate_discovery_config(&config);
 
         config
     }
@@ -139,6 +144,27 @@ fn is_production_env() -> bool {
             .ok()
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
     })
+}
+
+fn is_strict_discovery_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        std::env::var(name).ok().is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("production") || value.eq_ignore_ascii_case("test")
+        })
+    })
+}
+
+fn discovery_required_from_env() -> bool {
+    parse_bool_env("DISCOVERY_REQUIRED", false) || is_strict_discovery_env()
+}
+
+fn validate_discovery_config(config: &Config) {
+    if config.discovery_required && !config.registry_enabled {
+        panic!(
+            "invalid chat-server discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"
+        );
+    }
 }
 
 fn validate_production_config(config: &Config) {
@@ -384,8 +410,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
-                let client =
-                    client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let client = client
+                    .with_key_prefix(config.registry_key_prefix.clone())
+                    .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let port = extract_port(&config.bind_addr)?;
                 let instance = build_service_instance(&config, port);
 
@@ -543,6 +570,10 @@ mod tests {
     const TICKET_SECRET_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
         "APP_ENV",
+        "DISCOVERY_REQUIRED",
+        "REGISTRY_ENABLED",
+        "REGISTRY_KEY_PREFIX",
+        "REDIS_KEY_PREFIX",
         "TICKET_SECRET",
         "DB_ENABLED",
         "GLOBAL_ID_ORIGIN_ID",
@@ -728,6 +759,29 @@ mod tests {
     }
 
     #[test]
+    fn registry_key_prefix_prefers_registry_specific_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_KEY_PREFIX", "registry:");
+            env::set_var("REDIS_KEY_PREFIX", "redis:");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.registry_key_prefix, "registry:");
+
+        unsafe {
+            env::remove_var("REGISTRY_KEY_PREFIX");
+        }
+
+        let config = Config::from_env();
+        assert_eq!(config.registry_key_prefix, "redis:");
+    }
+
+    #[test]
     fn service_registry_instance_and_endpoint_include_discovery_metadata() {
         let config = Config {
             db_enabled: false,
@@ -750,6 +804,7 @@ mod tests {
             registry_enabled: true,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
             registry_heartbeat_interval_secs: 10,
             service_name: "chat-server".to_string(),
             service_instance_id: "chat-a".to_string(),
@@ -788,6 +843,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::remove_var("TICKET_SECRET");
             env::set_var("DB_ENABLED", "true");
         }
@@ -808,6 +864,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("TICKET_SECRET", "replace-with-a-long-random-string");
             env::set_var("DB_ENABLED", "true");
         }
@@ -826,6 +883,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("TICKET_SECRET", "   ");
             env::set_var("DB_ENABLED", "true");
         }
@@ -851,6 +909,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "production");
             env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::set_var("TICKET_SECRET", "prod-chat-ticket-secret-123");
             env::set_var("DB_ENABLED", "true");
         }
@@ -869,6 +928,7 @@ mod tests {
         unsafe {
             env::set_var("NODE_ENV", "development");
             env::set_var("APP_ENV", "production");
+            env::set_var("REGISTRY_ENABLED", "true");
             env::remove_var("TICKET_SECRET");
             env::set_var("DB_ENABLED", "true");
         }
@@ -893,5 +953,39 @@ mod tests {
         let config = Config::from_env();
 
         assert_eq!(config.ticket_secret, DEFAULT_TICKET_SECRET);
+    }
+
+    #[test]
+    fn required_discovery_rejects_registry_disabled() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::remove_var("APP_ENV");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("REGISTRY_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"));
+    }
+
+    #[test]
+    fn test_environment_requires_registry_discovery() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::remove_var("NODE_ENV");
+            env::set_var("APP_ENV", "test");
+            env::remove_var("DISCOVERY_REQUIRED");
+            env::set_var("REGISTRY_ENABLED", "false");
+        }
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true"));
     }
 }

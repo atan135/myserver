@@ -206,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
+                let client = client.with_key_prefix(config.registry_key_prefix.clone());
                 let route_store_backend = config.route_store_backend_name();
                 let instance = build_service_instance(&config);
 
@@ -424,6 +425,7 @@ mod tests {
             },
             registry_enabled: true,
             registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
             registry_discover_interval_secs: 5,
             upstream_service_name: "game-server".to_string(),
             service_name: "edge-proxy".to_string(),

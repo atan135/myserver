@@ -324,7 +324,7 @@ export class GameAdminClient {
       );
     }
 
-    return discoverGameServerAdminEndpoints(this.redis);
+    return discoverGameServerAdminEndpoints(this.redis, this.config.registryKeyPrefix || "");
   }
 
   async resolveAdminEndpoint(options = {}) {

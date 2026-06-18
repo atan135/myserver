@@ -57,6 +57,12 @@ function isProductionEnv() {
   );
 }
 
+function isStrictDiscoveryEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && ["production", "test"].includes(value.trim().toLowerCase())
+  );
+}
+
 function validateProductionConfig(config) {
   if (!isProductionEnv()) {
     return;
@@ -103,6 +109,7 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/auth-http",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
     authRedisBlocklistEnabled: parseBoolean(process.env.AUTH_REDIS_BLOCKLIST_ENABLED, false),
     authRedisBlocklistCacheTtlMs: Number.parseInt(
       process.env.AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS || String(DEFAULT_AUTH_REDIS_BLOCKLIST_CACHE_TTL_MS),
@@ -144,7 +151,7 @@ export function getConfig() {
     gameProxyHost: process.env.GAME_PROXY_HOST || "127.0.0.1",
     gameProxyPort: Number.parseInt(process.env.GAME_PROXY_PORT || "4000", 10),
     registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
-    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isProductionEnv()),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
     authExposeInternalServiceEndpoints: parseBoolean(
       process.env.AUTH_EXPOSE_INTERNAL_SERVICE_ENDPOINTS,
       !isProductionEnv()

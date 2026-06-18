@@ -1,6 +1,8 @@
 import {
   discoverEndpoint,
   normalizeServiceInstance,
+  registryHeartbeatKey,
+  registryInstanceScanPattern,
 } from "../../../packages/service-registry/node/registry-schema.js";
 import { serviceUnavailable } from "./common/http-exception.js";
 
@@ -80,12 +82,13 @@ export class ServiceDiscovery {
   }
 
   async discoverInstances(serviceName) {
-    const keys = await scanKeys(this.redis, `service:${serviceName}:instances:*`);
+    const registryKeyPrefix = this.config.registryKeyPrefix || "";
+    const keys = await scanKeys(this.redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
     const instances = [];
 
     for (const key of keys.sort()) {
       const instanceId = key.split(":").at(-1);
-      const heartbeatKey = `heartbeat:${serviceName}:${instanceId}`;
+      const heartbeatKey = registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId);
       const heartbeatExists = await this.redis.exists(heartbeatKey);
       if (!heartbeatExists) {
         continue;

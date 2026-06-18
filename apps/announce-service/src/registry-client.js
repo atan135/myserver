@@ -1,5 +1,9 @@
 import { log } from "./logger.js";
-import { createServiceInstancePayload } from "../../../packages/service-registry/node/registry-schema.js";
+import {
+  createServiceInstancePayload,
+  registryHeartbeatKey,
+  registryInstanceKey
+} from "../../../packages/service-registry/node/registry-schema.js";
 
 export class RegistryClient {
   constructor(redis, config) {
@@ -7,11 +11,12 @@ export class RegistryClient {
     this.config = config;
     this.instanceId = config.serviceInstanceId;
     this.serviceName = config.serviceName;
+    this.registryKeyPrefix = config.registryKeyPrefix || "";
     this.heartbeatInterval = null;
   }
 
   async register() {
-    const key = `service:${this.serviceName}:instances:${this.instanceId}`;
+    const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const data = createServiceInstancePayload({
       id: this.instanceId,
       name: this.serviceName,
@@ -49,8 +54,8 @@ export class RegistryClient {
   }
 
   async deregister() {
-    const key = `service:${this.serviceName}:instances:${this.instanceId}`;
-    const heartbeatKey = `heartbeat:${this.serviceName}:${this.instanceId}`;
+    const key = registryInstanceKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
+    const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
 
     await this.redis.del(key);
     await this.redis.del(heartbeatKey);
@@ -62,7 +67,7 @@ export class RegistryClient {
   }
 
   startHeartbeat(intervalSeconds = 10) {
-    const heartbeatKey = `heartbeat:${this.serviceName}:${this.instanceId}`;
+    const heartbeatKey = registryHeartbeatKey(this.registryKeyPrefix, this.serviceName, this.instanceId);
     const ttl = 30;
 
     this.redis.setex(heartbeatKey, ttl, "1");

@@ -134,6 +134,7 @@ pub struct Config {
     // Service Registry
     pub registry_enabled: bool,
     pub registry_url: String,
+    pub registry_key_prefix: String,
     pub registry_discover_interval_secs: u64,
     pub upstream_service_name: String,
     pub service_name: String,
@@ -264,6 +265,9 @@ impl Config {
         let registry_url = env::var("REGISTRY_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let registry_key_prefix = env::var("REGISTRY_KEY_PREFIX")
+            .or_else(|_| env::var("REDIS_KEY_PREFIX"))
+            .unwrap_or_default();
         let registry_discover_interval_secs = env::var("REGISTRY_DISCOVER_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -321,6 +325,7 @@ impl Config {
             rollout_drain_status_check,
             registry_enabled,
             registry_url,
+            registry_key_prefix,
             registry_discover_interval_secs,
             upstream_service_name,
             service_name,
@@ -1245,6 +1250,8 @@ mod tests {
             "APP_ENV",
             "DISCOVERY_REQUIRED",
             "REGISTRY_ENABLED",
+            "REGISTRY_KEY_PREFIX",
+            "REDIS_KEY_PREFIX",
             "UPSTREAM_SERVER_ID",
             "UPSTREAM_LOCAL_SOCKET_NAME",
             "PROXY_ADMIN_TOKEN",
@@ -1431,6 +1438,7 @@ mod tests {
             "PROXY_ROUTE_STORE_KEY_PREFIX",
             "REGISTRY_URL",
             "REDIS_URL",
+            "REGISTRY_KEY_PREFIX",
             "REDIS_KEY_PREFIX",
         ]);
 
@@ -1453,5 +1461,36 @@ mod tests {
         ));
         assert_eq!(config.route_store_redis_url, "redis://registry:6379");
         assert_eq!(config.route_store_key_prefix, "dev:");
+    }
+
+    #[test]
+    fn registry_key_prefix_prefers_registry_specific_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "REGISTRY_KEY_PREFIX",
+            "REDIS_KEY_PREFIX",
+        ]);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("PROXY_ADMIN_TOKEN");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::set_var("REGISTRY_KEY_PREFIX", "registry:");
+            env::set_var("REDIS_KEY_PREFIX", "redis:");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        assert_eq!(config.registry_key_prefix, "registry:");
+
+        unsafe {
+            env::remove_var("REGISTRY_KEY_PREFIX");
+        }
+
+        let config = Config::try_from_env().unwrap();
+        assert_eq!(config.registry_key_prefix, "redis:");
     }
 }

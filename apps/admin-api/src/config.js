@@ -136,6 +136,7 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/admin-api",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "admin-api-001",

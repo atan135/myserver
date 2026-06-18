@@ -53,6 +53,18 @@ function isProductionEnv() {
   );
 }
 
+function isStrictDiscoveryEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && ["production", "test"].includes(value.trim().toLowerCase())
+  );
+}
+
+function validateDiscoveryConfig(config) {
+  if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
+    throw new Error("Invalid announce-service discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+}
+
 function isWeakSecret(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized.length < 16) {
@@ -123,6 +135,7 @@ export function getConfig() {
     logDir: process.env.LOG_DIR || "logs/announce-service",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
+    registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
     databaseUrl:
@@ -142,10 +155,13 @@ export function getConfig() {
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "announce-001",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
+    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
 
   validateProductionConfig(config);
+  validateDiscoveryConfig(config);
   return config;
 }

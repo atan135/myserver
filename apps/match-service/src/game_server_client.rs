@@ -156,6 +156,7 @@ impl GameServerClient {
 
 struct GameServerDiscovery {
     registry_url: String,
+    registry_key_prefix: String,
     registry_service_name: String,
     registry_instance_id: String,
     game_server_service_name: String,
@@ -170,6 +171,7 @@ impl GameServerDiscovery {
     fn new(config: &Config) -> Self {
         Self {
             registry_url: config.registry_url.clone(),
+            registry_key_prefix: config.registry_key_prefix.clone(),
             registry_service_name: config.service_name.clone(),
             registry_instance_id: config.service_instance_id.clone(),
             game_server_service_name: config.game_server_service_name.clone(),
@@ -248,7 +250,7 @@ impl GameServerDiscovery {
                 "required registry discovery failed: registry client unavailable for game-server.internal: {error}"
             ))
         })?;
-        let client = Arc::new(client);
+        let client = Arc::new(client.with_key_prefix(self.registry_key_prefix.clone()));
         *guard = Some(client.clone());
         Ok(client)
     }

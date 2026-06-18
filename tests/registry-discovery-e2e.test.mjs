@@ -19,6 +19,7 @@ const redisUrl = process.env.TEST_REDIS_URL || "redis://127.0.0.1:6379";
 const ticketSecret = "test-only-ticket-secret";
 const proxyAdminToken = "test-only-proxy-admin-token";
 const redisKeyPrefix = `test:registry:${randomId("redis")}:`;
+const registryKeyPrefix = `test:registry:${randomId("registry")}:`;
 const gameServerInstanceId = randomId("game-server");
 const gameProxyInstanceId = randomId("game-proxy");
 const registryInstances = [
@@ -64,7 +65,7 @@ async function fetchGuestLogin(baseUrl, guestId) {
   return payload;
 }
 
-async function readRegistryInstance(serviceName, instanceId) {
+async function readRegistryInstance(serviceName, instanceId, keyPrefix = "") {
   const redis = new Redis(redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
@@ -74,8 +75,8 @@ async function readRegistryInstance(serviceName, instanceId) {
   await redis.connect();
   try {
     const [data, heartbeatExists] = await Promise.all([
-      redis.hget(`service:${serviceName}:instances:${instanceId}`, "data"),
-      redis.exists(`heartbeat:${serviceName}:${instanceId}`)
+      redis.hget(`${keyPrefix}service:${serviceName}:instances:${instanceId}`, "data"),
+      redis.exists(`${keyPrefix}heartbeat:${serviceName}:${instanceId}`)
     ]);
     return {
       data: data ? JSON.parse(data) : null,
@@ -86,8 +87,23 @@ async function readRegistryInstance(serviceName, instanceId) {
   }
 }
 
+async function registryKeyExists(serviceName, instanceId, keyPrefix = "") {
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    return await redis.exists(`${keyPrefix}service:${serviceName}:instances:${instanceId}`) === 1;
+  } finally {
+    await redis.quit();
+  }
+}
+
 before(async () => {
-  await cleanupRegistryInstances(redisUrl, registryInstances);
+  await cleanupRegistryInstances(redisUrl, registryInstances, registryKeyPrefix);
 
   const authPort = await findFreePort();
   const gamePort = await findFreePort();
@@ -112,6 +128,7 @@ before(async () => {
     envOverrides: {
       REGISTRY_ENABLED: "true",
       REGISTRY_URL: redisUrl,
+      REGISTRY_KEY_PREFIX: registryKeyPrefix,
       NATS_URL: natsServer.url,
       SERVICE_INSTANCE_ID: gameServerInstanceId,
       REGISTRY_HEARTBEAT_INTERVAL: "1"
@@ -119,9 +136,17 @@ before(async () => {
   });
 
   await waitFor(async () => {
-    const instance = await readRegistryInstance("game-server", gameServerInstanceId);
+    const instance = await readRegistryInstance("game-server", gameServerInstanceId, registryKeyPrefix);
     return instance.data && instance.heartbeatExists ? instance : false;
   }, "game-server registry instance and heartbeat");
+  assert.equal(
+    await registryKeyExists("game-server", gameServerInstanceId, registryKeyPrefix),
+    true
+  );
+  assert.equal(
+    await registryKeyExists("game-server", gameServerInstanceId),
+    false
+  );
 
   gameProxy = await startGameProxy({
     host: "127.0.0.1",
@@ -132,6 +157,7 @@ before(async () => {
     envOverrides: {
       REGISTRY_ENABLED: "true",
       REGISTRY_URL: redisUrl,
+      REGISTRY_KEY_PREFIX: registryKeyPrefix,
       REDIS_URL: redisUrl,
       REDIS_KEY_PREFIX: redisKeyPrefix,
       NATS_URL: natsServer.url,
@@ -145,9 +171,17 @@ before(async () => {
   });
 
   await waitFor(async () => {
-    const instance = await readRegistryInstance("game-proxy", gameProxyInstanceId);
+    const instance = await readRegistryInstance("game-proxy", gameProxyInstanceId, registryKeyPrefix);
     return instance.data && instance.heartbeatExists ? instance : false;
   }, "game-proxy registry instance and heartbeat");
+  assert.equal(
+    await registryKeyExists("game-proxy", gameProxyInstanceId, registryKeyPrefix),
+    true
+  );
+  assert.equal(
+    await registryKeyExists("game-proxy", gameProxyInstanceId),
+    false
+  );
 
   await waitFor(async () => {
     const response = await fetch(`http://127.0.0.1:${gameProxy.adminPort}/instances`, {
@@ -179,6 +213,7 @@ before(async () => {
       REGISTRY_ENABLED: "true",
       DISCOVERY_REQUIRED: "true",
       REGISTRY_URL: redisUrl,
+      REGISTRY_KEY_PREFIX: registryKeyPrefix,
       NATS_URL: natsServer.url,
       SERVICE_INSTANCE_ID: randomId("auth-http"),
       GAME_PROXY_HOST: "127.0.0.1",
@@ -201,7 +236,8 @@ after(async () => {
     await natsServer.close();
   }
 
-  await cleanupRegistryInstances(redisUrl, registryInstances);
+  await cleanupRegistryInstances(redisUrl, registryInstances, registryKeyPrefix);
+  await cleanupRedisPrefix(redisUrl, registryKeyPrefix);
   await cleanupRedisPrefix(redisUrl, redisKeyPrefix);
 });
 

@@ -14,6 +14,10 @@ const CONFIG_ENV_NAMES = [
   "ANNOUNCE_READ_AUTH_REQUIRED",
   "ANNOUNCE_READ_TOKEN",
   "TICKET_SECRET",
+  "REGISTRY_ENABLED",
+  "DISCOVERY_REQUIRED",
+  "REGISTRY_KEY_PREFIX",
+  "REDIS_KEY_PREFIX",
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
   "SERVICE_BUILD_VERSION"
@@ -60,4 +64,49 @@ test("announce-service config defaults service build version to dev", async () =
 
     assert.equal(config.serviceBuildVersion, "dev");
   });
+});
+
+test("announce-service config reads registry discovery flags", async () => {
+  await withEnv({
+    REGISTRY_ENABLED: "true",
+    DISCOVERY_REQUIRED: "true"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.registryDiscoveryEnabled, true);
+    assert.equal(config.registryDiscoveryRequired, true);
+  });
+});
+
+test("announce-service reads registry key prefix with Redis prefix fallback", async () => {
+  await withEnv({
+    REGISTRY_KEY_PREFIX: "registry:",
+    REDIS_KEY_PREFIX: "redis:"
+  }, (getConfig) => {
+    assert.equal(getConfig().registryKeyPrefix, "registry:");
+  });
+
+  await withEnv({ REDIS_KEY_PREFIX: "redis:" }, (getConfig) => {
+    assert.equal(getConfig().registryKeyPrefix, "redis:");
+  });
+});
+
+test("announce-service DISCOVERY_REQUIRED=true rejects registry disabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      REGISTRY_ENABLED: "false",
+      DISCOVERY_REQUIRED: "true"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("announce-service test environment requires registry discovery by default", async () => {
+  await assert.rejects(
+    () => withEnv({
+      APP_ENV: "test",
+      REGISTRY_ENABLED: "false"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
 });

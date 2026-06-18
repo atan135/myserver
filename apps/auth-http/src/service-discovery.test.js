@@ -7,12 +7,16 @@ import { ServiceDiscovery } from "./service-discovery.js";
 function createRedis(instancesByService) {
   const dataByKey = new Map();
   const heartbeatKeys = new Set();
+  const registryKeyPrefix = instancesByService.__registryKeyPrefix || "";
 
   for (const [serviceName, instances] of Object.entries(instancesByService)) {
+    if (serviceName === "__registryKeyPrefix") {
+      continue;
+    }
     for (const instance of instances) {
-      const key = `service:${serviceName}:instances:${instance.id}`;
+      const key = `${registryKeyPrefix}service:${serviceName}:instances:${instance.id}`;
       dataByKey.set(key, JSON.stringify(instance));
-      heartbeatKeys.add(`heartbeat:${serviceName}:${instance.id}`);
+      heartbeatKeys.add(`${registryKeyPrefix}heartbeat:${serviceName}:${instance.id}`);
     }
   }
 
@@ -162,6 +166,48 @@ test("ServiceDiscovery discovers game-proxy.client and named service endpoints",
       port: 9014,
       protocol: "http"
     }
+  });
+});
+
+test("ServiceDiscovery uses registry key prefix for scans and heartbeats", async () => {
+  const redis = createRedis({
+    __registryKeyPrefix: "test:",
+    "game-proxy": [
+      {
+        id: "proxy-a",
+        name: "game-proxy",
+        host: "10.0.0.1",
+        port: 4000,
+        endpoints: [
+          {
+            name: "client",
+            protocol: "kcp",
+            host: "203.0.113.10",
+            port: 4100,
+            socket: "",
+            visibility: "public",
+            metadata: {},
+            healthy: true
+          }
+        ]
+      }
+    ]
+  });
+  const discovery = new ServiceDiscovery(
+    redis,
+    createConfig({
+      registryDiscoveryEnabled: true,
+      authExposeInternalServiceEndpoints: false,
+      registryKeyPrefix: "test:"
+    })
+  );
+
+  const services = await discovery.discoverClientServices();
+
+  assert.deepEqual(services.game, {
+    host: "203.0.113.10",
+    port: 4100,
+    protocol: "kcp"
   });
 });
 

@@ -29,6 +29,22 @@ export const SERVICE_INSTANCE_SCHEMA_VERSION = 2;
 export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "local_socket"];
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
 
+export function normalizeRegistryKeyPrefix(prefix) {
+  return typeof prefix === "string" ? prefix : "";
+}
+
+export function registryInstanceKey(prefix, serviceName, instanceId) {
+  return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instances:${instanceId}`;
+}
+
+export function registryHeartbeatKey(prefix, serviceName, instanceId) {
+  return `${normalizeRegistryKeyPrefix(prefix)}heartbeat:${serviceName}:${instanceId}`;
+}
+
+export function registryInstanceScanPattern(prefix, serviceName) {
+  return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instances:*`;
+}
+
 export function createServiceInstancePayload({
   schema_version = SERVICE_INSTANCE_SCHEMA_VERSION,
   id,

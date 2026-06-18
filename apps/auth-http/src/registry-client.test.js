@@ -88,3 +88,13 @@ test("RegistryClient metadata falls back to dev build version", async () => {
   assert.equal(payload.metadata.ticket_validation_enabled, false);
   assert.equal(payload.metadata.build_version, "dev");
 });
+
+test("RegistryClient uses registry key prefix for registration", async () => {
+  const redis = createRedisCapture();
+  const client = new RegistryClient(redis, createConfig({ registryKeyPrefix: "test:" }));
+
+  await client.register();
+
+  assert.ok(redis.hashes.has("test:service:auth-http:instances:auth-http-test-001:data"));
+  assert.equal(redis.hashes.has("service:auth-http:instances:auth-http-test-001:data"), false);
+});

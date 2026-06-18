@@ -47,7 +47,7 @@ export async function cleanupRedisPrefix(redisUrl, prefix) {
   }
 }
 
-export async function cleanupRegistryInstances(redisUrl, instances) {
+export async function cleanupRegistryInstances(redisUrl, instances, registryKeyPrefix = "") {
   const redis = new Redis(redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
@@ -59,8 +59,8 @@ export async function cleanupRegistryInstances(redisUrl, instances) {
   try {
     const keys = [];
     for (const { serviceName, instanceId } of instances) {
-      keys.push(`service:${serviceName}:instances:${instanceId}`);
-      keys.push(`heartbeat:${serviceName}:${instanceId}`);
+      keys.push(`${registryKeyPrefix}service:${serviceName}:instances:${instanceId}`);
+      keys.push(`${registryKeyPrefix}heartbeat:${serviceName}:${instanceId}`);
     }
 
     if (keys.length > 0) {

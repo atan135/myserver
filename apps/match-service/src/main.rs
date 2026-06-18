@@ -89,8 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         {
             Ok(client) => {
-                let client =
-                    client.with_heartbeat_interval(config.registry_heartbeat_interval_secs);
+                let client = client
+                    .with_key_prefix(config.registry_key_prefix.clone())
+                    .with_heartbeat_interval(config.registry_heartbeat_interval_secs);
                 let instance = ServiceInstance::new(
                     config.service_instance_id.clone(),
                     config.service_name.clone(),
@@ -257,7 +258,9 @@ mod tests {
             global_id_worker_id: None,
             nats_url: "nats://127.0.0.1:4222".to_string(),
             registry_enabled: false,
+            discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
             registry_heartbeat_interval_secs: 10,
             service_name: "match-service".to_string(),
             service_instance_id: "match-service-test".to_string(),

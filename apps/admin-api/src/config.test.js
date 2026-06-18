@@ -28,6 +28,8 @@ const CONFIG_ENV_KEYS = [
   "GAME_PROXY_ADMIN_MAX_RESPONSE_BYTES",
   "REGISTRY_ENABLED",
   "DISCOVERY_REQUIRED",
+  "REGISTRY_KEY_PREFIX",
+  "REDIS_KEY_PREFIX",
   "APP_ENV",
   "SERVICE_NAME",
   "SERVICE_BUILD_VERSION"
@@ -160,6 +162,19 @@ test("admin-api service registry identity reads defaults and build version overr
   });
 });
 
+test("admin-api reads registry key prefix with Redis prefix fallback", async () => {
+  await withEnv({
+    REGISTRY_KEY_PREFIX: "registry:",
+    REDIS_KEY_PREFIX: "redis:"
+  }, (config) => {
+    assert.equal(config.registryKeyPrefix, "registry:");
+  });
+
+  await withEnv({ REDIS_KEY_PREFIX: "redis:" }, (config) => {
+    assert.equal(config.registryKeyPrefix, "redis:");
+  });
+});
+
 test("admin-api strict discovery requires registry in production", async () => {
   await assert.rejects(
     withEnv({
@@ -179,6 +194,16 @@ test("admin-api DISCOVERY_REQUIRED=true rejects registry disabled", async () => 
     withEnv({
       NODE_ENV: "development",
       DISCOVERY_REQUIRED: "true",
+      REGISTRY_ENABLED: "false"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("admin-api test environment rejects registry disabled", async () => {
+  await assert.rejects(
+    withEnv({
+      APP_ENV: "test",
       REGISTRY_ENABLED: "false"
     }, () => {}),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/

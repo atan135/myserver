@@ -226,11 +226,13 @@ pub async fn run(
 
     if config.registry_enabled {
         let registry_url = config.registry_url.clone();
+        let registry_key_prefix = config.registry_key_prefix.clone();
         let service_name = config.upstream_service_name.clone();
         let discover_interval = config.registry_discover_interval_secs;
         let route_store_clone = route_store.clone();
         let initial_client = RegistryClient::new(&registry_url, "proxy", "proxy-initial")
             .await
+            .map(|client| client.with_key_prefix(registry_key_prefix.clone()))
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let initial_routes =
             discover_and_update_routes(&initial_client, &service_name, &route_store)
@@ -246,8 +248,9 @@ pub async fn run(
 
         tokio::spawn(async move {
             if let Err(error) = run_upstream_discovery(
-                registry_url,
-                service_name,
+            registry_url,
+            registry_key_prefix,
+            service_name,
                 discover_interval,
                 route_store_clone,
             )
@@ -373,11 +376,14 @@ pub async fn run(
 
 async fn run_upstream_discovery(
     registry_url: String,
+    registry_key_prefix: String,
     service_name: String,
     discover_interval_secs: u64,
     route_store: ProxyRouteStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = RegistryClient::new(&registry_url, "proxy", "proxy-static").await?;
+    let client = RegistryClient::new(&registry_url, "proxy", "proxy-static")
+        .await?
+        .with_key_prefix(registry_key_prefix);
     let discovered = discover_and_update_routes(&client, &service_name, &route_store).await?;
     if discovered == 0 {
         tracing::error!(

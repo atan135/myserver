@@ -209,6 +209,41 @@ test("discoverGameServerAdminEndpoints returns healthy tcp admin endpoints for a
   );
 });
 
+test("discoverGameServerAdminEndpoints uses registry key prefix", async () => {
+  const redis = createRedisCapture();
+  const instance = {
+    id: "game-server-prefixed",
+    schema_version: 2,
+    name: "game-server",
+    host: "10.0.0.9",
+    port: 7000,
+    admin_port: 7500,
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host: "10.0.0.9",
+        port: 7500,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: [],
+    weight: 100,
+    metadata: {},
+    registered_at: 1,
+    healthy: true
+  };
+  redis.hashes.set(`test:service:game-server:instances:${instance.id}:data`, JSON.stringify(instance));
+  redis.keys.set(`test:heartbeat:game-server:${instance.id}`, { ttl: 30, value: "1" });
+
+  const endpoints = await discoverGameServerAdminEndpoints(redis, "test:");
+
+  assert.deepEqual(endpoints.map((endpoint) => endpoint.instanceId), ["game-server-prefixed"]);
+});
+
 test("discoverGameProxyAdminEndpoints returns healthy http admin endpoints for all instances", async () => {
   const redis = createRedisCapture();
   const instances = [

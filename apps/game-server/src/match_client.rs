@@ -27,6 +27,7 @@ pub struct MatchClientConfig {
     pub registry_enabled: bool,
     pub discovery_required: bool,
     pub registry_url: String,
+    pub registry_key_prefix: String,
     pub service_name: String,
     pub rediscovery_interval_secs: u64,
 }
@@ -40,6 +41,9 @@ impl MatchClientConfig {
         let registry_url = std::env::var("REGISTRY_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let registry_key_prefix = std::env::var("REGISTRY_KEY_PREFIX")
+            .or_else(|_| std::env::var("REDIS_KEY_PREFIX"))
+            .unwrap_or_default();
         let service_name =
             std::env::var("MATCH_SERVICE_NAME").unwrap_or_else(|_| "match-service".to_string());
         let rediscovery_interval_secs = env_u64(
@@ -55,6 +59,7 @@ impl MatchClientConfig {
                 registry_enabled,
                 discovery_required,
                 registry_url,
+                registry_key_prefix,
                 service_name,
                 rediscovery_interval_secs,
             };
@@ -62,6 +67,7 @@ impl MatchClientConfig {
 
         let addr = resolve_match_service_addr(
             &registry_url,
+            &registry_key_prefix,
             &service_name,
             &fallback_addr,
             discovery_required,
@@ -81,6 +87,7 @@ impl MatchClientConfig {
             registry_enabled,
             discovery_required,
             registry_url,
+            registry_key_prefix,
             service_name,
             rediscovery_interval_secs,
         }
@@ -330,6 +337,7 @@ pub fn spawn_match_client_rediscovery(
 
             let discovered_addr = match resolve_match_service_addr(
                 &config.registry_url,
+                &config.registry_key_prefix,
                 &config.service_name,
                 &config.fallback_addr,
                 config.discovery_required,
@@ -474,12 +482,17 @@ pub fn resolve_discovery_outcome(
 
 async fn resolve_match_service_addr(
     registry_url: &str,
+    registry_key_prefix: &str,
     service_name: &str,
     fallback_addr: &str,
     discovery_required: bool,
 ) -> Result<ResolvedMatchServiceAddr, Box<dyn Error + Send + Sync>> {
     let outcome = match RegistryClient::new(registry_url, "game-server", "match-discovery").await {
-        Ok(client) => match client.discover_endpoint(service_name, "grpc").await {
+        Ok(client) => match client
+            .with_key_prefix(registry_key_prefix.to_string())
+            .discover_endpoint(service_name, "grpc")
+            .await
+        {
             Ok(Some(endpoint)) => {
                 let addr = format!("http://{}:{}", endpoint.host, endpoint.port);
                 tracing::info!(source = "registry", service = %service_name, endpoint = "grpc", addr = %addr, "match-service address resolved");
@@ -644,6 +657,7 @@ mod tests {
             registry_enabled: false,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),
+            registry_key_prefix: String::new(),
             service_name: "match-service".to_string(),
             rediscovery_interval_secs: DEFAULT_MATCH_REDISCOVERY_INTERVAL_SECS,
         };

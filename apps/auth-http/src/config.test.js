@@ -12,6 +12,8 @@ const CONFIG_ENV_KEYS = [
   "AUTH_REGISTER_REQUIRE_REVIEW",
   "DISCOVERY_REQUIRED",
   "REGISTRY_ENABLED",
+  "REGISTRY_KEY_PREFIX",
+  "REDIS_KEY_PREFIX",
   "TRUST_PROXY",
   "TRUSTED_PROXIES",
   "SERVICE_BUILD_VERSION",
@@ -92,14 +94,14 @@ test("auth-http hides internal service endpoints by default in production", asyn
   });
 });
 
-test("auth-http keeps registry discovery optional by default outside production", async () => {
-  await withEnv({ NODE_ENV: "test" }, (config) => {
-    assert.equal(config.registryDiscoveryRequired, false);
+test("auth-http requires registry discovery by default in test", async () => {
+  await withEnv({ NODE_ENV: "test", REGISTRY_ENABLED: "true" }, (config) => {
+    assert.equal(config.registryDiscoveryRequired, true);
   });
 });
 
 test("auth-http allows internal service endpoints outside production by default", async () => {
-  await withEnv({ NODE_ENV: "test" }, (config) => {
+  await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.authExposeInternalServiceEndpoints, true);
   });
 });
@@ -135,6 +137,16 @@ test("auth-http rejects required discovery when registry is disabled", async () 
       NODE_ENV: "development",
       REGISTRY_ENABLED: "false",
       DISCOVERY_REQUIRED: "true"
+    }, () => {}),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("auth-http test environment rejects registry disabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      NODE_ENV: "test",
+      REGISTRY_ENABLED: "false"
     }, () => {}),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
@@ -219,6 +231,23 @@ test("auth-http reads service identity and build version", async () => {
   }, (config) => {
     assert.equal(config.serviceName, "auth-http-blue");
     assert.equal(config.serviceBuildVersion, "2026.06.18+auth");
+  });
+});
+
+test("auth-http reads registry key prefix with Redis prefix fallback", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    REDIS_KEY_PREFIX: "redis:",
+    REGISTRY_KEY_PREFIX: "registry:"
+  }, (config) => {
+    assert.equal(config.registryKeyPrefix, "registry:");
+  });
+
+  await withEnv({
+    NODE_ENV: "development",
+    REDIS_KEY_PREFIX: "redis:"
+  }, (config) => {
+    assert.equal(config.registryKeyPrefix, "redis:");
   });
 });
 
