@@ -673,6 +673,28 @@ mod tests {
     }
 
     #[test]
+    fn env_example_does_not_enable_legacy_internal_socket_fallback_by_default() {
+        let env_example = include_str!("../.env.example");
+        let active_names = env_example
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
+            .collect::<Vec<_>>();
+
+        assert!(!active_names.contains(&"GAME_SERVER_INTERNAL_SOCKET_NAME"));
+        assert!(!active_names.contains(&"GAME_INTERNAL_SOCKET_NAME"));
+        assert!(
+            env_example.contains("# GAME_SERVER_INTERNAL_SOCKET_NAME="),
+            ".env.example should keep GAME_SERVER_INTERNAL_SOCKET_NAME only as a commented local fallback example"
+        );
+        assert!(
+            env_example.contains("# GAME_INTERNAL_SOCKET_NAME="),
+            ".env.example should document GAME_INTERNAL_SOCKET_NAME only as a commented legacy local fallback alias"
+        );
+    }
+
+    #[test]
     fn rejects_legacy_internal_socket_env_when_migration_complete_switch_is_enabled() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(SERVICE_BUILD_VERSION_ENV_NAMES);
