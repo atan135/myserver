@@ -26,6 +26,30 @@ function violationVariables(result) {
   return result.violations.map((violation) => `${violation.file}:${violation.variable}`).sort();
 }
 
+function hasActiveConfigAssignment(content, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [
+    new RegExp(`^(?:export\\s+)?${escapedName}\\s*=`),
+    new RegExp(`^\\$env:${escapedName}\\s*=`, "i"),
+    new RegExp(`^-?\\s*${escapedName}\\s*:`),
+    new RegExp(`^"${escapedName}"\\s*:`)
+  ];
+
+  return content
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .some((line) => {
+      const trimmed = line.trim();
+      return (
+        trimmed &&
+        !trimmed.startsWith("#") &&
+        !trimmed.startsWith("//") &&
+        patterns.some((pattern) => pattern.test(trimmed))
+      );
+    });
+}
+
 test("repository discovery config scan passes current strict overlays and local fallback examples", () => {
   const result = scanDiscoveryConfig({ rootDir: projectRoot });
 
@@ -45,6 +69,97 @@ test("repository discovery config scan passes current strict overlays and local 
       (item) => item.file === "apps/game-server/.env.example" && item.variable === "MATCH_SERVICE_ADDR"
     )
   );
+});
+
+test("repository game-server strict templates omit MATCH_SERVICE_ADDR while local fallback remains allowed", () => {
+  const result = scanDiscoveryConfig({ rootDir: projectRoot });
+  const gameServerStrictFiles = result.strictFiles.filter((file) =>
+    file.startsWith("apps/game-server/")
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(gameServerStrictFiles.includes("apps/game-server/.env.test.example"));
+  assert.ok(gameServerStrictFiles.includes("apps/game-server/.env.production.example"));
+
+  for (const file of gameServerStrictFiles) {
+    const content = fs.readFileSync(path.join(projectRoot, file), "utf8");
+    assert.equal(
+      hasActiveConfigAssignment(content, "MATCH_SERVICE_ADDR"),
+      false,
+      `${file} must not define MATCH_SERVICE_ADDR`
+    );
+  }
+
+  assert.ok(
+    result.allowedLocalFallbacks.some(
+      (item) =>
+        item.file === "apps/game-server/.env.example" &&
+        item.variable === "MATCH_SERVICE_ADDR" &&
+        item.service === "game-server"
+    )
+  );
+});
+
+test("game-server MATCH_SERVICE_ADDR is forbidden in test production and staging templates", () => {
+  const tempDir = createTempRepo();
+  try {
+    writeFile(
+      tempDir,
+      "apps/game-server/.env.example",
+      [
+        "APP_ENV=development",
+        "REGISTRY_ENABLED=true",
+        "DISCOVERY_REQUIRED=true",
+        "# Local fallback only: used only when registry discovery is disabled.",
+        "# Do not use for strict/test/production/staging discovery.",
+        "MATCH_SERVICE_ADDR=http://127.0.0.1:9002"
+      ].join("\n")
+    );
+
+    for (const [file, appEnv] of [
+      ["apps/game-server/.env.test.example", "test"],
+      ["apps/game-server/.env.production.example", "production"],
+      ["apps/game-server/.env.staging.example", "staging"]
+    ]) {
+      writeFile(
+        tempDir,
+        file,
+        [
+          `APP_ENV=${appEnv}`,
+          "REGISTRY_ENABLED=true",
+          "DISCOVERY_REQUIRED=true",
+          "DISALLOW_LEGACY_DIRECT_CONFIG=true",
+          "MATCH_SERVICE_ADDR=http://10.0.0.22:9002"
+        ].join("\n")
+      );
+    }
+
+    const result = scanDiscoveryConfig({ rootDir: tempDir });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(violationVariables(result), [
+      "apps/game-server/.env.production.example:MATCH_SERVICE_ADDR",
+      "apps/game-server/.env.staging.example:MATCH_SERVICE_ADDR",
+      "apps/game-server/.env.test.example:MATCH_SERVICE_ADDR"
+    ]);
+    assert.ok(
+      result.allowedLocalFallbacks.some(
+        (item) =>
+          item.file === "apps/game-server/.env.example" &&
+          item.variable === "MATCH_SERVICE_ADDR" &&
+          item.service === "game-server"
+      )
+    );
+    for (const violation of result.violations) {
+      assert.equal(violation.service, "game-server");
+      assert.equal(violation.rule, "strict_legacy_direct_config_forbidden");
+      assert.match(violation.reason, /match-service\.grpc/);
+      assert.match(violation.remediation, /Local fallback examples/);
+      assert.ok(violation.strictContext.includes("strict path/name"));
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("strict config scan rejects consumers using legacy direct target variables", () => {
