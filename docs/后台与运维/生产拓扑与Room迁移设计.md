@@ -202,6 +202,24 @@ hook 必须使用与 rollout drill 和控制面相同的 service registry discov
 
 hook 每次执行后都必须写入可回放日志和审计记录，至少包含环境名、service name、target instance id / server id、rollout epoch、解析出的 endpoint、`source=registry`、执行原因、调用结果和失败原因。发生发现失败、身份不匹配或多 endpoint 歧义时，也必须记录 reason，便于复盘停服是否被正确阻断。
 
+### 5.7 异常退出与 heartbeat TTL 摘除
+
+当前 service registry 使用独立 heartbeat key 判断实例是否仍可发现。Rust `service-registry` client 默认 heartbeat interval 为 10 秒、TTL 为 30 秒；Node registry client 也默认每 10 秒对 heartbeat key 执行 `setex`，TTL 为 30 秒。实例异常退出后，进程不再刷新 heartbeat key，Redis 会在 TTL 过期后自动删除该 key。
+
+registry discovery 查询实例时会过滤 heartbeat key 不存在的实例。因此异常退出后，实例记录即使仍残留在 registry instance key 中，也应在 heartbeat TTL 过期后不再被新的 discovery 结果返回，入口、控制面或依赖服务的新选择不应再选中该实例。
+
+TTL 摘除只作为异常退出兜底，不是正常下线流程。滚动发布、缩容、维护停服和受控重启仍必须先移出接新流量、等待业务收敛，然后显式停止 heartbeat 并执行 deregister；不能把等待 TTL 过期当作正常注销路径。
+
+部署和监控需要覆盖异常退出演练，并在至少一个 TTL 窗口内校验以下结果：
+
+1. 目标实例的 service registry heartbeat key 已过期或不存在。
+2. registry discovery 对应 service / endpoint 不再返回该 instance id。
+3. 入口、控制面和依赖服务的新请求不再路由或选择到该实例。
+
+已有连接、旧绑定、room route、player route、rollout target 或其他 route store 状态不由 registry TTL 自动清理。异常退出后的旧连接断开、重连降级、房间迁移、route store 清理或故障标记，仍必须依赖各服务自身的降级、探活、清理和控制面策略；不能只靠 registry TTL 保证全链路摘除。
+
+`metrics-collector` 不参与 service registry heartbeat，也不注册为 service registry 实例。它写入的 `metrics:heartbeat:*` 只表示指标快照的新鲜度，不能作为服务发现实例是否存活、是否可被 discovery 返回或是否可接流量的依据。
+
 ## 6. game-proxy 单实例与多实例边界
 
 ### 6.1 当前单实例边界
