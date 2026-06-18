@@ -10,6 +10,8 @@ const CONFIG_ENV_NAMES = [
   "GAME_ADMIN_WRITE_TIMEOUT_MS",
   "GAME_ADMIN_READ_TIMEOUT_MS",
   "GAME_ADMIN_MAX_RESPONSE_BYTES",
+  "REGISTRY_ENABLED",
+  "DISCOVERY_REQUIRED",
   "MAIL_PLAYER_AUTH_REQUIRED",
   "MAIL_SERVICE_TOKEN",
   "SERVICE_BUILD_VERSION",
@@ -92,4 +94,26 @@ test("mail-service config defaults service build version to dev", async () => {
 
     assert.equal(config.serviceBuildVersion, "dev");
   });
+});
+
+test("mail-service config reads registry discovery flags", async () => {
+  await withEnv({
+    REGISTRY_ENABLED: "true",
+    DISCOVERY_REQUIRED: "true"
+  }, (getConfig) => {
+    const config = getConfig();
+
+    assert.equal(config.registryDiscoveryEnabled, true);
+    assert.equal(config.registryDiscoveryRequired, true);
+  });
+});
+
+test("mail-service DISCOVERY_REQUIRED=true rejects registry disabled", async () => {
+  await assert.rejects(
+    () => withEnv({
+      REGISTRY_ENABLED: "false",
+      DISCOVERY_REQUIRED: "true"
+    }, (getConfig) => getConfig()),
+    /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
 });

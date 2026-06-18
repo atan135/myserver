@@ -6,6 +6,7 @@ import {
   MESSAGE_TYPE,
   buildAdminAuthBody,
   buildGrantMailAttachmentsPayload,
+  GameAdminClient,
   getDefaultGameAdminActor,
   normalizeGameAdminActor,
   normalizeServiceActorCandidate,
@@ -15,8 +16,61 @@ import {
 const config = {
   gameAdminToken: "secret-admin-token",
   serviceInstanceId: "mail-001",
-  serviceName: "mail-service"
+  serviceName: "mail-service",
+  gameServerAdminHost: "127.0.0.1",
+  gameServerAdminPort: 7500
 };
+
+function createRedisWithGameServers(instances) {
+  const instanceById = new Map(instances.map((instance) => [instance.id, instance]));
+
+  return {
+    async scan(cursor, _match, pattern) {
+      assert.equal(cursor, "0");
+      assert.equal(pattern, "service:game-server:instances:*");
+      return ["0", instances.map((instance) => `service:game-server:instances:${instance.id}`)];
+    },
+    async exists(key) {
+      const instanceId = key.split(":").at(-1);
+      return instanceById.has(instanceId) ? 1 : 0;
+    },
+    async hget(key, field) {
+      assert.equal(field, "data");
+      const instanceId = key.split(":").at(-1);
+      const instance = instanceById.get(instanceId);
+      return instance ? JSON.stringify(instance) : null;
+    }
+  };
+}
+
+function createGameServerInstance(id, port) {
+  return {
+    schema_version: 2,
+    id,
+    name: "game-server",
+    host: "127.0.0.1",
+    port: 7000,
+    admin_port: port,
+    local_socket: "",
+    endpoints: [
+      {
+        name: "admin",
+        protocol: "tcp",
+        host: "10.0.0.1",
+        port,
+        socket: "",
+        visibility: "admin",
+        metadata: {},
+        healthy: true
+      }
+    ],
+    tags: ["game"],
+    weight: 100,
+    metadata: {},
+    registered_at: Date.now(),
+    healthy: true
+  };
+}
 
 test("admin auth body keeps legacy plain token when actor is missing", () => {
   const body = buildAdminAuthBody(config);
@@ -108,4 +162,72 @@ test("mail admin client rejects response larger than configured limit", async ()
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("GameAdminClient requires targetInstanceId when multiple registry endpoints exist", async () => {
+  const client = new GameAdminClient(
+    { ...config, registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createRedisWithGameServers([
+      createGameServerInstance("game-server-a", 7501),
+      createGameServerInstance("game-server-b", 7502)
+    ])
+  );
+
+  await assert.rejects(
+    () => client.resolveAdminEndpoint({ requireExplicitTarget: true }),
+    { code: "GAME_SERVER_ADMIN_TARGET_REQUIRED" }
+  );
+});
+
+test("GameAdminClient resolves explicit targetInstanceId to matching registry endpoint", async () => {
+  const client = new GameAdminClient(
+    { ...config, registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    createRedisWithGameServers([
+      createGameServerInstance("game-server-a", 7501),
+      createGameServerInstance("game-server-b", 7502)
+    ])
+  );
+
+  const endpoint = await client.resolveAdminEndpoint({
+    requireExplicitTarget: true,
+    targetInstanceId: "game-server-b"
+  });
+
+  assert.equal(endpoint.instanceId, "game-server-b");
+  assert.equal(endpoint.port, 7502);
+});
+
+test("GameAdminClient forbids local fallback when discovery is required", async () => {
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: true
+  });
+
+  await assert.rejects(client.listAdminEndpoints(), { code: "SERVICE_DISCOVERY_REQUIRED" });
+});
+
+test("GameAdminClient allows local fallback when discovery is disabled and optional", async () => {
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false
+  });
+
+  const endpoints = await client.listAdminEndpoints();
+
+  assert.deepEqual(endpoints, [
+    {
+      service: "game-server",
+      instanceId: "local-fallback",
+      instance_id: "local-fallback",
+      endpointName: "admin",
+      endpoint_name: "admin",
+      protocol: "tcp",
+      host: "127.0.0.1",
+      port: 7500,
+      healthy: true,
+      fallback: true
+    }
+  ]);
 });

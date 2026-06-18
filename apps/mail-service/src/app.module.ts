@@ -79,8 +79,8 @@ import {
     },
     {
       provide: MAIL_GAME_ADMIN_CLIENT,
-      inject: [MAIL_CONFIG],
-      useFactory: (config: any) => new GameAdminClient(config)
+      inject: [MAIL_CONFIG, MAIL_REDIS],
+      useFactory: (config: any, redis: any) => new GameAdminClient(config, redis)
     },
     {
       provide: MAIL_REGISTRY,

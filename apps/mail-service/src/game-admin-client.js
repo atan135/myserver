@@ -1,5 +1,7 @@
 import net from "node:net";
 
+import { discoverGameServerAdminEndpoints } from "./registry-client.js";
+
 const MAGIC = 0xcafe;
 const VERSION = 1;
 const HEADER_LEN = 14;
@@ -130,9 +132,13 @@ function createAdminError(code, message = code) {
 }
 
 async function sendRequest(config, messageType, payload, expectedType, options = {}) {
-  const socket = net.createConnection({
+  const endpoint = options.endpoint || {
     host: config.gameServerAdminHost,
     port: config.gameServerAdminPort
+  };
+  const socket = net.createConnection({
+    host: endpoint.host,
+    port: endpoint.port
   });
 
   try {
@@ -301,12 +307,84 @@ function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 10
 }
 
 export class GameAdminClient {
-  constructor(config) {
+  constructor(config, redis = null) {
     this.config = config;
+    this.redis = redis;
+  }
+
+  async listAdminEndpoints() {
+    if (!this.config.registryDiscoveryEnabled) {
+      if (this.config.registryDiscoveryRequired) {
+        throw createAdminError(
+          "SERVICE_DISCOVERY_REQUIRED",
+          "Required registry discovery failed: REGISTRY_ENABLED=false"
+        );
+      }
+
+      return [
+        {
+          service: "game-server",
+          instanceId: "local-fallback",
+          instance_id: "local-fallback",
+          endpointName: "admin",
+          endpoint_name: "admin",
+          protocol: "tcp",
+          host: this.config.gameServerAdminHost,
+          port: this.config.gameServerAdminPort,
+          healthy: true,
+          fallback: true
+        }
+      ];
+    }
+
+    if (!this.redis) {
+      throw createAdminError(
+        "SERVICE_DISCOVERY_UNAVAILABLE",
+        "Redis client is required for game-server admin discovery"
+      );
+    }
+
+    return discoverGameServerAdminEndpoints(this.redis);
+  }
+
+  async resolveAdminEndpoint(options = {}) {
+    if (options.endpoint) {
+      return options.endpoint;
+    }
+
+    const endpoints = await this.listAdminEndpoints();
+    if (endpoints.length === 0) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND",
+        "game-server admin endpoint not found in service registry"
+      );
+    }
+
+    const targetInstanceId = normalizeTargetInstanceId(options.targetInstanceId || options.target_instance_id);
+    if (targetInstanceId) {
+      const selected = endpoints.find((endpoint) => endpoint.instanceId === targetInstanceId);
+      if (!selected) {
+        throw createAdminError(
+          "GAME_SERVER_ADMIN_TARGET_NOT_FOUND",
+          `game-server admin target instance not found: ${targetInstanceId}`
+        );
+      }
+      return selected;
+    }
+
+    if (endpoints.length > 1 && options.requireExplicitTarget) {
+      throw createAdminError(
+        "GAME_SERVER_ADMIN_TARGET_REQUIRED",
+        "multiple game-server admin endpoints are available; targetInstanceId is required"
+      );
+    }
+
+    return endpoints[0];
   }
 
   async grantMailAttachments(playerId, mailId, attachments, reason = "", options = {}) {
     const payload = buildGrantMailAttachmentsPayload(playerId, mailId, attachments, reason);
+    const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
 
     await sendRequest(
       this.config,
@@ -315,18 +393,27 @@ export class GameAdminClient {
       MESSAGE_TYPE.GM_SEND_ITEM_RES,
       {
         ...options,
+        endpoint,
         actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
       }
     );
 
-    return { ok: true };
+    return { ok: true, instanceId: endpoint.instanceId };
   }
+}
+
+function normalizeTargetInstanceId(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return String(value).trim();
 }
 
 export {
   MESSAGE_TYPE,
   buildAdminAuthBody,
   buildGrantMailAttachmentsPayload,
+  createAdminError,
   getDefaultGameAdminActor,
   normalizeGameAdminActor,
   normalizeServiceActorCandidate,

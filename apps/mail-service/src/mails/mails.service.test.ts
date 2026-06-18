@@ -164,12 +164,32 @@ test("claim grants once with stable request id, source semantics, and completes 
     "player-1",
     "mail_claim:mail-1",
     [{ itemId: 1001, count: 2, binded: true }],
-    "claim mail mail-1"
+    "claim mail mail-1",
+    { targetInstanceId: "" }
   ]);
   assert.deepEqual(calls.complete, ["mail-1"]);
   assert.equal(result.claimed, true);
   assert.equal(result.already_claimed, false);
   assert.equal(result.status, "claimed");
+});
+
+test("claim passes explicit targetInstanceId to downstream grant", async () => {
+  const { service, calls } = createService();
+
+  await service.claim("mail-1", "player-1", { targetInstanceId: "game-server-b" });
+
+  assert.equal(calls.grant.length, 1);
+  assert.equal(calls.grant[0][4].targetInstanceId, "game-server-b");
+  assert.deepEqual(calls.complete, ["mail-1"]);
+  assert.equal(calls.release.length, 0);
+});
+
+test("claim accepts snake_case target_instance_id for downstream grant", async () => {
+  const { service, calls } = createService();
+
+  await service.claim("mail-1", "player-1", { target_instance_id: "game-server-c" });
+
+  assert.equal(calls.grant[0][4].targetInstanceId, "game-server-c");
 });
 
 test("claim releases reservation and maps downstream grant failure", async () => {
@@ -187,6 +207,26 @@ test("claim releases reservation and maps downstream grant failure", async () =>
   );
 
   assert.equal(calls.grant.length, 1);
+  assert.deepEqual(calls.release, ["mail-1"]);
+  assert.equal(calls.complete.length, 0);
+});
+
+test("claim releases reservation when registry has multiple targets but targetInstanceId is missing", async () => {
+  const grantError = new Error("multiple game-server admin endpoints are available; targetInstanceId is required");
+  (grantError as any).code = "GAME_SERVER_ADMIN_TARGET_REQUIRED";
+  const { service, calls } = createService({ grantError });
+
+  await assert.rejects(
+    () => service.claim("mail-1", "player-1"),
+    (error: any) => {
+      assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
+      assert.equal(error.getStatus?.(), 502);
+      return true;
+    }
+  );
+
+  assert.equal(calls.grant.length, 1);
+  assert.equal(calls.grant[0][4].targetInstanceId, "");
   assert.deepEqual(calls.release, ["mail-1"]);
   assert.equal(calls.complete.length, 0);
 });

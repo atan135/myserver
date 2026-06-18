@@ -71,6 +71,14 @@ function assertPlayerIdMatches(authenticatedPlayerId: string, requestedPlayerId:
   }
 }
 
+function normalizeTargetInstanceId(value: any) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
 function normalizeMailAttachmentItems(attachments: any) {
   const list = Array.isArray(attachments) ? attachments : [attachments];
 
@@ -336,6 +344,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
   async claim(mailId: string, authenticatedPlayerId: string, body: any = {}) {
     try {
       const { player_id } = body || {};
+      const targetInstanceId = normalizeTargetInstanceId(body?.targetInstanceId ?? body?.target_instance_id);
       assertAuthenticatedPlayer(authenticatedPlayerId);
       assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
@@ -392,7 +401,8 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           authenticatedPlayerId,
           `mail_claim:${mail.mail_id}`,
           normalizedAttachments,
-          `claim mail ${mail.mail_id}`
+          `claim mail ${mail.mail_id}`,
+          { targetInstanceId }
         );
       } catch (error: any) {
         await this.mailStore.releaseClaimAttachments(mailId);

@@ -43,6 +43,18 @@ function isProductionEnv() {
   );
 }
 
+function isStrictDiscoveryEnv() {
+  return [process.env.NODE_ENV, process.env.APP_ENV].some(
+    (value) => typeof value === "string" && ["production", "test"].includes(value.trim().toLowerCase())
+  );
+}
+
+function validateDiscoveryConfig(config) {
+  if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
+    throw new Error("Invalid mail-service discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+}
+
 function validateProductionConfig(config) {
   if (!isProductionEnv()) {
     return;
@@ -105,6 +117,8 @@ export function getConfig() {
     dbPoolSize: Number.parseInt(process.env.DB_POOL_SIZE || "10", 10),
     gameServerAdminHost: process.env.GAME_SERVER_ADMIN_HOST || "127.0.0.1",
     gameServerAdminPort: Number.parseInt(process.env.GAME_SERVER_ADMIN_PORT || "7500", 10),
+    registryDiscoveryEnabled: parseBoolean(process.env.REGISTRY_ENABLED, false),
+    registryDiscoveryRequired: parseBoolean(process.env.DISCOVERY_REQUIRED, isStrictDiscoveryEnv()),
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
@@ -123,5 +137,6 @@ export function getConfig() {
   };
 
   validateProductionConfig(config);
+  validateDiscoveryConfig(config);
   return config;
 }
