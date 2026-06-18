@@ -8,6 +8,7 @@ import { GameAdminClient } from "./game-admin-client.js";
 import { DbAuthStore } from "./db-store.js";
 import { MaintenanceStore } from "./maintenance-store.js";
 import { AccountLockout, RateLimiter } from "./rate-limiter.js";
+import { RegistryClient } from "./registry-client.js";
 import { ServiceDiscovery } from "./service-discovery.js";
 import { createDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
@@ -35,6 +36,7 @@ import {
   AUTH_NATS,
   AUTH_RATE_LIMITER,
   AUTH_REDIS,
+  AUTH_REGISTRY,
   AUTH_SERVICE_DISCOVERY,
   AUTH_STORE
 } from "./tokens.js";
@@ -102,6 +104,11 @@ import {
       provide: AUTH_SERVICE_DISCOVERY,
       inject: [AUTH_REDIS, AUTH_CONFIG],
       useFactory: (redis: any, config: any) => new ServiceDiscovery(redis, config)
+    },
+    {
+      provide: AUTH_REGISTRY,
+      inject: [AUTH_REDIS, AUTH_CONFIG],
+      useFactory: (redis: any, config: any) => new RegistryClient(redis, config)
     },
     {
       provide: AUTH_MAINTENANCE_STORE,

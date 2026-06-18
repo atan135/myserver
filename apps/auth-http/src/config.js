@@ -109,8 +109,10 @@ export function getConfig() {
       10
     ),
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
+    serviceName: process.env.SERVICE_NAME || "auth-http",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "auth-http-001",
+    serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID,
     dbEnabled: parseBoolean(process.env.DB_ENABLED, false),

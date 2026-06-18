@@ -2,12 +2,20 @@ import log4js from "log4js";
 
 import { createNestApp, closeNestApp } from "./nest-app.js";
 import { log } from "./logger.js";
-import { AUTH_CONFIG } from "./tokens.js";
+import { AUTH_CONFIG, AUTH_REGISTRY } from "./tokens.js";
 
 export async function bootstrap() {
   const app = await createNestApp();
   const config = app.get<any>(AUTH_CONFIG);
   const httpServer = await app.listen(config.port, config.host);
+  const registryClient = app.get<any>(AUTH_REGISTRY, { strict: false });
+
+  try {
+    await registryClient.register();
+    registryClient.startHeartbeat(10);
+  } catch (error: any) {
+    log("error", "startup.registry_failed", { error: error.message });
+  }
   let shuttingDown = false;
 
   const shutdown = async (signal: string) => {

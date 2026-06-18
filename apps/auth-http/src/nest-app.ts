@@ -14,7 +14,8 @@ import {
   AUTH_DB_POOL,
   AUTH_METRICS,
   AUTH_NATS,
-  AUTH_REDIS
+  AUTH_REDIS,
+  AUTH_REGISTRY
 } from "./tokens.js";
 
 export async function createNestApp() {
@@ -57,6 +58,7 @@ export async function createNestApp() {
 
 export async function closeNestApp(app: INestApplication) {
   const metrics = app.get<any>(AUTH_METRICS, { strict: false });
+  const registryClient = app.get<any>(AUTH_REGISTRY, { strict: false });
   const redis = app.get<any>(AUTH_REDIS, { strict: false });
   const nats = app.get<any>(AUTH_NATS, { strict: false });
   const dbPool = app.get<any>(AUTH_DB_POOL, { strict: false });
@@ -65,6 +67,14 @@ export async function closeNestApp(app: INestApplication) {
     await metrics?.stop?.();
   } catch (error: any) {
     log("error", "shutdown.metrics_stop_failed", { error: error.message });
+  }
+
+  registryClient?.stopHeartbeat?.();
+
+  try {
+    await registryClient?.deregister?.();
+  } catch (error: any) {
+    log("error", "shutdown.deregister_failed", { error: error.message });
   }
 
   try {

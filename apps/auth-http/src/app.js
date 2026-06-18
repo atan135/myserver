@@ -11,6 +11,7 @@ export async function createApp() {
     AUTH_DB_POOL,
     AUTH_METRICS,
     AUTH_NATS,
+    AUTH_REGISTRY,
     AUTH_REDIS
   } = await import("./tokens.ts");
 
@@ -24,6 +25,7 @@ export async function createApp() {
     nats: nestApp.get(AUTH_NATS, { strict: false }),
     dbPool: nestApp.get(AUTH_DB_POOL, { strict: false }),
     metrics: nestApp.get(AUTH_METRICS, { strict: false }),
+    registryClient: nestApp.get(AUTH_REGISTRY, { strict: false }),
     close: () => closeNestApp(nestApp)
   };
 }

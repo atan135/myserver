@@ -13,6 +13,8 @@ const CONFIG_ENV_KEYS = [
   "REGISTRY_ENABLED",
   "TRUST_PROXY",
   "TRUSTED_PROXIES",
+  "SERVICE_BUILD_VERSION",
+  "SERVICE_NAME",
   "TICKET_SECRET",
   "GAME_ADMIN_TOKEN",
   "INTERNAL_API_TOKEN"
@@ -157,5 +159,23 @@ test("auth-http reads password registration review switch", async () => {
     AUTH_REGISTER_REQUIRE_REVIEW: "true"
   }, (config) => {
     assert.equal(config.registerRequireReview, true);
+  });
+});
+
+test("auth-http reads service identity and build version", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    SERVICE_NAME: "auth-http-blue",
+    SERVICE_BUILD_VERSION: "2026.06.18+auth"
+  }, (config) => {
+    assert.equal(config.serviceName, "auth-http-blue");
+    assert.equal(config.serviceBuildVersion, "2026.06.18+auth");
+  });
+});
+
+test("auth-http service identity defaults to auth-http dev build", async () => {
+  await withEnv({ NODE_ENV: "development" }, (config) => {
+    assert.equal(config.serviceName, "auth-http");
+    assert.equal(config.serviceBuildVersion, "dev");
   });
 });
