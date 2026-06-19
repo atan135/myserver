@@ -30,11 +30,19 @@ function gameServerError(error: any) {
 }
 
 function gameServerFailure(error: any) {
-  return {
+  const failure: any = {
     ok: false,
     error: error?.code || "GAME_SERVER_ERROR",
     message: error?.message || "game-server error"
   };
+  if (error?.gameAdminEndpoint) {
+    failure.endpoint = error.gameAdminEndpoint;
+    failure.instanceId = error.gameAdminEndpoint.instanceId;
+  }
+  if (error?.gameAdminInstances) {
+    failure.instances = error.gameAdminInstances;
+  }
+  return failure;
 }
 
 function isGameAdminTargetSelectionError(error: any) {
@@ -216,13 +224,13 @@ export class GmController {
     };
     if (!globalBroadcast.ok) {
       try {
-        await this.gameAdminClient.broadcast(
+        const result = await this.gameAdminClient.broadcast(
           normalizedTitle,
           normalizedContent,
           normalizedSender,
           gameAdminOptions
         );
-        legacyBroadcast = { ok: true, fallback: true };
+        legacyBroadcast = { ...result, fallback: true };
       } catch (error: any) {
         legacyBroadcast = gameServerFailure(error);
         legacyBroadcast.fallback = true;
@@ -239,6 +247,7 @@ export class GmController {
         title: normalizedTitle,
         content: normalizedContent,
         sender: normalizedSender,
+        requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
         globalBroadcast,
         legacyBroadcast
       },
@@ -277,7 +286,13 @@ export class GmController {
 
     try {
       const gameAdminOptions = createGameAdminOptions(req, body);
-      await this.gameAdminClient.sendItem(playerId, itemId, itemCount, reason || "", gameAdminOptions);
+      const gameAdminResult = await this.gameAdminClient.sendItem(
+        playerId,
+        itemId,
+        itemCount,
+        reason || "",
+        gameAdminOptions
+      );
 
       await this.adminStore.appendAuditLog({
         adminId: req.admin.sub,
@@ -285,7 +300,17 @@ export class GmController {
         action: "gm_send_item",
         targetType: "player",
         targetValue: playerId,
-        details: { itemId, itemCount, reason, targetInstanceId: gameAdminOptions.targetInstanceId },
+        details: {
+          itemId,
+          itemCount,
+          reason,
+          requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
+          gameAdmin: {
+            ok: gameAdminResult?.ok === true,
+            instanceId: gameAdminResult?.instanceId,
+            endpoint: gameAdminResult?.endpoint
+          }
+        },
         ip: getClientIp(req, this.config)
       });
 
@@ -309,7 +334,7 @@ export class GmController {
 
     let legacyKick: any = { ok: true };
     try {
-      await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
+      legacyKick = await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
         ...gameAdminOptions,
         endpoint: targetEndpoint
       });
@@ -330,7 +355,7 @@ export class GmController {
         reason: normalizedReason,
         globalKick,
         legacyKick,
-        targetInstanceId: gameAdminOptions.targetInstanceId
+        requestedTargetInstanceId: gameAdminOptions.targetInstanceId
       },
       ip: getClientIp(req, this.config)
     });
@@ -377,7 +402,7 @@ export class GmController {
 
     let legacyBan: any = { ok: true };
     try {
-      await this.gameAdminClient.banPlayer(
+      legacyBan = await this.gameAdminClient.banPlayer(
         normalizedPlayerId,
         durationSeconds,
         normalizedReason,
@@ -407,7 +432,7 @@ export class GmController {
         reason: normalizedReason,
         globalKick,
         legacyBan,
-        targetInstanceId: gameAdminOptions.targetInstanceId
+        requestedTargetInstanceId: gameAdminOptions.targetInstanceId
       },
       ip: getClientIp(req, this.config)
     });

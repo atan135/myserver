@@ -21,7 +21,24 @@ function makeReq() {
   };
 }
 
-function makeController(gameAdminClient) {
+function endpointSummary(instanceId, host = "10.0.0.2", port = 7501) {
+  return {
+    service: "game-server",
+    instanceId,
+    instance_id: instanceId,
+    endpointName: "admin",
+    endpoint_name: "admin",
+    protocol: "tcp",
+    host,
+    port,
+    healthy: true,
+    fallback: false,
+    source: "registry",
+    reason: "discovered"
+  };
+}
+
+function makeController(gameAdminClient, options = {}) {
   const audits = [];
   const natsCalls = [];
   const adminStore = {
@@ -40,6 +57,9 @@ function makeController(gameAdminClient) {
     calls: natsCalls,
     async publishJson(subject, payload) {
       natsCalls.push({ subject, payload });
+      if (options.publishJson) {
+        return options.publishJson(subject, payload);
+      }
       return { ok: true };
     }
   };
@@ -75,10 +95,11 @@ test("send-item returns explicit target required error from GameAdminClient", as
 
 test("send-item passes explicit targetInstanceId to GameAdminClient", async () => {
   let capturedOptions = null;
+  const resolvedEndpoint = endpointSummary("game-server-resolved", "10.0.0.9", 7599);
   const { controller, audits } = makeController({
     async sendItem(_playerId, _itemId, _itemCount, _reason, options) {
       capturedOptions = options;
-      return { ok: true, instanceId: options.targetInstanceId };
+      return { ok: true, instanceId: resolvedEndpoint.instanceId, endpoint: resolvedEndpoint };
     }
   });
 
@@ -95,7 +116,10 @@ test("send-item passes explicit targetInstanceId to GameAdminClient", async () =
   assert.equal(result.ok, true);
   assert.equal(capturedOptions.targetInstanceId, "game-server-b");
   assert.equal(capturedOptions.actor, "ops");
-  assert.equal(audits[0].details.targetInstanceId, "game-server-b");
+  assert.equal(audits[0].details.requestedTargetInstanceId, "game-server-b");
+  assert.equal(audits[0].details.gameAdmin.instanceId, "game-server-resolved");
+  assert.deepEqual(audits[0].details.gameAdmin.endpoint, resolvedEndpoint);
+  assert.equal(audits[0].details.targetInstanceId, undefined);
 });
 
 test("kick-player returns explicit target required error from GameAdminClient", async () => {
@@ -174,4 +198,110 @@ test("kick-player returns target not found error from GameAdminClient", async ()
     }
   );
   assert.equal(nats.calls.length, 0);
+});
+
+test("kick-player audit records resolved game-server admin endpoint", async () => {
+  const resolvedEndpoint = endpointSummary("game-server-a", "10.0.0.1", 7500);
+  let capturedOptions = null;
+  const { controller, audits } = makeController({
+    async resolveAdminEndpoint(options) {
+      assert.equal(options.targetInstanceId, "requested-game-server");
+      assert.equal(options.requireExplicitTarget, true);
+      return resolvedEndpoint;
+    },
+    async kickPlayer(_playerId, _reason, options) {
+      capturedOptions = options;
+      return { ok: true, instanceId: resolvedEndpoint.instanceId, endpoint: resolvedEndpoint };
+    }
+  });
+
+  const result = await controller.kickPlayer(
+    { playerId: "plr_1", reason: "duplicate login", targetInstanceId: "requested-game-server" },
+    makeReq()
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(capturedOptions.endpoint, resolvedEndpoint);
+  assert.equal(audits[0].details.requestedTargetInstanceId, "requested-game-server");
+  assert.equal(audits[0].details.legacyKick.instanceId, "game-server-a");
+  assert.deepEqual(audits[0].details.legacyKick.endpoint, resolvedEndpoint);
+  assert.equal(audits[0].details.targetInstanceId, undefined);
+});
+
+test("ban-player audit records resolved game-server admin endpoint", async () => {
+  const resolvedEndpoint = endpointSummary("game-server-ban", "10.0.0.3", 7503);
+  const { controller, audits } = makeController({
+    async resolveAdminEndpoint(options) {
+      assert.equal(options.targetInstanceId, "game-server-requested");
+      assert.equal(options.requireExplicitTarget, true);
+      return resolvedEndpoint;
+    },
+    async banPlayer(_playerId, _durationSeconds, _reason, options) {
+      assert.equal(options.endpoint, resolvedEndpoint);
+      return { ok: true, instanceId: resolvedEndpoint.instanceId, endpoint: resolvedEndpoint };
+    }
+  });
+
+  const result = await controller.banPlayer(
+    { playerId: "plr_1", durationSeconds: 3600, reason: "abuse", targetInstanceId: "game-server-requested" },
+    makeReq()
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(audits[0].details.requestedTargetInstanceId, "game-server-requested");
+  assert.equal(audits[0].details.legacyBan.instanceId, "game-server-ban");
+  assert.deepEqual(audits[0].details.legacyBan.endpoint, resolvedEndpoint);
+  assert.equal(audits[0].details.targetInstanceId, undefined);
+});
+
+test("broadcast legacy fallback audit records all called game-server endpoints", async () => {
+  const endpoints = [
+    endpointSummary("game-server-a", "10.0.0.1", 7500),
+    endpointSummary("game-server-b", "10.0.0.2", 7501)
+  ];
+  const { controller, audits } = makeController(
+    {
+      async broadcast(_title, _content, _sender, options) {
+        assert.equal(options.targetInstanceId, undefined);
+        return {
+          ok: true,
+          instances: endpoints.map((endpoint) => ({
+            ok: true,
+            instanceId: endpoint.instanceId,
+            endpoint
+          }))
+        };
+      }
+    },
+    {
+      publishJson() {
+        const error = new Error("nats unavailable");
+        error.code = "NATS_DOWN";
+        throw error;
+      }
+    }
+  );
+
+  await assert.rejects(
+    controller.broadcast(
+      { title: "Notice", content: "Server restart", sender: "Ops" },
+      makeReq()
+    ),
+    (caught) => {
+      assert.equal(caught.getStatus(), 502);
+      assert.equal(caught.getResponse().error, "GM_BROADCAST_PUBLISH_FAILED");
+      return true;
+    }
+  );
+
+  assert.equal(audits[0].details.requestedTargetInstanceId, undefined);
+  assert.deepEqual(
+    audits[0].details.legacyBroadcast.instances.map((instance) => instance.endpoint),
+    endpoints
+  );
+  assert.deepEqual(
+    audits[0].details.legacyBroadcast.instances.map((instance) => instance.instanceId),
+    ["game-server-a", "game-server-b"]
+  );
+  assert.equal(audits[0].details.legacyBroadcast.fallback, true);
 });

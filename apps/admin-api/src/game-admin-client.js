@@ -113,6 +113,49 @@ function createAdminError(code, message = code) {
   return error;
 }
 
+function describeAdminEndpoint(endpoint) {
+  if (!endpoint || typeof endpoint !== "object") {
+    return null;
+  }
+
+  const instanceId = endpoint.instanceId || endpoint.instance_id || "";
+  const endpointName = endpoint.endpointName || endpoint.endpoint_name || endpoint.name || "";
+  const summary = {
+    service: endpoint.service || "game-server",
+    instanceId,
+    instance_id: instanceId,
+    endpointName,
+    endpoint_name: endpointName,
+    protocol: endpoint.protocol || "tcp",
+    host: endpoint.host,
+    port: endpoint.port
+  };
+
+  if (typeof endpoint.healthy === "boolean") {
+    summary.healthy = endpoint.healthy;
+  }
+  if (typeof endpoint.fallback === "boolean") {
+    summary.fallback = endpoint.fallback;
+  }
+  if (endpoint.source !== undefined) {
+    summary.source = endpoint.source;
+  }
+  if (endpoint.reason !== undefined) {
+    summary.reason = endpoint.reason;
+  }
+
+  return summary;
+}
+
+function attachEndpointToError(error, endpoint, extra = {}) {
+  const endpointSummary = describeAdminEndpoint(endpoint);
+  if (endpointSummary) {
+    error.gameAdminEndpoint = endpointSummary;
+  }
+  Object.assign(error, extra);
+  return error;
+}
+
 async function sendRequest(config, messageType, payload, expectedType, options = {}) {
   const endpoint = options.endpoint || {
     host: config.gameServerAdminHost,
@@ -377,13 +420,17 @@ export class GameAdminClient {
   }
 
   async sendToEndpoint(endpoint, messageType, payload, expectedType, options = {}) {
-    return sendRequest(
-      this.config,
-      messageType,
-      payload,
-      expectedType,
-      { ...options, endpoint }
-    );
+    try {
+      return await sendRequest(
+        this.config,
+        messageType,
+        payload,
+        expectedType,
+        { ...options, endpoint }
+      );
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
   }
 
   async getServerStatus(options = {}) {
@@ -396,21 +443,27 @@ export class GameAdminClient {
       { ...options, endpoint }
     );
     // Simplified: just return basic info, real implementation would decode protobuf
-    return { ok: true, instanceId: endpoint.instanceId, endpoint };
+    const endpointSummary = describeAdminEndpoint(endpoint);
+    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
   }
 
   async updateConfig(key, value, options = {}) {
     // Simple string-based for now, real impl would use protobuf
     const payload = Buffer.from(JSON.stringify({ key, value }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
-    await sendRequest(
-      this.config,
-      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
-      payload,
-      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
-      { ...options, endpoint }
-    );
-    return { ok: true, instanceId: endpoint.instanceId };
+    try {
+      await sendRequest(
+        this.config,
+        MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
+        payload,
+        MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
+        { ...options, endpoint }
+      );
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
+    const endpointSummary = describeAdminEndpoint(endpoint);
+    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
   }
 
   async broadcast(title, content, sender = "System", options = {}) {
@@ -421,8 +474,22 @@ export class GameAdminClient {
     const results = [];
 
     for (const endpoint of endpoints) {
-      await this.sendToEndpoint(endpoint, MESSAGE_TYPE.GM_BROADCAST_REQ, payload, MESSAGE_TYPE.GM_BROADCAST_RES, options);
-      results.push({ ok: true, instanceId: endpoint.instanceId });
+      const endpointSummary = describeAdminEndpoint(endpoint);
+      try {
+        await this.sendToEndpoint(endpoint, MESSAGE_TYPE.GM_BROADCAST_REQ, payload, MESSAGE_TYPE.GM_BROADCAST_RES, options);
+        results.push({ ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary });
+      } catch (error) {
+        const failure = {
+          ok: false,
+          error: error?.code || "GAME_SERVER_ERROR",
+          message: error?.message || "game-server error",
+          instanceId: endpointSummary?.instanceId || "",
+          endpoint: endpointSummary
+        };
+        throw attachEndpointToError(error, endpoint, {
+          gameAdminInstances: [...results, failure]
+        });
+      }
     }
 
     return { ok: true, instances: results };
@@ -431,40 +498,55 @@ export class GameAdminClient {
   async sendItem(playerId, itemId, itemCount, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, itemId, itemCount, reason }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
-    await sendRequest(
-      this.config,
-      MESSAGE_TYPE.GM_SEND_ITEM_REQ,
-      payload,
-      MESSAGE_TYPE.GM_SEND_ITEM_RES,
-      { ...options, endpoint }
-    );
-    return { ok: true, instanceId: endpoint.instanceId };
+    try {
+      await sendRequest(
+        this.config,
+        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        payload,
+        MESSAGE_TYPE.GM_SEND_ITEM_RES,
+        { ...options, endpoint }
+      );
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
+    const endpointSummary = describeAdminEndpoint(endpoint);
+    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
   }
 
   async kickPlayer(playerId, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, reason }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
-    await sendRequest(
-      this.config,
-      MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
-      payload,
-      MESSAGE_TYPE.GM_KICK_PLAYER_RES,
-      { ...options, endpoint }
-    );
-    return { ok: true, instanceId: endpoint.instanceId };
+    try {
+      await sendRequest(
+        this.config,
+        MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
+        payload,
+        MESSAGE_TYPE.GM_KICK_PLAYER_RES,
+        { ...options, endpoint }
+      );
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
+    const endpointSummary = describeAdminEndpoint(endpoint);
+    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
   }
 
   async banPlayer(playerId, durationSeconds, reason = "", options = {}) {
     const payload = Buffer.from(JSON.stringify({ playerId, durationSeconds, reason }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
-    await sendRequest(
-      this.config,
-      MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
-      payload,
-      MESSAGE_TYPE.GM_BAN_PLAYER_RES,
-      { ...options, endpoint }
-    );
-    return { ok: true, instanceId: endpoint.instanceId };
+    try {
+      await sendRequest(
+        this.config,
+        MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
+        payload,
+        MESSAGE_TYPE.GM_BAN_PLAYER_RES,
+        { ...options, endpoint }
+      );
+    } catch (error) {
+      throw attachEndpointToError(error, endpoint);
+    }
+    const endpointSummary = describeAdminEndpoint(endpoint);
+    return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
   }
 }
 
@@ -491,4 +573,11 @@ function logDiscovery(level, event, context = {}) {
   }));
 }
 
-export { MESSAGE_TYPE, buildAdminAuthBody, createAdminError, normalizeGameAdminActor, sendRequest };
+export {
+  MESSAGE_TYPE,
+  buildAdminAuthBody,
+  createAdminError,
+  describeAdminEndpoint,
+  normalizeGameAdminActor,
+  sendRequest
+};

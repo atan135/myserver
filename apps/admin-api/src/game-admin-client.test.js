@@ -6,6 +6,7 @@ import {
   GameAdminClient,
   MESSAGE_TYPE,
   buildAdminAuthBody,
+  describeAdminEndpoint,
   normalizeGameAdminActor,
   sendRequest
 } from "./game-admin-client.js";
@@ -229,4 +230,159 @@ test("GameAdminClient marks optional local fallback endpoint source and reason",
   assert.deepEqual(endpoints.map(({ source, reason, instance_id }) => ({ source, reason, instance_id })), [
     { source: "fallback", reason: "fallback_used", instance_id: "local-fallback" }
   ]);
+});
+
+test("describeAdminEndpoint returns only safe endpoint summary fields", () => {
+  const summary = describeAdminEndpoint({
+    service: "game-server",
+    instanceId: "game-server-a",
+    endpointName: "admin",
+    protocol: "tcp",
+    host: "10.0.0.1",
+    port: 7500,
+    healthy: true,
+    fallback: false,
+    source: "registry",
+    reason: "discovered",
+    metadata: {
+      token: "secret",
+      Authorization: "Bearer secret"
+    }
+  });
+
+  assert.deepEqual(summary, {
+    service: "game-server",
+    instanceId: "game-server-a",
+    instance_id: "game-server-a",
+    endpointName: "admin",
+    endpoint_name: "admin",
+    protocol: "tcp",
+    host: "10.0.0.1",
+    port: 7500,
+    healthy: true,
+    fallback: false,
+    source: "registry",
+    reason: "discovered"
+  });
+  assert.equal("metadata" in summary, false);
+});
+
+test("GameAdminClient broadcast returns actual endpoint summaries for every called instance", async () => {
+  const endpoints = [
+    {
+      service: "game-server",
+      instanceId: "game-server-a",
+      instance_id: "game-server-a",
+      endpointName: "admin",
+      endpoint_name: "admin",
+      protocol: "tcp",
+      host: "10.0.0.1",
+      port: 7500,
+      healthy: true,
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
+    },
+    {
+      service: "game-server",
+      instanceId: "game-server-b",
+      instance_id: "game-server-b",
+      endpointName: "admin",
+      endpoint_name: "admin",
+      protocol: "tcp",
+      host: "10.0.0.2",
+      port: 7501,
+      healthy: true,
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
+    }
+  ];
+  class TestGameAdminClient extends GameAdminClient {
+    async listAdminEndpoints() {
+      return endpoints;
+    }
+
+    async sendToEndpoint() {
+      return Buffer.alloc(0);
+    }
+  }
+  const client = new TestGameAdminClient({});
+
+  const result = await client.broadcast("Notice", "Server restart", "Ops");
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.instances.map((instance) => instance.endpoint),
+    endpoints.map(describeAdminEndpoint)
+  );
+  assert.deepEqual(
+    result.instances.map((instance) => instance.instanceId),
+    ["game-server-a", "game-server-b"]
+  );
+});
+
+test("GameAdminClient broadcast failure exposes attempted endpoint summaries", async () => {
+  const endpoints = [
+    {
+      service: "game-server",
+      instanceId: "game-server-a",
+      instance_id: "game-server-a",
+      endpointName: "admin",
+      endpoint_name: "admin",
+      protocol: "tcp",
+      host: "10.0.0.1",
+      port: 7500,
+      healthy: true,
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
+    },
+    {
+      service: "game-server",
+      instanceId: "game-server-b",
+      instance_id: "game-server-b",
+      endpointName: "admin",
+      endpoint_name: "admin",
+      protocol: "tcp",
+      host: "10.0.0.2",
+      port: 7501,
+      healthy: true,
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
+    }
+  ];
+  class TestGameAdminClient extends GameAdminClient {
+    async listAdminEndpoints() {
+      return endpoints;
+    }
+
+    async sendToEndpoint(endpoint) {
+      if (endpoint.instanceId === "game-server-b") {
+        const error = new Error("connection refused");
+        error.code = "ECONNREFUSED";
+        throw error;
+      }
+      return Buffer.alloc(0);
+    }
+  }
+  const client = new TestGameAdminClient({});
+
+  await assert.rejects(
+    client.broadcast("Notice", "Server restart", "Ops"),
+    (error) => {
+      assert.equal(error.code, "ECONNREFUSED");
+      assert.deepEqual(error.gameAdminEndpoint, describeAdminEndpoint(endpoints[1]));
+      assert.deepEqual(
+        error.gameAdminInstances.map((instance) => instance.endpoint),
+        endpoints.map(describeAdminEndpoint)
+      );
+      assert.deepEqual(
+        error.gameAdminInstances.map((instance) => instance.ok),
+        [true, false]
+      );
+      return true;
+    }
+  );
 });
