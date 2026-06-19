@@ -1194,7 +1194,7 @@ if ($script:Discovery.mode -eq "local-fallback") {
     if ($script:RegistryEnabledValue -and $script:DiscoveryRequiredValue) {
         $preflightErrors += "local fallback endpoints are forbidden when RegistryEnabled=true and DiscoveryRequired=true"
     } elseif (Test-StrictDiscoveryEnvironment) {
-        $preflightErrors += "local fallback endpoints are forbidden when EnvironmentName, APP_ENV or NODE_ENV is production/test"
+        $preflightErrors += "local fallback endpoints are forbidden when EnvironmentName, APP_ENV or NODE_ENV is production/staging/test"
     } else {
         $preflightWarnings += "using local fallback endpoints; this is only valid for registry disabled or discovery non-required local drills"
     }
@@ -1221,7 +1221,7 @@ Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "script
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $OldServerId, "-Port", [string]$OldGamePort, "-AdminPort", [string]$OldAdminPort)
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $NewServerId, "-Port", [string]$NewGamePort, "-AdminPort", [string]$NewAdminPort)
 Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-proxy.ps1")
-Write-Host "Prerequisite: auth-http internal game-server admin client must point to the old game-server for drain status and shutdown checks." -ForegroundColor Yellow
+Write-Host "Prerequisite: auth-http internal game-server admin client must resolve the old game-server admin endpoint through registry discovery or the explicit old instance id." -ForegroundColor Yellow
 Add-StageResult "manual-service-preparation" "printed"
 
 Write-Section "Stage 1 - Start Proxy Rollout"
