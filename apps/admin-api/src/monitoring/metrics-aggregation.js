@@ -7,12 +7,25 @@ const SUM_FIELDS = new Set([
   "connections",
   "pool_size",
   "room_count",
+  "registry_scan_total",
+  "registry_scan_duration_ms_total",
+  "registry_scan_instance_keys_total",
+  "registry_scan_visible_instances_total",
+  "registry_discovery_cache_hit_total",
+  "registry_discovery_cache_miss_total",
   "register_failed_total",
   "heartbeat_failed_total",
   "deregister_failed_total"
 ]);
 
-const MAX_FIELDS = new Set(["latency_ms"]);
+const MAX_FIELDS = new Set([
+  "latency_ms",
+  "registry_scan_duration_ms_last",
+  "registry_scan_duration_ms_max",
+  "registry_scan_instance_keys_last",
+  "registry_scan_visible_instances_last",
+  "registry_discovery_cache_hit_rate_basis_points"
+]);
 
 const NUMERIC_OUTPUT_FIELDS = new Set([
   ...SUM_FIELDS,

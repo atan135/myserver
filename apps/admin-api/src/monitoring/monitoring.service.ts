@@ -156,11 +156,15 @@ export class MonitoringService {
   async registry() {
     const checkedAt = Date.now();
     const services = [];
+    const capacitySummaries = [];
     const alerts = [];
 
     for (const serviceName of SERVICE_NAMES) {
       const instances = await discoverServiceInstances(this.redis, serviceName, this.config.registryKeyPrefix || "");
       const schemaParseFailures = await this.findRegistrySchemaParseFailures(serviceName);
+      const latestMetrics = await this.getLatestMetrics(serviceName);
+      const capacity = buildRegistryCapacitySummary(latestMetrics || {});
+      capacitySummaries.push(capacity);
       const normalizedInstances = [];
 
       for (const instance of instances) {
@@ -198,6 +202,7 @@ export class MonitoringService {
         instance_count: normalizedInstances.length,
         healthy_instance_count: healthyInstances.length,
         status: normalizedInstances.length === 0 ? "missing" : healthyInstances.length > 0 ? "healthy" : "unhealthy",
+        capacity,
         instances: normalizedInstances,
         alerts: []
       };
@@ -217,6 +222,7 @@ export class MonitoringService {
       checked_at: checkedAt,
       alert_level: alertLevel,
       alert_message: discoveryAlertMessage(alertLevel, dedupedAlerts),
+      capacity: aggregateRegistryCapacitySummaries(capacitySummaries),
       alerts: dedupedAlerts,
       services
     };
@@ -842,6 +848,76 @@ function buildRegistryLifecycleMetricAlerts(): any[] {
   } catch {
     return [];
   }
+}
+
+function buildRegistryCapacitySummary(metrics: any = {}): any {
+  const cacheHits = parseMetricInt(metrics.registry_discovery_cache_hit_total);
+  const cacheMisses = parseMetricInt(metrics.registry_discovery_cache_miss_total);
+  return {
+    scan_total: parseMetricInt(metrics.registry_scan_total),
+    scan_duration_ms_total: parseMetricInt(metrics.registry_scan_duration_ms_total),
+    scan_duration_ms_last: parseMetricInt(metrics.registry_scan_duration_ms_last),
+    scan_duration_ms_max: parseMetricInt(metrics.registry_scan_duration_ms_max),
+    scan_instance_keys_total: parseMetricInt(metrics.registry_scan_instance_keys_total),
+    scan_instance_keys_last: parseMetricInt(metrics.registry_scan_instance_keys_last),
+    scan_visible_instances_total: parseMetricInt(metrics.registry_scan_visible_instances_total),
+    scan_visible_instances_last: parseMetricInt(metrics.registry_scan_visible_instances_last),
+    cache_hit_total: cacheHits,
+    cache_miss_total: cacheMisses,
+    cache_hit_rate_basis_points: cacheHitRateBasisPoints(cacheHits, cacheMisses)
+  };
+}
+
+function aggregateRegistryCapacitySummaries(summaries: any[]): any {
+  const aggregate = {
+    scan_total: 0,
+    scan_duration_ms_total: 0,
+    scan_duration_ms_last: 0,
+    scan_duration_ms_max: 0,
+    scan_instance_keys_total: 0,
+    scan_instance_keys_last: 0,
+    scan_visible_instances_total: 0,
+    scan_visible_instances_last: 0,
+    cache_hit_total: 0,
+    cache_miss_total: 0,
+    cache_hit_rate_basis_points: 0
+  };
+
+  for (const summary of summaries) {
+    aggregate.scan_total += parseMetricInt(summary.scan_total);
+    aggregate.scan_duration_ms_total += parseMetricInt(summary.scan_duration_ms_total);
+    aggregate.scan_duration_ms_last = Math.max(
+      aggregate.scan_duration_ms_last,
+      parseMetricInt(summary.scan_duration_ms_last)
+    );
+    aggregate.scan_duration_ms_max = Math.max(
+      aggregate.scan_duration_ms_max,
+      parseMetricInt(summary.scan_duration_ms_max)
+    );
+    aggregate.scan_instance_keys_total += parseMetricInt(summary.scan_instance_keys_total);
+    aggregate.scan_instance_keys_last = Math.max(
+      aggregate.scan_instance_keys_last,
+      parseMetricInt(summary.scan_instance_keys_last)
+    );
+    aggregate.scan_visible_instances_total += parseMetricInt(summary.scan_visible_instances_total);
+    aggregate.scan_visible_instances_last = Math.max(
+      aggregate.scan_visible_instances_last,
+      parseMetricInt(summary.scan_visible_instances_last)
+    );
+    aggregate.cache_hit_total += parseMetricInt(summary.cache_hit_total);
+    aggregate.cache_miss_total += parseMetricInt(summary.cache_miss_total);
+  }
+
+  aggregate.cache_hit_rate_basis_points = cacheHitRateBasisPoints(
+    aggregate.cache_hit_total,
+    aggregate.cache_miss_total
+  );
+  return aggregate;
+}
+
+function cacheHitRateBasisPoints(cacheHits: number, cacheMisses: number): number {
+  const total = cacheHits + cacheMisses;
+  return total > 0 ? Math.round((cacheHits * 10000) / total) : 0;
 }
 
 function registryLifecycleMetricMessage(metric: any): string {

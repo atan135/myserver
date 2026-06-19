@@ -47,6 +47,31 @@ export const REGISTRY_LIFECYCLE_METRIC_KINDS = [
 ];
 const REGISTRY_LIFECYCLE_METRIC_KIND_SET = new Set(REGISTRY_LIFECYCLE_METRIC_KINDS);
 const registryLifecycleMetrics = new Map();
+export const REGISTRY_CAPACITY_METRIC_FIELDS = [
+  "registry_scan_total",
+  "registry_scan_duration_ms_total",
+  "registry_scan_duration_ms_last",
+  "registry_scan_duration_ms_max",
+  "registry_scan_instance_keys_total",
+  "registry_scan_instance_keys_last",
+  "registry_scan_visible_instances_total",
+  "registry_scan_visible_instances_last",
+  "registry_discovery_cache_hit_total",
+  "registry_discovery_cache_miss_total",
+  "registry_discovery_cache_hit_rate_basis_points"
+];
+const registryCapacityMetrics = {
+  scanCount: 0,
+  scanDurationMsTotal: 0,
+  scanDurationMsLast: 0,
+  scanDurationMsMax: 0,
+  scanInstanceKeysTotal: 0,
+  scanInstanceKeysLast: 0,
+  scanVisibleInstancesTotal: 0,
+  scanVisibleInstancesLast: 0,
+  cacheHitTotal: 0,
+  cacheMissTotal: 0
+};
 const INSTANCE_DISCOVERY_STRATEGY = "healthy_instances_sorted_v1";
 const ENDPOINT_PICK_STRATEGY = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY = "all_healthy_endpoints_sorted_v1";
@@ -272,6 +297,84 @@ export function collectRegistryLifecycleMetricFields({ reset = false } = {}) {
 
   return Object.fromEntries(
     REGISTRY_LIFECYCLE_METRIC_KINDS.map((kind) => [`${kind}_total`, String(totals[kind] || 0)])
+  );
+}
+
+export function recordRegistryCapacityScan({
+  durationMs = 0,
+  instanceKeyCount = 0,
+  visibleInstanceCount = 0
+} = {}) {
+  const normalizedDurationMs = normalizeMetricInteger(durationMs);
+  const normalizedInstanceKeyCount = normalizeMetricInteger(instanceKeyCount);
+  const normalizedVisibleInstanceCount = normalizeMetricInteger(visibleInstanceCount);
+
+  registryCapacityMetrics.scanCount += 1;
+  registryCapacityMetrics.scanDurationMsTotal += normalizedDurationMs;
+  registryCapacityMetrics.scanDurationMsLast = normalizedDurationMs;
+  registryCapacityMetrics.scanDurationMsMax = Math.max(
+    registryCapacityMetrics.scanDurationMsMax,
+    normalizedDurationMs
+  );
+  registryCapacityMetrics.scanInstanceKeysTotal += normalizedInstanceKeyCount;
+  registryCapacityMetrics.scanInstanceKeysLast = normalizedInstanceKeyCount;
+  registryCapacityMetrics.scanVisibleInstancesTotal += normalizedVisibleInstanceCount;
+  registryCapacityMetrics.scanVisibleInstancesLast = normalizedVisibleInstanceCount;
+
+  return getRegistryCapacityMetricsSnapshot();
+}
+
+export function recordRegistryCapacityCacheHit(count = 1) {
+  registryCapacityMetrics.cacheHitTotal += normalizeMetricInteger(count);
+  return getRegistryCapacityMetricsSnapshot();
+}
+
+export function recordRegistryCapacityCacheMiss(count = 1) {
+  registryCapacityMetrics.cacheMissTotal += normalizeMetricInteger(count);
+  return getRegistryCapacityMetricsSnapshot();
+}
+
+export function getRegistryCapacityMetricsSnapshot() {
+  return {
+    registry_scan_total: registryCapacityMetrics.scanCount,
+    registry_scan_duration_ms_total: registryCapacityMetrics.scanDurationMsTotal,
+    registry_scan_duration_ms_last: registryCapacityMetrics.scanDurationMsLast,
+    registry_scan_duration_ms_max: registryCapacityMetrics.scanDurationMsMax,
+    registry_scan_instance_keys_total: registryCapacityMetrics.scanInstanceKeysTotal,
+    registry_scan_instance_keys_last: registryCapacityMetrics.scanInstanceKeysLast,
+    registry_scan_visible_instances_total: registryCapacityMetrics.scanVisibleInstancesTotal,
+    registry_scan_visible_instances_last: registryCapacityMetrics.scanVisibleInstancesLast,
+    registry_discovery_cache_hit_total: registryCapacityMetrics.cacheHitTotal,
+    registry_discovery_cache_miss_total: registryCapacityMetrics.cacheMissTotal,
+    registry_discovery_cache_hit_rate_basis_points: cacheHitRateBasisPoints(
+      registryCapacityMetrics.cacheHitTotal,
+      registryCapacityMetrics.cacheMissTotal
+    )
+  };
+}
+
+export function resetRegistryCapacityMetrics() {
+  registryCapacityMetrics.scanCount = 0;
+  registryCapacityMetrics.scanDurationMsTotal = 0;
+  registryCapacityMetrics.scanDurationMsLast = 0;
+  registryCapacityMetrics.scanDurationMsMax = 0;
+  registryCapacityMetrics.scanInstanceKeysTotal = 0;
+  registryCapacityMetrics.scanInstanceKeysLast = 0;
+  registryCapacityMetrics.scanVisibleInstancesTotal = 0;
+  registryCapacityMetrics.scanVisibleInstancesLast = 0;
+  registryCapacityMetrics.cacheHitTotal = 0;
+  registryCapacityMetrics.cacheMissTotal = 0;
+}
+
+export function collectRegistryCapacityMetricFields({ reset = false } = {}) {
+  const snapshot = getRegistryCapacityMetricsSnapshot();
+
+  if (reset) {
+    resetRegistryCapacityMetrics();
+  }
+
+  return Object.fromEntries(
+    REGISTRY_CAPACITY_METRIC_FIELDS.map((field) => [field, String(snapshot[field] || 0)])
   );
 }
 
@@ -712,19 +815,23 @@ export class RegistryDiscoveryClient {
 
   getCachedEntry(key) {
     if (this.discoveryCacheTtlMs <= 0) {
+      recordRegistryCapacityCacheMiss();
       return undefined;
     }
 
     const entry = this.cache.get(key);
     if (!entry) {
+      recordRegistryCapacityCacheMiss();
       return undefined;
     }
 
     if (entry.expiresAt <= this.now()) {
       this.cache.delete(key);
+      recordRegistryCapacityCacheMiss();
       return undefined;
     }
 
+    recordRegistryCapacityCacheHit();
     return entry;
   }
 
@@ -1051,6 +1158,22 @@ function toNonNegativeInteger(value) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : -1;
 }
 
+function normalizeMetricInteger(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+}
+
+function monotonicNowMs() {
+  return typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now();
+}
+
+function cacheHitRateBasisPoints(hitTotal, missTotal) {
+  const hits = normalizeMetricInteger(hitTotal);
+  const misses = normalizeMetricInteger(missTotal);
+  const total = hits + misses;
+  return total > 0 ? Math.round((hits * 10000) / total) : 0;
+}
+
 function isPort(value) {
   return Number.isInteger(value) && value >= 0 && value <= 65535;
 }
@@ -1082,36 +1205,50 @@ function stableHash(value) {
 }
 
 async function scanServiceInstances(redis, serviceName, registryKeyPrefix, onParseError = null) {
-  const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
-  const instances = [];
+  const startedAt = monotonicNowMs();
+  let instanceKeyCount = 0;
+  let visibleInstanceCount = 0;
 
-  for (const key of keys.sort()) {
-    const instanceId = key.split(":").at(-1);
-    if (!instanceId) {
-      continue;
-    }
+  try {
+    const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
+    instanceKeyCount = keys.length;
+    const instances = [];
 
-    const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
-    if (!heartbeatExists) {
-      continue;
-    }
-
-    const data = await redis.hget(key, "data");
-    if (!data) {
-      continue;
-    }
-
-    try {
-      const instance = normalizeServiceInstance(JSON.parse(data));
-      if (instance) {
-        instances.push(instance);
+    for (const key of keys.sort()) {
+      const instanceId = key.split(":").at(-1);
+      if (!instanceId) {
+        continue;
       }
-    } catch (error) {
-      onParseError?.(error, { serviceName, instanceId });
-    }
-  }
 
-  return instances;
+      const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
+      if (!heartbeatExists) {
+        continue;
+      }
+
+      const data = await redis.hget(key, "data");
+      if (!data) {
+        continue;
+      }
+
+      try {
+        const instance = normalizeServiceInstance(JSON.parse(data));
+        if (instance) {
+          instances.push(instance);
+        }
+      } catch (error) {
+        onParseError?.(error, { serviceName, instanceId });
+      }
+    }
+
+    visibleInstanceCount = instances.length;
+    return instances;
+  } finally {
+    recordRegistryCapacityScan({
+      durationMs: monotonicNowMs() - startedAt,
+      instanceKeyCount,
+      visibleInstanceCount
+    });
+  }
 }
 
 async function scanKeys(redis, pattern) {

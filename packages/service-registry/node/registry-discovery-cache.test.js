@@ -4,14 +4,17 @@ import test from "node:test";
 import {
   RegistryDiscoveryClient,
   collectDiscoveryMetricFields,
+  collectRegistryCapacityMetricFields,
   createServiceInstancePayload,
   discoveryLogContext,
   getDiscoveryMetricsSnapshot,
+  getRegistryCapacityMetricsSnapshot,
   getRegistryDiscoveryClient,
   recordDiscoveryMetric,
   registryHeartbeatKey,
   registryInstanceKey,
-  resetDiscoveryMetrics
+  resetDiscoveryMetrics,
+  resetRegistryCapacityMetrics
 } from "./registry-schema.js";
 
 function createInstance(serviceName, instanceId, endpointName, port) {
@@ -93,6 +96,35 @@ test("RegistryDiscoveryClient reuses cached service scan before ttl expires", as
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
   assert.equal(redis.stats.scanCount, 1);
+});
+
+test("RegistryDiscoveryClient records registry scan capacity and cache hit rate", async () => {
+  resetRegistryCapacityMetrics();
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
+  redis.hashes.set(
+    registryInstanceKey("", "game-server", "game-stale"),
+    JSON.stringify(createInstance("game-server", "game-stale", "admin", 7501))
+  );
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
+
+  assert.equal((await client.discoverInstances("game-server")).length, 1);
+  assert.equal((await client.discoverInstances("game-server")).length, 1);
+
+  const snapshot = getRegistryCapacityMetricsSnapshot();
+  assert.equal(snapshot.registry_scan_total, 1);
+  assert.equal(snapshot.registry_scan_instance_keys_total, 2);
+  assert.equal(snapshot.registry_scan_instance_keys_last, 2);
+  assert.equal(snapshot.registry_scan_visible_instances_total, 1);
+  assert.equal(snapshot.registry_scan_visible_instances_last, 1);
+  assert.equal(snapshot.registry_discovery_cache_hit_total, 1);
+  assert.equal(snapshot.registry_discovery_cache_miss_total, 1);
+  assert.equal(snapshot.registry_discovery_cache_hit_rate_basis_points, 5000);
+  assert.ok(snapshot.registry_scan_duration_ms_total >= 0);
+  assert.ok(snapshot.registry_scan_duration_ms_max >= 0);
+
+  assert.equal(collectRegistryCapacityMetricFields({ reset: true }).registry_scan_total, "1");
+  assert.equal(getRegistryCapacityMetricsSnapshot().registry_scan_total, 0);
 });
 
 test("RegistryDiscoveryClient refreshes Redis scan after ttl expires", async () => {

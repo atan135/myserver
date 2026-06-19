@@ -13,6 +13,7 @@ const {
   recordDiscoveryMetric,
   recordRegistryLifecycleMetric,
   resetDiscoveryMetrics,
+  resetRegistryCapacityMetrics,
   resetRegistryLifecycleMetrics
 } = await import("../../../../packages/service-registry/node/registry-schema.js");
 
@@ -553,6 +554,7 @@ test("registry returns all configured services with empty status for missing ins
 
 test("registry returns instance heartbeat ttl and endpoint fields", async () => {
   resetDiscoveryMetrics();
+  resetRegistryCapacityMetrics();
   resetRegistryLifecycleMetrics();
   const redis = createServiceRedis(
     [
@@ -605,6 +607,107 @@ test("registry returns instance heartbeat ttl and endpoint fields", async () => 
       metadata: {}
     }
   );
+});
+
+test("registry returns capacity summaries from latest service metrics", async () => {
+  resetDiscoveryMetrics();
+  resetRegistryCapacityMetrics();
+  resetRegistryLifecycleMetrics();
+  const bucket = Math.floor(Date.now() / 1000);
+  const redis = createServiceRedis(
+    [
+      gameServerInstance("game-server-a", "10.0.0.1", 7500)
+    ],
+    {
+      ttls: {
+        "heartbeat:game-server:game-server-a": 24
+      },
+      metricEntries: [
+        {
+          key: `metrics:game-server:game-server-a:${bucket}`,
+          data: {
+            qps: 0,
+            latency_ms: 0,
+            registry_scan_total: 2,
+            registry_scan_duration_ms_total: 11,
+            registry_scan_duration_ms_last: 4,
+            registry_scan_duration_ms_max: 7,
+            registry_scan_instance_keys_total: 6,
+            registry_scan_instance_keys_last: 3,
+            registry_scan_visible_instances_total: 5,
+            registry_scan_visible_instances_last: 2,
+            registry_discovery_cache_hit_total: 4,
+            registry_discovery_cache_miss_total: 1,
+            registry_discovery_cache_hit_rate_basis_points: 8000
+          }
+        },
+        {
+          key: `metrics:game-server:game-server-b:${bucket}`,
+          data: {
+            qps: 0,
+            latency_ms: 0,
+            registry_scan_total: 1,
+            registry_scan_duration_ms_total: 9,
+            registry_scan_duration_ms_last: 9,
+            registry_scan_duration_ms_max: 9,
+            registry_scan_instance_keys_total: 4,
+            registry_scan_instance_keys_last: 4,
+            registry_scan_visible_instances_total: 4,
+            registry_scan_visible_instances_last: 4,
+            registry_discovery_cache_hit_total: 1,
+            registry_discovery_cache_miss_total: 4,
+            registry_discovery_cache_hit_rate_basis_points: 2000
+          }
+        },
+        {
+          key: `metrics:auth-http:auth-http-a:${bucket}`,
+          data: {
+            qps: 0,
+            latency_ms: 0,
+            registry_scan_total: 1,
+            registry_scan_duration_ms_total: 3,
+            registry_scan_duration_ms_last: 3,
+            registry_scan_duration_ms_max: 3,
+            registry_scan_instance_keys_total: 1,
+            registry_scan_instance_keys_last: 1,
+            registry_scan_visible_instances_total: 1,
+            registry_scan_visible_instances_last: 1,
+            registry_discovery_cache_hit_total: 1,
+            registry_discovery_cache_miss_total: 0,
+            registry_discovery_cache_hit_rate_basis_points: 10000
+          }
+        }
+      ]
+    }
+  );
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+  const gameServer = result.services.find((item) => item.name === "game-server");
+
+  assert.deepEqual(gameServer.capacity, {
+    scan_total: 3,
+    scan_duration_ms_total: 20,
+    scan_duration_ms_last: 9,
+    scan_duration_ms_max: 9,
+    scan_instance_keys_total: 10,
+    scan_instance_keys_last: 4,
+    scan_visible_instances_total: 9,
+    scan_visible_instances_last: 4,
+    cache_hit_total: 5,
+    cache_miss_total: 5,
+    cache_hit_rate_basis_points: 5000
+  });
+  assert.equal(result.capacity.scan_total, 4);
+  assert.equal(result.capacity.scan_duration_ms_total, 23);
+  assert.equal(result.capacity.scan_duration_ms_max, 9);
+  assert.equal(result.capacity.cache_hit_total, 6);
+  assert.equal(result.capacity.cache_miss_total, 5);
+  assert.equal(result.capacity.cache_hit_rate_basis_points, 5455);
+  assert.equal(result.alerts.some((alert) => String(alert.kind).includes("capacity")), false);
 });
 
 test("registry tolerates redis clients without ttl support", async () => {

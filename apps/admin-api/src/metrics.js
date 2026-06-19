@@ -8,6 +8,7 @@
 import { encodeSubjectToken } from "./nats-client.js";
 import {
   collectDiscoveryMetricFields,
+  collectRegistryCapacityMetricFields,
   collectRegistryLifecycleMetricFields
 } from "../../../packages/service-registry/node/registry-schema.js";
 
@@ -66,6 +67,7 @@ export class MetricsCollector {
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
+      const capacityMetrics = collectRegistryCapacityMetricFields({ reset: true });
       const lifecycleMetrics = collectRegistryLifecycleMetricFields({ reset: true });
       await this.nats.publishJson(
         `myserver.metrics.${this.serviceName}.${encodeSubjectToken(this.serviceInstanceId)}`,
@@ -78,6 +80,7 @@ export class MetricsCollector {
             qps,
             latency_ms: latencyMs,
             ...discoveryMetrics,
+            ...capacityMetrics,
             ...lifecycleMetrics
           }
         }

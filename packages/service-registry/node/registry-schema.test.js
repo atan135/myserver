@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectRegistryCapacityMetricFields,
   collectRegistryLifecycleMetricFields,
+  getRegistryCapacityMetricsSnapshot,
   getRegistryLifecycleMetricsSnapshot,
+  recordRegistryCapacityCacheHit,
+  recordRegistryCapacityCacheMiss,
+  recordRegistryCapacityScan,
   recordRegistryLifecycleMetric,
   SERVICE_ENDPOINT_VISIBILITIES,
   normalizeEndpoint,
   normalizeServiceInstance,
+  resetRegistryCapacityMetrics,
   resetRegistryLifecycleMetrics,
   validateServiceEndpoint
 } from "./registry-schema.js";
@@ -196,4 +202,62 @@ test("registry lifecycle metrics aggregate failure events by operation labels", 
     deregister_failed_total: "0"
   });
   assert.deepEqual(getRegistryLifecycleMetricsSnapshot(), []);
+});
+
+test("registry capacity metrics aggregate scan and cache fields", () => {
+  resetRegistryCapacityMetrics();
+
+  recordRegistryCapacityScan({
+    durationMs: 12.4,
+    instanceKeyCount: 3,
+    visibleInstanceCount: 2
+  });
+  recordRegistryCapacityScan({
+    durationMs: 5,
+    instanceKeyCount: 1,
+    visibleInstanceCount: 1
+  });
+  recordRegistryCapacityCacheHit(3);
+  recordRegistryCapacityCacheMiss(1);
+
+  assert.deepEqual(getRegistryCapacityMetricsSnapshot(), {
+    registry_scan_total: 2,
+    registry_scan_duration_ms_total: 17,
+    registry_scan_duration_ms_last: 5,
+    registry_scan_duration_ms_max: 12,
+    registry_scan_instance_keys_total: 4,
+    registry_scan_instance_keys_last: 1,
+    registry_scan_visible_instances_total: 3,
+    registry_scan_visible_instances_last: 1,
+    registry_discovery_cache_hit_total: 3,
+    registry_discovery_cache_miss_total: 1,
+    registry_discovery_cache_hit_rate_basis_points: 7500
+  });
+
+  assert.deepEqual(collectRegistryCapacityMetricFields({ reset: true }), {
+    registry_scan_total: "2",
+    registry_scan_duration_ms_total: "17",
+    registry_scan_duration_ms_last: "5",
+    registry_scan_duration_ms_max: "12",
+    registry_scan_instance_keys_total: "4",
+    registry_scan_instance_keys_last: "1",
+    registry_scan_visible_instances_total: "3",
+    registry_scan_visible_instances_last: "1",
+    registry_discovery_cache_hit_total: "3",
+    registry_discovery_cache_miss_total: "1",
+    registry_discovery_cache_hit_rate_basis_points: "7500"
+  });
+  assert.deepEqual(collectRegistryCapacityMetricFields(), {
+    registry_scan_total: "0",
+    registry_scan_duration_ms_total: "0",
+    registry_scan_duration_ms_last: "0",
+    registry_scan_duration_ms_max: "0",
+    registry_scan_instance_keys_total: "0",
+    registry_scan_instance_keys_last: "0",
+    registry_scan_visible_instances_total: "0",
+    registry_scan_visible_instances_last: "0",
+    registry_discovery_cache_hit_total: "0",
+    registry_discovery_cache_miss_total: "0",
+    registry_discovery_cache_hit_rate_basis_points: "0"
+  });
 });
