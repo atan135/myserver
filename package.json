@@ -36,6 +36,7 @@
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",
     "check:registry-outage-drill": "node tools/check-registry-outage-drill.js",
     "check:registry-heartbeat-loss": "node tools/check-registry-heartbeat-loss.js",
+    "check:registry-stale-keys": "node tools/check-registry-stale-keys.js",
     "check:registry-schema-mixed-rollout": "node tools/check-registry-schema-mixed-rollout.js",
     "check:registry-fallback-observability": "node tools/check-registry-fallback-observability.js",
     "check:discovery-config": "node tools/check-discovery-config.js",
