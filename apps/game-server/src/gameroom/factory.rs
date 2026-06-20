@@ -2,8 +2,8 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicFactory};
 
 use super::{
-    CombatDemoLogic, DisposableMatchLogic, MovementDemoLogic, PersistentWorldLogic, SandboxLogic,
-    TestRoomLogic, UITouchRoomLogic,
+    CombatDemoLogic, DisposableMatchLogic, MovementDemoLogic, PersistentWorldLogic,
+    RobotSyncRoomLogic, SandboxLogic, TestRoomLogic, UITouchRoomLogic,
 };
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ impl RoomLogicFactory for GameRoomLogicFactory {
     fn create(&self, policy_id: &str) -> Box<dyn RoomLogic> {
         match policy_id {
             "ui_touch_room" | "UITouchRoom" => Box::new(UITouchRoomLogic::default()),
+            "robot_sync_room" => Box::new(RobotSyncRoomLogic::default()),
             "combat_demo" => Box::new(CombatDemoLogic::new(self.config_tables.clone())),
             "movement_demo" => {
                 let config_tables = self.config_tables.clone();
