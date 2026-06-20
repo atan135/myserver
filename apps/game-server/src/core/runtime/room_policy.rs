@@ -246,6 +246,35 @@ impl RoomRuntimePolicy {
             movement_control_stop_frames: 0,
         }
     }
+
+    pub fn robot_sync_room() -> Self {
+        Self {
+            policy_id: "robot_sync_room".to_string(),
+            max_members: 32,
+            min_start_players: 1,
+            allow_join_in_game: true,
+            silent_room_fps: 1,
+            idle_room_fps: 10,
+            active_room_fps: 20,
+            busy_room_fps: 20,
+            busy_room_player_threshold: 8,
+            destroy_enabled: true,
+            destroy_when_empty: false,
+            empty_ttl_secs: 300,
+            retain_state_when_empty: true,
+            offline_ttl_secs: 120,
+            snapshot_interval_frames: 20,
+            input_delay_frames: 2,
+            wait_timeout_ms: 100,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 0,
+            movement_correction_threshold: 0.0,
+            movement_aoi_enabled: false,
+            movement_aoi_radius: 0.0,
+            movement_control_stop_frames: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +305,10 @@ impl Default for RoomPolicyRegistry {
         policies.insert(
             "ui_touch_room".to_string(),
             RoomRuntimePolicy::ui_touch_room(),
+        );
+        policies.insert(
+            "robot_sync_room".to_string(),
+            RoomRuntimePolicy::robot_sync_room(),
         );
         policies.insert(
             "UITouchRoom".to_string(),
@@ -366,6 +399,43 @@ mod tests {
         assert_eq!(combat.busy_room_fps, 30);
         assert_eq!(combat.snapshot_interval_frames, 10);
         assert_eq!(combat.wait_timeout_ms, 100);
+    }
+
+    #[test]
+    fn robot_sync_room_policy_resolves_to_explicit_runtime_settings() {
+        let registry = RoomPolicyRegistry::default();
+        let robot_sync = registry.resolve("robot_sync_room");
+
+        assert_eq!(robot_sync.policy_id, "robot_sync_room");
+        assert_eq!(robot_sync.max_members, 32);
+        assert_eq!(robot_sync.min_start_players, 1);
+        assert!(robot_sync.allow_join_in_game);
+        assert_eq!(robot_sync.silent_room_fps, 1);
+        assert_eq!(robot_sync.idle_room_fps, 10);
+        assert_eq!(robot_sync.active_room_fps, 20);
+        assert_eq!(robot_sync.busy_room_fps, 20);
+        assert_eq!(robot_sync.busy_room_player_threshold, 8);
+        assert!(robot_sync.destroy_enabled);
+        assert!(!robot_sync.destroy_when_empty);
+        assert_eq!(robot_sync.empty_ttl_secs, 300);
+        assert!(robot_sync.retain_state_when_empty);
+        assert_eq!(robot_sync.offline_ttl_secs, 120);
+        assert_eq!(robot_sync.snapshot_interval_frames, 20);
+        assert_eq!(robot_sync.input_delay_frames, 2);
+        assert_eq!(robot_sync.wait_timeout_ms, 100);
+        assert_eq!(robot_sync.wait_strategy, InputWaitStrategy::Optimistic);
+        assert_eq!(
+            robot_sync.missing_input_strategy,
+            MissingInputStrategy::Empty
+        );
+        assert_eq!(robot_sync.movement_correction_interval_frames, 0);
+        assert_eq!(robot_sync.movement_correction_threshold, 0.0);
+        assert!(!robot_sync.movement_aoi_enabled);
+        assert_eq!(robot_sync.movement_aoi_radius, 0.0);
+        assert_eq!(robot_sync.movement_control_stop_frames, 0);
+
+        let fallback = registry.resolve("unknown_robot_sync_room");
+        assert_eq!(fallback.policy_id, DEFAULT_ROOM_POLICY_ID);
     }
 
     #[test]
