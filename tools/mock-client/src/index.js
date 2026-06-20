@@ -38,6 +38,7 @@ import {
   // Game scenarios
   runGameplayRoundtrip,
   runCombatDualClient,
+  runRobotSyncRoom,
   // Movement scenarios
   runMovementDemo,
   runMovementSyncValidation,
@@ -103,6 +104,12 @@ async function main() {
 
   if (options.scenario === SCENARIO.COMBAT_DUAL_CLIENT) {
     await runCombatDualClient(options);
+    console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ROBOT_SYNC_ROOM) {
+    await runRobotSyncRoom(options);
     console.log(`scenario completed: ${options.scenario}`);
     return;
   }

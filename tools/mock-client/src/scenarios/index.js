@@ -35,6 +35,12 @@ export {
 export { runGameplayRoundtrip } from "./game.js";
 export { runCombatDualClient } from "./combat.js";
 export {
+  buildRobotMovePayload,
+  expectPlayerInputRejected,
+  runRobotSyncRoom,
+  waitForRobotMoveFrameBundle
+} from "./robot-sync.js";
+export {
   runMovementDemo,
   runMovementSyncValidation,
   runMovementDualClientSync,
