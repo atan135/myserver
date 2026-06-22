@@ -224,6 +224,15 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-b
 ```
 
+MyBevy `arena.robot_sync` 对应的服务端验收场景是 `robot-sync-room`，要求 room policy 为 `robot_sync_room`。本地完整栈建议带匹配服务启动，否则 `game-server` 可能因为发现不到 `match-service.grpc` 无法正常服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1 -WithMatch
+npm run flow:mock-client -- --scenario robot-sync-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id robot-sync-room --policy-id robot_sync_room
+```
+
+如果本机 `apps/game-proxy/.env` 覆盖了 TCP fallback，例如 `PROXY_TCP_FALLBACK_PORT=17002`，把命令中的 `--port 14000` 改为实际端口。该场景会验证两个客户端都收到包含双方 `robot_move` 的 `FrameBundlePush`，并验证非法 action、非法 JSON、方向越界和速度越界会被拒绝。
+
 下面是绕过 `game-proxy`、直连 `game-server:7000` 的调试方式，仅用于本地定位游戏服协议或房间逻辑问题，不作为测试、预发或线上路径：
 
 ```powershell

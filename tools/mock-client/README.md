@@ -24,6 +24,7 @@ tools/mock-client/
 │       ├── mail.js      # 邮件相关场景 (HTTP + 通知联调)
 │       ├── announce.js  # 公告相关场景 (HTTP CRUD 调试)
 │       ├── game.js      # 游戏相关场景
+│       ├── robot-sync.js # MyBevy Robot Sync 房间场景
 │       ├── movement.js  # 移动相关场景
 │       ├── movement-interactive.js # 交互式双客户端移动
 │       ├── inventory.js # 背包系统测试
@@ -135,6 +136,7 @@ Protobuf 风格的编解码工具：
 | `gameplay-roundtrip` | 完整游戏流程：入房→准备→开始→输入→结束 |
 | `combat-dual-client` | 双客户端 `combat_demo` 联调：A 施法，B 掉血并验证快照 |
 | `movement-demo` | movement_demo 单客户端位移联调 |
+| `robot-sync-room` | 双客户端 `robot_sync_room` 联调：验证 `robot_move` 帧转发和非法输入拒绝 |
 
 ### 聊天场景 (chat.js, interactive.js)
 | 场景 | 说明 |
@@ -245,6 +247,12 @@ node tools/mock-client/src/index.js --scenario combat-dual-client \
   --http-base-url http://127.0.0.1:3000 \
   --room-id room-combat-demo --policy-id combat_demo \
   --combat-skill-id 2
+
+# MyBevy arena.robot_sync / robot_sync_room 双客户端联调
+node tools/mock-client/src/index.js --scenario robot-sync-room \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --room-id robot-sync-room --policy-id robot_sync_room
 
 # 聊天测试（9001 是本地内部联调地址示例）
 node tools/mock-client/src/index.js --scenario chat-private \
@@ -440,6 +448,27 @@ node tools/mock-client/src/index.js --scenario announce-delete \
 node tools/mock-client/src/index.js --scenario two-client-room \
   --http-base-url http://127.0.0.1:3000 --room-id test-room
 ```
+
+Robot Sync 双客户端场景：
+
+```bash
+node tools/mock-client/src/index.js --scenario robot-sync-room \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --room-id robot-sync-room --policy-id robot_sync_room
+```
+
+该场景会：
+
+- 登录两个客户端并加入同一 room。
+- 显式使用 `policy_id = "robot_sync_room"`，不依赖未知 policy 回退。
+- ready 后由房主 start room。
+- 发送合法 `PlayerInputReq(action="robot_move")`，payload 字段为 `version`、`seq`、`botTick`、`dirX`、`dirY`、`speed`。
+- 等待两端都收到包含两个玩家 `robot_move` 的 `FrameBundlePush`。
+- 验证非法 action、非法 JSON、方向越界、速度越界分别返回明确 `PlayerInputRes.errorCode`。
+- 如果收到 `MovementSnapshotPush` 会直接失败，因为 `robot_sync_room` 第一版不广播机器人坐标。
+
+本地完整栈建议先用仓库根目录 `scripts/dev-stack.ps1 -WithMatch` 启动。默认 `--port 14000` 是 `game-proxy` TCP fallback 的常见默认值；如果本机 `apps/game-proxy/.env` 覆盖为 `17002`，按实际端口传参。
 
 ### 通过 Proxy 测试
 
