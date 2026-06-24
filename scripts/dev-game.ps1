@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$env:NODE_ENV="development"
+$env:APP_ENV="local"
 $env:REGISTRY_ENABLED="true"
 $env:SERVICE_INSTANCE_ID=$InstanceId
 $env:GAME_PORT=$Port

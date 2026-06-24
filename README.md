@@ -180,7 +180,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev-announce.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1
 ```
 
-默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce` 启用；`mail-service` 当前不在 `dev-stack.ps1` 的默认编排中，可用 `npm run dev:mail` 单独启动。
+默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce` 启用；未启用 `match-service` 时，`dev-game.ps1` 会按本地开发环境允许 `game-server` 降级跳过匹配通知。`mail-service` 当前不在 `dev-stack.ps1` 的默认编排中，可用 `npm run dev:mail` 单独启动。
 
 Node.js 服务也可以通过根脚本启动：
 
@@ -224,7 +224,7 @@ npm run flow:mock-client -- --scenario happy --http-base-url http://127.0.0.1:30
 npm run flow:mock-client -- --scenario two-client-room --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id room-b
 ```
 
-MyBevy `arena.robot_sync` 对应的服务端验收场景是 `robot-sync-room`，要求 room policy 为 `robot_sync_room`。本地完整栈建议带匹配服务启动，否则 `game-server` 可能因为发现不到 `match-service.grpc` 无法正常服务：
+MyBevy `arena.robot_sync` 对应的服务端验收场景是 `robot-sync-room`，要求 room policy 为 `robot_sync_room`。本地完整匹配链路建议带匹配服务启动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1 -WithMatch
