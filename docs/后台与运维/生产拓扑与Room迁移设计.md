@@ -63,7 +63,7 @@
 - 客户端直连 `match-service`。
 - 客户端绕过 `game-proxy` 直连 `game-server`。
 
-`tools/mock-client` 只用于服务端联调和回归验证，可以覆盖直连调试路径，但不能作为正式客户端边界依据。`apps/simple-client` 是已废弃的 Unity 历史 demo，不参与生产协议同步或测试准入。
+`tools/mock-client` 只用于服务端联调和回归验证，可以覆盖直连调试路径，但不能作为正式客户端边界依据。本仓库不再保留 Unity 历史 demo，不参与生产协议同步或测试准入。
 
 ## 4. 多实例定义
 

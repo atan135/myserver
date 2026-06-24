@@ -52,8 +52,7 @@ apps/
 ├── announce-service/ # Node.js HTTP 公告服务
 ├── mail-service/     # Node.js HTTP 邮件服务
 ├── admin-api/        # Node.js + NestJS 管理后台 API
-├── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
-└── simple-client/    # 已废弃的 Unity 历史 demo，不作为当前客户端事实源
+└── admin-web/        # Vue 3 + Vite + Element Plus 管理前端
 packages/
 ├── proto/            # 共享 Protobuf 协议
 ├── authority-core/   # 服务端和客户端共用的控制机迁移/快照/输入基础结构
@@ -69,7 +68,7 @@ docs/                 # 当前正式设计文档
 
 正式游戏客户端已迁移到独立仓库 `mybevy`，不作为 MyServer monorepo 的子目录维护。本机开发示例路径可以是 `C:\project\mybevy`，其他环境应按实际 clone 路径配置，不要依赖该绝对路径。
 
-如脚本或本地工具需要访问外部客户端，统一通过 `MYSERVER_CLIENT_ROOT` 指定；未设置时，本仓库仅使用 `tools/mock-client` 做服务端联调。`apps/simple-client` 只保留为历史 Unity demo，不再参与协议同步、常规联调或测试准入。
+如脚本或本地工具需要访问外部客户端，统一通过 `MYSERVER_CLIENT_ROOT` 指定；未设置时，本仓库仅使用 `tools/mock-client` 做服务端联调。本仓库不再保留 Unity 历史 demo，不参与协议同步、常规联调或测试准入。
 
 ## 服务与端口
 
