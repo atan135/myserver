@@ -81,6 +81,8 @@ Protobuf 风格的编解码工具：
 
 当前登录后必须先选择角色才能拿到可用于游戏入口的 ticket。`fetchTicket()` 会在登录后按 `--character-id`、已有角色列表、`--auto-create-character` / `--create-character-if-missing` 选择或创建角色；无角色且未请求自动创建时会提示先创建或选择角色，不会直接进入游戏。
 
+角色接口和 ticket payload 以 `docs/协议与客户端/协议设计.md` 为准；外部客户端接入流程见 `docs/协议与客户端/外部客户端接入说明.md`。
+
 ### scenarios/mail.js
 邮件辅助场景：
 - 通过 HTTP 调用 `mail-service` 的邮件 CRUD / claim 接口
