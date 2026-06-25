@@ -100,6 +100,27 @@ class MemoryCharacterPool {
       return { rows, rowCount: rows.length };
     }
 
+    if (normalizedSql.startsWith("SELECT character_id, account_player_id") && normalizedSql.includes("WHERE name = $1")) {
+      const [name] = params;
+      const includeDeleted = !normalizedSql.includes("deleted_at IS NULL");
+      const accountParamIndex = normalizedSql.includes("account_player_id = $2") ? 1 : -1;
+      const worldParamIndex = normalizedSql.includes("world_id = $2")
+        ? 1
+        : normalizedSql.includes("world_id = $3")
+          ? 2
+          : -1;
+      const limit = params.at(-1);
+      const rows = this.rows
+        .filter((row) => row.name === name)
+        .filter((row) => accountParamIndex === -1 || row.account_player_id === params[accountParamIndex])
+        .filter((row) => worldParamIndex === -1 || row.world_id === params[worldParamIndex])
+        .filter((row) => includeDeleted || row.deleted_at === null)
+        .sort((left, right) => left.world_id - right.world_id || left.created_at - right.created_at || left.character_id.localeCompare(right.character_id))
+        .slice(0, limit)
+        .map((row) => ({ ...row }));
+      return { rows, rowCount: rows.length };
+    }
+
     if (normalizedSql.startsWith("SELECT character_id, account_player_id") && normalizedSql.includes("WHERE character_id = $1")) {
       const [characterId] = params;
       const includeDeleted = !normalizedSql.includes("deleted_at IS NULL");
@@ -109,6 +130,17 @@ class MemoryCharacterPool {
           (includeDeleted || candidate.deleted_at === null)
       );
       return { rows: row ? [{ ...row }] : [], rowCount: row ? 1 : 0 };
+    }
+
+    if (normalizedSql.startsWith("SELECT character_id FROM characters WHERE world_id = $1 AND name = $2")) {
+      const [worldId, name] = params;
+      const row = this.rows.find(
+        (candidate) =>
+          candidate.world_id === worldId &&
+          candidate.name === name &&
+          candidate.deleted_at === null
+      );
+      return { rows: row ? [{ character_id: row.character_id }] : [], rowCount: row ? 1 : 0 };
     }
 
     if (normalizedSql.startsWith("UPDATE characters SET deleted_at = current_timestamp")) {
@@ -347,6 +379,26 @@ test("CharacterStore normal creation rejects the seventh effective character", a
   );
 });
 
+test("CharacterStore normal creation limit is configurable", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool, {
+    maxEffectiveCharactersPerAccount: 2
+  });
+
+  await store.createCharacter(createInput());
+  await store.createCharacter(createInput());
+
+  await assert.rejects(
+    () => store.createCharacter(createInput()),
+    (error) => {
+      assert.equal(error.code, "CHARACTER_LIMIT_EXCEEDED");
+      assert.equal(error.current, 2);
+      assert.equal(error.limit, 2);
+      return true;
+    }
+  );
+});
+
 test("CharacterStore soft deleted characters do not count against normal creation limit", async () => {
   const pool = new MemoryCharacterPool();
   const store = createStore(pool);
@@ -364,9 +416,64 @@ test("CharacterStore soft deleted characters do not count against normal creatio
   assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 6);
 });
 
-test("CharacterStore admin creation bypasses normal limit through a separate method", async () => {
+test("CharacterStore can reject duplicate character names when configured", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool, {
+    allowDuplicateNames: false
+  });
+
+  const first = await store.createCharacter(createInput("player-001", { worldId: 9, name: "Echo" }));
+  await assert.rejects(
+    () => store.createCharacter(createInput("player-002", { worldId: 9, name: "Echo" })),
+    (error) => {
+      assert.equal(error.code, "CHARACTER_NAME_DUPLICATE");
+      assert.equal(error.worldId, 9);
+      assert.equal(error.name, "Echo");
+      assert.equal(error.existingCharacterId, first.characterId);
+      return true;
+    }
+  );
+
+  const differentWorld = await store.createCharacter(createInput("player-002", { worldId: 10, name: "Echo" }));
+  assert.equal(differentWorld.worldId, 10);
+});
+
+test("CharacterStore searchByCharacterName returns multiple disambiguated candidates", async () => {
   const pool = new MemoryCharacterPool();
   const store = createStore(pool);
+
+  const first = await store.createCharacter(createInput("player-001", { worldId: 2, name: "Echo" }));
+  const second = await store.createCharacter(createInput("player-002", { worldId: 1, name: "Echo" }));
+  const third = await store.createCharacter(createInput("player-003", { worldId: 3, name: "Echo" }));
+  await store.createCharacter(createInput("player-004", { name: "Other" }));
+  await store.softDeleteCharacter(third.characterId);
+
+  const candidates = await store.searchByCharacterName("Echo");
+  assert.deepEqual(
+    candidates.map((character) => [character.characterId, character.accountPlayerId, character.worldId, character.name]),
+    [
+      [second.characterId, "player-002", 1, "Echo"],
+      [first.characterId, "player-001", 2, "Echo"]
+    ]
+  );
+
+  const scoped = await store.searchByCharacterName("Echo", { accountPlayerId: "player-001", limit: 1 });
+  assert.deepEqual(scoped.map((character) => character.characterId), [first.characterId]);
+
+  const withDeleted = await store.searchByCharacterName("Echo", { includeDeleted: true });
+  assert.deepEqual(
+    withDeleted.map((character) => character.characterId),
+    [second.characterId, first.characterId, third.characterId]
+  );
+});
+
+test("CharacterStore admin creation bypasses normal limit through explicit audited options", async () => {
+  const pool = new MemoryCharacterPool();
+  const logs = [];
+  const store = createStore(pool);
+  store.logger = (level, message, extra) => {
+    logs.push({ level, message, extra });
+  };
 
   for (let index = 1; index <= DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT; index += 1) {
     await store.createCharacter(createInput());
@@ -374,15 +481,76 @@ test("CharacterStore admin creation bypasses normal limit through a separate met
 
   const beforeQueryCount = pool.queries.length;
   const gmCreated = await store.createCharacterForAdmin(
-    createInput("player-001", { name: "GmCreated" })
+    createInput("player-001", { name: "GmCreated" }),
+    {
+      bypassCharacterLimit: true,
+      adminActor: "ops@example.com",
+      reason: "restore after support ticket",
+      targetAccountPlayerId: "player-001"
+    }
   );
   const bypassQueries = pool.queries.slice(beforeQueryCount);
 
   assert.match(gmCreated.characterId, /^chr_[0-9a-hjkmnp-tv-z]+$/);
+  assert.deepEqual(gmCreated.adminAudit, {
+    auditLogTable: "admin_audit_logs",
+    action: "character.create",
+    adminActor: "ops@example.com",
+    reason: "restore after support ticket",
+    targetAccountPlayerId: "player-001",
+    generatedCharacterId: gmCreated.characterId,
+    targetType: "character",
+    targetValue: gmCreated.characterId,
+    characterName: "GmCreated",
+    worldId: 0,
+    bypassCharacterLimit: true
+  });
+  assert.deepEqual(logs, [
+    {
+      level: "info",
+      message: "character.admin_bypass_create",
+      extra: gmCreated.adminAudit
+    }
+  ]);
   assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 7);
   assert.equal(
     bypassQueries.some((query) => query.sql.startsWith("SELECT COUNT(*) AS total")),
     false
+  );
+});
+
+test("CharacterStore admin creation requires explicit bypass audit fields", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool);
+
+  await assert.rejects(
+    () => store.createCharacterForAdmin(createInput("player-001")),
+    { code: "ADMIN_BYPASS_CHARACTER_LIMIT_REQUIRED" }
+  );
+  await assert.rejects(
+    () => store.createCharacterForAdmin(createInput("player-001"), {
+      bypassCharacterLimit: true,
+      reason: "restore",
+      targetAccountPlayerId: "player-001"
+    }),
+    { code: "ADMIN_AUDIT_ACTOR_REQUIRED" }
+  );
+  await assert.rejects(
+    () => store.createCharacterForAdmin(createInput("player-001"), {
+      bypassCharacterLimit: true,
+      adminActor: "ops@example.com",
+      targetAccountPlayerId: "player-001"
+    }),
+    { code: "ADMIN_AUDIT_REASON_REQUIRED" }
+  );
+  await assert.rejects(
+    () => store.createCharacterForAdmin(createInput("player-001"), {
+      bypassCharacterLimit: true,
+      adminActor: "ops@example.com",
+      reason: "restore",
+      targetAccountPlayerId: "player-002"
+    }),
+    { code: "ADMIN_AUDIT_TARGET_ACCOUNT_MISMATCH" }
   );
 });
 
@@ -396,7 +564,13 @@ test("CharacterStore admin creation also ignores caller supplied characterId", a
     createInput("player-001", {
       characterId: "chr_admin_supplied",
       name: "GmCreated"
-    })
+    }),
+    {
+      bypassCharacterLimit: true,
+      adminActor: "ops@example.com",
+      reason: "restore",
+      targetAccountPlayerId: "player-001"
+    }
   );
 
   assert.equal(created.characterId, "chr_admngenerated");

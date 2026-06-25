@@ -36,6 +36,12 @@ export class CharactersController {
         character: {
           character_id: "chr_0000000000001",
           character_id_short: "00000001",
+          display_discriminator: "00000001",
+          same_name_hint: {
+            type: "character_id_short",
+            value: "00000001",
+            source: "characters.character_id"
+          },
           name: "WindRunner",
           world_id: 0,
           status: "active",
@@ -66,6 +72,12 @@ export class CharactersController {
         character: {
           character_id: "chr_0000000000001",
           character_id_short: "00000001",
+          display_discriminator: "00000001",
+          same_name_hint: {
+            type: "character_id_short",
+            value: "00000001",
+            source: "characters.character_id"
+          },
           name: "WindRunner",
           world_id: 0,
           status: "active",

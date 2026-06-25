@@ -9,7 +9,11 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { AuthService } = await import("../apps/auth-http/src/auth/auth.service.ts");
-const { CharactersService } = await import("../apps/auth-http/src/characters/characters.service.ts");
+const {
+  CHARACTER_ID_SHORT_LENGTH,
+  CharactersService,
+  shortCharacterId
+} = await import("../apps/auth-http/src/characters/characters.service.ts");
 
 function decodeTicketPayload(ticket) {
   return JSON.parse(Buffer.from(ticket.split(".")[0], "base64url").toString("utf8"));
@@ -33,6 +37,7 @@ class FakeCharacterStore {
     this.enabled = true;
     this.rows = [];
     this.nextId = 1;
+    this.createdInputs = [];
   }
 
   async listByAccountPlayerId(accountPlayerId, { includeDeleted = false } = {}) {
@@ -55,6 +60,7 @@ class FakeCharacterStore {
   }
 
   async createCharacter(input) {
+    this.createdInputs.push(structuredClone(input));
     const effectiveCount = this.rows.filter(
       (row) => row.accountPlayerId === input.accountPlayerId && row.deletedAt === null
     ).length;
@@ -238,6 +244,13 @@ test("normal account creates first character with server defaults and balanced a
   assert.equal(result.ok, true);
   assert.equal(result.character.name, "Echo");
   assert.match(result.character.character_id, /^chr_[0-9a-hjkmnp-tv-z]+$/);
+  assert.equal(result.character.character_id_short.length, CHARACTER_ID_SHORT_LENGTH);
+  assert.equal(result.character.display_discriminator, result.character.character_id_short);
+  assert.deepEqual(result.character.same_name_hint, {
+    type: "character_id_short",
+    value: result.character.character_id_short,
+    source: "characters.character_id"
+  });
   assert.equal(result.character.world_id, 9);
   assert.deepEqual(result.character.position, {
     scene_id: 300,
@@ -261,6 +274,58 @@ test("normal account creates first character with server defaults and balanced a
   assert.deepEqual(blocklistChecks, [
     { playerId: "player-001", clientIp: "127.0.0.1", source: "character_create" }
   ]);
+});
+
+test("normal character creation ignores admin bypass fields from request body", async () => {
+  const { service, characterStore } = createContext();
+
+  await service.create(createRequest(), {
+    name: "Echo",
+    appearance: { body: "default" },
+    bypassCharacterLimit: true,
+    bypass: true,
+    admin: true,
+    adminActor: "ops@example.com",
+    reason: "client should not control this",
+    targetAccountPlayerId: "player-999",
+    character_id: "chr_client_supplied",
+    characterId: "chr_client_supplied"
+  });
+
+  assert.deepEqual(Object.keys(characterStore.createdInputs[0]).sort(), [
+    "accountPlayerId",
+    "affinity",
+    "appearance",
+    "mastery",
+    "name",
+    "position",
+    "worldId"
+  ]);
+  assert.equal(characterStore.createdInputs[0].accountPlayerId, "player-001");
+  assert.equal(characterStore.createdInputs[0].name, "Echo");
+});
+
+test("normal character creation cannot bypass ordinary limit with request parameters", async () => {
+  const { service, characterStore } = createContext();
+
+  for (let index = 0; index < 6; index += 1) {
+    characterStore.rows.push(createCharacter({
+      characterId: `chr_${String(index + 1).padStart(13, "0")}`,
+      accountPlayerId: "player-001"
+    }));
+  }
+
+  await assertApiError(
+    service.create(createRequest(), {
+      name: "Echo",
+      appearance: { body: "default" },
+      bypassCharacterLimit: true,
+      adminActor: "ops@example.com",
+      reason: "support restore"
+    }),
+    403,
+    "CHARACTER_LIMIT_EXCEEDED"
+  );
 });
 
 test("same account and different accounts can create duplicate names up to ordinary limit", async () => {
@@ -323,6 +388,12 @@ test("list only returns current account characters and hides soft-deleted rows",
       ["chr_0000000000002", "Echo", "00000002"]
     ]
   );
+  assert.equal(result.characters[0].display_discriminator, "00000001");
+  assert.deepEqual(result.characters[0].same_name_hint, {
+    type: "character_id_short",
+    value: "00000001",
+    source: "characters.character_id"
+  });
   assert.deepEqual(result.characters[0].attributes.affinity, {
     earth: 2500,
     fire: 2500,
@@ -336,6 +407,13 @@ test("list only returns current account characters and hides soft-deleted rows",
     dir_x: 0,
     dir_y: 1
   });
+});
+
+test("shortCharacterId uses the last eight characters after the id prefix", () => {
+  assert.equal(shortCharacterId("chr_0000000000001"), "00000001");
+  assert.equal(shortCharacterId("chr_01jyt7b8pq9x0"), "7b8pq9x0");
+  assert.equal(shortCharacterId("legacyid"), "legacyid");
+  assert.equal(shortCharacterId("prefix_part"), "part");
 });
 
 test("empty account list returns empty array without auto creation", async () => {

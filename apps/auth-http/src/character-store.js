@@ -2,6 +2,8 @@ import { generateCharacterId } from "./global-id.js";
 import { log } from "./logger.js";
 
 const DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT = 6;
+const DEFAULT_CHARACTER_NAME_SEARCH_LIMIT = 20;
+const MAX_CHARACTER_NAME_SEARCH_LIMIT = 100;
 const UNIQUE_VIOLATION = "23505";
 
 function toIsoString(value) {
@@ -137,6 +139,32 @@ function normalizedElements(elements = {}, defaults) {
   };
 }
 
+function normalizePositiveInteger(value, fallback) {
+  const numeric = Number.parseInt(String(value), 10);
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+function normalizeBoolean(value, fallback) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value === "true" || value === "1";
+  }
+
+  return fallback;
+}
+
+function normalizeOptionalString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function normalizeCreateInput(input) {
   const position = normalizedPosition(input.position);
   const affinity = normalizedElements(input.affinity, {
@@ -173,6 +201,14 @@ export class CharacterStore {
     this.pool = pool;
     this.characterIdGenerator = options.characterIdGenerator || generateCharacterId;
     this.logger = options.logger || defaultLog;
+    this.maxEffectiveCharactersPerAccount = normalizePositiveInteger(
+      options.maxEffectiveCharactersPerAccount ?? options.characterMaxEffectivePerAccount,
+      DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT
+    );
+    this.allowDuplicateNames = normalizeBoolean(
+      options.allowDuplicateNames ?? options.characterAllowDuplicateNames,
+      true
+    );
   }
 
   get enabled() {
@@ -213,6 +249,56 @@ export class CharacterStore {
     return rows.length > 0 ? toCharacter(rows[0]) : null;
   }
 
+  async searchByCharacterName(name, options = {}) {
+    if (!this.enabled) {
+      return [];
+    }
+
+    const normalizedName = normalizeOptionalString(name);
+    if (!normalizedName) {
+      return [];
+    }
+
+    const {
+      accountPlayerId = null,
+      worldId = null,
+      includeDeleted = false
+    } = options;
+    const limit = Math.min(
+      normalizePositiveInteger(options.limit, DEFAULT_CHARACTER_NAME_SEARCH_LIMIT),
+      MAX_CHARACTER_NAME_SEARCH_LIMIT
+    );
+
+    const params = [normalizedName];
+    const where = ["name = $1"];
+
+    if (accountPlayerId) {
+      params.push(accountPlayerId);
+      where.push(`account_player_id = $${params.length}`);
+    }
+
+    if (worldId !== null && worldId !== undefined) {
+      params.push(worldId);
+      where.push(`world_id = $${params.length}`);
+    }
+
+    if (!includeDeleted) {
+      where.push("deleted_at IS NULL");
+    }
+
+    params.push(limit);
+    const { rows } = await this.pool.query(
+      `SELECT ${characterSelectColumns()}
+       FROM characters
+       WHERE ${where.join(" AND ")}
+       ORDER BY world_id ASC, created_at ASC, character_id ASC
+       LIMIT $${params.length}`,
+      params
+    );
+
+    return rows.map(toCharacter);
+  }
+
   async countEffectiveByAccountPlayerId(accountPlayerId) {
     if (!this.enabled) {
       return 0;
@@ -226,15 +312,28 @@ export class CharacterStore {
       throw createCharacterStoreError("CHARACTER_STORE_DISABLED", "character store is disabled");
     }
 
-    return this.#createCharacterWithLimit(input, DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT);
+    return this.#createCharacterWithLimit(input, this.maxEffectiveCharactersPerAccount);
   }
 
-  async createCharacterForAdmin(input) {
+  async createCharacterForAdmin(input, options = {}) {
     if (!this.enabled) {
       throw createCharacterStoreError("CHARACTER_STORE_DISABLED", "character store is disabled");
     }
 
-    return this.#insertCharacter(this.pool, input);
+    const auditOptions = this.#normalizeAdminBypassOptions(input, options);
+    const character = await this.#createCharacterBypassingLimit(input);
+    const adminAudit = this.#buildAdminBypassAudit(character, auditOptions);
+
+    try {
+      this.logger?.("info", "character.admin_bypass_create", adminAudit);
+    } catch {
+      // Logging failure must not hide that the admin bypass has succeeded.
+    }
+
+    return {
+      ...character,
+      adminAudit
+    };
   }
 
   async softDeleteCharacter(characterId) {
@@ -343,6 +442,36 @@ export class CharacterStore {
     }
   }
 
+  async #createCharacterBypassingLimit(input) {
+    const client = await this.#checkoutClient();
+    const transactional = client !== this.pool;
+    let transactionClosed = false;
+
+    try {
+      if (transactional) {
+        await client.query("BEGIN");
+        await client.query("LOCK TABLE characters IN SHARE ROW EXCLUSIVE MODE");
+      }
+
+      const character = await this.#insertCharacter(client, input);
+
+      if (transactional) {
+        await client.query("COMMIT");
+        transactionClosed = true;
+      }
+      return character;
+    } catch (error) {
+      if (transactional && !transactionClosed) {
+        await client.query("ROLLBACK");
+      }
+      throw error;
+    } finally {
+      if (transactional) {
+        client.release();
+      }
+    }
+  }
+
   async #checkoutClient() {
     if (typeof this.pool.connect !== "function") {
       return this.pool;
@@ -365,6 +494,7 @@ export class CharacterStore {
 
   async #insertCharacter(client, input) {
     const normalized = normalizeCreateInput(input);
+    await this.#assertDuplicateNameAllowed(client, normalized);
     const characterId = this.#generateCharacterId(normalized);
 
     try {
@@ -426,6 +556,96 @@ export class CharacterStore {
     }
   }
 
+  async #assertDuplicateNameAllowed(client, normalized) {
+    if (this.allowDuplicateNames) {
+      return;
+    }
+
+    const { rows } = await client.query(
+      `SELECT character_id
+       FROM characters
+       WHERE world_id = $1
+         AND name = $2
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [normalized.worldId, normalized.name]
+    );
+
+    if (rows.length === 0) {
+      return;
+    }
+
+    throw createCharacterStoreError("CHARACTER_NAME_DUPLICATE", "character name already exists in world", {
+      worldId: normalized.worldId,
+      name: normalized.name,
+      existingCharacterId: rows[0].character_id
+    });
+  }
+
+  #normalizeAdminBypassOptions(input, options) {
+    if (options?.bypassCharacterLimit !== true) {
+      throw createCharacterStoreError(
+        "ADMIN_BYPASS_CHARACTER_LIMIT_REQUIRED",
+        "admin character creation must explicitly set bypassCharacterLimit=true"
+      );
+    }
+
+    const adminActor = normalizeOptionalString(options.adminActor ?? options.actor);
+    if (!adminActor) {
+      throw createCharacterStoreError("ADMIN_AUDIT_ACTOR_REQUIRED", "admin character creation requires adminActor");
+    }
+
+    const reason = normalizeOptionalString(options.reason);
+    if (!reason) {
+      throw createCharacterStoreError("ADMIN_AUDIT_REASON_REQUIRED", "admin character creation requires reason");
+    }
+
+    const targetAccountPlayerId = normalizeOptionalString(
+      options.targetAccountPlayerId ?? input?.accountPlayerId
+    );
+    if (!targetAccountPlayerId) {
+      throw createCharacterStoreError(
+        "ADMIN_AUDIT_TARGET_ACCOUNT_REQUIRED",
+        "admin character creation requires target account"
+      );
+    }
+
+    if (input?.accountPlayerId !== targetAccountPlayerId) {
+      throw createCharacterStoreError(
+        "ADMIN_AUDIT_TARGET_ACCOUNT_MISMATCH",
+        "admin character creation target account must match input account",
+        {
+          inputAccountPlayerId: input?.accountPlayerId,
+          targetAccountPlayerId
+        }
+      );
+    }
+
+    return {
+      action: normalizeOptionalString(options.action) || "character.create",
+      adminActor,
+      reason,
+      targetAccountPlayerId,
+      bypassCharacterLimit: true
+    };
+  }
+
+  #buildAdminBypassAudit(character, auditOptions) {
+    return {
+      auditLogTable: "admin_audit_logs",
+      action: auditOptions.action,
+      adminActor: auditOptions.adminActor,
+      reason: auditOptions.reason,
+      targetAccountPlayerId: auditOptions.targetAccountPlayerId,
+      generatedCharacterId: character.characterId,
+      targetType: "character",
+      targetValue: character.characterId,
+      characterName: character.name,
+      worldId: character.worldId,
+      bypassCharacterLimit: auditOptions.bypassCharacterLimit
+    };
+  }
+
   #generateCharacterId(normalized) {
     try {
       const characterId = this.characterIdGenerator();
@@ -464,6 +684,8 @@ export class CharacterStore {
 
 export {
   DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT,
+  DEFAULT_CHARACTER_NAME_SEARCH_LIMIT,
+  MAX_CHARACTER_NAME_SEARCH_LIMIT,
   createCharacterStoreError,
   toCharacter
 };

@@ -33,6 +33,8 @@ const CONFIG_ENV_KEYS = [
   "AUTH_GAME_DATABASE_URL",
   "GAME_DB_POOL_SIZE",
   "AUTH_GAME_DB_POOL_SIZE",
+  "CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT",
+  "CHARACTER_ALLOW_DUPLICATE_NAMES",
   "CHARACTER_NAME_MIN_LENGTH",
   "CHARACTER_NAME_MAX_LENGTH",
   "CHARACTER_NAME_FORBIDDEN_WORDS",
@@ -43,6 +45,11 @@ const CONFIG_ENV_KEYS = [
   "CHARACTER_DEFAULT_DIR_X",
   "CHARACTER_DEFAULT_DIR_Y",
   "CHARACTER_APPEARANCE_MAX_JSON_BYTES",
+  "ALLOW_MISSING_CHARACTER_ID_TICKET",
+  "TICKET_ALLOW_MISSING_CHARACTER_ID",
+  "AUTH_ALLOW_MISSING_CHARACTER_ID_TICKET",
+  "ALLOW_LEGACY_TICKET_WITHOUT_CHARACTER_ID",
+  "TICKET_ALLOW_LEGACY_MISSING_CHARACTER_ID",
   "TICKET_SECRET",
   "GAME_ADMIN_TOKEN",
   "INTERNAL_API_TOKEN"
@@ -391,6 +398,113 @@ test("auth-http reads password registration review switch", async () => {
   }, (config) => {
     assert.equal(config.registerRequireReview, true);
   });
+});
+
+test("auth-http character config defaults match P0 identity split design", async () => {
+  await withEnv({ NODE_ENV: "development" }, (config) => {
+    assert.equal(config.characterMaxEffectivePerAccount, 6);
+    assert.equal(config.characterAllowDuplicateNames, true);
+    assert.equal(config.characterNameMinLength, 2);
+    assert.equal(config.characterNameMaxLength, 16);
+    assert.deepEqual(config.characterNameForbiddenWords, []);
+    assert.equal(config.characterDefaultWorldId, 0);
+    assert.equal(config.characterDefaultSceneId, 100);
+    assert.equal(config.characterDefaultX, 0);
+    assert.equal(config.characterDefaultY, 0);
+    assert.equal(config.characterDefaultDirX, 0);
+    assert.equal(config.characterDefaultDirY, 1);
+    assert.equal(config.characterAppearanceMaxJsonBytes, 4096);
+  });
+});
+
+test("auth-http reads explicit character config overrides", async () => {
+  await withEnv({
+    NODE_ENV: "development",
+    CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT: "9",
+    CHARACTER_ALLOW_DUPLICATE_NAMES: "false",
+    CHARACTER_NAME_MIN_LENGTH: "3",
+    CHARACTER_NAME_MAX_LENGTH: "20",
+    CHARACTER_NAME_FORBIDDEN_WORDS: "gm, admin ",
+    CHARACTER_DEFAULT_WORLD_ID: "2",
+    CHARACTER_DEFAULT_SCENE_ID: "300",
+    CHARACTER_DEFAULT_X: "10.5",
+    CHARACTER_DEFAULT_Y: "-20.25",
+    CHARACTER_DEFAULT_DIR_X: "1",
+    CHARACTER_DEFAULT_DIR_Y: "0",
+    CHARACTER_APPEARANCE_MAX_JSON_BYTES: "8192"
+  }, (config) => {
+    assert.equal(config.characterMaxEffectivePerAccount, 9);
+    assert.equal(config.characterAllowDuplicateNames, false);
+    assert.equal(config.characterNameMinLength, 3);
+    assert.equal(config.characterNameMaxLength, 20);
+    assert.deepEqual(config.characterNameForbiddenWords, ["gm", "admin"]);
+    assert.equal(config.characterDefaultWorldId, 2);
+    assert.equal(config.characterDefaultSceneId, 300);
+    assert.equal(config.characterDefaultX, 10.5);
+    assert.equal(config.characterDefaultY, -20.25);
+    assert.equal(config.characterDefaultDirX, 1);
+    assert.equal(config.characterDefaultDirY, 0);
+    assert.equal(config.characterAppearanceMaxJsonBytes, 8192);
+  });
+});
+
+test("auth-http rejects invalid character config with clear startup errors", async () => {
+  const invalidCases = [
+    [
+      { CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT: "0" },
+      /CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT must be a positive integer/
+    ],
+    [
+      { CHARACTER_ALLOW_DUPLICATE_NAMES: "maybe" },
+      /CHARACTER_ALLOW_DUPLICATE_NAMES must be true, false, 1, or 0/
+    ],
+    [
+      { CHARACTER_NAME_MIN_LENGTH: "8", CHARACTER_NAME_MAX_LENGTH: "4" },
+      /CHARACTER_NAME_MIN_LENGTH must be less than or equal to CHARACTER_NAME_MAX_LENGTH/
+    ],
+    [
+      { CHARACTER_NAME_MAX_LENGTH: "65" },
+      /CHARACTER_NAME_MAX_LENGTH must be at most 64 characters/
+    ],
+    [
+      { CHARACTER_DEFAULT_WORLD_ID: "-1" },
+      /CHARACTER_DEFAULT_WORLD_ID must be a non-negative integer/
+    ],
+    [
+      { CHARACTER_DEFAULT_SCENE_ID: "NaN" },
+      /CHARACTER_DEFAULT_SCENE_ID must be a non-negative integer/
+    ],
+    [
+      { CHARACTER_DEFAULT_X: "Infinity" },
+      /CHARACTER_DEFAULT_X must be a finite number/
+    ],
+    [
+      { CHARACTER_APPEARANCE_MAX_JSON_BYTES: "0" },
+      /CHARACTER_APPEARANCE_MAX_JSON_BYTES must be a positive integer/
+    ]
+  ];
+
+  for (const [env, expectedError] of invalidCases) {
+    await assert.rejects(
+      () => withEnv({ NODE_ENV: "development", ...env }, () => {}),
+      expectedError
+    );
+  }
+});
+
+test("auth-http rejects legacy ticket configs that allow missing characterId", async () => {
+  for (const switchName of [
+    "ALLOW_MISSING_CHARACTER_ID_TICKET",
+    "TICKET_ALLOW_MISSING_CHARACTER_ID",
+    "AUTH_ALLOW_MISSING_CHARACTER_ID_TICKET",
+    "ALLOW_LEGACY_TICKET_WITHOUT_CHARACTER_ID",
+    "TICKET_ALLOW_LEGACY_MISSING_CHARACTER_ID"
+  ]) {
+    await assert.rejects(
+      () => withEnv({ NODE_ENV: "development", [switchName]: "true" }, () => {}),
+      new RegExp(`missing-characterId game tickets are not supported.*${switchName}`)
+    );
+  }
 });
 
 test("auth-http reads service identity and build version", async () => {

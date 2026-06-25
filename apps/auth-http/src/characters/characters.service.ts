@@ -8,6 +8,7 @@ import { AUTH_CHARACTER_STORE, AUTH_CONFIG, AUTH_STORE } from "../tokens.js";
 const LOGINABLE_CHARACTER_STATUSES = new Set(["active"]);
 const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
 const CHARACTER_NAME_PATTERN = /^[\p{Script=Han}A-Za-z0-9_-]+$/u;
+const CHARACTER_ID_SHORT_LENGTH = 8;
 const APPEARANCE_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const MAX_APPEARANCE_DEPTH = 4;
 const MAX_APPEARANCE_ARRAY_ITEMS = 16;
@@ -35,13 +36,20 @@ function toInteger(value: unknown, fallback: number) {
 
 function shortCharacterId(characterId: string) {
   const suffix = String(characterId || "").split("_").pop() || characterId;
-  return suffix.length <= 8 ? suffix : suffix.slice(-8);
+  return suffix.length <= CHARACTER_ID_SHORT_LENGTH ? suffix : suffix.slice(-CHARACTER_ID_SHORT_LENGTH);
 }
 
 function toSnakeCharacter(character: any) {
+  const characterIdShort = shortCharacterId(character.characterId);
   return {
     character_id: character.characterId,
-    character_id_short: shortCharacterId(character.characterId),
+    character_id_short: characterIdShort,
+    display_discriminator: characterIdShort,
+    same_name_hint: {
+      type: "character_id_short",
+      value: characterIdShort,
+      source: "characters.character_id"
+    },
     name: character.name,
     world_id: character.worldId,
     status: character.status,
@@ -117,6 +125,9 @@ export class CharactersService {
           "CHARACTER_LIMIT_EXCEEDED",
           `ordinary accounts can create at most ${error.limit || 6} effective characters`
         );
+      }
+      if (error?.code === "CHARACTER_NAME_DUPLICATE") {
+        throw forbidden("CHARACTER_NAME_DUPLICATE", "character name already exists");
       }
       if (error?.code === "CHARACTER_STORE_DISABLED") {
         throw serviceUnavailable("CHARACTER_STORE_UNAVAILABLE", "character store is unavailable");
@@ -378,4 +389,4 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-export { toSnakeCharacter, shortCharacterId };
+export { CHARACTER_ID_SHORT_LENGTH, toSnakeCharacter, shortCharacterId };

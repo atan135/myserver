@@ -16,6 +16,23 @@ function parseBoolean(value, fallback) {
   return value === "true" || value === "1";
 }
 
+function isBooleanLiteral(value) {
+  return ["true", "false", "1", "0"].includes(String(value).trim().toLowerCase());
+}
+
+function parseStrictBoolean(value, fallback, envName) {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!isBooleanLiteral(normalized)) {
+    throw new Error(`Invalid auth-http character config: ${envName} must be true, false, 1, or 0`);
+  }
+
+  return normalized === "true" || normalized === "1";
+}
+
 function parseCsv(value) {
   if (typeof value !== "string") {
     return [];
@@ -82,6 +99,13 @@ const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_SERVER_ADMIN_HOST",
   "GAME_SERVER_ADMIN_PORT"
 ];
+const FORBIDDEN_MISSING_CHARACTER_ID_TICKET_ENV_NAMES = [
+  "ALLOW_MISSING_CHARACTER_ID_TICKET",
+  "TICKET_ALLOW_MISSING_CHARACTER_ID",
+  "AUTH_ALLOW_MISSING_CHARACTER_ID_TICKET",
+  "ALLOW_LEGACY_TICKET_WITHOUT_CHARACTER_ID",
+  "TICKET_ALLOW_LEGACY_MISSING_CHARACTER_ID"
+];
 
 function isProductionEnv() {
   return [process.env.NODE_ENV, process.env.APP_ENV].some(
@@ -139,6 +163,81 @@ function validateDiscoveryConfig(config) {
   }
 }
 
+function validateForbiddenTicketCompatibilityConfig() {
+  const configured = collectConfiguredLegacyDirectConfigNames(FORBIDDEN_MISSING_CHARACTER_ID_TICKET_ENV_NAMES);
+  if (configured.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    `Invalid auth-http ticket config: missing-characterId game tickets are not supported; remove unsupported compatibility switch(es): ${configured.join(", ")}`
+  );
+}
+
+function isSafeInteger(value) {
+  return Number.isSafeInteger(value);
+}
+
+function collectCharacterConfigErrors(config) {
+  const errors = [];
+
+  if (!isSafeInteger(config.characterMaxEffectivePerAccount) || config.characterMaxEffectivePerAccount <= 0) {
+    errors.push("CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT must be a positive integer");
+  }
+
+  if (!isSafeInteger(config.characterNameMinLength) || config.characterNameMinLength <= 0) {
+    errors.push("CHARACTER_NAME_MIN_LENGTH must be a positive integer");
+  }
+
+  if (!isSafeInteger(config.characterNameMaxLength) || config.characterNameMaxLength <= 0) {
+    errors.push("CHARACTER_NAME_MAX_LENGTH must be a positive integer");
+  }
+
+  if (
+    isSafeInteger(config.characterNameMinLength) &&
+    isSafeInteger(config.characterNameMaxLength) &&
+    config.characterNameMinLength > config.characterNameMaxLength
+  ) {
+    errors.push("CHARACTER_NAME_MIN_LENGTH must be less than or equal to CHARACTER_NAME_MAX_LENGTH");
+  }
+
+  if (isSafeInteger(config.characterNameMaxLength) && config.characterNameMaxLength > 64) {
+    errors.push("CHARACTER_NAME_MAX_LENGTH must be at most 64 characters");
+  }
+
+  if (!isSafeInteger(config.characterDefaultWorldId) || config.characterDefaultWorldId < 0) {
+    errors.push("CHARACTER_DEFAULT_WORLD_ID must be a non-negative integer");
+  }
+
+  if (!isSafeInteger(config.characterDefaultSceneId) || config.characterDefaultSceneId < 0) {
+    errors.push("CHARACTER_DEFAULT_SCENE_ID must be a non-negative integer");
+  }
+
+  for (const [envName, value] of [
+    ["CHARACTER_DEFAULT_X", config.characterDefaultX],
+    ["CHARACTER_DEFAULT_Y", config.characterDefaultY],
+    ["CHARACTER_DEFAULT_DIR_X", config.characterDefaultDirX],
+    ["CHARACTER_DEFAULT_DIR_Y", config.characterDefaultDirY]
+  ]) {
+    if (!Number.isFinite(value)) {
+      errors.push(`${envName} must be a finite number`);
+    }
+  }
+
+  if (!isSafeInteger(config.characterAppearanceMaxJsonBytes) || config.characterAppearanceMaxJsonBytes <= 0) {
+    errors.push("CHARACTER_APPEARANCE_MAX_JSON_BYTES must be a positive integer");
+  }
+
+  return errors;
+}
+
+function validateCharacterConfig(config) {
+  const errors = collectCharacterConfigErrors(config);
+  if (errors.length > 0) {
+    throw new Error(`Invalid auth-http character config: ${errors.join("; ")}`);
+  }
+}
+
 function collectConfiguredLegacyDirectConfigNames(envNames) {
   return envNames.filter((name) => process.env[name] !== undefined);
 }
@@ -189,6 +288,7 @@ export function getConfig() {
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
   const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
+  validateForbiddenTicketCompatibilityConfig();
   validateLegacyDirectConfig(
     "auth-http",
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
@@ -296,6 +396,8 @@ export function getConfig() {
     registerRequireReview: parseBoolean(process.env.AUTH_REGISTER_REQUIRE_REVIEW, false),
 
     // Character creation defaults
+    characterMaxEffectivePerAccount: Number.parseInt(process.env.CHARACTER_MAX_EFFECTIVE_PER_ACCOUNT || "6", 10),
+    characterAllowDuplicateNames: parseStrictBoolean(process.env.CHARACTER_ALLOW_DUPLICATE_NAMES, true, "CHARACTER_ALLOW_DUPLICATE_NAMES"),
     characterNameMinLength: Number.parseInt(process.env.CHARACTER_NAME_MIN_LENGTH || "2", 10),
     characterNameMaxLength: Number.parseInt(process.env.CHARACTER_NAME_MAX_LENGTH || "16", 10),
     characterNameForbiddenWords: parseCsv(process.env.CHARACTER_NAME_FORBIDDEN_WORDS),
@@ -324,5 +426,6 @@ export function getConfig() {
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);
   validateProductionConfig(config);
   validateDiscoveryConfig(config);
+  validateCharacterConfig(config);
   return config;
 }

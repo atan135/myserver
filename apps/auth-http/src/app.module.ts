@@ -87,8 +87,12 @@ import {
     },
     {
       provide: AUTH_CHARACTER_STORE,
-      inject: [AUTH_GAME_DB_POOL],
-      useFactory: (gameDbPool: any) => new CharacterStore(gameDbPool)
+      inject: [AUTH_GAME_DB_POOL, AUTH_CONFIG],
+      useFactory: (gameDbPool: any, config: any) =>
+        new CharacterStore(gameDbPool, {
+          maxEffectiveCharactersPerAccount: config.characterMaxEffectivePerAccount,
+          allowDuplicateNames: config.characterAllowDuplicateNames
+        })
     },
     {
       provide: AUTH_BLOCKLIST,
