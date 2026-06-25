@@ -101,5 +101,16 @@ export {
   runInventoryFull
 } from "./inventory.js";
 
+// Character scenarios
+export {
+  runCharacterList,
+  runCharacterCreate,
+  runCharacterSelect,
+  runCharacterLoginAuth,
+  runCharacterRoomJoin,
+  runCharacterDuplicateName,
+  runCharacterLimit
+} from "./character.js";
+
 // Re-export MESSAGE_TYPE for convenience
 export { MESSAGE_TYPE } from "../constants.js";

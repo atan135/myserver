@@ -77,7 +77,15 @@ import {
   runInventoryWarehouse,
   runInventoryAdd,
   runGetInventory,
-  runInventoryFull
+  runInventoryFull,
+  // Character scenarios
+  runCharacterList,
+  runCharacterCreate,
+  runCharacterSelect,
+  runCharacterLoginAuth,
+  runCharacterRoomJoin,
+  runCharacterDuplicateName,
+  runCharacterLimit
 } from "./scenarios/index.js";
 
 async function main() {
@@ -330,6 +338,89 @@ async function main() {
   if (options.scenario === SCENARIO.PASSWORD_TICKET_REVOKE) {
     await runPasswordTicketRevoke(options);
     console.log(`scenario completed: ${options.scenario}`);
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_LIST) {
+    const result = await runCharacterList(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_CREATE) {
+    const result = await runCharacterCreate(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_SELECT) {
+    const result = await runCharacterSelect(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DUPLICATE_NAME) {
+    const result = await runCharacterDuplicateName(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_LIMIT) {
+    const result = await runCharacterLimit(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_LOGIN_AUTH) {
+    const result = await runCharacterLoginAuth(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_ROOM_JOIN) {
+    const result = await runCharacterRoomJoin(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
     return;
   }
 

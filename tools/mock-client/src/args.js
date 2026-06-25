@@ -48,6 +48,12 @@ const DEFAULT_OPTIONS = {
   loginNameB: "",
   passwordB: "",
   ticket: "",
+  characterId: "",
+  characterName: "",
+  characterAppearanceJson: "",
+  autoCreateCharacter: false,
+  createCharacterIfMissing: false,
+  characterNamePrefix: "MockRole",
   timeoutMs: 5000,
   scenario: SCENARIO.HAPPY,
   maxBodyLen: 4096,
@@ -203,6 +209,24 @@ export function parseArgs(argv) {
         break;
       case "--ticket":
         ({ value: result.ticket, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--character-id":
+        ({ value: result.characterId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--character-name":
+        ({ value: result.characterName, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--character-appearance-json":
+        ({ value: result.characterAppearanceJson, nextIndex: index } = collectJsonLikeOptionValue(argv, index));
+        break;
+      case "--auto-create-character":
+        result.autoCreateCharacter = true;
+        break;
+      case "--create-character-if-missing":
+        result.createCharacterIfMissing = true;
+        break;
+      case "--character-name-prefix":
+        ({ value: result.characterNamePrefix, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--no-service-discovery":
         result.useServiceDiscovery = false;

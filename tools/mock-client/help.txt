@@ -12,6 +12,13 @@
 # --room-id <id>             房间ID (默认 room-default)
 # --login-name <name>        登录用户名
 # --password <pwd>           登录密码
+# --character-id <chr_...>   指定已有角色并签发 character-bound game ticket
+# --character-name <name>    创建/按名称选择角色时使用的角色名；角色名允许重复
+# --character-appearance-json <json> 创建角色外观 JSON，例如 {"body":"default"}
+# --auto-create-character    登录后直接创建新角色并选择；适合一条命令创建新角色联调
+# --create-character-if-missing 无可用角色或指定名称不存在时创建角色
+# --character-name-prefix <text> 自动生成角色名的前缀 (默认 MockRole)
+# --json-output              输出机器可读 JSON，便于测试脚本断言
 # --timeout-ms <ms>          超时毫秒 (默认 5000)
 # --policy-id <id>           房间策略，例如 movement_demo / combat_demo
 # --combat-skill-id <id>     combat-dual-client 使用的技能ID (默认 2)
@@ -57,6 +64,32 @@
 # --announce-admin-token <token> 公告写接口 token；默认读取 ANNOUNCE_ADMIN_TOKEN
 
 # ========== 场景列表 ==========
+
+# ---------- 角色体系 ----------
+
+# 0.1 查询当前账号角色列表 (CHARACTER_LIST)
+node tools/mock-client/src/index.js --scenario character-list --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --json-output
+
+# 0.2 创建角色 (CHARACTER_CREATE)
+node tools/mock-client/src/index.js --scenario character-create --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --character-appearance-json '{"body":"default","palette":"blue"}'
+
+# 0.3 选择角色并展示 character-bound ticket 摘要 (CHARACTER_SELECT)
+node tools/mock-client/src/index.js --scenario character-select --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --json-output
+
+# 0.4 一条命令完成登录、创建角色、选择角色并连接 game-proxy 完成 AuthReq (CHARACTER_LOGIN_AUTH)
+node tools/mock-client/src/index.js --scenario character-login-auth --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --auto-create-character --character-name Echo
+
+# 0.5 选择角色后进入 game-server 房间基础流程 (CHARACTER_ROOM_JOIN)
+node tools/mock-client/src/index.js --scenario character-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --room-id room-character-debug
+
+# 0.6 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
+node tools/mock-client/src/index.js --scenario character-duplicate-name --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --json-output
+
+# 0.7 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
+node tools/mock-client/src/index.js --scenario character-limit --http-base-url http://127.0.0.1:3000 --login-name fresh_limit_account --password Passw0rd! --character-name-prefix Limit --json-output
+
+# 提示：无角色账号直接执行 happy/get-room-data 等进游戏场景会提示先创建或选择角色，不会直接进入游戏。
+# 可传 --character-id 指定已有角色，或传 --auto-create-character / --create-character-if-missing 自动创建后继续联调。
 
 # ---------- 基础流程 ----------
 
@@ -427,6 +460,13 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # inventory-add          | 添加物品（测试用）
 # inventory-get          | 获取背包信息
 # inventory-full          | 完整背包流程
+# character-list          | 查询账号角色列表
+# character-create        | 创建角色
+# character-select        | 选择角色并展示 characterId/ticket payload
+# character-login-auth    | 选角后连接 game-proxy 完成 AuthReq
+# character-room-join     | 选角后进入房间基础流程
+# character-duplicate-name | 验证同名角色创建
+# character-limit         | 验证普通账号第 7 个角色创建失败
 
 # ========== 帧同步测试说明 ==========
 # gameplay-roundtrip 场景输出示例：

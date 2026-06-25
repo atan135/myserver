@@ -2,6 +2,84 @@
  * Authentication utilities for mock-client
  */
 
+const DEFAULT_CHARACTER_APPEARANCE = {};
+
+function getCharacterId(character) {
+  return character?.character_id || character?.characterId || "";
+}
+
+function getCharacterWorldId(character) {
+  if (!character) {
+    return null;
+  }
+
+  return character.world_id ?? character.worldId ?? null;
+}
+
+function getCharacterName(character) {
+  return character?.name || "";
+}
+
+function summarizeCharacter(character) {
+  if (!character) {
+    return null;
+  }
+
+  return {
+    characterId: getCharacterId(character) || null,
+    name: getCharacterName(character) || null,
+    worldId: getCharacterWorldId(character),
+    status: character.status || null,
+    displayDiscriminator: character.display_discriminator || character.displayDiscriminator || null
+  };
+}
+
+export function decodeTicketPayload(ticket) {
+  if (!ticket || typeof ticket !== "string") {
+    return null;
+  }
+
+  const [payloadB64] = ticket.split(".");
+  if (!payloadB64) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function summarizeTicketPayload(ticket) {
+  const payload = decodeTicketPayload(ticket);
+  if (!payload) {
+    return null;
+  }
+
+  return {
+    playerId: payload.playerId || null,
+    characterId: payload.characterId || null,
+    worldId: payload.worldId ?? null,
+    exp: payload.exp || null
+  };
+}
+
+function attachTicketSummary(login) {
+  const ticketPayload = summarizeTicketPayload(login.ticket);
+  if (!ticketPayload) {
+    return login;
+  }
+
+  return {
+    ...login,
+    playerId: login.playerId || ticketPayload.playerId,
+    characterId: login.characterId || ticketPayload.characterId,
+    worldId: login.worldId ?? ticketPayload.worldId,
+    ticketPayload
+  };
+}
+
 /**
  * Resolve account credentials from options with optional overrides
  * @param {Object} options
@@ -67,13 +145,26 @@ export function resolveMultiClientLoginOverrides(options, clientSuffix, guestId)
  * @returns {Object}
  */
 export function formatLoginSummary(login) {
+  const ticketPayload = login.ticketPayload || summarizeTicketPayload(login.ticket);
+
   return {
     playerId: login.playerId,
+    characterId: login.characterId || ticketPayload?.characterId || null,
+    worldId: login.worldId ?? ticketPayload?.worldId ?? null,
     loginName: login.loginName || null,
     guestId: login.guestId || null,
     hasAccessToken: Boolean(login.accessToken),
     ticketPreview: login.ticket ? `${login.ticket.slice(0, 16)}...` : null,
+    ticketPayload: ticketPayload
+      ? {
+          playerId: ticketPayload.playerId || null,
+          characterId: ticketPayload.characterId || null,
+          worldId: ticketPayload.worldId ?? null,
+          exp: ticketPayload.exp || null
+        }
+      : null,
     ticketExpiresAt: login.ticketExpiresAt || null,
+    character: summarizeCharacter(login.character),
     services: summarizeServices(login.services)
   };
 }
@@ -124,6 +215,222 @@ export function applyDiscoveredServices(options, login) {
   applyHttpService(options, login.services.announce, "announceBaseUrl");
 }
 
+function buildAuthHeaders(accessToken, hasBody = false) {
+  const headers = hasBody ? { "content-type": "application/json" } : {};
+  if (accessToken) {
+    headers.authorization = `Bearer ${accessToken}`;
+  }
+  return headers;
+}
+
+async function readJsonPayload(response) {
+  if (typeof response.text === "function") {
+    const text = await response.text();
+    if (!text) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { rawText: text };
+    }
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function requestAuthJson(options, pathname, init = {}) {
+  const response = await fetch(`${options.httpBaseUrl}${pathname}`, {
+    ...init,
+    headers: {
+      ...(init.headers || {})
+    },
+    signal: AbortSignal.timeout(options.timeoutMs)
+  });
+  const payload = await readJsonPayload(response);
+
+  return {
+    ok: response.ok && payload?.ok !== false,
+    status: response.status,
+    payload
+  };
+}
+
+function assertAuthJsonOk(label, result) {
+  if (result.ok) {
+    return result.payload;
+  }
+
+  const error = result.payload?.error || result.payload?.errorCode || "REQUEST_FAILED";
+  const message = result.payload?.message || JSON.stringify(result.payload);
+  throw new Error(`${label} failed with status ${result.status}: ${error}${message ? `: ${message}` : ""}`);
+}
+
+export function parseCharacterAppearance(options) {
+  const raw = options.characterAppearanceJson || "";
+  if (!raw.trim()) {
+    return { ...DEFAULT_CHARACTER_APPEARANCE };
+  }
+
+  let appearance;
+  try {
+    appearance = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`invalid --character-appearance-json: ${error.message}`);
+  }
+
+  if (!appearance || typeof appearance !== "object" || Array.isArray(appearance)) {
+    throw new Error("--character-appearance-json must be a JSON object");
+  }
+
+  return appearance;
+}
+
+function normalizeCharacterNameToken(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_-]/g, "")
+    .slice(0, 16);
+}
+
+export function buildGeneratedCharacterName(options, suffix = Date.now().toString(36)) {
+  const token = normalizeCharacterNameToken(suffix).slice(-6) || "000001";
+  const fallbackPrefix = "MockRole";
+  const rawPrefix = normalizeCharacterNameToken(options.characterNamePrefix || fallbackPrefix) || fallbackPrefix;
+  const maxPrefixLength = Math.max(2, 16 - token.length);
+  const prefix = rawPrefix.slice(0, maxPrefixLength);
+  return `${prefix}${token}`.slice(0, 16);
+}
+
+export function buildCharacterCreateInput(options, overrides = {}) {
+  return {
+    name: overrides.name || options.characterName || buildGeneratedCharacterName(options, overrides.suffix),
+    appearance: overrides.appearance || parseCharacterAppearance(options)
+  };
+}
+
+export async function requestCharacterList(options, accessToken) {
+  return requestAuthJson(options, "/api/v1/characters", {
+    method: "GET",
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export async function listCharacters(options, accessToken) {
+  const payload = assertAuthJsonOk(
+    "character list",
+    await requestCharacterList(options, accessToken)
+  );
+
+  return {
+    ...payload,
+    characters: Array.isArray(payload.characters) ? payload.characters : []
+  };
+}
+
+export async function requestCreateCharacter(options, accessToken, input = null) {
+  const characterInput = input || buildCharacterCreateInput(options);
+  return requestAuthJson(options, "/api/v1/characters", {
+    method: "POST",
+    headers: buildAuthHeaders(accessToken, true),
+    body: JSON.stringify({
+      name: characterInput.name,
+      appearance: characterInput.appearance
+    })
+  });
+}
+
+export async function createCharacter(options, accessToken, input = null) {
+  const payload = assertAuthJsonOk(
+    "character create",
+    await requestCreateCharacter(options, accessToken, input)
+  );
+
+  return payload.character;
+}
+
+export async function requestSelectCharacter(options, accessToken, characterId) {
+  return requestAuthJson(options, "/api/v1/characters/select", {
+    method: "POST",
+    headers: buildAuthHeaders(accessToken, true),
+    body: JSON.stringify({ character_id: characterId })
+  });
+}
+
+export async function selectCharacter(options, session, characterId) {
+  const payload = assertAuthJsonOk(
+    "character select",
+    await requestSelectCharacter(options, session.accessToken, characterId)
+  );
+  const character = payload.character || { character_id: payload.characterId || characterId };
+  const login = attachTicketSummary({
+    ...session,
+    ...payload,
+    character,
+    characterId: payload.characterId || getCharacterId(character),
+    worldId: payload.worldId ?? getCharacterWorldId(character)
+  });
+
+  applyDiscoveredServices(options, login);
+  return login;
+}
+
+function findCharacterForOptions(characters, options) {
+  if (options.characterName) {
+    return characters.find((character) => getCharacterName(character) === options.characterName) || null;
+  }
+
+  return characters[0] || null;
+}
+
+function buildNoCharacterError(session) {
+  return new Error(
+    `account ${session.playerId} has no characters; create one first with ` +
+    `--scenario character-create or rerun with --auto-create-character / --create-character-if-missing`
+  );
+}
+
+async function resolveCharacterLogin(options, session) {
+  if (session.ticket) {
+    return attachTicketSummary(session);
+  }
+
+  if (!session.accessToken) {
+    throw new Error("character selection requires accessToken; omit --ticket or login with account/guest credentials");
+  }
+
+  if (options.characterId) {
+    return selectCharacter(options, session, options.characterId);
+  }
+
+  let characters = [];
+  if (!options.autoCreateCharacter) {
+    const listed = await listCharacters(options, session.accessToken);
+    characters = listed.characters;
+    const selected = findCharacterForOptions(characters, options);
+    if (selected) {
+      return selectCharacter(options, session, getCharacterId(selected));
+    }
+  }
+
+  if (options.autoCreateCharacter || options.createCharacterIfMissing) {
+    const character = await createCharacter(options, session.accessToken);
+    return selectCharacter(options, session, getCharacterId(character));
+  }
+
+  if (characters.length === 0) {
+    throw buildNoCharacterError(session);
+  }
+
+  throw new Error(
+    `character "${options.characterName}" was not found; pass --create-character-if-missing or choose an existing --character-id`
+  );
+}
+
 function ticketExpiresSoon(login, skewMs = 30000) {
   if (!login?.ticketExpiresAt) {
     return false;
@@ -142,9 +449,18 @@ export async function refreshTicketIfNeeded(options, login, skewMs = 30000) {
     throw new Error("ticket is near expiry but accessToken is unavailable; fetch a new login or omit --ticket");
   }
 
+  const characterId = login.characterId || getCharacterId(login.character);
+  if (!characterId) {
+    throw new Error("ticket refresh requires a selected characterId; login again with --character-id or select a character");
+  }
+
   const response = await fetch(`${options.httpBaseUrl}/api/v1/game-ticket/issue`, {
     method: "POST",
-    headers: { authorization: `Bearer ${login.accessToken}` }
+    headers: {
+      authorization: `Bearer ${login.accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ character_id: characterId })
   });
 
   const payload = await response.json();
@@ -155,6 +471,9 @@ export async function refreshTicketIfNeeded(options, login, skewMs = 30000) {
   login.ticket = payload.ticket;
   login.ticketExpiresAt = payload.ticketExpiresAt;
   login.services = payload.services || login.services;
+  login.characterId = payload.characterId || characterId;
+  login.worldId = payload.worldId ?? login.worldId;
+  login.ticketPayload = summarizeTicketPayload(payload.ticket);
   applyDiscoveredServices(options, login);
   return login;
 }
@@ -432,15 +751,15 @@ export async function runPasswordTicketRevoke(options) {
 }
 
 /**
- * Fetch authentication ticket from HTTP auth service
+ * Fetch login session from HTTP auth service without selecting a character.
  * @param {Object} options
  * @param {Object} overrides - Override loginName/password/guestId
- * @returns {Promise<Object>} Login response with playerId, ticket, accessToken
+ * @returns {Promise<Object>} Login response with playerId and accessToken
  */
-export async function fetchTicket(options, overrides = {}) {
+export async function fetchLoginSession(options, overrides = {}) {
   // If ticket is provided and no overrides, use it directly
   if (options.ticket && Object.keys(overrides).length === 0) {
-    return { playerId: "manual-ticket", accessToken: "", ticket: options.ticket, manualTicket: true };
+    return attachTicketSummary({ playerId: "manual-ticket", accessToken: "", ticket: options.ticket, manualTicket: true });
   }
 
   // If guestId is explicitly provided in overrides, use guest login directly
@@ -506,4 +825,27 @@ export async function fetchTicket(options, overrides = {}) {
 
   applyDiscoveredServices(options, payload);
   return payload;
+}
+
+/**
+ * Fetch a character-bound game ticket from HTTP auth service.
+ * @param {Object} options
+ * @param {Object} overrides - Override loginName/password/guestId
+ * @returns {Promise<Object>} Login response with playerId, characterId, ticket, accessToken
+ */
+export async function fetchTicket(options, overrides = {}) {
+  const session = await fetchLoginSession(options, overrides);
+  if (session.manualTicket) {
+    return attachTicketSummary(session);
+  }
+  if (session.ticket) {
+    const ticketPayload = summarizeTicketPayload(session.ticket);
+    if (ticketPayload?.characterId) {
+      return attachTicketSummary(session);
+    }
+    session.ticket = null;
+    session.ticketExpiresAt = null;
+  }
+
+  return resolveCharacterLogin(options, session);
 }

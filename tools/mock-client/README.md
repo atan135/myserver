@@ -23,6 +23,7 @@ tools/mock-client/
 │       ├── chat.js      # 聊天相关场景
 │       ├── mail.js      # 邮件相关场景 (HTTP + 通知联调)
 │       ├── announce.js  # 公告相关场景 (HTTP CRUD 调试)
+│       ├── character.js # 角色体系接口与选角后入服调试
 │       ├── game.js      # 游戏相关场景
 │       ├── robot-sync.js # MyBevy Robot Sync 房间场景
 │       ├── movement.js  # 移动相关场景
@@ -71,10 +72,14 @@ Protobuf 风格的编解码工具：
 ### auth.js
 认证辅助函数：
 - `fetchTicket(options, overrides)` - 从 HTTP 认证服务获取 ticket
+- `fetchLoginSession(options, overrides)` - 只登录并获取 access token，不自动选角
+- `listCharacters()` / `createCharacter()` / `selectCharacter()` - 调用角色列表、创建、选择接口
 - `refreshTicketIfNeeded(options, login)` - ticket 快过期时通过 access token 重新签发
 - `applyDiscoveredServices(options, login)` - 使用 auth-http 返回的 `services` 自动更新测试目标地址
 - `resolveAccountCredentials()` - 解析账号密码
-- `formatLoginSummary()` - 格式化登录信息
+- `formatLoginSummary()` - 格式化登录信息，包含 ticket payload 中的 `playerId`、`characterId`、`worldId`、`exp`
+
+当前登录后必须先选择角色才能拿到可用于游戏入口的 ticket。`fetchTicket()` 会在登录后按 `--character-id`、已有角色列表、`--auto-create-character` / `--create-character-if-missing` 选择或创建角色；无角色且未请求自动创建时会提示先创建或选择角色，不会直接进入游戏。
 
 ### scenarios/mail.js
 邮件辅助场景：
@@ -195,6 +200,17 @@ Protobuf 风格的编解码工具：
 | `inventory-get` | 获取当前背包和仓库状态 |
 | `inventory-full` | 完整背包流程测试 |
 
+### 角色体系场景 (character.js)
+| 场景 | 说明 |
+|------|------|
+| `character-list` | 查询当前账号角色列表，可输出 JSON |
+| `character-create` | 创建角色，支持角色名和外观 JSON |
+| `character-select` | 选择角色并展示 `characterId` 和 ticket payload 摘要 |
+| `character-login-auth` | 登录、选角、连接 `game-proxy` 并完成 `AuthReq` |
+| `character-room-join` | 登录、选角、连接游戏入口并加入房间 |
+| `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
+| `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
+
 ### 认证与安全场景 (auth.js)
 | 场景 | 说明 |
 |------|------|
@@ -214,7 +230,43 @@ Protobuf 风格的编解码工具：
 # 正常流程测试
 node tools/mock-client/src/index.js --scenario happy \
   --http-base-url http://127.0.0.1:3000 \
-  --login-name test001 --password Passw0rd!
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001
+
+# 查询角色列表，输出机器可读 JSON
+node tools/mock-client/src/index.js --scenario character-list \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --json-output
+
+# 创建角色
+node tools/mock-client/src/index.js --scenario character-create \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --character-name Echo \
+  --character-appearance-json '{"body":"default","palette":"blue"}'
+
+# 选择角色并展示 ticket payload 摘要
+node tools/mock-client/src/index.js --scenario character-select \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --json-output
+
+# 一条命令登录、创建角色、选择角色、连接 game-proxy 完成 AuthReq
+node tools/mock-client/src/index.js --scenario character-login-auth \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --auto-create-character --character-name Echo
+
+# 选择已有角色后进入房间基础流程
+node tools/mock-client/src/index.js --scenario character-room-join \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --room-id room-character-debug
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -313,6 +365,13 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--password` | 登录密码 | - |
 | `--new-password` | `password-ticket-revoke` 改密后的新密码 | - |
 | `--no-restore-password` | `password-ticket-revoke` 结束后不恢复原密码 | 默认恢复 |
+| `--character-id` | 指定已有角色，签发 character-bound game ticket | 空 |
+| `--character-name` | 创建角色名，或按名称选择已有角色；角色名允许重复 | 空 |
+| `--character-appearance-json` | 创建角色外观 JSON 对象；PowerShell 建议用单引号包裹 | `{}` |
+| `--auto-create-character` | 登录后直接创建新角色并选择 | `false` |
+| `--create-character-if-missing` | 无角色或指定角色名不存在时创建角色 | `false` |
+| `--character-name-prefix` | 自动生成角色名的前缀 | `MockRole` |
+| `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |
 | `--login-name-a` | 客户端A登录用户名 | - |
 | `--password-a` | 客户端A登录密码 | - |
 | `--login-name-b` | 客户端B登录用户名 | - |

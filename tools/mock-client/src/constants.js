@@ -219,6 +219,14 @@ export const SCENARIO = {
   INVENTORY_ADD: "inventory-add",
   INVENTORY_GET: "inventory-get",
   INVENTORY_FULL: "inventory-full",
+  // Character scenarios
+  CHARACTER_LIST: "character-list",
+  CHARACTER_CREATE: "character-create",
+  CHARACTER_SELECT: "character-select",
+  CHARACTER_LOGIN_AUTH: "character-login-auth",
+  CHARACTER_ROOM_JOIN: "character-room-join",
+  CHARACTER_DUPLICATE_NAME: "character-duplicate-name",
+  CHARACTER_LIMIT: "character-limit",
   // Auth scenarios
   LOGOUT: "logout",
   KICK_SESSION: "kick-session",
