@@ -41,6 +41,9 @@ function playerTicketVersionKey(playerId) {
   return `player-ticket-version:${playerId}`;
 }
 
+export const GAME_TICKET_INVALIDATION_SCOPE = "account";
+export const GAME_TICKET_REDIS_OWNER_SCOPE = "account_player";
+
 function createAuthError(code, message = code) {
   const error = new Error(message);
   error.code = code;
@@ -57,6 +60,67 @@ function logSecurity(level, message, extra) {
   } catch {
     // Some focused tests instantiate AuthStore without bootstrapping log4js.
   }
+}
+
+function requireTicketCharacterId(characterId) {
+  if (typeof characterId !== "string" || characterId.trim().length === 0) {
+    throw createAuthError("MISSING_CHARACTER_ID", "game ticket requires characterId");
+  }
+
+  return characterId.trim();
+}
+
+function timingSafeEqualText(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+export function verifyGameTicketPayload(secret, ticket, { nowMs = Date.now() } = {}) {
+  if (typeof ticket !== "string" || ticket.length === 0) {
+    throw createAuthError("INVALID_TICKET_FORMAT");
+  }
+
+  const [payloadB64, signatureB64, extra] = ticket.split(".");
+  if (!payloadB64 || !signatureB64 || extra !== undefined) {
+    throw createAuthError("INVALID_TICKET_FORMAT");
+  }
+
+  const expectedSignature = signTicketPayload(payloadB64, secret);
+  if (!timingSafeEqualText(signatureB64, expectedSignature)) {
+    throw createAuthError("INVALID_TICKET_SIGNATURE");
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+  } catch {
+    throw createAuthError("INVALID_TICKET_PAYLOAD");
+  }
+
+  if (!payload || typeof payload.playerId !== "string" || payload.playerId.trim().length === 0) {
+    throw createAuthError("INVALID_TICKET_PAYLOAD");
+  }
+
+  requireTicketCharacterId(payload.characterId);
+
+  const expiresAtMs = Date.parse(payload.exp);
+  if (!Number.isFinite(expiresAtMs)) {
+    throw createAuthError("INVALID_TICKET_EXP");
+  }
+
+  if (expiresAtMs <= nowMs) {
+    throw createAuthError("TICKET_EXPIRED");
+  }
+
+  return {
+    ...payload,
+    playerId: payload.playerId.trim(),
+    characterId: payload.characterId.trim()
+  };
 }
 
 export class AuthStore {
@@ -364,7 +428,6 @@ export class AuthStore {
       });
     }
 
-    const gameTicket = await this.issueGameTicket(account.playerId, clientIp);
     await this.markSessionActive(accessToken);
 
     await this.dbStore?.appendAuthAudit({
@@ -372,17 +435,18 @@ export class AuthStore {
       guestId: account.guestId || null,
       eventType,
       accessToken,
-      ticket: gameTicket.value,
       clientIp,
       details: {
         sessionCreatedAt: session.createdAt,
-        loginName: account.loginName || null
+        loginName: account.loginName || null,
+        gameTicketIssued: false,
+        gameTicketReason: "character_selection_required"
       }
     });
 
     return {
       ...session,
-      gameTicket
+      gameTicket: null
     };
   }
 
@@ -463,6 +527,7 @@ export class AuthStore {
   }
 
   async issueGameTicket(playerId, clientIp = null, options = {}) {
+    const characterId = requireTicketCharacterId(options.characterId);
     const versionKey = this.prefixedKey(playerTicketVersionKey(playerId));
     let ticketVersion = await this.redis.get(versionKey);
     if (!ticketVersion) {
@@ -475,13 +540,11 @@ export class AuthStore {
     ).toISOString();
     const payload = {
       playerId,
+      characterId,
       nonce: crypto.randomBytes(12).toString("hex"),
       ver: Number.parseInt(ticketVersion, 10) || 1,
       exp: expiresAt
     };
-    if (options.characterId) {
-      payload.characterId = options.characterId;
-    }
     if (options.worldId !== undefined && options.worldId !== null) {
       payload.worldId = options.worldId;
     }
@@ -491,6 +554,8 @@ export class AuthStore {
 
     await this.redis.set(
       this.prefixedKey(ticketKey(ticket)),
+      // Redis ticket records intentionally remain account-owned for P0.
+      // player-ticket-version, logout, and revoke all invalidate by account playerId.
       playerId,
       "EX",
       this.config.ticketTtlSeconds
@@ -503,7 +568,7 @@ export class AuthStore {
       clientIp,
       details: {
         expiresAt,
-        characterId: options.characterId || null,
+        characterId,
         worldId: options.worldId ?? null
       }
     });
@@ -550,7 +615,28 @@ export class AuthStore {
   }
 
   async invalidatePlayerTickets(playerId) {
+    // P0 role split keeps ticket invalidation account-scoped. A logout,
+    // password change, or player-ticket-version bump revokes all character
+    // tickets under the account playerId.
     return this.redis.incr(this.prefixedKey(playerTicketVersionKey(playerId)));
+  }
+
+  async validateGameTicket(ticket) {
+    const payload = verifyGameTicketPayload(this.config.ticketSecret, ticket);
+    const owner = await this.getTicketOwner(ticket);
+    if (owner !== payload.playerId) {
+      throw createAuthError("TICKET_NOT_FOUND");
+    }
+
+    const versionKey = this.prefixedKey(playerTicketVersionKey(payload.playerId));
+    const currentTicketVersion = await this.redis.get(versionKey);
+    const expectedVersion = Number.parseInt(String(payload.ver ?? 1), 10) || 1;
+    const currentVersion = Number.parseInt(String(currentTicketVersion ?? 1), 10) || 1;
+    if (expectedVersion !== currentVersion) {
+      throw createAuthError("TICKET_REVOKED");
+    }
+
+    return payload;
   }
 
   async revokeTicket(ticket, clientIp = null, options = {}) {

@@ -78,8 +78,8 @@ export class AuthService {
       guestId: session.guestId || null,
       loginName: session.loginName || null,
       accessToken: session.accessToken,
-      ticket: session.gameTicket.value,
-      ticketExpiresAt: session.gameTicket.expiresAt,
+      ticket: session.gameTicket?.value || null,
+      ticketExpiresAt: session.gameTicket?.expiresAt || null,
       gameProxyHost: gameProxy.host,
       gameProxyPort: gameProxy.port,
       services

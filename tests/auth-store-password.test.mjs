@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import crypto from "node:crypto";
 import { test } from "node:test";
 
-import { AuthStore } from "../apps/auth-http/src/auth-store.js";
+import {
+  AuthStore,
+  GAME_TICKET_INVALIDATION_SCOPE,
+  GAME_TICKET_REDIS_OWNER_SCOPE,
+  verifyGameTicketPayload
+} from "../apps/auth-http/src/auth-store.js";
 import {
   createPasswordSalt,
   hashPassword
@@ -86,13 +92,11 @@ test("AuthStore password login validates credentials from database store", async
   assert.equal(session.loginName, "test001");
   assert.equal(session.guestId, null);
   assert.ok(session.accessToken);
-  assert.ok(session.gameTicket.value);
+  assert.equal(session.gameTicket, null);
   assert.deepEqual(touchedPlayerIds, ["player-001"]);
   assert.equal(audits.some((entry) => entry.eventType === "password_login"), true);
-  const ticketPayload = JSON.parse(
-    Buffer.from(session.gameTicket.value.split(".")[0], "base64url").toString("utf8")
-  );
-  assert.equal(ticketPayload.ver, 1);
+  assert.equal(audits.some((entry) => entry.eventType === "issue_ticket"), false);
+  assert.equal(audits.at(-1).details.gameTicketReason, "character_selection_required");
 
   const storedSession = await authStore.getSessionByAccessToken(session.accessToken);
   assert.equal(storedSession.playerId, "player-001");
@@ -152,7 +156,9 @@ test("AuthStore rejects ticket revoke for another player", async () => {
     redis
   );
 
-  const ticket = await authStore.issueGameTicket("player-001", "127.0.0.1");
+  const ticket = await authStore.issueGameTicket("player-001", "127.0.0.1", {
+    characterId: "chr_0000000000001"
+  });
 
   await assert.rejects(
     () =>
@@ -190,4 +196,49 @@ test("AuthStore can issue game ticket payload with selected character", async ()
   assert.equal(ticketPayload.worldId, 9);
   assert.equal(ticketPayload.ver, 1);
   assert.equal(await authStore.getTicketOwner(ticket.value), "player-001");
+  assert.equal(GAME_TICKET_REDIS_OWNER_SCOPE, "account_player");
+  assert.equal(GAME_TICKET_INVALIDATION_SCOPE, "account");
+  assert.deepEqual(await authStore.validateGameTicket(ticket.value), {
+    ...ticketPayload,
+    playerId: "player-001",
+    characterId: "chr_0000000000001"
+  });
+  assert.deepEqual(verifyGameTicketPayload("test-secret", ticket.value), {
+    ...ticketPayload,
+    playerId: "player-001",
+    characterId: "chr_0000000000001"
+  });
+});
+
+test("AuthStore rejects issuing or validating game ticket without characterId", async () => {
+  const redis = new FakeRedis();
+  const authStore = new AuthStore(
+    {
+      redisKeyPrefix: "test:",
+      sessionTtlSeconds: 600,
+      ticketTtlSeconds: 300,
+      ticketSecret: "test-secret"
+    },
+    redis
+  );
+
+  await assert.rejects(
+    () => authStore.issueGameTicket("player-001", "127.0.0.1"),
+    { code: "MISSING_CHARACTER_ID" }
+  );
+
+  const expiresAt = new Date(Date.now() + 300000).toISOString();
+  const payloadB64 = Buffer.from(JSON.stringify({
+    playerId: "player-001",
+    nonce: "old-ticket",
+    ver: 1,
+    exp: expiresAt
+  })).toString("base64url");
+  const signature = crypto.createHmac("sha256", "test-secret").update(payloadB64).digest("base64url");
+  const legacyTicket = `${payloadB64}.${signature}`;
+
+  await assert.rejects(
+    () => authStore.validateGameTicket(legacyTicket),
+    { code: "MISSING_CHARACTER_ID" }
+  );
 });

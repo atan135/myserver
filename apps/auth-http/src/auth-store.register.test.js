@@ -59,8 +59,9 @@ test("register password account creates login session when review is disabled", 
 
   assert.equal(result.pendingReview, false);
   assert.equal(result.session.playerId, "player-1");
-  assert.equal(result.session.gameTicket.value.includes("."), true);
-  assert.deepEqual(audits.map((entry) => entry.eventType), ["password_register", "issue_ticket", "password_register_login"]);
+  assert.equal(result.session.gameTicket, null);
+  assert.deepEqual(audits.map((entry) => entry.eventType), ["password_register", "password_register_login"]);
+  assert.equal(audits.at(-1).details.gameTicketReason, "character_selection_required");
 });
 
 test("register password account returns pending review without session when review is enabled", async () => {

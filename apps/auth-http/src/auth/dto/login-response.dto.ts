@@ -53,11 +53,15 @@ export class LoginResponseDto {
   @ApiProperty({ example: "a3f01b8f9e8a46ad930b7ff9b91b6c2e" })
   accessToken: string;
 
-  @ApiProperty({ example: "eyJwbGF5ZXJJZCI6InBscl8xajdxdjhtNHgyIn0.signature" })
-  ticket: string;
+  @ApiProperty({
+    example: null,
+    nullable: true,
+    description: "Login does not issue an enter-game ticket. Select a character to receive a character-bound game ticket."
+  })
+  ticket: string | null;
 
-  @ApiProperty({ example: "2026-05-28T12:00:00.000Z" })
-  ticketExpiresAt: string;
+  @ApiProperty({ example: null, nullable: true })
+  ticketExpiresAt: string | null;
 
   @ApiProperty({ example: "127.0.0.1" })
   gameProxyHost: string;

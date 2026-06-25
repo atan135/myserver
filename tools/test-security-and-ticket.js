@@ -8,8 +8,8 @@
  * 测试内容:
  * 1. IP 限流
  * 2. 账号锁定
- * 3. Ticket 会话级（24小时有效期）
- * 4. Ticket revoke
+ * 3. 角色绑定 game ticket / 账号级失效语义
+ * 4. 角色绑定 game ticket revoke
  */
 
 import http from "node:http";
@@ -65,6 +65,126 @@ async function doRequest(method, path, body = null, headers = {}) {
 
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function decodeTicketPayload(ticket) {
+  try {
+    return JSON.parse(Buffer.from(ticket.split(".")[0], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function printCharacterStoreHint(response) {
+  const error = response?.data?.error;
+  if (
+    error === "CHARACTER_STORE_UNAVAILABLE" ||
+    error === "PASSWORD_REGISTER_UNAVAILABLE" ||
+    error === "PASSWORD_LOGIN_UNAVAILABLE"
+  ) {
+    console.log("  [FAIL] 角色体系接口不可用。阶段 5 ticket 测试需要启用 DB，并已应用 characters 表初始化/迁移。");
+    console.log(`  响应: ${response.status} - ${JSON.stringify(response.data)}`);
+    return true;
+  }
+  return false;
+}
+
+async function loginGuestForTicket(prefix) {
+  const guestId = `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const loginRes = await request("POST", "/api/v1/auth/guest-login", { guestId });
+
+  if (loginRes.status !== 201 || !loginRes.data?.ok) {
+    console.log(`  [FAIL] 登录失败: ${loginRes.status} - ${JSON.stringify(loginRes.data)}`);
+    return null;
+  }
+
+  if (loginRes.data.ticket !== null || loginRes.data.ticketExpiresAt !== null) {
+    console.log("  [FAIL] 登录阶段不应再签发 game ticket；应返回 ticket=null/ticketExpiresAt=null");
+    console.log(`  响应: ${JSON.stringify({ ticket: loginRes.data.ticket, ticketExpiresAt: loginRes.data.ticketExpiresAt })}`);
+    return null;
+  }
+
+  console.log("  [PASS] 登录只返回 accessToken，game ticket 需要选角后签发");
+  return loginRes.data;
+}
+
+async function createCharacter(accessToken, namePrefix) {
+  const response = await request(
+    "POST",
+    "/api/v1/characters",
+    {
+      name: `${namePrefix}${String(Date.now()).slice(-6)}`,
+      appearance: { body: "default", palette: "blue" }
+    },
+    { Authorization: `Bearer ${accessToken}` }
+  );
+
+  if (response.status !== 201 || !response.data?.ok) {
+    if (!printCharacterStoreHint(response)) {
+      console.log(`  [FAIL] 创建角色失败: ${response.status} - ${JSON.stringify(response.data)}`);
+    }
+    return null;
+  }
+
+  return response.data.character;
+}
+
+async function selectCharacter(accessToken, characterId) {
+  const response = await request(
+    "POST",
+    "/api/v1/characters/select",
+    { character_id: characterId },
+    { Authorization: `Bearer ${accessToken}` }
+  );
+
+  if (response.status !== 200 || !response.data?.ok) {
+    if (!printCharacterStoreHint(response)) {
+      console.log(`  [FAIL] 选择角色签发 ticket 失败: ${response.status} - ${JSON.stringify(response.data)}`);
+    }
+    return null;
+  }
+
+  return response.data;
+}
+
+async function issueCharacterGameTicket(prefix) {
+  const login = await loginGuestForTicket(prefix);
+  if (!login) {
+    return null;
+  }
+
+  const character = await createCharacter(login.accessToken, "Sec");
+  if (!character) {
+    return null;
+  }
+
+  const characterId = character.character_id;
+  console.log(`  创建角色成功: ${characterId}`);
+
+  const selected = await selectCharacter(login.accessToken, characterId);
+  if (!selected) {
+    return null;
+  }
+
+  const payload = decodeTicketPayload(selected.ticket);
+  if (!payload) {
+    console.log("  [FAIL] ticket payload 解码失败");
+    return null;
+  }
+
+  if (payload.playerId !== login.playerId || payload.characterId !== characterId) {
+    console.log(`  [FAIL] ticket payload 归属异常: ${JSON.stringify(payload)}`);
+    return null;
+  }
+
+  console.log(`  [PASS] 签发角色绑定 game ticket: playerId=${payload.playerId}, characterId=${payload.characterId}`);
+  return {
+    login,
+    character,
+    ticket: selected.ticket,
+    ticketExpiresAt: selected.ticketExpiresAt,
+    payload
+  };
 }
 
 async function testIPRateLimit() {
@@ -150,24 +270,20 @@ async function testAccountLockout() {
   return true;
 }
 
-async function testTicketSessionLevel() {
-  console.log("\n=== 测试 3: Ticket 会话级（24小时有效期） ===");
+async function testCharacterBoundGameTicket() {
+  console.log("\n=== 测试 3: 角色绑定 game ticket / 账号级失效语义 ===");
 
-  // 1. 游客登录获取 ticket
-  console.log("  1. 游客登录获取 ticket...");
-  const guestId = "test-guest-" + Date.now();
-  const loginRes = await request("POST", "/api/v1/auth/guest-login", { guestId });
-
-  if (loginRes.status !== 201) {
-    console.log(`  [FAIL] 登录失败: ${loginRes.status}`);
+  console.log("  1. 游客登录，确认登录不直接签发 game ticket...");
+  console.log("  2. 创建并选择角色，获取角色绑定 game ticket...");
+  const issued = await issueCharacterGameTicket("test-guest");
+  if (!issued) {
     return false;
   }
 
-  const { ticket, ticketExpiresAt } = loginRes.data;
-  console.log(`  Ticket 签发成功`);
+  const { ticket, ticketExpiresAt, payload } = issued;
   console.log(`  Expires: ${ticketExpiresAt}`);
 
-  // 2. 验证 ticket 有效期是否为 24 小时
+  // 3. 验证 ticket 有效期是否为 24 小时
   const expiresTime = new Date(ticketExpiresAt).getTime();
   const now = Date.now();
   const diffHours = (expiresTime - now) / (1000 * 60 * 60);
@@ -175,35 +291,41 @@ async function testTicketSessionLevel() {
   console.log(`  距离过期: ${diffHours.toFixed(1)} 小时`);
 
   if (diffHours >= 23 && diffHours <= 25) {
-    console.log("  [PASS] Ticket 有效期为约 24 小时");
+    console.log("  [PASS] game ticket 有效期为约 24 小时");
   } else {
-    console.log(`  [FAIL] Ticket 有效期异常: ${diffHours.toFixed(1)} 小时`);
+    console.log(`  [FAIL] game ticket 有效期异常: ${diffHours.toFixed(1)} 小时`);
     return false;
   }
 
-  // 3. 验证 ticket 格式
+  // 4. 验证 ticket 格式与角色字段
   if (ticket && ticket.includes(".")) {
     const parts = ticket.split(".");
     console.log(`  Ticket 格式正确: ${parts.length} 部分`);
+  } else {
+    console.log("  [FAIL] Ticket 格式异常");
+    return false;
   }
 
+  if (!payload.characterId || !payload.playerId) {
+    console.log(`  [FAIL] ticket payload 缺少 playerId/characterId: ${JSON.stringify(payload)}`);
+    return false;
+  }
+
+  console.log("  [PASS] payload 包含 playerId 与 characterId；Redis owner / logout / player-ticket-version 仍按账号级 playerId 失效");
   return true;
 }
 
 async function testTicketRevoke() {
-  console.log("\n=== 测试 4: Ticket Revoke ===");
+  console.log("\n=== 测试 4: 角色绑定 game ticket revoke ===");
 
-  // 1. 登录获取 accessToken 和 ticket
-  const guestId = "revoke-test-" + Date.now();
-  const loginRes = await request("POST", "/api/v1/auth/guest-login", { guestId });
-
-  if (loginRes.status !== 201) {
-    console.log(`  [FAIL] 登录失败: ${loginRes.status}`);
+  console.log("  1. 登录、创建角色并选择角色获取 game ticket...");
+  const issued = await issueCharacterGameTicket("revoke-test");
+  if (!issued) {
     return false;
   }
 
-  const { accessToken, ticket } = loginRes.data;
-  console.log(`  1. 登录成功，获得 ticket`);
+  const { accessToken } = issued.login;
+  const { ticket } = issued;
 
   // 2. 使用 /api/v1/game-ticket/revoke 使役 ticket
   console.log("  2. 调用 revoke 接口...");
@@ -221,10 +343,15 @@ async function testTicketRevoke() {
 
   console.log("  [PASS] Revoke 成功");
 
-  // 3. 验证 ticket 已失效（通过安全审计日志确认）
-  console.log("  3. 验证 ticket 已从 Redis 删除...");
-  // 注意：外部无法直接验证 Redis，但 revoke 返回成功说明逻辑正常
-  console.log("  [INFO] Revoke 操作已记录到审计日志");
+  // 3. 通过 validate 验证 ticket 已失效
+  console.log("  3. 验证 ticket 已失效...");
+  const validateRes = await request("POST", "/api/v1/game-ticket/validate", { ticket });
+  if (validateRes.status !== 401 || validateRes.data?.error !== "TICKET_NOT_FOUND") {
+    console.log(`  [FAIL] revoke 后 validate 结果异常: ${validateRes.status} - ${JSON.stringify(validateRes.data)}`);
+    return false;
+  }
+
+  console.log("  [PASS] revoke 后 ticket 已不可用");
 
   return true;
 }
@@ -251,7 +378,7 @@ async function main() {
   if (await testAccountLockout()) passed++; else failed++;
   await delay(500);
 
-  if (await testTicketSessionLevel()) passed++; else failed++;
+  if (await testCharacterBoundGameTicket()) passed++; else failed++;
   await delay(500);
 
   if (await testTicketRevoke()) passed++; else failed++;

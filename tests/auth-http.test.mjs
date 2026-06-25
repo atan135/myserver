@@ -15,7 +15,10 @@ before(async () => {
     port: await findFreePort(),
     ticketSecret,
     redisUrl,
-    redisKeyPrefix
+    redisKeyPrefix,
+    envOverrides: {
+      NODE_ENV: "development"
+    }
   });
 });
 
@@ -36,7 +39,7 @@ test("GET /healthz returns service health", async () => {
   assert.equal(payload.storage, "redis");
 });
 
-test("guest login creates session and game ticket", async () => {
+test("guest login creates session and waits for character selection before game ticket", async () => {
   const guestId = randomId("guest");
   const loginResponse = await fetch(`${authServer.baseUrl}/api/v1/auth/guest-login`, {
     method: "POST",
@@ -48,9 +51,10 @@ test("guest login creates session and game ticket", async () => {
   const loginPayload = await loginResponse.json();
   assert.equal(loginPayload.ok, true);
   assert.equal(loginPayload.guestId, guestId);
-  assert.match(loginPayload.playerId, /^player-/);
+  assert.match(loginPayload.playerId, /^plr_[0-9a-z]+$/);
   assert.ok(loginPayload.accessToken);
-  assert.ok(loginPayload.ticket);
+  assert.equal(loginPayload.ticket, null);
+  assert.equal(loginPayload.ticketExpiresAt, null);
 
   const meResponse = await fetch(`${authServer.baseUrl}/api/v1/auth/me`, {
     headers: {
@@ -67,15 +71,18 @@ test("guest login creates session and game ticket", async () => {
   const ticketResponse = await fetch(`${authServer.baseUrl}/api/v1/game-ticket/issue`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${loginPayload.accessToken}`
-    }
+      authorization: `Bearer ${loginPayload.accessToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({})
   });
 
-  assert.equal(ticketResponse.status, 201);
-  const ticketPayload = await ticketResponse.json();
-  assert.equal(ticketPayload.ok, true);
-  assert.equal(ticketPayload.playerId, loginPayload.playerId);
-  assert.ok(ticketPayload.ticket);
+  assert.equal(ticketResponse.status, 400);
+  assert.deepEqual(await ticketResponse.json(), {
+    ok: false,
+    error: "MISSING_CHARACTER_ID",
+    message: "character_id must be a non-empty string"
+  });
 });
 
 test("auth endpoints reject missing or invalid bearer token", async () => {

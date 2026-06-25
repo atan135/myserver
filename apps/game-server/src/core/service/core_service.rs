@@ -37,6 +37,8 @@ pub async fn handle_auth(
     match verify_ticket(&services.config.ticket_secret, &request.ticket) {
         Ok(ticket_payload) => {
             let player_id = ticket_payload.player_id;
+            let character_id = ticket_payload.character_id;
+            let world_id = ticket_payload.world_id;
             let ticket_key = format!(
                 "{}ticket:{}",
                 services.config.redis_key_prefix,
@@ -108,6 +110,8 @@ pub async fn handle_auth(
             info!(
                 session_id = connection.session.id,
                 player_id = %player_id,
+                character_id = %character_id,
+                world_id = ?world_id,
                 "player authenticated"
             );
 
@@ -127,7 +131,11 @@ pub async fn handle_auth(
                     Some(&player_id),
                     Some(&connection.peer_addr),
                     "auth_success",
-                    Some(serde_json::json!({ "seq": packet.header.seq })),
+                    Some(serde_json::json!({
+                        "seq": packet.header.seq,
+                        "characterId": character_id,
+                        "worldId": world_id
+                    })),
                 )
                 .await;
 

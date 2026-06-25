@@ -260,6 +260,7 @@ test("auth-http blocks new game ticket issue but leaves revoke path outside main
     { trustProxy: false, trustedProxies: [] },
     { async checkPlayer() { return { blocked: false, unavailable: false }; } },
     null,
+    { enabled: true, async getByCharacterId() { return null; } },
     service
   );
   const req = {
