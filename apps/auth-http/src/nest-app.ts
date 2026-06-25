@@ -12,6 +12,7 @@ import { releaseGlobalIdLease } from "./global-id.js";
 import {
   AUTH_CONFIG,
   AUTH_DB_POOL,
+  AUTH_GAME_DB_POOL,
   AUTH_METRICS,
   AUTH_NATS,
   AUTH_REDIS,
@@ -62,6 +63,7 @@ export async function closeNestApp(app: INestApplication) {
   const redis = app.get<any>(AUTH_REDIS, { strict: false });
   const nats = app.get<any>(AUTH_NATS, { strict: false });
   const dbPool = app.get<any>(AUTH_DB_POOL, { strict: false });
+  const gameDbPool = app.get<any>(AUTH_GAME_DB_POOL, { strict: false });
 
   try {
     await metrics?.stop?.();
@@ -100,6 +102,14 @@ export async function closeNestApp(app: INestApplication) {
       await dbPool.end();
     } catch (error: any) {
       log("error", "shutdown.db_close_failed", { error: error.message });
+    }
+  }
+
+  if (gameDbPool && gameDbPool !== dbPool) {
+    try {
+      await gameDbPool.end();
+    } catch (error: any) {
+      log("error", "shutdown.game_db_close_failed", { error: error.message });
     }
   }
 

@@ -5,16 +5,19 @@ import { RedisBlocklistChecker } from "./blocklist.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
+import { CharacterStore } from "./character-store.js";
 import { DbAuthStore } from "./db-store.js";
 import { MaintenanceStore } from "./maintenance-store.js";
 import { AccountLockout, RateLimiter } from "./rate-limiter.js";
 import { RegistryClient } from "./registry-client.js";
 import { ServiceDiscovery } from "./service-discovery.js";
-import { createDbPool } from "./db-client.js";
+import { createDbPool, createGameDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
+import { CharactersController } from "./characters/characters.controller.js";
+import { CharactersService } from "./characters/characters.service.js";
 import { GameTicketController } from "./game-ticket/game-ticket.controller.js";
 import { initializeGlobalIdLease } from "./global-id.js";
 import { InternalController } from "./internal/internal.controller.js";
@@ -26,7 +29,9 @@ import { TlsRequiredMiddleware } from "./common/tls-required.middleware.js";
 import {
   AUTH_ACCOUNT_LOCKOUT,
   AUTH_BLOCKLIST,
+  AUTH_CHARACTER_STORE,
   AUTH_CONFIG,
+  AUTH_GAME_DB_POOL,
   AUTH_DB_POOL,
   AUTH_DB_STORE,
   AUTH_GLOBAL_ID_LEASE,
@@ -42,9 +47,10 @@ import {
 } from "./tokens.js";
 
 @Module({
-  controllers: [AuthController, GameTicketController, InternalController, MetaController],
+  controllers: [AuthController, CharactersController, GameTicketController, InternalController, MetaController],
   providers: [
     AuthService,
+    CharactersService,
     {
       provide: AUTH_CONFIG,
       useFactory: () => getConfig()
@@ -70,9 +76,19 @@ import {
       useFactory: (config: any) => createDbPool(config)
     },
     {
+      provide: AUTH_GAME_DB_POOL,
+      inject: [AUTH_CONFIG, AUTH_GLOBAL_ID_LEASE],
+      useFactory: (config: any) => createGameDbPool(config)
+    },
+    {
       provide: AUTH_DB_STORE,
       inject: [AUTH_DB_POOL],
       useFactory: (dbPool: any) => new DbAuthStore(dbPool)
+    },
+    {
+      provide: AUTH_CHARACTER_STORE,
+      inject: [AUTH_GAME_DB_POOL],
+      useFactory: (gameDbPool: any) => new CharacterStore(gameDbPool)
     },
     {
       provide: AUTH_BLOCKLIST,

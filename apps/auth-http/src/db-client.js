@@ -67,6 +67,13 @@ function createPoolOptions(config) {
   };
 }
 
+function createGamePoolOptions(config) {
+  return {
+    connectionString: config.gameDatabaseUrl,
+    max: config.gameDbPoolSize || config.dbPoolSize || 10
+  };
+}
+
 export async function createDbPool(config) {
   if (!config.dbEnabled) {
     return null;
@@ -82,6 +89,29 @@ export async function createDbPool(config) {
     for (const statement of AUTH_SCHEMA_STATEMENTS) {
       await client.query(statement);
     }
+  } catch (error) {
+    client?.release();
+    client = null;
+    await pool.end();
+    throw error;
+  } finally {
+    client?.release();
+  }
+
+  return pool;
+}
+
+export async function createGameDbPool(config) {
+  if (!config.dbEnabled) {
+    return null;
+  }
+
+  const pool = new Pool(createGamePoolOptions(config));
+
+  let client = null;
+  try {
+    client = await pool.connect();
+    await client.query("SELECT 1");
   } catch (error) {
     client?.release();
     client = null;

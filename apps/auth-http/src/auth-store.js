@@ -462,7 +462,7 @@ export class AuthStore {
     return session;
   }
 
-  async issueGameTicket(playerId, clientIp = null) {
+  async issueGameTicket(playerId, clientIp = null, options = {}) {
     const versionKey = this.prefixedKey(playerTicketVersionKey(playerId));
     let ticketVersion = await this.redis.get(versionKey);
     if (!ticketVersion) {
@@ -479,6 +479,12 @@ export class AuthStore {
       ver: Number.parseInt(ticketVersion, 10) || 1,
       exp: expiresAt
     };
+    if (options.characterId) {
+      payload.characterId = options.characterId;
+    }
+    if (options.worldId !== undefined && options.worldId !== null) {
+      payload.worldId = options.worldId;
+    }
     const payloadB64 = base64UrlEncode(JSON.stringify(payload));
     const signature = signTicketPayload(payloadB64, this.config.ticketSecret);
     const ticket = `${payloadB64}.${signature}`;
@@ -496,7 +502,9 @@ export class AuthStore {
       ticket,
       clientIp,
       details: {
-        expiresAt
+        expiresAt,
+        characterId: options.characterId || null,
+        worldId: options.worldId ?? null
       }
     });
 

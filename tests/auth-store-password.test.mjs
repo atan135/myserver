@@ -164,3 +164,30 @@ test("AuthStore rejects ticket revoke for another player", async () => {
 
   assert.equal(await authStore.getTicketOwner(ticket.value), "player-001");
 });
+
+test("AuthStore can issue game ticket payload with selected character", async () => {
+  const redis = new FakeRedis();
+  const authStore = new AuthStore(
+    {
+      redisKeyPrefix: "test:",
+      sessionTtlSeconds: 600,
+      ticketTtlSeconds: 300,
+      ticketSecret: "test-secret"
+    },
+    redis
+  );
+
+  const ticket = await authStore.issueGameTicket("player-001", "127.0.0.1", {
+    characterId: "chr_0000000000001",
+    worldId: 9
+  });
+  const ticketPayload = JSON.parse(
+    Buffer.from(ticket.value.split(".")[0], "base64url").toString("utf8")
+  );
+
+  assert.equal(ticketPayload.playerId, "player-001");
+  assert.equal(ticketPayload.characterId, "chr_0000000000001");
+  assert.equal(ticketPayload.worldId, 9);
+  assert.equal(ticketPayload.ver, 1);
+  assert.equal(await authStore.getTicketOwner(ticket.value), "player-001");
+});

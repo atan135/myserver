@@ -231,6 +231,14 @@ export function getConfig() {
       process.env.DATABASE_URL ||
       "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
     dbPoolSize: Number.parseInt(process.env.DB_POOL_SIZE || "10", 10),
+    gameDatabaseUrl:
+      process.env.GAME_DATABASE_URL ||
+      process.env.AUTH_GAME_DATABASE_URL ||
+      "postgresql://postgres:password@127.0.0.1:5432/myserver_game",
+    gameDbPoolSize: Number.parseInt(
+      process.env.GAME_DB_POOL_SIZE || process.env.AUTH_GAME_DB_POOL_SIZE || process.env.DB_POOL_SIZE || "10",
+      10
+    ),
     sessionTtlSeconds: Number.parseInt(
       process.env.SESSION_TTL_SECONDS || "86400",
       10
@@ -286,6 +294,18 @@ export function getConfig() {
 
     // Registration
     registerRequireReview: parseBoolean(process.env.AUTH_REGISTER_REQUIRE_REVIEW, false),
+
+    // Character creation defaults
+    characterNameMinLength: Number.parseInt(process.env.CHARACTER_NAME_MIN_LENGTH || "2", 10),
+    characterNameMaxLength: Number.parseInt(process.env.CHARACTER_NAME_MAX_LENGTH || "16", 10),
+    characterNameForbiddenWords: parseCsv(process.env.CHARACTER_NAME_FORBIDDEN_WORDS),
+    characterDefaultWorldId: Number.parseInt(process.env.CHARACTER_DEFAULT_WORLD_ID || "0", 10),
+    characterDefaultSceneId: Number.parseInt(process.env.CHARACTER_DEFAULT_SCENE_ID || "100", 10),
+    characterDefaultX: Number.parseFloat(process.env.CHARACTER_DEFAULT_X || "0"),
+    characterDefaultY: Number.parseFloat(process.env.CHARACTER_DEFAULT_Y || "0"),
+    characterDefaultDirX: Number.parseFloat(process.env.CHARACTER_DEFAULT_DIR_X || "0"),
+    characterDefaultDirY: Number.parseFloat(process.env.CHARACTER_DEFAULT_DIR_Y || "1"),
+    characterAppearanceMaxJsonBytes: Number.parseInt(process.env.CHARACTER_APPEARANCE_MAX_JSON_BYTES || "4096", 10),
 
     // Ticket Validation
     ticketValidateEnabled: parseBoolean(process.env.TICKET_VALIDATE_ENABLED, true),
