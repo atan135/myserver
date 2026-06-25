@@ -89,6 +89,7 @@ pub async fn handle_room_join(
         log_drain_mode_room_creation_rejected(
             "room_join",
             Some(&player_id),
+            Some(&character_id),
             &room_id,
             None,
             &state,
@@ -520,6 +521,7 @@ pub async fn handle_player_input(
             services,
             &room_id,
             &player_id,
+            Some(&character_id),
             request.frame_id,
             packet.header.seq,
             "PlayerInputReq",
@@ -546,6 +548,7 @@ pub async fn handle_player_input(
         packet.header.seq,
         &room_id,
         &player_id,
+        Some(&character_id),
         request.frame_id,
         "PlayerInputReq",
     )
@@ -559,6 +562,7 @@ pub async fn handle_player_input(
         services,
         &room_id,
         &player_id,
+        Some(&character_id),
         request.frame_id,
         &input_fingerprint,
         packet.header.seq,
@@ -573,6 +577,7 @@ pub async fn handle_player_input(
             packet.header.seq,
             &room_id,
             &player_id,
+            Some(&character_id),
             request.frame_id,
             "PlayerInputReq",
         )
@@ -633,6 +638,7 @@ pub async fn handle_player_input(
                     services,
                     &room_id,
                     &player_id,
+                    Some(&character_id),
                     request.frame_id,
                     packet.header.seq,
                     "PlayerInputReq",
@@ -716,6 +722,7 @@ pub async fn handle_move_input(
             services,
             &room_id,
             &player_id,
+            Some(&character_id),
             request.frame_id,
             packet.header.seq,
             "MoveInputReq",
@@ -742,6 +749,7 @@ pub async fn handle_move_input(
         packet.header.seq,
         &room_id,
         &player_id,
+        Some(&character_id),
         request.frame_id,
         "MoveInputReq",
     )
@@ -771,6 +779,7 @@ pub async fn handle_move_input(
         services,
         &room_id,
         &player_id,
+        Some(&character_id),
         request.frame_id,
         &input_fingerprint,
         packet.header.seq,
@@ -785,6 +794,7 @@ pub async fn handle_move_input(
             packet.header.seq,
             &room_id,
             &player_id,
+            Some(&character_id),
             request.frame_id,
             "MoveInputReq",
         )
@@ -850,6 +860,7 @@ pub async fn handle_move_input(
                     services,
                     &room_id,
                     &player_id,
+                    Some(&character_id),
                     request.frame_id,
                     packet.header.seq,
                     "MoveInputReq",
@@ -910,6 +921,7 @@ async fn remember_input_frame_and_record_duplicate(
     services: &ServiceContext,
     room_id: &str,
     player_id: &str,
+    character_id: Option<&str>,
     frame_id: u32,
     input_fingerprint: &str,
     seq: u32,
@@ -934,6 +946,7 @@ async fn remember_input_frame_and_record_duplicate(
             services,
             room_id,
             player_id,
+            character_id,
             frame_id,
             seq,
             request_type,
@@ -957,6 +970,7 @@ async fn reject_if_input_anomaly_blocked(
     seq: u32,
     room_id: &str,
     player_id: &str,
+    character_id: Option<&str>,
     frame_id: u32,
     request_type: &'static str,
 ) -> Result<bool, std::io::Error> {
@@ -978,7 +992,9 @@ async fn reject_if_input_anomaly_blocked(
 
     warn!(
         room_id = %room_id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = ?character_id,
         frame_id = frame_id,
         seq = seq,
         request_type = request_type,
@@ -1002,6 +1018,7 @@ async fn record_input_anomaly(
     services: &ServiceContext,
     room_id: &str,
     player_id: &str,
+    character_id: Option<&str>,
     frame_id: u32,
     seq: u32,
     request_type: &'static str,
@@ -1018,7 +1035,9 @@ async fn record_input_anomaly(
 
     warn!(
         room_id = %room_id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = ?character_id,
         frame_id = frame_id,
         seq = seq,
         request_type = request_type,
@@ -1483,6 +1502,7 @@ pub async fn handle_join_as_observer(
         log_drain_mode_room_creation_rejected(
             "observer_join",
             Some(&player_id),
+            Some(&character_id),
             &room_id,
             None,
             &state,
@@ -1743,6 +1763,7 @@ async fn create_matched_room_impl(
         log_drain_mode_room_creation_rejected(
             "create_matched_room",
             actor_player_id,
+            actor_character_id,
             room_id,
             Some(match_id),
             &state,
@@ -1921,13 +1942,16 @@ fn default_if_blank(value: &str, default_value: &str) -> String {
 fn log_drain_mode_room_creation_rejected(
     request_kind: &'static str,
     player_id: Option<&str>,
+    character_id: Option<&str>,
     room_id: &str,
     match_id: Option<&str>,
     state: &DrainModeState,
 ) {
     info!(
         request_kind,
+        account_player_id = %player_id.unwrap_or_default(),
         player_id = %player_id.unwrap_or_default(),
+        character_id = %character_id.unwrap_or_default(),
         room_id = %room_id,
         match_id = %match_id.unwrap_or_default(),
         drain_mode_entered_at_ms = state.entered_at_ms,

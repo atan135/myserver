@@ -492,7 +492,7 @@ pub async fn run(
     // Initialize PgPlayerStore for inventory persistence
     let db_player_store = PgPlayerStore::new(config).await?;
 
-    let player_registry: PlayerRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let player_registry: PlayerRegistry = PlayerRegistry::default();
 
     let services = ServiceContext {
         config: config.clone(),
@@ -743,6 +743,8 @@ where
                 info!(
                     session_id = connection.session.id,
                     player_id = ?connection.session.player_id,
+                    account_player_id = ?connection.session.account_player_id,
+                    character_id = ?connection.session.character_id,
                     reason = %kick_reason,
                     "session kicked"
                 );
@@ -778,6 +780,8 @@ where
                 warn!(
                     session_id = connection.session.id,
                     player_id = ?connection.session.player_id,
+                    account_player_id = ?connection.session.account_player_id,
+                    character_id = ?connection.session.character_id,
                     peer = %connection.peer_addr,
                     reason = %close_reason,
                     "server requested connection close"
@@ -1037,14 +1041,16 @@ where
 
     room_service::handle_disconnect_cleanup(&services, &connection).await;
 
-    // Unregister from player registry (only if our session_id still matches)
-    if let Some(player_id) = &connection.session.player_id {
+    // Unregister from online registry (only if our session_id still matches).
+    // P0 registry uniqueness is account-scoped; character lookup is secondary.
+    if let Some(account_player_id) = connection
+        .session
+        .account_player_id
+        .as_ref()
+        .or(connection.session.player_id.as_ref())
+    {
         let mut registry = services.player_registry.write().await;
-        if let Some(handle) = registry.get(player_id) {
-            if handle.session_id == connection.session.id {
-                registry.remove(player_id);
-            }
-        }
+        registry.remove_by_account_if_session(account_player_id, connection.session.id);
     }
 
     if connection.session.state == crate::session::SessionState::Authenticated {

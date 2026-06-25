@@ -114,6 +114,11 @@ pub async fn handle_auth(
                 return Ok(());
             }
 
+            let previous_account_player_id = connection
+                .session
+                .account_player_id
+                .clone()
+                .or_else(|| connection.session.player_id.clone());
             let was_authenticated = connection.session.state == SessionState::Authenticated;
             connection.session.set_authenticated_identity(
                 account_player_id.clone(),
@@ -163,9 +168,19 @@ pub async fn handle_auth(
                 .await;
 
             // Register in player registry; kick old connection on same server
-            {
+            let old_handle = {
                 let mut registry = services.player_registry.write().await;
+                if let Some(previous_account_player_id) = previous_account_player_id.as_deref() {
+                    if previous_account_player_id != account_player_id {
+                        registry.remove_by_account_if_session(
+                            previous_account_player_id,
+                            connection.session.id,
+                        );
+                    }
+                }
                 let handle = PlayerConnectionHandle {
+                    account_player_id: account_player_id.clone(),
+                    character_id: character_id.clone(),
                     kick_notify: connection.kick_notify.clone(),
                     session_id: connection.session.id,
                     outbound: OutboundChannel::new(
@@ -174,19 +189,21 @@ pub async fn handle_auth(
                     ),
                     kick_reason: connection.kick_reason.clone(),
                 };
-                if let Some(old_handle) = registry.insert(account_player_id.clone(), handle) {
-                    if old_handle.session_id != connection.session.id {
-                        info!(
-                            account_player_id = %account_player_id,
-                            player_id = %account_player_id,
-                            character_id = %connection.session.character_id.as_deref().unwrap_or_default(),
-                            old_session_id = old_handle.session_id,
-                            new_session_id = connection.session.id,
-                            "kicking old connection on same server"
-                        );
-                        *old_handle.kick_reason.write().await = "new_login".to_string();
-                        old_handle.kick_notify.notify_one();
-                    }
+                registry.insert_by_account(handle)
+            };
+            if let Some(old_handle) = old_handle {
+                if old_handle.session_id != connection.session.id {
+                    info!(
+                        account_player_id = %account_player_id,
+                        player_id = %account_player_id,
+                        old_character_id = %old_handle.character_id,
+                        new_character_id = %character_id,
+                        old_session_id = old_handle.session_id,
+                        new_session_id = connection.session.id,
+                        "kicking old connection on same account"
+                    );
+                    *old_handle.kick_reason.write().await = "new_login".to_string();
+                    old_handle.kick_notify.notify_one();
                 }
             }
         }

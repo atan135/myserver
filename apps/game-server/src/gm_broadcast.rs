@@ -233,8 +233,15 @@ pub async fn broadcast_gm_message_to_online_players(
     let handles = {
         let registry = player_registry.read().await;
         registry
-            .iter()
-            .map(|(player_id, handle)| (player_id.clone(), handle.outbound.clone()))
+            .online_connections()
+            .into_iter()
+            .map(|handle| {
+                (
+                    handle.account_player_id,
+                    handle.character_id,
+                    handle.outbound,
+                )
+            })
             .collect::<Vec<_>>()
     };
 
@@ -253,7 +260,7 @@ pub async fn broadcast_gm_message_to_online_players(
     });
 
     let mut delivered = 0;
-    for (player_id, outbound) in handles {
+    for (account_player_id, character_id, outbound) in handles {
         match outbound.try_send(
             OutboundMessage {
                 message_type: MessageType::GameMessagePush,
@@ -261,7 +268,7 @@ pub async fn broadcast_gm_message_to_online_players(
                 body: body.clone(),
             },
             OutboundQueueLogContext {
-                player_id: Some(&player_id),
+                player_id: Some(&account_player_id),
                 operation: "gm_broadcast",
                 ..OutboundQueueLogContext::default()
             },
@@ -269,7 +276,9 @@ pub async fn broadcast_gm_message_to_online_players(
             Ok(()) => delivered += 1,
             Err(error) => {
                 warn!(
-                    player_id = %player_id,
+                    account_player_id = %account_player_id,
+                    player_id = %account_player_id,
+                    character_id = %character_id,
                     error = %error,
                     "failed to queue gm broadcast"
                 );
@@ -287,7 +296,7 @@ mod tests {
     use tokio::sync::{Notify, RwLock, mpsc};
 
     use super::*;
-    use crate::core::context::PlayerConnectionHandle;
+    use crate::core::context::{OnlinePlayerRegistry, PlayerConnectionHandle};
     use crate::core::room::{ConnectionCloseState, OutboundChannel};
 
     fn player_registry_fixture(
@@ -301,15 +310,16 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let notify = Arc::new(Notify::new());
         let kick_reason = Arc::new(RwLock::new("session_kicked".to_string()));
-        let registry = Arc::new(RwLock::new(std::collections::HashMap::from([(
-            player_id.to_string(),
-            PlayerConnectionHandle {
-                kick_notify: notify.clone(),
-                session_id: 42,
-                outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
-                kick_reason: kick_reason.clone(),
-            },
-        )])));
+        let mut registry_state = OnlinePlayerRegistry::default();
+        registry_state.insert_by_account(PlayerConnectionHandle {
+            account_player_id: player_id.to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            kick_notify: notify.clone(),
+            session_id: 42,
+            outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
+            kick_reason: kick_reason.clone(),
+        });
+        let registry = Arc::new(RwLock::new(registry_state));
 
         (registry, notify, kick_reason, rx)
     }

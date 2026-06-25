@@ -72,6 +72,7 @@ struct GmBanPlayerCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KickOnlineOutcome {
     player_id: String,
+    character_id: String,
     session_id: u64,
 }
 
@@ -569,7 +570,9 @@ async fn handle_admin_connection(
                         {
                             Ok(outcome) => {
                                 info!(
+                                    account_player_id = %outcome.player_id,
                                     player_id = %outcome.player_id,
+                                    character_id = %outcome.character_id,
                                     session_id = outcome.session_id,
                                     reason = %kick_reason,
                                     "gm kick player delivered"
@@ -632,7 +635,9 @@ async fn handle_admin_connection(
                         {
                             Ok(outcome) => {
                                 info!(
+                                    account_player_id = %outcome.player_id,
                                     player_id = %outcome.player_id,
+                                    character_id = %outcome.character_id,
                                     session_id = outcome.session_id,
                                     duration_seconds = request.duration_seconds,
                                     reason = %kick_reason,
@@ -1800,9 +1805,10 @@ async fn kick_online_player(
     player_id: &str,
     kick_reason: &str,
 ) -> Result<KickOnlineOutcome, &'static str> {
+    // GM kick keeps the legacy player_id request field as an account id in P0.
     let handle = {
         let registry = player_registry.read().await;
-        registry.get(player_id).cloned()
+        registry.get_by_account(player_id).cloned()
     }
     .ok_or("PLAYER_OFFLINE")?;
 
@@ -1814,7 +1820,8 @@ async fn kick_online_player(
     handle.kick_notify.notify_one();
 
     Ok(KickOnlineOutcome {
-        player_id: player_id.to_string(),
+        player_id: handle.account_player_id,
+        character_id: handle.character_id,
         session_id: handle.session_id,
     })
 }
@@ -2260,7 +2267,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::core::context::PlayerConnectionHandle;
+    use crate::core::context::{OnlinePlayerRegistry, PlayerConnectionHandle};
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
     use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
@@ -2342,15 +2349,16 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let notify = Arc::new(Notify::new());
         let kick_reason = Arc::new(RwLock::new("session_kicked".to_string()));
-        let registry = Arc::new(RwLock::new(std::collections::HashMap::from([(
-            player_id.to_string(),
-            PlayerConnectionHandle {
-                kick_notify: notify.clone(),
-                session_id: 42,
-                outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
-                kick_reason: kick_reason.clone(),
-            },
-        )])));
+        let mut registry_state = OnlinePlayerRegistry::default();
+        registry_state.insert_by_account(PlayerConnectionHandle {
+            account_player_id: player_id.to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            kick_notify: notify.clone(),
+            session_id: 42,
+            outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
+            kick_reason: kick_reason.clone(),
+        });
+        let registry = Arc::new(RwLock::new(registry_state));
 
         (registry, notify, kick_reason, rx)
     }
@@ -2821,6 +2829,7 @@ mod tests {
             outcome,
             KickOnlineOutcome {
                 player_id: "player-a".to_string(),
+                character_id: "chr_0000000000001".to_string(),
                 session_id: 42,
             }
         );

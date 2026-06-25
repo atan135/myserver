@@ -264,6 +264,11 @@ pub enum MemberRole {
 
 #[derive(Clone)]
 pub struct RoomMemberState {
+    /// P0 compatibility boundary: this remains the account-level player id.
+    /// Do not treat it as character_id. Switching room membership, frame
+    /// inputs, transfer payloads, and offline indexes to character_id requires
+    /// a separate migration because client protocol fields still expose
+    /// RoomMember.player_id.
     pub player_id: String,
     pub ready: bool,
     pub sender: OutboundSender,
@@ -368,6 +373,9 @@ pub struct Room {
     pub policy_id: String,
     pub current_frame: u32,
     pub pending_inputs: PendingFrameInputs,
+    /// Keyed by account-level player id in P0. A character-scoped room member
+    /// model must update this map together with frame input ownership,
+    /// owner_player_id, room transfer payloads, and reconnect/offline indexes.
     pub members: HashMap<String, RoomMemberState>,
     pub logic: Box<dyn RoomLogic>,
     pub created_at: Instant,

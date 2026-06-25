@@ -10,6 +10,7 @@ use crate::core::context::PlayerRegistry;
 
 #[derive(Debug, serde::Deserialize)]
 struct SessionKickEvent {
+    /// Account-level player id. Session kick remains account-scoped in P0.
     player_id: String,
     reason: Option<String>,
 }
@@ -61,12 +62,14 @@ async fn run_subscriber(
 
         let handle = {
             let registry = player_registry.read().await;
-            registry.get(&event.player_id).cloned()
+            registry.get_by_account(&event.player_id).cloned()
         };
         if let Some(handle) = handle {
             let reason = event.reason.as_deref().unwrap_or("session_kicked");
             info!(
-                player_id = %event.player_id,
+                account_player_id = %handle.account_player_id,
+                player_id = %handle.account_player_id,
+                character_id = %handle.character_id,
                 session_id = handle.session_id,
                 reason = reason,
                 "received session kick event, notifying connection"
@@ -75,6 +78,7 @@ async fn run_subscriber(
             handle.kick_notify.notify_one();
         } else {
             info!(
+                account_player_id = %event.player_id,
                 player_id = %event.player_id,
                 reason = ?event.reason,
                 "received session kick event, player not on this server"
