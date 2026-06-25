@@ -1,3 +1,6 @@
+import { generateCharacterId } from "./global-id.js";
+import { log } from "./logger.js";
+
 const DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT = 6;
 const UNIQUE_VIOLATION = "23505";
 
@@ -43,6 +46,14 @@ function createCharacterStoreError(code, message = code, details = {}) {
   error.code = code;
   Object.assign(error, details);
   return error;
+}
+
+function defaultLog(level, message, extra) {
+  try {
+    log(level, message, extra);
+  } catch {
+    // Focused store tests may instantiate CharacterStore without configuring log4js.
+  }
 }
 
 function characterSelectColumns() {
@@ -142,7 +153,6 @@ function normalizeCreateInput(input) {
   });
 
   return {
-    characterId: input.characterId,
     accountPlayerId: input.accountPlayerId,
     worldId: input.worldId ?? 0,
     name: input.name,
@@ -159,8 +169,10 @@ function isUniqueViolation(error) {
 }
 
 export class CharacterStore {
-  constructor(pool) {
+  constructor(pool, options = {}) {
     this.pool = pool;
+    this.characterIdGenerator = options.characterIdGenerator || generateCharacterId;
+    this.logger = options.logger || defaultLog;
   }
 
   get enabled() {
@@ -353,6 +365,7 @@ export class CharacterStore {
 
   async #insertCharacter(client, input) {
     const normalized = normalizeCreateInput(input);
+    const characterId = this.#generateCharacterId(normalized);
 
     try {
       const { rows } = await client.query(
@@ -382,7 +395,7 @@ export class CharacterStore {
          )
          RETURNING ${characterSelectColumns()}`,
         [
-          normalized.characterId,
+          characterId,
           normalized.accountPlayerId,
           normalized.worldId,
           normalized.name,
@@ -410,6 +423,41 @@ export class CharacterStore {
         throw createCharacterStoreError("CHARACTER_ID_EXISTS", "characterId already exists");
       }
       throw error;
+    }
+  }
+
+  #generateCharacterId(normalized) {
+    try {
+      const characterId = this.characterIdGenerator();
+      if (!/^chr_[0-9a-hjkmnp-tv-z]+$/.test(characterId)) {
+        throw createCharacterStoreError(
+          "INVALID_CHARACTER_ID_FORMAT",
+          "generated characterId has invalid format",
+          { generatedCharacterId: characterId }
+        );
+      }
+      return characterId;
+    } catch (error) {
+      const wrapped = createCharacterStoreError(
+        "CHARACTER_ID_GENERATION_FAILED",
+        "failed to generate characterId",
+        {
+          cause: error,
+          generatorErrorCode: error?.code || null,
+          accountPlayerId: normalized.accountPlayerId
+        }
+      );
+      try {
+        this.logger?.("error", "character.id_generation_failed", {
+          errorCode: wrapped.code,
+          generatorErrorCode: wrapped.generatorErrorCode,
+          accountPlayerId: wrapped.accountPlayerId,
+          message: error?.message || String(error)
+        });
+      } catch {
+        // Logging failure must not replace the explicit store error.
+      }
+      throw wrapped;
     }
   }
 }

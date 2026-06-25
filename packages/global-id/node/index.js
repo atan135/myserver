@@ -16,6 +16,7 @@ export const DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS = 10000;
 const BASE32_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 const KIND_BY_PREFIX = new Map([
   ["plr", "player"],
+  ["chr", "character"],
   ["room", "room"],
   ["mail", "mail"],
   ["ann", "announcement"],

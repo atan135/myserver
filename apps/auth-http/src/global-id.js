@@ -35,3 +35,7 @@ function getPlayerIdGenerator() {
 export function generatePlayerId() {
   return getPlayerIdGenerator().generateString();
 }
+
+export function generateCharacterId() {
+  return getPlayerIdGenerator().generateString("chr");
+}

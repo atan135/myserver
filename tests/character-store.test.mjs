@@ -5,6 +5,7 @@ import {
   CharacterStore,
   DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT
 } from "../apps/auth-http/src/character-store.js";
+import { encodeGlobalId } from "../packages/global-id/node/index.js";
 
 class MemoryCharacterPool {
   constructor() {
@@ -159,9 +160,23 @@ class MemoryCharacterPool {
   }
 }
 
-function createInput(characterId, accountPlayerId = "player-001", overrides = {}) {
+function createCharacterIdGenerator() {
+  let next = 0n;
+  return () => {
+    next += 1n;
+    return encodeGlobalId("chr", next);
+  };
+}
+
+function createStore(pool, options = {}) {
+  return new CharacterStore(pool, {
+    characterIdGenerator: createCharacterIdGenerator(),
+    ...options
+  });
+}
+
+function createInput(accountPlayerId = "player-001", overrides = {}) {
   return {
-    characterId,
     accountPlayerId,
     name: overrides.name ?? "SameName",
     appearance: overrides.appearance ?? { body: "default" },
@@ -178,14 +193,14 @@ function createInput(characterId, accountPlayerId = "player-001", overrides = {}
 
 test("CharacterStore creates characters and fetches by character_id", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
-  const created = await store.createCharacter(createInput("chr_001"));
-  const fetched = await store.getByCharacterId("chr_001");
+  const created = await store.createCharacter(createInput());
+  const fetched = await store.getByCharacterId(created.characterId);
 
-  assert.equal(created.characterId, "chr_001");
+  assert.match(created.characterId, /^chr_[0-9a-hjkmnp-tv-z]+$/);
   assert.equal(created.accountPlayerId, "player-001");
-  assert.equal(fetched.characterId, "chr_001");
+  assert.equal(fetched.characterId, created.characterId);
   assert.equal(pool.queries.some((query) => query.sql === "BEGIN"), true);
   assert.equal(
     pool.queries.some((query) => query.sql.startsWith("LOCK TABLE characters")),
@@ -207,55 +222,88 @@ test("CharacterStore creates characters and fetches by character_id", async () =
   });
 });
 
+test("CharacterStore ignores caller supplied characterId on normal creation", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool, {
+    characterIdGenerator: () => "chr_generated"
+  });
+
+  const created = await store.createCharacter(
+    createInput("player-001", { characterId: "chr_client_supplied" })
+  );
+
+  assert.equal(created.characterId, "chr_generated");
+  assert.equal(await store.getByCharacterId("chr_client_supplied"), null);
+  assert.equal(pool.rows[0].character_id, "chr_generated");
+});
+
+test("CharacterStore creates distinct generated character IDs across repeated creation", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool);
+
+  const created = [];
+  for (let index = 0; index < 5; index += 1) {
+    created.push(await store.createCharacter(createInput()));
+  }
+
+  const ids = created.map((character) => character.characterId);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(ids.every((id) => /^chr_[0-9a-hjkmnp-tv-z]+$/.test(id)), true);
+});
+
 test("CharacterStore lists by account and allows duplicate names with distinct character_id", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
-  await store.createCharacter(createInput("chr_001", "player-001", { name: "Echo" }));
-  await store.createCharacter(createInput("chr_002", "player-001", { name: "Echo" }));
-  await store.createCharacter(createInput("chr_003", "player-002", { name: "Echo" }));
+  const first = await store.createCharacter(createInput("player-001", { name: "Echo" }));
+  const second = await store.createCharacter(createInput("player-001", { name: "Echo" }));
+  await store.createCharacter(createInput("player-002", { name: "Echo" }));
 
   const list = await store.listByAccountPlayerId("player-001");
   assert.deepEqual(
     list.map((character) => [character.characterId, character.name]),
     [
-      ["chr_001", "Echo"],
-      ["chr_002", "Echo"]
+      [first.characterId, "Echo"],
+      [second.characterId, "Echo"]
     ]
   );
 
-  assert.equal((await store.getByCharacterId("chr_001")).name, "Echo");
-  assert.equal((await store.getByCharacterId("chr_002")).name, "Echo");
+  assert.notEqual(first.characterId, second.characterId);
+  assert.equal((await store.getByCharacterId(first.characterId)).name, "Echo");
+  assert.equal((await store.getByCharacterId(second.characterId)).name, "Echo");
 });
 
 test("CharacterStore soft delete hides ordinary list and get while admin query can include deleted", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
-  await store.createCharacter(createInput("chr_001"));
-  await store.createCharacter(createInput("chr_002"));
+  const first = await store.createCharacter(createInput());
+  const second = await store.createCharacter(createInput());
 
-  assert.equal(await store.softDeleteCharacter("chr_001"), true);
-  assert.equal(await store.getByCharacterId("chr_001"), null);
+  assert.equal(await store.softDeleteCharacter(first.characterId), true);
+  assert.equal(await store.getByCharacterId(first.characterId), null);
 
   const ordinaryList = await store.listByAccountPlayerId("player-001");
-  assert.deepEqual(ordinaryList.map((character) => character.characterId), ["chr_002"]);
+  assert.deepEqual(ordinaryList.map((character) => character.characterId), [second.characterId]);
 
-  const adminFetched = await store.getByCharacterId("chr_001", { includeDeleted: true });
+  const adminFetched = await store.getByCharacterId(first.characterId, { includeDeleted: true });
   const adminList = await store.listByAccountPlayerId("player-001", { includeDeleted: true });
-  assert.equal(adminFetched.characterId, "chr_001");
+  assert.equal(adminFetched.characterId, first.characterId);
   assert.ok(adminFetched.deletedAt);
-  assert.deepEqual(adminList.map((character) => character.characterId), ["chr_001", "chr_002"]);
+  assert.deepEqual(adminList.map((character) => character.characterId), [
+    first.characterId,
+    second.characterId
+  ]);
 });
 
 test("CharacterStore updates last_login_at and current position for active characters only", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
-  await store.createCharacter(createInput("chr_001"));
-  assert.equal(await store.updateLastLoginAt("chr_001"), true);
+  const created = await store.createCharacter(createInput());
+  assert.equal(await store.updateLastLoginAt(created.characterId), true);
   assert.equal(
-    await store.updatePosition("chr_001", {
+    await store.updatePosition(created.characterId, {
       sceneId: 200,
       x: 11.5,
       y: -3,
@@ -265,7 +313,7 @@ test("CharacterStore updates last_login_at and current position for active chara
     true
   );
 
-  const fetched = await store.getByCharacterId("chr_001");
+  const fetched = await store.getByCharacterId(created.characterId);
   assert.ok(fetched.lastLoginAt);
   assert.deepEqual(fetched.position, {
     sceneId: 200,
@@ -275,21 +323,21 @@ test("CharacterStore updates last_login_at and current position for active chara
     dirY: 0
   });
 
-  await store.softDeleteCharacter("chr_001");
-  assert.equal(await store.updateLastLoginAt("chr_001"), false);
-  assert.equal(await store.updatePosition("chr_001", { sceneId: 300 }), false);
+  await store.softDeleteCharacter(created.characterId);
+  assert.equal(await store.updateLastLoginAt(created.characterId), false);
+  assert.equal(await store.updatePosition(created.characterId, { sceneId: 300 }), false);
 });
 
 test("CharacterStore normal creation rejects the seventh effective character", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
   for (let index = 1; index <= DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT; index += 1) {
-    await store.createCharacter(createInput(`chr_${index}`));
+    await store.createCharacter(createInput());
   }
 
   await assert.rejects(
-    () => store.createCharacter(createInput("chr_7")),
+    () => store.createCharacter(createInput()),
     (error) => {
       assert.equal(error.code, "CHARACTER_LIMIT_EXCEEDED");
       assert.equal(error.current, 6);
@@ -301,37 +349,118 @@ test("CharacterStore normal creation rejects the seventh effective character", a
 
 test("CharacterStore soft deleted characters do not count against normal creation limit", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
+  let firstCharacterId = null;
   for (let index = 1; index <= DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT; index += 1) {
-    await store.createCharacter(createInput(`chr_${index}`));
+    const created = await store.createCharacter(createInput());
+    firstCharacterId ??= created.characterId;
   }
-  await store.softDeleteCharacter("chr_1");
+  await store.softDeleteCharacter(firstCharacterId);
 
   assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 5);
-  const created = await store.createCharacter(createInput("chr_7"));
-  assert.equal(created.characterId, "chr_7");
+  const created = await store.createCharacter(createInput());
+  assert.match(created.characterId, /^chr_[0-9a-hjkmnp-tv-z]+$/);
   assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 6);
 });
 
 test("CharacterStore admin creation bypasses normal limit through a separate method", async () => {
   const pool = new MemoryCharacterPool();
-  const store = new CharacterStore(pool);
+  const store = createStore(pool);
 
   for (let index = 1; index <= DEFAULT_MAX_EFFECTIVE_CHARACTERS_PER_ACCOUNT; index += 1) {
-    await store.createCharacter(createInput(`chr_${index}`));
+    await store.createCharacter(createInput());
   }
 
   const beforeQueryCount = pool.queries.length;
   const gmCreated = await store.createCharacterForAdmin(
-    createInput("chr_gm_7", "player-001", { name: "GmCreated" })
+    createInput("player-001", { name: "GmCreated" })
   );
   const bypassQueries = pool.queries.slice(beforeQueryCount);
 
-  assert.equal(gmCreated.characterId, "chr_gm_7");
+  assert.match(gmCreated.characterId, /^chr_[0-9a-hjkmnp-tv-z]+$/);
   assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 7);
   assert.equal(
     bypassQueries.some((query) => query.sql.startsWith("SELECT COUNT(*) AS total")),
     false
   );
+});
+
+test("CharacterStore admin creation also ignores caller supplied characterId", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool, {
+    characterIdGenerator: () => "chr_admngenerated"
+  });
+
+  const created = await store.createCharacterForAdmin(
+    createInput("player-001", {
+      characterId: "chr_admin_supplied",
+      name: "GmCreated"
+    })
+  );
+
+  assert.equal(created.characterId, "chr_admngenerated");
+  assert.equal(await store.getByCharacterId("chr_admin_supplied"), null);
+});
+
+test("CharacterStore reports and logs character ID generation failures", async () => {
+  const pool = new MemoryCharacterPool();
+  const logs = [];
+  const generatorError = new Error("lease inactive");
+  generatorError.code = "WORKER_LEASE_INACTIVE";
+  const store = createStore(pool, {
+    characterIdGenerator: () => {
+      throw generatorError;
+    },
+    logger: (level, message, extra) => {
+      logs.push({ level, message, extra });
+    }
+  });
+
+  await assert.rejects(
+    () => store.createCharacter(createInput()),
+    (error) => {
+      assert.equal(error.code, "CHARACTER_ID_GENERATION_FAILED");
+      assert.equal(error.generatorErrorCode, "WORKER_LEASE_INACTIVE");
+      assert.equal(error.accountPlayerId, "player-001");
+      assert.equal(error.cause, generatorError);
+      return true;
+    }
+  );
+  assert.deepEqual(logs, [
+    {
+      level: "error",
+      message: "character.id_generation_failed",
+      extra: {
+        errorCode: "CHARACTER_ID_GENERATION_FAILED",
+        generatorErrorCode: "WORKER_LEASE_INACTIVE",
+        accountPlayerId: "player-001",
+        message: "lease inactive"
+      }
+    }
+  ]);
+  assert.equal(pool.rows.length, 0);
+});
+
+test("CharacterStore rejects invalid generated character ID format", async () => {
+  const pool = new MemoryCharacterPool();
+  const logs = [];
+  const store = createStore(pool, {
+    characterIdGenerator: () => "player_supplied_id",
+    logger: (level, message, extra) => {
+      logs.push({ level, message, extra });
+    }
+  });
+
+  await assert.rejects(
+    () => store.createCharacter(createInput()),
+    (error) => {
+      assert.equal(error.code, "CHARACTER_ID_GENERATION_FAILED");
+      assert.equal(error.generatorErrorCode, "INVALID_CHARACTER_ID_FORMAT");
+      return true;
+    }
+  );
+  assert.equal(logs[0].extra.errorCode, "CHARACTER_ID_GENERATION_FAILED");
+  assert.equal(logs[0].extra.generatorErrorCode, "INVALID_CHARACTER_ID_FORMAT");
+  assert.equal(pool.rows.length, 0);
 });

@@ -39,6 +39,15 @@ test("prefixed decode", () => {
   assert.equal(decoded.originId, 2);
 });
 
+test("character prefixed decode", () => {
+  const id = composeGlobalId({ timeMs: 2n, originId: 3n, workerId: 4n, sequence: 5n });
+  const encoded = encodeGlobalId("chr", id);
+  const decoded = decodeGlobalIdInput(encoded);
+  assert.equal(decoded.normalizedId, encoded);
+  assert.equal(decoded.idKind, "character");
+  assert.equal(decoded.prefix, "chr");
+});
+
 test("numeric decode is treated as item uid", () => {
   const id = composeGlobalId({ timeMs: 1n, originId: 2n, workerId: 3n, sequence: 4n });
   const decoded = decodeGlobalIdInput(id.toString());
