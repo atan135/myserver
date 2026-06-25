@@ -15,6 +15,13 @@ pub struct ProxyAuthService {
     ticket_secret: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedIdentity {
+    pub account_player_id: String,
+    pub character_id: String,
+    pub world_id: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TicketPayload {
     #[serde(rename = "playerId")]
@@ -40,14 +47,18 @@ impl ProxyAuthService {
         })
     }
 
-    pub async fn authenticate_ticket(&self, ticket: &str) -> Result<String, &'static str> {
+    pub async fn authenticate_ticket(
+        &self,
+        ticket: &str,
+    ) -> Result<AuthenticatedIdentity, &'static str> {
         let ticket_payload = verify_ticket(&self.ticket_secret, ticket)?;
-        let player_id = ticket_payload.player_id;
-        let _character_id = ticket_payload.character_id;
+        let account_player_id = ticket_payload.player_id;
+        let character_id = ticket_payload.character_id;
+        let world_id = ticket_payload.world_id;
         let ticket_key = format!("{}ticket:{}", self.redis_key_prefix, hash_ticket(ticket));
         let ticket_version_key = format!(
             "{}player-ticket-version:{}",
-            self.redis_key_prefix, player_id
+            self.redis_key_prefix, account_player_id
         );
         let mut conn = self
             .redis_client
@@ -59,20 +70,42 @@ impl ProxyAuthService {
             .await
             .map_err(|_| "AUTH_BACKEND_UNAVAILABLE")?;
 
-        if ticket_owner.as_deref() != Some(player_id.as_str()) {
-            return Err("TICKET_NOT_FOUND");
-        }
+        validate_ticket_owner(ticket_owner.as_deref(), &account_player_id)?;
 
         let current_ticket_version: Option<u64> = conn
             .get(ticket_version_key)
             .await
             .map_err(|_| "AUTH_BACKEND_UNAVAILABLE")?;
-        if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
-            return Err("TICKET_REVOKED");
-        }
+        validate_ticket_version(ticket_payload.ver, current_ticket_version)?;
 
-        Ok(player_id)
+        Ok(AuthenticatedIdentity {
+            account_player_id,
+            character_id,
+            world_id,
+        })
     }
+}
+
+fn validate_ticket_owner(
+    ticket_owner: Option<&str>,
+    expected_account_player_id: &str,
+) -> Result<(), &'static str> {
+    match ticket_owner {
+        Some(owner) if owner == expected_account_player_id => Ok(()),
+        Some(_) => Err("ACCOUNT_PLAYER_ID_MISMATCH"),
+        None => Err("TICKET_NOT_FOUND"),
+    }
+}
+
+fn validate_ticket_version(
+    ticket_version: Option<u64>,
+    current_ticket_version: Option<u64>,
+) -> Result<(), &'static str> {
+    if ticket_version.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+        return Err("TICKET_REVOKED");
+    }
+
+    Ok(())
 }
 
 fn hash_ticket(ticket: &str) -> String {
@@ -116,7 +149,21 @@ fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'static s
         return Err("MISSING_CHARACTER_ID");
     }
 
+    if !is_valid_character_id(&payload.character_id) {
+        return Err("INVALID_CHARACTER_ID");
+    }
+
     Ok(payload)
+}
+
+fn is_valid_character_id(character_id: &str) -> bool {
+    character_id
+        .strip_prefix("chr_")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_crockford_base32_char))
+}
+
+fn is_crockford_base32_char(value: char) -> bool {
+    matches!(value, '0'..='9' | 'a'..='h' | 'j'..='k' | 'm'..='n' | 'p'..='t' | 'v'..='z')
 }
 
 #[cfg(test)]
@@ -167,6 +214,107 @@ mod tests {
         assert_eq!(
             verify_ticket("test-secret", &ticket).unwrap_err(),
             "MISSING_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn verify_ticket_rejects_invalid_character_id() {
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": "character-1",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            verify_ticket("test-secret", &ticket).unwrap_err(),
+            "INVALID_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn verify_ticket_rejects_character_id_with_outer_whitespace() {
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": " chr_0000000000001 ",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            verify_ticket("test-secret", &ticket).unwrap_err(),
+            "INVALID_CHARACTER_ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_ticket_rejects_missing_character_id_before_redis_lookup() {
+        let auth_service = ProxyAuthService::new("redis://127.0.0.1:1", "", "test-secret")
+            .expect("test redis url should parse");
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            auth_service.authenticate_ticket(&ticket).await.unwrap_err(),
+            "MISSING_CHARACTER_ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_ticket_rejects_invalid_character_id_before_redis_lookup() {
+        let auth_service = ProxyAuthService::new("redis://127.0.0.1:1", "", "test-secret")
+            .expect("test redis url should parse");
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": "invalid-character",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            auth_service.authenticate_ticket(&ticket).await.unwrap_err(),
+            "INVALID_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn validate_ticket_owner_distinguishes_account_mismatch() {
+        assert_eq!(
+            validate_ticket_owner(Some("player-001"), "player-001"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_ticket_owner(Some("player-002"), "player-001").unwrap_err(),
+            "ACCOUNT_PLAYER_ID_MISMATCH"
+        );
+        assert_eq!(
+            validate_ticket_owner(None, "player-001").unwrap_err(),
+            "TICKET_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn validate_ticket_version_keeps_account_level_revocation() {
+        assert_eq!(validate_ticket_version(Some(2), Some(2)), Ok(()));
+        assert_eq!(validate_ticket_version(None, None), Ok(()));
+        assert_eq!(
+            validate_ticket_version(Some(1), Some(2)).unwrap_err(),
+            "TICKET_REVOKED"
         );
     }
 }

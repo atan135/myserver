@@ -10,7 +10,7 @@ use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-use crate::auth::ProxyAuthService;
+use crate::auth::{AuthenticatedIdentity, ProxyAuthService};
 use crate::blocklist::{BlocklistDecision, RedisBlocklistChecker};
 use crate::config::Config;
 use crate::connection_limits::{ConnectionLimiter, PlayerConnectionTracker};
@@ -43,7 +43,18 @@ pub type SharedMaintenanceFlag = Arc<RwLock<bool>>;
 #[derive(Default)]
 struct DeferredAuthState {
     auth_req_packet: Option<Vec<u8>>,
-    player_id: Option<String>,
+    account_player_id: Option<String>,
+    character_id: Option<String>,
+    world_id: Option<u64>,
+}
+
+impl DeferredAuthState {
+    fn clear(&mut self) {
+        self.auth_req_packet = None;
+        self.account_player_id = None;
+        self.character_id = None;
+        self.world_id = None;
+    }
 }
 
 struct ActiveConnectionGuard {
@@ -415,7 +426,7 @@ async fn run_upstream_discovery(
             async move {
                 refresh_routes_from_discovery_snapshot(snapshot, &route_store).await;
             }
-        }
+        },
     );
 
     loop {
@@ -439,7 +450,12 @@ async fn refresh_routes_from_discovery_snapshot(
 ) -> usize {
     if let Some(error) = snapshot.error {
         route_store.sync_discovered_routes(Vec::new()).await;
-        record_discovery_metric(&snapshot.service_name, "proxy-local", "registry", "registry_error");
+        record_discovery_metric(
+            &snapshot.service_name,
+            "proxy-local",
+            "registry",
+            "registry_error",
+        );
         tracing::warn!(
             service = %snapshot.service_name,
             endpoint = "proxy-local",
@@ -461,7 +477,11 @@ async fn refresh_routes_from_discovery_snapshot(
         &snapshot.service_name,
         "proxy-local",
         "registry",
-        if endpoint_count == 0 { "endpoint_missing" } else { "discovered" },
+        if endpoint_count == 0 {
+            "endpoint_missing"
+        } else {
+            "discovered"
+        },
     );
     tracing::info!(
         service = %snapshot.service_name,
@@ -638,7 +658,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 session_id = session.id,
                 client_addr = %client_addr,
                 peer = %client_addr,
-                player_id = session.player_id.as_deref().or(deferred_auth.player_id.as_deref()).unwrap_or_default(),
+                account_player_id = session.account_player_id.as_deref().or(deferred_auth.account_player_id.as_deref()).unwrap_or_default(),
+                character_id = session.character_id.as_deref().or(deferred_auth.character_id.as_deref()).unwrap_or_default(),
                 msg_type = packet.header.msg_type,
                 window_ms = msg_rate_config.window.as_millis() as u64,
                 max = msg_rate_config.max,
@@ -734,7 +755,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 let route = match select_route_for_packet(
                     &route_store,
                     &packet,
-                    deferred_auth.player_id.as_deref(),
+                    deferred_auth.account_player_id.as_deref(),
                 )
                 .await
                 {
@@ -758,16 +779,14 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 METRICS.record_latency(connect_started_at.elapsed().as_millis() as u64);
 
                 session.upstream_server_id = Some(route.server_id.clone());
-                if let Some(player_id) = deferred_auth.player_id.clone() {
-                    session.player_id = Some(player_id);
-                }
+                copy_deferred_identity_to_session(&mut session, &deferred_auth);
 
                 if let Some(auth_packet) = deferred_auth.auth_req_packet.as_deref() {
                     session.state = ProxySessionState::ReplayingAuth;
                     replay_auth_to_upstream(
                         &mut upstream,
                         auth_packet,
-                        deferred_auth.player_id.as_deref(),
+                        deferred_auth.account_player_id.as_deref(),
                     )
                     .await?;
                 }
@@ -779,7 +798,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     client_addr = %client_addr,
                     upstream_server_id = %route.server_id,
                     upstream_local_socket_name = %route.local_socket_name,
-                    player_id = session.player_id.as_deref().unwrap_or_default(),
+                    account_player_id = session.account_player_id.as_deref().unwrap_or_default(),
+                    character_id = session.character_id.as_deref().unwrap_or_default(),
                     "proxy upstream bound"
                 );
 
@@ -823,7 +843,8 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                         msg_rate_config,
                         session.id,
                         client_addr,
-                        session.player_id.clone().unwrap_or_default(),
+                        session.account_player_id.clone().unwrap_or_default(),
+                        session.character_id.clone().unwrap_or_default(),
                     )
                     .await
                 };
@@ -834,6 +855,9 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                     Ok((from_client, from_upstream)) => {
                         info!(
                             session_id = session.id,
+                            account_player_id =
+                                session.account_player_id.as_deref().unwrap_or_default(),
+                            character_id = session.character_id.as_deref().unwrap_or_default(),
                             room_id = session.room_id.as_deref().unwrap_or_default(),
                             bytes_from_client = from_client,
                             bytes_from_upstream = from_upstream,
@@ -860,12 +884,62 @@ fn preauth_decision(session: &ProxySession, packet: &Packet) -> PreauthDecision 
 }
 
 fn is_authenticated_for_upstream(session: &ProxySession) -> bool {
-    session.state == ProxySessionState::Authenticated && session.player_id.is_some()
+    session.state == ProxySessionState::Authenticated
+        && session.account_player_id.is_some()
+        && session.character_id.is_some()
 }
 
 fn restore_authenticated_after_local_routing_error(session: &mut ProxySession) {
-    if session.player_id.is_some() && session.upstream_server_id.is_none() {
+    if session.account_player_id.is_some()
+        && session.character_id.is_some()
+        && session.upstream_server_id.is_none()
+    {
         session.state = ProxySessionState::Authenticated;
+    }
+}
+
+fn clear_authenticated_identity(
+    deferred_auth: &mut DeferredAuthState,
+    session: &mut ProxySession,
+    player_connection_tracker: &mut PlayerConnectionTracker,
+) {
+    deferred_auth.clear();
+    session.account_player_id = None;
+    session.character_id = None;
+    session.player_id = None;
+    player_connection_tracker.clear();
+}
+
+fn apply_authenticated_identity(
+    deferred_auth: &mut DeferredAuthState,
+    session: &mut ProxySession,
+    identity: AuthenticatedIdentity,
+    auth_req_packet: Vec<u8>,
+) {
+    let account_player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
+
+    deferred_auth.auth_req_packet = Some(auth_req_packet);
+    deferred_auth.account_player_id = Some(account_player_id.clone());
+    deferred_auth.character_id = Some(character_id.clone());
+    deferred_auth.world_id = world_id;
+
+    session.account_player_id = Some(account_player_id.clone());
+    session.character_id = Some(character_id);
+    session.player_id = Some(account_player_id);
+}
+
+fn copy_deferred_identity_to_session(
+    session: &mut ProxySession,
+    deferred_auth: &DeferredAuthState,
+) {
+    if let Some(account_player_id) = deferred_auth.account_player_id.clone() {
+        session.account_player_id = Some(account_player_id.clone());
+        session.player_id = Some(account_player_id);
+    }
+    if let Some(character_id) = deferred_auth.character_id.clone() {
+        session.character_id = Some(character_id);
     }
 }
 
@@ -885,10 +959,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
     let request = match packet.decode_body::<AuthReq>("INVALID_AUTH_BODY") {
         Ok(request) => request,
         Err(error_code) => {
-            deferred_auth.auth_req_packet = None;
-            deferred_auth.player_id = None;
-            session.player_id = None;
-            player_connection_tracker.clear();
+            clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
             write_proxy_error(
                 client_stream,
                 packet.header.seq,
@@ -907,10 +978,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
         match global_maintenance.is_enabled().await {
             Ok(enabled) => enabled,
             Err(error_code) => {
-                deferred_auth.auth_req_packet = None;
-                deferred_auth.player_id = None;
-                session.player_id = None;
-                player_connection_tracker.clear();
+                clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
                 write_message(
                     client_stream,
                     MessageType::AuthRes,
@@ -927,10 +995,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
         }
     };
     if should_reject_new_auth(local_enabled, global_enabled) {
-        deferred_auth.auth_req_packet = None;
-        deferred_auth.player_id = None;
-        session.player_id = None;
-        player_connection_tracker.clear();
+        clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
         write_message(
             client_stream,
             MessageType::AuthRes,
@@ -946,18 +1011,20 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
     }
 
     match auth_service.authenticate_ticket(&request.ticket).await {
-        Ok(player_id) => {
-            match blocklist_checker.check_player(&player_id).await {
+        Ok(identity) => {
+            let account_player_id = identity.account_player_id.clone();
+            let character_id = identity.character_id.clone();
+            let world_id = identity.world_id;
+            match blocklist_checker.check_player(&account_player_id).await {
                 Ok(BlocklistDecision::Allowed) => {}
                 Ok(BlocklistDecision::Blocked(error_code)) => {
-                    deferred_auth.auth_req_packet = None;
-                    deferred_auth.player_id = None;
-                    session.player_id = None;
-                    player_connection_tracker.clear();
+                    clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
                     warn!(
                         session_id = session.id,
                         client_ip = %client_ip,
-                        player_id = %player_id,
+                        account_player_id = %account_player_id,
+                        character_id = %character_id,
+                        world_id = ?world_id,
                         error_code,
                         "proxy auth rejected by redis player blocklist"
                     );
@@ -975,14 +1042,13 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                     return Ok(false);
                 }
                 Err(error_code) => {
-                    deferred_auth.auth_req_packet = None;
-                    deferred_auth.player_id = None;
-                    session.player_id = None;
-                    player_connection_tracker.clear();
+                    clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
                     warn!(
                         session_id = session.id,
                         client_ip = %client_ip,
-                        player_id = %player_id,
+                        account_player_id = %account_player_id,
+                        character_id = %character_id,
+                        world_id = ?world_id,
                         error_code,
                         "proxy auth rejected because redis blocklist is unavailable"
                     );
@@ -1002,17 +1068,16 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             }
 
             if let Err(error) = player_connection_tracker
-                .replace_authenticated_player(connection_limiter, &player_id)
+                .replace_authenticated_player(connection_limiter, &account_player_id)
             {
-                deferred_auth.auth_req_packet = None;
-                deferred_auth.player_id = None;
-                session.player_id = None;
-                player_connection_tracker.clear();
+                clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
                 let error_code = error.code();
                 warn!(
                     session_id = session.id,
                     client_ip = %client_ip,
-                    player_id = %player_id,
+                    account_player_id = %account_player_id,
+                    character_id = %character_id,
+                    world_id = ?world_id,
                     error_code,
                     "proxy auth rejected by player connection limit"
                 );
@@ -1030,16 +1095,22 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 return Ok(false);
             }
 
-            deferred_auth.auth_req_packet = Some(packet.to_bytes());
-            deferred_auth.player_id = Some(player_id.clone());
-            session.player_id = Some(player_id.clone());
+            apply_authenticated_identity(deferred_auth, session, identity, packet.to_bytes());
+            tracing::info!(
+                session_id = session.id,
+                client_ip = %client_ip,
+                account_player_id = %account_player_id,
+                character_id = %character_id,
+                world_id = ?world_id,
+                "proxy auth accepted"
+            );
             write_message(
                 client_stream,
                 MessageType::AuthRes,
                 packet.header.seq,
                 &AuthRes {
                     ok: true,
-                    player_id,
+                    player_id: account_player_id,
                     error_code: String::new(),
                 },
             )
@@ -1047,10 +1118,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             Ok(true)
         }
         Err(error_code) => {
-            deferred_auth.auth_req_packet = None;
-            deferred_auth.player_id = None;
-            session.player_id = None;
-            player_connection_tracker.clear();
+            clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
             write_message(
                 client_stream,
                 MessageType::AuthRes,
@@ -1070,7 +1138,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
 async fn replay_auth_to_upstream<U: AsyncRead + AsyncWrite + Unpin>(
     upstream: &mut U,
     auth_packet: &[u8],
-    expected_player_id: Option<&str>,
+    expected_account_player_id: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     upstream.write_all(auth_packet).await?;
     let auth_response = read_packet(upstream, MAX_PROXY_BODY_LEN)
@@ -1094,10 +1162,10 @@ async fn replay_auth_to_upstream<U: AsyncRead + AsyncWrite + Unpin>(
         ))));
     }
 
-    if let Some(expected_player_id) = expected_player_id {
-        if decoded.player_id != expected_player_id {
+    if let Some(expected_account_player_id) = expected_account_player_id {
+        if decoded.player_id != expected_account_player_id {
             return Err(Box::new(std::io::Error::other(
-                "upstream auth returned mismatched player id",
+                "upstream auth returned mismatched account player id",
             )));
         }
     }
@@ -1108,7 +1176,7 @@ async fn replay_auth_to_upstream<U: AsyncRead + AsyncWrite + Unpin>(
 async fn select_route_for_packet(
     route_store: &ProxyRouteStore,
     packet: &Packet,
-    authenticated_player_id: Option<&str>,
+    authenticated_account_player_id: Option<&str>,
 ) -> Result<UpstreamRoute, &'static str> {
     let route = match packet.message_type() {
         Some(MessageType::RoomJoinReq) => {
@@ -1123,8 +1191,10 @@ async fn select_route_for_packet(
         }
         Some(MessageType::RoomReconnectReq) => {
             let request = packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")?;
-            if let Some(authenticated_player_id) = authenticated_player_id {
-                if !request.player_id.is_empty() && request.player_id != authenticated_player_id {
+            if let Some(authenticated_account_player_id) = authenticated_account_player_id {
+                if !request.player_id.is_empty()
+                    && request.player_id != authenticated_account_player_id
+                {
                     return Err("PLAYER_ID_MISMATCH");
                 }
             }
@@ -1156,7 +1226,7 @@ async fn update_routing_metadata(
                         .bind_room_owner(
                             &join_response.room_id,
                             &route.server_id,
-                            deferred_auth.player_id.as_deref(),
+                            deferred_auth.account_player_id.as_deref(),
                             false,
                         )
                         .await;
@@ -1202,7 +1272,7 @@ async fn update_routing_metadata(
                         .bind_room_owner(
                             &observer_response.room_id,
                             &route.server_id,
-                            deferred_auth.player_id.as_deref(),
+                            deferred_auth.account_player_id.as_deref(),
                             true,
                         )
                         .await;
@@ -1230,7 +1300,8 @@ async fn log_rollout_redirect_reconnect(
 
     info!(
         session_id = session.id,
-        player_id = player_id,
+        account_player_id = %player_id,
+        character_id = session.character_id.as_deref().unwrap_or_default(),
         room_id = room_id,
         upstream_server_id = %route.server_id,
         rollout_epoch = %rollout_session.rollout_epoch,
@@ -1263,7 +1334,8 @@ async fn proxy_bound_streams<S>(
     msg_rate_config: MsgRateLimitConfig,
     session_id: u64,
     client_addr: std::net::SocketAddr,
-    player_id: String,
+    account_player_id: String,
+    character_id: String,
 ) -> Result<(u64, u64), std::io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1278,7 +1350,8 @@ where
     let client_writer_for_rate_limit = Arc::clone(&client_writer);
     let client_bytes = Arc::clone(&bytes_from_client);
     let mut msg_rate_limiter = msg_rate_limiter;
-    let player_id_for_rate_limit = player_id.clone();
+    let account_player_id_for_rate_limit = account_player_id.clone();
+    let character_id_for_rate_limit = character_id.clone();
     let mut client_to_upstream = tokio::spawn(async move {
         loop {
             let Some(packet) = read_packet(&mut client_reader, MAX_PROXY_BODY_LEN).await? else {
@@ -1295,7 +1368,8 @@ where
                     session_id,
                     client_addr = %client_addr,
                     peer = %client_addr,
-                    player_id = %player_id_for_rate_limit,
+                    account_player_id = %account_player_id_for_rate_limit,
+                    character_id = %character_id_for_rate_limit,
                     msg_type = packet.header.msg_type,
                     window_ms = msg_rate_config.window.as_millis() as u64,
                     max = msg_rate_config.max,
@@ -1409,11 +1483,13 @@ mod tests {
     use super::{
         MsgRateDecision, MsgRateLimitConfig, MsgRateLimiter, PREAUTH_MESSAGE_NOT_ALLOWED,
         PreauthDecision, discover_proxy_local_routes, preauth_decision,
-        refresh_routes_from_discovery_snapshot, restore_authenticated_after_local_routing_error,
-        select_route_for_packet,
+        refresh_routes_from_discovery_snapshot, replay_auth_to_upstream,
+        restore_authenticated_after_local_routing_error, select_route_for_packet,
     };
     use crate::pb::{RoomJoinReq, RoomReconnectReq};
-    use crate::protocol::{MessageType, Packet, PacketHeader};
+    use crate::protocol::{
+        MessageType, Packet, PacketHeader, encode_body, encode_packet, read_packet,
+    };
     use crate::route_store::{
         PlayerRouteRecord, ProxyRouteStore, RoomMigrationState, RoomRouteRecord,
         UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
@@ -1422,6 +1498,7 @@ mod tests {
     use prost::Message;
     use service_registry::{DiscoverySnapshot, ServiceEndpoint, ServiceInstance};
     use std::time::{Duration, Instant};
+    use tokio::io::{AsyncWriteExt, duplex};
 
     fn packet(msg_type: u16) -> Packet {
         Packet::new(
@@ -1447,6 +1524,13 @@ mod tests {
             },
             body,
         )
+    }
+
+    fn authenticate_session(session: &mut ProxySession, account_player_id: &str) {
+        session.state = ProxySessionState::Authenticated;
+        session.account_player_id = Some(account_player_id.to_string());
+        session.character_id = Some("chr_0000000000001".to_string());
+        session.player_id = Some(account_player_id.to_string());
     }
 
     fn upstream_route(server_id: &str, operation_state: UpstreamOperationState) -> UpstreamRoute {
@@ -1479,6 +1563,16 @@ mod tests {
             7000,
         )
         .with_endpoints(vec![endpoint])
+    }
+
+    fn auth_req_packet(ticket: &str) -> Vec<u8> {
+        encode_packet(
+            MessageType::AuthReq,
+            7,
+            &encode_body(&crate::pb::AuthReq {
+                ticket: ticket.to_string(),
+            }),
+        )
     }
 
     fn room_route(
@@ -1528,6 +1622,8 @@ mod tests {
     fn auth_failure_keeps_business_messages_in_preauth_reject_state() {
         let mut session = ProxySession::new(1);
         session.state = ProxySessionState::Connected;
+        session.account_player_id = None;
+        session.character_id = None;
         session.player_id = None;
         let packet = packet(MessageType::RoomReconnectReq as u16);
 
@@ -1540,13 +1636,26 @@ mod tests {
     #[test]
     fn authenticated_session_allows_business_message_to_reach_routing() {
         let mut session = ProxySession::new(1);
-        session.state = ProxySessionState::Authenticated;
-        session.player_id = Some("player-1".to_string());
+        authenticate_session(&mut session, "player-1");
         let packet = packet(MessageType::RoomJoinReq as u16);
 
         assert_eq!(
             preauth_decision(&session, &packet),
             PreauthDecision::AllowUpstreamSelection
+        );
+    }
+
+    #[test]
+    fn authenticated_session_requires_character_identity() {
+        let mut session = ProxySession::new(1);
+        session.state = ProxySessionState::Authenticated;
+        session.player_id = Some("player-1".to_string());
+        session.account_player_id = Some("player-1".to_string());
+        let packet = packet(MessageType::RoomJoinReq as u16);
+
+        assert_eq!(
+            preauth_decision(&session, &packet),
+            PreauthDecision::Reject(PREAUTH_MESSAGE_NOT_ALLOWED)
         );
     }
 
@@ -1568,11 +1677,79 @@ mod tests {
     fn routing_error_keeps_authenticated_session_authenticated() {
         let mut session = ProxySession::new(1);
         session.state = ProxySessionState::SelectingUpstream;
+        session.account_player_id = Some("player-1".to_string());
+        session.character_id = Some("chr_0000000000001".to_string());
         session.player_id = Some("player-1".to_string());
 
         restore_authenticated_after_local_routing_error(&mut session);
 
         assert_eq!(session.state, ProxySessionState::Authenticated);
+    }
+
+    #[tokio::test]
+    async fn replay_auth_to_upstream_preserves_original_auth_req_packet() {
+        let auth_packet = auth_req_packet("ticket-with-character-id");
+        let expected_auth_packet = auth_packet.clone();
+        let (mut proxy_side, mut upstream_side) = duplex(4096);
+
+        let upstream_task = tokio::spawn(async move {
+            let replayed_packet = read_packet(&mut upstream_side, 1024 * 1024)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(replayed_packet.to_bytes(), expected_auth_packet);
+
+            let response = crate::pb::AuthRes {
+                ok: true,
+                player_id: "player-1".to_string(),
+                error_code: String::new(),
+            };
+            upstream_side
+                .write_all(&encode_packet(
+                    MessageType::AuthRes,
+                    replayed_packet.header.seq,
+                    &encode_body(&response),
+                ))
+                .await
+                .unwrap();
+        });
+
+        replay_auth_to_upstream(&mut proxy_side, &auth_packet, Some("player-1"))
+            .await
+            .unwrap();
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn replay_auth_to_upstream_rejects_account_player_id_mismatch() {
+        let auth_packet = auth_req_packet("ticket-with-character-id");
+        let (mut proxy_side, mut upstream_side) = duplex(4096);
+
+        let upstream_task = tokio::spawn(async move {
+            let replayed_packet = read_packet(&mut upstream_side, 1024 * 1024)
+                .await
+                .unwrap()
+                .unwrap();
+            let response = crate::pb::AuthRes {
+                ok: true,
+                player_id: "player-2".to_string(),
+                error_code: String::new(),
+            };
+            upstream_side
+                .write_all(&encode_packet(
+                    MessageType::AuthRes,
+                    replayed_packet.header.seq,
+                    &encode_body(&response),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let error = replay_auth_to_upstream(&mut proxy_side, &auth_packet, Some("player-1"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("mismatched account player id"));
+        upstream_task.await.unwrap();
     }
 
     #[test]
@@ -1729,7 +1906,10 @@ mod tests {
     async fn discovery_snapshot_failure_marks_existing_routes_unavailable() {
         let store = ProxyRouteStore::default();
         store
-            .set_static_routes(vec![upstream_route("game-001", UpstreamOperationState::Active)])
+            .set_static_routes(vec![upstream_route(
+                "game-001",
+                UpstreamOperationState::Active,
+            )])
             .await;
 
         let endpoint_count = refresh_routes_from_discovery_snapshot(
@@ -1750,7 +1930,10 @@ mod tests {
     async fn discovery_snapshot_empty_list_marks_existing_routes_unavailable() {
         let store = ProxyRouteStore::default();
         store
-            .set_static_routes(vec![upstream_route("game-001", UpstreamOperationState::Active)])
+            .set_static_routes(vec![upstream_route(
+                "game-001",
+                UpstreamOperationState::Active,
+            )])
             .await;
 
         let endpoint_count = refresh_routes_from_discovery_snapshot(
