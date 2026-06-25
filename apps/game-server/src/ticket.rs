@@ -60,7 +60,43 @@ pub fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'stat
         return Err("MISSING_CHARACTER_ID");
     }
 
+    if !is_valid_character_id(&payload.character_id) {
+        return Err("INVALID_CHARACTER_ID");
+    }
+
     Ok(payload)
+}
+
+pub fn validate_ticket_owner(
+    ticket_owner: Option<&str>,
+    expected_account_player_id: &str,
+) -> Result<(), &'static str> {
+    match ticket_owner {
+        Some(owner) if owner == expected_account_player_id => Ok(()),
+        Some(_) => Err("ACCOUNT_PLAYER_ID_MISMATCH"),
+        None => Err("TICKET_NOT_FOUND"),
+    }
+}
+
+pub fn validate_ticket_version(
+    ticket_version: Option<u64>,
+    current_ticket_version: Option<u64>,
+) -> Result<(), &'static str> {
+    if ticket_version.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+        return Err("TICKET_REVOKED");
+    }
+
+    Ok(())
+}
+
+fn is_valid_character_id(character_id: &str) -> bool {
+    character_id
+        .strip_prefix("chr_")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(is_crockford_base32_char))
+}
+
+fn is_crockford_base32_char(value: char) -> bool {
+    matches!(value, '0'..='9' | 'a'..='h' | 'j'..='k' | 'm'..='n' | 'p'..='t' | 'v'..='z')
 }
 
 #[cfg(test)]
@@ -111,6 +147,68 @@ mod tests {
         assert_eq!(
             verify_ticket("test-secret", &ticket).unwrap_err(),
             "MISSING_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn verify_ticket_rejects_invalid_character_id() {
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": "character-1",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            verify_ticket("test-secret", &ticket).unwrap_err(),
+            "INVALID_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn verify_ticket_rejects_character_id_with_outer_whitespace() {
+        let ticket = create_ticket(
+            json!({
+                "playerId": "player-001",
+                "characterId": " chr_0000000000001 ",
+                "ver": 1,
+                "exp": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
+            }),
+            "test-secret",
+        );
+
+        assert_eq!(
+            verify_ticket("test-secret", &ticket).unwrap_err(),
+            "INVALID_CHARACTER_ID"
+        );
+    }
+
+    #[test]
+    fn validate_ticket_owner_distinguishes_account_mismatch() {
+        assert_eq!(
+            validate_ticket_owner(Some("player-001"), "player-001"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_ticket_owner(Some("player-002"), "player-001").unwrap_err(),
+            "ACCOUNT_PLAYER_ID_MISMATCH"
+        );
+        assert_eq!(
+            validate_ticket_owner(None, "player-001").unwrap_err(),
+            "TICKET_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn validate_ticket_version_keeps_account_level_revocation() {
+        assert_eq!(validate_ticket_version(Some(2), Some(2)), Ok(()));
+        assert_eq!(validate_ticket_version(None, None), Ok(()));
+        assert_eq!(
+            validate_ticket_version(Some(1), Some(2)).unwrap_err(),
+            "TICKET_REVOKED"
         );
     }
 }

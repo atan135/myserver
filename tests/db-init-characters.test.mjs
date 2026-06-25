@@ -20,6 +20,12 @@ const gameSection = sectionBetween("\\connect myserver_game", "\\connect myserve
 const charactersTableMatch = gameSection.match(
   /CREATE TABLE IF NOT EXISTS characters \([\s\S]*?\n\);/
 );
+const connectionAuditTableMatch = gameSection.match(
+  /CREATE TABLE IF NOT EXISTS game_connection_audit_logs \([\s\S]*?\n\);/
+);
+const roomEventTableMatch = gameSection.match(
+  /CREATE TABLE IF NOT EXISTS room_event_logs \([\s\S]*?\n\);/
+);
 
 test("db init creates characters table in the game database section", () => {
   assert.notEqual(charactersTableMatch, null, "characters table should be created in myserver_game");
@@ -87,6 +93,38 @@ test("characters table has lookup indexes required by P0", () => {
     assert.match(
       gameSection,
       new RegExp(`CREATE INDEX IF NOT EXISTS ${indexName}\\s+ON characters \\(${columnName}\\);`)
+    );
+  }
+});
+
+test("game audit tables directly include account and character identity fields", () => {
+  assert.notEqual(
+    connectionAuditTableMatch,
+    null,
+    "game_connection_audit_logs table should be created in myserver_game"
+  );
+  assert.notEqual(roomEventTableMatch, null, "room_event_logs table should be created in myserver_game");
+
+  for (const tableSql of [connectionAuditTableMatch[0], roomEventTableMatch[0]]) {
+    assert.match(tableSql, /account_player_id varchar\(64\) NULL/);
+    assert.match(tableSql, /character_id varchar\(64\) NULL/);
+  }
+});
+
+test("game audit tables have account and character lookup indexes", () => {
+  for (const [indexName, tableName, columnName] of [
+    [
+      "idx_game_connection_audit_logs_account_player_id",
+      "game_connection_audit_logs",
+      "account_player_id"
+    ],
+    ["idx_game_connection_audit_logs_character_id", "game_connection_audit_logs", "character_id"],
+    ["idx_room_event_logs_account_player_id", "room_event_logs", "account_player_id"],
+    ["idx_room_event_logs_character_id", "room_event_logs", "character_id"]
+  ]) {
+    assert.match(
+      gameSection,
+      new RegExp(`CREATE INDEX IF NOT EXISTS ${indexName}\\s+ON ${tableName} \\(${columnName}\\);`)
     );
   }
 });

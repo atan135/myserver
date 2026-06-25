@@ -7,7 +7,7 @@ pub async fn handle_get_room_data(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(_player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(_identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
 

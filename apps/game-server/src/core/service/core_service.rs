@@ -9,7 +9,7 @@ use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
 use crate::protocol::{MessageType, Packet};
 use crate::session::SessionState;
-use crate::ticket::verify_ticket;
+use crate::ticket::{validate_ticket_owner, validate_ticket_version, verify_ticket};
 
 pub async fn handle_auth(
     services: &ServiceContext,
@@ -36,7 +36,7 @@ pub async fn handle_auth(
 
     match verify_ticket(&services.config.ticket_secret, &request.ticket) {
         Ok(ticket_payload) => {
-            let player_id = ticket_payload.player_id;
+            let account_player_id = ticket_payload.player_id;
             let character_id = ticket_payload.character_id;
             let world_id = ticket_payload.world_id;
             let ticket_key = format!(
@@ -46,28 +46,36 @@ pub async fn handle_auth(
             );
             let ticket_version_key = format!(
                 "{}player-ticket-version:{}",
-                services.config.redis_key_prefix, player_id
+                services.config.redis_key_prefix, account_player_id
             );
             let ticket_owner: Option<String> = connection.redis.get(ticket_key).await?;
 
-            if ticket_owner.as_deref() != Some(player_id.as_str()) {
+            if let Err(error_code) =
+                validate_ticket_owner(ticket_owner.as_deref(), &account_player_id)
+            {
                 connection.queue_message(
                     MessageType::AuthRes,
                     packet.header.seq,
                     AuthRes {
                         ok: false,
                         player_id: String::new(),
-                        error_code: "TICKET_NOT_FOUND".to_string(),
+                        error_code: error_code.to_string(),
                     },
                 )?;
                 services
                     .db_store
-                    .append_connection_event(
+                    .append_connection_event_with_identity(
                         connection.session.id,
-                        Some(&player_id),
+                        Some(&account_player_id),
+                        Some(&account_player_id),
+                        Some(&character_id),
                         Some(&connection.peer_addr),
-                        "auth_ticket_not_found",
-                        Some(serde_json::json!({ "seq": packet.header.seq })),
+                        "auth_ticket_owner_rejected",
+                        Some(serde_json::json!({
+                            "seq": packet.header.seq,
+                            "errorCode": error_code,
+                            "worldId": world_id
+                        })),
                     )
                     .await;
                 return Ok(());
@@ -75,32 +83,43 @@ pub async fn handle_auth(
 
             let current_ticket_version: Option<u64> =
                 connection.redis.get(ticket_version_key).await?;
-            if ticket_payload.ver.unwrap_or(1) != current_ticket_version.unwrap_or(1) {
+            if let Err(error_code) =
+                validate_ticket_version(ticket_payload.ver, current_ticket_version)
+            {
                 connection.queue_message(
                     MessageType::AuthRes,
                     packet.header.seq,
                     AuthRes {
                         ok: false,
                         player_id: String::new(),
-                        error_code: "TICKET_REVOKED".to_string(),
+                        error_code: error_code.to_string(),
                     },
                 )?;
                 services
                     .db_store
-                    .append_connection_event(
+                    .append_connection_event_with_identity(
                         connection.session.id,
-                        Some(&player_id),
+                        Some(&account_player_id),
+                        Some(&account_player_id),
+                        Some(&character_id),
                         Some(&connection.peer_addr),
                         "auth_ticket_revoked",
-                        Some(serde_json::json!({ "seq": packet.header.seq })),
+                        Some(serde_json::json!({
+                            "seq": packet.header.seq,
+                            "errorCode": error_code,
+                            "worldId": world_id
+                        })),
                     )
                     .await;
                 return Ok(());
             }
 
             let was_authenticated = connection.session.state == SessionState::Authenticated;
-            connection.session.state = SessionState::Authenticated;
-            connection.session.player_id = Some(player_id.clone());
+            connection.session.set_authenticated_identity(
+                account_player_id.clone(),
+                character_id.clone(),
+                world_id,
+            );
             if !was_authenticated {
                 let online_players =
                     services.online_player_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -109,7 +128,8 @@ pub async fn handle_auth(
 
             info!(
                 session_id = connection.session.id,
-                player_id = %player_id,
+                account_player_id = %account_player_id,
+                player_id = %account_player_id,
                 character_id = %character_id,
                 world_id = ?world_id,
                 "player authenticated"
@@ -120,19 +140,22 @@ pub async fn handle_auth(
                 packet.header.seq,
                 AuthRes {
                     ok: true,
-                    player_id: player_id.clone(),
+                    player_id: account_player_id.clone(),
                     error_code: String::new(),
                 },
             )?;
             services
                 .db_store
-                .append_connection_event(
+                .append_connection_event_with_identity(
                     connection.session.id,
-                    Some(&player_id),
+                    Some(&account_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
                     Some(&connection.peer_addr),
                     "auth_success",
                     Some(serde_json::json!({
                         "seq": packet.header.seq,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
                         "worldId": world_id
                     })),
@@ -151,10 +174,12 @@ pub async fn handle_auth(
                     ),
                     kick_reason: connection.kick_reason.clone(),
                 };
-                if let Some(old_handle) = registry.insert(player_id.clone(), handle) {
+                if let Some(old_handle) = registry.insert(account_player_id.clone(), handle) {
                     if old_handle.session_id != connection.session.id {
                         info!(
-                            player_id = %player_id,
+                            account_player_id = %account_player_id,
+                            player_id = %account_player_id,
+                            character_id = %connection.session.character_id.as_deref().unwrap_or_default(),
                             old_session_id = old_handle.session_id,
                             new_session_id = connection.session.id,
                             "kicking old connection on same server"

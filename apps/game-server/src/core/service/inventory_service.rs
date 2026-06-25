@@ -16,9 +16,12 @@ pub async fn handle_item_equip(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     let request = match packet.decode_body::<ItemEquipReq>("INVALID_ITEM_EQUIP_BODY") {
         Ok(value) => value,
@@ -30,7 +33,10 @@ pub async fn handle_item_equip(
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         item_uid = request.item_uid,
         equip_slot = request.equip_slot,
         "handle_item_equip"
@@ -112,9 +118,12 @@ pub async fn handle_item_use(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     let request = match packet.decode_body::<ItemUseReq>("INVALID_ITEM_USE_BODY") {
         Ok(value) => value,
@@ -126,7 +135,10 @@ pub async fn handle_item_use(
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         item_uid = request.item_uid,
         "handle_item_use"
     );
@@ -192,9 +204,12 @@ pub async fn handle_item_discard(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     let request = match packet.decode_body::<ItemDiscardReq>("INVALID_ITEM_DISCARD_BODY") {
         Ok(value) => value,
@@ -206,7 +221,10 @@ pub async fn handle_item_discard(
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         item_uid = request.item_uid,
         count = request.count,
         "handle_item_discard"
@@ -258,9 +276,12 @@ pub async fn handle_warehouse_access(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     let request = match packet.decode_body::<WarehouseAccessReq>("INVALID_WAREHOUSE_ACCESS_BODY") {
         Ok(value) => value,
@@ -276,7 +297,10 @@ pub async fn handle_warehouse_access(
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         action = request.action,
         item_uid = request.item_uid,
         count = request.count,
@@ -333,9 +357,12 @@ pub async fn handle_item_add(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     let request = match packet.decode_body::<ItemAddReq>("INVALID_ITEM_ADD_BODY") {
         Ok(value) => value,
@@ -347,7 +374,10 @@ pub async fn handle_item_add(
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         item_id = request.item_id,
         count = request.count,
         binded = request.binded,
@@ -430,13 +460,19 @@ pub async fn handle_get_inventory(
     connection: &ConnectionContext,
     packet: &Packet,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(player_id) = connection.ensure_authenticated(packet.header.seq)? else {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
+    let player_id = identity.account_player_id;
+    let character_id = identity.character_id;
+    let world_id = identity.world_id;
 
     info!(
         session_id = connection.session.id,
+        account_player_id = %player_id,
         player_id = %player_id,
+        character_id = %character_id,
+        world_id = ?world_id,
         "handle_get_inventory"
     );
 

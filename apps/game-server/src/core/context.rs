@@ -17,7 +17,7 @@ use crate::core::runtime::RoomManager;
 use crate::db_store::PgAuditStore;
 use crate::protocol::{MessageType, encode_body};
 use crate::server::{PlayerInputAnomalyTracker, PlayerMessageRateLimiter, RuntimeConfig};
-use crate::session::{Session, SessionState};
+use crate::session::{AuthenticatedSessionIdentity, Session, SessionState};
 
 pub type SharedRoomManager = Arc<RoomManager>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
@@ -77,13 +77,25 @@ impl ConnectionContext {
         OutboundChannel::new(self.tx.clone(), self.close_state.clone())
     }
 
-    pub fn ensure_authenticated(&self, seq: u32) -> Result<Option<String>, std::io::Error> {
+    pub fn authenticated_identity(&self) -> Option<AuthenticatedSessionIdentity> {
+        self.session.authenticated_identity()
+    }
+
+    pub fn ensure_authenticated_identity(
+        &self,
+        seq: u32,
+    ) -> Result<Option<AuthenticatedSessionIdentity>, std::io::Error> {
         if self.session.state != SessionState::Authenticated {
             self.queue_error(seq, "NOT_AUTHENTICATED", "authenticate first")?;
             return Ok(None);
         }
 
-        Ok(self.session.player_id.clone())
+        let identity = self.authenticated_identity();
+        if identity.is_none() {
+            self.queue_error(seq, "AUTH_CONTEXT_INCOMPLETE", "auth context incomplete")?;
+        }
+
+        Ok(identity)
     }
 
     pub fn queue_error(

@@ -5,7 +5,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
 use interprocess::local_socket::traits::tokio::Listener as _;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, mpsc};
@@ -760,15 +760,13 @@ where
                         "failed to queue session kick push"
                     );
                 }
-                services
-                    .db_store
-                    .append_connection_event(
-                        connection.session.id,
-                        connection.session.player_id.as_deref(),
-                        Some(&connection.peer_addr),
-                        "session_kicked",
-                        Some(json!({ "reason": kick_reason })),
-                    )
+                append_connection_event_for_session(
+                    &services.db_store,
+                    &connection.session,
+                    &connection.peer_addr,
+                    "session_kicked",
+                    Some(json!({ "reason": kick_reason })),
+                )
                 .await;
                 break;
             }
@@ -784,16 +782,14 @@ where
                     reason = %close_reason,
                     "server requested connection close"
                 );
-                services
-                    .db_store
-                    .append_connection_event(
-                        connection.session.id,
-                        connection.session.player_id.as_deref(),
-                        Some(&connection.peer_addr),
-                        "server_close_requested",
-                        Some(json!({ "reason": close_reason })),
-                    )
-                    .await;
+                append_connection_event_for_session(
+                    &services.db_store,
+                    &connection.session,
+                    &connection.peer_addr,
+                    "server_close_requested",
+                    Some(json!({ "reason": close_reason })),
+                )
+                .await;
                 close_event_appended = true;
                 break;
             }
@@ -807,16 +803,14 @@ where
             Ok(Ok(_)) => {}
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 info!(session_id = connection.session.id, "peer closed connection");
-                services
-                    .db_store
-                    .append_connection_event(
-                        connection.session.id,
-                        connection.session.player_id.as_deref(),
-                        Some(&connection.peer_addr),
-                        "closed",
-                        None,
-                    )
-                    .await;
+                append_connection_event_for_session(
+                    &services.db_store,
+                    &connection.session,
+                    &connection.peer_addr,
+                    "closed",
+                    None,
+                )
+                .await;
                 break;
             }
             Ok(Err(error)) => {
@@ -834,16 +828,14 @@ where
                         "failed to queue heartbeat timeout error"
                     );
                 }
-                services
-                    .db_store
-                    .append_connection_event(
-                        connection.session.id,
-                        connection.session.player_id.as_deref(),
-                        Some(&connection.peer_addr),
-                        "heartbeat_timeout",
-                        None,
-                    )
-                    .await;
+                append_connection_event_for_session(
+                    &services.db_store,
+                    &connection.session,
+                    &connection.peer_addr,
+                    "heartbeat_timeout",
+                    None,
+                )
+                .await;
                 break;
             }
         }
@@ -858,16 +850,14 @@ where
                         "failed to queue invalid header error"
                     );
                 }
-                services
-                    .db_store
-                    .append_connection_event(
-                        connection.session.id,
-                        connection.session.player_id.as_deref(),
-                        Some(&connection.peer_addr),
-                        "invalid_header",
-                        Some(json!({ "errorCode": error_code })),
-                    )
-                    .await;
+                append_connection_event_for_session(
+                    &services.db_store,
+                    &connection.session,
+                    &connection.peer_addr,
+                    "invalid_header",
+                    Some(json!({ "errorCode": error_code })),
+                )
+                .await;
                 break;
             }
         };
@@ -889,20 +879,18 @@ where
                     "failed to discard oversized body"
                 );
             }
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "body_too_large",
-                    Some(json!({
-                        "seq": header.seq,
-                        "bodyLen": header.body_len,
-                        "maxBodyLen": runtime.max_body_len
-                    })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "body_too_large",
+                Some(json!({
+                    "seq": header.seq,
+                    "bodyLen": header.body_len,
+                    "maxBodyLen": runtime.max_body_len
+                })),
+            )
+            .await;
             break;
         }
 
@@ -913,16 +901,14 @@ where
                 error = %error,
                 "connection body read error, will cleanup"
             );
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "body_read_error",
-                    Some(json!({ "seq": header.seq, "error": error.to_string() })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "body_read_error",
+                Some(json!({ "seq": header.seq, "error": error.to_string() })),
+            )
+            .await;
             break;
         }
         let packet = Packet::new(header, body);
@@ -941,21 +927,19 @@ where
                 );
                 break;
             }
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "msg_rate_exceeded",
-                    Some(json!({
-                        "msgType": packet.header.msg_type,
-                        "seq": packet.header.seq,
-                        "windowMs": runtime.msg_rate_window_ms,
-                        "max": runtime.msg_rate_max
-                    })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "msg_rate_exceeded",
+                Some(json!({
+                    "msgType": packet.header.msg_type,
+                    "seq": packet.header.seq,
+                    "windowMs": runtime.msg_rate_window_ms,
+                    "max": runtime.msg_rate_max
+                })),
+            )
+            .await;
             continue;
         }
 
@@ -985,21 +969,19 @@ where
                         );
                         break;
                     }
-                    services
-                        .db_store
-                        .append_connection_event(
-                            connection.session.id,
-                            Some(player_id),
-                            Some(&connection.peer_addr),
-                            "player_msg_rate_exceeded",
-                            Some(json!({
-                                "msgType": packet.header.msg_type,
-                                "seq": packet.header.seq,
-                                "windowMs": runtime.player_msg_rate_window_ms,
-                                "max": runtime.player_msg_rate_max
-                            })),
-                        )
-                        .await;
+                    append_connection_event_for_session(
+                        &services.db_store,
+                        &connection.session,
+                        &connection.peer_addr,
+                        "player_msg_rate_exceeded",
+                        Some(json!({
+                            "msgType": packet.header.msg_type,
+                            "seq": packet.header.seq,
+                            "windowMs": runtime.player_msg_rate_window_ms,
+                            "max": runtime.player_msg_rate_max
+                        })),
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -1023,37 +1005,33 @@ where
                 error = %error_message,
                 "packet dispatch failed, will cleanup"
             );
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "dispatch_error",
-                    Some(json!({
-                        "msgType": packet.header.msg_type,
-                        "seq": packet.header.seq,
-                        "error": error_message,
-                        "outboundQueueErrorKind": outbound_error_kind
-                    })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "dispatch_error",
+                Some(json!({
+                    "msgType": packet.header.msg_type,
+                    "seq": packet.header.seq,
+                    "error": error_message,
+                    "outboundQueueErrorKind": outbound_error_kind
+                })),
+            )
+            .await;
             break;
         }
     }
 
     if !close_event_appended {
         if let Some(close_reason) = connection.close_state.reason() {
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "server_close_requested",
-                    Some(json!({ "reason": close_reason })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "server_close_requested",
+                Some(json!({ "reason": close_reason })),
+            )
+            .await;
         }
     }
 
@@ -1080,6 +1058,33 @@ where
     Ok(())
 }
 
+async fn append_connection_event_for_session(
+    db_store: &PgAuditStore,
+    session: &Session,
+    peer_addr: &str,
+    event_type: &str,
+    details: Option<Value>,
+) {
+    let identity = session.authenticated_identity();
+    let account_player_id = identity
+        .as_ref()
+        .map(|value| value.account_player_id.as_str())
+        .or(session.player_id.as_deref());
+    let character_id = identity.as_ref().map(|value| value.character_id.as_str());
+
+    db_store
+        .append_connection_event_with_identity(
+            session.id,
+            session.player_id.as_deref(),
+            account_player_id,
+            character_id,
+            Some(peer_addr),
+            event_type,
+            details,
+        )
+        .await;
+}
+
 async fn discard_body<R>(reader: &mut R, body_len: usize) -> Result<(), std::io::Error>
 where
     R: AsyncRead + Unpin,
@@ -1104,19 +1109,17 @@ async fn dispatch_packet(
             "PREAUTH_MESSAGE_NOT_ALLOWED",
             "authenticate before sending business messages",
         )?;
-        services
-            .db_store
-            .append_connection_event(
-                connection.session.id,
-                connection.session.player_id.as_deref(),
-                Some(&connection.peer_addr),
-                "preauth_message_rejected",
-                Some(json!({
-                    "msgType": packet.header.msg_type,
-                    "seq": packet.header.seq
-                })),
-            )
-            .await;
+        append_connection_event_for_session(
+            &services.db_store,
+            &connection.session,
+            &connection.peer_addr,
+            "preauth_message_rejected",
+            Some(json!({
+                "msgType": packet.header.msg_type,
+                "seq": packet.header.seq
+            })),
+        )
+        .await;
         return Ok(());
     }
 
@@ -1190,19 +1193,17 @@ async fn dispatch_packet(
                 "UNKNOWN_MESSAGE_TYPE",
                 "unknown message type",
             )?;
-            services
-                .db_store
-                .append_connection_event(
-                    connection.session.id,
-                    connection.session.player_id.as_deref(),
-                    Some(&connection.peer_addr),
-                    "unknown_message_type",
-                    Some(json!({
-                        "msgType": packet.header.msg_type,
-                        "seq": packet.header.seq
-                    })),
-                )
-                .await;
+            append_connection_event_for_session(
+                &services.db_store,
+                &connection.session,
+                &connection.peer_addr,
+                "unknown_message_type",
+                Some(json!({
+                    "msgType": packet.header.msg_type,
+                    "seq": packet.header.seq
+                })),
+            )
+            .await;
             Ok(())
         }
     }
