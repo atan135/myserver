@@ -13,6 +13,7 @@ import {
   runCharacterLoginAuth,
   runCharacterLimit,
   runCharacterList,
+  runCharacterRoomJoin,
   runCharacterSelect
 } from "../tools/mock-client/src/scenarios/character.js";
 import { MESSAGE_TYPE, HEADER_LEN, MAGIC } from "../tools/mock-client/src/constants.js";
@@ -20,6 +21,7 @@ import { encodePacket } from "../tools/mock-client/src/packet.js";
 import {
   decodeFieldsWithRepeated,
   encodeBoolField,
+  encodeUInt32Field,
   encodeStringField,
   readString
 } from "../tools/mock-client/src/protocol.js";
@@ -171,8 +173,9 @@ function installMockAuthFetch({
   };
 }
 
-async function startFakeGameAuthServer() {
+async function startFakeGameAuthServer({ roomJoin = false, frameRateBeforeJoin = false } = {}) {
   const authRequests = [];
+  const roomJoinRequests = [];
   const sockets = new Set();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -192,24 +195,61 @@ async function startFakeGameAuthServer() {
 
         const body = buffer.subarray(HEADER_LEN, packetLen);
         buffer = buffer.subarray(packetLen);
-        assert.equal(messageType, MESSAGE_TYPE.AUTH_REQ);
-
         const fields = decodeFieldsWithRepeated(body);
-        const ticket = readString(fields, 1);
-        const ticketPayload = JSON.parse(Buffer.from(ticket.split(".")[0], "base64url").toString("utf8"));
-        authRequests.push({ seq, ticket, ticketPayload });
 
-        socket.write(
-          encodePacket(
-            MESSAGE_TYPE.AUTH_RES,
-            seq,
+        if (messageType === MESSAGE_TYPE.AUTH_REQ) {
+          const ticket = readString(fields, 1);
+          const ticketPayload = JSON.parse(Buffer.from(ticket.split(".")[0], "base64url").toString("utf8"));
+          authRequests.push({ seq, ticket, ticketPayload });
+
+          socket.write(
+            encodePacket(
+              MESSAGE_TYPE.AUTH_RES,
+              seq,
+              Buffer.concat([
+                encodeBoolField(1, true),
+                encodeStringField(2, ticketPayload.playerId),
+                encodeStringField(3, "")
+              ])
+            )
+          );
+          continue;
+        }
+
+        assert.equal(messageType, MESSAGE_TYPE.ROOM_JOIN_REQ);
+        assert.equal(roomJoin, true);
+        const roomId = readString(fields, 1);
+        roomJoinRequests.push({ seq, roomId });
+
+        const packets = [];
+        if (frameRateBeforeJoin) {
+          packets.push(encodePacket(
+            MESSAGE_TYPE.ROOM_FRAME_RATE_PUSH,
+            0,
             Buffer.concat([
-              encodeBoolField(1, true),
-              encodeStringField(2, ticketPayload.playerId),
-              encodeStringField(3, "")
+              encodeStringField(1, roomId),
+              encodeUInt32Field(2, 2),
+              encodeStringField(3, "runtime_policy_changed")
             ])
-          )
-        );
+          ));
+        }
+        packets.push(encodePacket(
+          MESSAGE_TYPE.ROOM_JOIN_RES,
+          seq,
+          Buffer.concat([
+            encodeBoolField(1, true),
+            encodeStringField(2, roomId),
+            encodeStringField(3, "")
+          ])
+        ));
+        packets.push(encodePacket(
+          MESSAGE_TYPE.ROOM_STATE_PUSH,
+          0,
+          Buffer.concat([
+            encodeStringField(1, "join")
+          ])
+        ));
+        socket.write(Buffer.concat(packets));
       }
     });
 
@@ -226,6 +266,7 @@ async function startFakeGameAuthServer() {
   return {
     port: server.address().port,
     authRequests,
+    roomJoinRequests,
     async close() {
       for (const socket of sockets) {
         socket.destroy();
@@ -425,6 +466,44 @@ test("character-login-auth auto-creates, selects, and authenticates with a chara
       worldId: 9,
       exp: ticketExpiresAt,
       ver: 1
+    });
+  } finally {
+    await gameServer.close();
+  }
+});
+
+test("character-room-join waits for RoomJoinRes when push arrives first", async () => {
+  const ticketExpiresAt = new Date(Date.now() + 300000).toISOString();
+  installMockAuthFetch({ ticketExpiresAt });
+  const gameServer = await startFakeGameAuthServer({ roomJoin: true, frameRateBeforeJoin: true });
+  const options = parseArgs([
+    "--scenario", "character-room-join",
+    "--login-name", "test001",
+    "--password", "Passw0rd!",
+    "--auto-create-character",
+    "--character-name", "Echo",
+    "--game-host", "127.0.0.1",
+    "--port", String(gameServer.port),
+    "--no-service-discovery",
+    "--room-id", "room-push-before-join",
+    "--json-output",
+    "--timeout-ms", "1000"
+  ]);
+
+  try {
+    const { logs, result } = await captureLogs(() => runCharacterRoomJoin(options));
+    const payload = JSON.parse(logs.at(-1));
+
+    assert.equal(result.ok, true);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.scenario, "character-room-join");
+    assert.equal(payload.login.characterId, "chr_0000000000001");
+    assert.equal(payload.room.roomId, "room-push-before-join");
+    assert.equal(payload.room.event, "join");
+    assert.equal(gameServer.roomJoinRequests.length, 1);
+    assert.deepEqual(gameServer.roomJoinRequests[0], {
+      seq: 2,
+      roomId: "room-push-before-join"
     });
   } finally {
     await gameServer.close();

@@ -270,6 +270,8 @@ node tools/mock-client/src/index.js --scenario character-room-join \
   --character-id chr_0000000000001 \
   --room-id room-character-debug
 
+`character-room-join` 会等待 `ROOM_JOIN_RES`，中间如果先收到 `RoomFrameRatePush` 或 `RoomStatePush` 会继续读取。真实客户端也应按 `messageType + seq` 匹配请求响应，不能假设请求后的下一包一定是对应响应包。
+
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
   --http-base-url http://127.0.0.1:3000 --room-id test-room

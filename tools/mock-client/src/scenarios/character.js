@@ -239,11 +239,19 @@ export async function runCharacterRoomJoin(options) {
     try {
       await authenticateClient(client, options, login, 1);
       await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId, options.policyId || ""));
-      const joinRes = printResponse("characterClient.roomJoin", await client.readNextPacket(options.timeoutMs));
+      const joinRes = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_JOIN_RES && packet.seq === 2,
+        "roomJoin"
+      );
       if (!joinRes.ok) {
         throw new Error(`room join failed: ${joinRes.errorCode}`);
       }
-      const push = printResponse("characterClient.roomStatePush(join)", await client.readNextPacket(options.timeoutMs));
+      const push = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH,
+        "roomStatePush(join)"
+      );
       return buildEnvelope("character-room-join", true, {
         login: formatLoginSummary(login),
         room: {
