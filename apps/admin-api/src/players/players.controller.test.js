@@ -8,13 +8,78 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { PlayersController } = await import("./players.controller.ts");
+const { AdminStore } = await import("../admin-store.js");
 
 function storeFixture() {
   return {
     status: null,
     audits: [],
+    titleQuery: null,
     async findPlayerById() {
       return { id: "player-1", status: "active", banExpiresAt: null };
+    },
+    async findCharacterTitleOverview(input) {
+      this.titleQuery = input;
+      const title = {
+        character_id: input.characterId,
+        title_id: "9001",
+        source_type: "system",
+        source_id: "debug-grant",
+        is_equipped: true,
+        unlocked_at: "2026-06-01T00:00:00.000Z",
+        expires_at: "2026-07-01T00:00:00.000Z",
+        expired: false,
+        created_at: "2026-06-01T00:00:00.000Z",
+        updated_at: "2026-06-02T00:00:00.000Z",
+        operator_type: "admin",
+        operator_id: "ops",
+        operator: {
+          type: "admin",
+          id: "ops"
+        },
+        latest_log: {
+          action: "grant",
+          operator_type: "admin",
+          operator_id: "ops",
+          operator: {
+            type: "admin",
+            id: "ops"
+          },
+          reason: "test",
+          created_at: "2026-06-01T00:00:00.000Z"
+        }
+      };
+
+      return {
+        titles: [title],
+        equippedTitle: title,
+        disciplines: [{
+          discipline_id: "forging",
+          points: 120,
+          tier: "novice",
+          active: true,
+          learned_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-06-01T00:00:00.000Z"
+        }],
+        titleLogs: [{
+          id: 7,
+          character_id: input.characterId,
+          title_id: "9001",
+          action: "grant",
+          source_type: "system",
+          source_id: "debug-grant",
+          operator_type: "admin",
+          operator_id: "ops",
+          operator: {
+            type: "admin",
+            id: "ops"
+          },
+          before_json: null,
+          after_json: { title_id: "9001" },
+          reason: "test",
+          created_at: "2026-06-01T00:00:00.000Z"
+        }]
+      };
     },
     async updatePlayerStatus(playerId, status) {
       this.status = { playerId, status };
@@ -38,6 +103,133 @@ function request(role) {
     headers: {}
   };
 }
+
+test("viewer can query character title overview with title metadata and audit", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.characterTitles(" char_1 ", "150", request("viewer"));
+
+  assert.equal(response.ok, true);
+  assert.equal(response.characterId, "char_1");
+  assert.deepEqual(store.titleQuery, { characterId: "char_1", logLimit: 100 });
+  assert.equal(response.titles.length, 1);
+  assert.equal(response.titles[0].title_id, "9001");
+  assert.equal(response.titles[0].source_type, "system");
+  assert.equal(response.titles[0].source_id, "debug-grant");
+  assert.equal(response.titles[0].operator.id, "ops");
+  assert.equal(response.titles[0].hidden, true);
+  assert.equal(response.titles[0].limited, false);
+  assert.equal(response.titles[0].is_equipped, true);
+  assert.equal(response.equippedTitle.title_id, "9001");
+  assert.equal(response.disciplines[0].discipline_id, "forging");
+  assert.equal(response.titleLogs[0].operator_id, "ops");
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "character_titles_query");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, "char_1");
+  assert.equal(store.audits[0].details.result, "success");
+  assert.equal(store.audits[0].details.logLimit, 100);
+  assert.equal(store.audits[0].details.titleCount, 1);
+});
+
+test("invalid character title query writes failed audit", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  await assert.rejects(
+    () => controller.characterTitles(" ", undefined, request("viewer")),
+    (error) => {
+      assert.equal(error.getStatus(), 400);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "INVALID_CHARACTER_ID",
+        message: "characterId is required"
+      });
+      return true;
+    }
+  );
+
+  assert.equal(store.titleQuery, null);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "character_titles_query_failed");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, null);
+  assert.equal(store.audits[0].details.error, "INVALID_CHARACTER_ID");
+});
+
+test("AdminStore maps character title overview by character_id", async () => {
+  const queries = [];
+  const store = new AdminStore({
+    async query(query, params) {
+      queries.push({ query, params });
+
+      if (query.includes("FROM character_titles ct")) {
+        return {
+          rows: [{
+            character_id: "char_1",
+            title_id: "1001",
+            source_type: "identity",
+            source_id: "character_created",
+            is_equipped: false,
+            unlocked_at: new Date("2026-06-01T00:00:00.000Z"),
+            expires_at: new Date("2026-06-02T00:00:00.000Z"),
+            expired: true,
+            created_at: new Date("2026-06-01T00:00:00.000Z"),
+            updated_at: new Date("2026-06-02T00:00:00.000Z"),
+            latest_action: "expire",
+            latest_operator_type: "system",
+            latest_operator_id: "title-service",
+            latest_reason: "expired",
+            latest_created_at: new Date("2026-06-02T00:00:00.000Z")
+          }]
+        };
+      }
+
+      if (query.includes("FROM character_disciplines")) {
+        return {
+          rows: [{
+            discipline_id: "forging",
+            points: "30",
+            tier: "novice",
+            active: true,
+            learned_at: new Date("2026-05-01T00:00:00.000Z"),
+            updated_at: new Date("2026-06-01T00:00:00.000Z")
+          }]
+        };
+      }
+
+      return {
+        rows: [{
+          id: "9",
+          character_id: "char_1",
+          title_id: "1001",
+          action: "expire",
+          source_type: "identity",
+          source_id: "character_created",
+          operator_type: "system",
+          operator_id: "title-service",
+          before_json: "{\"is_equipped\":true}",
+          after_json: { is_equipped: false },
+          reason: "expired",
+          created_at: new Date("2026-06-02T00:00:00.000Z")
+        }]
+      };
+    }
+  });
+
+  const overview = await store.findCharacterTitleOverview({ characterId: "char_1", logLimit: 5 });
+
+  assert.equal(queries.length, 3);
+  assert.ok(queries.every((entry) => entry.params[0] === "char_1"));
+  assert.deepEqual(queries[2].params, ["char_1", 5]);
+  assert.equal(overview.titles[0].expired, true);
+  assert.equal(overview.titles[0].operator_id, "title-service");
+  assert.equal(overview.equippedTitle, null);
+  assert.equal(overview.disciplines[0].points, 30);
+  assert.deepEqual(overview.titleLogs[0].before_json, { is_equipped: true });
+  assert.deepEqual(overview.titleLogs[0].after_json, { is_equipped: false });
+});
 
 test("operator can update non-ban player status", async () => {
   const store = storeFixture();

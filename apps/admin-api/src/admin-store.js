@@ -107,6 +107,91 @@ function toPlayer(row) {
   };
 }
 
+function normalizeJson(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function toCharacterTitle(row) {
+  const operator = row.latest_operator_type || row.latest_operator_id
+    ? {
+        type: row.latest_operator_type || null,
+        id: row.latest_operator_id || null
+      }
+    : null;
+
+  return {
+    character_id: row.character_id,
+    title_id: row.title_id,
+    source_type: row.source_type,
+    source_id: row.source_id,
+    is_equipped: row.is_equipped === true,
+    unlocked_at: toIsoString(row.unlocked_at),
+    expires_at: toIsoString(row.expires_at),
+    expired: row.expired === true,
+    created_at: toIsoString(row.created_at),
+    updated_at: toIsoString(row.updated_at),
+    operator_type: row.latest_operator_type || null,
+    operator_id: row.latest_operator_id || null,
+    operator,
+    latest_log: row.latest_action ? {
+      action: row.latest_action,
+      operator_type: row.latest_operator_type || null,
+      operator_id: row.latest_operator_id || null,
+      operator,
+      reason: row.latest_reason || null,
+      created_at: toIsoString(row.latest_created_at)
+    } : null
+  };
+}
+
+function toCharacterDiscipline(row) {
+  return {
+    discipline_id: row.discipline_id,
+    points: toNumericId(row.points),
+    tier: row.tier,
+    active: row.active === true,
+    learned_at: toIsoString(row.learned_at),
+    updated_at: toIsoString(row.updated_at)
+  };
+}
+
+function toCharacterTitleLog(row) {
+  const operator = row.operator_type || row.operator_id
+    ? {
+        type: row.operator_type || null,
+        id: row.operator_id || null
+      }
+    : null;
+
+  return {
+    id: toNumericId(row.id),
+    character_id: row.character_id,
+    title_id: row.title_id,
+    action: row.action,
+    source_type: row.source_type || null,
+    source_id: row.source_id || null,
+    operator_type: row.operator_type || null,
+    operator_id: row.operator_id || null,
+    operator,
+    before_json: normalizeJson(row.before_json),
+    after_json: normalizeJson(row.after_json),
+    reason: row.reason || null,
+    created_at: toIsoString(row.created_at)
+  };
+}
+
 function toIdOrigin(row) {
   return {
     origin_id: toNumericId(row.origin_id),
@@ -497,6 +582,65 @@ export class AdminStore {
       [status, nextBanExpiresAt, playerId]
     );
     return result.rowCount > 0;
+  }
+
+  async findCharacterTitleOverview({ characterId, logLimit = 20 } = {}) {
+    const [titleResult, disciplineResult, logResult] = await Promise.all([
+      this.pool.query(
+        `SELECT
+           ct.character_id,
+           ct.title_id,
+           ct.source_type,
+           ct.source_id,
+           ct.is_equipped,
+           ct.unlocked_at,
+           ct.expires_at,
+           ct.created_at,
+           ct.updated_at,
+           (ct.expires_at IS NOT NULL AND ct.expires_at <= current_timestamp) AS expired,
+           latest_log.action AS latest_action,
+           latest_log.operator_type AS latest_operator_type,
+           latest_log.operator_id AS latest_operator_id,
+           latest_log.reason AS latest_reason,
+           latest_log.created_at AS latest_created_at
+         FROM character_titles ct
+         LEFT JOIN LATERAL (
+           SELECT action, operator_type, operator_id, reason, created_at
+           FROM character_title_logs ctl
+           WHERE ctl.character_id = ct.character_id
+             AND ctl.title_id = ct.title_id
+           ORDER BY ctl.created_at DESC, ctl.id DESC
+           LIMIT 1
+         ) latest_log ON true
+         WHERE ct.character_id = $1
+         ORDER BY ct.is_equipped DESC, expired ASC, ct.unlocked_at DESC, ct.title_id ASC`,
+        [characterId]
+      ),
+      this.pool.query(
+        `SELECT discipline_id, points, tier, active, learned_at, updated_at
+         FROM character_disciplines
+         WHERE character_id = $1
+         ORDER BY active DESC, updated_at DESC, discipline_id ASC`,
+        [characterId]
+      ),
+      this.pool.query(
+        `SELECT id, character_id, title_id, action, source_type, source_id, operator_type, operator_id,
+                before_json, after_json, reason, created_at
+         FROM character_title_logs
+         WHERE character_id = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT $2`,
+        [characterId, logLimit]
+      )
+    ]);
+
+    const titles = titleResult.rows.map(toCharacterTitle);
+    return {
+      titles,
+      equippedTitle: titles.find((title) => title.is_equipped && !title.expired) || null,
+      disciplines: disciplineResult.rows.map(toCharacterDiscipline),
+      titleLogs: logResult.rows.map(toCharacterTitleLog)
+    };
   }
 
   // ============================================================
