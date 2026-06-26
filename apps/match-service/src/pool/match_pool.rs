@@ -9,7 +9,7 @@ use crate::metrics::METRICS;
 use crate::runtime_store::{
     MatchRuntimeSnapshot, SharedMatchRuntimeStore, StoredMatchCandidate, StoredMatchTask,
 };
-use crate::state::{SharedPlayerState, new_player_state_store};
+use crate::state::{SharedCharacterState, new_character_state_store};
 
 use super::candidate::MatchCandidate;
 
@@ -18,22 +18,22 @@ use super::candidate::MatchCandidate;
 pub struct MatchTask {
     pub match_id: String,
     pub mode: String,
-    pub players: Vec<String>,
+    pub character_ids: Vec<String>,
     pub room_id: Option<String>,
-    pub joined_players: HashSet<String>,
-    pub active_players: HashSet<String>,
+    pub joined_characters: HashSet<String>,
+    pub active_characters: HashSet<String>,
 }
 
 impl MatchTask {
-    pub fn new(match_id: String, mode: String, players: Vec<String>) -> Self {
-        let active_players = players.iter().cloned().collect();
+    pub fn new(match_id: String, mode: String, character_ids: Vec<String>) -> Self {
+        let active_characters = character_ids.iter().cloned().collect();
         Self {
             match_id,
             mode,
-            players,
+            character_ids,
             room_id: None,
-            joined_players: HashSet::new(),
-            active_players,
+            joined_characters: HashSet::new(),
+            active_characters,
         }
     }
 }
@@ -51,15 +51,15 @@ pub struct MatchPool {
     pools: RwLock<HashMap<String, ModePool>>,
     /// 活跃的匹配任务
     matches: RwLock<HashMap<String, MatchTask>>,
-    /// 玩家状态管理
-    player_state: SharedPlayerState,
+    /// 角色状态管理
+    character_state: SharedCharacterState,
     /// 可选运行时持久化存储
     runtime_store: Option<SharedMatchRuntimeStore>,
 }
 
 impl Default for MatchPool {
     fn default() -> Self {
-        Self::new(new_player_state_store())
+        Self::new(new_character_state_store())
     }
 }
 
@@ -71,17 +71,20 @@ impl MatchPool {
             .sum()
     }
 
-    pub fn new(player_state: SharedPlayerState) -> Self {
+    pub fn new(character_state: SharedCharacterState) -> Self {
         Self {
             pools: RwLock::new(HashMap::new()),
             matches: RwLock::new(HashMap::new()),
-            player_state,
+            character_state,
             runtime_store: None,
         }
     }
 
     /// 使用指定模式创建匹配池
-    pub fn with_modes(player_state: SharedPlayerState, modes: HashMap<String, ModeConfig>) -> Self {
+    pub fn with_modes(
+        character_state: SharedCharacterState,
+        modes: HashMap<String, ModeConfig>,
+    ) -> Self {
         let pools = modes
             .into_iter()
             .map(|(mode, config)| {
@@ -98,17 +101,17 @@ impl MatchPool {
         Self {
             pools: RwLock::new(pools),
             matches: RwLock::new(HashMap::new()),
-            player_state,
+            character_state,
             runtime_store: None,
         }
     }
 
     pub fn with_modes_and_runtime_store(
-        player_state: SharedPlayerState,
+        character_state: SharedCharacterState,
         modes: HashMap<String, ModeConfig>,
         runtime_store: SharedMatchRuntimeStore,
     ) -> Self {
-        let pool = Self::with_modes(player_state, modes);
+        let pool = Self::with_modes(character_state, modes);
         Self {
             runtime_store: Some(runtime_store),
             ..pool
@@ -186,7 +189,7 @@ impl MatchPool {
                     .await
                 {
                     tracing::warn!(
-                        player_id = %candidate.player_id,
+                        character_id = %candidate.character_id,
                         match_id = %candidate.match_id,
                         mode = %candidate.mode,
                         error = %error,
@@ -196,7 +199,7 @@ impl MatchPool {
             }
             tracing::info!(
                 mode = %candidate.mode,
-                player_id = %candidate.player_id,
+                character_id = %candidate.character_id,
                 match_id = %candidate.match_id,
                 count_before = count_before,
                 count_after = count_after,
@@ -206,8 +209,8 @@ impl MatchPool {
         }
     }
 
-    /// 从匹配池移除候选人
-    pub async fn remove_candidate(&self, player_id: &str, mode: &str) -> Option<MatchCandidate> {
+    /// 从匹配池移除候选角色
+    pub async fn remove_candidate(&self, character_id: &str, mode: &str) -> Option<MatchCandidate> {
         let (removed, pool_size) = {
             let mut pools = self.pools.write().await;
             let mut removed = None;
@@ -215,7 +218,7 @@ impl MatchPool {
                 if let Some(pos) = pool
                     .candidates
                     .iter()
-                    .position(|c| c.player_id == *player_id)
+                    .position(|c| c.character_id == *character_id)
                 {
                     removed = Some(pool.candidates.remove(pos));
                 }
@@ -226,9 +229,9 @@ impl MatchPool {
         if removed.is_some() {
             METRICS.set_pool_size(pool_size);
             if let Some(runtime_store) = &self.runtime_store {
-                if let Err(error) = runtime_store.remove_candidate(player_id, mode).await {
+                if let Err(error) = runtime_store.remove_candidate(character_id, mode).await {
                     tracing::warn!(
-                        player_id,
+                        character_id,
                         mode,
                         error = %error,
                         "failed to remove persisted match candidate"
@@ -266,11 +269,11 @@ impl MatchPool {
                 if let Some(candidates) = matched.as_ref() {
                     for candidate in candidates {
                         if let Err(error) = runtime_store
-                            .remove_candidate(&candidate.player_id, &candidate.mode)
+                            .remove_candidate(&candidate.character_id, &candidate.mode)
                             .await
                         {
                             tracing::warn!(
-                                player_id = %candidate.player_id,
+                                character_id = %candidate.character_id,
                                 mode = %candidate.mode,
                                 error = %error,
                                 "failed to remove persisted candidate after match"
@@ -284,8 +287,13 @@ impl MatchPool {
     }
 
     /// 创建匹配任务
-    pub async fn create_match_task(&self, match_id: String, mode: String, players: Vec<String>) {
-        let task = MatchTask::new(match_id.clone(), mode, players);
+    pub async fn create_match_task(
+        &self,
+        match_id: String,
+        mode: String,
+        character_ids: Vec<String>,
+    ) {
+        let task = MatchTask::new(match_id.clone(), mode, character_ids);
         {
             let mut matches = self.matches.write().await;
             matches.insert(match_id.clone(), task.clone());
@@ -335,14 +343,22 @@ impl MatchPool {
         }
     }
 
-    /// 标记玩家已进入房间
-    pub async fn mark_player_joined(&self, match_id: &str, player_id: &str) -> Option<MatchTask> {
+    /// 标记角色已进入房间
+    pub async fn mark_character_joined(
+        &self,
+        match_id: &str,
+        character_id: &str,
+    ) -> Option<MatchTask> {
         let updated_task = {
             let mut matches = self.matches.write().await;
             let task = matches.get_mut(match_id)?;
-            if task.players.iter().any(|player| player == player_id) {
-                task.joined_players.insert(player_id.to_string());
-                task.active_players.insert(player_id.to_string());
+            if task
+                .character_ids
+                .iter()
+                .any(|character| character == character_id)
+            {
+                task.joined_characters.insert(character_id.to_string());
+                task.active_characters.insert(character_id.to_string());
             }
             task.clone()
         };
@@ -354,7 +370,7 @@ impl MatchPool {
             {
                 tracing::warn!(
                     match_id,
-                    player_id,
+                    character_id,
                     error = %error,
                     "failed to persist joined match task"
                 );
@@ -363,12 +379,16 @@ impl MatchPool {
         Some(updated_task)
     }
 
-    /// 标记玩家已离开房间
-    pub async fn mark_player_left(&self, match_id: &str, player_id: &str) -> Option<MatchTask> {
+    /// 标记角色已离开房间
+    pub async fn mark_character_left(
+        &self,
+        match_id: &str,
+        character_id: &str,
+    ) -> Option<MatchTask> {
         let updated_task = {
             let mut matches = self.matches.write().await;
             let task = matches.get_mut(match_id)?;
-            task.active_players.remove(player_id);
+            task.active_characters.remove(character_id);
             task.clone()
         };
 
@@ -379,7 +399,7 @@ impl MatchPool {
             {
                 tracing::warn!(
                     match_id,
-                    player_id,
+                    character_id,
                     error = %error,
                     "failed to persist left match task"
                 );
@@ -408,9 +428,9 @@ impl MatchPool {
         removed
     }
 
-    /// 获取玩家状态管理
-    pub fn player_state(&self) -> &SharedPlayerState {
-        &self.player_state
+    /// 获取角色状态管理
+    pub fn character_state(&self) -> &SharedCharacterState {
+        &self.character_state
     }
 
     /// 获取匹配池中某模式的候选人数
@@ -442,11 +462,11 @@ impl MatchPool {
         if let Some(runtime_store) = &self.runtime_store {
             for candidate in &removed {
                 if let Err(error) = runtime_store
-                    .remove_candidate(&candidate.player_id, &candidate.mode)
+                    .remove_candidate(&candidate.character_id, &candidate.mode)
                     .await
                 {
                     tracing::warn!(
-                        player_id = %candidate.player_id,
+                        character_id = %candidate.character_id,
                         mode = %candidate.mode,
                         error = %error,
                         "failed to remove timed out persisted candidate"
@@ -461,24 +481,24 @@ impl MatchPool {
 
 pub type SharedMatchPool = Arc<MatchPool>;
 
-pub fn new_match_pool(player_state: SharedPlayerState) -> SharedMatchPool {
-    Arc::new(MatchPool::new(player_state))
+pub fn new_match_pool(character_state: SharedCharacterState) -> SharedMatchPool {
+    Arc::new(MatchPool::new(character_state))
 }
 
 pub fn new_match_pool_with_modes(
-    player_state: SharedPlayerState,
+    character_state: SharedCharacterState,
     modes: std::collections::HashMap<String, ModeConfig>,
 ) -> SharedMatchPool {
-    Arc::new(MatchPool::with_modes(player_state, modes))
+    Arc::new(MatchPool::with_modes(character_state, modes))
 }
 
 pub fn new_match_pool_with_modes_and_runtime_store(
-    player_state: SharedPlayerState,
+    character_state: SharedCharacterState,
     modes: std::collections::HashMap<String, ModeConfig>,
     runtime_store: SharedMatchRuntimeStore,
 ) -> SharedMatchPool {
     Arc::new(MatchPool::with_modes_and_runtime_store(
-        player_state,
+        character_state,
         modes,
         runtime_store,
     ))

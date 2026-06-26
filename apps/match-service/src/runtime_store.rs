@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::pool::{MatchCandidate, MatchTask};
 use crate::proto::myserver::matchservice::MatchEvent;
-use crate::state::{PlayerMatchContext, PlayerMatchStatus};
+use crate::state::{CharacterMatchContext, CharacterMatchStatus};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -35,37 +35,37 @@ fn lease_expires_at_ms(ttl: Duration) -> u64 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StoredPlayerMatchStatus {
+pub enum StoredCharacterMatchStatus {
     Idle,
     Matching,
     Matched,
     InRoom,
 }
 
-impl From<PlayerMatchStatus> for StoredPlayerMatchStatus {
-    fn from(status: PlayerMatchStatus) -> Self {
+impl From<CharacterMatchStatus> for StoredCharacterMatchStatus {
+    fn from(status: CharacterMatchStatus) -> Self {
         match status {
-            PlayerMatchStatus::Idle => Self::Idle,
-            PlayerMatchStatus::Matching => Self::Matching,
-            PlayerMatchStatus::Matched => Self::Matched,
-            PlayerMatchStatus::InRoom => Self::InRoom,
+            CharacterMatchStatus::Idle => Self::Idle,
+            CharacterMatchStatus::Matching => Self::Matching,
+            CharacterMatchStatus::Matched => Self::Matched,
+            CharacterMatchStatus::InRoom => Self::InRoom,
         }
     }
 }
 
-impl From<StoredPlayerMatchStatus> for PlayerMatchStatus {
-    fn from(status: StoredPlayerMatchStatus) -> Self {
+impl From<StoredCharacterMatchStatus> for CharacterMatchStatus {
+    fn from(status: StoredCharacterMatchStatus) -> Self {
         match status {
-            StoredPlayerMatchStatus::Idle => Self::Idle,
-            StoredPlayerMatchStatus::Matching => Self::Matching,
-            StoredPlayerMatchStatus::Matched => Self::Matched,
-            StoredPlayerMatchStatus::InRoom => Self::InRoom,
+            StoredCharacterMatchStatus::Idle => Self::Idle,
+            StoredCharacterMatchStatus::Matching => Self::Matching,
+            StoredCharacterMatchStatus::Matched => Self::Matched,
+            StoredCharacterMatchStatus::InRoom => Self::InRoom,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredPlayerMatchContext {
+pub struct StoredCharacterMatchContext {
     pub match_id: String,
     pub mode: String,
     #[serde(default)]
@@ -74,8 +74,8 @@ pub struct StoredPlayerMatchContext {
     pub token: Option<String>,
 }
 
-impl From<PlayerMatchContext> for StoredPlayerMatchContext {
-    fn from(ctx: PlayerMatchContext) -> Self {
+impl From<CharacterMatchContext> for StoredCharacterMatchContext {
+    fn from(ctx: CharacterMatchContext) -> Self {
         Self {
             match_id: ctx.match_id,
             mode: ctx.mode,
@@ -85,8 +85,8 @@ impl From<PlayerMatchContext> for StoredPlayerMatchContext {
     }
 }
 
-impl From<StoredPlayerMatchContext> for PlayerMatchContext {
-    fn from(ctx: StoredPlayerMatchContext) -> Self {
+impl From<StoredCharacterMatchContext> for CharacterMatchContext {
+    fn from(ctx: StoredCharacterMatchContext) -> Self {
         Self {
             match_id: ctx.match_id,
             mode: ctx.mode,
@@ -131,7 +131,7 @@ impl StoredMatchEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMatchCandidate {
-    pub player_id: String,
+    pub character_id: String,
     pub match_id: String,
     pub mode: String,
     pub created_at_ms: u64,
@@ -151,7 +151,7 @@ impl StoredMatchCandidate {
             now_wall_clock.saturating_sub(candidate.created_at.elapsed().as_millis() as u64);
 
         Self {
-            player_id: candidate.player_id.clone(),
+            character_id: candidate.character_id.clone(),
             match_id: candidate.match_id.clone(),
             mode: candidate.mode.clone(),
             created_at_ms,
@@ -167,7 +167,7 @@ impl StoredMatchCandidate {
             .checked_sub(elapsed_since_created)
             .unwrap_or(now_instant);
         MatchCandidate {
-            player_id: self.player_id,
+            character_id: self.character_id,
             match_id: self.match_id,
             mode: self.mode,
             created_at,
@@ -180,13 +180,13 @@ impl StoredMatchCandidate {
 pub struct StoredMatchTask {
     pub match_id: String,
     pub mode: String,
-    pub players: Vec<String>,
+    pub character_ids: Vec<String>,
     #[serde(default)]
     pub room_id: Option<String>,
     #[serde(default)]
-    pub joined_players: HashSet<String>,
+    pub joined_characters: HashSet<String>,
     #[serde(default)]
-    pub active_players: HashSet<String>,
+    pub active_characters: HashSet<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -197,10 +197,10 @@ impl StoredMatchTask {
         Self {
             match_id: task.match_id.clone(),
             mode: task.mode.clone(),
-            players: task.players.clone(),
+            character_ids: task.character_ids.clone(),
             room_id: task.room_id.clone(),
-            joined_players: task.joined_players.clone(),
-            active_players: task.active_players.clone(),
+            joined_characters: task.joined_characters.clone(),
+            active_characters: task.active_characters.clone(),
             created_at_ms: timestamp,
             updated_at_ms: timestamp,
         }
@@ -210,10 +210,10 @@ impl StoredMatchTask {
         MatchTask {
             match_id: self.match_id,
             mode: self.mode,
-            players: self.players,
+            character_ids: self.character_ids,
             room_id: self.room_id,
-            joined_players: self.joined_players,
-            active_players: self.active_players,
+            joined_characters: self.joined_characters,
+            active_characters: self.active_characters,
         }
     }
 }
@@ -238,9 +238,9 @@ pub struct MatchRuntimeSnapshot {
     #[serde(default)]
     pub matches: HashMap<String, StoredMatchTask>,
     #[serde(default)]
-    pub player_status: HashMap<String, StoredPlayerMatchStatus>,
+    pub character_status: HashMap<String, StoredCharacterMatchStatus>,
     #[serde(default)]
-    pub player_context: HashMap<String, StoredPlayerMatchContext>,
+    pub character_context: HashMap<String, StoredCharacterMatchContext>,
     #[serde(default)]
     pub latest_events: HashMap<String, StoredMatchEvent>,
     #[serde(default)]
@@ -289,25 +289,28 @@ pub trait MatchRuntimeStore: Send + Sync {
     ) -> Result<(), MatchRuntimeStoreError>;
     async fn remove_candidate(
         &self,
-        player_id: &str,
+        character_id: &str,
         mode: &str,
     ) -> Result<(), MatchRuntimeStoreError>;
     async fn save_match_task(&self, task: StoredMatchTask) -> Result<(), MatchRuntimeStoreError>;
     async fn remove_match_task(&self, match_id: &str) -> Result<(), MatchRuntimeStoreError>;
-    async fn set_player_status(
+    async fn set_character_status(
         &self,
-        player_id: &str,
-        status: StoredPlayerMatchStatus,
+        character_id: &str,
+        status: StoredCharacterMatchStatus,
     ) -> Result<(), MatchRuntimeStoreError>;
-    async fn set_player_context(
+    async fn set_character_context(
         &self,
-        player_id: &str,
-        context: StoredPlayerMatchContext,
+        character_id: &str,
+        context: StoredCharacterMatchContext,
     ) -> Result<(), MatchRuntimeStoreError>;
-    async fn clear_player_context(&self, player_id: &str) -> Result<(), MatchRuntimeStoreError>;
+    async fn clear_character_context(
+        &self,
+        character_id: &str,
+    ) -> Result<(), MatchRuntimeStoreError>;
     async fn save_latest_event(
         &self,
-        player_id: &str,
+        character_id: &str,
         event: StoredMatchEvent,
     ) -> Result<(), MatchRuntimeStoreError>;
     async fn acquire_lease(
@@ -351,19 +354,19 @@ impl MatchRuntimeStore for MemoryMatchRuntimeStore {
             .candidates_by_mode
             .entry(candidate.mode.clone())
             .or_default();
-        candidates.retain(|existing| existing.player_id != candidate.player_id);
+        candidates.retain(|existing| existing.character_id != candidate.character_id);
         candidates.push(candidate);
         Ok(())
     }
 
     async fn remove_candidate(
         &self,
-        player_id: &str,
+        character_id: &str,
         mode: &str,
     ) -> Result<(), MatchRuntimeStoreError> {
         let mut snapshot = self.snapshot.write().await;
         if let Some(candidates) = snapshot.candidates_by_mode.get_mut(mode) {
-            candidates.retain(|candidate| candidate.player_id != player_id);
+            candidates.retain(|candidate| candidate.character_id != character_id);
             if candidates.is_empty() {
                 snapshot.candidates_by_mode.remove(mode);
             }
@@ -385,51 +388,54 @@ impl MatchRuntimeStore for MemoryMatchRuntimeStore {
         Ok(())
     }
 
-    async fn set_player_status(
+    async fn set_character_status(
         &self,
-        player_id: &str,
-        status: StoredPlayerMatchStatus,
+        character_id: &str,
+        status: StoredCharacterMatchStatus,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.snapshot
             .write()
             .await
-            .player_status
-            .insert(player_id.to_string(), status);
+            .character_status
+            .insert(character_id.to_string(), status);
         Ok(())
     }
 
-    async fn set_player_context(
+    async fn set_character_context(
         &self,
-        player_id: &str,
-        context: StoredPlayerMatchContext,
+        character_id: &str,
+        context: StoredCharacterMatchContext,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.snapshot
             .write()
             .await
-            .player_context
-            .insert(player_id.to_string(), context);
+            .character_context
+            .insert(character_id.to_string(), context);
         Ok(())
     }
 
-    async fn clear_player_context(&self, player_id: &str) -> Result<(), MatchRuntimeStoreError> {
+    async fn clear_character_context(
+        &self,
+        character_id: &str,
+    ) -> Result<(), MatchRuntimeStoreError> {
         let mut snapshot = self.snapshot.write().await;
-        snapshot.player_context.remove(player_id);
+        snapshot.character_context.remove(character_id);
         snapshot
-            .player_status
-            .insert(player_id.to_string(), StoredPlayerMatchStatus::Idle);
+            .character_status
+            .insert(character_id.to_string(), StoredCharacterMatchStatus::Idle);
         Ok(())
     }
 
     async fn save_latest_event(
         &self,
-        player_id: &str,
+        character_id: &str,
         event: StoredMatchEvent,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.snapshot
             .write()
             .await
             .latest_events
-            .insert(player_id.to_string(), event);
+            .insert(character_id.to_string(), event);
         Ok(())
     }
 
@@ -510,7 +516,7 @@ if op == "save_candidate" then
     state["candidates_by_mode"][mode] = state["candidates_by_mode"][mode] or {}
     local next = {}
     for _, candidate in ipairs(state["candidates_by_mode"][mode]) do
-        if candidate["player_id"] ~= value["player_id"] then
+        if candidate["character_id"] ~= value["character_id"] then
             table.insert(next, candidate)
         end
     end
@@ -522,7 +528,7 @@ elseif op == "remove_candidate" then
     local current_candidates = state["candidates_by_mode"][mode] or {}
     local next = {}
     for _, candidate in ipairs(current_candidates) do
-        if candidate["player_id"] ~= value["player_id"] then
+        if candidate["character_id"] ~= value["character_id"] then
             table.insert(next, candidate)
         end
     end
@@ -537,20 +543,20 @@ elseif op == "save_match_task" then
 elseif op == "remove_match_task" then
     state["matches"] = state["matches"] or {}
     state["matches"][value["match_id"]] = nil
-elseif op == "set_player_status" then
-    state["player_status"] = state["player_status"] or {}
-    state["player_status"][value["player_id"]] = value["status"]
-elseif op == "set_player_context" then
-    state["player_context"] = state["player_context"] or {}
-    state["player_context"][value["player_id"]] = value["context"]
-elseif op == "clear_player_context" then
-    state["player_context"] = state["player_context"] or {}
-    state["player_status"] = state["player_status"] or {}
-    state["player_context"][value["player_id"]] = nil
-    state["player_status"][value["player_id"]] = "Idle"
+elseif op == "set_character_status" then
+    state["character_status"] = state["character_status"] or {}
+    state["character_status"][value["character_id"]] = value["status"]
+elseif op == "set_character_context" then
+    state["character_context"] = state["character_context"] or {}
+    state["character_context"][value["character_id"]] = value["context"]
+elseif op == "clear_character_context" then
+    state["character_context"] = state["character_context"] or {}
+    state["character_status"] = state["character_status"] or {}
+    state["character_context"][value["character_id"]] = nil
+    state["character_status"][value["character_id"]] = "Idle"
 elseif op == "save_latest_event" then
     state["latest_events"] = state["latest_events"] or {}
-    state["latest_events"][value["player_id"]] = value["event"]
+    state["latest_events"][value["character_id"]] = value["event"]
 end
 
 redis.call("SET", KEYS[1], cjson.encode(state))
@@ -643,13 +649,13 @@ impl MatchRuntimeStore for RedisMatchRuntimeStore {
 
     async fn remove_candidate(
         &self,
-        player_id: &str,
+        character_id: &str,
         mode: &str,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.update_state(
             "remove_candidate",
             serde_json::json!({
-                "player_id": player_id,
+                "character_id": character_id,
                 "mode": mode,
             }),
         )
@@ -671,41 +677,44 @@ impl MatchRuntimeStore for RedisMatchRuntimeStore {
         .await
     }
 
-    async fn set_player_status(
+    async fn set_character_status(
         &self,
-        player_id: &str,
-        status: StoredPlayerMatchStatus,
+        character_id: &str,
+        status: StoredCharacterMatchStatus,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.update_state(
-            "set_player_status",
+            "set_character_status",
             serde_json::json!({
-                "player_id": player_id,
+                "character_id": character_id,
                 "status": status,
             }),
         )
         .await
     }
 
-    async fn set_player_context(
+    async fn set_character_context(
         &self,
-        player_id: &str,
-        context: StoredPlayerMatchContext,
+        character_id: &str,
+        context: StoredCharacterMatchContext,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.update_state(
-            "set_player_context",
+            "set_character_context",
             serde_json::json!({
-                "player_id": player_id,
+                "character_id": character_id,
                 "context": context,
             }),
         )
         .await
     }
 
-    async fn clear_player_context(&self, player_id: &str) -> Result<(), MatchRuntimeStoreError> {
+    async fn clear_character_context(
+        &self,
+        character_id: &str,
+    ) -> Result<(), MatchRuntimeStoreError> {
         self.update_state(
-            "clear_player_context",
+            "clear_character_context",
             serde_json::json!({
-                "player_id": player_id,
+                "character_id": character_id,
             }),
         )
         .await
@@ -713,13 +722,13 @@ impl MatchRuntimeStore for RedisMatchRuntimeStore {
 
     async fn save_latest_event(
         &self,
-        player_id: &str,
+        character_id: &str,
         event: StoredMatchEvent,
     ) -> Result<(), MatchRuntimeStoreError> {
         self.update_state(
             "save_latest_event",
             serde_json::json!({
-                "player_id": player_id,
+                "character_id": character_id,
                 "event": event,
             }),
         )
@@ -852,13 +861,13 @@ mod tests {
         let store = MemoryMatchRuntimeStore::new();
 
         store
-            .set_player_status("player-a", StoredPlayerMatchStatus::Matching)
+            .set_character_status("chr-a", StoredCharacterMatchStatus::Matching)
             .await
             .unwrap();
         store
-            .set_player_context(
-                "player-a",
-                StoredPlayerMatchContext {
+            .set_character_context(
+                "chr-a",
+                StoredCharacterMatchContext {
                     match_id: "match-a".to_string(),
                     mode: "1v1".to_string(),
                     room_id: None,
@@ -869,7 +878,7 @@ mod tests {
             .unwrap();
         store
             .save_latest_event(
-                "player-a",
+                "chr-a",
                 StoredMatchEvent::new(MatchEvent {
                     event: "match_failed".to_string(),
                     match_id: "match-a".to_string(),
@@ -884,20 +893,20 @@ mod tests {
         let snapshot = store.load_snapshot().await.unwrap();
 
         assert_eq!(
-            snapshot.player_status.get("player-a"),
-            Some(&StoredPlayerMatchStatus::Matching)
+            snapshot.character_status.get("chr-a"),
+            Some(&StoredCharacterMatchStatus::Matching)
         );
         assert_eq!(
             snapshot
-                .player_context
-                .get("player-a")
+                .character_context
+                .get("chr-a")
                 .map(|ctx| ctx.match_id.as_str()),
             Some("match-a")
         );
         assert_eq!(
             snapshot
                 .latest_events
-                .get("player-a")
+                .get("chr-a")
                 .map(|event| event.error_code.as_str()),
             Some("MATCH_TIMEOUT")
         );

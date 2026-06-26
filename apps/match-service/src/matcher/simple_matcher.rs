@@ -16,14 +16,14 @@ use crate::runtime_store::{
     LeaseAcquireResult, SharedMatchRuntimeStore, new_memory_match_runtime_store,
 };
 use crate::state::{
-    PlayerMatchContext, PlayerMatchStatus, SharedPlayerState,
-    new_player_state_store_with_runtime_store,
+    CharacterMatchContext, CharacterMatchStatus, SharedCharacterState,
+    new_character_state_store_with_runtime_store,
 };
 
 /// 简单撮合器
 pub struct SimpleMatcher {
     pool: SharedMatchPool,
-    player_state: SharedPlayerState,
+    character_state: SharedCharacterState,
     game_server_client: GameServerClient,
     config: Config,
     runtime_store: SharedMatchRuntimeStore,
@@ -49,9 +49,9 @@ impl SimpleMatcher {
         runtime_store: SharedMatchRuntimeStore,
         room_id_generator: Arc<GlobalIdGenerator>,
     ) -> Self {
-        let player_state = new_player_state_store_with_runtime_store(runtime_store.clone());
+        let character_state = new_character_state_store_with_runtime_store(runtime_store.clone());
         let pool = new_match_pool_with_modes_and_runtime_store(
-            player_state.clone(),
+            character_state.clone(),
             config.modes.clone(),
             runtime_store.clone(),
         );
@@ -59,7 +59,7 @@ impl SimpleMatcher {
 
         Self {
             pool,
-            player_state,
+            character_state,
             game_server_client,
             config,
             runtime_store,
@@ -83,8 +83,8 @@ impl SimpleMatcher {
         &self.pool
     }
 
-    pub fn player_state(&self) -> &SharedPlayerState {
-        &self.player_state
+    pub fn character_state(&self) -> &SharedCharacterState {
+        &self.character_state
     }
 
     pub async fn recover_runtime_state(&self) -> Result<(), MatchError> {
@@ -98,23 +98,28 @@ impl SimpleMatcher {
             .await
             .map_err(|error| MatchError::Internal(error.to_string()))?;
 
-        self.player_state.apply_snapshot(&snapshot).await;
+        self.character_state.apply_snapshot(&snapshot).await;
         self.pool.apply_snapshot(&snapshot).await;
 
         info!(
             candidate_modes = snapshot.candidates_by_mode.len(),
             match_count = snapshot.matches.len(),
-            player_context_count = snapshot.player_context.len(),
+            character_context_count = snapshot.character_context.len(),
             latest_event_count = snapshot.latest_events.len(),
             "match runtime state recovered"
         );
 
         for task in snapshot.matches.values() {
             if let Some(room_id) = task.room_id.as_deref() {
-                self.ensure_room_assignment(&task.match_id, &task.mode, room_id, &task.players)
-                    .await?;
+                self.ensure_room_assignment(
+                    &task.match_id,
+                    &task.mode,
+                    room_id,
+                    &task.character_ids,
+                )
+                .await?;
             } else {
-                self.resume_pending_room_create(&task.match_id, &task.mode, &task.players)
+                self.resume_pending_room_create(&task.match_id, &task.mode, &task.character_ids)
                     .await?;
             }
         }
@@ -127,35 +132,39 @@ impl SimpleMatcher {
     }
 
     /// 开始匹配
-    pub async fn start_match(&self, player_id: String, mode: String) -> Result<String, MatchError> {
+    pub async fn start_match(
+        &self,
+        character_id: String,
+        mode: String,
+    ) -> Result<String, MatchError> {
         let mode_config = self
             .config
             .get_mode(&mode)
             .ok_or_else(|| MatchError::InvalidMode(mode.clone()))?;
 
-        let current_status = self.player_state.get_status(&player_id).await;
-        if current_status != PlayerMatchStatus::Idle {
-            return Err(MatchError::AlreadyMatching(player_id));
+        let current_status = self.character_state.get_status(&character_id).await;
+        if current_status != CharacterMatchStatus::Idle {
+            return Err(MatchError::AlreadyMatching(character_id));
         }
 
         let match_id = uuid::Uuid::new_v4().to_string();
         let timeout_at =
             std::time::Instant::now() + Duration::from_secs(mode_config.match_timeout_secs);
         let candidate = MatchCandidate::new(
-            player_id.clone(),
+            character_id.clone(),
             match_id.clone(),
             mode.clone(),
             timeout_at,
         );
 
         self.pool.add_candidate(candidate).await;
-        self.player_state
-            .set_status(&player_id, PlayerMatchStatus::Matching)
+        self.character_state
+            .set_status(&character_id, CharacterMatchStatus::Matching)
             .await;
-        self.player_state
+        self.character_state
             .set_context(
-                &player_id,
-                PlayerMatchContext {
+                &character_id,
+                CharacterMatchContext {
                     match_id: match_id.clone(),
                     mode: mode.clone(),
                     room_id: None,
@@ -165,12 +174,12 @@ impl SimpleMatcher {
             .await;
 
         info!(
-            player_id = %player_id,
+            character_id = %character_id,
             mode = %mode,
             match_id = %match_id,
             timeout_secs = mode_config.match_timeout_secs,
-            required_players = mode_config.total_size,
-            "player started matching"
+            required_characters = mode_config.total_size,
+            "character started matching"
         );
 
         self.try_match_mode(&mode).await?;
@@ -179,27 +188,27 @@ impl SimpleMatcher {
     }
 
     /// 取消匹配
-    pub async fn cancel_match(&self, player_id: &str, match_id: &str) -> Result<(), MatchError> {
+    pub async fn cancel_match(&self, character_id: &str, match_id: &str) -> Result<(), MatchError> {
         let ctx = self
-            .player_state
-            .get_context(player_id)
+            .character_state
+            .get_context(character_id)
             .await
-            .ok_or_else(|| MatchError::NotMatching(player_id.to_string()))?;
+            .ok_or_else(|| MatchError::NotMatching(character_id.to_string()))?;
 
         if ctx.match_id != match_id {
             return Err(MatchError::MatchNotFound(match_id.to_string()));
         }
 
-        let status = self.player_state.get_status(player_id).await;
-        if status != PlayerMatchStatus::Matching {
-            return Err(MatchError::NotMatching(player_id.to_string()));
+        let status = self.character_state.get_status(character_id).await;
+        if status != CharacterMatchStatus::Matching {
+            return Err(MatchError::NotMatching(character_id.to_string()));
         }
 
-        self.pool.remove_candidate(player_id, &ctx.mode).await;
-        self.player_state
-            .set_status(player_id, PlayerMatchStatus::Idle)
+        self.pool.remove_candidate(character_id, &ctx.mode).await;
+        self.character_state
+            .set_status(character_id, CharacterMatchStatus::Idle)
             .await;
-        self.player_state.clear_context(player_id).await;
+        self.character_state.clear_context(character_id).await;
 
         let event = MatchEvent {
             event: "match_cancelled".to_string(),
@@ -208,10 +217,10 @@ impl SimpleMatcher {
             token: String::new(),
             error_code: String::new(),
         };
-        let _ = self.player_state.send_event(player_id, event).await;
+        let _ = self.character_state.send_event(character_id, event).await;
 
         info!(
-            player_id = %player_id,
+            character_id = %character_id,
             match_id = %match_id,
             mode = %ctx.mode,
             "match cancelled"
@@ -221,9 +230,9 @@ impl SimpleMatcher {
     }
 
     /// 查询匹配状态
-    pub async fn get_status(&self, player_id: &str) -> Result<MatchStatusRes, MatchError> {
-        let ctx = self.player_state.get_context(player_id).await;
-        let status = self.player_state.get_status(player_id).await;
+    pub async fn get_status(&self, character_id: &str) -> Result<MatchStatusRes, MatchError> {
+        let ctx = self.character_state.get_context(character_id).await;
+        let status = self.character_state.get_status(character_id).await;
 
         let (match_id, room_id, token, estimated_wait) = match ctx {
             Some(c) => (
@@ -236,10 +245,10 @@ impl SimpleMatcher {
         };
 
         let status_str = match status {
-            PlayerMatchStatus::Idle => "idle",
-            PlayerMatchStatus::Matching => "matching",
-            PlayerMatchStatus::Matched => "matched",
-            PlayerMatchStatus::InRoom => "in_room",
+            CharacterMatchStatus::Idle => "idle",
+            CharacterMatchStatus::Matching => "matching",
+            CharacterMatchStatus::Matched => "matched",
+            CharacterMatchStatus::InRoom => "in_room",
         };
 
         Ok(MatchStatusRes {
@@ -256,19 +265,23 @@ impl SimpleMatcher {
         &self,
         match_id: &str,
         room_id: &str,
-        player_ids: &[String],
+        character_ids: &[String],
         mode: &str,
     ) -> Result<(), MatchError> {
         if self.pool.get_match_task(match_id).await.is_none() {
             warn!(
                 match_id = %match_id,
                 room_id = %room_id,
-                players = ?player_ids,
+                characters = ?character_ids,
                 mode = %mode,
                 "CreateRoomAndJoin received without existing match task, reconstructing task"
             );
             self.pool
-                .create_match_task(match_id.to_string(), mode.to_string(), player_ids.to_vec())
+                .create_match_task(
+                    match_id.to_string(),
+                    mode.to_string(),
+                    character_ids.to_vec(),
+                )
                 .await;
         }
 
@@ -279,7 +292,7 @@ impl SimpleMatcher {
             .ok_or_else(|| MatchError::MatchNotFound(match_id.to_string()))?;
 
         if task.room_id.as_deref() == Some(room_id) {
-            self.ensure_room_assignment(match_id, mode, room_id, player_ids)
+            self.ensure_room_assignment(match_id, mode, room_id, character_ids)
                 .await?;
             info!(
                 match_id = %match_id,
@@ -302,16 +315,16 @@ impl SimpleMatcher {
             .update_match_room(match_id, room_id.to_string())
             .await;
 
-        for player_id in player_ids {
+        for character_id in character_ids {
             let token = uuid::Uuid::new_v4().to_string();
-            self.update_player_to_matched(player_id, match_id, mode, room_id, Some(token))
+            self.update_character_to_matched(character_id, match_id, mode, room_id, Some(token))
                 .await?;
         }
 
         info!(
             match_id = %match_id,
             room_id = %room_id,
-            players = ?player_ids,
+            characters = ?character_ids,
             mode = %mode,
             "CreateRoomAndJoin applied to match state"
         );
@@ -319,18 +332,18 @@ impl SimpleMatcher {
         Ok(())
     }
 
-    /// 玩家进入房间回调
+    /// 角色进入房间回调
     pub async fn player_joined(
         &self,
         match_id: &str,
-        player_id: &str,
+        character_id: &str,
         room_id: &str,
     ) -> Result<(), MatchError> {
         let ctx = self
-            .player_state
-            .get_context(player_id)
+            .character_state
+            .get_context(character_id)
             .await
-            .ok_or_else(|| MatchError::NotMatching(player_id.to_string()))?;
+            .ok_or_else(|| MatchError::NotMatching(character_id.to_string()))?;
 
         if ctx.match_id != match_id {
             return Err(MatchError::MatchNotFound(match_id.to_string()));
@@ -338,19 +351,19 @@ impl SimpleMatcher {
 
         let task = self
             .pool
-            .mark_player_joined(match_id, player_id)
+            .mark_character_joined(match_id, character_id)
             .await
             .ok_or_else(|| MatchError::MatchNotFound(match_id.to_string()))?;
 
-        self.player_state
-            .set_status(player_id, PlayerMatchStatus::InRoom)
+        self.character_state
+            .set_status(character_id, CharacterMatchStatus::InRoom)
             .await;
 
-        if let Some(existing_ctx) = self.player_state.get_context(player_id).await {
-            self.player_state
+        if let Some(existing_ctx) = self.character_state.get_context(character_id).await {
+            self.character_state
                 .set_context(
-                    player_id,
-                    PlayerMatchContext {
+                    character_id,
+                    CharacterMatchContext {
                         match_id: existing_ctx.match_id,
                         mode: existing_ctx.mode,
                         room_id: Some(room_id.to_string()),
@@ -361,29 +374,29 @@ impl SimpleMatcher {
         }
 
         info!(
-            player_id = %player_id,
+            character_id = %character_id,
             match_id = %match_id,
             room_id = %room_id,
-            joined_players = task.joined_players.len(),
-            total_players = task.players.len(),
-            "player joined room"
+            joined_characters = task.joined_characters.len(),
+            total_characters = task.character_ids.len(),
+            "character joined room"
         );
 
         Ok(())
     }
 
-    /// 玩家离开回调
+    /// 角色离开回调
     pub async fn player_left(
         &self,
         match_id: &str,
-        player_id: &str,
+        character_id: &str,
         reason: &str,
     ) -> Result<bool, MatchError> {
         let ctx = self
-            .player_state
-            .get_context(player_id)
+            .character_state
+            .get_context(character_id)
             .await
-            .ok_or_else(|| MatchError::NotMatching(player_id.to_string()))?;
+            .ok_or_else(|| MatchError::NotMatching(character_id.to_string()))?;
 
         if ctx.match_id != match_id {
             return Err(MatchError::MatchNotFound(match_id.to_string()));
@@ -391,25 +404,25 @@ impl SimpleMatcher {
 
         let task = self
             .pool
-            .mark_player_left(match_id, player_id)
+            .mark_character_left(match_id, character_id)
             .await
             .ok_or_else(|| MatchError::MatchNotFound(match_id.to_string()))?;
 
-        self.player_state
-            .set_status(player_id, PlayerMatchStatus::Matched)
+        self.character_state
+            .set_status(character_id, CharacterMatchStatus::Matched)
             .await;
 
-        let should_abort = task.active_players.is_empty() && reason != "disconnect";
+        let should_abort = task.active_characters.is_empty() && reason != "disconnect";
 
         info!(
-            player_id = %player_id,
+            character_id = %character_id,
             match_id = %match_id,
             mode = %ctx.mode,
             reason = %reason,
-            active_players = task.active_players.len(),
-            joined_players = task.joined_players.len(),
+            active_characters = task.active_characters.len(),
+            joined_characters = task.joined_characters.len(),
             match_should_abort = should_abort,
-            "player left match"
+            "character left match"
         );
 
         Ok(should_abort)
@@ -425,21 +438,21 @@ impl SimpleMatcher {
         let task = self.pool.remove_match_task(match_id).await;
 
         if let Some(task) = task {
-            let player_count = task.players.len();
+            let character_count = task.character_ids.len();
 
-            for player_id in &task.players {
-                self.player_state
-                    .set_status(player_id, PlayerMatchStatus::Idle)
+            for character_id in &task.character_ids {
+                self.character_state
+                    .set_status(character_id, CharacterMatchStatus::Idle)
                     .await;
-                self.player_state.clear_context(player_id).await;
+                self.character_state.clear_context(character_id).await;
             }
 
             info!(
                 match_id = %match_id,
                 mode = %task.mode,
                 room_id = %room_id,
-                player_count = player_count,
-                players = ?task.players,
+                character_count = character_count,
+                characters = ?task.character_ids,
                 reason = %reason,
                 "match ended"
             );
@@ -484,24 +497,26 @@ impl SimpleMatcher {
 
         let result = async {
             while let Some(candidates) = self.pool.try_match(mode).await {
-                let player_ids: Vec<String> =
-                    candidates.iter().map(|c| c.player_id.clone()).collect();
+                let character_ids: Vec<String> = candidates
+                    .iter()
+                    .map(|candidate| candidate.character_id.clone())
+                    .collect();
                 let match_id = uuid::Uuid::new_v4().to_string();
 
                 info!(
                     mode = %mode,
                     match_id = %match_id,
-                    player_count = player_ids.len(),
-                    players = ?player_ids,
+                    character_count = character_ids.len(),
+                    characters = ?character_ids,
                     "match formed, creating room via game-server"
                 );
 
                 self.pool
-                    .create_match_task(match_id.clone(), mode.to_string(), player_ids.clone())
+                    .create_match_task(match_id.clone(), mode.to_string(), character_ids.clone())
                     .await;
-                self.prepare_players_for_match(&player_ids, &match_id, mode)
+                self.prepare_characters_for_match(&character_ids, &match_id, mode)
                     .await?;
-                self.resume_pending_room_create(&match_id, mode, &player_ids)
+                self.resume_pending_room_create(&match_id, mode, &character_ids)
                     .await?;
             }
 
@@ -516,7 +531,7 @@ impl SimpleMatcher {
         &self,
         match_id: &str,
         mode: &str,
-        player_ids: &[String],
+        character_ids: &[String],
     ) -> Result<(), MatchError> {
         if !self.auto_create_rooms {
             return Ok(());
@@ -528,7 +543,7 @@ impl SimpleMatcher {
             .map_err(|error| MatchError::Internal(error.to_string()))?;
         let room_id = match self
             .game_server_client
-            .create_matched_room(match_id, &expected_room_id, player_ids, mode)
+            .create_matched_room(match_id, &expected_room_id, character_ids, mode)
             .await
         {
             Ok(room_id) => room_id,
@@ -543,7 +558,7 @@ impl SimpleMatcher {
                     warn!(
                         mode = %mode,
                         match_id = %match_id,
-                        players = ?player_ids,
+                        characters = ?character_ids,
                         error = %error,
                         "room creation response failed after callback already applied"
                     );
@@ -552,12 +567,12 @@ impl SimpleMatcher {
                     error!(
                         mode = %mode,
                         match_id = %match_id,
-                        players = ?player_ids,
+                        characters = ?character_ids,
                         error = %error,
                         "failed to create matched room"
                     );
                     self.pool.remove_match_task(match_id).await;
-                    self.fail_matched_players(player_ids, match_id, "ROOM_CREATE_FAILED")
+                    self.fail_matched_characters(character_ids, match_id, "ROOM_CREATE_FAILED")
                         .await;
                     return Ok(());
                 }
@@ -572,7 +587,7 @@ impl SimpleMatcher {
             .is_some();
 
         if !callback_applied {
-            self.create_room_and_join(match_id, &room_id, player_ids, mode)
+            self.create_room_and_join(match_id, &room_id, character_ids, mode)
                 .await?;
         }
 
@@ -580,22 +595,24 @@ impl SimpleMatcher {
             mode = %mode,
             match_id = %match_id,
             room_id = %room_id,
-            players = ?player_ids,
+            characters = ?character_ids,
             "match created successfully"
         );
 
         Ok(())
     }
 
-    /// 清理超时玩家
+    /// 清理超时角色
     pub async fn cleanup_timeout(&self) -> Result<(), MatchError> {
         let timed_out = self.pool.cleanup_timeout().await;
 
         for candidate in timed_out {
-            self.player_state
-                .set_status(&candidate.player_id, PlayerMatchStatus::Idle)
+            self.character_state
+                .set_status(&candidate.character_id, CharacterMatchStatus::Idle)
                 .await;
-            self.player_state.clear_context(&candidate.player_id).await;
+            self.character_state
+                .clear_context(&candidate.character_id)
+                .await;
 
             let event = MatchEvent {
                 event: "match_failed".to_string(),
@@ -605,12 +622,12 @@ impl SimpleMatcher {
                 error_code: "MATCH_TIMEOUT".to_string(),
             };
             let _ = self
-                .player_state
-                .send_event(&candidate.player_id, event)
+                .character_state
+                .send_event(&candidate.character_id, event)
                 .await;
 
             info!(
-                player_id = %candidate.player_id,
+                character_id = %candidate.character_id,
                 match_id = %candidate.match_id,
                 mode = %candidate.mode,
                 "match candidate timed out"
@@ -620,23 +637,23 @@ impl SimpleMatcher {
         Ok(())
     }
 
-    async fn prepare_players_for_match(
+    async fn prepare_characters_for_match(
         &self,
-        player_ids: &[String],
+        character_ids: &[String],
         match_id: &str,
         mode: &str,
     ) -> Result<(), MatchError> {
-        for player_id in player_ids {
+        for character_id in character_ids {
             let ctx = self
-                .player_state
-                .get_context(player_id)
+                .character_state
+                .get_context(character_id)
                 .await
-                .ok_or_else(|| MatchError::PlayerNotFound(player_id.clone()))?;
+                .ok_or_else(|| MatchError::CharacterNotFound(character_id.clone()))?;
 
-            self.player_state
+            self.character_state
                 .set_context(
-                    player_id,
-                    PlayerMatchContext {
+                    character_id,
+                    CharacterMatchContext {
                         match_id: match_id.to_string(),
                         mode: ctx.mode,
                         room_id: None,
@@ -644,37 +661,37 @@ impl SimpleMatcher {
                     },
                 )
                 .await;
-            self.player_state
-                .set_status(player_id, PlayerMatchStatus::Matched)
+            self.character_state
+                .set_status(character_id, CharacterMatchStatus::Matched)
                 .await;
         }
 
         info!(
             match_id = %match_id,
             mode = %mode,
-            players = ?player_ids,
-            "players promoted from matching queue into match task"
+            characters = ?character_ids,
+            "characters promoted from matching queue into match task"
         );
 
         Ok(())
     }
 
-    async fn update_player_to_matched(
+    async fn update_character_to_matched(
         &self,
-        player_id: &str,
+        character_id: &str,
         match_id: &str,
         mode: &str,
         room_id: &str,
         token_override: Option<String>,
     ) -> Result<(), MatchError> {
-        let ctx = self.player_state.get_context(player_id).await;
+        let ctx = self.character_state.get_context(character_id).await;
         if let Some(existing_ctx) = ctx.as_ref() {
             if existing_ctx.match_id != match_id {
                 warn!(
-                    player_id = %player_id,
+                    character_id = %character_id,
                     previous_match_id = %existing_ctx.match_id,
                     new_match_id = %match_id,
-                    "player context match_id differed from room callback, overwriting with room callback"
+                    "character context match_id differed from room callback, overwriting with room callback"
                 );
             }
         }
@@ -690,10 +707,10 @@ impl SimpleMatcher {
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         });
 
-        self.player_state
+        self.character_state
             .set_context(
-                player_id,
-                PlayerMatchContext {
+                character_id,
+                CharacterMatchContext {
                     match_id: match_id.to_string(),
                     mode: resolved_mode,
                     room_id: Some(room_id.to_string()),
@@ -701,8 +718,8 @@ impl SimpleMatcher {
                 },
             )
             .await;
-        self.player_state
-            .set_status(player_id, PlayerMatchStatus::Matched)
+        self.character_state
+            .set_status(character_id, CharacterMatchStatus::Matched)
             .await;
 
         let event = MatchEvent {
@@ -712,7 +729,7 @@ impl SimpleMatcher {
             token,
             error_code: String::new(),
         };
-        let _ = self.player_state.send_event(player_id, event).await;
+        let _ = self.character_state.send_event(character_id, event).await;
 
         Ok(())
     }
@@ -722,22 +739,22 @@ impl SimpleMatcher {
         match_id: &str,
         mode: &str,
         room_id: &str,
-        player_ids: &[String],
+        character_ids: &[String],
     ) -> Result<(), MatchError> {
-        for player_id in player_ids {
-            let existing_ctx = self.player_state.get_context(player_id).await;
+        for character_id in character_ids {
+            let existing_ctx = self.character_state.get_context(character_id).await;
             if let Some(ctx) = existing_ctx.as_ref() {
                 if ctx.match_id != match_id {
                     warn!(
-                        player_id = %player_id,
+                        character_id = %character_id,
                         previous_match_id = %ctx.match_id,
                         repaired_match_id = %match_id,
-                        "player context match_id differed while repairing recovered room assignment"
+                        "character context match_id differed while repairing recovered room assignment"
                     );
                 }
             }
 
-            let existing_event = self.player_state.latest_event(player_id).await;
+            let existing_event = self.character_state.latest_event(character_id).await;
             let token = existing_ctx
                 .as_ref()
                 .filter(|ctx| {
@@ -775,10 +792,10 @@ impl SimpleMatcher {
                 })
                 .unwrap_or(true);
             if context_needs_repair {
-                self.player_state
+                self.character_state
                     .set_context(
-                        player_id,
-                        PlayerMatchContext {
+                        character_id,
+                        CharacterMatchContext {
                             match_id: match_id.to_string(),
                             mode: resolved_mode.clone(),
                             room_id: Some(room_id.to_string()),
@@ -788,14 +805,14 @@ impl SimpleMatcher {
                     .await;
             }
 
-            let status = self.player_state.get_status(player_id).await;
+            let status = self.character_state.get_status(character_id).await;
             let status_needs_repair = !matches!(
                 status,
-                PlayerMatchStatus::Matched | PlayerMatchStatus::InRoom
+                CharacterMatchStatus::Matched | CharacterMatchStatus::InRoom
             );
             if status_needs_repair {
-                self.player_state
-                    .set_status(player_id, PlayerMatchStatus::Matched)
+                self.character_state
+                    .set_status(character_id, CharacterMatchStatus::Matched)
                     .await;
             }
 
@@ -816,18 +833,18 @@ impl SimpleMatcher {
                     token: token.clone(),
                     error_code: String::new(),
                 };
-                let _ = self.player_state.send_event(player_id, event).await;
+                let _ = self.character_state.send_event(character_id, event).await;
             }
 
             if context_needs_repair || status_needs_repair || event_needs_repair {
                 info!(
-                    player_id = %player_id,
+                    character_id = %character_id,
                     match_id = %match_id,
                     room_id = %room_id,
                     repaired_context = context_needs_repair,
                     repaired_status = status_needs_repair,
                     repaired_event = event_needs_repair,
-                    "repaired recovered room assignment for player"
+                    "repaired recovered room assignment for character"
                 );
             }
         }
@@ -839,12 +856,17 @@ impl SimpleMatcher {
         Duration::from_secs(self.config.match_runtime_lease_ttl_secs.max(1))
     }
 
-    async fn fail_matched_players(&self, player_ids: &[String], match_id: &str, error_code: &str) {
-        for player_id in player_ids {
-            self.player_state
-                .set_status(player_id, PlayerMatchStatus::Idle)
+    async fn fail_matched_characters(
+        &self,
+        character_ids: &[String],
+        match_id: &str,
+        error_code: &str,
+    ) {
+        for character_id in character_ids {
+            self.character_state
+                .set_status(character_id, CharacterMatchStatus::Idle)
                 .await;
-            self.player_state.clear_context(player_id).await;
+            self.character_state.clear_context(character_id).await;
 
             let event = MatchEvent {
                 event: "match_failed".to_string(),
@@ -853,7 +875,7 @@ impl SimpleMatcher {
                 token: String::new(),
                 error_code: error_code.to_string(),
             };
-            let _ = self.player_state.send_event(player_id, event).await;
+            let _ = self.character_state.send_event(character_id, event).await;
         }
     }
 }
@@ -1006,16 +1028,68 @@ pub fn new_simple_matcher_with_runtime_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModeConfig;
     use crate::runtime_store::{
         StoredMatchCandidate, StoredMatchTask, new_memory_match_runtime_store,
     };
-    use crate::state::{PlayerMatchContext, PlayerMatchStatus};
+    use crate::state::{CharacterMatchContext, CharacterMatchStatus};
+
+    fn test_config() -> Config {
+        let mut modes = std::collections::HashMap::new();
+        modes.insert(
+            "1v1".to_string(),
+            ModeConfig {
+                team_size: 1,
+                total_size: 2,
+                match_timeout_secs: 30,
+            },
+        );
+
+        Config {
+            bind_addr: "0.0.0.0:9002".to_string(),
+            public_host: "127.0.0.1".to_string(),
+            port: 9002,
+            match_timeout_secs: 30,
+            max_concurrent_matches: 1000,
+            modes,
+            match_cleanup_interval_secs: 1,
+            game_server_service_name: "game-server".to_string(),
+            game_server_internal_socket_name: "fallback.sock".to_string(),
+            local_discovery_fallback_enabled: true,
+            game_server_discovery_cache_ttl_secs: 1,
+            game_server_target_zone: String::new(),
+            game_internal_token: "dev-only-change-this-game-internal-token".to_string(),
+            log_level: "info".to_string(),
+            log_enable_console: true,
+            log_enable_file: false,
+            log_dir: "logs".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            redis_key_prefix: String::new(),
+            global_id_origin_id: 0,
+            global_id_worker_id: None,
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            registry_enabled: false,
+            discovery_required: false,
+            registry_url: "redis://127.0.0.1:1".to_string(),
+            registry_key_prefix: String::new(),
+            registry_heartbeat_interval_secs: 10,
+            service_name: "match-service".to_string(),
+            service_instance_id: "match-service-test".to_string(),
+            service_zone: "local".to_string(),
+            service_build_version: "dev".to_string(),
+            match_runtime_store: "memory".to_string(),
+            match_runtime_key_prefix: "myserver:".to_string(),
+            match_runtime_lease_ttl_secs: 10,
+            match_recovery_enabled: true,
+            legacy_direct_config_warnings: Vec::new(),
+        }
+    }
 
     async fn seed_in_room_match(
         matcher: &SimpleMatcher,
         match_id: &str,
         room_id: &str,
-        players: &[&str],
+        characters: &[&str],
         mode: &str,
     ) {
         matcher
@@ -1023,48 +1097,51 @@ mod tests {
             .create_match_task(
                 match_id.to_string(),
                 mode.to_string(),
-                players.iter().map(|player| (*player).to_string()).collect(),
+                characters
+                    .iter()
+                    .map(|character| (*character).to_string())
+                    .collect(),
             )
             .await;
 
-        for player_id in players {
+        for character_id in characters {
             matcher
-                .player_state()
+                .character_state()
                 .set_context(
-                    player_id,
-                    PlayerMatchContext {
+                    character_id,
+                    CharacterMatchContext {
                         match_id: match_id.to_string(),
                         mode: mode.to_string(),
                         room_id: Some(room_id.to_string()),
-                        token: Some(format!("token-{player_id}")),
+                        token: Some(format!("token-{character_id}")),
                     },
                 )
                 .await;
             matcher
-                .player_state()
-                .set_status(player_id, PlayerMatchStatus::InRoom)
+                .character_state()
+                .set_status(character_id, CharacterMatchStatus::InRoom)
                 .await;
         }
     }
 
     #[tokio::test]
-    async fn disconnecting_last_active_player_does_not_abort_match() {
-        let matcher = SimpleMatcher::new(Config::from_env());
+    async fn disconnecting_last_active_character_does_not_abort_match() {
+        let matcher = SimpleMatcher::new(test_config());
         seed_in_room_match(
             &matcher,
             "match-1",
             "room-1",
-            &["player-a", "player-b"],
+            &["character-a", "character-b"],
             "1v1",
         )
         .await;
 
         let left_a = matcher
-            .player_left("match-1", "player-a", "disconnect")
+            .player_left("match-1", "character-a", "disconnect")
             .await
             .unwrap();
         let left_b = matcher
-            .player_left("match-1", "player-b", "disconnect")
+            .player_left("match-1", "character-b", "disconnect")
             .await
             .unwrap();
 
@@ -1076,27 +1153,27 @@ mod tests {
             .get_match_task("match-1")
             .await
             .expect("match task should still exist");
-        assert!(task.active_players.is_empty());
+        assert!(task.active_characters.is_empty());
     }
 
     #[tokio::test]
-    async fn normal_leave_still_aborts_when_last_active_player_leaves() {
-        let matcher = SimpleMatcher::new(Config::from_env());
+    async fn normal_leave_still_aborts_when_last_active_character_leaves() {
+        let matcher = SimpleMatcher::new(test_config());
         seed_in_room_match(
             &matcher,
             "match-2",
             "room-2",
-            &["player-a", "player-b"],
+            &["character-a", "character-b"],
             "1v1",
         )
         .await;
 
         let left_a = matcher
-            .player_left("match-2", "player-a", "normal")
+            .player_left("match-2", "character-a", "normal")
             .await
             .unwrap();
         let left_b = matcher
-            .player_left("match-2", "player-b", "normal")
+            .player_left("match-2", "character-b", "normal")
             .await
             .unwrap();
 
@@ -1105,13 +1182,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn different_character_ids_are_distinct_match_participants() {
+        let matcher =
+            SimpleMatcher::new_for_test(test_config(), new_memory_match_runtime_store(), false);
+
+        let match_a = matcher
+            .start_match("account-1:character-a".to_string(), "1v1".to_string())
+            .await
+            .unwrap();
+        let match_b = matcher
+            .start_match("account-1:character-b".to_string(), "1v1".to_string())
+            .await
+            .unwrap();
+
+        assert_ne!(match_a, match_b);
+        assert_eq!(
+            matcher
+                .character_state()
+                .get_status("account-1:character-a")
+                .await,
+            CharacterMatchStatus::Matched
+        );
+        assert_eq!(
+            matcher
+                .character_state()
+                .get_status("account-1:character-b")
+                .await,
+            CharacterMatchStatus::Matched
+        );
+
+        let ctx_a = matcher
+            .character_state()
+            .get_context("account-1:character-a")
+            .await
+            .expect("character-a should keep its own match context");
+        let ctx_b = matcher
+            .character_state()
+            .get_context("account-1:character-b")
+            .await
+            .expect("character-b should keep its own match context");
+        assert_eq!(ctx_a.match_id, ctx_b.match_id);
+
+        let task = matcher
+            .pool()
+            .get_match_task(&ctx_a.match_id)
+            .await
+            .expect("match task should be created for both characters");
+        assert_eq!(
+            task.character_ids,
+            vec![
+                "account-1:character-a".to_string(),
+                "account-1:character-b".to_string(),
+            ]
+        );
+        assert_eq!(task.active_characters.len(), 2);
+    }
+
+    #[tokio::test]
     async fn recovery_restores_matching_candidate_state() {
         let store = new_memory_match_runtime_store();
-        let config = Config::from_env();
+        let config = test_config();
         let matcher = SimpleMatcher::new_for_test(config, store.clone(), false);
         let timeout_at = std::time::Instant::now() + Duration::from_secs(30);
         let candidate = MatchCandidate::new(
-            "player-a".to_string(),
+            "character-a".to_string(),
             "match-a".to_string(),
             "1v1".to_string(),
             timeout_at,
@@ -1121,13 +1255,13 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_player_status("player-a", PlayerMatchStatus::Matching.into())
+            .set_character_status("character-a", CharacterMatchStatus::Matching.into())
             .await
             .unwrap();
         store
-            .set_player_context(
-                "player-a",
-                PlayerMatchContext {
+            .set_character_context(
+                "character-a",
+                CharacterMatchContext {
                     match_id: "match-a".to_string(),
                     mode: "1v1".to_string(),
                     room_id: None,
@@ -1141,8 +1275,8 @@ mod tests {
         matcher.recover_runtime_state().await.unwrap();
 
         assert_eq!(
-            matcher.player_state().get_status("player-a").await,
-            PlayerMatchStatus::Matching
+            matcher.character_state().get_status("character-a").await,
+            CharacterMatchStatus::Matching
         );
         assert_eq!(matcher.pool().candidate_count("1v1").await, 1);
     }
@@ -1150,12 +1284,12 @@ mod tests {
     #[tokio::test]
     async fn recovery_restores_pending_match_task() {
         let store = new_memory_match_runtime_store();
-        let config = Config::from_env();
+        let config = test_config();
         let matcher = SimpleMatcher::new_for_test(config, store.clone(), false);
         let task = crate::pool::MatchTask::new(
             "match-pending".to_string(),
             "1v1".to_string(),
-            vec!["player-a".to_string(), "player-b".to_string()],
+            vec!["character-a".to_string(), "character-b".to_string()],
         );
         store
             .save_match_task(StoredMatchTask::from_task(&task))
@@ -1169,19 +1303,19 @@ mod tests {
             .get_match_task("match-pending")
             .await
             .expect("pending match task should be recovered");
-        assert_eq!(recovered.players, task.players);
+        assert_eq!(recovered.character_ids, task.character_ids);
         assert!(recovered.room_id.is_none());
     }
 
     #[tokio::test]
-    async fn recovery_repairs_room_task_player_assignment_state() {
+    async fn recovery_repairs_room_task_character_assignment_state() {
         let store = new_memory_match_runtime_store();
-        let config = Config::from_env();
+        let config = test_config();
         let matcher = SimpleMatcher::new_for_test(config, store.clone(), false);
         let mut task = crate::pool::MatchTask::new(
             "match-roomed".to_string(),
             "1v1".to_string(),
-            vec!["player-a".to_string(), "player-b".to_string()],
+            vec!["character-a".to_string(), "character-b".to_string()],
         );
         task.room_id = Some("room-recovered".to_string());
         store
@@ -1189,13 +1323,13 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_player_status("player-a", PlayerMatchStatus::Matched.into())
+            .set_character_status("character-a", CharacterMatchStatus::Matched.into())
             .await
             .unwrap();
         store
-            .set_player_context(
-                "player-a",
-                PlayerMatchContext {
+            .set_character_context(
+                "character-a",
+                CharacterMatchContext {
                     match_id: "match-roomed".to_string(),
                     mode: "1v1".to_string(),
                     room_id: Some("room-recovered".to_string()),
@@ -1209,37 +1343,37 @@ mod tests {
         matcher.recover_runtime_state().await.unwrap();
 
         let ctx_a = matcher
-            .player_state()
-            .get_context("player-a")
+            .character_state()
+            .get_context("character-a")
             .await
             .expect("existing context should remain available");
         assert_eq!(ctx_a.room_id.as_deref(), Some("room-recovered"));
         assert_eq!(ctx_a.token.as_deref(), Some("token-existing"));
         let event_a = matcher
-            .player_state()
-            .latest_event("player-a")
+            .character_state()
+            .latest_event("character-a")
             .await
-            .expect("existing player should get recovered latest event");
+            .expect("existing character should get recovered latest event");
         assert_eq!(event_a.event, "matched");
         assert_eq!(event_a.token, "token-existing");
 
         let ctx_b = matcher
-            .player_state()
-            .get_context("player-b")
+            .character_state()
+            .get_context("character-b")
             .await
-            .expect("missing player context should be repaired");
+            .expect("missing character context should be repaired");
         assert_eq!(ctx_b.match_id, "match-roomed");
         assert_eq!(ctx_b.room_id.as_deref(), Some("room-recovered"));
         assert!(ctx_b.token.as_ref().is_some_and(|token| !token.is_empty()));
         assert_eq!(
-            matcher.player_state().get_status("player-b").await,
-            PlayerMatchStatus::Matched
+            matcher.character_state().get_status("character-b").await,
+            CharacterMatchStatus::Matched
         );
         let event_b = matcher
-            .player_state()
-            .latest_event("player-b")
+            .character_state()
+            .latest_event("character-b")
             .await
-            .expect("missing player should get recovered latest event");
+            .expect("missing character should get recovered latest event");
         assert_eq!(event_b.event, "matched");
         assert_eq!(event_b.match_id, "match-roomed");
         assert_eq!(event_b.room_id, "room-recovered");
@@ -1249,7 +1383,7 @@ mod tests {
     #[tokio::test]
     async fn mode_lease_blocks_candidate_consumption_by_other_instance() {
         let store = new_memory_match_runtime_store();
-        let mut config = Config::from_env();
+        let mut config = test_config();
         config.service_instance_id = "instance-b".to_string();
         let matcher = SimpleMatcher::new_for_test(config, store.clone(), false);
 
@@ -1258,20 +1392,20 @@ mod tests {
             .await
             .unwrap();
 
-        for player_id in ["player-a", "player-b"] {
-            let match_id = format!("match-{player_id}");
+        for character_id in ["character-a", "character-b"] {
+            let match_id = format!("match-{character_id}");
             let candidate = MatchCandidate::new(
-                player_id.to_string(),
+                character_id.to_string(),
                 match_id.clone(),
                 "1v1".to_string(),
                 std::time::Instant::now() + Duration::from_secs(30),
             );
             matcher.pool().add_candidate(candidate).await;
             matcher
-                .player_state()
+                .character_state()
                 .set_context(
-                    player_id,
-                    PlayerMatchContext {
+                    character_id,
+                    CharacterMatchContext {
                         match_id,
                         mode: "1v1".to_string(),
                         room_id: None,
@@ -1280,8 +1414,8 @@ mod tests {
                 )
                 .await;
             matcher
-                .player_state()
-                .set_status(player_id, PlayerMatchStatus::Matching)
+                .character_state()
+                .set_status(character_id, CharacterMatchStatus::Matching)
                 .await;
         }
 
@@ -1291,7 +1425,7 @@ mod tests {
         assert!(
             matcher
                 .pool()
-                .get_match_task("match-player-a")
+                .get_match_task("match-character-a")
                 .await
                 .is_none()
         );

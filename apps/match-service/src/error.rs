@@ -7,17 +7,17 @@ pub enum MatchError {
     #[error("invalid mode: {0}")]
     InvalidMode(String),
 
-    #[error("already matching: player_id={0}")]
+    #[error("already matching: character_id={0}")]
     AlreadyMatching(String),
 
-    #[error("not matching: player_id={0}")]
+    #[error("not matching: character_id={0}")]
     NotMatching(String),
 
     #[error("match not found: match_id={0}")]
     MatchNotFound(String),
 
-    #[error("player not found: player_id={0}")]
-    PlayerNotFound(String),
+    #[error("character not found: character_id={0}")]
+    CharacterNotFound(String),
 
     #[error("match timeout: match_id={0}")]
     MatchTimeout(String),
@@ -36,7 +36,7 @@ impl MatchError {
             MatchError::AlreadyMatching(_) => "ALREADY_MATCHING",
             MatchError::NotMatching(_) => "NOT_MATCHING",
             MatchError::MatchNotFound(_) => "MATCH_NOT_FOUND",
-            MatchError::PlayerNotFound(_) => "PLAYER_NOT_FOUND",
+            MatchError::CharacterNotFound(_) => "CHARACTER_NOT_FOUND",
             MatchError::MatchTimeout(_) => "MATCH_TIMEOUT",
             MatchError::RoomCreateFailed(_) => "ROOM_CREATE_FAILED",
             MatchError::Internal(_) => "INTERNAL_ERROR",

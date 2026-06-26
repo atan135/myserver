@@ -7,9 +7,9 @@ use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use proto::myserver::matchservice::{
-    match_internal_client::MatchInternalClient, match_service_client::MatchServiceClient,
     CreateRoomAndJoinReq, MatchEndReq, MatchEvent, MatchEventStreamReq, MatchStartReq,
-    MatchStatusReq, PlayerJoinedReq, PlayerLeftReq,
+    MatchStatusReq, PlayerJoinedReq, PlayerLeftReq, match_internal_client::MatchInternalClient,
+    match_service_client::MatchServiceClient,
 };
 use tonic::transport::Channel;
 
@@ -19,7 +19,7 @@ struct Options {
     addr: String,
     mode: String,
     timeout_secs: u64,
-    player_ids: Vec<String>,
+    character_ids: Vec<String>,
     json_output: bool,
 }
 
@@ -29,7 +29,7 @@ fn parse_options() -> Result<Options, String> {
         env::var("MATCH_SERVICE_ADDR").unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
     let mut mode = "1v1".to_string();
     let mut timeout_secs = 15_u64;
-    let mut player_ids = Vec::new();
+    let mut character_ids = Vec::new();
     let mut json_output = false;
 
     let mut args = env::args().skip(1);
@@ -58,10 +58,10 @@ fn parse_options() -> Result<Options, String> {
                     .parse::<u64>()
                     .map_err(|_| format!("invalid --timeout-secs value: {raw}"))?;
             }
-            "--player-id" => {
-                player_ids.push(
+            "--character-id" => {
+                character_ids.push(
                     args.next()
-                        .ok_or_else(|| "--player-id requires a value".to_string())?,
+                        .ok_or_else(|| "--character-id requires a value".to_string())?,
                 );
             }
             "--json-output" => {
@@ -69,7 +69,7 @@ fn parse_options() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: cargo run --example match_flow_probe -- [--scenario matched|timeout] [--addr http://127.0.0.1:9002] [--mode 1v1] [--timeout-secs 15] [--player-id PLAYER_A --player-id PLAYER_B] [--json-output]"
+                    "usage: cargo run --example match_flow_probe -- [--scenario matched|timeout] [--addr http://127.0.0.1:9002] [--mode 1v1] [--timeout-secs 15] [--character-id character_a --character-id character_b] [--json-output]"
                         .to_string(),
                 );
             }
@@ -79,28 +79,28 @@ fn parse_options() -> Result<Options, String> {
         }
     }
 
-    if player_ids.is_empty() {
+    if character_ids.is_empty() {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("system clock error: {error}"))?
             .as_millis();
-        player_ids.push(format!("probe-{seed}-a"));
+        character_ids.push(format!("chr-probe-{seed}-a"));
         if scenario == "matched" || scenario == "player-left" {
-            player_ids.push(format!("probe-{seed}-b"));
+            character_ids.push(format!("chr-probe-{seed}-b"));
         }
     }
 
-    let expected_players = match scenario.as_str() {
+    let expected_characters = match scenario.as_str() {
         "matched" => 2,
         "player-left" => 2,
         "timeout" => 1,
         other => return Err(format!("unsupported --scenario value: {other}")),
     };
 
-    if player_ids.len() != expected_players {
+    if character_ids.len() != expected_characters {
         return Err(format!(
-            "scenario {scenario} expects exactly {expected_players} player ids, got {}",
-            player_ids.len(),
+            "scenario {scenario} expects exactly {expected_characters} character ids, got {}",
+            character_ids.len(),
         ));
     }
 
@@ -109,7 +109,7 @@ fn parse_options() -> Result<Options, String> {
         addr,
         mode,
         timeout_secs,
-        player_ids,
+        character_ids,
         json_output,
     })
 }
@@ -125,22 +125,22 @@ async fn connect_internal(
 }
 
 async fn wait_for_event(
-    player_id: &str,
+    character_id: &str,
     mut stream: tonic::Streaming<MatchEvent>,
     timeout_secs: u64,
 ) -> Result<MatchEvent, Box<dyn std::error::Error>> {
     let event = tokio::time::timeout(Duration::from_secs(timeout_secs), stream.message()).await??;
-    let event = event.ok_or_else(|| format!("event stream closed for player {player_id}"))?;
+    let event = event.ok_or_else(|| format!("event stream closed for character {character_id}"))?;
     Ok(event)
 }
 
 async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
-    let player_a = options.player_ids[0].clone();
-    let player_b = options.player_ids[1].clone();
+    let character_a = options.character_ids[0].clone();
+    let character_b = options.character_ids[1].clone();
 
     println!(
-        "match_flow_probe matched: addr={} mode={} players={:?}",
-        options.addr, options.mode, options.player_ids
+        "match_flow_probe matched: addr={} mode={} characters={:?}",
+        options.addr, options.mode, options.character_ids
     );
 
     let mut stream_client_a = connect(&options.addr).await?;
@@ -151,25 +151,25 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
 
     let stream_a = stream_client_a
         .match_event_stream(MatchEventStreamReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
         })
         .await?
         .into_inner();
     let stream_b = stream_client_b
         .match_event_stream(MatchEventStreamReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
         })
         .await?
         .into_inner();
 
     let (start_a, start_b) = tokio::try_join!(
         action_client_a.match_start(MatchStartReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
             mode: options.mode.clone(),
             rank_tier: 0,
         }),
         action_client_b.match_start(MatchStartReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
             mode: options.mode.clone(),
             rank_tier: 0,
         })
@@ -197,8 +197,8 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
     }
 
     let (event_a, event_b) = tokio::try_join!(
-        wait_for_event(&player_a, stream_a, options.timeout_secs),
-        wait_for_event(&player_b, stream_b, options.timeout_secs)
+        wait_for_event(&character_a, stream_a, options.timeout_secs),
+        wait_for_event(&character_b, stream_b, options.timeout_secs)
     )?;
 
     println!(
@@ -228,14 +228,14 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
     }
     if event_a.room_id != event_b.room_id {
         return Err(format!(
-            "players matched into different rooms: {} vs {}",
+            "characters matched into different rooms: {} vs {}",
             event_a.room_id, event_b.room_id
         )
         .into());
     }
     if event_a.match_id != event_b.match_id {
         return Err(format!(
-            "players matched into different match ids: {} vs {}",
+            "characters matched into different match ids: {} vs {}",
             event_a.match_id, event_b.match_id
         )
         .into());
@@ -243,20 +243,25 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
 
     let status_a = status_client
         .match_status(MatchStatusReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
         })
         .await?
         .into_inner();
     let status_b = status_client
         .match_status(MatchStatusReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
         })
         .await?
         .into_inner();
 
     println!(
         "match status: A={{ status: {}, match_id: {}, room_id: {} }} B={{ status: {}, match_id: {}, room_id: {} }}",
-        status_a.status, status_a.match_id, status_a.room_id, status_b.status, status_b.match_id, status_b.room_id
+        status_a.status,
+        status_a.match_id,
+        status_a.room_id,
+        status_b.status,
+        status_b.match_id,
+        status_b.room_id
     );
 
     if status_a.status != "matched" || status_b.status != "matched" {
@@ -282,7 +287,7 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
                 "scenario": "matched",
                 "matchId": event_a.match_id,
                 "roomId": event_a.room_id,
-                "playerIds": [player_a, player_b],
+                "characterIds": [character_a, character_b],
                 "mode": options.mode,
                 "statuses": [status_a.status, status_b.status]
             })
@@ -292,11 +297,11 @@ async fn run_matched_probe(options: &Options) -> Result<(), Box<dyn std::error::
 }
 
 async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
-    let player_id = options.player_ids[0].clone();
+    let character_id = options.character_ids[0].clone();
 
     println!(
-        "match_flow_probe timeout: addr={} mode={} player={} timeout_secs={}",
-        options.addr, options.mode, player_id, options.timeout_secs
+        "match_flow_probe timeout: addr={} mode={} character={} timeout_secs={}",
+        options.addr, options.mode, character_id, options.timeout_secs
     );
 
     let mut stream_client = connect(&options.addr).await?;
@@ -305,14 +310,14 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
 
     let stream = stream_client
         .match_event_stream(MatchEventStreamReq {
-            player_id: player_id.clone(),
+            character_id: character_id.clone(),
         })
         .await?
         .into_inner();
 
     let start = action_client
         .match_start(MatchStartReq {
-            player_id: player_id.clone(),
+            character_id: character_id.clone(),
             mode: options.mode.clone(),
             rank_tier: 0,
         })
@@ -328,7 +333,7 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
         return Err(format!("match_start failed: {}", start.error_code).into());
     }
 
-    let event = wait_for_event(&player_id, stream, options.timeout_secs).await?;
+    let event = wait_for_event(&character_id, stream, options.timeout_secs).await?;
     println!(
         "timeout event: event={} match_id={} room_id={} error={}",
         event.event, event.match_id, event.room_id, event.error_code
@@ -347,7 +352,7 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
 
     let status = status_client
         .match_status(MatchStatusReq {
-            player_id: player_id.clone(),
+            character_id: character_id.clone(),
         })
         .await?
         .into_inner();
@@ -368,7 +373,7 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
             serde_json::json!({
                 "ok": true,
                 "scenario": "timeout",
-                "playerIds": [player_id],
+                "characterIds": [character_id],
                 "mode": options.mode,
                 "event": event.event,
                 "errorCode": event.error_code,
@@ -380,15 +385,15 @@ async fn run_timeout_probe(options: &Options) -> Result<(), Box<dyn std::error::
 }
 
 async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
-    let player_a = options.player_ids[0].clone();
-    let player_b = options.player_ids[1].clone();
+    let character_a = options.character_ids[0].clone();
+    let character_b = options.character_ids[1].clone();
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let match_id = format!("probe-player-left-{now}");
-    let room_id = format!("room-probe-player-left-{now}");
+    let match_id = format!("chr-probe-player-left-{now}");
+    let room_id = format!("room-chr-probe-player-left-{now}");
 
     println!(
-        "match_flow_probe player-left: addr={} mode={} players={:?} match_id={} room_id={}",
-        options.addr, options.mode, options.player_ids, match_id, room_id
+        "match_flow_probe player-left: addr={} mode={} characters={:?} match_id={} room_id={}",
+        options.addr, options.mode, options.character_ids, match_id, room_id
     );
 
     let mut internal_client = connect_internal(&options.addr).await?;
@@ -398,7 +403,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
         .create_room_and_join(CreateRoomAndJoinReq {
             match_id: match_id.clone(),
             room_id: room_id.clone(),
-            player_ids: vec![player_a.clone(), player_b.clone()],
+            character_ids: vec![character_a.clone(), character_b.clone()],
             mode: options.mode.clone(),
         })
         .await?
@@ -415,7 +420,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
     let joined_a = internal_client
         .player_joined(PlayerJoinedReq {
             match_id: match_id.clone(),
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
             room_id: room_id.clone(),
         })
         .await?
@@ -423,7 +428,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
     let joined_b = internal_client
         .player_joined(PlayerJoinedReq {
             match_id: match_id.clone(),
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
             room_id: room_id.clone(),
         })
         .await?
@@ -443,29 +448,32 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
 
     let status_joined_a = status_client
         .match_status(MatchStatusReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
         })
         .await?
         .into_inner();
     let status_joined_b = status_client
         .match_status(MatchStatusReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
         })
         .await?
         .into_inner();
 
     println!(
         "status after player_joined: A={{ status: {}, room_id: {} }} B={{ status: {}, room_id: {} }}",
-        status_joined_a.status, status_joined_a.room_id, status_joined_b.status, status_joined_b.room_id
+        status_joined_a.status,
+        status_joined_a.room_id,
+        status_joined_b.status,
+        status_joined_b.room_id
     );
     if status_joined_a.status != "in_room" || status_joined_b.status != "in_room" {
-        return Err("expected both players to be in_room after player_joined".into());
+        return Err("expected both characters to be in_room after player_joined".into());
     }
 
     let left_a = internal_client
         .player_left(PlayerLeftReq {
             match_id: match_id.clone(),
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
             reason: "normal".to_string(),
         })
         .await?
@@ -473,7 +481,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
     let left_b = internal_client
         .player_left(PlayerLeftReq {
             match_id: match_id.clone(),
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
             reason: "normal".to_string(),
         })
         .await?
@@ -497,13 +505,13 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
 
     let status_left_a = status_client
         .match_status(MatchStatusReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
         })
         .await?
         .into_inner();
     let status_left_b = status_client
         .match_status(MatchStatusReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
         })
         .await?
         .into_inner();
@@ -513,7 +521,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
         status_left_a.status, status_left_a.room_id, status_left_b.status, status_left_b.room_id
     );
     if status_left_a.status != "matched" || status_left_b.status != "matched" {
-        return Err("expected both players to fall back to matched after player_left".into());
+        return Err("expected both characters to fall back to matched after player_left".into());
     }
 
     let match_end = internal_client
@@ -535,13 +543,13 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
 
     let status_end_a = status_client
         .match_status(MatchStatusReq {
-            player_id: player_a.clone(),
+            character_id: character_a.clone(),
         })
         .await?
         .into_inner();
     let status_end_b = status_client
         .match_status(MatchStatusReq {
-            player_id: player_b.clone(),
+            character_id: character_b.clone(),
         })
         .await?
         .into_inner();
@@ -551,7 +559,7 @@ async fn run_player_left_probe(options: &Options) -> Result<(), Box<dyn std::err
         status_end_a.status, status_end_a.room_id, status_end_b.status, status_end_b.room_id
     );
     if status_end_a.status != "idle" || status_end_b.status != "idle" {
-        return Err("expected both players to be idle after match_end".into());
+        return Err("expected both characters to be idle after match_end".into());
     }
 
     println!("match_flow_probe player-left: success");

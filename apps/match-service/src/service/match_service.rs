@@ -43,15 +43,15 @@ impl MatchService for MatchServiceImpl {
         let req = request.into_inner();
 
         info!(
-            player_id = %req.player_id,
+            character_id = %req.character_id,
             mode = %req.mode,
             "MatchStart request"
         );
 
         let mode = req.mode.clone();
-        let player_id = req.player_id.clone();
+        let character_id = req.character_id.clone();
 
-        let result = self.matcher.start_match(player_id, mode).await;
+        let result = self.matcher.start_match(character_id, mode).await;
 
         let response = match result {
             Ok(match_id) => Ok(Response::new(MatchStartRes {
@@ -81,14 +81,14 @@ impl MatchService for MatchServiceImpl {
         let req = request.into_inner();
 
         info!(
-            player_id = %req.player_id,
+            character_id = %req.character_id,
             match_id = %req.match_id,
             "MatchCancel request"
         );
 
         let result = self
             .matcher
-            .cancel_match(&req.player_id, &req.match_id)
+            .cancel_match(&req.character_id, &req.match_id)
             .await;
 
         let response = match result {
@@ -116,7 +116,7 @@ impl MatchService for MatchServiceImpl {
         let started_at = Instant::now();
         let req = request.into_inner();
 
-        let result = self.matcher.get_status(&req.player_id).await;
+        let result = self.matcher.get_status(&req.character_id).await;
 
         let response = match result {
             Ok(res) => Ok(Response::new(res)),
@@ -139,18 +139,18 @@ impl MatchService for MatchServiceImpl {
     ) -> Result<Response<Self::MatchEventStreamStream>, Status> {
         let started_at = Instant::now();
         let req = request.into_inner();
-        let player_id = req.player_id.clone();
+        let character_id = req.character_id.clone();
 
-        info!(player_id = %player_id, "MatchEventStream connected");
+        info!(character_id = %character_id, "MatchEventStream connected");
 
         // 创建通道
         let (tx, rx) = mpsc::channel(128);
 
-        // 注册到 player_state
-        let player_state = self.matcher.player_state().clone();
-        player_state.register_stream(&player_id, tx).await;
-        if let Some(event) = player_state.latest_event(&player_id).await {
-            let _ = player_state.send_event(&player_id, event).await;
+        // 注册到角色状态
+        let character_state = self.matcher.character_state().clone();
+        character_state.register_stream(&character_id, tx).await;
+        if let Some(event) = character_state.latest_event(&character_id).await {
+            let _ = character_state.send_event(&character_id, event).await;
         }
 
         let stream: Self::MatchEventStreamStream = Box::pin(async_stream::stream! {
@@ -190,14 +190,14 @@ impl MatchInternal for MatchInternalImpl {
         info!(
             match_id = %req.match_id,
             room_id = %req.room_id,
-            players = ?req.player_ids,
+            characters = ?req.character_ids,
             mode = %req.mode,
             "CreateRoomAndJoin request"
         );
 
         let result = self
             .matcher
-            .create_room_and_join(&req.match_id, &req.room_id, &req.player_ids, &req.mode)
+            .create_room_and_join(&req.match_id, &req.room_id, &req.character_ids, &req.mode)
             .await;
 
         let response = match result {
@@ -224,14 +224,14 @@ impl MatchInternal for MatchInternalImpl {
 
         info!(
             match_id = %req.match_id,
-            player_id = %req.player_id,
+            character_id = %req.character_id,
             room_id = %req.room_id,
             "PlayerJoined request"
         );
 
         let result = self
             .matcher
-            .player_joined(&req.match_id, &req.player_id, &req.room_id)
+            .player_joined(&req.match_id, &req.character_id, &req.room_id)
             .await;
 
         let response = match result {
@@ -258,14 +258,14 @@ impl MatchInternal for MatchInternalImpl {
 
         info!(
             match_id = %req.match_id,
-            player_id = %req.player_id,
+            character_id = %req.character_id,
             reason = %req.reason,
             "PlayerLeft request"
         );
 
         let result = self
             .matcher
-            .player_left(&req.match_id, &req.player_id, &req.reason)
+            .player_left(&req.match_id, &req.character_id, &req.reason)
             .await;
 
         let response = match result {

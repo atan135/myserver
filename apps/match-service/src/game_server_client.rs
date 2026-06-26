@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::tokio::Stream as _;
-use interprocess::local_socket::{tokio::Stream, GenericFilePath, ToFsName};
+use interprocess::local_socket::{GenericFilePath, ToFsName, tokio::Stream};
 use prost::Message;
-use service_registry::{record_discovery_metric, RegistryClient, ServiceInstance};
+use service_registry::{RegistryClient, ServiceInstance, record_discovery_metric};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -38,7 +38,7 @@ impl GameServerClient {
         &self,
         match_id: &str,
         room_id: &str,
-        player_ids: &[String],
+        character_ids: &[String],
         mode: &str,
     ) -> Result<String, MatchError> {
         let socket_name = self.resolve_internal_socket_name(match_id, mode).await?;
@@ -60,7 +60,7 @@ impl GameServerClient {
         let request = CreateMatchedRoomReq {
             match_id: match_id.to_string(),
             room_id: room_id.to_string(),
-            player_ids: player_ids.to_vec(),
+            character_ids: character_ids.to_vec(),
             mode: mode.to_string(),
         };
         let body = encode_body(&request);
@@ -1004,9 +1004,11 @@ mod tests {
             select_socket(&cached_after_refresh, "match-switch", "ranked", "zone-a").unwrap();
 
         assert_eq!(socket_after_refresh, "new.sock");
-        assert!(!cached_after_refresh
-            .iter()
-            .any(|candidate| candidate.socket == "old.sock"));
+        assert!(
+            !cached_after_refresh
+                .iter()
+                .any(|candidate| candidate.socket == "old.sock")
+        );
     }
 
     #[tokio::test]

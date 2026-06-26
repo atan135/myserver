@@ -1,4 +1,4 @@
-//! 玩家匹配状态机
+//! 角色匹配状态机
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,13 +6,13 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::proto::myserver::matchservice::MatchEvent;
 use crate::runtime_store::{
-    MatchRuntimeSnapshot, SharedMatchRuntimeStore, StoredMatchEvent, StoredPlayerMatchContext,
-    StoredPlayerMatchStatus,
+    MatchRuntimeSnapshot, SharedMatchRuntimeStore, StoredCharacterMatchContext,
+    StoredCharacterMatchStatus, StoredMatchEvent,
 };
 
-/// 玩家匹配状态
+/// 角色匹配状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayerMatchStatus {
+pub enum CharacterMatchStatus {
     /// 未匹配
     Idle,
     /// 匹配中
@@ -23,42 +23,42 @@ pub enum PlayerMatchStatus {
     InRoom,
 }
 
-impl Default for PlayerMatchStatus {
+impl Default for CharacterMatchStatus {
     fn default() -> Self {
-        PlayerMatchStatus::Idle
+        CharacterMatchStatus::Idle
     }
 }
 
-/// 玩家匹配上下文
+/// 角色匹配上下文
 #[derive(Clone)]
-pub struct PlayerMatchContext {
+pub struct CharacterMatchContext {
     pub match_id: String,
     pub mode: String,
     pub room_id: Option<String>,
     pub token: Option<String>,
 }
 
-/// 玩家状态管理
-pub struct PlayerStateStore {
-    /// player_id -> 匹配状态
-    status: RwLock<HashMap<String, PlayerMatchStatus>>,
-    /// player_id -> 匹配上下文
-    context: RwLock<HashMap<String, PlayerMatchContext>>,
-    /// player_id -> 事件推送通道
+/// 角色状态管理
+pub struct CharacterStateStore {
+    /// character_id -> 匹配状态
+    status: RwLock<HashMap<String, CharacterMatchStatus>>,
+    /// character_id -> 匹配上下文
+    context: RwLock<HashMap<String, CharacterMatchContext>>,
+    /// character_id -> 事件推送通道
     streams: RwLock<HashMap<String, mpsc::Sender<MatchEvent>>>,
-    /// player_id -> 最近一次匹配事件
+    /// character_id -> 最近一次匹配事件
     latest_events: RwLock<HashMap<String, StoredMatchEvent>>,
     /// 可选运行时持久化存储
     runtime_store: Option<SharedMatchRuntimeStore>,
 }
 
-impl Default for PlayerStateStore {
+impl Default for CharacterStateStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PlayerStateStore {
+impl CharacterStateStore {
     pub fn new() -> Self {
         Self {
             status: RwLock::new(HashMap::new()),
@@ -85,9 +85,9 @@ impl PlayerStateStore {
             status.clear();
             status.extend(
                 snapshot
-                    .player_status
+                    .character_status
                     .iter()
-                    .map(|(player_id, value)| (player_id.clone(), value.clone().into())),
+                    .map(|(character_id, value)| (character_id.clone(), value.clone().into())),
             );
         }
 
@@ -96,9 +96,9 @@ impl PlayerStateStore {
             context.clear();
             context.extend(
                 snapshot
-                    .player_context
+                    .character_context
                     .iter()
-                    .map(|(player_id, value)| (player_id.clone(), value.clone().into())),
+                    .map(|(character_id, value)| (character_id.clone(), value.clone().into())),
             );
         }
 
@@ -109,124 +109,124 @@ impl PlayerStateStore {
         }
     }
 
-    /// 获取玩家当前状态
-    pub async fn get_status(&self, player_id: &str) -> PlayerMatchStatus {
+    /// 获取角色当前状态
+    pub async fn get_status(&self, character_id: &str) -> CharacterMatchStatus {
         self.status
             .read()
             .await
-            .get(player_id)
+            .get(character_id)
             .copied()
-            .unwrap_or(PlayerMatchStatus::Idle)
+            .unwrap_or(CharacterMatchStatus::Idle)
     }
 
-    /// 设置玩家状态
-    pub async fn set_status(&self, player_id: &str, status: PlayerMatchStatus) {
+    /// 设置角色状态
+    pub async fn set_status(&self, character_id: &str, status: CharacterMatchStatus) {
         self.status
             .write()
             .await
-            .insert(player_id.to_string(), status);
+            .insert(character_id.to_string(), status);
         if let Some(runtime_store) = &self.runtime_store {
             if let Err(error) = runtime_store
-                .set_player_status(player_id, StoredPlayerMatchStatus::from(status))
+                .set_character_status(character_id, StoredCharacterMatchStatus::from(status))
                 .await
             {
                 tracing::warn!(
-                    player_id,
+                    character_id,
                     error = %error,
-                    "failed to persist player match status"
+                    "failed to persist character match status"
                 );
             }
         }
     }
 
-    /// 获取玩家上下文
-    pub async fn get_context(&self, player_id: &str) -> Option<PlayerMatchContext> {
-        self.context.read().await.get(player_id).cloned()
+    /// 获取角色上下文
+    pub async fn get_context(&self, character_id: &str) -> Option<CharacterMatchContext> {
+        self.context.read().await.get(character_id).cloned()
     }
 
-    /// 设置玩家上下文
-    pub async fn set_context(&self, player_id: &str, ctx: PlayerMatchContext) {
+    /// 设置角色上下文
+    pub async fn set_context(&self, character_id: &str, ctx: CharacterMatchContext) {
         self.context
             .write()
             .await
-            .insert(player_id.to_string(), ctx.clone());
+            .insert(character_id.to_string(), ctx.clone());
         if let Some(runtime_store) = &self.runtime_store {
             if let Err(error) = runtime_store
-                .set_player_context(player_id, StoredPlayerMatchContext::from(ctx))
+                .set_character_context(character_id, StoredCharacterMatchContext::from(ctx))
                 .await
             {
                 tracing::warn!(
-                    player_id,
+                    character_id,
                     error = %error,
-                    "failed to persist player match context"
+                    "failed to persist character match context"
                 );
             }
         }
     }
 
-    /// 清除玩家上下文
-    pub async fn clear_context(&self, player_id: &str) {
-        self.context.write().await.remove(player_id);
+    /// 清除角色上下文
+    pub async fn clear_context(&self, character_id: &str) {
+        self.context.write().await.remove(character_id);
         if let Some(runtime_store) = &self.runtime_store {
-            if let Err(error) = runtime_store.clear_player_context(player_id).await {
+            if let Err(error) = runtime_store.clear_character_context(character_id).await {
                 tracing::warn!(
-                    player_id,
+                    character_id,
                     error = %error,
-                    "failed to clear persisted player match context"
+                    "failed to clear persisted character match context"
                 );
             }
         }
     }
 
     /// 注册推送通道
-    pub async fn register_stream(&self, player_id: &str, sender: mpsc::Sender<MatchEvent>) {
+    pub async fn register_stream(&self, character_id: &str, sender: mpsc::Sender<MatchEvent>) {
         self.streams
             .write()
             .await
-            .insert(player_id.to_string(), sender);
+            .insert(character_id.to_string(), sender);
     }
 
     /// 注销推送通道
-    pub async fn unregister_stream(&self, player_id: &str) {
-        self.streams.write().await.remove(player_id);
+    pub async fn unregister_stream(&self, character_id: &str) {
+        self.streams.write().await.remove(character_id);
     }
 
     /// 获取推送通道
-    pub async fn get_stream(&self, player_id: &str) -> Option<mpsc::Sender<MatchEvent>> {
-        self.streams.read().await.get(player_id).cloned()
+    pub async fn get_stream(&self, character_id: &str) -> Option<mpsc::Sender<MatchEvent>> {
+        self.streams.read().await.get(character_id).cloned()
     }
 
-    pub async fn latest_event(&self, player_id: &str) -> Option<MatchEvent> {
+    pub async fn latest_event(&self, character_id: &str) -> Option<MatchEvent> {
         self.latest_events
             .read()
             .await
-            .get(player_id)
+            .get(character_id)
             .cloned()
             .map(StoredMatchEvent::into_event)
     }
 
-    /// 发送事件给玩家
-    pub async fn send_event(&self, player_id: &str, event: MatchEvent) -> bool {
+    /// 发送事件给角色
+    pub async fn send_event(&self, character_id: &str, event: MatchEvent) -> bool {
         let stored_event = StoredMatchEvent::new(event.clone());
         self.latest_events
             .write()
             .await
-            .insert(player_id.to_string(), stored_event.clone());
+            .insert(character_id.to_string(), stored_event.clone());
 
         if let Some(runtime_store) = &self.runtime_store {
             if let Err(error) = runtime_store
-                .save_latest_event(player_id, stored_event)
+                .save_latest_event(character_id, stored_event)
                 .await
             {
                 tracing::warn!(
-                    player_id,
+                    character_id,
                     error = %error,
                     "failed to persist latest match event"
                 );
             }
         }
 
-        if let Some(sender) = self.streams.read().await.get(player_id) {
+        if let Some(sender) = self.streams.read().await.get(character_id) {
             sender.send(event).await.is_ok()
         } else {
             false
@@ -234,14 +234,14 @@ impl PlayerStateStore {
     }
 }
 
-pub type SharedPlayerState = Arc<PlayerStateStore>;
+pub type SharedCharacterState = Arc<CharacterStateStore>;
 
-pub fn new_player_state_store() -> SharedPlayerState {
-    Arc::new(PlayerStateStore::new())
+pub fn new_character_state_store() -> SharedCharacterState {
+    Arc::new(CharacterStateStore::new())
 }
 
-pub fn new_player_state_store_with_runtime_store(
+pub fn new_character_state_store_with_runtime_store(
     runtime_store: SharedMatchRuntimeStore,
-) -> SharedPlayerState {
-    Arc::new(PlayerStateStore::with_runtime_store(runtime_store))
+) -> SharedCharacterState {
+    Arc::new(CharacterStateStore::with_runtime_store(runtime_store))
 }
