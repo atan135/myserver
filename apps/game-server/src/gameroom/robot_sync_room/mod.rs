@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(state["tickCount"], 1);
         assert_eq!(state["lastFrame"], 7);
         assert_eq!(state["recentInputs"][0]["frameId"], 7);
-        assert_eq!(state["recentInputs"][0]["playerId"], "player-a");
+        assert_eq!(state["recentInputs"][0]["characterId"], "player-a");
         assert_eq!(state["recentInputs"][0]["seq"], 42);
         assert_eq!(state["recentInputs"][0]["botTick"], 100);
         assert_eq!(state["recentInputs"][0]["dirX"], -1000);

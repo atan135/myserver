@@ -91,8 +91,8 @@ impl Default for RoomNpcTransferPosition {
 pub struct RoomNpcTransferThreatEntry {
     #[serde(rename = "targetEntityId", default)]
     pub target_entity_id: Option<u32>,
-    #[serde(rename = "targetPlayerId", default)]
-    pub target_player_id: Option<String>,
+    #[serde(rename = "targetCharacterId", default)]
+    pub target_character_id: Option<String>,
     pub threat: i64,
 }
 
@@ -144,8 +144,8 @@ pub struct RoomNpcTransferEntity {
     pub max_hp: i32,
     #[serde(rename = "targetEntityId", default)]
     pub target_entity_id: Option<u32>,
-    #[serde(rename = "targetPlayerId", default)]
-    pub target_player_id: Option<String>,
+    #[serde(rename = "targetCharacterId", default)]
+    pub target_character_id: Option<String>,
     #[serde(rename = "threatEntries", default)]
     pub threat_entries: Vec<RoomNpcTransferThreatEntry>,
     #[serde(rename = "behaviorNode")]
@@ -180,7 +180,7 @@ impl RoomNpcTransferEntity {
             hp,
             max_hp,
             target_entity_id: None,
-            target_player_id: None,
+            target_character_id: None,
             threat_entries: Vec::new(),
             behavior_node: behavior_node.into(),
             blackboard: BTreeMap::new(),
@@ -232,6 +232,9 @@ impl RoomNpcTransferState {
             != Some(u64::from(ROOM_TRANSFER_SCHEMA_VERSION))
         {
             return Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA");
+        }
+        if contains_json_key(&value, "targetPlayerId") {
+            return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
         }
 
         let state =
@@ -443,7 +446,7 @@ fn validate_npc_transfer_entity(
         validate_npc_entity_id(entity_id)?;
     }
     if entity
-        .target_player_id
+        .target_character_id
         .as_deref()
         .is_some_and(|character_id| character_id.trim().is_empty())
     {
@@ -516,18 +519,18 @@ fn validate_npc_threat_entries(
             validate_npc_entity_id(entity_id)?;
         }
         if entry
-            .target_player_id
+            .target_character_id
             .as_deref()
             .is_some_and(|character_id| character_id.trim().is_empty())
         {
             return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
         }
-        if entry.target_entity_id.is_none() && entry.target_player_id.is_none() {
+        if entry.target_entity_id.is_none() && entry.target_character_id.is_none() {
             return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
         }
         let target_key = (
             entry.target_entity_id,
-            entry.target_player_id.as_deref().unwrap_or_default(),
+            entry.target_character_id.as_deref().unwrap_or_default(),
         );
         if !seen_targets.insert(target_key) {
             return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
@@ -630,6 +633,18 @@ fn validate_json_value(value: &serde_json::Value, depth: usize) -> Result<(), &'
     }
 }
 
+fn contains_json_key(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| contains_json_key(value, needle)),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key == needle || contains_json_key(value, needle)),
+        _ => false,
+    }
+}
+
 pub trait RoomLogicTransfer {
     fn export_transfer_state(&self) -> Result<RoomLogicTransferState, &'static str> {
         Err(UNSUPPORTED_ROOM_TRANSFER)
@@ -696,5 +711,119 @@ pub trait RoomLogic: Send + RoomLogicTransfer {
 
     fn take_pending_broadcasts(&mut self) -> Vec<RoomLogicBroadcast> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npc_transfer_json_uses_target_character_id_fields() {
+        let mut state = RoomNpcTransferState::new();
+        let mut entity = RoomNpcTransferEntity::new(
+            1,
+            "monster",
+            RoomNpcTransferPosition { x: 12.0, y: 34.0 },
+            80,
+            100,
+            "attack",
+        );
+        entity.target_character_id = Some("chr_0000000000001".to_string());
+        entity.threat_entries.push(RoomNpcTransferThreatEntry {
+            target_entity_id: None,
+            target_character_id: Some("chr_0000000000002".to_string()),
+            threat: 42,
+        });
+        state.entities.push(entity);
+
+        let json = state.to_json().expect("npc transfer state should serialize");
+        assert!(json.contains("targetCharacterId"));
+        assert!(!json.contains("targetPlayerId"));
+
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("npc transfer json should be valid");
+        assert_eq!(
+            value["entities"][0]["targetCharacterId"],
+            "chr_0000000000001"
+        );
+        assert_eq!(
+            value["entities"][0]["threatEntries"][0]["targetCharacterId"],
+            "chr_0000000000002"
+        );
+
+        let restored =
+            RoomNpcTransferState::from_json(&json).expect("npc transfer state should restore");
+        assert_eq!(
+            restored.entities[0].target_character_id.as_deref(),
+            Some("chr_0000000000001")
+        );
+        assert_eq!(
+            restored.entities[0].threat_entries[0]
+                .target_character_id
+                .as_deref(),
+            Some("chr_0000000000002")
+        );
+    }
+
+    #[test]
+    fn npc_transfer_json_rejects_legacy_target_player_id_only_threat_entry() {
+        let legacy_json = serde_json::json!({
+            "schema": ROOM_NPC_TRANSFER_SCHEMA,
+            "schemaVersion": ROOM_TRANSFER_SCHEMA_VERSION,
+            "entities": [
+                {
+                    "entityId": 1,
+                    "entityKind": "monster",
+                    "position": { "x": 0.0, "y": 0.0 },
+                    "hp": 10,
+                    "maxHp": 10,
+                    "targetPlayerId": "chr_0000000000001",
+                    "threatEntries": [
+                        {
+                            "targetPlayerId": "chr_0000000000001",
+                            "threat": 10
+                        }
+                    ],
+                    "behaviorNode": "attack"
+                }
+            ]
+        });
+
+        assert_eq!(
+            RoomNpcTransferState::from_json(&legacy_json.to_string()),
+            Err(ROOM_TRANSFER_INVALID_NPC_STATE)
+        );
+    }
+
+    #[test]
+    fn npc_transfer_json_rejects_legacy_entity_target_player_id_even_with_valid_targets() {
+        let legacy_json = serde_json::json!({
+            "schema": ROOM_NPC_TRANSFER_SCHEMA,
+            "schemaVersion": ROOM_TRANSFER_SCHEMA_VERSION,
+            "entities": [
+                {
+                    "entityId": 1,
+                    "entityKind": "monster",
+                    "position": { "x": 0.0, "y": 0.0 },
+                    "hp": 10,
+                    "maxHp": 10,
+                    "targetPlayerId": "chr_0000000000001",
+                    "targetCharacterId": "chr_0000000000001",
+                    "threatEntries": [
+                        {
+                            "targetCharacterId": "chr_0000000000002",
+                            "threat": 10
+                        }
+                    ],
+                    "behaviorNode": "attack"
+                }
+            ]
+        });
+
+        assert_eq!(
+            RoomNpcTransferState::from_json(&legacy_json.to_string()),
+            Err(ROOM_TRANSFER_INVALID_NPC_STATE)
+        );
     }
 }
