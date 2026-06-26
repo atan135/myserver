@@ -1009,6 +1009,9 @@ mod tests {
             config_tables,
             item_uid_generator: crate::core::global_id::ItemUidGenerator::new_for_test(1),
             player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
+            character_element_service: crate::core::character_element::CharacterElementService::new(
+                crate::core::character_element::PgCharacterElementStore::new_disabled(),
+            ),
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),
