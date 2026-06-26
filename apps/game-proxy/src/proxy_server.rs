@@ -755,7 +755,7 @@ async fn handle_session<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
                 let route = match select_route_for_packet(
                     &route_store,
                     &packet,
-                    deferred_auth.account_player_id.as_deref(),
+                    deferred_auth.character_id.as_deref(),
                 )
                 .await
                 {
@@ -1176,7 +1176,7 @@ async fn replay_auth_to_upstream<U: AsyncRead + AsyncWrite + Unpin>(
 async fn select_route_for_packet(
     route_store: &ProxyRouteStore,
     packet: &Packet,
-    authenticated_account_player_id: Option<&str>,
+    authenticated_character_id: Option<&str>,
 ) -> Result<UpstreamRoute, &'static str> {
     let route = match packet.message_type() {
         Some(MessageType::RoomJoinReq) => {
@@ -1190,16 +1190,12 @@ async fn select_route_for_packet(
             route_store.select_upstream_for_room(&request.room_id).await
         }
         Some(MessageType::RoomReconnectReq) => {
-            let request = packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")?;
-            if let Some(authenticated_account_player_id) = authenticated_account_player_id {
-                if !request.player_id.is_empty()
-                    && request.player_id != authenticated_account_player_id
-                {
-                    return Err("PLAYER_ID_MISMATCH");
-                }
-            }
+            packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")?;
+            let Some(character_id) = authenticated_character_id else {
+                return Err("CHARACTER_ID_REQUIRED");
+            };
             route_store
-                .select_upstream_for_player(&request.player_id)
+                .select_upstream_for_character(character_id)
                 .await
         }
         _ => route_store.select_default_upstream().await,
@@ -1226,7 +1222,7 @@ async fn update_routing_metadata(
                         .bind_room_owner(
                             &join_response.room_id,
                             &route.server_id,
-                            deferred_auth.account_player_id.as_deref(),
+                            deferred_auth.character_id.as_deref(),
                             false,
                         )
                         .await;
@@ -1234,8 +1230,9 @@ async fn update_routing_metadata(
             }
         }
         Some(MessageType::RoomReconnectReq) => {
-            if let Ok(reconnect_request) =
-                request.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")
+            if request
+                .decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY")
+                .is_ok()
             {
                 if let Ok(reconnect_response) =
                     response.decode_body::<RoomReconnectRes>("INVALID_ROOM_RECONNECT_RES")
@@ -1246,7 +1243,7 @@ async fn update_routing_metadata(
                             .bind_room_owner(
                                 &reconnect_response.room_id,
                                 &route.server_id,
-                                Some(&reconnect_request.player_id),
+                                deferred_auth.character_id.as_deref(),
                                 false,
                             )
                             .await;
@@ -1254,7 +1251,6 @@ async fn update_routing_metadata(
                             route_store,
                             route,
                             session,
-                            &reconnect_request.player_id,
                             &reconnect_response.room_id,
                         )
                         .await;
@@ -1272,7 +1268,7 @@ async fn update_routing_metadata(
                         .bind_room_owner(
                             &observer_response.room_id,
                             &route.server_id,
-                            deferred_auth.account_player_id.as_deref(),
+                            deferred_auth.character_id.as_deref(),
                             true,
                         )
                         .await;
@@ -1287,7 +1283,6 @@ async fn log_rollout_redirect_reconnect(
     route_store: &ProxyRouteStore,
     route: &UpstreamRoute,
     session: &ProxySession,
-    player_id: &str,
     room_id: &str,
 ) {
     let Some(rollout_session) = route_store.get_rollout_session().await else {
@@ -1300,14 +1295,14 @@ async fn log_rollout_redirect_reconnect(
 
     info!(
         session_id = session.id,
-        account_player_id = %player_id,
+        account_player_id = session.account_player_id.as_deref().unwrap_or_default(),
         character_id = session.character_id.as_deref().unwrap_or_default(),
         room_id = room_id,
         upstream_server_id = %route.server_id,
         rollout_epoch = %rollout_session.rollout_epoch,
         old_server_id = %rollout_session.old_server_id,
         new_server_id = %rollout_session.new_server_id,
-        "player reconnected after redirect"
+        "character reconnected after redirect"
     );
 }
 
@@ -1491,7 +1486,7 @@ mod tests {
         MessageType, Packet, PacketHeader, encode_body, encode_packet, read_packet,
     };
     use crate::route_store::{
-        PlayerRouteRecord, ProxyRouteStore, RoomMigrationState, RoomRouteRecord,
+        CharacterRouteRecord, ProxyRouteStore, RoomMigrationState, RoomRouteRecord,
         UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
     };
     use crate::session::{ProxySession, ProxySessionState};
@@ -1990,7 +1985,7 @@ mod tests {
             },
         );
 
-        let route = select_route_for_packet(&store, &packet, Some("player-1"))
+        let route = select_route_for_packet(&store, &packet, Some("chr_0000000000001"))
             .await
             .expect("route should be selected");
 
@@ -1998,7 +1993,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_reconnect_packet_prefers_transferred_room_owner_over_stale_player_route() {
+    async fn room_reconnect_packet_prefers_transferred_room_owner_over_stale_character_route() {
         let store = ProxyRouteStore::default();
         store
             .set_static_routes(vec![
@@ -2029,8 +2024,8 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_player_route(PlayerRouteRecord {
-                player_id: "player-1".to_string(),
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000001".to_string(),
                 current_room_id: Some("room-1".to_string()),
                 preferred_server_id: Some("old".to_string()),
                 rollout_epoch: "rollout-1".to_string(),
@@ -2039,14 +2034,38 @@ mod tests {
             .await
             .unwrap();
 
-        let packet = packet_with_body(
-            MessageType::RoomReconnectReq,
-            &RoomReconnectReq {
-                player_id: "player-1".to_string(),
-            },
-        );
+        let packet = packet_with_body(MessageType::RoomReconnectReq, &RoomReconnectReq {});
 
-        let route = select_route_for_packet(&store, &packet, Some("player-1"))
+        let route = select_route_for_packet(&store, &packet, Some("chr_0000000000001"))
+            .await
+            .expect("route should be selected");
+
+        assert_eq!(route.server_id, "new");
+    }
+
+    #[tokio::test]
+    async fn room_reconnect_packet_does_not_share_route_between_characters() {
+        let store = ProxyRouteStore::default();
+        store
+            .set_static_routes(vec![
+                upstream_route("old", UpstreamOperationState::Draining),
+                upstream_route("new", UpstreamOperationState::Active),
+            ])
+            .await;
+        store
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000001".to_string(),
+                current_room_id: None,
+                preferred_server_id: Some("old".to_string()),
+                rollout_epoch: "rollout-1".to_string(),
+                updated_at_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        let packet = packet_with_body(MessageType::RoomReconnectReq, &RoomReconnectReq {});
+
+        let route = select_route_for_packet(&store, &packet, Some("chr_0000000000002"))
             .await
             .expect("route should be selected");
 

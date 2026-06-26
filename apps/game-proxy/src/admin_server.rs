@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use crate::config::{AdminPermissionScope, AdminScopedTokenConfig};
 use crate::rollout_drain_status::{OldServerDrainStatusCheckSummary, OldServerDrainStatusChecker};
 use crate::route_store::{
-    PlayerRouteRecord, ProxyRouteStore, RolloutCompleteIfDrainedResult, RolloutDrainEvaluation,
+    CharacterRouteRecord, ProxyRouteStore, RolloutCompleteIfDrainedResult, RolloutDrainEvaluation,
     RolloutDrainStatus, RolloutEndSummary, RolloutSessionState, RoomMigrationState,
     RoomRouteRecord, RouteStoreUpdateError, UpstreamOperationState,
 };
@@ -33,7 +33,7 @@ struct StatusResponse {
     active_upstream: Option<String>,
     rollout_session: Option<crate::route_store::RolloutSession>,
     room_route_count: usize,
-    player_route_count: usize,
+    character_route_count: usize,
 }
 
 #[derive(Serialize)]
@@ -66,9 +66,9 @@ struct RoomRoutesResponse {
 }
 
 #[derive(Serialize)]
-struct PlayerRoutesResponse {
+struct CharacterRoutesResponse {
     ok: bool,
-    routes: Vec<PlayerRouteRecord>,
+    routes: Vec<CharacterRouteRecord>,
 }
 
 #[derive(Clone)]
@@ -207,7 +207,7 @@ struct AdminAuditEvent<'a> {
     error: &'a str,
     server_id: &'a str,
     room_id: &'a str,
-    player_id: &'a str,
+    character_id: &'a str,
     rollout_epoch: &'a str,
 }
 
@@ -370,7 +370,7 @@ async fn handle_connection(
                 active_upstream: route_store.active_upstream_server_id().await,
                 rollout_session: route_store.get_rollout_session().await,
                 room_route_count: counts.room_routes,
-                player_route_count: counts.player_routes,
+                character_route_count: counts.character_routes,
             })
         }
         ("GET", "/instances") => write_json(InstancesResponse {
@@ -386,9 +386,9 @@ async fn handle_connection(
             ok: true,
             routes: route_store.list_room_routes().await,
         }),
-        ("GET", "/player-routes") => write_json(PlayerRoutesResponse {
+        ("GET", "/character-routes") => write_json(CharacterRoutesResponse {
             ok: true,
-            routes: route_store.list_player_routes().await,
+            routes: route_store.list_character_routes().await,
         }),
         ("POST", "/maintenance/on") => {
             match audit_ok(
@@ -507,8 +507,8 @@ async fn handle_connection(
         ("POST", "/room-route/upsert") => {
             handle_room_route_upsert(&route_store, &query, &audit_logger, &context).await
         }
-        ("POST", "/player-route/upsert") => {
-            handle_player_route_upsert(&route_store, &query, &audit_logger, &context).await
+        ("POST", "/character-route/upsert") => {
+            handle_character_route_upsert(&route_store, &query, &audit_logger, &context).await
         }
         ("POST", route_path) => {
             if let Some(server_id) = route_path.strip_prefix("/switch/") {
@@ -1291,14 +1291,14 @@ async fn handle_room_route_upsert(
     }
 }
 
-async fn handle_player_route_upsert(
+async fn handle_character_route_upsert(
     route_store: &ProxyRouteStore,
     query: &HashMap<String, String>,
     audit_logger: &AdminAuditLogger,
     context: &AdminRequestContext,
 ) -> String {
-    let action = "player_route_upsert";
-    let player_id = match required_identifier(query, "player_id") {
+    let action = "character_route_upsert";
+    let character_id = match required_identifier(query, "character_id") {
         Ok(value) => value,
         Err(error) => {
             return audited_bad_request(
@@ -1324,7 +1324,7 @@ async fn handle_player_route_upsert(
                 error,
                 None,
                 None,
-                Some(player_id),
+                Some(character_id),
                 None,
             )
             .await;
@@ -1340,7 +1340,7 @@ async fn handle_player_route_upsert(
                 error,
                 None,
                 None,
-                Some(player_id),
+                Some(character_id),
                 None,
             )
             .await;
@@ -1355,7 +1355,7 @@ async fn handle_player_route_upsert(
                 "unknown upstream preferred_server_id",
                 Some(server_id),
                 current_room_id.as_deref(),
-                Some(player_id),
+                Some(character_id),
                 None,
             )
             .await;
@@ -1371,7 +1371,7 @@ async fn handle_player_route_upsert(
                 error,
                 preferred_server_id.as_deref(),
                 current_room_id.as_deref(),
-                Some(player_id),
+                Some(character_id),
                 None,
             )
             .await;
@@ -1379,8 +1379,8 @@ async fn handle_player_route_upsert(
     };
 
     let result = route_store
-        .upsert_player_route(PlayerRouteRecord {
-            player_id: player_id.to_string(),
+        .upsert_character_route(CharacterRouteRecord {
+            character_id: character_id.to_string(),
             current_room_id: current_room_id.clone(),
             preferred_server_id: preferred_server_id.clone(),
             rollout_epoch: rollout_epoch.clone(),
@@ -1396,7 +1396,7 @@ async fn handle_player_route_upsert(
                 action,
                 preferred_server_id.as_deref(),
                 current_room_id.as_deref(),
-                Some(player_id),
+                Some(character_id),
                 Some(rollout_epoch.as_str()),
             )
             .await
@@ -1413,7 +1413,7 @@ async fn handle_player_route_upsert(
                 &error,
                 preferred_server_id.as_deref(),
                 current_room_id.as_deref(),
-                Some(player_id),
+                Some(character_id),
                 Some(rollout_epoch.as_str()),
             )
             .await
@@ -1545,7 +1545,7 @@ fn missing_field_error(key: &str) -> &'static str {
         "server_id" => "missing server_id",
         "room_id" => "missing room_id",
         "owner_server_id" => "missing owner_server_id",
-        "player_id" => "missing player_id",
+        "character_id" => "missing character_id",
         _ => "missing required field",
     }
 }
@@ -1558,7 +1558,7 @@ fn field_too_long_error(key: &str) -> &'static str {
         "server_id" => "server_id too long",
         "room_id" => "room_id too long",
         "owner_server_id" => "owner_server_id too long",
-        "player_id" => "player_id too long",
+        "character_id" => "character_id too long",
         "current_room_id" => "current_room_id too long",
         "preferred_server_id" => "preferred_server_id too long",
         "last_transfer_checksum" => "last_transfer_checksum too long",
@@ -1575,7 +1575,7 @@ fn invalid_identifier_error(key: &str) -> &'static str {
         "server_id" => "invalid server_id",
         "room_id" => "invalid room_id",
         "owner_server_id" => "invalid owner_server_id",
-        "player_id" => "invalid player_id",
+        "character_id" => "invalid character_id",
         "current_room_id" => "invalid current_room_id",
         "preferred_server_id" => "invalid preferred_server_id",
         "last_transfer_checksum" => "invalid last_transfer_checksum",
@@ -1607,7 +1607,7 @@ async fn upstream_exists(route_store: &ProxyRouteStore, server_id: &str) -> bool
 struct AuditTarget<'a> {
     server_id: Option<&'a str>,
     room_id: Option<&'a str>,
-    player_id: Option<&'a str>,
+    character_id: Option<&'a str>,
     rollout_epoch: Option<&'a str>,
 }
 
@@ -1617,7 +1617,7 @@ async fn audit_ok(
     action: &'static str,
     server_id: Option<&str>,
     room_id: Option<&str>,
-    player_id: Option<&str>,
+    character_id: Option<&str>,
     rollout_epoch: Option<&str>,
 ) -> Result<(), AdminAuditError> {
     info!(
@@ -1626,7 +1626,7 @@ async fn audit_ok(
         actor_missing = context.actor_missing,
         server_id = %server_id.unwrap_or_default(),
         room_id = %room_id.unwrap_or_default(),
-        player_id = %player_id.unwrap_or_default(),
+        character_id = %character_id.unwrap_or_default(),
         rollout_epoch = %rollout_epoch.unwrap_or_default(),
         result = "ok",
         "proxy admin write operation"
@@ -1643,7 +1643,7 @@ async fn audit_ok(
             error: "",
             server_id: server_id.unwrap_or_default(),
             room_id: room_id.unwrap_or_default(),
-            player_id: player_id.unwrap_or_default(),
+            character_id: character_id.unwrap_or_default(),
             rollout_epoch: rollout_epoch.unwrap_or_default(),
         })
         .await
@@ -1656,7 +1656,7 @@ async fn audit_error(
     error: &str,
     server_id: Option<&str>,
     room_id: Option<&str>,
-    player_id: Option<&str>,
+    character_id: Option<&str>,
     rollout_epoch: Option<&str>,
 ) -> Result<(), AdminAuditError> {
     warn!(
@@ -1665,7 +1665,7 @@ async fn audit_error(
         actor_missing = context.actor_missing,
         server_id = %server_id.unwrap_or_default(),
         room_id = %room_id.unwrap_or_default(),
-        player_id = %player_id.unwrap_or_default(),
+        character_id = %character_id.unwrap_or_default(),
         rollout_epoch = %rollout_epoch.unwrap_or_default(),
         result = "error",
         error,
@@ -1683,7 +1683,7 @@ async fn audit_error(
             error,
             server_id: server_id.unwrap_or_default(),
             room_id: room_id.unwrap_or_default(),
-            player_id: player_id.unwrap_or_default(),
+            character_id: character_id.unwrap_or_default(),
             rollout_epoch: rollout_epoch.unwrap_or_default(),
         })
         .await
@@ -1696,13 +1696,13 @@ async fn audited_bad_request(
     error: &'static str,
     server_id: Option<&str>,
     room_id: Option<&str>,
-    player_id: Option<&str>,
+    character_id: Option<&str>,
     rollout_epoch: Option<&str>,
 ) -> String {
     let target = AuditTarget {
         server_id,
         room_id,
-        player_id,
+        character_id,
         rollout_epoch,
     };
     match audit_error(
@@ -1712,7 +1712,7 @@ async fn audited_bad_request(
         error,
         target.server_id,
         target.room_id,
-        target.player_id,
+        target.character_id,
         target.rollout_epoch,
     )
     .await
@@ -1729,7 +1729,7 @@ async fn audited_update_error(
     error: &RouteStoreUpdateError,
     server_id: Option<&str>,
     room_id: Option<&str>,
-    player_id: Option<&str>,
+    character_id: Option<&str>,
     rollout_epoch: Option<&str>,
 ) -> String {
     let error_code = error.code();
@@ -1740,7 +1740,7 @@ async fn audited_update_error(
         error_code,
         server_id,
         room_id,
-        player_id,
+        character_id,
         rollout_epoch,
     )
     .await
@@ -1798,13 +1798,13 @@ fn log_old_server_drain_status_blocked_completion(
         new_server_id = evaluation.new_server_id.as_deref().unwrap_or_default(),
         drain_status = evaluation.status.as_str(),
         blocked_room_count = evaluation.blocked_room_count,
-        blocked_player_count = evaluation.blocked_player_count,
+        blocked_character_count = evaluation.blocked_character_count,
         stale_room_route_count = evaluation.stale_room_route_count,
-        stale_player_route_count = evaluation.stale_player_route_count,
+        stale_character_route_count = evaluation.stale_character_route_count,
         removed_room_route_count = 0,
-        removed_player_route_count = 0,
+        removed_character_route_count = 0,
         remaining_room_route_count = 0,
-        remaining_player_route_count = 0,
+        remaining_character_route_count = 0,
         status_code = ?old_server_drain_status.status_code,
         ok = ?old_server_drain_status.ok,
         owned_room_count = ?old_server_drain_status.owned_room_count,
@@ -1830,13 +1830,13 @@ fn log_rollout_complete_if_drained_rejected(
         new_server_id = evaluation.new_server_id.as_deref().unwrap_or_default(),
         drain_status = evaluation.status.as_str(),
         blocked_room_count = evaluation.blocked_room_count,
-        blocked_player_count = evaluation.blocked_player_count,
+        blocked_character_count = evaluation.blocked_character_count,
         stale_room_route_count = evaluation.stale_room_route_count,
-        stale_player_route_count = evaluation.stale_player_route_count,
+        stale_character_route_count = evaluation.stale_character_route_count,
         removed_room_route_count = 0,
-        removed_player_route_count = 0,
+        removed_character_route_count = 0,
         remaining_room_route_count = 0,
-        remaining_player_route_count = 0,
+        remaining_character_route_count = 0,
         "proxy rollout complete-if-drained rejected"
     );
 }
@@ -2030,7 +2030,7 @@ fn admin_route_requirement(method: &str, route_path: &str) -> Option<AdminRouteR
         | ("GET", "/instances")
         | ("GET", "/rollout")
         | ("GET", "/room-routes")
-        | ("GET", "/player-routes") => Some(AdminRouteRequirement {
+        | ("GET", "/character-routes") => Some(AdminRouteRequirement {
             permission: AdminPermissionScope::Read,
             action: "admin_read",
             is_write: false,
@@ -2070,9 +2070,9 @@ fn admin_route_requirement(method: &str, route_path: &str) -> Option<AdminRouteR
             action: "room_route_upsert",
             is_write: true,
         }),
-        ("POST", "/player-route/upsert") => Some(AdminRouteRequirement {
+        ("POST", "/character-route/upsert") => Some(AdminRouteRequirement {
             permission: AdminPermissionScope::RouteWrite,
-            action: "player_route_upsert",
+            action: "character_route_upsert",
             is_write: true,
         }),
         ("POST", route_path) if route_path.strip_prefix("/switch/").is_some() => {
@@ -2225,7 +2225,7 @@ mod tests {
     use super::{
         AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
         admin_request_context, admin_route_requirement, audit_ok, audit_write_failed, authorize,
-        authorize_method, authorize_route, handle_connection, handle_player_route_upsert,
+        authorize_method, authorize_route, handle_character_route_upsert, handle_connection,
         handle_rollout_complete_if_drained, handle_rollout_start, handle_rollout_state,
         handle_room_route_upsert, handle_switch, is_authorized, split_path_and_query,
     };
@@ -2447,7 +2447,7 @@ mod tests {
         let rollout_end = admin_route_requirement("POST", "/rollout/end").unwrap();
         let rollout_complete =
             admin_route_requirement("POST", "/rollout/complete-if-drained").unwrap();
-        let route = admin_route_requirement("POST", "/player-route/upsert").unwrap();
+        let route = admin_route_requirement("POST", "/character-route/upsert").unwrap();
 
         assert!(authorize_route(&request, rollout_start, &config).is_ok());
         assert!(authorize_route(&request, rollout_end, &config).is_ok());
@@ -2465,12 +2465,12 @@ mod tests {
         let request =
             format!("POST /room-route/upsert HTTP/1.1\r\nauthorization: Bearer {token}\r\n\r\n");
         let room_route = admin_route_requirement("POST", "/room-route/upsert").unwrap();
-        let player_route = admin_route_requirement("POST", "/player-route/upsert").unwrap();
+        let character_route = admin_route_requirement("POST", "/character-route/upsert").unwrap();
         let switch = admin_route_requirement("POST", "/switch/game-server-2").unwrap();
         let maintenance = admin_route_requirement("POST", "/maintenance/off").unwrap();
 
         assert!(authorize_route(&request, room_route, &config).is_ok());
-        assert!(authorize_route(&request, player_route, &config).is_ok());
+        assert!(authorize_route(&request, character_route, &config).is_ok());
         assert!(authorize_route(&request, switch, &config).is_ok());
         assert_eq!(
             authorize_route(&request, maintenance, &config),
@@ -3044,42 +3044,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn player_route_upsert_rejects_invalid_query_without_write() {
+    async fn character_route_upsert_rejects_invalid_query_without_write() {
         let store = route_store().await;
         let audit_logger = test_audit_logger();
-        let context = test_context("/player-route/upsert");
+        let context = test_context("/character-route/upsert");
 
-        let bad_player = handle_player_route_upsert(
+        let bad_character = handle_character_route_upsert(
             &store,
-            &query("/player-route/upsert?player_id=bad/player&preferred_server_id=game-server-1"),
+            &query(
+                "/character-route/upsert?character_id=bad/player&preferred_server_id=game-server-1",
+            ),
             &audit_logger,
             &context,
         )
         .await;
-        assert_eq!(status_code(&bad_player), 400);
+        assert_eq!(status_code(&bad_character), 400);
 
-        let unknown_server = handle_player_route_upsert(
+        let unknown_server = handle_character_route_upsert(
             &store,
-            &query("/player-route/upsert?player_id=player-1&preferred_server_id=missing"),
+            &query("/character-route/upsert?character_id=chr_0000000000001&preferred_server_id=missing"),
             &audit_logger,
             &context,
         )
         .await;
         assert_eq!(status_code(&unknown_server), 400);
 
-        assert!(store.list_player_routes().await.is_empty());
+        assert!(store.list_character_routes().await.is_empty());
     }
 
     #[tokio::test]
-    async fn player_route_upsert_accepts_valid_query() {
+    async fn character_route_upsert_accepts_valid_query() {
         let store = route_store().await;
         let audit_logger = test_audit_logger();
-        let context = test_context("/player-route/upsert");
+        let context = test_context("/character-route/upsert");
 
-        let response = handle_player_route_upsert(
+        let response = handle_character_route_upsert(
             &store,
             &query(
-                "/player-route/upsert?player_id=player-1&current_room_id=room-1&preferred_server_id=game-server-1",
+                "/character-route/upsert?character_id=chr_0000000000001&current_room_id=room-1&preferred_server_id=game-server-1",
             ),
             &audit_logger,
             &context,
@@ -3087,14 +3089,22 @@ mod tests {
         .await;
 
         assert_eq!(status_code(&response), 200);
-        let routes = store.list_player_routes().await;
+        let routes = store.list_character_routes().await;
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].player_id, "player-1");
+        assert_eq!(routes[0].character_id, "chr_0000000000001");
         assert_eq!(routes[0].current_room_id.as_deref(), Some("room-1"));
         assert_eq!(
             routes[0].preferred_server_id.as_deref(),
             Some("game-server-1")
         );
+    }
+
+    #[test]
+    fn legacy_player_route_admin_paths_are_removed() {
+        assert!(admin_route_requirement("GET", "/player-routes").is_none());
+        assert!(admin_route_requirement("POST", "/player-route/upsert").is_none());
+        assert!(admin_route_requirement("GET", "/character-routes").is_some());
+        assert!(admin_route_requirement("POST", "/character-route/upsert").is_some());
     }
 
     #[tokio::test]

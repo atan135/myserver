@@ -152,8 +152,8 @@ pub struct RoomRouteRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlayerRouteRecord {
-    pub player_id: String,
+pub struct CharacterRouteRecord {
+    pub character_id: String,
     pub current_room_id: Option<String>,
     pub preferred_server_id: Option<String>,
     pub rollout_epoch: String,
@@ -163,7 +163,7 @@ pub struct PlayerRouteRecord {
 #[derive(Clone, Debug)]
 pub struct RouteCounts {
     pub room_routes: usize,
-    pub player_routes: usize,
+    pub character_routes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,11 +190,11 @@ pub struct RolloutDrainEvaluation {
     pub old_server_id: Option<String>,
     pub new_server_id: Option<String>,
     pub blocked_room_count: usize,
-    pub blocked_player_count: usize,
+    pub blocked_character_count: usize,
     pub blocked_room_samples: Vec<String>,
-    pub blocked_player_samples: Vec<String>,
+    pub blocked_character_samples: Vec<String>,
     pub stale_room_route_count: usize,
-    pub stale_player_route_count: usize,
+    pub stale_character_route_count: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,16 +203,16 @@ pub struct RolloutEndSummary {
     pub old_server_id: Option<String>,
     pub new_server_id: Option<String>,
     pub removed_room_route_count: usize,
-    pub removed_player_route_count: usize,
+    pub removed_character_route_count: usize,
     pub remaining_room_route_count: usize,
-    pub remaining_player_route_count: usize,
+    pub remaining_character_route_count: usize,
 }
 
 impl RolloutEndSummary {
     fn has_changes(&self) -> bool {
         self.rollout_epoch.is_some()
             || self.removed_room_route_count > 0
-            || self.removed_player_route_count > 0
+            || self.removed_character_route_count > 0
     }
 }
 
@@ -236,7 +236,7 @@ struct RouteStoreState {
     routes: HashMap<String, UpstreamRoute>,
     rollout_session: Option<RolloutSession>,
     room_routes: HashMap<String, RoomRouteRecord>,
-    player_routes: HashMap<String, PlayerRouteRecord>,
+    character_routes: HashMap<String, CharacterRouteRecord>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -248,7 +248,7 @@ pub struct PersistedRouteStoreState {
     #[serde(default)]
     pub room_routes: HashMap<String, RoomRouteRecord>,
     #[serde(default)]
-    pub player_routes: HashMap<String, PlayerRouteRecord>,
+    pub character_routes: HashMap<String, CharacterRouteRecord>,
 }
 
 #[derive(Debug)]
@@ -885,10 +885,10 @@ impl ProxyRouteStore {
         routes
     }
 
-    pub async fn list_player_routes(&self) -> Vec<PlayerRouteRecord> {
+    pub async fn list_character_routes(&self) -> Vec<CharacterRouteRecord> {
         let state = self.state.read().await;
-        let mut routes: Vec<_> = state.player_routes.values().cloned().collect();
-        routes.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        let mut routes: Vec<_> = state.character_routes.values().cloned().collect();
+        routes.sort_by(|left, right| left.character_id.cmp(&right.character_id));
         routes
     }
 
@@ -896,7 +896,7 @@ impl ProxyRouteStore {
         let state = self.state.read().await;
         RouteCounts {
             room_routes: state.room_routes.len(),
-            player_routes: state.player_routes.len(),
+            character_routes: state.character_routes.len(),
         }
     }
 
@@ -970,19 +970,19 @@ impl ProxyRouteStore {
         result.map(|_| ())
     }
 
-    pub async fn upsert_player_route(
+    pub async fn upsert_character_route(
         &self,
-        mut record: PlayerRouteRecord,
+        mut record: CharacterRouteRecord,
     ) -> Result<(), RouteStoreUpdateError> {
         let mut log_context = None;
         let result = self
-            .update_persisted_state("upsert_player_route", |state| {
+            .update_persisted_state("upsert_character_route", |state| {
                 validate_rollout_epoch(&state.rollout_session, &record.rollout_epoch)?;
-                let existing = state.player_routes.get(&record.player_id).cloned();
+                let existing = state.character_routes.get(&record.character_id).cloned();
                 record.updated_at_ms = now_ms();
                 state
-                    .player_routes
-                    .insert(record.player_id.clone(), record.clone());
+                    .character_routes
+                    .insert(record.character_id.clone(), record.clone());
                 log_context = Some((existing, record.clone()));
                 Ok(true)
             })
@@ -990,7 +990,7 @@ impl ProxyRouteStore {
 
         if result.is_ok() {
             if let Some((existing, current)) = log_context {
-                log_player_route_update("admin_upsert", existing.as_ref(), &current);
+                log_character_route_update("admin_upsert", existing.as_ref(), &current);
             }
         }
 
@@ -1001,11 +1001,11 @@ impl ProxyRouteStore {
         &self,
         room_id: &str,
         owner_server_id: &str,
-        player_id: Option<&str>,
+        character_id: Option<&str>,
         observer_only: bool,
     ) {
         let mut room_log_context = None;
-        let mut player_log_context = None;
+        let mut character_log_context = None;
         let changed = self
             .update_bind_metadata("bind_room_owner", |state| {
                 let current_rollout_epoch = state
@@ -1106,19 +1106,20 @@ impl ProxyRouteStore {
                     .insert(room_id.to_string(), next_room_route.clone());
                 room_log_context = Some((existing_room_route, next_room_route));
 
-                if let Some(player_id) = player_id {
-                    let existing_player_route = state.player_routes.get(player_id).cloned();
-                    let next_player_route = PlayerRouteRecord {
-                        player_id: player_id.to_string(),
+                if let Some(character_id) = character_id {
+                    let existing_character_route =
+                        state.character_routes.get(character_id).cloned();
+                    let next_character_route = CharacterRouteRecord {
+                        character_id: character_id.to_string(),
                         current_room_id: Some(room_id.to_string()),
                         preferred_server_id: Some(bound_owner_server_id),
                         rollout_epoch,
                         updated_at_ms: now_ms(),
                     };
                     state
-                        .player_routes
-                        .insert(player_id.to_string(), next_player_route.clone());
-                    player_log_context = Some((existing_player_route, next_player_route));
+                        .character_routes
+                        .insert(character_id.to_string(), next_character_route.clone());
+                    character_log_context = Some((existing_character_route, next_character_route));
                 }
                 Ok(true)
             })
@@ -1128,8 +1129,8 @@ impl ProxyRouteStore {
             if let Some((existing, current)) = room_log_context {
                 log_room_route_update("bind_room_owner", existing.as_ref(), &current);
             }
-            if let Some((existing, current)) = player_log_context {
-                log_player_route_update("bind_room_owner", existing.as_ref(), &current);
+            if let Some((existing, current)) = character_log_context {
+                log_character_route_update("bind_room_owner", existing.as_ref(), &current);
             }
         }
     }
@@ -1145,9 +1146,9 @@ impl ProxyRouteStore {
         state.select_default_for_new_room().cloned()
     }
 
-    pub async fn select_upstream_for_player(&self, player_id: &str) -> Option<UpstreamRoute> {
+    pub async fn select_upstream_for_character(&self, character_id: &str) -> Option<UpstreamRoute> {
         let state = self.state.read().await;
-        if let Some(record) = state.player_routes.get(player_id) {
+        if let Some(record) = state.character_routes.get(character_id) {
             if let Some(room_id) = record.current_room_id.as_deref() {
                 if let Some(room_route) = state.room_routes.get(room_id) {
                     if let Some(route) = state.find_connectable_route(&room_route.owner_server_id) {
@@ -1273,11 +1274,11 @@ impl RouteStoreState {
                 old_server_id: None,
                 new_server_id: None,
                 blocked_room_count: 0,
-                blocked_player_count: 0,
+                blocked_character_count: 0,
                 blocked_room_samples: Vec::new(),
-                blocked_player_samples: Vec::new(),
+                blocked_character_samples: Vec::new(),
                 stale_room_route_count: self.room_routes.len(),
-                stale_player_route_count: self.player_routes.len(),
+                stale_character_route_count: self.character_routes.len(),
             };
         };
 
@@ -1307,14 +1308,14 @@ impl RouteStoreState {
         blocked_room_ids.sort();
         blocked_room_ids.dedup();
 
-        let mut blocked_player_ids = Vec::new();
-        let mut stale_player_route_count = 0;
-        let mut player_routes: Vec<_> = self.player_routes.values().collect();
-        player_routes.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        let mut blocked_character_ids = Vec::new();
+        let mut stale_character_route_count = 0;
+        let mut character_routes: Vec<_> = self.character_routes.values().collect();
+        character_routes.sort_by(|left, right| left.character_id.cmp(&right.character_id));
 
-        for record in player_routes {
+        for record in character_routes {
             if !route_epoch_matches_current(&record.rollout_epoch, &session.rollout_epoch) {
-                stale_player_route_count += 1;
+                stale_character_route_count += 1;
                 continue;
             }
 
@@ -1325,11 +1326,11 @@ impl RouteStoreState {
                 .as_ref()
                 .is_some_and(|room_id| blocked_room_lookup.contains_key(room_id));
             if preferred_old || current_room_blocked {
-                blocked_player_ids.push(record.player_id.clone());
+                blocked_character_ids.push(record.character_id.clone());
             }
         }
 
-        let status = if blocked_room_ids.is_empty() && blocked_player_ids.is_empty() {
+        let status = if blocked_room_ids.is_empty() && blocked_character_ids.is_empty() {
             RolloutDrainStatus::Drained
         } else {
             RolloutDrainStatus::Blocked
@@ -1341,17 +1342,17 @@ impl RouteStoreState {
             old_server_id: Some(session.old_server_id.clone()),
             new_server_id: Some(session.new_server_id.clone()),
             blocked_room_count: blocked_room_ids.len(),
-            blocked_player_count: blocked_player_ids.len(),
+            blocked_character_count: blocked_character_ids.len(),
             blocked_room_samples: blocked_room_ids
                 .into_iter()
                 .take(ROLLOUT_DRAIN_SAMPLE_LIMIT)
                 .collect(),
-            blocked_player_samples: blocked_player_ids
+            blocked_character_samples: blocked_character_ids
                 .into_iter()
                 .take(ROLLOUT_DRAIN_SAMPLE_LIMIT)
                 .collect(),
             stale_room_route_count,
-            stale_player_route_count,
+            stale_character_route_count,
         }
     }
 
@@ -1371,9 +1372,9 @@ impl RouteStoreState {
 
     fn finish_rollout(&mut self) -> RolloutEndSummary {
         let ended_session = self.rollout_session.take();
-        let removed_player_route_count = self.player_routes.len();
+        let removed_character_route_count = self.character_routes.len();
         let room_route_count_before = self.room_routes.len();
-        self.player_routes.clear();
+        self.character_routes.clear();
 
         let (rollout_epoch, old_server_id, new_server_id) = if let Some(session) = ended_session {
             self.room_routes.retain(|_, record| {
@@ -1394,9 +1395,9 @@ impl RouteStoreState {
             new_server_id,
             removed_room_route_count: room_route_count_before
                 .saturating_sub(self.room_routes.len()),
-            removed_player_route_count,
+            removed_character_route_count,
             remaining_room_route_count: self.room_routes.len(),
-            remaining_player_route_count: self.player_routes.len(),
+            remaining_character_route_count: self.character_routes.len(),
         }
     }
 
@@ -1405,7 +1406,7 @@ impl RouteStoreState {
             store_revision: self.store_revision,
             rollout_session: self.rollout_session.clone(),
             room_routes: self.room_routes.clone(),
-            player_routes: self.player_routes.clone(),
+            character_routes: self.character_routes.clone(),
         }
     }
 
@@ -1418,7 +1419,7 @@ impl RouteStoreState {
         self.store_revision = persisted.store_revision;
         self.rollout_session = persisted.rollout_session;
         self.room_routes = persisted.room_routes;
-        self.player_routes = persisted.player_routes;
+        self.character_routes = persisted.character_routes;
         if let Some(session) = finished_session {
             self.apply_rollout_finished_upstream_mode(
                 &session.old_server_id,
@@ -1552,8 +1553,11 @@ fn room_route_records_match(left: &RoomRouteRecord, right: &RoomRouteRecord) -> 
         && left.last_transfer_checksum == right.last_transfer_checksum
 }
 
-fn player_route_records_match(left: &PlayerRouteRecord, right: &PlayerRouteRecord) -> bool {
-    left.player_id == right.player_id
+fn character_route_records_match(
+    left: &CharacterRouteRecord,
+    right: &CharacterRouteRecord,
+) -> bool {
+    left.character_id == right.character_id
         && left.current_room_id == right.current_room_id
         && left.preferred_server_id == right.preferred_server_id
         && left.rollout_epoch == right.rollout_epoch
@@ -1592,19 +1596,19 @@ fn log_room_route_update(
     );
 }
 
-fn log_player_route_update(
+fn log_character_route_update(
     update_source: &'static str,
-    previous: Option<&PlayerRouteRecord>,
-    current: &PlayerRouteRecord,
+    previous: Option<&CharacterRouteRecord>,
+    current: &CharacterRouteRecord,
 ) {
-    if previous.is_some_and(|previous| player_route_records_match(previous, current)) {
+    if previous.is_some_and(|previous| character_route_records_match(previous, current)) {
         return;
     }
 
     info!(
         update_source,
         action = if previous.is_some() { "updated" } else { "created" },
-        player_id = %current.player_id,
+        character_id = %current.character_id,
         current_room_id = %current.current_room_id.as_deref().unwrap_or_default(),
         preferred_server_id = %current.preferred_server_id.as_deref().unwrap_or_default(),
         rollout_epoch = %current.rollout_epoch,
@@ -1615,7 +1619,7 @@ fn log_player_route_update(
             .and_then(|record| record.preferred_server_id.as_deref())
             .unwrap_or_default(),
         previous_rollout_epoch = %previous.map(|record| record.rollout_epoch.as_str()).unwrap_or_default(),
-        "player route updated"
+        "character route updated"
     );
 }
 
@@ -1633,13 +1637,13 @@ fn log_rollout_session_lifecycle(
         rollout_state = session.state.as_str(),
         drain_status = "not_evaluated",
         blocked_room_count = 0,
-        blocked_player_count = 0,
+        blocked_character_count = 0,
         stale_room_route_count = 0,
-        stale_player_route_count = 0,
+        stale_character_route_count = 0,
         removed_room_route_count = 0,
-        removed_player_route_count = 0,
+        removed_character_route_count = 0,
         remaining_room_route_count = 0,
-        remaining_player_route_count = 0,
+        remaining_character_route_count = 0,
         "proxy rollout lifecycle updated"
     );
 }
@@ -1657,13 +1661,13 @@ fn log_rollout_completion_evaluation(
         new_server_id = %evaluation.new_server_id.as_deref().unwrap_or_default(),
         drain_status = evaluation.status.as_str(),
         blocked_room_count = evaluation.blocked_room_count,
-        blocked_player_count = evaluation.blocked_player_count,
+        blocked_character_count = evaluation.blocked_character_count,
         stale_room_route_count = evaluation.stale_room_route_count,
-        stale_player_route_count = evaluation.stale_player_route_count,
+        stale_character_route_count = evaluation.stale_character_route_count,
         removed_room_route_count = 0,
-        removed_player_route_count = 0,
+        removed_character_route_count = 0,
         remaining_room_route_count = 0,
-        remaining_player_route_count = 0,
+        remaining_character_route_count = 0,
         "proxy rollout complete-if-drained evaluated"
     );
 }
@@ -1681,13 +1685,13 @@ fn log_rollout_end_summary(update_source: &'static str, summary: &RolloutEndSumm
         new_server_id = %summary.new_server_id.as_deref().unwrap_or_default(),
         drain_status = "completed",
         blocked_room_count = 0,
-        blocked_player_count = 0,
+        blocked_character_count = 0,
         stale_room_route_count = 0,
-        stale_player_route_count = 0,
+        stale_character_route_count = 0,
         removed_room_route_count = summary.removed_room_route_count,
-        removed_player_route_count = summary.removed_player_route_count,
+        removed_character_route_count = summary.removed_character_route_count,
         remaining_room_route_count = summary.remaining_room_route_count,
-        remaining_player_route_count = summary.remaining_player_route_count,
+        remaining_character_route_count = summary.remaining_character_route_count,
         "proxy rollout ended"
     );
 }
@@ -2037,7 +2041,7 @@ mod tests {
             .unwrap();
 
         store
-            .bind_room_owner("room-1", "server-a", Some("player-1"), false)
+            .bind_room_owner("room-1", "server-a", Some("chr_0000000000001"), false)
             .await;
 
         let route = get_room_route(&store, "room-1").await;
@@ -2069,24 +2073,24 @@ mod tests {
             .unwrap();
 
         store
-            .bind_room_owner("room-1", "new", Some("player-1"), false)
+            .bind_room_owner("room-1", "new", Some("chr_0000000000001"), false)
             .await;
 
         let route = get_room_route(&store, "room-1").await;
         assert_eq!(route.owner_server_id, "old");
         assert_eq!(route.room_version, 1);
 
-        let player_route = store
-            .list_player_routes()
+        let character_route = store
+            .list_character_routes()
             .await
             .into_iter()
-            .find(|record| record.player_id == "player-1")
-            .expect("player route should exist");
-        assert_eq!(player_route.preferred_server_id.as_deref(), Some("old"));
+            .find(|record| record.character_id == "chr_0000000000001")
+            .expect("character route should exist");
+        assert_eq!(character_route.preferred_server_id.as_deref(), Some("old"));
     }
 
     #[tokio::test]
-    async fn player_reconnect_prefers_transferred_room_owner_route() {
+    async fn character_reconnect_prefers_transferred_room_owner_route() {
         let store = ProxyRouteStore::default();
         store
             .set_static_routes(vec![
@@ -2113,7 +2117,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .bind_room_owner("room-1", "old", Some("player-1"), false)
+            .bind_room_owner("room-1", "old", Some("chr_0000000000001"), false)
             .await;
         store
             .upsert_room_route(
@@ -2131,7 +2135,7 @@ mod tests {
             .unwrap();
 
         let route = store
-            .select_upstream_for_player("player-1")
+            .select_upstream_for_character("chr_0000000000001")
             .await
             .expect("route should be selected");
 
@@ -2180,7 +2184,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .bind_room_owner("room-1", "old", Some("player-1"), false)
+            .bind_room_owner("room-1", "old", Some("chr_0000000000001"), false)
             .await;
 
         store
@@ -2216,11 +2220,11 @@ mod tests {
             .expect("room route should fall back to healthy default");
         assert_eq!(room_route.server_id, "new");
 
-        let player_route = store
-            .select_upstream_for_player("player-1")
+        let character_route = store
+            .select_upstream_for_character("chr_0000000000001")
             .await
-            .expect("player route should fall back to healthy default");
-        assert_eq!(player_route.server_id, "new");
+            .expect("character route should fall back to healthy default");
+        assert_eq!(character_route.server_id, "new");
     }
 
     #[tokio::test]
@@ -2231,7 +2235,7 @@ mod tests {
 
         assert_eq!(evaluation.status, RolloutDrainStatus::NoActiveRollout);
         assert_eq!(evaluation.blocked_room_count, 0);
-        assert_eq!(evaluation.blocked_player_count, 0);
+        assert_eq!(evaluation.blocked_character_count, 0);
 
         let result = store.complete_rollout_if_drained().await.unwrap();
         assert!(matches!(
@@ -2359,7 +2363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollout_drain_evaluation_blocks_old_player_routes() {
+    async fn rollout_drain_evaluation_blocks_old_character_routes() {
         let store = ProxyRouteStore::default();
         store
             .begin_rollout(
@@ -2370,8 +2374,8 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_player_route(PlayerRouteRecord {
-                player_id: "player-1".to_string(),
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000001".to_string(),
                 current_room_id: None,
                 preferred_server_id: Some("old".to_string()),
                 rollout_epoch: "rollout-1".to_string(),
@@ -2383,8 +2387,11 @@ mod tests {
         let evaluation = store.evaluate_rollout_drain().await;
 
         assert_eq!(evaluation.status, RolloutDrainStatus::Blocked);
-        assert_eq!(evaluation.blocked_player_count, 1);
-        assert_eq!(evaluation.blocked_player_samples, vec!["player-1"]);
+        assert_eq!(evaluation.blocked_character_count, 1);
+        assert_eq!(
+            evaluation.blocked_character_samples,
+            vec!["chr_0000000000001"]
+        );
     }
 
     #[tokio::test]
@@ -2437,8 +2444,8 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_player_route(PlayerRouteRecord {
-                player_id: "player-new".to_string(),
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000002".to_string(),
                 current_room_id: Some("room-new".to_string()),
                 preferred_server_id: Some("new".to_string()),
                 rollout_epoch: "rollout-1".to_string(),
@@ -2460,7 +2467,7 @@ mod tests {
         assert_eq!(evaluation.stale_room_route_count, 1);
         assert_eq!(end_summary.rollout_epoch.as_deref(), Some("rollout-1"));
         assert_eq!(end_summary.removed_room_route_count, 2);
-        assert_eq!(end_summary.removed_player_route_count, 1);
+        assert_eq!(end_summary.removed_character_route_count, 1);
         assert!(store.get_rollout_session().await.is_none());
 
         let routes = store.list_room_routes().await;
@@ -2593,7 +2600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_state_restores_rollout_room_and_player_routes() {
+    async fn persisted_state_restores_rollout_room_and_character_routes() {
         let persistence = Arc::new(MemoryRouteStorePersistence::default());
         let store = ProxyRouteStore::with_persistence(persistence.clone());
         store
@@ -2613,8 +2620,8 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_player_route(PlayerRouteRecord {
-                player_id: "player-1".to_string(),
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000001".to_string(),
                 current_room_id: Some("room-1".to_string()),
                 preferred_server_id: Some("old".to_string()),
                 rollout_epoch: "rollout-1".to_string(),
@@ -2638,14 +2645,14 @@ mod tests {
         assert_eq!(room_route.owner_server_id, "old");
         assert_eq!(room_route.room_version, 1);
 
-        let player_route = restored
-            .list_player_routes()
+        let character_route = restored
+            .list_character_routes()
             .await
             .into_iter()
-            .find(|record| record.player_id == "player-1")
-            .expect("player route should be restored");
-        assert_eq!(player_route.current_room_id.as_deref(), Some("room-1"));
-        assert_eq!(player_route.preferred_server_id.as_deref(), Some("old"));
+            .find(|record| record.character_id == "chr_0000000000001")
+            .expect("character route should be restored");
+        assert_eq!(character_route.current_room_id.as_deref(), Some("room-1"));
+        assert_eq!(character_route.preferred_server_id.as_deref(), Some("old"));
     }
 
     #[tokio::test]
@@ -2664,8 +2671,8 @@ mod tests {
         assert_eq!(persistence.persisted_state().await.store_revision, 1);
 
         store
-            .upsert_player_route(PlayerRouteRecord {
-                player_id: "player-1".to_string(),
+            .upsert_character_route(CharacterRouteRecord {
+                character_id: "chr_0000000000001".to_string(),
                 current_room_id: Some("room-1".to_string()),
                 preferred_server_id: Some("old".to_string()),
                 rollout_epoch: "rollout-1".to_string(),
@@ -2892,7 +2899,7 @@ mod tests {
                     ""
                 )
             },
-            "player_routes": {}
+            "character_routes": {}
         })
         .to_string();
         let legacy = Arc::new(JsonRouteStorePersistence { json: legacy_json });
