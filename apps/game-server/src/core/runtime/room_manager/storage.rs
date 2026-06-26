@@ -46,8 +46,8 @@ impl RoomManager {
 
         if inserted {
             replace_room_member_indexes(
-                &self.player_rooms,
-                &self.offline_players,
+                &self.character_rooms,
+                &self.offline_characters,
                 room_id,
                 members,
             )
@@ -59,8 +59,8 @@ impl RoomManager {
 
     pub(super) async fn rebuild_room_indexes(&self, room_id: &str, room_entry: &SharedRoom) {
         sync_room_member_indexes_from_entry(
-            &self.player_rooms,
-            &self.offline_players,
+            &self.character_rooms,
+            &self.offline_characters,
             room_id,
             room_entry,
         )
@@ -68,28 +68,38 @@ impl RoomManager {
     }
 
     pub(super) async fn remove_room_indexes(&self, room_id: &str) {
-        remove_room_member_indexes(&self.player_rooms, &self.offline_players, room_id).await;
+        remove_room_member_indexes(&self.character_rooms, &self.offline_characters, room_id).await;
     }
 
-    pub(super) async fn remove_player_indexes_for_room(&self, player_id: &str, room_id: &str) {
-        remove_player_index_for_room(
-            &self.player_rooms,
-            &self.offline_players,
-            player_id,
+    pub(super) async fn remove_character_indexes_for_room(
+        &self,
+        character_id: &str,
+        room_id: &str,
+    ) {
+        remove_character_index_for_room(
+            &self.character_rooms,
+            &self.offline_characters,
+            character_id,
             room_id,
         )
         .await;
     }
 
-    pub(super) async fn remove_offline_player_index(&self, player_id: &str, room_id: &str) {
-        remove_offline_player_index_for_room(&self.offline_players, player_id, room_id).await;
+    pub(super) async fn remove_offline_character_index(&self, character_id: &str, room_id: &str) {
+        remove_offline_character_index_for_room(&self.offline_characters, character_id, room_id)
+            .await;
     }
 
-    pub(super) async fn set_player_index(&self, player_id: &str, room_id: &str, offline: bool) {
-        set_player_room_index(
-            &self.player_rooms,
-            &self.offline_players,
-            player_id,
+    pub(super) async fn set_character_index(
+        &self,
+        character_id: &str,
+        room_id: &str,
+        offline: bool,
+    ) {
+        set_character_room_index(
+            &self.character_rooms,
+            &self.offline_characters,
+            character_id,
             room_id,
             offline,
         )
@@ -108,8 +118,8 @@ impl RoomManager {
     pub(super) fn spawn_cleanup_task(&self, cleanup_interval_secs: u64) {
         let rooms = std::sync::Arc::clone(&self.rooms);
         let runtimes = std::sync::Arc::clone(&self.runtimes);
-        let player_rooms = std::sync::Arc::clone(&self.player_rooms);
-        let offline_players = std::sync::Arc::clone(&self.offline_players);
+        let character_rooms = std::sync::Arc::clone(&self.character_rooms);
+        let offline_characters = std::sync::Arc::clone(&self.offline_characters);
         let policies = self.policies.clone();
         let match_client = std::sync::Arc::clone(&self.match_client);
         let cleanup_interval_secs = cleanup_interval_secs.max(1);
@@ -145,26 +155,26 @@ impl RoomManager {
                         }
 
                         let policy = policies.resolve(&room.policy_id);
-                        let expired_players =
-                            room.collect_expired_offline_players(policy.offline_ttl_secs);
-                        if !expired_players.is_empty() {
+                        let expired_characters =
+                            room.collect_expired_offline_characters(policy.offline_ttl_secs);
+                        if !expired_characters.is_empty() {
                             info!(
                                 room_id = %room_id,
-                                expired_players = ?expired_players,
+                                expired_characters = ?expired_characters,
                                 ttl_secs = policy.offline_ttl_secs,
-                                "removing expired offline players from cleanup task"
+                                "removing expired offline characters from cleanup task"
                             );
 
-                            for player_id in &expired_players {
-                                room.logic.on_player_leave(player_id);
+                            for character_id in &expired_characters {
+                                room.logic.on_character_leave(character_id);
                             }
 
-                            room.remove_members(&expired_players);
-                            for player_id in &expired_players {
-                                remove_player_index_for_room(
-                                    &player_rooms,
-                                    &offline_players,
-                                    player_id,
+                            room.remove_members(&expired_characters);
+                            for character_id in &expired_characters {
+                                remove_character_index_for_room(
+                                    &character_rooms,
+                                    &offline_characters,
+                                    character_id,
                                     &room_id,
                                 )
                                 .await;
@@ -236,7 +246,8 @@ impl RoomManager {
                         let mut runtimes = runtimes.write().await;
                         runtimes.remove(&room_id);
                     }
-                    remove_room_member_indexes(&player_rooms, &offline_players, &room_id).await;
+                    remove_room_member_indexes(&character_rooms, &offline_characters, &room_id)
+                        .await;
                     let room_count = {
                         let mut rooms = rooms.write().await;
                         rooms.remove(&room_id);
@@ -270,10 +281,15 @@ impl RoomManager {
         self.rooms.read().await.contains_key(room_id)
     }
 
-    pub async fn find_room_by_offline_player(&self, player_id: &str) -> Option<String> {
-        let room_id = self.offline_players.read().await.get(player_id).cloned()?;
+    pub async fn find_room_by_offline_character(&self, character_id: &str) -> Option<String> {
+        let room_id = self
+            .offline_characters
+            .read()
+            .await
+            .get(character_id)
+            .cloned()?;
         let Some(room_entry) = self.get_room_entry(&room_id).await else {
-            self.remove_player_indexes_for_room(player_id, &room_id)
+            self.remove_character_indexes_for_room(character_id, &room_id)
                 .await;
             return None;
         };
@@ -285,18 +301,19 @@ impl RoomManager {
             {
                 None
             } else {
-                room.members.get(player_id).map(|member| member.offline)
+                room.members.get(character_id).map(|member| member.offline)
             }
         };
 
         match index_state {
             Some(true) => Some(room_id),
             Some(false) => {
-                self.remove_offline_player_index(player_id, &room_id).await;
+                self.remove_offline_character_index(character_id, &room_id)
+                    .await;
                 None
             }
             None => {
-                self.remove_player_indexes_for_room(player_id, &room_id)
+                self.remove_character_indexes_for_room(character_id, &room_id)
                     .await;
                 None
             }

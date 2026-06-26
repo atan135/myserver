@@ -13,29 +13,32 @@ impl RoomLogic for TestRoomLogic {
         info!(room_id = _room_id, "[RoomLogic/test_room] room created");
     }
 
-    fn on_player_join(&mut self, _player_id: &str) {
+    fn on_character_join(&mut self, _character_id: &str) {
         info!(
-            player_id = _player_id,
+            character_id = _character_id,
             "[RoomLogic/test_room] player joined"
         );
     }
 
-    fn on_player_leave(&mut self, _player_id: &str) {
-        info!(player_id = _player_id, "[RoomLogic/test_room] player left");
+    fn on_character_leave(&mut self, _character_id: &str) {
+        info!(
+            character_id = _character_id,
+            "[RoomLogic/test_room] player left"
+        );
     }
 
-    fn on_player_offline(&mut self, _room_id: &str, _player_id: &str) {
+    fn on_character_offline(&mut self, _room_id: &str, _character_id: &str) {
         info!(
             room_id = _room_id,
-            player_id = _player_id,
+            character_id = _character_id,
             "[RoomLogic/test_room] player offline, AI takeover possible"
         );
     }
 
-    fn on_player_online(&mut self, _room_id: &str, _player_id: &str) {
+    fn on_character_online(&mut self, _room_id: &str, _character_id: &str) {
         info!(
             room_id = _room_id,
-            player_id = _player_id,
+            character_id = _character_id,
             "[RoomLogic/test_room] player online"
         );
     }

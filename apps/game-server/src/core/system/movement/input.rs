@@ -316,7 +316,7 @@ mod tests {
     fn parse_player_input_rejects_out_of_range_direction() {
         let record = PlayerInputRecord {
             frame_id: 3,
-            player_id: "player-a".to_string(),
+            character_id: "player-a".to_string(),
             action: ACTION_MOVE_DIR.to_string(),
             payload_json: "{\"dirX\":1.0e30,\"dirY\":0.0}".to_string(),
             received_at: std::time::Instant::now(),

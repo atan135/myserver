@@ -69,7 +69,7 @@ pub struct MovementCorrectionEnvelope {
     pub correction_kind: i32,
     pub reason_code: i32,
     pub reference_frame_id: u32,
-    pub target_player_ids: Vec<String>,
+    pub target_character_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +124,7 @@ struct RoomMovementTransferSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomMovementTransferEntity {
     entity_id: EntityId,
+    #[serde(rename = "character_id")]
     player_id: Option<String>,
     scene_id: i32,
     position: RoomMovementTransferVec2,
@@ -142,6 +143,7 @@ struct RoomMovementTransferVec2 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomMovementTransferClientState {
+    #[serde(rename = "character_id")]
     player_id: String,
     frame_id: u32,
     x: f32,
@@ -150,6 +152,7 @@ struct RoomMovementTransferClientState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomMovementTransferPlayerFrame {
+    #[serde(rename = "character_id")]
     player_id: String,
     frame_id: u32,
 }
@@ -494,13 +497,13 @@ impl RoomMovementState {
         next
     }
 
-    pub fn targets_for_player(&self, requester_player_id: &str) -> Vec<EntityTransform> {
+    pub fn targets_for_character(&self, requester_character_id: &str) -> Vec<EntityTransform> {
         if !self.aoi_enabled {
             return self.all_transforms();
         }
 
         let Some(origin) = self
-            .entity(requester_player_id)
+            .entity(requester_character_id)
             .map(|entity| entity.position)
         else {
             return self.all_transforms();
@@ -509,7 +512,7 @@ impl RoomMovementState {
         self.dense_indices()
             .filter_map(|dense_index| self.entity_proto_at(dense_index))
             .filter(|entity| {
-                entity.player_id == requester_player_id
+                entity.character_id == requester_character_id
                     || distance(
                         origin,
                         Vec2 {
@@ -525,7 +528,7 @@ impl RoomMovementState {
         &mut self,
         frame_id: u32,
         reason_code: MovementCorrectionReason,
-        target_player_ids: Vec<String>,
+        target_character_ids: Vec<String>,
         entities: Vec<EntityTransform>,
     ) -> MovementCorrectionEnvelope {
         self.last_snapshot_frame = frame_id;
@@ -536,7 +539,7 @@ impl RoomMovementState {
             correction_kind: MovementCorrectionKind::FullSync as i32,
             reason_code: reason_code as i32,
             reference_frame_id: frame_id,
-            target_player_ids,
+            target_character_ids,
         }
     }
 
@@ -544,7 +547,7 @@ impl RoomMovementState {
         &mut self,
         frame_id: u32,
         reason_code: MovementCorrectionReason,
-        target_player_ids: Vec<String>,
+        target_character_ids: Vec<String>,
         entities: Vec<EntityTransform>,
     ) -> MovementCorrectionEnvelope {
         self.last_snapshot_frame = frame_id;
@@ -554,7 +557,7 @@ impl RoomMovementState {
             correction_kind: MovementCorrectionKind::Strong as i32,
             reason_code: reason_code as i32,
             reference_frame_id: frame_id,
-            target_player_ids,
+            target_character_ids,
         }
     }
 
@@ -562,7 +565,7 @@ impl RoomMovementState {
         &mut self,
         frame_id: u32,
         reason_code: MovementCorrectionReason,
-        target_player_ids: Vec<String>,
+        target_character_ids: Vec<String>,
         entities: Vec<EntityTransform>,
     ) -> MovementCorrectionEnvelope {
         self.last_snapshot_frame = frame_id;
@@ -572,18 +575,18 @@ impl RoomMovementState {
             correction_kind: MovementCorrectionKind::Incremental as i32,
             reason_code: reason_code as i32,
             reference_frame_id: frame_id,
-            target_player_ids,
+            target_character_ids,
         }
     }
 
-    pub fn recovery_state_for_player(
+    pub fn recovery_state_for_character(
         &self,
-        requester_player_id: Option<&str>,
+        requester_character_id: Option<&str>,
         frame_id: u32,
         reason_code: MovementCorrectionReason,
     ) -> MovementRecoveryState {
-        let entities = requester_player_id
-            .map(|player_id| self.targets_for_player(player_id))
+        let entities = requester_character_id
+            .map(|character_id| self.targets_for_character(character_id))
             .unwrap_or_else(|| self.all_transforms());
 
         MovementRecoveryState {
@@ -897,7 +900,7 @@ impl MovementEntityState {
     pub fn to_proto(&self) -> EntityTransform {
         EntityTransform {
             entity_id: self.entity_id,
-            player_id: self.player_id.clone(),
+            character_id: self.player_id.clone(),
             scene_id: self.scene_id,
             x: self.position.x,
             y: self.position.y,

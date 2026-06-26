@@ -28,7 +28,7 @@ pub async fn handle_room_join(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -49,9 +49,9 @@ pub async fn handle_room_join(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
+        room_subject_id = %character_id,
         world_id = ?world_id,
         room_id = %room_id,
         "handle_room_join"
@@ -88,7 +88,7 @@ pub async fn handle_room_join(
     {
         log_drain_mode_room_creation_rejected(
             "room_join",
-            Some(&player_id),
+            Some(&account_player_id),
             Some(&character_id),
             &room_id,
             None,
@@ -110,7 +110,7 @@ pub async fn handle_room_join(
         .room_manager
         .join_room(
             &room_id,
-            &player_id,
+            &character_id,
             connection.outbound_channel(),
             MemberRole::Player,
             requested_policy_id,
@@ -122,7 +122,7 @@ pub async fn handle_room_join(
             connection.session.room_id = Some(room_id.clone());
             let sync_before_broadcast = services
                 .room_manager
-                .is_member_syncing(&room_id, &player_id)
+                .is_member_syncing(&room_id, &character_id)
                 .await;
             connection.queue_message(
                 MessageType::RoomJoinRes,
@@ -147,20 +147,21 @@ pub async fn handle_room_join(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "room_joined",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id,
                         "members": snapshot.members.iter().map(|member| json!({
-                            "playerId": member.player_id,
+                            "characterId": member.character_id,
                             "ready": member.ready,
                             "isOwner": member.is_owner
                         })).collect::<Vec<_>>()
@@ -174,7 +175,7 @@ pub async fn handle_room_join(
             if sync_before_broadcast {
                 services
                     .room_manager
-                    .finish_member_sync(&room_id, &player_id)
+                    .finish_member_sync(&room_id, &character_id)
                     .await;
             }
             broadcast_result?;
@@ -193,8 +194,8 @@ pub async fn handle_room_join(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
+                    Some(&character_id),
+                    Some(&account_player_id),
                     Some(&character_id),
                     None,
                     "room_join_failed",
@@ -203,8 +204,9 @@ pub async fn handle_room_join(
                     Some(json!({
                         "errorCode": error_code,
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id
                     })),
                 )
@@ -236,11 +238,14 @@ pub async fn handle_room_leave(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
-    let leave_result = services.room_manager.leave_room(&room_id, &player_id).await;
+    let leave_result = services
+        .room_manager
+        .leave_room(&room_id, &character_id)
+        .await;
     connection.session.room_id = None;
 
     connection.queue_message(
@@ -258,17 +263,18 @@ pub async fn handle_room_leave(
             .db_store
             .append_room_event_with_identity(
                 &room_id,
-                Some(&player_id),
-                Some(&player_id),
                 Some(&character_id),
-                Some(&snapshot.owner_player_id),
+                Some(&account_player_id),
+                Some(&character_id),
+                Some(&snapshot.owner_character_id),
                 "room_left",
                 Some(&snapshot.state),
                 snapshot.members.len(),
                 Some(json!({
                     "seq": packet.header.seq,
-                    "accountPlayerId": player_id,
+                    "accountPlayerId": account_player_id,
                     "characterId": character_id,
+                    "roomSubjectId": character_id,
                     "worldId": world_id
                 })),
             )
@@ -282,8 +288,8 @@ pub async fn handle_room_leave(
             .db_store
             .append_room_event_with_identity(
                 &room_id,
-                Some(&player_id),
-                Some(&player_id),
+                Some(&character_id),
+                Some(&account_player_id),
                 Some(&character_id),
                 None,
                 "room_disbanded",
@@ -291,8 +297,9 @@ pub async fn handle_room_leave(
                 0,
                 Some(json!({
                     "seq": packet.header.seq,
-                    "accountPlayerId": player_id,
+                    "accountPlayerId": account_player_id,
                     "characterId": character_id,
+                    "roomSubjectId": character_id,
                     "worldId": world_id
                 })),
             )
@@ -310,7 +317,7 @@ pub async fn handle_room_ready(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
     let Some(room_id) = connection.session.room_id.clone() else {
@@ -337,7 +344,7 @@ pub async fn handle_room_ready(
 
     let ready_result = services
         .room_manager
-        .set_ready_state(&room_id, &player_id, request.ready)
+        .set_ready_state(&room_id, &character_id, request.ready)
         .await;
 
     match ready_result {
@@ -356,18 +363,19 @@ pub async fn handle_room_ready(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "room_ready_changed",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "ready": request.ready,
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id
                     })),
                 )
@@ -402,7 +410,7 @@ pub async fn handle_room_start(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
     let Some(room_id) = connection.session.room_id.clone() else {
@@ -418,7 +426,10 @@ pub async fn handle_room_start(
         return Ok(());
     };
 
-    let start_result = services.room_manager.start_game(&room_id, &player_id).await;
+    let start_result = services
+        .room_manager
+        .start_game(&room_id, &character_id)
+        .await;
 
     match start_result {
         Ok(snapshot) => {
@@ -435,17 +446,18 @@ pub async fn handle_room_start(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "game_started",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id
                     })),
                 )
@@ -479,7 +491,7 @@ pub async fn handle_player_input(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
     let Some(room_id) = connection.session.room_id.clone() else {
@@ -509,9 +521,9 @@ pub async fn handle_player_input(
     ) {
         warn!(
             room_id = %room_id,
-            account_player_id = %player_id,
-            player_id = %player_id,
+            account_player_id = %account_player_id,
             character_id = %character_id,
+            room_subject_id = %character_id,
             frame_id = request.frame_id,
             client_timestamp_ms = request.client_timestamp_ms,
             error_code = %error_code,
@@ -520,8 +532,8 @@ pub async fn handle_player_input(
         record_input_anomaly(
             services,
             &room_id,
-            &player_id,
-            Some(&character_id),
+            Some(&account_player_id),
+            &character_id,
             request.frame_id,
             packet.header.seq,
             "PlayerInputReq",
@@ -547,8 +559,8 @@ pub async fn handle_player_input(
         MessageType::PlayerInputRes,
         packet.header.seq,
         &room_id,
-        &player_id,
-        Some(&character_id),
+        Some(&account_player_id),
+        &character_id,
         request.frame_id,
         "PlayerInputReq",
     )
@@ -561,8 +573,8 @@ pub async fn handle_player_input(
     if remember_input_frame_and_record_duplicate(
         services,
         &room_id,
-        &player_id,
-        Some(&character_id),
+        Some(&account_player_id),
+        &character_id,
         request.frame_id,
         &input_fingerprint,
         packet.header.seq,
@@ -576,8 +588,8 @@ pub async fn handle_player_input(
             MessageType::PlayerInputRes,
             packet.header.seq,
             &room_id,
-            &player_id,
-            Some(&character_id),
+            Some(&account_player_id),
+            &character_id,
             request.frame_id,
             "PlayerInputReq",
         )
@@ -591,7 +603,7 @@ pub async fn handle_player_input(
         .room_manager
         .accept_player_input(
             &room_id,
-            &player_id,
+            &character_id,
             request.frame_id,
             &request.action,
             &request.payload_json,
@@ -613,8 +625,8 @@ pub async fn handle_player_input(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
+                    Some(&character_id),
+                    Some(&account_player_id),
                     Some(&character_id),
                     None,
                     "player_input",
@@ -622,8 +634,9 @@ pub async fn handle_player_input(
                     0,
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id,
                         "frameId": request.frame_id,
                         "action": request.action,
@@ -637,8 +650,8 @@ pub async fn handle_player_input(
                 record_input_anomaly(
                     services,
                     &room_id,
-                    &player_id,
-                    Some(&character_id),
+                    Some(&account_player_id),
+                    &character_id,
                     request.frame_id,
                     packet.header.seq,
                     "PlayerInputReq",
@@ -649,9 +662,9 @@ pub async fn handle_player_input(
             }
             warn!(
                 room_id = %room_id,
-                account_player_id = %player_id,
-                player_id = %player_id,
+                account_player_id = %account_player_id,
                 character_id = %character_id,
+                room_subject_id = %character_id,
                 frame_id = request.frame_id,
                 action = %request.action,
                 error_code = %error_code,
@@ -680,7 +693,7 @@ pub async fn handle_move_input(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
     let Some(room_id) = connection.session.room_id.clone() else {
@@ -710,9 +723,9 @@ pub async fn handle_move_input(
     ) {
         warn!(
             room_id = %room_id,
-            account_player_id = %player_id,
-            player_id = %player_id,
+            account_player_id = %account_player_id,
             character_id = %character_id,
+            room_subject_id = %character_id,
             frame_id = request.frame_id,
             client_timestamp_ms = request.client_timestamp_ms,
             error_code = %error_code,
@@ -721,8 +734,8 @@ pub async fn handle_move_input(
         record_input_anomaly(
             services,
             &room_id,
-            &player_id,
-            Some(&character_id),
+            Some(&account_player_id),
+            &character_id,
             request.frame_id,
             packet.header.seq,
             "MoveInputReq",
@@ -748,8 +761,8 @@ pub async fn handle_move_input(
         MessageType::MoveInputRes,
         packet.header.seq,
         &room_id,
-        &player_id,
-        Some(&character_id),
+        Some(&account_player_id),
+        &character_id,
         request.frame_id,
         "MoveInputReq",
     )
@@ -778,8 +791,8 @@ pub async fn handle_move_input(
     if remember_input_frame_and_record_duplicate(
         services,
         &room_id,
-        &player_id,
-        Some(&character_id),
+        Some(&account_player_id),
+        &character_id,
         request.frame_id,
         &input_fingerprint,
         packet.header.seq,
@@ -793,8 +806,8 @@ pub async fn handle_move_input(
             MessageType::MoveInputRes,
             packet.header.seq,
             &room_id,
-            &player_id,
-            Some(&character_id),
+            Some(&account_player_id),
+            &character_id,
             request.frame_id,
             "MoveInputReq",
         )
@@ -808,7 +821,7 @@ pub async fn handle_move_input(
         .room_manager
         .accept_player_input(
             &room_id,
-            &player_id,
+            &character_id,
             request.frame_id,
             action,
             &payload_json,
@@ -830,8 +843,8 @@ pub async fn handle_move_input(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
+                    Some(&character_id),
+                    Some(&account_player_id),
                     Some(&character_id),
                     None,
                     "move_input",
@@ -839,8 +852,9 @@ pub async fn handle_move_input(
                     0,
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id,
                         "frameId": request.frame_id,
                         "inputType": request.input_type,
@@ -859,8 +873,8 @@ pub async fn handle_move_input(
                 record_input_anomaly(
                     services,
                     &room_id,
-                    &player_id,
-                    Some(&character_id),
+                    Some(&account_player_id),
+                    &character_id,
                     request.frame_id,
                     packet.header.seq,
                     "MoveInputReq",
@@ -920,8 +934,8 @@ fn input_anomaly_kind_from_error(error_code: &str) -> Option<InputAnomalyKind> {
 async fn remember_input_frame_and_record_duplicate(
     services: &ServiceContext,
     room_id: &str,
-    player_id: &str,
-    character_id: Option<&str>,
+    account_player_id: Option<&str>,
+    character_id: &str,
     frame_id: u32,
     input_fingerprint: &str,
     seq: u32,
@@ -933,7 +947,7 @@ async fn remember_input_frame_and_record_duplicate(
         .lock()
         .await
         .remember_frame(
-            player_id,
+            character_id,
             room_id,
             frame_id,
             input_fingerprint,
@@ -945,7 +959,7 @@ async fn remember_input_frame_and_record_duplicate(
         record_input_anomaly(
             services,
             room_id,
-            player_id,
+            account_player_id,
             character_id,
             frame_id,
             seq,
@@ -969,8 +983,8 @@ async fn reject_if_input_anomaly_blocked(
     response_type: MessageType,
     seq: u32,
     room_id: &str,
-    player_id: &str,
-    character_id: Option<&str>,
+    account_player_id: Option<&str>,
+    character_id: &str,
     frame_id: u32,
     request_type: &'static str,
 ) -> Result<bool, std::io::Error> {
@@ -980,7 +994,7 @@ async fn reject_if_input_anomaly_blocked(
         .lock()
         .await
         .is_blocked(
-            player_id,
+            character_id,
             Instant::now(),
             runtime.input_anomaly_window_ms,
             runtime.input_anomaly_max,
@@ -992,9 +1006,9 @@ async fn reject_if_input_anomaly_blocked(
 
     warn!(
         room_id = %room_id,
-        account_player_id = %player_id,
-        player_id = %player_id,
-        character_id = ?character_id,
+        account_player_id = ?account_player_id,
+        character_id = %character_id,
+        room_subject_id = %character_id,
         frame_id = frame_id,
         seq = seq,
         request_type = request_type,
@@ -1017,8 +1031,8 @@ async fn reject_if_input_anomaly_blocked(
 async fn record_input_anomaly(
     services: &ServiceContext,
     room_id: &str,
-    player_id: &str,
-    character_id: Option<&str>,
+    account_player_id: Option<&str>,
+    character_id: &str,
     frame_id: u32,
     seq: u32,
     request_type: &'static str,
@@ -1027,7 +1041,7 @@ async fn record_input_anomaly(
 ) {
     let runtime = services.runtime_config.read().await.clone();
     let outcome = services.player_input_anomaly_tracker.lock().await.record(
-        player_id,
+        character_id,
         Instant::now(),
         runtime.input_anomaly_window_ms,
         runtime.input_anomaly_max,
@@ -1035,9 +1049,9 @@ async fn record_input_anomaly(
 
     warn!(
         room_id = %room_id,
-        account_player_id = %player_id,
-        player_id = %player_id,
-        character_id = ?character_id,
+        account_player_id = ?account_player_id,
+        character_id = %character_id,
+        room_subject_id = %character_id,
         frame_id = frame_id,
         seq = seq,
         request_type = request_type,
@@ -1089,7 +1103,7 @@ pub async fn handle_room_end(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
     let Some(room_id) = connection.session.room_id.clone() else {
@@ -1113,7 +1127,10 @@ pub async fn handle_room_end(
         }
     };
 
-    let end_result = services.room_manager.end_game(&room_id, &player_id).await;
+    let end_result = services
+        .room_manager
+        .end_game(&room_id, &character_id)
+        .await;
 
     match end_result {
         Ok(snapshot) => {
@@ -1130,17 +1147,18 @@ pub async fn handle_room_end(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "game_ended",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id,
                         "reason": request.reason
                     })),
@@ -1171,27 +1189,27 @@ pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &C
     let session = &connection.session;
     let room_id = session.room_id.clone();
     let identity = session.authenticated_identity();
-    let player_id = identity
+    let account_player_id = identity
         .as_ref()
         .map(|value| value.account_player_id.clone())
-        .or_else(|| session.player_id.clone());
+        .or_else(|| session.account_player_id.clone());
     let character_id = identity.as_ref().map(|value| value.character_id.clone());
     let world_id = identity.as_ref().and_then(|value| value.world_id);
 
     info!(
         session_id = session.id,
         room_id = ?room_id,
-        account_player_id = ?player_id,
-        player_id = ?player_id,
+        account_player_id = ?account_player_id,
         character_id = ?character_id,
+        room_subject_id = ?character_id,
         world_id = ?world_id,
         "handle_disconnect_cleanup called"
     );
 
-    if let (Some(room_id), Some(player_id)) = (room_id, player_id) {
+    if let (Some(room_id), Some(character_id)) = (room_id, character_id) {
         let leave_result = services
             .room_manager
-            .disconnect_room_member(&room_id, &player_id)
+            .disconnect_room_member(&room_id, &character_id)
             .await;
 
         if let Some(snapshot) = leave_result.snapshot {
@@ -1199,16 +1217,17 @@ pub async fn handle_disconnect_cleanup(services: &ServiceContext, connection: &C
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
-                    character_id.as_deref(),
-                    Some(&snapshot.owner_player_id),
+                    Some(&character_id),
+                    account_player_id.as_deref(),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "member_disconnected",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id
                     })),
                 )
@@ -1229,68 +1248,14 @@ pub async fn handle_room_reconnect(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
-    let request = match packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY") {
-        Ok(value) => value,
+    match packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY") {
+        Ok(_) => {}
         Err(error_code) => {
             connection.queue_error(packet.header.seq, error_code, "invalid room reconnect body")?;
-            return Ok(());
-        }
-    };
-
-    let reconnect_player_id = match resolve_reconnect_account_player_id(
-        &player_id,
-        &request.player_id,
-    ) {
-        Ok(value) => value,
-        Err(error_code) => {
-            warn!(
-                session_id = connection.session.id,
-                account_player_id = %player_id,
-                player_id = %player_id,
-                requested_player_id = %request.player_id,
-                character_id = %character_id,
-                world_id = ?world_id,
-                error_code = error_code,
-                "room reconnect rejected because request player_id does not match authenticated account"
-            );
-            connection.queue_message(
-                MessageType::RoomReconnectRes,
-                packet.header.seq,
-                RoomReconnectRes {
-                    ok: false,
-                    room_id: String::new(),
-                    error_code: error_code.to_string(),
-                    snapshot: None,
-                    current_frame_id: 0,
-                    recent_inputs: vec![],
-                    waiting_frame_id: 0,
-                    waiting_inputs: vec![],
-                    input_delay_frames: 0,
-                    movement_recovery: None,
-                },
-            )?;
-            services
-                .db_store
-                .append_connection_event_with_identity(
-                    connection.session.id,
-                    Some(&player_id),
-                    Some(&player_id),
-                    Some(&character_id),
-                    Some(&connection.peer_addr),
-                    "room_reconnect_account_mismatch",
-                    Some(json!({
-                        "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
-                        "requestedPlayerId": request.player_id,
-                        "characterId": character_id,
-                        "worldId": world_id
-                    })),
-                )
-                .await;
             return Ok(());
         }
     };
@@ -1316,22 +1281,7 @@ pub async fn handle_room_reconnect(
         return Ok(());
     }
 
-    // Find the room the player is offline in (via PostgreSQL audit log or cache)
-    // For now, client should provide room_id - we'll search for the player
-    // This is a simplified implementation - in production you'd track this in Redis
-    let room_id = match services
-        .db_store
-        .find_room_by_offline_player(&reconnect_player_id)
-        .await
-    {
-        Some(room_id) => Some(room_id),
-        None => {
-            services
-                .room_manager
-                .find_room_by_offline_player(&reconnect_player_id)
-                .await
-        }
-    };
+    let room_id = find_reconnect_room_for_character(services, &character_id).await;
 
     let Some(room_id) = room_id else {
         connection.queue_message(
@@ -1355,11 +1305,7 @@ pub async fn handle_room_reconnect(
 
     let reconnect_result = services
         .room_manager
-        .reconnect_room(
-            &room_id,
-            &reconnect_player_id,
-            connection.outbound_channel(),
-        )
+        .reconnect_room(&room_id, &character_id, connection.outbound_channel())
         .await;
 
     match reconnect_result {
@@ -1386,17 +1332,18 @@ pub async fn handle_room_reconnect(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&reconnect_player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "player_reconnected",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
                         "worldId": world_id
                     })),
                 )
@@ -1429,14 +1376,24 @@ pub async fn handle_room_reconnect(
     Ok(())
 }
 
-fn resolve_reconnect_account_player_id(
-    authenticated_account_player_id: &str,
-    requested_player_id: &str,
-) -> Result<String, &'static str> {
-    if requested_player_id.is_empty() || requested_player_id == authenticated_account_player_id {
-        Ok(authenticated_account_player_id.to_string())
-    } else {
-        Err("ACCOUNT_PLAYER_ID_MISMATCH")
+async fn find_reconnect_room_for_character(
+    services: &ServiceContext,
+    character_id: &str,
+) -> Option<String> {
+    // Reconnect is bound to the authenticated character from the ticket.
+    // The client cannot supply or override the reconnect subject.
+    match services
+        .db_store
+        .find_room_by_offline_character(character_id)
+        .await
+    {
+        Some(room_id) => Some(room_id),
+        None => {
+            services
+                .room_manager
+                .find_room_by_offline_character(character_id)
+                .await
+        }
     }
 }
 
@@ -1448,7 +1405,7 @@ pub async fn handle_join_as_observer(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -1468,9 +1425,9 @@ pub async fn handle_join_as_observer(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
+        room_subject_id = %character_id,
         world_id = ?world_id,
         room_id = %room_id,
         "handle_join_as_observer"
@@ -1501,7 +1458,7 @@ pub async fn handle_join_as_observer(
     {
         log_drain_mode_room_creation_rejected(
             "observer_join",
-            Some(&player_id),
+            Some(&account_player_id),
             Some(&character_id),
             &room_id,
             None,
@@ -1528,7 +1485,7 @@ pub async fn handle_join_as_observer(
 
     let join_result = services
         .room_manager
-        .join_room_as_observer(&room_id, &player_id, connection.outbound_channel())
+        .join_room_as_observer(&room_id, &character_id, connection.outbound_channel())
         .await;
 
     match join_result {
@@ -1555,17 +1512,19 @@ pub async fn handle_join_as_observer(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
                     Some(&character_id),
-                    Some(&snapshot.owner_player_id),
+                    Some(&account_player_id),
+                    Some(&character_id),
+                    Some(&snapshot.owner_character_id),
                     "observer_joined",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
+                        "observerUsesCharacterId": true,
                         "worldId": world_id,
                         "currentFrameId": recovery.current_frame_id,
                         "waitingFrameId": recovery.waiting_frame_id
@@ -1594,8 +1553,8 @@ pub async fn handle_join_as_observer(
                 .db_store
                 .append_room_event_with_identity(
                     &room_id,
-                    Some(&player_id),
-                    Some(&player_id),
+                    Some(&character_id),
+                    Some(&account_player_id),
                     Some(&character_id),
                     None,
                     "observer_join_failed",
@@ -1604,8 +1563,10 @@ pub async fn handle_join_as_observer(
                     Some(json!({
                         "errorCode": error_code,
                         "seq": packet.header.seq,
-                        "accountPlayerId": player_id,
+                        "accountPlayerId": account_player_id,
                         "characterId": character_id,
+                        "roomSubjectId": character_id,
+                        "observerUsesCharacterId": true,
                         "worldId": world_id
                     })),
                 )
@@ -1624,7 +1585,7 @@ pub async fn handle_create_matched_room(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -1644,25 +1605,25 @@ pub async fn handle_create_matched_room(
     let CreateMatchedRoomReq {
         match_id,
         room_id,
-        player_ids,
+        character_ids,
         mode,
     } = request;
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
+        room_subject_id = %character_id,
         world_id = ?world_id,
         match_id = %match_id,
         room_id = %room_id,
-        player_ids = ?player_ids,
+        character_ids = ?character_ids,
         mode = %mode,
         "handle_create_matched_room"
     );
 
-    // Verify the player is in the player_ids list
-    if !player_ids.contains(&player_id) {
+    // Verify the authenticated character is in the matched character list.
+    if !character_ids.contains(&character_id) {
         connection.queue_message(
             MessageType::CreateMatchedRoomRes,
             packet.header.seq,
@@ -1678,12 +1639,12 @@ pub async fn handle_create_matched_room(
 
     let response = create_matched_room_impl(
         services,
-        Some(&player_id),
+        Some(&account_player_id),
         Some(&character_id),
         world_id,
         &match_id,
         &room_id,
-        &player_ids,
+        &character_ids,
         &mode,
         "client",
     )
@@ -1709,14 +1670,14 @@ pub async fn handle_create_matched_room_internal(
     let CreateMatchedRoomReq {
         match_id,
         room_id,
-        player_ids,
+        character_ids,
         mode,
     } = request;
 
     info!(
         match_id = %match_id,
         room_id = %room_id,
-        player_ids = ?player_ids,
+        character_ids = ?character_ids,
         mode = %mode,
         "handle_create_matched_room_internal"
     );
@@ -1728,7 +1689,7 @@ pub async fn handle_create_matched_room_internal(
         None,
         &match_id,
         &room_id,
-        &player_ids,
+        &character_ids,
         &mode,
         "internal",
     )
@@ -1737,32 +1698,32 @@ pub async fn handle_create_matched_room_internal(
 
 async fn create_matched_room_impl(
     services: &ServiceContext,
-    actor_player_id: Option<&str>,
+    actor_account_player_id: Option<&str>,
     actor_character_id: Option<&str>,
     actor_world_id: Option<u64>,
     match_id: &str,
     room_id: &str,
-    player_ids: &[String],
+    character_ids: &[String],
     mode: &str,
     source: &str,
 ) -> CreateMatchedRoomRes {
-    if player_ids.is_empty() {
+    if character_ids.is_empty() {
         return CreateMatchedRoomRes {
             ok: false,
             room_id: room_id.to_string(),
-            error_code: "EMPTY_PLAYER_IDS".to_string(),
+            error_code: "EMPTY_CHARACTER_IDS".to_string(),
             snapshot: None,
         };
     }
 
-    let owner_player_id = player_ids.first().cloned().unwrap_or_default();
+    let owner_character_id = character_ids.first().cloned().unwrap_or_default();
 
     if let DrainNewRoomDecision::RejectNewRoom(state) =
         evaluate_drain_new_room_creation(services, DrainRoomCreateKind::MatchedRoom, room_id).await
     {
         log_drain_mode_room_creation_rejected(
             "create_matched_room",
-            actor_player_id,
+            actor_account_player_id,
             actor_character_id,
             room_id,
             Some(match_id),
@@ -1778,7 +1739,7 @@ async fn create_matched_room_impl(
 
     match services
         .room_manager
-        .create_matched_room(match_id, room_id, player_ids, mode)
+        .create_matched_room(match_id, room_id, character_ids, mode)
         .await
     {
         Ok(snapshot) => {
@@ -1786,20 +1747,21 @@ async fn create_matched_room_impl(
                 .db_store
                 .append_room_event_with_identity(
                     room_id,
-                    actor_player_id,
-                    actor_player_id,
                     actor_character_id,
-                    Some(&owner_player_id),
+                    actor_account_player_id,
+                    actor_character_id,
+                    Some(&owner_character_id),
                     "matched_room_created",
                     Some(&snapshot.state),
                     snapshot.members.len(),
                     Some(json!({
-                        "accountPlayerId": actor_player_id,
+                        "accountPlayerId": actor_account_player_id,
                         "characterId": actor_character_id,
+                        "roomSubjectId": actor_character_id,
                         "worldId": actor_world_id,
                         "matchId": match_id,
                         "mode": mode,
-                        "playerCount": player_ids.len(),
+                        "characterCount": character_ids.len(),
                         "source": source
                     })),
                 )
@@ -1830,21 +1792,22 @@ async fn create_matched_room_impl(
                 .db_store
                 .append_room_event_with_identity(
                     room_id,
-                    actor_player_id,
-                    actor_player_id,
+                    actor_character_id,
+                    actor_account_player_id,
                     actor_character_id,
                     None,
                     "matched_room_create_failed",
                     None,
                     0,
                     Some(json!({
-                        "accountPlayerId": actor_player_id,
+                        "accountPlayerId": actor_account_player_id,
                         "characterId": actor_character_id,
+                        "roomSubjectId": actor_character_id,
                         "worldId": actor_world_id,
                         "errorCode": error_code,
                         "matchId": match_id,
                         "mode": mode,
-                        "playerCount": player_ids.len(),
+                        "characterCount": character_ids.len(),
                         "source": source
                     })),
                 )
@@ -1941,7 +1904,7 @@ fn default_if_blank(value: &str, default_value: &str) -> String {
 
 fn log_drain_mode_room_creation_rejected(
     request_kind: &'static str,
-    player_id: Option<&str>,
+    account_player_id: Option<&str>,
     character_id: Option<&str>,
     room_id: &str,
     match_id: Option<&str>,
@@ -1949,9 +1912,9 @@ fn log_drain_mode_room_creation_rejected(
 ) {
     info!(
         request_kind,
-        account_player_id = %player_id.unwrap_or_default(),
-        player_id = %player_id.unwrap_or_default(),
+        account_player_id = %account_player_id.unwrap_or_default(),
         character_id = %character_id.unwrap_or_default(),
+        room_subject_id = %character_id.unwrap_or_default(),
         room_id = %room_id,
         match_id = %match_id.unwrap_or_default(),
         drain_mode_entered_at_ms = state.entered_at_ms,
@@ -2323,24 +2286,68 @@ mod tests {
         assert_eq!(validate_input_timestamp(&runtime, stale_timestamp), Ok(()));
     }
 
-    #[test]
-    fn reconnect_account_resolution_defaults_to_authenticated_account() {
+    #[tokio::test]
+    async fn reconnect_room_lookup_uses_authenticated_character_only() {
+        let services = service_context_fixture(false).await;
+        let room_id = "room-reconnect-character-bound";
+        let (tx_a, _rx_a) = tokio::sync::mpsc::channel(8);
+        let (tx_b, _rx_b) = tokio::sync::mpsc::channel(8);
+
+        services
+            .room_manager
+            .join_room(
+                room_id,
+                "chr_0000000000001",
+                tx_a,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        services
+            .room_manager
+            .join_room(
+                room_id,
+                "chr_0000000000002",
+                tx_b,
+                MemberRole::Player,
+                Some("default_match"),
+            )
+            .await
+            .unwrap();
+        services
+            .room_manager
+            .disconnect_room_member(room_id, "chr_0000000000002")
+            .await;
+
         assert_eq!(
-            resolve_reconnect_account_player_id("plr_0000000000001", "").unwrap(),
-            "plr_0000000000001"
+            find_reconnect_room_for_character(&services, "chr_0000000000002").await,
+            Some(room_id.to_string())
+        );
+        assert_eq!(
+            find_reconnect_room_for_character(&services, "chr_0000000000001").await,
+            None
         );
     }
 
-    #[test]
-    fn reconnect_account_resolution_accepts_matching_account_only() {
-        assert_eq!(
-            resolve_reconnect_account_player_id("plr_0000000000001", "plr_0000000000001").unwrap(),
-            "plr_0000000000001"
-        );
-        assert_eq!(
-            resolve_reconnect_account_player_id("plr_0000000000001", "plr_0000000000002")
-                .unwrap_err(),
-            "ACCOUNT_PLAYER_ID_MISMATCH"
-        );
+    #[tokio::test]
+    async fn create_matched_room_impl_rejects_empty_character_ids_with_uppercase_code() {
+        let services = service_context_fixture(false).await;
+
+        let response = create_matched_room_impl(
+            &services,
+            Some("plr_0000000000001"),
+            Some("chr_0000000000001"),
+            Some(1),
+            "match-empty",
+            "room-match-empty",
+            &[],
+            "1v1",
+            "client",
+        )
+        .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "EMPTY_CHARACTER_IDS");
     }
 }

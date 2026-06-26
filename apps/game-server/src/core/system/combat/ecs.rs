@@ -242,6 +242,7 @@ pub struct CombatBuffSnapshot {
 pub struct CombatEntitySnapshot {
     pub entity_id: EntityId,
     pub entity_type: EntityType,
+    #[serde(rename = "character_id")]
     pub player_id: Option<String>,
     pub team_id: u16,
     pub alive: bool,
@@ -288,6 +289,7 @@ struct RoomCombatTransferSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomCombatTransferPlayerEntity {
+    #[serde(rename = "character_id")]
     player_id: String,
     entity_id: EntityId,
 }
@@ -2151,8 +2153,8 @@ mod tests {
         );
 
         let mut duplicate_player = transfer_sample_value();
-        let first_player_id = duplicate_player["entities"][0]["player_id"].clone();
-        duplicate_player["entities"][1]["player_id"] = first_player_id;
+        let first_player_id = duplicate_player["entities"][0]["character_id"].clone();
+        duplicate_player["entities"][1]["character_id"] = first_player_id;
         assert_eq!(
             RoomCombatEcs::import_transfer_state_json(&duplicate_player.to_string()).unwrap_err(),
             ROOM_TRANSFER_INVALID_COMBAT_STATE

@@ -277,7 +277,7 @@ impl RoomManager {
             room_id: room.room_id.clone(),
             room_version,
             policy_id: room.policy_id.clone(),
-            owner_player_id: room.owner_player_id.clone(),
+            owner_character_id: room.owner_character_id.clone(),
             room_phase: room_phase_name(room.phase).to_string(),
             current_frame_id,
             last_applied_frame_id,
@@ -438,7 +438,7 @@ impl RoomManager {
 
         let mut room = Room::new(
             room_id.clone(),
-            payload.owner_player_id.clone(),
+            payload.owner_character_id.clone(),
             payload.policy_id.clone(),
             logic,
         );
@@ -454,9 +454,9 @@ impl RoomManager {
         for member in snapshot.members {
             let (sender, _receiver) = mpsc::channel(1);
             room.members.insert(
-                member.player_id.clone(),
+                member.character_id.clone(),
                 RoomMemberState {
-                    player_id: member.player_id,
+                    character_id: member.character_id,
                     ready: member.ready,
                     sender,
                     close_state: ConnectionCloseState::new(),
@@ -473,10 +473,10 @@ impl RoomManager {
         }
 
         for input in payload.recent_inputs {
-            room.push_input_history(player_input_record_from_frame_input(input, true));
+            room.push_input_history(character_input_record_from_frame_input(input, true));
         }
         for input in payload.waiting_inputs {
-            room.upsert_pending_input(player_input_record_from_frame_input(input, true));
+            room.upsert_pending_input(character_input_record_from_frame_input(input, true));
         }
         if !room.has_online_members() {
             room.mark_empty();

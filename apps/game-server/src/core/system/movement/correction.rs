@@ -13,17 +13,17 @@ pub fn decide_corrections(
     result: &SimulationTickResult,
 ) -> Vec<MovementCorrectionEnvelope> {
     let mut corrections = Vec::new();
-    let mut targeted_players = std::collections::BTreeSet::new();
+    let mut targeted_characters = std::collections::BTreeSet::new();
 
     for reject in &result.rejects {
-        targeted_players.insert(reject.player_id.clone());
+        targeted_characters.insert(reject.player_id.clone());
         corrections.push(
             state.strong_correction(
                 frame_id,
                 MovementCorrectionReason::try_from(reject.reason_code)
                     .unwrap_or(MovementCorrectionReason::MovementRejected),
                 vec![reject.player_id.clone()],
-                state.targets_for_player(&reject.player_id),
+                state.targets_for_character(&reject.player_id),
             ),
         );
     }
@@ -38,15 +38,15 @@ pub fn decide_corrections(
     }
 
     for drift in &result.drifted_players {
-        if targeted_players.contains(&drift.player_id) {
+        if targeted_characters.contains(&drift.player_id) {
             continue;
         }
-        targeted_players.insert(drift.player_id.clone());
+        targeted_characters.insert(drift.player_id.clone());
         corrections.push(state.strong_correction(
             frame_id,
             MovementCorrectionReason::ClientDrift,
             vec![drift.player_id.clone()],
-            state.targets_for_player(&drift.player_id),
+            state.targets_for_character(&drift.player_id),
         ));
     }
 
@@ -94,7 +94,7 @@ pub fn reject_broadcast(
     let message = MovementRejectPush {
         room_id: room_id.to_string(),
         frame_id,
-        player_id: reject.player_id.clone(),
+        character_id: reject.player_id.clone(),
         error_code: reject.error_code.clone(),
         corrected: Some(reject.corrected.clone()),
         correction_kind: MovementCorrectionKind::Strong as i32,
@@ -110,7 +110,7 @@ pub fn reject_broadcast(
         server_y: reject.server_y,
     };
 
-    RoomLogicBroadcast::broadcast_to_players(
+    RoomLogicBroadcast::broadcast_to_characters(
         MessageType::MovementRejectPush,
         encode_body(&message),
         vec![reject.player_id.clone()],
@@ -138,20 +138,20 @@ fn snapshot_broadcast_from_envelope(
         reason: correction_reason_label(reason).to_string(),
         correction_kind: correction.correction_kind,
         reason_code: correction.reason_code,
-        target_player_ids: correction.target_player_ids.clone(),
+        target_character_ids: correction.target_character_ids.clone(),
         reference_frame_id: correction.reference_frame_id,
     };
 
-    if correction.target_player_ids.is_empty() {
+    if correction.target_character_ids.is_empty() {
         RoomLogicBroadcast::broadcast_to_room(
             MessageType::MovementSnapshotPush,
             encode_body(&message),
         )
     } else {
-        RoomLogicBroadcast::broadcast_to_players(
+        RoomLogicBroadcast::broadcast_to_characters(
             MessageType::MovementSnapshotPush,
             encode_body(&message),
-            correction.target_player_ids,
+            correction.target_character_ids,
         )
     }
 }

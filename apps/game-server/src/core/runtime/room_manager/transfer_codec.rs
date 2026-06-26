@@ -13,7 +13,7 @@ use crate::pb::RoomTransferPayload;
 
 pub(super) fn frame_input_from_record(input: &PlayerInputRecord) -> FrameInput {
     FrameInput {
-        player_id: input.player_id.clone(),
+        character_id: input.character_id.clone(),
         action: input.action.clone(),
         payload_json: input.payload_json.clone(),
         frame_id: input.frame_id,
@@ -37,13 +37,13 @@ pub(super) fn room_frame_inputs_from_pending(room: &Room, frame_id: u32) -> Vec<
         .collect()
 }
 
-pub(super) fn player_input_record_from_frame_input(
+pub(super) fn character_input_record_from_frame_input(
     input: FrameInput,
     is_synthetic: bool,
 ) -> PlayerInputRecord {
     PlayerInputRecord {
         frame_id: input.frame_id,
-        player_id: input.player_id,
+        character_id: input.character_id,
         action: input.action,
         payload_json: input.payload_json,
         received_at: Instant::now(),
@@ -255,7 +255,7 @@ pub(super) fn validate_room_transfer_payload(
     if payload.policy_id.trim().is_empty() {
         return Err("ROOM_TRANSFER_INVALID_POLICY");
     }
-    if payload.owner_player_id.trim().is_empty() {
+    if payload.owner_character_id.trim().is_empty() {
         return Err("ROOM_TRANSFER_INVALID_OWNER");
     }
     if payload.snapshot.is_none() {
@@ -272,10 +272,10 @@ pub(super) fn validate_room_transfer_payload(
     Ok(())
 }
 
-fn synthetic_empty_input(frame_id: u32, player_id: &str) -> PlayerInputRecord {
+fn synthetic_empty_input(frame_id: u32, character_id: &str) -> PlayerInputRecord {
     PlayerInputRecord {
         frame_id,
-        player_id: player_id.to_string(),
+        character_id: character_id.to_string(),
         action: String::new(),
         payload_json: String::new(),
         received_at: Instant::now(),
@@ -286,7 +286,7 @@ fn synthetic_empty_input(frame_id: u32, player_id: &str) -> PlayerInputRecord {
 fn clone_input_for_frame(frame_id: u32, input: &PlayerInputRecord) -> PlayerInputRecord {
     PlayerInputRecord {
         frame_id,
-        player_id: input.player_id.clone(),
+        character_id: input.character_id.clone(),
         action: input.action.clone(),
         payload_json: input.payload_json.clone(),
         received_at: Instant::now(),
@@ -302,46 +302,46 @@ pub(super) fn resolve_tick_inputs(
 ) -> (Vec<PlayerInputRecord>, Vec<String>) {
     let mut frame_inputs = room.take_pending_inputs_for_frame(frame_id);
     let mut resolved_inputs = Vec::with_capacity(participants.len());
-    let mut newly_offline_players = Vec::new();
+    let mut newly_offline_characters = Vec::new();
 
-    for player_id in participants {
-        if let Some(input) = frame_inputs.remove(player_id) {
-            room.reset_missing_input_streak(player_id);
-            room.set_last_applied_input(player_id, input.clone());
+    for character_id in participants {
+        if let Some(input) = frame_inputs.remove(character_id) {
+            room.reset_missing_input_streak(character_id);
+            room.set_last_applied_input(character_id, input.clone());
             resolved_inputs.push(input);
             continue;
         }
 
         let resolved = match policy.missing_input_strategy {
-            MissingInputStrategy::Empty => synthetic_empty_input(frame_id, player_id),
+            MissingInputStrategy::Empty => synthetic_empty_input(frame_id, character_id),
             MissingInputStrategy::RepeatLast => room
-                .last_applied_input_for_player(player_id)
+                .last_applied_input_for_character(character_id)
                 .map(|input| clone_input_for_frame(frame_id, input))
-                .unwrap_or_else(|| synthetic_empty_input(frame_id, player_id)),
+                .unwrap_or_else(|| synthetic_empty_input(frame_id, character_id)),
             MissingInputStrategy::DropAfterMisses => {
-                let streak = room.increment_missing_input_streak(player_id);
+                let streak = room.increment_missing_input_streak(character_id);
                 if streak >= MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
                     let should_mark_offline = room
                         .members
-                        .get(player_id)
+                        .get(character_id)
                         .map(|member| !member.offline)
                         .unwrap_or(false);
                     if should_mark_offline {
-                        if let Some(member) = room.members.get_mut(player_id) {
+                        if let Some(member) = room.members.get_mut(character_id) {
                             member.offline = true;
                             member.offline_since = Some(Instant::now());
                         }
-                        room.logic.on_player_offline(&room.room_id, player_id);
-                        newly_offline_players.push(player_id.clone());
+                        room.logic.on_character_offline(&room.room_id, character_id);
+                        newly_offline_characters.push(character_id.clone());
                     }
                 }
-                synthetic_empty_input(frame_id, player_id)
+                synthetic_empty_input(frame_id, character_id)
             }
         };
 
-        room.set_last_applied_input(player_id, resolved.clone());
+        room.set_last_applied_input(character_id, resolved.clone());
         resolved_inputs.push(resolved);
     }
 
-    (resolved_inputs, newly_offline_players)
+    (resolved_inputs, newly_offline_characters)
 }

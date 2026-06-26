@@ -44,7 +44,7 @@ pub fn tick_movement<S: SceneQuery>(
     let mut players_with_locomotion_control = std::collections::BTreeSet::new();
 
     for input in inputs {
-        let Some(dense_index) = state.dense_index_by_player(&input.player_id) else {
+        let Some(dense_index) = state.dense_index_by_player(&input.character_id) else {
             continue;
         };
         let Some(before) = state.entity_proto_at(dense_index) else {
@@ -53,13 +53,13 @@ pub fn tick_movement<S: SceneQuery>(
         match parse_player_input(input) {
             Ok(parsed) => {
                 if let Some(client_state) = parsed.client_state {
-                    state.set_client_state_for_player(&input.player_id, client_state);
-                    players_with_client_state.insert(input.player_id.clone());
+                    state.set_client_state_for_player(&input.character_id, client_state);
+                    players_with_client_state.insert(input.character_id.clone());
                 }
                 if let Some(command) = parsed.command {
                     if command.is_locomotion_control() && !input.is_synthetic {
-                        state.reset_missing_movement_control_frames(&input.player_id);
-                        players_with_locomotion_control.insert(input.player_id.clone());
+                        state.reset_missing_movement_control_frames(&input.character_id);
+                        players_with_locomotion_control.insert(input.character_id.clone());
                     }
                     if state.apply_command_at(dense_index, input.frame_id, command) {
                         let Some(after) = state.entity_proto_at(dense_index) else {
@@ -76,11 +76,11 @@ pub fn tick_movement<S: SceneQuery>(
                     continue;
                 };
                 rejects.push(MovementRejectRecord {
-                    player_id: input.player_id.clone(),
+                    player_id: input.character_id.clone(),
                     error_code: error.error_code.to_string(),
                     corrected: corrected.clone(),
                     reason_code: MovementCorrectionReason::MovementRejected as i32,
-                    client_state: state.client_state_for_player(&input.player_id),
+                    client_state: state.client_state_for_player(&input.character_id),
                     server_x: corrected.x,
                     server_y: corrected.y,
                 });
@@ -97,7 +97,7 @@ pub fn tick_movement<S: SceneQuery>(
     for timeout_entity in &control_timeout_entities {
         for reject in rejects
             .iter_mut()
-            .filter(|reject| reject.player_id == timeout_entity.player_id)
+            .filter(|reject| reject.player_id == timeout_entity.character_id)
         {
             reject.corrected = timeout_entity.clone();
             reject.server_x = timeout_entity.x;
@@ -314,7 +314,7 @@ mod tests {
     ) -> PlayerInputRecord {
         PlayerInputRecord {
             frame_id,
-            player_id: player_id.to_string(),
+            character_id: player_id.to_string(),
             action: action.to_string(),
             payload_json: payload_json.to_string(),
             received_at: Instant::now(),

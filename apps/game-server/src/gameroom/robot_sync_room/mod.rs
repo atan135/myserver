@@ -23,7 +23,7 @@ pub struct RobotSyncRoomLogic {
 #[serde(rename_all = "camelCase")]
 struct RobotMoveInputSummary {
     frame_id: u32,
-    player_id: String,
+    character_id: String,
     seq: u32,
     bot_tick: u32,
     dir_x: i32,
@@ -45,9 +45,9 @@ impl RoomLogic for RobotSyncRoomLogic {
         self.room_id = room_id.to_string();
     }
 
-    fn validate_player_input(
+    fn validate_character_input(
         &self,
-        _player_id: &str,
+        _character_id: &str,
         action: &str,
         payload_json: &str,
     ) -> Result<(), &'static str> {
@@ -73,7 +73,7 @@ impl RoomLogic for RobotSyncRoomLogic {
 
             self.recent_inputs.push_back(RobotMoveInputSummary {
                 frame_id: input.frame_id,
-                player_id: input.player_id.clone(),
+                character_id: input.character_id.clone(),
                 seq: payload.seq,
                 bot_tick: payload.bot_tick,
                 dir_x: payload.dir_x,
@@ -219,7 +219,7 @@ mod tests {
         let logic = RobotSyncRoomLogic::default();
 
         assert_eq!(
-            logic.validate_player_input("player-a", ROBOT_MOVE_ACTION, valid_payload()),
+            logic.validate_character_input("player-a", ROBOT_MOVE_ACTION, valid_payload()),
             Ok(())
         );
     }
@@ -229,11 +229,11 @@ mod tests {
         let logic = RobotSyncRoomLogic::default();
 
         assert_eq!(
-            logic.validate_player_input("player-a", "move", valid_payload()),
+            logic.validate_character_input("player-a", "move", valid_payload()),
             Err("INVALID_ROBOT_MOVE_ACTION")
         );
         assert_eq!(
-            logic.validate_player_input("player-a", ROBOT_MOVE_ACTION, "{"),
+            logic.validate_character_input("player-a", ROBOT_MOVE_ACTION, "{"),
             Err("INVALID_ROBOT_MOVE_JSON")
         );
 
@@ -242,12 +242,12 @@ mod tests {
             "x".repeat(ROBOT_MOVE_PAYLOAD_MAX_BYTES)
         );
         assert_eq!(
-            logic.validate_player_input("player-a", ROBOT_MOVE_ACTION, &too_large),
+            logic.validate_character_input("player-a", ROBOT_MOVE_ACTION, &too_large),
             Err("ROBOT_MOVE_PAYLOAD_TOO_LARGE")
         );
 
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":42,"botTick":100,"dirX":-1,"dirY":1}"#
@@ -255,7 +255,7 @@ mod tests {
             Err("ROBOT_MOVE_FIELDS_MISMATCH")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":42,"botTick":100,"dirX":-1,"dirY":1,"speed":5,"extra":0}"#
@@ -263,7 +263,7 @@ mod tests {
             Err("ROBOT_MOVE_FIELDS_MISMATCH")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":42.0,"botTick":100,"dirX":-1,"dirY":1,"speed":5}"#
@@ -271,7 +271,7 @@ mod tests {
             Err("ROBOT_MOVE_FIELD_NOT_INTEGER")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":"42","botTick":100,"dirX":-1,"dirY":1,"speed":5}"#
@@ -279,7 +279,7 @@ mod tests {
             Err("ROBOT_MOVE_FIELD_NOT_INTEGER")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":42,"botTick":100,"dirX":-1001,"dirY":1,"speed":5}"#
@@ -287,7 +287,7 @@ mod tests {
             Err("ROBOT_MOVE_DIR_OUT_OF_RANGE")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":4294967296,"botTick":100,"dirX":-1,"dirY":1,"speed":5}"#
@@ -295,7 +295,7 @@ mod tests {
             Err("ROBOT_MOVE_SEQ_OUT_OF_RANGE")
         );
         assert_eq!(
-            logic.validate_player_input(
+            logic.validate_character_input(
                 "player-a",
                 ROBOT_MOVE_ACTION,
                 r#"{"version":1,"seq":42,"botTick":100,"dirX":-1,"dirY":1,"speed":10001}"#
@@ -310,11 +310,11 @@ mod tests {
 
         let logic = factory.create("robot_sync_room");
         assert_eq!(
-            logic.validate_player_input("player-a", ROBOT_MOVE_ACTION, valid_payload()),
+            logic.validate_character_input("player-a", ROBOT_MOVE_ACTION, valid_payload()),
             Ok(())
         );
         assert_eq!(
-            logic.validate_player_input("player-a", "test_room_action", valid_payload()),
+            logic.validate_character_input("player-a", "test_room_action", valid_payload()),
             Err("INVALID_ROBOT_MOVE_ACTION")
         );
         assert!(
@@ -329,7 +329,7 @@ mod tests {
         logic.on_room_created("room-robot");
         let input = PlayerInputRecord {
             frame_id: 7,
-            player_id: "player-a".to_string(),
+            character_id: "player-a".to_string(),
             action: ROBOT_MOVE_ACTION.to_string(),
             payload_json: valid_payload().to_string(),
             received_at: Instant::now(),

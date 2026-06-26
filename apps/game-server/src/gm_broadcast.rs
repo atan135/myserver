@@ -248,7 +248,7 @@ pub async fn broadcast_gm_message_to_online_players(
     let body = encode_body(&GameMessagePush {
         event: "gm_broadcast".to_string(),
         room_id: String::new(),
-        player_id: String::new(),
+        character_id: String::new(),
         action: "broadcast".to_string(),
         payload_json: json!({
             "title": request.title,

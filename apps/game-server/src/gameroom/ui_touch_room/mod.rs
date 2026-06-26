@@ -55,24 +55,27 @@ impl RoomLogic for UITouchRoomLogic {
         info!(room_id, "[RoomLogic/ui_touch_room] room created");
     }
 
-    fn on_player_join(&mut self, player_id: &str) {
-        info!(room_id = self.room_id, player_id, "ui touch player joined");
+    fn on_character_join(&mut self, character_id: &str) {
+        info!(
+            room_id = self.room_id,
+            character_id, "ui touch player joined"
+        );
     }
 
-    fn on_player_leave(&mut self, player_id: &str) {
-        self.player_states.remove(player_id);
-        info!(room_id = self.room_id, player_id, "ui touch player left");
+    fn on_character_leave(&mut self, character_id: &str) {
+        self.player_states.remove(character_id);
+        info!(room_id = self.room_id, character_id, "ui touch player left");
     }
 
-    fn on_player_offline(&mut self, _room_id: &str, player_id: &str) {
-        if let Some(state) = self.player_states.get_mut(player_id) {
+    fn on_character_offline(&mut self, _room_id: &str, character_id: &str) {
+        if let Some(state) = self.player_states.get_mut(character_id) {
             state.pressed = false;
         }
     }
 
-    fn validate_player_input(
+    fn validate_character_input(
         &self,
-        _player_id: &str,
+        _character_id: &str,
         action: &str,
         payload_json: &str,
     ) -> Result<(), &'static str> {
@@ -94,7 +97,7 @@ impl RoomLogic for UITouchRoomLogic {
             let Ok(payload) = serde_json::from_str::<TouchInputPayload>(&input.payload_json) else {
                 warn!(
                     room_id = self.room_id,
-                    player_id = input.player_id,
+                    player_id = input.character_id,
                     frame_id,
                     "invalid ui touch payload"
                 );
@@ -103,7 +106,7 @@ impl RoomLogic for UITouchRoomLogic {
 
             let Some(sample) = payload.samples.last() else {
                 self.player_states
-                    .entry(input.player_id.clone())
+                    .entry(input.character_id.clone())
                     .and_modify(|state| {
                         state.frame_id = frame_id;
                         state.seq = payload.seq;
@@ -113,9 +116,9 @@ impl RoomLogic for UITouchRoomLogic {
             };
 
             self.player_states.insert(
-                input.player_id.clone(),
+                input.character_id.clone(),
                 TouchPlayerState {
-                    player_id: input.player_id.clone(),
+                    player_id: input.character_id.clone(),
                     frame_id,
                     seq: payload.seq,
                     pointer_id: payload.pointer_id,
@@ -178,7 +181,7 @@ mod tests {
 
         let logic = UITouchRoomLogic::default();
         assert_eq!(
-            logic.validate_player_input("player-a", "move", payload),
+            logic.validate_character_input("player-a", "move", payload),
             Err("INVALID_UI_TOUCH_ACTION")
         );
 

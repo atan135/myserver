@@ -7,7 +7,7 @@ impl RoomManager {
         &self,
         match_id: &str,
         room_id: &str,
-        player_ids: &[String],
+        character_ids: &[String],
         mode: &str,
     ) -> Result<RoomSnapshot, &'static str> {
         let default_policy = self.policies.default_policy();
@@ -29,7 +29,7 @@ impl RoomManager {
             );
             let mut room = Room::new(
                 room_id.to_string(),
-                player_ids.first().cloned().unwrap_or_default(),
+                character_ids.first().cloned().unwrap_or_default(),
                 default_policy.policy_id.clone(),
                 logic,
             );
@@ -47,7 +47,7 @@ impl RoomManager {
         }
         METRICS.set_room_count(room_count as u64);
 
-        self.notify_room_created(match_id, room_id, player_ids, mode)
+        self.notify_room_created(match_id, room_id, character_ids, mode)
             .await;
 
         Ok(snapshot)
@@ -56,7 +56,7 @@ impl RoomManager {
     pub(super) fn join_existing_room_locked(
         &self,
         room: &mut Room,
-        player_id: &str,
+        character_id: &str,
         outbound: OutboundChannel,
         role: MemberRole,
     ) -> Result<(RoomSnapshot, Option<String>), &'static str> {
@@ -67,22 +67,22 @@ impl RoomManager {
         let policy = self.policies.resolve(&room.policy_id);
         if room.phase == RoomPhase::InGame
             && !policy.allow_join_in_game
-            && !room.members.contains_key(player_id)
+            && !room.members.contains_key(character_id)
         {
             return Err("ROOM_ALREADY_IN_GAME");
         }
 
-        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+        if room.members.len() >= policy.max_members && !room.members.contains_key(character_id) {
             return Err("ROOM_FULL");
         }
 
-        let is_new_member = !room.members.contains_key(player_id);
+        let is_new_member = !room.members.contains_key(character_id);
         let sync_before_broadcast =
             is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
         room.members.insert(
-            player_id.to_string(),
+            character_id.to_string(),
             RoomMemberState {
-                player_id: player_id.to_string(),
+                character_id: character_id.to_string(),
                 ready: false,
                 sender: outbound.sender,
                 close_state: outbound.close_state,
@@ -96,7 +96,7 @@ impl RoomManager {
         if is_new_member {
             room.update_activity();
             room.clear_empty();
-            room.logic.on_player_join(player_id);
+            room.logic.on_character_join(character_id);
         }
 
         Ok((room.snapshot(), room.match_id.clone()))
@@ -105,7 +105,7 @@ impl RoomManager {
     pub(super) fn join_observer_locked(
         &self,
         room: &mut Room,
-        player_id: &str,
+        character_id: &str,
         outbound: OutboundChannel,
     ) -> Result<RoomRecoveryState, &'static str> {
         if room_rejects_mutation(room) {
@@ -113,15 +113,15 @@ impl RoomManager {
         }
 
         let policy = self.policies.resolve(&room.policy_id);
-        if room.members.len() >= policy.max_members && !room.members.contains_key(player_id) {
+        if room.members.len() >= policy.max_members && !room.members.contains_key(character_id) {
             return Err("ROOM_FULL");
         }
 
-        let is_new_member = !room.members.contains_key(player_id);
+        let is_new_member = !room.members.contains_key(character_id);
         room.members.insert(
-            player_id.to_string(),
+            character_id.to_string(),
             RoomMemberState {
-                player_id: player_id.to_string(),
+                character_id: character_id.to_string(),
                 ready: false,
                 sender: outbound.sender,
                 close_state: outbound.close_state,
@@ -135,7 +135,7 @@ impl RoomManager {
         if is_new_member {
             room.update_activity();
             room.clear_empty();
-            room.logic.on_player_join(player_id);
+            room.logic.on_character_join(character_id);
         }
 
         let snapshot = room.snapshot();
@@ -162,7 +162,7 @@ impl RoomManager {
     pub async fn join_room(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
         outbound: impl Into<OutboundChannel>,
         role: MemberRole,
         requested_policy_id: Option<&str>,
@@ -180,7 +180,7 @@ impl RoomManager {
             let mut room = room_entry.lock().await;
             let (snapshot, match_id) = self.join_existing_room_locked(
                 &mut room,
-                player_id,
+                character_id,
                 outbound.take().expect("outbound should be available"),
                 role,
             )?;
@@ -190,19 +190,19 @@ impl RoomManager {
             logic.on_room_created(room_id);
             info!(
                 room_id = room_id,
-                owner_player_id = player_id,
+                owner_character_id = character_id,
                 policy_id = %selected_policy.policy_id,
                 "room created"
             );
             let mut room = Room::new(
                 room_id.to_string(),
-                player_id.to_string(),
+                character_id.to_string(),
                 selected_policy.policy_id.clone(),
                 logic,
             );
             let (new_snapshot, new_match_id) = self.join_existing_room_locked(
                 &mut room,
-                player_id,
+                character_id,
                 outbound
                     .as_ref()
                     .expect("outbound should be available")
@@ -213,7 +213,7 @@ impl RoomManager {
             if inserted {
                 info!(
                     room_id = room_id,
-                    player_id = player_id,
+                    character_id = character_id,
                     "room initialized and published"
                 );
                 (new_snapshot, new_match_id, room_count)
@@ -221,7 +221,7 @@ impl RoomManager {
                 let mut room = room_entry.lock().await;
                 let (snapshot, match_id) = self.join_existing_room_locked(
                     &mut room,
-                    player_id,
+                    character_id,
                     outbound.take().expect("outbound should be available"),
                     role,
                 )?;
@@ -231,51 +231,51 @@ impl RoomManager {
         if self.get_runtime_entry(room_id).await.is_none() {
             self.ensure_runtime_entry(room_id).await;
         }
-        self.set_player_index(player_id, room_id, false).await;
+        self.set_character_index(character_id, room_id, false).await;
         METRICS.set_room_count(room_count as u64);
 
         if let Some(ref mid) = match_id {
-            self.notify_player_joined(mid, player_id, room_id).await;
+            self.notify_player_joined(mid, character_id, room_id).await;
         }
         self.update_room_fps(room_id).await;
 
         Ok(snapshot)
     }
 
-    pub async fn finish_member_sync(&self, room_id: &str, player_id: &str) {
+    pub async fn finish_member_sync(&self, room_id: &str, character_id: &str) {
         let sync_completed = {
             let Some(room_entry) = self.get_room_entry(room_id).await else {
                 return;
             };
             let mut room = room_entry.lock().await;
-            room.finish_member_sync(player_id)
+            room.finish_member_sync(character_id)
         };
 
         if sync_completed {
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 "room member sync completed"
             );
             self.update_room_fps(room_id).await;
         }
     }
 
-    pub async fn is_member_syncing(&self, room_id: &str, player_id: &str) -> bool {
+    pub async fn is_member_syncing(&self, room_id: &str, character_id: &str) -> bool {
         let Some(room_entry) = self.get_room_entry(room_id).await else {
             return false;
         };
         let room = room_entry.lock().await;
         room.members
-            .get(player_id)
+            .get(character_id)
             .map(|member| member.syncing)
             .unwrap_or(false)
     }
 
-    pub async fn leave_room(&self, room_id: &str, player_id: &str) -> RoomLeaveResult {
+    pub async fn leave_room(&self, room_id: &str, character_id: &str) -> RoomLeaveResult {
         info!(
             room_id = room_id,
-            player_id = player_id,
+            character_id = character_id,
             "leave_room called"
         );
 
@@ -299,21 +299,21 @@ impl RoomManager {
             .filter(|member| !member.offline)
             .count();
 
-        if let Some(member) = room.members.get_mut(player_id) {
+        if let Some(member) = room.members.get_mut(character_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
             detach_member_outbound(member);
-            room.logic.on_player_offline(room_id, player_id);
+            room.logic.on_character_offline(room_id, character_id);
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 "player marked offline, members count: {}",
                 room.members.len()
             );
         } else {
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 "leave_room: player not found in room members, current members: {:?}",
                 room.members.keys().collect::<Vec<_>>()
             );
@@ -325,21 +325,21 @@ impl RoomManager {
 
         let policy = self.policies.resolve(&room.policy_id);
 
-        if room.owner_player_id == player_id {
+        if room.owner_character_id == character_id {
             if let Some(next_owner) = room
                 .members
                 .values()
                 .find(|m| !m.offline)
-                .map(|m| m.player_id.clone())
+                .map(|m| m.character_id.clone())
             {
-                room.owner_player_id = next_owner;
+                room.owner_character_id = next_owner;
             }
         }
 
         if !room.has_online_members() {
             room.mark_empty();
             if previous_online_member_count > 0 {
-                log_room_entered_transferable_empty_candidate(&room, player_id, "leave_room");
+                log_room_entered_transferable_empty_candidate(&room, character_id, "leave_room");
             }
         }
 
@@ -351,14 +351,14 @@ impl RoomManager {
         let match_id = room.match_id.clone();
         drop(room);
 
-        self.set_player_index(player_id, room_id, true).await;
+        self.set_character_index(character_id, room_id, true).await;
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
         self.update_room_fps(room_id).await;
 
         if let Some(ref mid) = match_id {
-            let should_abort = self.notify_player_left(mid, player_id, "normal").await;
+            let should_abort = self.notify_player_left(mid, character_id, "normal").await;
             if should_abort {
                 info!(
                     room_id = room_id,
@@ -375,10 +375,14 @@ impl RoomManager {
         }
     }
 
-    pub async fn disconnect_room_member(&self, room_id: &str, player_id: &str) -> RoomLeaveResult {
+    pub async fn disconnect_room_member(
+        &self,
+        room_id: &str,
+        character_id: &str,
+    ) -> RoomLeaveResult {
         info!(
             room_id = room_id,
-            player_id = player_id,
+            character_id = character_id,
             "disconnect_room_member called"
         );
 
@@ -402,21 +406,21 @@ impl RoomManager {
             .filter(|member| !member.offline)
             .count();
 
-        if let Some(member) = room.members.get_mut(player_id) {
+        if let Some(member) = room.members.get_mut(character_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
             detach_member_outbound(member);
-            room.logic.on_player_offline(room_id, player_id);
+            room.logic.on_character_offline(room_id, character_id);
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 phase = ?room.phase,
                 "player marked offline without resetting runtime state"
             );
         } else {
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 "disconnect_room_member: player not found in room members, current members: {:?}",
                 room.members.keys().collect::<Vec<_>>()
             );
@@ -426,14 +430,14 @@ impl RoomManager {
             };
         }
 
-        if room.owner_player_id == player_id {
+        if room.owner_character_id == character_id {
             if let Some(next_owner) = room
                 .members
                 .values()
                 .find(|m| !m.offline)
-                .map(|m| m.player_id.clone())
+                .map(|m| m.character_id.clone())
             {
-                room.owner_player_id = next_owner;
+                room.owner_character_id = next_owner;
             }
         }
 
@@ -443,7 +447,7 @@ impl RoomManager {
             if previous_online_member_count > 0 {
                 log_room_entered_transferable_empty_candidate(
                     &room,
-                    player_id,
+                    character_id,
                     "disconnect_room_member",
                 );
             }
@@ -454,14 +458,16 @@ impl RoomManager {
         let match_id = room.match_id.clone();
         drop(room);
 
-        self.set_player_index(player_id, room_id, true).await;
+        self.set_character_index(character_id, room_id, true).await;
 
         self.broadcast_logic_broadcasts(room_id, pending_broadcasts)
             .await;
         self.update_room_fps(room_id).await;
 
         if let Some(ref mid) = match_id {
-            let should_abort = self.notify_player_left(mid, player_id, "disconnect").await;
+            let should_abort = self
+                .notify_player_left(mid, character_id, "disconnect")
+                .await;
             if should_abort {
                 info!(
                     room_id = room_id,
@@ -481,7 +487,7 @@ impl RoomManager {
     pub async fn reconnect_room(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
         outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let outbound = outbound.into();
@@ -492,7 +498,7 @@ impl RoomManager {
             return Err(room_mutation_error_code(&room));
         }
 
-        if let Some(member) = room.members.get_mut(player_id) {
+        if let Some(member) = room.members.get_mut(character_id) {
             if !member.offline {
                 return Err("PLAYER_ALREADY_ONLINE");
             }
@@ -502,13 +508,13 @@ impl RoomManager {
             member.sender = outbound.sender;
             member.close_state = outbound.close_state;
             member.syncing = false;
-            room.logic.on_player_online(room_id, player_id);
+            room.logic.on_character_online(room_id, character_id);
             room.clear_empty();
             room.update_activity();
 
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 "player reconnected"
             );
 
@@ -519,17 +525,18 @@ impl RoomManager {
             let waiting_inputs = room_frame_inputs_from_pending(&room, waiting_frame_id);
             let input_delay_frames = self.policies.resolve(&room.policy_id).input_delay_frames;
             let movement_recovery = room.logic.movement_recovery_state(
-                Some(player_id),
+                Some(character_id),
                 MovementCorrectionReason::ReconnectRecovery,
             );
             let match_id = room.match_id.clone();
             drop(room);
 
-            self.remove_offline_player_index(player_id, room_id).await;
-            self.set_player_index(player_id, room_id, false).await;
+            self.remove_offline_character_index(character_id, room_id)
+                .await;
+            self.set_character_index(character_id, room_id, false).await;
 
             if let Some(ref mid) = match_id {
-                self.notify_player_joined(mid, player_id, room_id).await;
+                self.notify_player_joined(mid, character_id, room_id).await;
             }
             self.update_room_fps(room_id).await;
 
@@ -550,7 +557,7 @@ impl RoomManager {
     pub async fn join_room_as_observer(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
         outbound: impl Into<OutboundChannel>,
     ) -> Result<RoomRecoveryState, &'static str> {
         let outbound = outbound.into();
@@ -560,7 +567,7 @@ impl RoomManager {
             let mut room = room_entry.lock().await;
             let recovery = self.join_observer_locked(
                 &mut room,
-                player_id,
+                character_id,
                 outbound.take().expect("outbound should be available"),
             )?;
             (recovery, self.room_count().await)
@@ -569,19 +576,19 @@ impl RoomManager {
             logic.on_room_created(room_id);
             info!(
                 room_id = room_id,
-                owner_player_id = player_id,
+                owner_character_id = character_id,
                 policy_id = %default_policy.policy_id,
                 "room created for observer"
             );
             let mut room = Room::new(
                 room_id.to_string(),
-                player_id.to_string(),
+                character_id.to_string(),
                 default_policy.policy_id.clone(),
                 logic,
             );
             let new_recovery = self.join_observer_locked(
                 &mut room,
-                player_id,
+                character_id,
                 outbound
                     .as_ref()
                     .expect("outbound should be available")
@@ -594,7 +601,7 @@ impl RoomManager {
                 let mut room = room_entry.lock().await;
                 let recovery = self.join_observer_locked(
                     &mut room,
-                    player_id,
+                    character_id,
                     outbound.take().expect("outbound should be available"),
                 )?;
                 (recovery, room_count)
@@ -603,12 +610,12 @@ impl RoomManager {
         if self.get_runtime_entry(room_id).await.is_none() {
             self.ensure_runtime_entry(room_id).await;
         }
-        self.set_player_index(player_id, room_id, false).await;
+        self.set_character_index(character_id, room_id, false).await;
         METRICS.set_room_count(room_count as u64);
 
         info!(
             room_id = room_id,
-            player_id = player_id,
+            character_id = character_id,
             current_frame_id = recovery.current_frame_id,
             "observer joined"
         );
@@ -618,7 +625,7 @@ impl RoomManager {
         Ok(recovery)
     }
 
-    pub async fn cleanup_expired_offline_players(&self) {
+    pub async fn cleanup_expired_offline_characters(&self) {
         for (room_id, room_entry) in self.room_entries_snapshot().await {
             let mut room = room_entry.lock().await;
             if room_rejects_mutation(&room) {
@@ -626,23 +633,23 @@ impl RoomManager {
             }
 
             let policy = self.policies.resolve(&room.policy_id);
-            let expired = room.collect_expired_offline_players(policy.offline_ttl_secs);
+            let expired = room.collect_expired_offline_characters(policy.offline_ttl_secs);
 
             if !expired.is_empty() {
                 info!(
                     room_id = room_id,
                     expired_players = ?expired,
                     ttl_secs = policy.offline_ttl_secs,
-                    "removing expired offline players"
+                    "removing expired offline characters"
                 );
 
-                for player_id in &expired {
-                    room.logic.on_player_leave(player_id);
+                for character_id in &expired {
+                    room.logic.on_character_leave(character_id);
                 }
 
                 room.remove_members(&expired);
-                for player_id in &expired {
-                    self.remove_player_indexes_for_room(player_id, &room_id)
+                for character_id in &expired {
+                    self.remove_character_indexes_for_room(character_id, &room_id)
                         .await;
                 }
 
@@ -658,7 +665,7 @@ impl RoomManager {
     pub async fn set_ready_state(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
         ready: bool,
     ) -> Result<RoomSnapshot, &'static str> {
         let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
@@ -673,7 +680,7 @@ impl RoomManager {
 
         let member = room
             .members
-            .get_mut(player_id)
+            .get_mut(character_id)
             .ok_or("ROOM_MEMBER_NOT_FOUND")?;
         member.ready = ready;
         Ok(room.snapshot())
@@ -682,7 +689,7 @@ impl RoomManager {
     pub async fn start_game(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
     ) -> Result<RoomSnapshot, &'static str> {
         {
             let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
@@ -692,13 +699,13 @@ impl RoomManager {
             if room_rejects_mutation(&room) {
                 return Err(room_mutation_error_code(&room));
             }
-            room.can_start_game(player_id, policy.min_start_players)?;
+            room.can_start_game(character_id, policy.min_start_players)?;
             room.phase = RoomPhase::InGame;
             room.clear_runtime_inputs();
             room.logic.on_game_started(room_id);
             info!(
                 room_id = room_id,
-                owner_player_id = player_id,
+                owner_character_id = character_id,
                 member_count = room.members.len(),
                 "room entered in_game phase"
             );
@@ -715,7 +722,7 @@ impl RoomManager {
     pub async fn accept_player_input(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
         frame_id: u32,
         action: &str,
         payload_json: &str,
@@ -727,9 +734,9 @@ impl RoomManager {
         if room_rejects_mutation(&room) {
             return Err(room_mutation_error_code(&room));
         }
-        room.can_send_input(player_id)?;
+        room.can_send_input(character_id)?;
         room.logic
-            .validate_player_input(player_id, action, payload_json)?;
+            .validate_character_input(character_id, action, payload_json)?;
         if frame_id <= room.current_frame {
             return Err("INPUT_FRAME_EXPIRED");
         }
@@ -743,7 +750,7 @@ impl RoomManager {
 
         let input_record = PlayerInputRecord {
             frame_id,
-            player_id: player_id.to_string(),
+            character_id: character_id.to_string(),
             action: action.to_string(),
             payload_json: payload_json.to_string(),
             received_at: Instant::now(),
@@ -751,11 +758,12 @@ impl RoomManager {
         };
         let outcome = room.upsert_pending_input(input_record);
         room.update_activity();
-        room.logic.on_player_input(player_id, action, payload_json);
+        room.logic
+            .on_character_input(character_id, action, payload_json);
         if matches!(outcome, PendingInputUpsert::Replaced) {
             info!(
                 room_id = room_id,
-                player_id = player_id,
+                character_id = character_id,
                 frame_id = frame_id,
                 "pending input replaced for same frame"
             );
@@ -767,7 +775,7 @@ impl RoomManager {
     pub async fn end_game(
         &self,
         room_id: &str,
-        player_id: &str,
+        character_id: &str,
     ) -> Result<RoomSnapshot, &'static str> {
         let room_entry = self.get_room_entry(room_id).await.ok_or("ROOM_NOT_FOUND")?;
         let mut room = room_entry.lock().await;
@@ -775,12 +783,12 @@ impl RoomManager {
         if room_rejects_mutation(&room) {
             return Err(room_mutation_error_code(&room));
         }
-        room.can_end_game(player_id)?;
+        room.can_end_game(character_id)?;
         room.logic.on_game_ended(room_id);
         room.reset_to_waiting();
         info!(
             room_id = room_id,
-            owner_player_id = player_id,
+            owner_character_id = character_id,
             member_count = room.members.len(),
             "room returned to waiting phase"
         );

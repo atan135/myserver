@@ -115,8 +115,8 @@ pub struct RolloutDrainSnapshot {
 pub struct RoomManager {
     rooms: std::sync::Arc<RwLock<HashMap<String, SharedRoom>>>,
     runtimes: std::sync::Arc<RwLock<HashMap<String, SharedRoomRuntime>>>,
-    player_rooms: PlayerRoomIndex,
-    offline_players: PlayerRoomIndex,
+    character_rooms: CharacterRoomIndex,
+    offline_characters: CharacterRoomIndex,
     policies: SharedRoomPolicyRegistry,
     logic_factory: SharedRoomLogicFactory,
     match_client: SharedMatchClient,
@@ -124,7 +124,7 @@ pub struct RoomManager {
 
 type SharedRoom = std::sync::Arc<Mutex<Room>>;
 type SharedRoomRuntime = std::sync::Arc<Mutex<RoomRuntime>>;
-type PlayerRoomIndex = std::sync::Arc<RwLock<HashMap<String, String>>>;
+type CharacterRoomIndex = std::sync::Arc<RwLock<HashMap<String, String>>>;
 
 fn room_member_index_entries(room: &Room) -> Vec<(String, bool)> {
     if room.marked_for_destruction || room.transfer_state.status == RoomTransferStatus::Retired {
@@ -133,110 +133,110 @@ fn room_member_index_entries(room: &Room) -> Vec<(String, bool)> {
 
     room.members
         .values()
-        .map(|member| (member.player_id.clone(), member.offline))
+        .map(|member| (member.character_id.clone(), member.offline))
         .collect()
 }
 
 async fn replace_room_member_indexes(
-    player_rooms: &PlayerRoomIndex,
-    offline_players: &PlayerRoomIndex,
+    character_rooms: &CharacterRoomIndex,
+    offline_characters: &CharacterRoomIndex,
     room_id: &str,
     members: Vec<(String, bool)>,
 ) {
     {
-        let mut player_rooms = player_rooms.write().await;
-        player_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
-        for (player_id, _offline) in &members {
-            player_rooms.insert(player_id.clone(), room_id.to_string());
+        let mut character_rooms = character_rooms.write().await;
+        character_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        for (character_id, _offline) in &members {
+            character_rooms.insert(character_id.clone(), room_id.to_string());
         }
     }
 
     {
-        let mut offline_players = offline_players.write().await;
-        offline_players.retain(|_, indexed_room_id| indexed_room_id != room_id);
-        for (player_id, offline) in &members {
+        let mut offline_characters = offline_characters.write().await;
+        offline_characters.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        for (character_id, offline) in &members {
             if *offline {
-                offline_players.insert(player_id.clone(), room_id.to_string());
+                offline_characters.insert(character_id.clone(), room_id.to_string());
             } else {
-                offline_players.remove(player_id);
+                offline_characters.remove(character_id);
             }
         }
     }
 }
 
-async fn set_player_room_index(
-    player_rooms: &PlayerRoomIndex,
-    offline_players: &PlayerRoomIndex,
-    player_id: &str,
+async fn set_character_room_index(
+    character_rooms: &CharacterRoomIndex,
+    offline_characters: &CharacterRoomIndex,
+    character_id: &str,
     room_id: &str,
     offline: bool,
 ) {
     {
-        let mut player_rooms = player_rooms.write().await;
-        player_rooms.insert(player_id.to_string(), room_id.to_string());
+        let mut character_rooms = character_rooms.write().await;
+        character_rooms.insert(character_id.to_string(), room_id.to_string());
     }
 
     {
-        let mut offline_players = offline_players.write().await;
+        let mut offline_characters = offline_characters.write().await;
         if offline {
-            offline_players.insert(player_id.to_string(), room_id.to_string());
+            offline_characters.insert(character_id.to_string(), room_id.to_string());
         } else {
-            offline_players.remove(player_id);
+            offline_characters.remove(character_id);
         }
     }
 }
 
 async fn remove_room_member_indexes(
-    player_rooms: &PlayerRoomIndex,
-    offline_players: &PlayerRoomIndex,
+    character_rooms: &CharacterRoomIndex,
+    offline_characters: &CharacterRoomIndex,
     room_id: &str,
 ) {
     {
-        let mut player_rooms = player_rooms.write().await;
-        player_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        let mut character_rooms = character_rooms.write().await;
+        character_rooms.retain(|_, indexed_room_id| indexed_room_id != room_id);
     }
 
     {
-        let mut offline_players = offline_players.write().await;
-        offline_players.retain(|_, indexed_room_id| indexed_room_id != room_id);
+        let mut offline_characters = offline_characters.write().await;
+        offline_characters.retain(|_, indexed_room_id| indexed_room_id != room_id);
     }
 }
 
-async fn remove_player_index_for_room(
-    player_rooms: &PlayerRoomIndex,
-    offline_players: &PlayerRoomIndex,
-    player_id: &str,
+async fn remove_character_index_for_room(
+    character_rooms: &CharacterRoomIndex,
+    offline_characters: &CharacterRoomIndex,
+    character_id: &str,
     room_id: &str,
 ) {
     {
-        let mut player_rooms = player_rooms.write().await;
-        if player_rooms.get(player_id).map(String::as_str) == Some(room_id) {
-            player_rooms.remove(player_id);
+        let mut character_rooms = character_rooms.write().await;
+        if character_rooms.get(character_id).map(String::as_str) == Some(room_id) {
+            character_rooms.remove(character_id);
         }
     }
 
     {
-        let mut offline_players = offline_players.write().await;
-        if offline_players.get(player_id).map(String::as_str) == Some(room_id) {
-            offline_players.remove(player_id);
+        let mut offline_characters = offline_characters.write().await;
+        if offline_characters.get(character_id).map(String::as_str) == Some(room_id) {
+            offline_characters.remove(character_id);
         }
     }
 }
 
-async fn remove_offline_player_index_for_room(
-    offline_players: &PlayerRoomIndex,
-    player_id: &str,
+async fn remove_offline_character_index_for_room(
+    offline_characters: &CharacterRoomIndex,
+    character_id: &str,
     room_id: &str,
 ) {
-    let mut offline_players = offline_players.write().await;
-    if offline_players.get(player_id).map(String::as_str) == Some(room_id) {
-        offline_players.remove(player_id);
+    let mut offline_characters = offline_characters.write().await;
+    if offline_characters.get(character_id).map(String::as_str) == Some(room_id) {
+        offline_characters.remove(character_id);
     }
 }
 
 async fn sync_room_member_indexes_from_entry(
-    player_rooms: &PlayerRoomIndex,
-    offline_players: &PlayerRoomIndex,
+    character_rooms: &CharacterRoomIndex,
+    offline_characters: &CharacterRoomIndex,
     room_id: &str,
     room_entry: &SharedRoom,
 ) {
@@ -244,7 +244,7 @@ async fn sync_room_member_indexes_from_entry(
         let room = room_entry.lock().await;
         room_member_index_entries(&room)
     };
-    replace_room_member_indexes(player_rooms, offline_players, room_id, members).await;
+    replace_room_member_indexes(character_rooms, offline_characters, room_id, members).await;
 }
 
 fn room_rejects_mutation(room: &Room) -> bool {
@@ -361,8 +361,8 @@ impl RoomManager {
         let this = Self {
             rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
             runtimes: std::sync::Arc::new(RwLock::new(HashMap::new())),
-            player_rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
-            offline_players: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            character_rooms: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            offline_characters: std::sync::Arc::new(RwLock::new(HashMap::new())),
             policies,
             logic_factory,
             match_client,

@@ -770,7 +770,6 @@ where
                 let kick_reason = connection.kick_reason.read().await.clone();
                 info!(
                     session_id = connection.session.id,
-                    player_id = ?connection.session.player_id,
                     account_player_id = ?connection.session.account_player_id,
                     character_id = ?connection.session.character_id,
                     reason = %kick_reason,
@@ -807,7 +806,6 @@ where
                     .unwrap_or_else(|| "server_close_requested".to_string());
                 warn!(
                     session_id = connection.session.id,
-                    player_id = ?connection.session.player_id,
                     account_player_id = ?connection.session.account_player_id,
                     character_id = ?connection.session.character_id,
                     peer = %connection.peer_addr,
@@ -976,11 +974,11 @@ where
         }
 
         if connection.session.state == SessionState::Authenticated {
-            if let Some(player_id) = connection.session.player_id.as_deref() {
+            if let Some(account_player_id) = connection.session.account_player_id.as_deref() {
                 let player_message_allowed = {
                     let mut limiter = services.player_msg_rate_limiter.lock().await;
                     limiter.allow(
-                        player_id,
+                        account_player_id,
                         started_at,
                         runtime.player_msg_rate_window_ms,
                         runtime.player_msg_rate_max,
@@ -995,7 +993,7 @@ where
                     ) {
                         warn!(
                             session_id = connection.session.id,
-                            player_id = %player_id,
+                            account_player_id = %account_player_id,
                             error = %error,
                             "failed to queue player message rate exceeded error"
                         );
@@ -1071,12 +1069,7 @@ where
 
     // Unregister from online registry (only if our session_id still matches).
     // P0 registry uniqueness is account-scoped; character lookup is secondary.
-    if let Some(account_player_id) = connection
-        .session
-        .account_player_id
-        .as_ref()
-        .or(connection.session.player_id.as_ref())
-    {
+    if let Some(account_player_id) = connection.session.account_player_id.as_ref() {
         let mut registry = services.player_registry.write().await;
         registry.remove_by_account_if_session(account_player_id, connection.session.id);
     }
@@ -1103,13 +1096,13 @@ async fn append_connection_event_for_session(
     let account_player_id = identity
         .as_ref()
         .map(|value| value.account_player_id.as_str())
-        .or(session.player_id.as_deref());
+        .or(session.account_player_id.as_deref());
     let character_id = identity.as_ref().map(|value| value.character_id.as_str());
 
     db_store
         .append_connection_event_with_identity(
             session.id,
-            session.player_id.as_deref(),
+            session.account_player_id.as_deref(),
             account_player_id,
             character_id,
             Some(peer_addr),
@@ -1224,8 +1217,7 @@ async fn dispatch_packet(
             .await
         }
         Some(MessageType::GetCharacterTitlesReq) => {
-            character_title_service::handle_get_character_titles(services, connection, packet)
-                .await
+            character_title_service::handle_get_character_titles(services, connection, packet).await
         }
         Some(MessageType::EquipCharacterTitleReq) => {
             character_title_service::handle_equip_character_title(services, connection, packet)

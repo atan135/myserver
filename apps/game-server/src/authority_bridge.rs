@@ -49,11 +49,11 @@ pub fn snapshot_from_room(snapshot: &RoomSnapshot, authority_epoch: u64) -> Auth
         room_id: snapshot.room_id.clone(),
         authority_epoch,
         frame_id: snapshot.current_frame_id,
-        authority_player_id: snapshot.owner_player_id.clone(),
+        authority_player_id: snapshot.owner_character_id.clone(),
         player_ids: snapshot
             .members
             .iter()
-            .map(|member| member.player_id.clone())
+            .map(|member| member.character_id.clone())
             .collect(),
         game_state_json: snapshot.game_state.clone(),
         checksum: String::new(),
@@ -62,7 +62,7 @@ pub fn snapshot_from_room(snapshot: &RoomSnapshot, authority_epoch: u64) -> Auth
 
 pub fn input_from_record(record: &PlayerInputRecord) -> AuthorityInput {
     AuthorityInput {
-        player_id: record.player_id.clone(),
+        player_id: record.character_id.clone(),
         frame_id: record.frame_id,
         action: record.action.clone(),
         payload_json: record.payload_json.clone(),

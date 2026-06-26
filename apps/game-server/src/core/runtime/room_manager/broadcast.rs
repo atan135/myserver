@@ -50,7 +50,7 @@ impl RoomManager {
                 .iter()
                 .map(|member| {
                     (
-                        member.player_id.clone(),
+                        member.character_id.clone(),
                         member.sender.clone(),
                         member.close_state.clone(),
                     )
@@ -58,7 +58,7 @@ impl RoomManager {
                 .collect::<Vec<_>>()
         };
 
-        for (player_id, sender, close_state) in senders {
+        for (character_id, sender, close_state) in senders {
             if let Err(error) = try_send_outbound(
                 &sender,
                 &close_state,
@@ -68,7 +68,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(&player_id),
+                    player_id: Some(&character_id),
                     room_id: Some(room_id),
                     operation: "room_broadcast",
                     ..OutboundQueueLogContext::default()
@@ -76,7 +76,7 @@ impl RoomManager {
             ) {
                 warn!(
                     room_id = room_id,
-                    player_id = %player_id,
+                    character_id = %character_id,
                     message_type = ?message_type,
                     error = %error,
                     "failed to queue room broadcast"
@@ -87,34 +87,34 @@ impl RoomManager {
         Ok(())
     }
 
-    pub(super) async fn broadcast_to_players(
+    pub(super) async fn broadcast_to_characters(
         &self,
         room_id: &str,
-        target_player_ids: &[String],
+        target_character_ids: &[String],
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
         let senders = {
             let Some(room_entry) = self.get_room_entry(room_id).await else {
-                info!(room_id = room_id, "broadcast_to_players: room not found");
+                info!(room_id = room_id, "broadcast_to_characters: room not found");
                 return Ok(());
             };
             let room = room_entry.lock().await;
             if room.marked_for_destruction {
                 info!(
                     room_id = room_id,
-                    "broadcast_to_players: room is being destroyed"
+                    "broadcast_to_characters: room is being destroyed"
                 );
                 return Ok(());
             }
 
-            let targets = target_player_ids
+            let targets = target_character_ids
                 .iter()
-                .filter_map(|player_id| room.members.get(player_id))
+                .filter_map(|character_id| room.members.get(character_id))
                 .filter(|member| !member.offline && !member.syncing)
                 .map(|member| {
                     (
-                        member.player_id.clone(),
+                        member.character_id.clone(),
                         member.sender.clone(),
                         member.close_state.clone(),
                     )
@@ -125,13 +125,13 @@ impl RoomManager {
                 room_id = room_id,
                 message_type = ?message_type,
                 target_count = targets.len(),
-                "broadcast_to_players"
+                "broadcast_to_characters"
             );
 
             targets
         };
 
-        for (player_id, sender, close_state) in senders {
+        for (character_id, sender, close_state) in senders {
             if let Err(error) = try_send_outbound(
                 &sender,
                 &close_state,
@@ -141,7 +141,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(&player_id),
+                    player_id: Some(&character_id),
                     room_id: Some(room_id),
                     operation: "targeted_room_broadcast",
                     ..OutboundQueueLogContext::default()
@@ -149,7 +149,7 @@ impl RoomManager {
             ) {
                 warn!(
                     room_id = room_id,
-                    player_id = %player_id,
+                    character_id = %character_id,
                     message_type = ?message_type,
                     error = %error,
                     "failed to queue targeted room broadcast"
@@ -163,14 +163,14 @@ impl RoomManager {
     pub(super) async fn broadcast_message(
         &self,
         room_id: &str,
-        target_player_ids: &[String],
+        target_character_ids: &[String],
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        if target_player_ids.is_empty() {
+        if target_character_ids.is_empty() {
             self.broadcast_to_room(room_id, message_type, body).await
         } else {
-            self.broadcast_to_players(room_id, target_player_ids, message_type, body)
+            self.broadcast_to_characters(room_id, target_character_ids, message_type, body)
                 .await
         }
     }
@@ -183,26 +183,26 @@ impl RoomManager {
         for RoomLogicBroadcast {
             message_type,
             body,
-            target_player_ids,
+            target_character_ids,
         } in broadcasts
         {
             let _ = self
-                .broadcast_message(room_id, &target_player_ids, message_type, body)
+                .broadcast_message(room_id, &target_character_ids, message_type, body)
                 .await;
         }
     }
 
     pub async fn send_to_player(
         &self,
-        player_id: &str,
+        character_id: &str,
         message_type: MessageType,
         body: Vec<u8>,
     ) -> Result<(), std::io::Error> {
-        let Some(room_id) = self.player_rooms.read().await.get(player_id).cloned() else {
+        let Some(room_id) = self.character_rooms.read().await.get(character_id).cloned() else {
             return Ok(());
         };
         let Some(room_entry) = self.get_room_entry(&room_id).await else {
-            self.remove_player_indexes_for_room(player_id, &room_id)
+            self.remove_character_indexes_for_room(character_id, &room_id)
                 .await;
             return Ok(());
         };
@@ -214,7 +214,7 @@ impl RoomManager {
             {
                 (None, true)
             } else {
-                match room.members.get(player_id) {
+                match room.members.get(character_id) {
                     Some(member) if !member.offline => (
                         Some((member.sender.clone(), member.close_state.clone())),
                         false,
@@ -235,20 +235,20 @@ impl RoomManager {
                     body,
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(player_id),
+                    player_id: Some(character_id),
                     operation: "send_to_player",
                     ..OutboundQueueLogContext::default()
                 },
             ) {
                 warn!(
-                    player_id = player_id,
+                    character_id = character_id,
                     message_type = ?message_type,
                     error = %error,
                     "failed to queue player message"
                 );
             }
         } else if stale_index {
-            self.remove_player_indexes_for_room(player_id, &room_id)
+            self.remove_character_indexes_for_room(character_id, &room_id)
                 .await;
         }
 

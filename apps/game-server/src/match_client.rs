@@ -165,13 +165,13 @@ impl MatchClient {
         &mut self,
         match_id: &str,
         room_id: &str,
-        player_ids: &[String],
+        character_ids: &[String],
         mode: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let req = CreateRoomAndJoinReq {
             match_id: match_id.to_string(),
             room_id: room_id.to_string(),
-            player_ids: player_ids.to_vec(),
+            character_ids: character_ids.to_vec(),
             mode: mode.to_string(),
         };
 
@@ -189,7 +189,7 @@ impl MatchClient {
             tracing::info!(
                 match_id = %match_id,
                 room_id = %room_id,
-                players = ?player_ids,
+                players = ?character_ids,
                 mode = %mode,
                 "CreateRoomAndJoin success"
             );
@@ -213,7 +213,7 @@ impl MatchClient {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let req = PlayerJoinedReq {
             match_id: match_id.to_string(),
-            player_id: player_id.to_string(),
+            character_id: player_id.to_string(),
             room_id: room_id.to_string(),
         };
 
@@ -251,7 +251,7 @@ impl MatchClient {
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let req = PlayerLeftReq {
             match_id: match_id.to_string(),
-            player_id: player_id.to_string(),
+            character_id: player_id.to_string(),
             reason: reason.to_string(),
         };
 

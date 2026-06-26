@@ -51,7 +51,7 @@ pub fn parse_player_input(
                 })?;
             let source_entity =
                 combat
-                    .entity_id_by_player(&record.player_id)
+                    .entity_id_by_player(&record.character_id)
                     .ok_or(CombatInputError {
                         error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
                     })?;
@@ -85,7 +85,7 @@ pub fn parse_player_input(
                 })?;
             let source_entity =
                 combat
-                    .entity_id_by_player(&record.player_id)
+                    .entity_id_by_player(&record.character_id)
                     .ok_or(CombatInputError {
                         error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
                     })?;
@@ -156,7 +156,7 @@ mod tests {
 
         let record = PlayerInputRecord {
             frame_id: 5,
-            player_id: "player-a".to_string(),
+            character_id: "player-a".to_string(),
             action: ACTION_COMBAT_CAST_SKILL.to_string(),
             payload_json: "{\"skillId\":1,\"targetPlayerId\":\"player-b\"}".to_string(),
             received_at: std::time::Instant::now(),

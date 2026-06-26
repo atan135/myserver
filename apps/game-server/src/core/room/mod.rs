@@ -264,12 +264,7 @@ pub enum MemberRole {
 
 #[derive(Clone)]
 pub struct RoomMemberState {
-    /// P0 compatibility boundary: this remains the account-level player id.
-    /// Do not treat it as character_id. Switching room membership, frame
-    /// inputs, transfer payloads, and offline indexes to character_id requires
-    /// a separate migration because client protocol fields still expose
-    /// RoomMember.player_id.
-    pub player_id: String,
+    pub character_id: String,
     pub ready: bool,
     pub sender: OutboundSender,
     pub close_state: ConnectionCloseState,
@@ -282,7 +277,7 @@ pub struct RoomMemberState {
 #[derive(Clone)]
 pub struct PlayerInputRecord {
     pub frame_id: u32,
-    pub player_id: String,
+    pub character_id: String,
     pub action: String,
     pub payload_json: String,
     pub received_at: Instant,
@@ -368,14 +363,14 @@ impl RoomTransferState {
 pub struct Room {
     pub room_id: String,
     pub match_id: Option<String>,
-    pub owner_player_id: String,
+    pub owner_character_id: String,
     pub phase: RoomPhase,
     pub policy_id: String,
     pub current_frame: u32,
     pub pending_inputs: PendingFrameInputs,
-    /// Keyed by account-level player id in P0. A character-scoped room member
-    /// model must update this map together with frame input ownership,
-    /// owner_player_id, room transfer payloads, and reconnect/offline indexes.
+    /// Keyed by character_id. Room membership, frame input ownership,
+    /// owner_character_id, room transfer payloads, and reconnect/offline indexes
+    /// all use character IDs.
     pub members: HashMap<String, RoomMemberState>,
     pub logic: Box<dyn RoomLogic>,
     pub created_at: Instant,
@@ -393,7 +388,7 @@ pub struct Room {
 impl Room {
     pub fn new(
         room_id: String,
-        owner_player_id: String,
+        owner_character_id: String,
         policy_id: String,
         logic: Box<dyn RoomLogic>,
     ) -> Self {
@@ -401,7 +396,7 @@ impl Room {
         Self {
             room_id,
             match_id: None,
-            owner_player_id,
+            owner_character_id,
             phase: RoomPhase::Waiting,
             policy_id,
             current_frame: 0,
@@ -433,19 +428,19 @@ impl Room {
                     MemberRole::Observer => PbMemberRole::Observer as i32,
                 };
                 RoomMember {
-                    player_id: member.player_id.clone(),
+                    character_id: member.character_id.clone(),
                     ready: member.ready,
-                    is_owner: member.player_id == self.owner_player_id,
+                    is_owner: member.character_id == self.owner_character_id,
                     offline: member.offline,
                     role,
                 }
             })
             .collect::<Vec<_>>();
-        members.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        members.sort_by(|left, right| left.character_id.cmp(&right.character_id));
 
         RoomSnapshot {
             room_id: self.room_id.clone(),
-            owner_player_id: self.owner_player_id.clone(),
+            owner_character_id: self.owner_character_id.clone(),
             state: self.state_name(),
             members,
             current_frame_id: self.current_frame,
@@ -470,12 +465,16 @@ impl Room {
         }
     }
 
-    pub fn can_start_game(&self, player_id: &str, min_players: usize) -> Result<(), &'static str> {
+    pub fn can_start_game(
+        &self,
+        character_id: &str,
+        min_players: usize,
+    ) -> Result<(), &'static str> {
         if self.phase == RoomPhase::InGame {
             return Err("ROOM_ALREADY_IN_GAME");
         }
 
-        if self.owner_player_id != player_id {
+        if self.owner_character_id != character_id {
             return Err("ONLY_OWNER_CAN_START");
         }
 
@@ -490,16 +489,16 @@ impl Room {
         Ok(())
     }
 
-    pub fn can_send_input(&self, player_id: &str) -> Result<(), &'static str> {
+    pub fn can_send_input(&self, character_id: &str) -> Result<(), &'static str> {
         if self.phase != RoomPhase::InGame {
             return Err("ROOM_NOT_IN_GAME");
         }
 
-        if !self.members.contains_key(player_id) {
+        if !self.members.contains_key(character_id) {
             return Err("ROOM_MEMBER_NOT_FOUND");
         }
 
-        if let Some(member) = self.members.get(player_id) {
+        if let Some(member) = self.members.get(character_id) {
             if member.role == MemberRole::Observer {
                 return Err("OBSERVER_CANNOT_SEND_INPUT");
             }
@@ -511,12 +510,12 @@ impl Room {
         Ok(())
     }
 
-    pub fn can_end_game(&self, player_id: &str) -> Result<(), &'static str> {
+    pub fn can_end_game(&self, character_id: &str) -> Result<(), &'static str> {
         if self.phase != RoomPhase::InGame {
             return Err("ROOM_NOT_IN_GAME");
         }
 
-        if self.owner_player_id != player_id {
+        if self.owner_character_id != character_id {
             return Err("ONLY_OWNER_CAN_END_GAME");
         }
 
@@ -562,15 +561,19 @@ impl Room {
         self.members.values().any(|m| !m.offline)
     }
 
-    pub fn mark_offline(&mut self, player_id: &str) {
-        if let Some(member) = self.members.get_mut(player_id) {
+    pub fn mark_offline(&mut self, character_id: &str) {
+        if let Some(member) = self.members.get_mut(character_id) {
             member.offline = true;
             member.offline_since = Some(Instant::now());
         }
     }
 
-    pub fn mark_online(&mut self, player_id: &str, outbound: impl Into<OutboundChannel>) -> bool {
-        if let Some(member) = self.members.get_mut(player_id) {
+    pub fn mark_online(
+        &mut self,
+        character_id: &str,
+        outbound: impl Into<OutboundChannel>,
+    ) -> bool {
+        if let Some(member) = self.members.get_mut(character_id) {
             let outbound = outbound.into();
             member.offline = false;
             member.offline_since = None;
@@ -582,15 +585,15 @@ impl Room {
         false
     }
 
-    pub fn update_sender(&mut self, player_id: &str, outbound: impl Into<OutboundChannel>) {
-        if let Some(member) = self.members.get_mut(player_id) {
+    pub fn update_sender(&mut self, character_id: &str, outbound: impl Into<OutboundChannel>) {
+        if let Some(member) = self.members.get_mut(character_id) {
             let outbound = outbound.into();
             member.sender = outbound.sender;
             member.close_state = outbound.close_state;
         }
     }
 
-    pub fn collect_expired_offline_players(&self, ttl_secs: u64) -> Vec<String> {
+    pub fn collect_expired_offline_characters(&self, ttl_secs: u64) -> Vec<String> {
         self.members
             .values()
             .filter(|m| {
@@ -603,17 +606,17 @@ impl Room {
                     false
                 }
             })
-            .map(|m| m.player_id.clone())
+            .map(|m| m.character_id.clone())
             .collect()
     }
 
-    pub fn remove_members(&mut self, player_ids: &[String]) {
-        for id in player_ids {
+    pub fn remove_members(&mut self, character_ids: &[String]) {
+        for id in character_ids {
             self.members.remove(id);
         }
-        if self.owner_player_id != *"" && !self.members.contains_key(&self.owner_player_id) {
+        if self.owner_character_id != *"" && !self.members.contains_key(&self.owner_character_id) {
             if let Some(next) = self.members.keys().next() {
-                self.owner_player_id = next.clone();
+                self.owner_character_id = next.clone();
             }
         }
     }
@@ -649,12 +652,12 @@ impl Room {
 
     pub fn upsert_pending_input(&mut self, input: PlayerInputRecord) -> PendingInputUpsert {
         let frame_inputs = self.pending_inputs.entry(input.frame_id).or_default();
-        let outcome = if frame_inputs.contains_key(&input.player_id) {
+        let outcome = if frame_inputs.contains_key(&input.character_id) {
             PendingInputUpsert::Replaced
         } else {
             PendingInputUpsert::New
         };
-        frame_inputs.insert(input.player_id.clone(), input);
+        frame_inputs.insert(input.character_id.clone(), input);
         outcome
     }
 
@@ -688,40 +691,44 @@ impl Room {
         self.wait_started_at = Some(Instant::now());
     }
 
-    pub fn player_input_participants(&self) -> Vec<String> {
-        let mut players = self
+    pub fn character_input_participants(&self) -> Vec<String> {
+        let mut characters = self
             .members
             .values()
             .filter(|member| !member.offline && member.role == MemberRole::Player)
             .filter(|member| !member.syncing)
-            .map(|member| member.player_id.clone())
+            .map(|member| member.character_id.clone())
             .collect::<Vec<_>>();
-        players.sort();
-        players
+        characters.sort();
+        characters
     }
 
-    pub fn last_applied_input_for_player(&self, player_id: &str) -> Option<&PlayerInputRecord> {
-        self.last_applied_inputs.get(player_id)
+    pub fn last_applied_input_for_character(
+        &self,
+        character_id: &str,
+    ) -> Option<&PlayerInputRecord> {
+        self.last_applied_inputs.get(character_id)
     }
 
-    pub fn set_last_applied_input(&mut self, player_id: &str, input: PlayerInputRecord) {
+    pub fn set_last_applied_input(&mut self, character_id: &str, input: PlayerInputRecord) {
         self.last_applied_inputs
-            .insert(player_id.to_string(), input);
+            .insert(character_id.to_string(), input);
     }
 
-    pub fn reset_missing_input_streak(&mut self, player_id: &str) {
-        self.missing_input_streaks.insert(player_id.to_string(), 0);
+    pub fn reset_missing_input_streak(&mut self, character_id: &str) {
+        self.missing_input_streaks
+            .insert(character_id.to_string(), 0);
     }
 
-    pub fn increment_missing_input_streak(&mut self, player_id: &str) -> u32 {
+    pub fn increment_missing_input_streak(&mut self, character_id: &str) -> u32 {
         let next = self
             .missing_input_streaks
-            .get(player_id)
+            .get(character_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
         self.missing_input_streaks
-            .insert(player_id.to_string(), next);
+            .insert(character_id.to_string(), next);
         next
     }
 
@@ -732,8 +739,8 @@ impl Room {
             .collect()
     }
 
-    pub fn finish_member_sync(&mut self, player_id: &str) -> bool {
-        if let Some(member) = self.members.get_mut(player_id) {
+    pub fn finish_member_sync(&mut self, character_id: &str) -> bool {
+        if let Some(member) = self.members.get_mut(character_id) {
             if member.syncing {
                 member.syncing = false;
                 return true;

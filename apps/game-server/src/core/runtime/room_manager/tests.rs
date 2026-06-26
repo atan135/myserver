@@ -63,9 +63,9 @@ fn recording_timer_state_json() -> String {
 }
 
 impl RoomLogic for RecordingRoomLogic {
-    fn on_player_input(&mut self, player_id: &str, action: &str, payload_json: &str) {
+    fn on_character_input(&mut self, character_id: &str, action: &str, payload_json: &str) {
         self.inputs.lock().unwrap().push((
-            player_id.to_string(),
+            character_id.to_string(),
             action.to_string(),
             payload_json.to_string(),
         ));
@@ -136,7 +136,7 @@ impl RoomLogicFactory for UnsupportedTransferRoomLogicFactory {
 
 async fn setup_started_room(
     policy_id: &str,
-    players: &[&str],
+    characters: &[&str],
 ) -> (
     RoomManager,
     RecordingRoomLogicFactory,
@@ -149,13 +149,13 @@ async fn setup_started_room(
     );
 
     let mut receivers = Vec::new();
-    for player_id in players {
+    for character_id in characters {
         let (tx, rx) = mpsc::channel(1024);
         receivers.push(rx);
         manager
             .join_room(
                 "room-test",
-                player_id,
+                character_id,
                 tx,
                 MemberRole::Player,
                 Some(policy_id),
@@ -163,11 +163,14 @@ async fn setup_started_room(
             .await
             .unwrap();
         manager
-            .set_ready_state("room-test", player_id, true)
+            .set_ready_state("room-test", character_id, true)
             .await
             .unwrap();
     }
-    manager.start_game("room-test", players[0]).await.unwrap();
+    manager
+        .start_game("room-test", characters[0])
+        .await
+        .unwrap();
     stop_runtime_for_test(&manager, "room-test").await;
 
     (manager, factory, receivers)
@@ -208,20 +211,36 @@ async fn insert_room_for_test(manager: &RoomManager, room_id: &str, room: Room) 
         .await
         .insert(room_id.to_string(), std::sync::Arc::new(Mutex::new(room)));
     replace_room_member_indexes(
-        &manager.player_rooms,
-        &manager.offline_players,
+        &manager.character_rooms,
+        &manager.offline_characters,
         room_id,
         members,
     )
     .await;
 }
 
-async fn player_room_index_for_test(manager: &RoomManager, player_id: &str) -> Option<String> {
-    manager.player_rooms.read().await.get(player_id).cloned()
+async fn character_room_index_for_test(
+    manager: &RoomManager,
+    character_id: &str,
+) -> Option<String> {
+    manager
+        .character_rooms
+        .read()
+        .await
+        .get(character_id)
+        .cloned()
 }
 
-async fn offline_player_index_for_test(manager: &RoomManager, player_id: &str) -> Option<String> {
-    manager.offline_players.read().await.get(player_id).cloned()
+async fn offline_character_index_for_test(
+    manager: &RoomManager,
+    character_id: &str,
+) -> Option<String> {
+    manager
+        .offline_characters
+        .read()
+        .await
+        .get(character_id)
+        .cloned()
 }
 
 async fn with_room_for_test<R>(
@@ -253,16 +272,16 @@ async fn with_room_mut_for_test<R>(
 async fn setup_started_room_with_id(
     manager: &RoomManager,
     room_id: &str,
-    players: &[String],
+    characters: &[String],
     receivers: &mut Vec<mpsc::Receiver<OutboundMessage>>,
 ) {
-    for player_id in players {
+    for character_id in characters {
         let (tx, rx) = mpsc::channel(1024);
         receivers.push(rx);
         manager
             .join_room(
                 room_id,
-                player_id,
+                character_id,
                 tx,
                 MemberRole::Player,
                 Some("default_match"),
@@ -270,11 +289,11 @@ async fn setup_started_room_with_id(
             .await
             .unwrap();
         manager
-            .set_ready_state(room_id, player_id, true)
+            .set_ready_state(room_id, character_id, true)
             .await
             .unwrap();
     }
-    manager.start_game(room_id, &players[0]).await.unwrap();
+    manager.start_game(room_id, &characters[0]).await.unwrap();
     stop_runtime_for_test(manager, room_id).await;
 }
 
@@ -293,14 +312,63 @@ fn drain_messages_of_type(
 
 fn combat_demo_entity_by_player<'a>(
     game_state: &'a serde_json::Value,
-    player_id: &str,
+    character_id: &str,
 ) -> &'a serde_json::Value {
     game_state["snapshot"]["entities"]
         .as_array()
         .expect("combat demo snapshot should contain entities")
         .iter()
-        .find(|entity| entity["player_id"].as_str() == Some(player_id))
+        .find(|entity| entity["character_id"].as_str() == Some(character_id))
         .expect("combat demo player entity should exist")
+}
+
+#[tokio::test]
+async fn room_member_index_keeps_same_account_characters_distinct() {
+    let factory = RecordingRoomLogicFactory::default();
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(factory),
+    );
+    let character_a = "account-a:character-1";
+    let character_b = "account-a:character-2";
+
+    let (tx_a, _rx_a) = mpsc::channel(1024);
+    manager
+        .join_room(
+            "room-test",
+            character_a,
+            tx_a,
+            MemberRole::Player,
+            Some("default_match"),
+        )
+        .await
+        .unwrap();
+    let (tx_b, _rx_b) = mpsc::channel(1024);
+    manager
+        .join_room(
+            "room-test",
+            character_b,
+            tx_b,
+            MemberRole::Player,
+            Some("default_match"),
+        )
+        .await
+        .unwrap();
+
+    with_room_for_test(&manager, "room-test", |room| {
+        assert_eq!(room.members.len(), 2);
+        assert!(room.members.contains_key(character_a));
+        assert!(room.members.contains_key(character_b));
+    })
+    .await;
+    assert_eq!(
+        character_room_index_for_test(&manager, character_a).await,
+        Some("room-test".to_string())
+    );
+    assert_eq!(
+        character_room_index_for_test(&manager, character_b).await,
+        Some("room-test".to_string())
+    );
 }
 
 #[tokio::test]
@@ -389,7 +457,10 @@ async fn marked_for_destruction_room_rejects_later_operations() {
         Err("ROOM_NOT_FOUND")
     );
     assert!(manager.process_room_tick("room-test", 10).await.is_none());
-    assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
+    assert_eq!(
+        manager.find_room_by_offline_character("player-a").await,
+        None
+    );
 }
 
 #[tokio::test]
@@ -494,12 +565,12 @@ async fn timer_freeze_stops_runtime_tick_and_clears_wait_started() {
         Arc::new(factory),
     );
 
-    for player_id in ["player-a", "player-b"] {
+    for character_id in ["player-a", "player-b"] {
         let (tx, _rx) = mpsc::channel(1024);
         manager
             .join_room(
                 "room-test",
-                player_id,
+                character_id,
                 tx,
                 MemberRole::Player,
                 Some("default_match"),
@@ -507,7 +578,7 @@ async fn timer_freeze_stops_runtime_tick_and_clears_wait_started() {
             .await
             .unwrap();
         manager
-            .set_ready_state("room-test", player_id, true)
+            .set_ready_state("room-test", character_id, true)
             .await
             .unwrap();
     }
@@ -1022,7 +1093,7 @@ async fn rollout_drain_notice_pushes_game_message_to_online_non_syncing_room_mem
     assert_eq!(push.event, "rollout_drain_notice");
     assert_eq!(push.room_id, "room-test");
     assert_eq!(push.action, "leave_room");
-    assert!(push.player_id.is_empty());
+    assert!(push.character_id.is_empty());
     let payload: serde_json::Value = serde_json::from_str(&push.payload_json).unwrap();
     assert_eq!(payload["room_id"], "room-test");
     assert_eq!(payload["rollout_epoch"], "epoch-1");
@@ -1404,14 +1475,14 @@ async fn movement_demo_transfer_restores_movement_payload_consistently() {
     assert_eq!(movement_json["last_full_sync_frame"], 0);
     assert_eq!(movement_json["movement_control_stop_frames"], 3);
     assert_eq!(
-        movement_json["latest_client_state_by_player"][0]["player_id"],
+        movement_json["latest_client_state_by_player"][0]["character_id"],
         "player-a"
     );
     assert_eq!(
         movement_json["missing_control_frames_by_player"][0]["frame_id"],
         1
     );
-    assert_eq!(movement_json["entities"][0]["player_id"], "player-a");
+    assert_eq!(movement_json["entities"][0]["character_id"], "player-a");
     assert_eq!(movement_json["entities"][0]["moving"], true);
     assert_eq!(movement_json["entities"][0]["last_input_frame"], 1);
 
@@ -1448,7 +1519,7 @@ async fn movement_demo_transfer_restores_movement_payload_consistently() {
     assert_eq!(movement_recovery.reference_frame_id, 2);
     assert!(movement_recovery.aoi_enabled);
     assert_eq!(movement_recovery.entities.len(), 1);
-    assert_eq!(movement_recovery.entities[0].player_id, "player-a");
+    assert_eq!(movement_recovery.entities[0].character_id, "player-a");
     assert!(movement_recovery.entities[0].moving);
     assert_eq!(movement_recovery.entities[0].last_input_frame, 1);
 
@@ -1647,8 +1718,8 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
     assert_eq!(
         combat_json["player_entity_map"],
         serde_json::json!([
-            {"player_id": "player-a", "entity_id": 1},
-            {"player_id": "player-b", "entity_id": 2}
+            {"character_id": "player-a", "entity_id": 1},
+            {"character_id": "player-b", "entity_id": 2}
         ])
     );
     assert_eq!(combat_json["skill_slots"][0][3]["skill_id"], 4);
@@ -2329,7 +2400,7 @@ async fn imported_room_is_treated_as_taken_over_room_for_join_and_reconnect() {
         join_snapshot
             .members
             .iter()
-            .any(|member| member.player_id == "player-b")
+            .any(|member| member.character_id == "player-b")
     );
 
     assert_eq!(target.room_count().await, 1);
@@ -2486,7 +2557,7 @@ async fn optimistic_strategy_advances_with_partial_inputs() {
         recorded[0]
             .1
             .iter()
-            .any(|input| input.player_id == "player-b" && input.action.is_empty())
+            .any(|input| input.character_id == "player-b" && input.action.is_empty())
     );
 }
 
@@ -2701,12 +2772,12 @@ async fn existing_room_runtime_paths_continue_for_drain_mode_contract() {
         Arc::new(factory.clone()),
     );
 
-    for player_id in ["player-a", "player-b"] {
+    for character_id in ["player-a", "player-b"] {
         let (tx, _rx) = mpsc::channel(1024);
         manager
             .join_room(
                 "room-test",
-                player_id,
+                character_id,
                 tx,
                 MemberRole::Player,
                 Some("default_match"),
@@ -2752,7 +2823,7 @@ async fn existing_room_runtime_paths_continue_for_drain_mode_contract() {
         .unwrap();
     assert_eq!(recovery.snapshot.state, "in_game");
 
-    manager.cleanup_expired_offline_players().await;
+    manager.cleanup_expired_offline_characters().await;
     assert!(manager.room_exists("room-test").await);
 
     let (waiting_tx, _waiting_rx) = mpsc::channel(1024);
@@ -2806,12 +2877,12 @@ async fn cleanup_removes_runtime_so_reused_room_can_restart_tick() {
     assert!(!manager.room_exists("room-reused").await);
     assert!(!runtime_exists_for_test(&manager, "room-reused").await);
 
-    for player_id in ["player-a", "player-b"] {
+    for character_id in ["player-a", "player-b"] {
         let (tx, _rx) = mpsc::channel(1024);
         manager
             .join_room(
                 "room-reused",
-                player_id,
+                character_id,
                 tx,
                 MemberRole::Player,
                 Some("default_match"),
@@ -2819,7 +2890,7 @@ async fn cleanup_removes_runtime_so_reused_room_can_restart_tick() {
             .await
             .unwrap();
         manager
-            .set_ready_state("room-reused", player_id, true)
+            .set_ready_state("room-reused", character_id, true)
             .await
             .unwrap();
     }
@@ -2864,7 +2935,7 @@ async fn strict_wait_timeout_repeats_last_input() {
     let repeated = second_tick
         .1
         .iter()
-        .find(|input| input.player_id == "player-b")
+        .find(|input| input.character_id == "player-b")
         .unwrap();
     assert_eq!(repeated.frame_id, 2);
     assert_eq!(repeated.action, "move");
@@ -2940,15 +3011,15 @@ async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
         .disconnect_room_member("room-test", "player-a")
         .await;
     assert_eq!(
-        player_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
         Some("room-test".to_string())
     );
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, "player-a").await,
         Some("room-test".to_string())
     );
     assert_eq!(
-        manager.find_room_by_offline_player("player-a").await,
+        manager.find_room_by_offline_character("player-a").await,
         Some("room-test".to_string())
     );
 
@@ -2958,28 +3029,31 @@ async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
         .await
         .unwrap();
     assert_eq!(
-        player_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
         Some("room-test".to_string())
     );
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, "player-a").await,
         None
     );
-    assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
+    assert_eq!(
+        manager.find_room_by_offline_character("player-a").await,
+        None
+    );
 
     manager.leave_room("room-test", "player-a").await;
     assert_eq!(
-        manager.find_room_by_offline_player("player-a").await,
+        manager.find_room_by_offline_character("player-a").await,
         Some("room-test".to_string())
     );
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, "player-a").await,
         Some("room-test".to_string())
     );
 }
 
 #[tokio::test]
-async fn cleanup_expired_offline_players_removes_player_indexes() {
+async fn cleanup_expired_offline_characters_removes_character_indexes() {
     let (manager, _factory, _receivers) =
         setup_started_room("default_match", &["player-a", "player-b"]).await;
 
@@ -2992,14 +3066,20 @@ async fn cleanup_expired_offline_players_removes_player_indexes() {
     })
     .await;
 
-    manager.cleanup_expired_offline_players().await;
+    manager.cleanup_expired_offline_characters().await;
 
-    assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
         None
     );
-    assert_eq!(manager.find_room_by_offline_player("player-a").await, None);
+    assert_eq!(
+        offline_character_index_for_test(&manager, "player-a").await,
+        None
+    );
+    assert_eq!(
+        manager.find_room_by_offline_character("player-a").await,
+        None
+    );
     with_room_for_test(&manager, "room-test", |room| {
         assert!(!room.members.contains_key("player-a"));
         assert!(room.members.contains_key("player-b"));
@@ -3036,9 +3116,12 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(!manager.room_exists("room-reused-index").await);
-    assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
+        None
+    );
+    assert_eq!(
+        offline_character_index_for_test(&manager, "player-a").await,
         None
     );
 
@@ -3054,11 +3137,11 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
         .await
         .unwrap();
     assert_eq!(
-        player_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
         Some("room-reused-index".to_string())
     );
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, "player-a").await,
         None
     );
 }
@@ -3102,9 +3185,12 @@ async fn send_to_player_uses_index_and_self_heals_stale_entry() {
         .await
         .unwrap();
     assert!(rx.try_recv().is_err());
-    assert_eq!(player_room_index_for_test(&manager, "player-a").await, None);
     assert_eq!(
-        offline_player_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, "player-a").await,
+        None
+    );
+    assert_eq!(
+        offline_character_index_for_test(&manager, "player-a").await,
         None
     );
 }
@@ -3120,14 +3206,14 @@ async fn concurrent_cross_room_runtime_paths_keep_room_state_isolated() {
     let mut receivers = Vec::new();
 
     for room_idx in 0..room_count {
-        let players = [
+        let characters = [
             format!("player-{room_idx}-a"),
             format!("player-{room_idx}-b"),
         ];
         setup_started_room_with_id(
             &manager,
             &format!("room-{room_idx}"),
-            &players,
+            &characters,
             &mut receivers,
         )
         .await;
@@ -3160,7 +3246,7 @@ async fn concurrent_cross_room_runtime_paths_keep_room_state_isolated() {
 
             manager.disconnect_room_member(&room_id, &player_b).await;
             assert_eq!(
-                manager.find_room_by_offline_player(&player_b).await,
+                manager.find_room_by_offline_character(&player_b).await,
                 Some(room_id.clone())
             );
 
@@ -3170,7 +3256,10 @@ async fn concurrent_cross_room_runtime_paths_keep_room_state_isolated() {
                 .await
                 .unwrap();
             assert_eq!(recovery.snapshot.room_id, room_id);
-            assert_eq!(manager.find_room_by_offline_player(&player_b).await, None);
+            assert_eq!(
+                manager.find_room_by_offline_character(&player_b).await,
+                None
+            );
         }));
     }
 
@@ -3184,15 +3273,15 @@ async fn concurrent_cross_room_runtime_paths_keep_room_state_isolated() {
         let player_a = format!("player-{room_idx}-a");
         let player_b = format!("player-{room_idx}-b");
         assert_eq!(
-            player_room_index_for_test(&manager, &player_a).await,
+            character_room_index_for_test(&manager, &player_a).await,
             Some(format!("room-{room_idx}"))
         );
         assert_eq!(
-            player_room_index_for_test(&manager, &player_b).await,
+            character_room_index_for_test(&manager, &player_b).await,
             Some(format!("room-{room_idx}"))
         );
         assert_eq!(
-            offline_player_index_for_test(&manager, &player_b).await,
+            offline_character_index_for_test(&manager, &player_b).await,
             None
         );
     }
@@ -3209,13 +3298,13 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
     let mut receivers = Vec::new();
 
     for room_idx in 0..room_count {
-        let player_id = format!("indexed-player-{room_idx}");
+        let character_id = format!("indexed-player-{room_idx}");
         let (tx, rx) = mpsc::channel(1024);
         receivers.push(rx);
         manager
             .join_room(
                 &format!("indexed-room-{room_idx}"),
-                &player_id,
+                &character_id,
                 tx,
                 MemberRole::Player,
                 Some("movement_demo"),
@@ -3261,10 +3350,12 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
         let manager = Arc::clone(&manager);
         disconnect_handles.push(tokio::spawn(async move {
             let room_id = format!("indexed-room-{room_idx}");
-            let player_id = format!("indexed-player-{room_idx}");
-            manager.disconnect_room_member(&room_id, &player_id).await;
+            let character_id = format!("indexed-player-{room_idx}");
+            manager
+                .disconnect_room_member(&room_id, &character_id)
+                .await;
             assert_eq!(
-                manager.find_room_by_offline_player(&player_id).await,
+                manager.find_room_by_offline_character(&character_id).await,
                 Some(room_id)
             );
         }));
@@ -3275,7 +3366,7 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
 
     for room_idx in 0..room_count {
         assert_eq!(
-            offline_player_index_for_test(&manager, &format!("indexed-player-{room_idx}")).await,
+            offline_character_index_for_test(&manager, &format!("indexed-player-{room_idx}")).await,
             Some(format!("indexed-room-{room_idx}"))
         );
     }
@@ -3297,7 +3388,7 @@ async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
         "in_game"
     );
 
-    manager.cleanup_expired_offline_players().await;
+    manager.cleanup_expired_offline_characters().await;
 
     let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
     let reconnect_a = manager
@@ -3398,7 +3489,7 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
     room.members.insert(
         "player-a".to_string(),
         RoomMemberState {
-            player_id: "player-a".to_string(),
+            character_id: "player-a".to_string(),
             ready: true,
             sender,
             close_state: ConnectionCloseState::new(),
@@ -3416,14 +3507,14 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
     };
 
     for frame_id in 1..=MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
-        let (resolved, newly_offline_players) =
+        let (resolved, newly_offline_characters) =
             resolve_tick_inputs(&mut room, &participants, frame_id, &policy);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].frame_id, frame_id);
         if frame_id < MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
-            assert!(newly_offline_players.is_empty());
+            assert!(newly_offline_characters.is_empty());
         } else {
-            assert_eq!(newly_offline_players, vec!["player-a".to_string()]);
+            assert_eq!(newly_offline_characters, vec!["player-a".to_string()]);
         }
     }
 

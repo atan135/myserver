@@ -136,7 +136,7 @@ impl RoomManager {
             return None;
         }
 
-        if room.player_input_participants().is_empty() {
+        if room.character_input_participants().is_empty() {
             room.wait_started_at = None;
             return None;
         }
@@ -146,14 +146,14 @@ impl RoomManager {
         room.ensure_wait_started();
 
         let waiting_frame_id = room.current_waiting_frame_id();
-        let participants = room.player_input_participants();
+        let participants = room.character_input_participants();
         let ready_count = room
             .pending_inputs_for_frame(waiting_frame_id)
             .into_iter()
             .filter(|input| {
                 participants
                     .iter()
-                    .any(|player_id| player_id == &input.player_id)
+                    .any(|character_id| character_id == &input.character_id)
             })
             .count();
         let all_inputs_arrived = ready_count == participants.len();
@@ -173,7 +173,7 @@ impl RoomManager {
             return None;
         }
 
-        let (tick_inputs, newly_offline_players) =
+        let (tick_inputs, newly_offline_characters) =
             resolve_tick_inputs(&mut room, &participants, waiting_frame_id, &policy);
         let inputs = tick_inputs
             .iter()
@@ -222,10 +222,10 @@ impl RoomManager {
                 debug!(
                     room_id = %room_id,
                     frame_id = waiting_frame_id,
-                    player_id = %input.player_id,
+                    character_id = %input.character_id,
                     action = %input.action,
                     "  └─ [{}] {}: {}",
-                    input.player_id,
+                    input.character_id,
                     input.action,
                     input.payload_json
                 );
@@ -245,8 +245,8 @@ impl RoomManager {
 
         drop(room);
 
-        for player_id in newly_offline_players {
-            self.set_player_index(&player_id, room_id, true).await;
+        for character_id in newly_offline_characters {
+            self.set_character_index(&character_id, room_id, true).await;
         }
 
         Some((

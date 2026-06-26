@@ -116,18 +116,18 @@ mod tests {
             event: "member_joined".to_string(),
             snapshot: Some(RoomSnapshot {
                 room_id: "room-1".to_string(),
-                owner_player_id: "player-a".to_string(),
+                owner_character_id: "player-a".to_string(),
                 state: "waiting".to_string(),
                 members: vec![
                     RoomMember {
-                        player_id: "player-a".to_string(),
+                        character_id: "player-a".to_string(),
                         ready: true,
                         is_owner: true,
                         offline: false,
                         role: 0,
                     },
                     RoomMember {
-                        player_id: "player-b".to_string(),
+                        character_id: "player-b".to_string(),
                         ready: false,
                         is_owner: false,
                         offline: false,
@@ -162,7 +162,7 @@ mod tests {
             frame_id: 12,
             fps: 10,
             inputs: vec![FrameInput {
-                player_id: "player-a".to_string(),
+                character_id: "player-a".to_string(),
                 action: "move".to_string(),
                 payload_json: "{\"x\":1}".to_string(),
                 frame_id: 12,

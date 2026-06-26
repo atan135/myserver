@@ -70,7 +70,7 @@ impl MovementDemoLogic {
         }
     }
 
-    fn spawn_player_if_needed(&mut self, player_id: &str) {
+    fn spawn_player_if_needed(&mut self, character_id: &str) {
         let Some(config_tables) = self.config_tables.as_ref() else {
             return;
         };
@@ -80,7 +80,7 @@ impl MovementDemoLogic {
             return;
         };
 
-        if movement_state.entity(player_id).is_some() {
+        if movement_state.entity(character_id).is_some() {
             return;
         }
 
@@ -100,10 +100,10 @@ impl MovementDemoLogic {
             return;
         };
 
-        movement_state.spawn_player(player_id, spawn, DEFAULT_MOVE_SPEED);
+        movement_state.spawn_player(character_id, spawn, DEFAULT_MOVE_SPEED);
         info!(
             room_id = self.room_id,
-            player_id,
+            character_id,
             scene_id = scene.id,
             spawn_id = spawn.id,
             "movement demo player spawned"
@@ -117,21 +117,25 @@ impl RoomLogic for MovementDemoLogic {
         info!(room_id, "[RoomLogic/movement_demo] room created");
     }
 
-    fn on_player_join(&mut self, player_id: &str) {
-        if !self.recipients.iter().any(|existing| existing == player_id) {
-            self.recipients.push(player_id.to_string());
+    fn on_character_join(&mut self, character_id: &str) {
+        if !self
+            .recipients
+            .iter()
+            .any(|existing| existing == character_id)
+        {
+            self.recipients.push(character_id.to_string());
         }
-        self.spawn_player_if_needed(player_id);
+        self.spawn_player_if_needed(character_id);
     }
 
-    fn on_player_leave(&mut self, player_id: &str) {
+    fn on_character_leave(&mut self, character_id: &str) {
         if let Some(movement_state) = self.movement_state.as_mut() {
-            movement_state.remove_player(player_id);
+            movement_state.remove_player(character_id);
         }
-        self.recipients.retain(|existing| existing != player_id);
+        self.recipients.retain(|existing| existing != character_id);
     }
 
-    fn on_player_offline(&mut self, _room_id: &str, player_id: &str) {
+    fn on_character_offline(&mut self, _room_id: &str, character_id: &str) {
         let Some(movement_state) = self.movement_state.as_mut() else {
             return;
         };
@@ -139,7 +143,7 @@ impl RoomLogic for MovementDemoLogic {
         let frame_id = movement_state
             .last_snapshot_frame
             .max(self.tick_count as u32);
-        let Some(corrected) = movement_state.stop_player(player_id, frame_id) else {
+        let Some(corrected) = movement_state.stop_player(character_id, frame_id) else {
             return;
         };
 
@@ -153,7 +157,7 @@ impl RoomLogic for MovementDemoLogic {
             .extend(snapshot_broadcasts(&self.room_id, vec![correction]));
         info!(
             room_id = self.room_id,
-            player_id, frame_id, "movement demo player stopped after offline"
+            character_id, frame_id, "movement demo player stopped after offline"
         );
     }
 
@@ -185,7 +189,7 @@ impl RoomLogic for MovementDemoLogic {
             info!(
                 room_id = self.room_id,
                 frame_id,
-                player_id = reject.player_id,
+                character_id = reject.player_id,
                 error_code = reject.error_code,
                 "movement input rejected"
             );
@@ -211,7 +215,7 @@ impl RoomLogic for MovementDemoLogic {
         #[derive(Serialize)]
         struct DemoEntityState {
             entity_id: u64,
-            player_id: String,
+            character_id: String,
             scene_id: i32,
             x: f32,
             y: f32,
@@ -244,7 +248,7 @@ impl RoomLogic for MovementDemoLogic {
                 .into_iter()
                 .map(|entity| DemoEntityState {
                     entity_id: entity.entity_id,
-                    player_id: entity.player_id,
+                    character_id: entity.character_id,
                     scene_id: entity.scene_id,
                     x: entity.x,
                     y: entity.y,
@@ -260,13 +264,13 @@ impl RoomLogic for MovementDemoLogic {
 
     fn movement_recovery_state(
         &self,
-        requester_player_id: Option<&str>,
+        requester_character_id: Option<&str>,
         reason: MovementCorrectionReason,
     ) -> Option<MovementRecoveryState> {
         let movement_state = self.movement_state.as_ref()?;
         Some(
-            movement_state.recovery_state_for_player(
-                requester_player_id,
+            movement_state.recovery_state_for_character(
+                requester_character_id,
                 movement_state
                     .last_snapshot_frame
                     .max(self.tick_count as u32),

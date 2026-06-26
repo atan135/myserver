@@ -89,6 +89,7 @@ pub enum EntityType {
 pub struct EntityMeta {
     pub entity_id: EntityId,
     pub entity_type: EntityType,
+    #[serde(rename = "character_id")]
     pub player_id: Option<String>,
     pub team_id: u16,
     pub alive: bool,

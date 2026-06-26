@@ -24,7 +24,7 @@ pub async fn handle_auth(
                 .db_store
                 .append_connection_event(
                     connection.session.id,
-                    connection.session.player_id.as_deref(),
+                    connection.session.account_player_id.as_deref(),
                     Some(&connection.peer_addr),
                     "invalid_auth_body",
                     Some(serde_json::json!({ "seq": packet.header.seq })),
@@ -36,7 +36,7 @@ pub async fn handle_auth(
 
     match verify_ticket(&services.config.ticket_secret, &request.ticket) {
         Ok(ticket_payload) => {
-            let account_player_id = ticket_payload.player_id;
+            let account_player_id = ticket_payload.account_player_id;
             let character_id = ticket_payload.character_id;
             let world_id = ticket_payload.world_id;
             let ticket_key = format!(
@@ -114,11 +114,7 @@ pub async fn handle_auth(
                 return Ok(());
             }
 
-            let previous_account_player_id = connection
-                .session
-                .account_player_id
-                .clone()
-                .or_else(|| connection.session.player_id.clone());
+            let previous_account_player_id = connection.session.account_player_id.clone();
             let was_authenticated = connection.session.state == SessionState::Authenticated;
             connection.session.set_authenticated_identity(
                 account_player_id.clone(),
@@ -134,7 +130,6 @@ pub async fn handle_auth(
             info!(
                 session_id = connection.session.id,
                 account_player_id = %account_player_id,
-                player_id = %account_player_id,
                 character_id = %character_id,
                 world_id = ?world_id,
                 "player authenticated"
@@ -195,7 +190,6 @@ pub async fn handle_auth(
                 if old_handle.session_id != connection.session.id {
                     info!(
                         account_player_id = %account_player_id,
-                        player_id = %account_player_id,
                         old_character_id = %old_handle.character_id,
                         new_character_id = %character_id,
                         old_session_id = old_handle.session_id,

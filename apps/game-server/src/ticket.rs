@@ -10,7 +10,7 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Debug, Deserialize)]
 pub struct TicketPayload {
     #[serde(rename = "playerId")]
-    pub player_id: String,
+    pub account_player_id: String,
     #[serde(default, rename = "characterId")]
     pub character_id: String,
     #[serde(rename = "worldId")]
@@ -52,7 +52,7 @@ pub fn verify_ticket(secret: &str, ticket: &str) -> Result<TicketPayload, &'stat
         return Err("TICKET_EXPIRED");
     }
 
-    if payload.player_id.trim().is_empty() {
+    if payload.account_player_id.trim().is_empty() {
         return Err("INVALID_TICKET_PAYLOAD");
     }
 
@@ -127,7 +127,7 @@ mod tests {
 
         let payload = verify_ticket("test-secret", &ticket).unwrap();
 
-        assert_eq!(payload.player_id, "player-001");
+        assert_eq!(payload.account_player_id, "player-001");
         assert_eq!(payload.character_id, "chr_0000000000001");
         assert_eq!(payload.world_id, Some(9));
         assert_eq!(payload.ver, Some(1));

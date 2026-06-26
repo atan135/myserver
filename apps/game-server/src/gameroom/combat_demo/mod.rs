@@ -44,23 +44,23 @@ impl CombatDemoLogic {
         }
     }
 
-    fn ensure_player_in_roster(&mut self, player_id: &str) {
-        if !self.roster.iter().any(|existing| existing == player_id) {
-            self.roster.push(player_id.to_string());
+    fn ensure_player_in_roster(&mut self, character_id: &str) {
+        if !self.roster.iter().any(|existing| existing == character_id) {
+            self.roster.push(character_id.to_string());
         }
     }
 
     fn rebuild_combat_state(&mut self) {
         self.combat.clear();
         let roster = self.roster.clone();
-        for (index, player_id) in roster.iter().enumerate() {
-            self.spawn_player_with_index(index, player_id);
+        for (index, character_id) in roster.iter().enumerate() {
+            self.spawn_player_with_index(index, character_id);
         }
         self.spawn_training_dummies();
     }
 
-    fn spawn_player_with_index(&mut self, index: usize, player_id: &str) {
-        if self.combat.entity_id_by_player(player_id).is_some() {
+    fn spawn_player_with_index(&mut self, index: usize, character_id: &str) {
+        if self.combat.entity_id_by_player(character_id).is_some() {
             return;
         }
 
@@ -75,7 +75,7 @@ impl CombatDemoLogic {
         };
 
         let _ = self.combat.spawn_entity(
-            CombatEntityBlueprint::player(player_id, team_id, Position { x, y })
+            CombatEntityBlueprint::player(character_id, team_id, Position { x, y })
                 .with_facing(facing)
                 .with_skills(&[1, 2, 3, 4, 5]),
         );
@@ -98,14 +98,14 @@ impl CombatDemoLogic {
         &mut self,
         event: &str,
         action: &str,
-        player_id: &str,
+        character_id: &str,
         payload: &T,
     ) {
         let payload_json = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
         let message = GameMessagePush {
             event: event.to_string(),
             room_id: self.room_id.clone(),
-            player_id: player_id.to_string(),
+            character_id: character_id.to_string(),
             action: action.to_string(),
             payload_json,
         };
@@ -143,29 +143,29 @@ impl CombatDemoLogic {
     }
 
     fn queue_event_push(&mut self, event: &CombatEvent) {
-        let player_id = event
+        let character_id = event
             .source_entity
             .and_then(|entity_id| self.combat.entity_player_id(entity_id))
             .unwrap_or_default()
             .to_string();
-        self.queue_game_push("combat", event.kind.as_str(), &player_id, event);
+        self.queue_game_push("combat", event.kind.as_str(), &character_id, event);
     }
 
-    fn queue_input_reject_push(&mut self, frame_id: u32, player_id: &str, error_code: &str) {
+    fn queue_input_reject_push(&mut self, frame_id: u32, character_id: &str, error_code: &str) {
         #[derive(Serialize)]
         struct RejectEnvelope<'a> {
             frame_id: u32,
-            player_id: &'a str,
+            character_id: &'a str,
             error_code: &'a str,
         }
 
         self.queue_game_push(
             "combat",
             "input_reject",
-            player_id,
+            character_id,
             &RejectEnvelope {
                 frame_id,
-                player_id,
+                character_id,
                 error_code,
             },
         );
@@ -365,21 +365,21 @@ impl RoomLogic for CombatDemoLogic {
         info!(room_id, "[RoomLogic/combat_demo] room created");
     }
 
-    fn on_player_join(&mut self, player_id: &str) {
-        self.ensure_player_in_roster(player_id);
+    fn on_character_join(&mut self, character_id: &str) {
+        self.ensure_player_in_roster(character_id);
         let index = self
             .roster
             .iter()
-            .position(|existing| existing == player_id)
+            .position(|existing| existing == character_id)
             .unwrap_or_default();
-        self.spawn_player_with_index(index, player_id);
+        self.spawn_player_with_index(index, character_id);
     }
 
-    fn on_player_leave(&mut self, player_id: &str) {
-        if let Some(entity_id) = self.combat.entity_id_by_player(player_id) {
+    fn on_character_leave(&mut self, character_id: &str) {
+        if let Some(entity_id) = self.combat.entity_id_by_player(character_id) {
             self.combat.remove_entity(entity_id);
         }
-        self.roster.retain(|existing| existing != player_id);
+        self.roster.retain(|existing| existing != character_id);
     }
 
     fn on_game_started(&mut self, _room_id: &str) {
@@ -406,13 +406,13 @@ impl RoomLogic for CombatDemoLogic {
                     match self.combat.execute_command(command, catalog, &mut hooks) {
                         CombatCommandResult::Accepted | CombatCommandResult::Ignored => {}
                         CombatCommandResult::Rejected { reason } => {
-                            self.queue_input_reject_push(frame_id, &input.player_id, &reason);
+                            self.queue_input_reject_push(frame_id, &input.character_id, &reason);
                         }
                     }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.queue_input_reject_push(frame_id, &input.player_id, error.error_code);
+                    self.queue_input_reject_push(frame_id, &input.character_id, error.error_code);
                 }
             }
         }
@@ -560,8 +560,8 @@ impl RoomLogicTransfer for CombatDemoLogic {
 
 fn validate_transfer_roster(roster: &[String]) -> Result<(), &'static str> {
     let mut seen = HashSet::new();
-    for player_id in roster {
-        if player_id.trim().is_empty() || !seen.insert(player_id.as_str()) {
+    for character_id in roster {
+        if character_id.trim().is_empty() || !seen.insert(character_id.as_str()) {
             return Err("ROOM_TRANSFER_INVALID_LOGIC_STATE");
         }
     }
@@ -594,7 +594,7 @@ mod tests {
     fn transfer_state_roundtrip_restores_demo_scheduler() {
         let mut source = CombatDemoLogic::new(config_tables());
         source.on_room_created("room-combat-transfer");
-        source.on_player_join("player-a");
+        source.on_character_join("player-a");
         source.on_game_started("room-combat-transfer");
         drain_broadcasts(&mut source);
 
@@ -663,7 +663,7 @@ mod tests {
     fn transfer_state_rejects_invalid_npc_state_contract() {
         let mut source = CombatDemoLogic::new(config_tables());
         source.on_room_created("room-combat-transfer");
-        source.on_player_join("player-a");
+        source.on_character_join("player-a");
         source.on_game_started("room-combat-transfer");
         source.on_tick(1, 20, &[]);
 

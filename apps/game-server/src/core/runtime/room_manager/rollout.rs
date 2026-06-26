@@ -114,7 +114,7 @@ impl RoomManager {
                 .filter(|member| !member.offline && !member.syncing)
                 .map(|member| {
                     (
-                        member.player_id.clone(),
+                        member.character_id.clone(),
                         member.sender.clone(),
                         member.close_state.clone(),
                     )
@@ -124,7 +124,7 @@ impl RoomManager {
 
         let mut delivered_count = 0u64;
         let mut failed_count = 0u64;
-        for (player_id, sender, close_state) in &targets {
+        for (character_id, sender, close_state) in &targets {
             match try_send_outbound(
                 sender,
                 close_state,
@@ -134,7 +134,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(player_id),
+                    player_id: Some(character_id),
                     room_id: Some(room_id),
                     operation: "server_redirect_push",
                     ..OutboundQueueLogContext::default()
@@ -145,7 +145,7 @@ impl RoomManager {
                     let close_requested = close_state.request_close(SERVER_REDIRECT_CLOSE_REASON);
                     info!(
                         room_id = room_id,
-                        player_id = %player_id,
+                        character_id = %character_id,
                         rollout_epoch = %push.rollout_epoch,
                         target_host = %push.target_host,
                         target_port = push.target_port,
@@ -159,7 +159,7 @@ impl RoomManager {
                     failed_count = failed_count.saturating_add(1);
                     warn!(
                         room_id = room_id,
-                        player_id = %player_id,
+                        character_id = %character_id,
                         rollout_epoch = %push.rollout_epoch,
                         target_host = %push.target_host,
                         target_port = push.target_port,
@@ -218,7 +218,7 @@ impl RoomManager {
         let push = GameMessagePush {
             event: "rollout_drain_notice".to_string(),
             room_id: room_id.to_string(),
-            player_id: String::new(),
+            character_id: String::new(),
             action: "leave_room".to_string(),
             payload_json,
         };
@@ -234,7 +234,7 @@ impl RoomManager {
                 .filter(|member| !member.offline && !member.syncing)
                 .map(|member| {
                     (
-                        member.player_id.clone(),
+                        member.character_id.clone(),
                         member.sender.clone(),
                         member.close_state.clone(),
                     )
@@ -244,7 +244,7 @@ impl RoomManager {
 
         let mut delivered_count = 0u64;
         let mut failed_count = 0u64;
-        for (player_id, sender, close_state) in &targets {
+        for (character_id, sender, close_state) in &targets {
             match try_send_outbound(
                 sender,
                 close_state,
@@ -254,7 +254,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(player_id),
+                    player_id: Some(character_id),
                     room_id: Some(room_id),
                     operation: "rollout_drain_notice",
                     ..OutboundQueueLogContext::default()
@@ -267,7 +267,7 @@ impl RoomManager {
                     failed_count = failed_count.saturating_add(1);
                     warn!(
                         room_id = room_id,
-                        player_id = %player_id,
+                        character_id = %character_id,
                         rollout_epoch = %notice.rollout_epoch,
                         error = %error,
                         "failed to queue rollout drain notice"

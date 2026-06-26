@@ -6,17 +6,32 @@ pub enum SessionState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedSessionIdentity {
+    /// Account-level player id from the login domain.
+    ///
+    /// This is the identity used for session ownership, ticket owner/version
+    /// checks, account kick, and account-scoped online concurrency limits.
     pub account_player_id: String,
+    /// Game character id selected for the authenticated session.
+    ///
+    /// This is the in-game subject id for character-scoped systems and
+    /// secondary online lookup. It must not be used for account-scoped checks.
     pub character_id: String,
     pub world_id: Option<u64>,
+}
+
+impl AuthenticatedSessionIdentity {
+    pub fn account_player_id(&self) -> &str {
+        &self.account_player_id
+    }
+
+    pub fn character_id(&self) -> &str {
+        &self.character_id
+    }
 }
 
 pub struct Session {
     pub id: u64,
     pub state: SessionState,
-    /// Legacy alias kept for existing room, registry, and protocol paths.
-    /// This is the account player id, not the in-game character id.
-    pub player_id: Option<String>,
     pub account_player_id: Option<String>,
     pub character_id: Option<String>,
     pub world_id: Option<u64>,
@@ -28,7 +43,6 @@ impl Session {
         Self {
             id,
             state: SessionState::Connected,
-            player_id: None,
             account_player_id: None,
             character_id: None,
             world_id: None,
@@ -43,7 +57,6 @@ impl Session {
         world_id: Option<u64>,
     ) {
         self.state = SessionState::Authenticated;
-        self.player_id = Some(account_player_id.clone());
         self.account_player_id = Some(account_player_id);
         self.character_id = Some(character_id);
         self.world_id = world_id;
@@ -54,11 +67,7 @@ impl Session {
             return None;
         }
 
-        let account_player_id = self
-            .account_player_id
-            .as_ref()
-            .or(self.player_id.as_ref())?
-            .clone();
+        let account_player_id = self.account_player_id.as_ref()?.clone();
         let character_id = self.character_id.as_ref()?.clone();
 
         Some(AuthenticatedSessionIdentity {
@@ -74,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authenticated_identity_keeps_player_id_as_account_alias() {
+    fn authenticated_identity_keeps_account_and_character_ids_separate() {
         let mut session = Session::new(42);
 
         session.set_authenticated_identity(
@@ -84,7 +93,6 @@ mod tests {
         );
 
         assert_eq!(session.state, SessionState::Authenticated);
-        assert_eq!(session.player_id.as_deref(), Some("plr_0000000000001"));
         assert_eq!(
             session.account_player_id.as_deref(),
             Some("plr_0000000000001")
@@ -95,6 +103,8 @@ mod tests {
         let identity = session.authenticated_identity().unwrap();
         assert_eq!(identity.account_player_id, "plr_0000000000001");
         assert_eq!(identity.character_id, "chr_0000000000001");
+        assert_eq!(identity.account_player_id(), "plr_0000000000001");
+        assert_eq!(identity.character_id(), "chr_0000000000001");
         assert_eq!(identity.world_id, Some(7));
     }
 
@@ -102,7 +112,6 @@ mod tests {
     fn authenticated_identity_requires_character_id() {
         let mut session = Session::new(42);
         session.state = SessionState::Authenticated;
-        session.player_id = Some("plr_0000000000001".to_string());
         session.account_player_id = Some("plr_0000000000001".to_string());
 
         assert_eq!(session.authenticated_identity(), None);

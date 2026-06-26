@@ -15,7 +15,7 @@ const ROOM_TRANSFER_INVALID_NPC_STATE: &str = "ROOM_TRANSFER_INVALID_NPC_STATE";
 pub struct RoomLogicBroadcast {
     pub message_type: MessageType,
     pub body: Vec<u8>,
-    pub target_player_ids: Vec<String>,
+    pub target_character_ids: Vec<String>,
 }
 
 impl RoomLogicBroadcast {
@@ -23,19 +23,19 @@ impl RoomLogicBroadcast {
         Self {
             message_type,
             body,
-            target_player_ids: Vec::new(),
+            target_character_ids: Vec::new(),
         }
     }
 
-    pub fn broadcast_to_players(
+    pub fn broadcast_to_characters(
         message_type: MessageType,
         body: Vec<u8>,
-        target_player_ids: Vec<String>,
+        target_character_ids: Vec<String>,
     ) -> Self {
         Self {
             message_type,
             body,
-            target_player_ids,
+            target_character_ids,
         }
     }
 }
@@ -445,7 +445,7 @@ fn validate_npc_transfer_entity(
     if entity
         .target_player_id
         .as_deref()
-        .is_some_and(|player_id| player_id.trim().is_empty())
+        .is_some_and(|character_id| character_id.trim().is_empty())
     {
         return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
     }
@@ -518,7 +518,7 @@ fn validate_npc_threat_entries(
         if entry
             .target_player_id
             .as_deref()
-            .is_some_and(|player_id| player_id.trim().is_empty())
+            .is_some_and(|character_id| character_id.trim().is_empty())
         {
             return Err(ROOM_TRANSFER_INVALID_NPC_STATE);
         }
@@ -646,14 +646,14 @@ pub trait RoomLogicTransfer {
 pub trait RoomLogic: Send + RoomLogicTransfer {
     fn on_room_created(&mut self, _room_id: &str) {}
 
-    fn on_player_join(&mut self, _player_id: &str) {}
+    fn on_character_join(&mut self, _character_id: &str) {}
 
-    fn on_player_leave(&mut self, _player_id: &str) {}
+    fn on_character_leave(&mut self, _character_id: &str) {}
 
     // Disconnection hook for AI takeover or offline state handling.
-    fn on_player_offline(&mut self, _room_id: &str, _player_id: &str) {}
+    fn on_character_offline(&mut self, _room_id: &str, _character_id: &str) {}
 
-    fn on_player_online(&mut self, _room_id: &str, _player_id: &str) {}
+    fn on_character_online(&mut self, _room_id: &str, _character_id: &str) {}
 
     fn on_game_started(&mut self, _room_id: &str) {}
 
@@ -662,11 +662,11 @@ pub trait RoomLogic: Send + RoomLogicTransfer {
     // Called only after framework validation and pending-input upsert.
     // Use this for telemetry or non-authoritative collection only. Authoritative
     // gameplay state changes must be applied in on_tick with resolved frame inputs.
-    fn on_player_input(&mut self, _player_id: &str, _action: &str, _payload_json: &str) {}
+    fn on_character_input(&mut self, _character_id: &str, _action: &str, _payload_json: &str) {}
 
-    fn validate_player_input(
+    fn validate_character_input(
         &self,
-        _player_id: &str,
+        _character_id: &str,
         _action: &str,
         _payload_json: &str,
     ) -> Result<(), &'static str> {
@@ -688,7 +688,7 @@ pub trait RoomLogic: Send + RoomLogicTransfer {
 
     fn movement_recovery_state(
         &self,
-        _requester_player_id: Option<&str>,
+        _requester_character_id: Option<&str>,
         _reason: crate::pb::MovementCorrectionReason,
     ) -> Option<crate::pb::MovementRecoveryState> {
         None
