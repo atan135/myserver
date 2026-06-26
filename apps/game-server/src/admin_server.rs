@@ -44,6 +44,7 @@ use crate::server::{DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, Runtim
 const ADMIN_MAX_BODY_LEN: usize = 64 * 1024;
 const GM_REASON_MAX_LEN: usize = 512;
 const GM_PLAYER_ID_MAX_LEN: usize = 128;
+const GM_CHARACTER_ID_MAX_LEN: usize = 128;
 const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
 const MAX_ADMIN_ACTOR_LEN: usize = 128;
 const DEFAULT_ADMIN_ACTOR: &str = "unknown";
@@ -171,6 +172,7 @@ struct AdminAuthEnvelope {
 struct AdminAuditTarget {
     room_id: String,
     player_id: String,
+    character_id: String,
     rollout_epoch: String,
     checksum: String,
     target_server_id: String,
@@ -188,6 +190,7 @@ struct AdminAuditEvent<'a> {
     error_code: &'a str,
     room_id: &'a str,
     player_id: &'a str,
+    character_id: &'a str,
     rollout_epoch: &'a str,
     checksum: &'a str,
     target_server_id: &'a str,
@@ -411,7 +414,7 @@ async fn handle_admin_connection(
                             continue;
                         }
                     };
-                let target = player_target(request.player_id.clone());
+                let target = character_target(request.character_id.clone());
                 if let Err(error_code) = validate_grant_items_request(&request, &config_tables)
                     .await
                     .map_err(|error| error.to_string())
@@ -455,7 +458,7 @@ async fn handle_admin_connection(
 
                 let result = player_manager
                     .grant_items_with_request(
-                        &request.player_id,
+                        &request.character_id,
                         &items,
                         &request.request_id,
                         &request.source,
@@ -468,14 +471,14 @@ async fn handle_admin_connection(
                         if outcome.applied {
                             let _ = push_item_obtain_if_online(
                                 &room_manager,
-                                &request.player_id,
+                                &request.character_id,
                                 &items,
                                 &request.source,
                             )
                             .await;
                             let _ = push_inventory_update_if_online(
                                 &room_manager,
-                                &request.player_id,
+                                &request.character_id,
                                 &outcome.player_data,
                             )
                             .await;
@@ -1396,6 +1399,7 @@ async fn audit_admin_write_result(
             error_code,
             room_id = %target.room_id,
             player_id = %target.player_id,
+            character_id = %target.character_id,
             rollout_epoch = %target.rollout_epoch,
             checksum = %target.checksum,
             target_server_id = %target.target_server_id,
@@ -1414,6 +1418,7 @@ async fn audit_admin_write_result(
             error_code,
             room_id = %target.room_id,
             player_id = %target.player_id,
+            character_id = %target.character_id,
             rollout_epoch = %target.rollout_epoch,
             checksum = %target.checksum,
             target_server_id = %target.target_server_id,
@@ -1435,6 +1440,7 @@ async fn audit_admin_write_result(
             error_code,
             room_id: &target.room_id,
             player_id: &target.player_id,
+            character_id: &target.character_id,
             rollout_epoch: &target.rollout_epoch,
             checksum: &target.checksum,
             target_server_id: &target.target_server_id,
@@ -1535,6 +1541,13 @@ fn update_config_target(request: &UpdateConfigReq) -> AdminAuditTarget {
 fn player_target(player_id: impl Into<String>) -> AdminAuditTarget {
     AdminAuditTarget {
         player_id: player_id.into(),
+        ..Default::default()
+    }
+}
+
+fn character_target(character_id: impl Into<String>) -> AdminAuditTarget {
+    AdminAuditTarget {
+        character_id: character_id.into(),
         ..Default::default()
     }
 }
@@ -1830,8 +1843,8 @@ async fn validate_grant_items_request(
     request: &GrantItemsReq,
     config_tables: &ConfigTableRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if request.player_id.trim().is_empty() {
-        return Err(Box::new(std::io::Error::other("INVALID_PLAYER_ID")));
+    if request.character_id.trim().is_empty() {
+        return Err(Box::new(std::io::Error::other("INVALID_CHARACTER_ID")));
     }
 
     if request.items.is_empty() {
@@ -1855,13 +1868,13 @@ fn decode_grant_items_request(
     packet: &Packet,
 ) -> Result<GrantItemsReq, Box<dyn std::error::Error>> {
     if let Ok(request) = packet.decode_body::<GrantItemsReq>("INVALID_GRANT_ITEMS_BODY") {
-        if !request.player_id.is_empty() {
+        if !request.character_id.is_empty() {
             return Ok(request);
         }
     }
 
     #[derive(serde::Deserialize)]
-    struct LegacySendItem {
+    struct GmSendItem {
         #[serde(rename = "itemId", alias = "id")]
         item_id: serde_json::Value,
         count: u32,
@@ -1870,22 +1883,29 @@ fn decode_grant_items_request(
     }
 
     #[derive(serde::Deserialize)]
-    struct LegacySendItemRequest {
+    struct GmSendItemRequest {
         #[serde(rename = "requestId")]
         request_id: Option<String>,
-        #[serde(rename = "playerId")]
-        player_id: String,
+        #[serde(rename = "characterId")]
+        character_id: Option<String>,
         #[serde(rename = "itemId")]
         item_id: Option<serde_json::Value>,
         #[serde(rename = "itemCount")]
         item_count: Option<u32>,
-        items: Option<Vec<LegacySendItem>>,
+        items: Option<Vec<GmSendItem>>,
         reason: Option<String>,
         source: Option<String>,
     }
 
-    let legacy: LegacySendItemRequest = serde_json::from_slice(&packet.body)?;
-    let items = if let Some(items) = legacy.items {
+    let request: GmSendItemRequest = serde_json::from_slice(&packet.body)?;
+    let character_id = normalize_required_string(
+        request.character_id,
+        "INVALID_CHARACTER_ID",
+        GM_CHARACTER_ID_MAX_LEN,
+        "CHARACTER_ID_TOO_LONG",
+    )
+    .map_err(std::io::Error::other)?;
+    let items = if let Some(items) = request.items {
         items
             .into_iter()
             .map(|item| {
@@ -1899,31 +1919,27 @@ fn decode_grant_items_request(
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?
     } else {
         let item_id = parse_item_id_value(
-            legacy
+            request
                 .item_id
                 .ok_or_else(|| std::io::Error::other("INVALID_ITEM_ID"))?,
         )?;
         vec![GrantItem {
             item_id,
-            count: legacy.item_count.unwrap_or(0),
+            count: request.item_count.unwrap_or(0),
             binded: false,
         }]
     };
 
-    let request_id = legacy.request_id.unwrap_or_else(|| {
-        format!(
-            "legacy-gm-send-item:{}:{}",
-            legacy.player_id,
-            current_unix_ms()
-        )
-    });
+    let request_id = request
+        .request_id
+        .unwrap_or_else(|| format!("gm-send-item:{}:{}", character_id, current_unix_ms()));
 
     Ok(GrantItemsReq {
         request_id,
-        player_id: legacy.player_id,
+        character_id,
         items,
-        source: legacy.source.unwrap_or_else(|| "gm".to_string()),
-        reason: legacy.reason.unwrap_or_default(),
+        source: request.source.unwrap_or_else(|| "gm".to_string()),
+        reason: request.reason.unwrap_or_default(),
     })
 }
 
@@ -1959,13 +1975,13 @@ fn current_unix_ms() -> i64 {
 
 async fn push_item_obtain_if_online(
     room_manager: &SharedRoomManager,
-    player_id: &str,
+    character_id: &str,
     items: &[Item],
     source: &str,
 ) -> Result<(), std::io::Error> {
     room_manager
         .send_to_player(
-            player_id,
+            character_id,
             MessageType::ItemObtainPush,
             encode_body(&ItemObtainPush {
                 items: items.iter().map(inventory_item_to_pb_item).collect(),
@@ -1977,12 +1993,12 @@ async fn push_item_obtain_if_online(
 
 async fn push_inventory_update_if_online(
     room_manager: &SharedRoomManager,
-    player_id: &str,
+    character_id: &str,
     player_data: &crate::core::inventory::PlayerData,
 ) -> Result<(), std::io::Error> {
     room_manager
         .send_to_player(
-            player_id,
+            character_id,
             MessageType::InventoryUpdatePush,
             encode_body(&InventoryUpdatePush {
                 inventory_items: player_data
@@ -2526,6 +2542,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gm_send_item_audit_event_targets_character() {
+        let audit_path = temp_audit_path("send-item-character-audit");
+        let audit_logger =
+            AdminAuditLogger::new(AdminAuditConfig::new(true, audit_path.clone(), false));
+        let context = AdminAuthContext {
+            actor: "ops@example.com".to_string(),
+            actor_missing: false,
+        };
+        let request = GrantItemsReq {
+            request_id: "gm-request-1".to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            items: vec![GrantItem {
+                item_id: 1001,
+                count: 2,
+                binded: false,
+            }],
+            source: "gm".to_string(),
+            reason: "unit-test".to_string(),
+        };
+        let packet = bytes_packet(MessageType::GmSendItemReq, 11, encode_body(&request));
+        let target = character_target(request.character_id.clone());
+
+        audit_admin_write_result(
+            &audit_logger,
+            &context,
+            &packet,
+            "gm_send_item",
+            true,
+            "",
+            &target,
+        )
+        .await
+        .unwrap();
+
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("\"action\":\"gm_send_item\""));
+        assert!(audit.contains("\"character_id\":\"chr_0000000000001\""));
+        assert!(audit.contains("\"player_id\":\"\""));
+        assert!(!audit.contains("gm-request-1"));
+        assert!(!audit.contains("unit-test"));
+        let _ = fs::remove_file(audit_path);
+    }
+
+    #[tokio::test]
     async fn admin_redirect_audit_event_includes_actor_action_result_and_target() {
         let audit_path = temp_audit_path("redirect-audit");
         let audit_logger =
@@ -2808,6 +2868,41 @@ mod tests {
             decode_gm_ban_player_request(&invalid_duration),
             Err("INVALID_DURATION")
         );
+    }
+
+    #[test]
+    fn decode_gm_send_item_uses_character_id() {
+        let packet = json_packet(
+            MessageType::GmSendItemReq,
+            r#"{"characterId":" chr_0000000000001 ","itemId":"1001","itemCount":2,"reason":"gift"}"#,
+        );
+
+        let request = decode_grant_items_request(&packet).unwrap();
+
+        assert_eq!(request.character_id, "chr_0000000000001");
+        assert_eq!(request.items.len(), 1);
+        assert_eq!(request.items[0].item_id, 1001);
+        assert_eq!(request.items[0].count, 2);
+        assert!(
+            request
+                .request_id
+                .starts_with("gm-send-item:chr_0000000000001:")
+        );
+    }
+
+    #[test]
+    fn decode_gm_send_item_rejects_legacy_player_id_target() {
+        let packet = json_packet(
+            MessageType::GmSendItemReq,
+            r#"{"playerId":"plr_1","itemId":"1001","itemCount":1}"#,
+        );
+
+        let error = match decode_grant_items_request(&packet) {
+            Ok(_) => panic!("legacy playerId target should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "INVALID_CHARACTER_ID");
     }
 
     #[test]

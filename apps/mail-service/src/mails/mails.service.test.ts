@@ -107,7 +107,7 @@ test("claim returns already_claimed without downstream grant when mail is alread
     }
   });
 
-  const result = await service.claim("mail-1", "player-1");
+  const result = await service.claim("mail-1", "player-1", "chr_1");
 
   assert.equal(result.already_claimed, true);
   assert.equal(result.claimed, false);
@@ -127,7 +127,7 @@ test("claim rejects in-progress reservations without downstream grant", async ()
   });
 
   await assert.rejects(
-    () => service.claim("mail-1", "player-1"),
+    () => service.claim("mail-1", "player-1", "chr_1"),
     (error: any) => {
       assert.equal(getErrorCode(error), "MAIL_CLAIM_IN_PROGRESS");
       assert.equal(error.getStatus?.(), 409);
@@ -148,20 +148,37 @@ test("claim rejects unreserved begin result as in-progress", async () => {
   });
 
   await assert.rejects(
-    () => service.claim("mail-1", "player-1"),
+    () => service.claim("mail-1", "player-1", "chr_1"),
     (error: any) => getErrorCode(error) === "MAIL_CLAIM_IN_PROGRESS"
   );
   assert.equal(calls.grant.length, 0);
 });
 
+test("claim requires authenticated character id before downstream grant", async () => {
+  const { service, calls } = createService();
+
+  await assert.rejects(
+    () => service.claim("mail-1", "player-1", ""),
+    (error: any) => {
+      assert.equal(getErrorCode(error), "MISSING_CHARACTER_ID");
+      assert.equal(error.getStatus?.(), 400);
+      return true;
+    }
+  );
+
+  assert.equal(calls.grant.length, 0);
+  assert.equal(calls.complete.length, 0);
+  assert.equal(calls.release.length, 0);
+});
+
 test("claim grants once with stable request id, source semantics, and completes claimed state", async () => {
   const { service, calls } = createService();
 
-  const result = await service.claim("mail-1", "player-1");
+  const result = await service.claim("mail-1", "player-1", " chr_1 ");
 
   assert.equal(calls.grant.length, 1);
   assert.deepEqual(calls.grant[0], [
-    "player-1",
+    "chr_1",
     "mail_claim:mail-1",
     [{ itemId: 1001, count: 2, binded: true }],
     "claim mail mail-1",
@@ -176,7 +193,7 @@ test("claim grants once with stable request id, source semantics, and completes 
 test("claim passes explicit targetInstanceId to downstream grant", async () => {
   const { service, calls } = createService();
 
-  await service.claim("mail-1", "player-1", { targetInstanceId: "game-server-b" });
+  await service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" });
 
   assert.equal(calls.grant.length, 1);
   assert.equal(calls.grant[0][4].targetInstanceId, "game-server-b");
@@ -187,7 +204,7 @@ test("claim passes explicit targetInstanceId to downstream grant", async () => {
 test("claim accepts snake_case target_instance_id for downstream grant", async () => {
   const { service, calls } = createService();
 
-  await service.claim("mail-1", "player-1", { target_instance_id: "game-server-c" });
+  await service.claim("mail-1", "player-1", "chr_1", { target_instance_id: "game-server-c" });
 
   assert.equal(calls.grant[0][4].targetInstanceId, "game-server-c");
 });
@@ -198,7 +215,7 @@ test("claim releases reservation and maps downstream grant failure", async () =>
   const { service, calls } = createService({ grantError });
 
   await assert.rejects(
-    () => service.claim("mail-1", "player-1"),
+    () => service.claim("mail-1", "player-1", "chr_1"),
     (error: any) => {
       assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
       assert.equal(error.getStatus?.(), 502);
@@ -217,7 +234,7 @@ test("claim releases reservation when registry has multiple targets but targetIn
   const { service, calls } = createService({ grantError });
 
   await assert.rejects(
-    () => service.claim("mail-1", "player-1"),
+    () => service.claim("mail-1", "player-1", "chr_1"),
     (error: any) => {
       assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
       assert.equal(error.getStatus?.(), 502);

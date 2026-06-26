@@ -12,6 +12,18 @@ import {
 } from "./game-admin-client.js";
 
 const config = { gameAdminToken: "secret-admin-token" };
+const HEADER_LEN = 14;
+
+function encodeTestPacket(messageType, seq, body = Buffer.alloc(0)) {
+  const header = Buffer.alloc(HEADER_LEN);
+  header.writeUInt16BE(0xcafe, 0);
+  header.writeUInt8(1, 2);
+  header.writeUInt8(0, 3);
+  header.writeUInt16BE(messageType, 4);
+  header.writeUInt32BE(seq, 6);
+  header.writeUInt32BE(body.length, 10);
+  return Buffer.concat([header, body]);
+}
 
 test("admin auth body keeps legacy plain token when actor is missing", () => {
   const body = buildAdminAuthBody(config);
@@ -74,6 +86,63 @@ test("admin client rejects response larger than configured limit", async () => {
       ),
       { code: "GAME_ADMIN_RESPONSE_TOO_LARGE" }
     );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("GameAdminClient sendItem sends characterId payload", async () => {
+  let grantPayload = null;
+  const server = net.createServer((socket) => {
+    let buffer = Buffer.alloc(0);
+
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= HEADER_LEN) {
+        const bodyLen = buffer.readUInt32BE(10);
+        const packetLen = HEADER_LEN + bodyLen;
+        if (buffer.length < packetLen) {
+          return;
+        }
+
+        const messageType = buffer.readUInt16BE(4);
+        const seq = buffer.readUInt32BE(6);
+        const body = buffer.subarray(HEADER_LEN, packetLen);
+        buffer = buffer.subarray(packetLen);
+
+        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+          grantPayload = JSON.parse(body.toString("utf8"));
+          socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq));
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: true,
+    gameServerAdminHost: "127.0.0.1",
+    gameServerAdminPort: port,
+    gameAdminToken: "secret-admin-token",
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 1024
+  });
+
+  try {
+    await client.sendItem("chr_1", "1001", 2, "gift");
+
+    assert.deepEqual(grantPayload, {
+      characterId: "chr_1",
+      itemId: "1001",
+      itemCount: 2,
+      reason: "gift"
+    });
+    assert.equal("playerId" in grantPayload, false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

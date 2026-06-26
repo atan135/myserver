@@ -6,11 +6,11 @@ use super::item::{Item, ItemError};
 use super::visual::PlayerVisual;
 use crate::csv_code::itemtable::ItemTable;
 
-/// 玩家完整数据
+/// 角色完整玩法数据
 #[derive(Debug, Clone)]
 pub struct PlayerData {
-    /// 玩家 ID
-    pub player_id: String,
+    /// 角色 ID
+    pub character_id: String,
 
     // ========== 物品存储 ==========
     /// 背包（随身）
@@ -42,23 +42,23 @@ pub const DEFAULT_INVENTORY_CAPACITY: usize = 48;
 pub const DEFAULT_WAREHOUSE_CAPACITY: usize = 64;
 
 impl PlayerData {
-    /// 创建新玩家数据
-    pub fn new(player_id: String) -> Self {
+    /// 创建新角色数据
+    pub fn new(character_id: String) -> Self {
         Self::with_capacity(
-            player_id,
+            character_id,
             DEFAULT_INVENTORY_CAPACITY,
             DEFAULT_WAREHOUSE_CAPACITY,
         )
     }
 
-    /// 使用指定容量创建玩家数据
+    /// 使用指定容量创建角色数据
     pub fn with_capacity(
-        player_id: String,
+        character_id: String,
         inventory_capacity: usize,
         warehouse_capacity: usize,
     ) -> Self {
         Self {
-            player_id: player_id.clone(),
+            character_id: character_id.clone(),
             inventory: ItemContainer::new(inventory_capacity),
             warehouse: ItemContainer::new(warehouse_capacity),
             equipment: EquipmentSlots::new(),
@@ -344,9 +344,9 @@ mod tests {
 
     #[test]
     fn test_player_data_creation() {
-        let player = PlayerData::new("player1".to_string());
+        let player = PlayerData::new("chr_0000000000001".to_string());
 
-        assert_eq!(player.player_id, "player1");
+        assert_eq!(player.character_id, "chr_0000000000001");
         assert_eq!(player.level, 1);
         assert_eq!(player.inventory.capacity(), DEFAULT_INVENTORY_CAPACITY);
         assert_eq!(player.warehouse.capacity(), DEFAULT_WAREHOUSE_CAPACITY);
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_item() {
-        let mut player = PlayerData::new("player1".to_string());
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
 
         let item = Item::new(1, 1001, 5, false);
         player.add_item(item).unwrap();

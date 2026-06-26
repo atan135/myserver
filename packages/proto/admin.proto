@@ -30,7 +30,7 @@ message GrantItem {
 
 message GrantItemsReq {
   string request_id = 1;
-  string player_id = 2;
+  string character_id = 2;
   repeated GrantItem items = 3;
   string source = 4;
   string reason = 5;

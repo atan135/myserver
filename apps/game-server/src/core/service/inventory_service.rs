@@ -3,10 +3,10 @@ use tracing::{info, warn};
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::inventory::{EquipSlot, ItemError, PlayerData};
 use crate::pb::{
-    AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryReq,
-    GetInventoryRes, InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq,
-    ItemDiscardRes, ItemEquipReq, ItemEquipRes, ItemUseReq, ItemUseRes, VisualChangePush,
-    WarehouseAccessReq, WarehouseAccessRes,
+    AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryRes,
+    InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq, ItemDiscardRes,
+    ItemEquipReq, ItemEquipRes, ItemUseReq, ItemUseRes, VisualChangePush, WarehouseAccessReq,
+    WarehouseAccessRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -19,7 +19,7 @@ pub async fn handle_item_equip(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -33,8 +33,7 @@ pub async fn handle_item_equip(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         item_uid = request.item_uid,
@@ -42,16 +41,16 @@ pub async fn handle_item_equip(
         "handle_item_equip"
     );
 
-    // 获取玩家数据
+    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     // 解析装备槽位
-    let slot = match EquipSlot::from_str(&request.equip_slot) {
-        Some(s) => s,
+    let _slot = match EquipSlot::from_str(&request.equip_slot) {
+        Some(slot) => slot,
         None => {
             connection.queue_message(
                 MessageType::ItemEquipRes,
@@ -71,10 +70,10 @@ pub async fn handle_item_equip(
 
     match result {
         Ok(()) => {
-            // 保存更新后的玩家数据
+            // 保存更新后的角色玩法数据
             services
                 .player_manager
-                .save_player(&player_id, player_data.clone())
+                .save_player(&character_id, player_data.clone())
                 .await;
 
             connection.queue_message(
@@ -121,7 +120,7 @@ pub async fn handle_item_use(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -135,19 +134,18 @@ pub async fn handle_item_use(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         item_uid = request.item_uid,
         "handle_item_use"
     );
 
-    // 获取玩家数据
+    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     let hp_before = player_data.get_hp();
@@ -159,7 +157,7 @@ pub async fn handle_item_use(
 
             services
                 .player_manager
-                .save_player(&player_id, player_data.clone())
+                .save_player(&character_id, player_data.clone())
                 .await;
 
             connection.queue_message(
@@ -207,7 +205,7 @@ pub async fn handle_item_discard(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -221,8 +219,7 @@ pub async fn handle_item_discard(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         item_uid = request.item_uid,
@@ -232,7 +229,7 @@ pub async fn handle_item_discard(
 
     let mut player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     let result = player_data.remove_item(request.item_uid, request.count);
@@ -241,7 +238,7 @@ pub async fn handle_item_discard(
         Ok(_item) => {
             services
                 .player_manager
-                .save_player(&player_id, player_data.clone())
+                .save_player(&character_id, player_data.clone())
                 .await;
 
             connection.queue_message(
@@ -279,7 +276,7 @@ pub async fn handle_warehouse_access(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -297,8 +294,7 @@ pub async fn handle_warehouse_access(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         action = request.action,
@@ -309,7 +305,7 @@ pub async fn handle_warehouse_access(
 
     let mut player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     let result = match request.action.as_str() {
@@ -322,7 +318,7 @@ pub async fn handle_warehouse_access(
         Ok(()) => {
             services
                 .player_manager
-                .save_player(&player_id, player_data.clone())
+                .save_player(&character_id, player_data.clone())
                 .await;
 
             connection.queue_message(
@@ -360,7 +356,7 @@ pub async fn handle_item_add(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
@@ -374,8 +370,7 @@ pub async fn handle_item_add(
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         item_id = request.item_id,
@@ -384,11 +379,11 @@ pub async fn handle_item_add(
         "handle_item_add"
     );
 
-    // 获取玩家数据
+    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     // 检查物品配置是否存在
@@ -417,7 +412,7 @@ pub async fn handle_item_add(
         Ok(()) => {
             services
                 .player_manager
-                .save_player(&player_id, player_data.clone())
+                .save_player(&character_id, player_data.clone())
                 .await;
 
             connection.queue_message(
@@ -463,23 +458,22 @@ pub async fn handle_get_inventory(
     let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
         return Ok(());
     };
-    let player_id = identity.account_player_id;
+    let account_player_id = identity.account_player_id;
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
     info!(
         session_id = connection.session.id,
-        account_player_id = %player_id,
-        player_id = %player_id,
+        account_player_id = %account_player_id,
         character_id = %character_id,
         world_id = ?world_id,
         "handle_get_inventory"
     );
 
-    // 获取玩家数据
+    // 获取角色玩法数据
     let player_data = services
         .player_manager
-        .get_or_create_player(&player_id)
+        .get_or_create_player(&character_id)
         .await;
 
     let inventory_items: Vec<PbItem> = player_data

@@ -157,7 +157,7 @@ test("default service actor uses normalized service identity", () => {
 
 test("grant mail attachments payload keeps stable idempotency fields", () => {
   const body = buildGrantMailAttachmentsPayload(
-    "player-1",
+    "chr_1",
     "mail_claim:mail-1",
     [{ itemId: 1001, count: 2, binded: true }],
     "claim mail mail-1"
@@ -165,11 +165,12 @@ test("grant mail attachments payload keeps stable idempotency fields", () => {
 
   assert.deepEqual(JSON.parse(body.toString("utf8")), {
     requestId: "mail_claim:mail-1",
-    playerId: "player-1",
+    characterId: "chr_1",
     items: [{ itemId: 1001, count: 2, binded: true }],
     source: "mail-claim",
     reason: "claim mail mail-1"
   });
+  assert.equal("playerId" in JSON.parse(body.toString("utf8")), false);
 });
 
 test("mail admin client rejects response larger than configured limit", async () => {
@@ -267,7 +268,7 @@ test("GameAdminClient grantMailAttachments sends grant to explicit registry targ
     );
 
     const result = await client.grantMailAttachments(
-      "player-1",
+      "chr_1",
       "mail_claim:mail-1",
       [{ itemId: 1001, count: 2, binded: true }],
       "claim mail mail-1",
@@ -278,7 +279,8 @@ test("GameAdminClient grantMailAttachments sends grant to explicit registry targ
     assert.equal(serverA.requests.length, 0);
     assert.equal(serverB.requests.length, 1);
     assert.equal(serverB.requests[0].body.requestId, "mail_claim:mail-1");
-    assert.equal(serverB.requests[0].body.playerId, "player-1");
+    assert.equal(serverB.requests[0].body.characterId, "chr_1");
+    assert.equal("playerId" in serverB.requests[0].body, false);
   } finally {
     await Promise.all([serverA.close(), serverB.close()]);
   }
@@ -303,7 +305,7 @@ test("GameAdminClient grantMailAttachments rejects ambiguous registry endpoints 
 
     await assert.rejects(
       () => client.grantMailAttachments(
-        "player-1",
+        "chr_1",
         "mail_claim:mail-1",
         [{ itemId: 1001, count: 2, binded: true }],
         "claim mail mail-1"

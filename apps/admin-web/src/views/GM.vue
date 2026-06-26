@@ -40,8 +40,8 @@
             <span>发放道具</span>
           </template>
           <el-form :model="sendItem" label-width="80px">
-            <el-form-item label="玩家ID">
-              <el-input v-model="sendItem.playerId" placeholder="plr_..." />
+            <el-form-item label="角色ID">
+              <el-input v-model="sendItem.characterId" placeholder="chr_..." />
             </el-form-item>
             <el-form-item label="道具ID">
               <el-input v-model="sendItem.itemId" placeholder="item-xxx" />
@@ -132,7 +132,7 @@ const broadcast = reactive({
 });
 
 const sendItem = reactive({
-  playerId: "",
+  characterId: "",
   itemId: "",
   itemCount: 1,
   reason: "",
@@ -175,20 +175,20 @@ async function handleBroadcast() {
 }
 
 async function handleSendItem() {
-  if (!sendItem.playerId || !sendItem.itemId) {
-    ElMessage.warning("请填写玩家ID和道具ID");
+  if (!sendItem.characterId || !sendItem.itemId) {
+    ElMessage.warning("请填写角色ID和道具ID");
     return;
   }
   sendItem.loading = true;
   try {
     await gmApi.sendItem({
-      playerId: sendItem.playerId,
+      characterId: sendItem.characterId,
       itemId: sendItem.itemId,
       itemCount: sendItem.itemCount,
       reason: sendItem.reason
     });
     ElMessage.success("道具已发放");
-    sendItem.playerId = "";
+    sendItem.characterId = "";
     sendItem.itemId = "";
     sendItem.itemCount = 1;
     sendItem.reason = "";

@@ -80,6 +80,13 @@ function normalizePlayerId(playerId: any) {
   return playerId.trim();
 }
 
+function normalizeCharacterId(characterId: any) {
+  if (!characterId || typeof characterId !== "string" || characterId.trim().length === 0) {
+    throw badRequest("INVALID_CHARACTER_ID", "characterId is required");
+  }
+  return characterId.trim();
+}
+
 function normalizeGmReason(reason: any, prefix: "gm_kick" | "gm_ban") {
   if (reason === undefined || reason === null) {
     return prefix;
@@ -270,11 +277,8 @@ export class GmController {
   @Permissions("gm.send_item")
   @HttpCode(HttpStatus.OK)
   async sendItem(@Body() body: any, @Req() req: any) {
-    const { playerId, itemId, itemCount, reason } = body || {};
-
-    if (!playerId || typeof playerId !== "string") {
-      throw badRequest("INVALID_PLAYER_ID", "playerId is required");
-    }
+    const { characterId, itemId, itemCount, reason } = body || {};
+    const normalizedCharacterId = normalizeCharacterId(characterId);
 
     if (!itemId || typeof itemId !== "string") {
       throw badRequest("INVALID_ITEM_ID", "itemId is required");
@@ -287,7 +291,7 @@ export class GmController {
     try {
       const gameAdminOptions = createGameAdminOptions(req, body);
       const gameAdminResult = await this.gameAdminClient.sendItem(
-        playerId,
+        normalizedCharacterId,
         itemId,
         itemCount,
         reason || "",
@@ -298,8 +302,8 @@ export class GmController {
         adminId: req.admin.sub,
         adminUsername: req.admin.username,
         action: "gm_send_item",
-        targetType: "player",
-        targetValue: playerId,
+        targetType: "character",
+        targetValue: normalizedCharacterId,
         details: {
           itemId,
           itemCount,

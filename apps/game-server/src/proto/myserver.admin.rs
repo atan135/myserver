@@ -42,7 +42,7 @@ pub struct GrantItemsReq {
     #[prost(string, tag = "1")]
     pub request_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "3")]
     pub items: ::prost::alloc::vec::Vec<GrantItem>,
     #[prost(string, tag = "4")]

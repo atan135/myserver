@@ -60,6 +60,13 @@ function assertAuthenticatedPlayer(playerId: any) {
   }
 }
 
+function assertAuthenticatedCharacter(characterId: any) {
+  if (!characterId || typeof characterId !== "string" || characterId.trim().length === 0) {
+    throw badRequest("MISSING_CHARACTER_ID", "character_id is required");
+  }
+  return characterId.trim();
+}
+
 function assertPlayerIdMatches(authenticatedPlayerId: string, requestedPlayerId: any) {
   if (
     requestedPlayerId !== undefined &&
@@ -341,11 +348,12 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async claim(mailId: string, authenticatedPlayerId: string, body: any = {}) {
+  async claim(mailId: string, authenticatedPlayerId: string, authenticatedCharacterId: string, body: any = {}) {
     try {
       const { player_id } = body || {};
       const targetInstanceId = normalizeTargetInstanceId(body?.targetInstanceId ?? body?.target_instance_id);
       assertAuthenticatedPlayer(authenticatedPlayerId);
+      const characterId = assertAuthenticatedCharacter(authenticatedCharacterId);
       assertPlayerIdMatches(authenticatedPlayerId, player_id);
 
       const mail = await this.mailStore.getMailById(mailId);
@@ -398,7 +406,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       let result;
       try {
         await this.gameAdminClient.grantMailAttachments(
-          authenticatedPlayerId,
+          characterId,
           `mail_claim:${mail.mail_id}`,
           normalizedAttachments,
           `claim mail ${mail.mail_id}`,
@@ -409,6 +417,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         log("error", "mail.claim_grant_failed", {
           mailId,
           playerId: authenticatedPlayerId,
+          characterId,
           error: error.message,
           code: error.code || null
         });
@@ -422,6 +431,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       log("info", result.claimed ? "mail.claimed" : "mail.claimed_idempotent", {
         mailId,
         playerId: authenticatedPlayerId,
+        characterId,
         attachmentCount: Array.isArray(currentMail.attachments) ? currentMail.attachments.length : 1
       });
 

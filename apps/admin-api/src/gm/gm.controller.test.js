@@ -82,7 +82,7 @@ test("send-item returns explicit target required error from GameAdminClient", as
 
   await assert.rejects(
     controller.sendItem(
-      { playerId: "plr_1", itemId: "item_1", itemCount: 1 },
+      { characterId: "chr_1", itemId: "item_1", itemCount: 1 },
       makeReq()
     ),
     (caught) => {
@@ -95,9 +95,11 @@ test("send-item returns explicit target required error from GameAdminClient", as
 
 test("send-item passes explicit targetInstanceId to GameAdminClient", async () => {
   let capturedOptions = null;
+  let capturedCharacterId = null;
   const resolvedEndpoint = endpointSummary("game-server-resolved", "10.0.0.9", 7599);
   const { controller, audits } = makeController({
-    async sendItem(_playerId, _itemId, _itemCount, _reason, options) {
+    async sendItem(characterId, _itemId, _itemCount, _reason, options) {
+      capturedCharacterId = characterId;
       capturedOptions = options;
       return { ok: true, instanceId: resolvedEndpoint.instanceId, endpoint: resolvedEndpoint };
     }
@@ -105,7 +107,7 @@ test("send-item passes explicit targetInstanceId to GameAdminClient", async () =
 
   const result = await controller.sendItem(
     {
-      playerId: "plr_1",
+      characterId: " chr_1 ",
       itemId: "item_1",
       itemCount: 2,
       targetInstanceId: "game-server-b"
@@ -114,12 +116,38 @@ test("send-item passes explicit targetInstanceId to GameAdminClient", async () =
   );
 
   assert.equal(result.ok, true);
+  assert.equal(capturedCharacterId, "chr_1");
   assert.equal(capturedOptions.targetInstanceId, "game-server-b");
   assert.equal(capturedOptions.actor, "ops");
+  assert.equal(audits[0].targetType, "character");
+  assert.equal(audits[0].targetValue, "chr_1");
   assert.equal(audits[0].details.requestedTargetInstanceId, "game-server-b");
   assert.equal(audits[0].details.gameAdmin.instanceId, "game-server-resolved");
   assert.deepEqual(audits[0].details.gameAdmin.endpoint, resolvedEndpoint);
   assert.equal(audits[0].details.targetInstanceId, undefined);
+});
+
+test("send-item rejects legacy playerId target field", async () => {
+  let called = false;
+  const { controller } = makeController({
+    async sendItem() {
+      called = true;
+      return { ok: true };
+    }
+  });
+
+  await assert.rejects(
+    controller.sendItem(
+      { playerId: "plr_1", itemId: "item_1", itemCount: 1 },
+      makeReq()
+    ),
+    (caught) => {
+      assert.equal(caught.getStatus(), 400);
+      assert.equal(caught.getResponse().error, "INVALID_CHARACTER_ID");
+      return true;
+    }
+  );
+  assert.equal(called, false);
 });
 
 test("kick-player returns explicit target required error from GameAdminClient", async () => {

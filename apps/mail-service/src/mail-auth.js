@@ -86,7 +86,13 @@ export function verifyTicketSignature(secret, ticket, nowMs = Date.now()) {
     throw createAuthError("INVALID_TICKET_PAYLOAD", "ticket payload is invalid");
   }
 
-  if (!payload || typeof payload.playerId !== "string" || !payload.playerId) {
+  if (
+    !payload ||
+    typeof payload.playerId !== "string" ||
+    !payload.playerId ||
+    typeof payload.characterId !== "string" ||
+    !payload.characterId
+  ) {
     throw createAuthError("INVALID_TICKET_PAYLOAD", "ticket payload is invalid");
   }
 
@@ -101,6 +107,7 @@ export function verifyTicketSignature(secret, ticket, nowMs = Date.now()) {
 
   return {
     playerId: payload.playerId,
+    characterId: payload.characterId,
     ver: payload.ver === undefined ? undefined : Number(payload.ver),
     exp: payload.exp
   };
@@ -148,6 +155,7 @@ export class MailPlayerAuthService {
 
     return {
       playerId: payload.playerId,
+      characterId: payload.characterId,
       ticketVersion
     };
   }

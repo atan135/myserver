@@ -17,7 +17,10 @@ export class MailsController {
 
   private async authenticatePlayer(headers: any, queryOrBody: any = {}) {
     if (!this.config.mailPlayerAuthRequired) {
-      return { playerId: queryOrBody?.player_id };
+      return {
+        playerId: queryOrBody?.player_id,
+        characterId: queryOrBody?.character_id ?? queryOrBody?.characterId
+      };
     }
 
     try {
@@ -74,6 +77,6 @@ export class MailsController {
   @ApiOperation({ summary: "Claim mail attachment" })
   async claim(@Param("mailId") mailId: string, @Headers() headers: any, @Body() body: any) {
     const auth = await this.authenticatePlayer(headers, body);
-    return this.mailsService.claim(mailId, auth.playerId, body);
+    return this.mailsService.claim(mailId, auth.playerId, auth.characterId, body);
   }
 }

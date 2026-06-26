@@ -117,10 +117,10 @@ function buildAdminAuthBody(config, actor) {
   return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
 }
 
-function buildGrantMailAttachmentsPayload(playerId, mailId, attachments, reason = "") {
+function buildGrantMailAttachmentsPayload(characterId, mailId, attachments, reason = "") {
   return Buffer.from(JSON.stringify({
     requestId: mailId,
-    playerId,
+    characterId,
     items: attachments,
     source: "mail-claim",
     reason
@@ -395,8 +395,8 @@ export class GameAdminClient {
     return endpoints[0];
   }
 
-  async grantMailAttachments(playerId, mailId, attachments, reason = "", options = {}) {
-    const payload = buildGrantMailAttachmentsPayload(playerId, mailId, attachments, reason);
+  async grantMailAttachments(characterId, mailId, attachments, reason = "", options = {}) {
+    const payload = buildGrantMailAttachmentsPayload(characterId, mailId, attachments, reason);
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
 
     await sendRequest(
