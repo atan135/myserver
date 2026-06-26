@@ -43,8 +43,8 @@ export function encodeRoomJoinReq(roomId, policyId = "") {
   return Buffer.concat(fields);
 }
 
-export function encodeRoomReconnectReq(playerId) {
-  return encodeStringField(1, playerId);
+export function encodeRoomReconnectReq() {
+  return Buffer.alloc(0);
 }
 
 export function encodeRoomJoinAsObserverReq(roomId) {
@@ -114,12 +114,12 @@ export function encodeGetRoomDataReq(idStart, idEnd) {
 }
 
 // Match
-export function encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode) {
-  const playerIdsBuffers = playerIds.map((id) => encodeStringField(3, id));
+export function encodeCreateMatchedRoomReq(matchId, roomId, characterIds, mode) {
+  const characterIdsBuffers = characterIds.map((id) => encodeStringField(3, id));
   return Buffer.concat([
     encodeStringField(1, matchId),
     encodeStringField(2, roomId),
-    ...playerIdsBuffers,
+    ...characterIdsBuffers,
     encodeStringField(4, mode)
   ]);
 }
@@ -282,7 +282,7 @@ export function encodeDebugCharacterTitleReq({
 function decodeFrameInput(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
-    playerId: readString(fields, 1),
+    characterId: readString(fields, 1),
     action: readString(fields, 2),
     payloadJson: readString(fields, 3),
     frameId: readUInt32(fields, 4) || 0
@@ -301,7 +301,7 @@ function decodeEntityTransform(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
     entityId: readInt64(fields, 1),
-    playerId: readString(fields, 2),
+    characterId: readString(fields, 2),
     sceneId: readUInt32(fields, 3),
     x: readFloat(fields, 4),
     y: readFloat(fields, 5),
@@ -315,7 +315,7 @@ function decodeEntityTransform(buffer) {
 function decodeRoomMember(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
-    playerId: readString(fields, 1),
+    characterId: readString(fields, 1),
     ready: readBool(fields, 2),
     isOwner: readBool(fields, 3),
     offline: readBool(fields, 4),
@@ -327,7 +327,7 @@ function decodeRoomSnapshot(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
     roomId: readString(fields, 1),
-    ownerPlayerId: readString(fields, 2),
+    ownerCharacterId: readString(fields, 2),
     state: readString(fields, 3),
     members: decodeRepeatedMessage(fields, 4, decodeRoomMember),
     currentFrameId: readUInt32(fields, 5) || 0,
@@ -542,7 +542,7 @@ export function decodeByMessageType(messageType, body) {
       return {
         event: readString(fields, 1),
         roomId: readString(fields, 2),
-        playerId: readString(fields, 3),
+        characterId: readString(fields, 3),
         action: readString(fields, 4),
         payloadJson: readString(fields, 5)
       };
@@ -571,7 +571,7 @@ export function decodeByMessageType(messageType, body) {
         reason: readString(fields, 5),
         correctionKind: readUInt32(fields, 6) || 0,
         reasonCode: readUInt32(fields, 7) || 0,
-        targetPlayerIds: readStringList(fields, 8),
+        targetCharacterIds: readStringList(fields, 8),
         referenceFrameId: readUInt32(fields, 9) || 0
       };
     }
@@ -579,7 +579,7 @@ export function decodeByMessageType(messageType, body) {
       return {
         roomId: readString(fields, 1),
         frameId: readUInt32(fields, 2),
-        playerId: readString(fields, 3),
+        characterId: readString(fields, 3),
         errorCode: readString(fields, 4),
         corrected: fields.get(5) ? decodeEntityTransform(fields.get(5)) : null,
         correctionKind: readUInt32(fields, 6) || 0,

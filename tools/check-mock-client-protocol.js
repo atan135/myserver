@@ -493,7 +493,9 @@ function checkMybevyClientProtocol(expectedMessageTypes) {
   }
 
   const protocolPath = firstExistingPath(clientRoot, [
+    "project/src/game/myserver/protocol.rs",
     "project/src/myserver/protocol.rs",
+    "src/game/myserver/protocol.rs",
     "src/myserver/protocol.rs"
   ]);
   const buildPath = firstExistingPath(clientRoot, ["project/build.rs", "build.rs"]);

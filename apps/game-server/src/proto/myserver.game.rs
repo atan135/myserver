@@ -8,6 +8,7 @@ pub struct AuthReq {
 pub struct AuthRes {
     #[prost(bool, tag = "1")]
     pub ok: bool,
+    /// Account-level player id for login/session ownership.
     #[prost(string, tag = "2")]
     pub player_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
@@ -145,8 +146,9 @@ pub struct GetRoomDataRes {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FrameInput {
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub action: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
@@ -184,8 +186,9 @@ pub struct GameMessagePush {
     pub event: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub room_id: ::prost::alloc::string::String,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "3")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub action: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
@@ -207,8 +210,9 @@ pub struct RoomEndRes {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomMember {
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(bool, tag = "2")]
     pub ready: bool,
     #[prost(bool, tag = "3")]
@@ -222,8 +226,9 @@ pub struct RoomMember {
 pub struct RoomSnapshot {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "2")]
-    pub owner_player_id: ::prost::alloc::string::String,
+    pub owner_character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub state: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
@@ -237,8 +242,9 @@ pub struct RoomSnapshot {
 pub struct EntityTransform {
     #[prost(uint64, tag = "1")]
     pub entity_id: u64,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "2")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(int32, tag = "3")]
     pub scene_id: i32,
     #[prost(float, tag = "4")]
@@ -277,8 +283,9 @@ pub struct MovementSnapshotPush {
     pub correction_kind: i32,
     #[prost(enumeration = "MovementCorrectionReason", tag = "7")]
     pub reason_code: i32,
+    /// Character ids targeted by this correction push. Empty means broadcast.
     #[prost(string, repeated, tag = "8")]
-    pub target_player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub target_character_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint32, tag = "9")]
     pub reference_frame_id: u32,
 }
@@ -288,8 +295,9 @@ pub struct MovementRejectPush {
     pub room_id: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
     pub frame_id: u32,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "3")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub error_code: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
@@ -356,11 +364,9 @@ pub struct RoomJoinAsObserverRes {
     #[prost(message, optional, tag = "10")]
     pub movement_recovery: ::core::option::Option<MovementRecoveryState>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RoomReconnectReq {
-    #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
-}
+/// Reconnect uses the authenticated ticket-bound character; no identity is supplied by the client.
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RoomReconnectReq {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomReconnectRes {
     #[prost(bool, tag = "1")]
@@ -411,8 +417,9 @@ pub struct AuthorityEndpoint {
     pub kind: i32,
     #[prost(string, tag = "2")]
     pub authority_id: ::prost::alloc::string::String,
+    /// Ticket-bound gameplay character id when authority is character-scoped.
     #[prost(string, tag = "3")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub host: ::prost::alloc::string::String,
     #[prost(uint32, tag = "5")]
@@ -426,8 +433,9 @@ pub struct AuthorityEndpoint {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuthorityInput {
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
     pub frame_id: u32,
     #[prost(string, tag = "3")]
@@ -443,10 +451,11 @@ pub struct AuthoritySnapshot {
     pub authority_epoch: u64,
     #[prost(uint32, tag = "3")]
     pub frame_id: u32,
+    /// Ticket-bound gameplay character id for the current authority holder.
     #[prost(string, tag = "4")]
-    pub authority_player_id: ::prost::alloc::string::String,
+    pub authority_character_id: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "5")]
-    pub player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub character_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "6")]
     pub game_state_json: ::prost::alloc::string::String,
     #[prost(string, tag = "7")]
@@ -507,8 +516,9 @@ pub struct RoomTransferPayload {
     pub room_version: u64,
     #[prost(string, tag = "4")]
     pub policy_id: ::prost::alloc::string::String,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "5")]
-    pub owner_player_id: ::prost::alloc::string::String,
+    pub owner_character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub room_phase: ::prost::alloc::string::String,
     #[prost(uint32, tag = "7")]
@@ -776,8 +786,9 @@ pub struct RequestServerShutdownRes {
 pub struct RoomMemberOfflinePush {
     #[prost(string, tag = "1")]
     pub room_id: ::prost::alloc::string::String,
+    /// Ticket-bound gameplay character id.
     #[prost(string, tag = "2")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub offline: bool,
 }
@@ -788,7 +799,7 @@ pub struct CreateMatchedRoomReq {
     #[prost(string, tag = "2")]
     pub room_id: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "3")]
-    pub player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub character_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "4")]
     pub mode: ::prost::alloc::string::String,
 }
@@ -800,6 +811,7 @@ pub struct CreateMatchedRoomRes {
     pub room_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub error_code: ::prost::alloc::string::String,
+    /// Snapshot uses character ids for members and ownership.
     #[prost(message, optional, tag = "4")]
     pub snapshot: ::core::option::Option<RoomSnapshot>,
 }

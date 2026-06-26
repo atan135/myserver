@@ -5,7 +5,7 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchStartReq {
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     /// "1v1", "3v3", "5v5"
     #[prost(string, tag = "2")]
     pub mode: ::prost::alloc::string::String,
@@ -28,7 +28,7 @@ pub struct MatchStartRes {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchCancelReq {
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub match_id: ::prost::alloc::string::String,
 }
@@ -45,7 +45,7 @@ pub struct MatchCancelRes {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchStatusReq {
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchStatusRes {
@@ -70,7 +70,7 @@ pub struct MatchStatusRes {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchEventStreamReq {
     #[prost(string, tag = "1")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MatchEvent {
@@ -96,7 +96,7 @@ pub struct CreateRoomAndJoinReq {
     #[prost(string, tag = "2")]
     pub room_id: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "3")]
-    pub player_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub character_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "4")]
     pub mode: ::prost::alloc::string::String,
 }
@@ -115,7 +115,7 @@ pub struct PlayerJoinedReq {
     #[prost(string, tag = "1")]
     pub match_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub room_id: ::prost::alloc::string::String,
 }
@@ -134,7 +134,7 @@ pub struct PlayerLeftReq {
     #[prost(string, tag = "1")]
     pub match_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub player_id: ::prost::alloc::string::String,
+    pub character_id: ::prost::alloc::string::String,
     /// "normal", "disconnect", "kicked"
     #[prost(string, tag = "3")]
     pub reason: ::prost::alloc::string::String,

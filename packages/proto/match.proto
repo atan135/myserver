@@ -40,7 +40,7 @@ service MatchInternal {
 // MatchStart
 // ============================================================
 message MatchStartReq {
-  string player_id = 1;
+  string character_id = 1;
   string mode = 2;           // "1v1", "3v3", "5v5"
   int32 rank_tier = 3;       // 预留：段位（暂不使用）
 }
@@ -55,7 +55,7 @@ message MatchStartRes {
 // MatchCancel
 // ============================================================
 message MatchCancelReq {
-  string player_id = 1;
+  string character_id = 1;
   string match_id = 2;
 }
 
@@ -68,7 +68,7 @@ message MatchCancelRes {
 // MatchStatus
 // ============================================================
 message MatchStatusReq {
-  string player_id = 1;
+  string character_id = 1;
 }
 
 message MatchStatusRes {
@@ -83,7 +83,7 @@ message MatchStatusRes {
 // MatchEventStream
 // ============================================================
 message MatchEventStreamReq {
-  string player_id = 1;
+  string character_id = 1;
 }
 
 message MatchEvent {
@@ -100,7 +100,7 @@ message MatchEvent {
 message CreateRoomAndJoinReq {
   string match_id = 1;
   string room_id = 2;
-  repeated string player_ids = 3;
+  repeated string character_ids = 3;
   string mode = 4;
 }
 
@@ -114,7 +114,7 @@ message CreateRoomAndJoinRes {
 // ============================================================
 message PlayerJoinedReq {
   string match_id = 1;
-  string player_id = 2;
+  string character_id = 2;
   string room_id = 3;
 }
 
@@ -128,7 +128,7 @@ message PlayerJoinedRes {
 // ============================================================
 message PlayerLeftReq {
   string match_id = 1;
-  string player_id = 2;
+  string character_id = 2;
   string reason = 3;  // "normal", "disconnect", "kicked"
 }
 

@@ -13,6 +13,7 @@ message AuthReq {
 
 message AuthRes {
   bool ok = 1;
+  // Account-level player id for login/session ownership.
   string player_id = 2;
   string error_code = 3;
 }
@@ -133,7 +134,8 @@ message GetRoomDataRes {
 }
 
 message FrameInput {
-  string player_id = 1;
+  // Ticket-bound gameplay character id.
+  string character_id = 1;
   string action = 2;
   string payload_json = 3;
   uint32 frame_id = 4;
@@ -157,7 +159,8 @@ message RoomFrameRatePush {
 message GameMessagePush {
   string event = 1;
   string room_id = 2;
-  string player_id = 3;
+  // Ticket-bound gameplay character id.
+  string character_id = 3;
   string action = 4;
   string payload_json = 5;
 }
@@ -173,7 +176,8 @@ message RoomEndRes {
 }
 
 message RoomMember {
-  string player_id = 1;
+  // Ticket-bound gameplay character id.
+  string character_id = 1;
   bool ready = 2;
   bool is_owner = 3;
   bool offline = 4;
@@ -182,7 +186,8 @@ message RoomMember {
 
 message RoomSnapshot {
   string room_id = 1;
-  string owner_player_id = 2;
+  // Ticket-bound gameplay character id.
+  string owner_character_id = 2;
   string state = 3;
   repeated RoomMember members = 4;
   uint32 current_frame_id = 5;
@@ -191,7 +196,8 @@ message RoomSnapshot {
 
 message EntityTransform {
   uint64 entity_id = 1;
-  string player_id = 2;
+  // Ticket-bound gameplay character id.
+  string character_id = 2;
   int32 scene_id = 3;
   float x = 4;
   float y = 5;
@@ -214,14 +220,16 @@ message MovementSnapshotPush {
   string reason = 5;
   MovementCorrectionKind correction_kind = 6;
   MovementCorrectionReason reason_code = 7;
-  repeated string target_player_ids = 8;
+  // Character ids targeted by this correction push. Empty means broadcast.
+  repeated string target_character_ids = 8;
   uint32 reference_frame_id = 9;
 }
 
 message MovementRejectPush {
   string room_id = 1;
   uint32 frame_id = 2;
-  string player_id = 3;
+  // Ticket-bound gameplay character id.
+  string character_id = 3;
   string error_code = 4;
   EntityTransform corrected = 5;
   MovementCorrectionKind correction_kind = 6;
@@ -261,9 +269,8 @@ message RoomJoinAsObserverRes {
   MovementRecoveryState movement_recovery = 10;
 }
 
-message RoomReconnectReq {
-  string player_id = 1;
-}
+// Reconnect uses the authenticated ticket-bound character; no identity is supplied by the client.
+message RoomReconnectReq {}
 
 message RoomReconnectRes {
   bool ok = 1;
@@ -309,7 +316,8 @@ enum AuthorityKind {
 message AuthorityEndpoint {
   AuthorityKind kind = 1;
   string authority_id = 2;
-  string player_id = 3;
+  // Ticket-bound gameplay character id when authority is character-scoped.
+  string character_id = 3;
   string host = 4;
   uint32 port = 5;
   string transport = 6;
@@ -318,7 +326,8 @@ message AuthorityEndpoint {
 }
 
 message AuthorityInput {
-  string player_id = 1;
+  // Ticket-bound gameplay character id.
+  string character_id = 1;
   uint32 frame_id = 2;
   string action = 3;
   string payload_json = 4;
@@ -328,8 +337,9 @@ message AuthoritySnapshot {
   string room_id = 1;
   uint64 authority_epoch = 2;
   uint32 frame_id = 3;
-  string authority_player_id = 4;
-  repeated string player_ids = 5;
+  // Ticket-bound gameplay character id for the current authority holder.
+  string authority_character_id = 4;
+  repeated string character_ids = 5;
   string game_state_json = 6;
   string checksum = 7;
 }
@@ -366,7 +376,8 @@ message RoomTransferPayload {
   string room_id = 2;
   uint64 room_version = 3;
   string policy_id = 4;
-  string owner_player_id = 5;
+  // Ticket-bound gameplay character id.
+  string owner_character_id = 5;
   string room_phase = 6;
   uint32 current_frame_id = 7;
   uint32 last_applied_frame_id = 8;
@@ -530,14 +541,15 @@ message RequestServerShutdownRes {
 
 message RoomMemberOfflinePush {
   string room_id = 1;
-  string player_id = 2;
+  // Ticket-bound gameplay character id.
+  string character_id = 2;
   bool offline = 3;
 }
 
 message CreateMatchedRoomReq {
   string match_id = 1;
   string room_id = 2;
-  repeated string player_ids = 3;
+  repeated string character_ids = 3;
   string mode = 4;
 }
 
@@ -545,6 +557,7 @@ message CreateMatchedRoomRes {
   bool ok = 1;
   string room_id = 2;
   string error_code = 3;
+  // Snapshot uses character ids for members and ownership.
   RoomSnapshot snapshot = 4;
 }
 
