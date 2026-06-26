@@ -31,6 +31,7 @@
 # --title-id <id>            character-titles-debug 授予/装备的称号 ID (默认 9001)
 # --discipline-id <id>       character-disciplines-debug 设置的职业 ID (默认 forging)
 # --discipline-tier <tier>   character-disciplines-debug 设置的职业阶位 (默认 novice)
+# --discipline-points <n>    character-disciplines-debug 设置的职业点数 (默认 1)
 # --title-change-reason <text> 称号/职业 debug 写入日志的原因
 # --title-debug-token <token> 称号/职业 debug token；默认读取 MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN 或 GAME_ADMIN_TOKEN
 # --json-output              输出机器可读 JSON，便于测试脚本断言
@@ -101,15 +102,24 @@ node tools/mock-client/src/index.js --scenario character-room-join --http-base-u
 # 需要玩家 ticket + GAME_ADMIN_TOKEN / --element-debug-token，仅用于测试或 GM 调试。
 node tools/mock-client/src/index.js --scenario character-elements-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --element-affinity-earth-delta -100 --element-affinity-fire-delta 100 --element-mastery-fire-delta 10 --element-debug-token "%GAME_ADMIN_TOKEN%" --json-output
 
-# 0.7 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
+# 0.7 查询、debug 授予并装备角色称号 (CHARACTER_TITLES_DEBUG)
+# 需要玩家 ticket + GAME_ADMIN_TOKEN / --title-debug-token，仅用于测试或 GM 调试。
+node tools/mock-client/src/index.js --scenario character-titles-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --title-id 9001 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+
+# 0.8 设置职业阶位并触发称号解锁检查 (CHARACTER_DISCIPLINES_DEBUG)
+# --discipline-points 默认 1；输出包含 before/action/after/unlockedTitles/equippedTitle/discipline/request。
+node tools/mock-client/src/index.js --scenario character-disciplines-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --discipline-id forging --discipline-tier novice --discipline-points 1 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+
+# 0.9 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
 node tools/mock-client/src/index.js --scenario character-duplicate-name --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --json-output
 
-# 0.8 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
+# 0.10 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
 node tools/mock-client/src/index.js --scenario character-limit --http-base-url http://127.0.0.1:3000 --login-name fresh_limit_account --password Passw0rd! --character-name-prefix Limit --json-output
 
 # 提示：无角色账号直接执行 happy/get-room-data 等进游戏场景会提示先创建或选择角色，不会直接进入游戏。
 # 可传 --character-id 指定已有角色，或传 --auto-create-character / --create-character-if-missing 自动创建后继续联调。
-# 真实客户端应按 messageType + seq 处理四属性查询响应，并把四属性查询结果或后续变化推送作为异步状态更新。
+# 真实客户端应按 messageType + seq 处理四属性、称号和职业阶位查询响应，并把查询结果或后续变化推送作为异步状态更新。
+# 称号与职业阶位手动验收依赖见 docs/游戏服与接入层/角色体系与四属性设计.md；启动服务或执行真实联调前必须先由用户确认。
 
 # ---------- 基础流程 ----------
 

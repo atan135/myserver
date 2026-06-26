@@ -307,10 +307,11 @@ node tools/mock-client/src/index.js --scenario character-disciplines-debug \
   --character-id chr_0000000000001 \
   --discipline-id forging \
   --discipline-tier novice \
+  --discipline-points 1 \
   --title-debug-token "$GAME_ADMIN_TOKEN" \
   --json-output
 
-`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle` 和 `discipline`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。
+`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md` 的 P2 手动联调步骤；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -428,6 +429,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--title-id` | `character-titles-debug` 授予/装备的称号 ID | `9001` |
 | `--discipline-id` | `character-disciplines-debug` 设置的职业 ID | `forging` |
 | `--discipline-tier` | `character-disciplines-debug` 设置的职业阶位 | `novice` |
+| `--discipline-points` | `character-disciplines-debug` 设置的职业点数 | `1` |
 | `--title-change-reason` | 称号/职业 debug 写入日志的原因 | `mock-client character title debug` |
 | `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |

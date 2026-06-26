@@ -190,6 +190,37 @@ mod tests {
     }
 
     #[test]
+    fn title_table_accepts_base_sample_titles() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("csv/TitleTable.csv");
+        let table = TitleTable::load_from_csv(&path).expect("sample TitleTable.csv should load");
+        validate_title_table(&table).expect("sample TitleTable.csv should validate");
+
+        for title_id in [1001, 2001, 3001, 9001] {
+            assert!(
+                table.get(title_id).is_some(),
+                "sample TitleTable.csv should include title {title_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_table_rejects_duplicate_title_id() {
+        let fixture = TempCsvFile::new(
+            "TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder\n\
+             int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int\n\
+             1,测试称号A,,identity,,,{}, {},common,icon,#fff,test,0,0,1\n\
+             1,测试称号B,,identity,,,{}, {},common,icon,#fff,test,0,0,2\n",
+        );
+
+        let error = TitleTable::load_from_csv(fixture.path())
+            .expect_err("duplicate TitleId should be rejected during csv load");
+        assert!(
+            error.to_string().contains("duplicate id 1"),
+            "error `{error}` should mention duplicate id"
+        );
+    }
+
+    #[test]
     fn title_table_rejects_missing_name() {
         assert_invalid(
             "TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder\n\
