@@ -205,19 +205,25 @@ impl std::error::Error for CharacterElementError {}
 
 #[derive(Clone)]
 pub struct CharacterElementService {
-    store: PgCharacterElementStore,
+    store: CharacterElementStore,
 }
 
 impl CharacterElementService {
     pub fn new(store: PgCharacterElementStore) -> Self {
-        Self { store }
+        Self {
+            store: CharacterElementStore::Pg(store),
+        }
     }
 
     pub async fn get_elements_for_identity(
         &self,
         identity: &AuthenticatedSessionIdentity,
     ) -> Result<CharacterElements, CharacterElementError> {
-        self.store.get(&identity.character_id).await
+        match &self.store {
+            CharacterElementStore::Pg(store) => store.get(&identity.character_id).await,
+            #[cfg(test)]
+            CharacterElementStore::Memory(store) => store.lock().await.get(&identity.character_id),
+        }
     }
 
     pub async fn apply_change(
@@ -227,14 +233,52 @@ impl CharacterElementService {
         source: CharacterElementChangeSource,
         reason: Option<&str>,
     ) -> Result<CharacterElementApplyResult, CharacterElementError> {
-        self.store
-            .apply_change(character_id, change, source, reason)
-            .await
+        match &self.store {
+            CharacterElementStore::Pg(store) => {
+                store
+                    .apply_change(character_id, change, source, reason)
+                    .await
+            }
+            #[cfg(test)]
+            CharacterElementStore::Memory(store) => {
+                store
+                    .lock()
+                    .await
+                    .apply_change(character_id, change, source, reason)
+            }
+        }
     }
 
     pub async fn close(&self) {
-        self.store.close().await;
+        match &self.store {
+            CharacterElementStore::Pg(store) => store.close().await,
+            #[cfg(test)]
+            CharacterElementStore::Memory(_) => {}
+        }
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_in_memory() -> Self {
+        Self {
+            store: CharacterElementStore::Memory(std::sync::Arc::new(tokio::sync::Mutex::new(
+                MemoryCharacterElementStore::default(),
+            ))),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_elements(&self, elements: CharacterElements) {
+        if let CharacterElementStore::Memory(store) = &self.store {
+            store.lock().await.set(elements);
+        }
+    }
+}
+
+#[derive(Clone)]
+enum CharacterElementStore {
+    Pg(PgCharacterElementStore),
+    #[cfg(test)]
+    Memory(std::sync::Arc<tokio::sync::Mutex<MemoryCharacterElementStore>>),
 }
 
 #[derive(Clone)]
@@ -564,6 +608,43 @@ fn validate_mastery(mastery: ElementValues) -> Result<(), CharacterElementError>
 fn map_db_error(error: sqlx::Error) -> CharacterElementError {
     CharacterElementError::DbError {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MemoryCharacterElementStore {
+    values: std::collections::BTreeMap<String, CharacterElements>,
+}
+
+#[cfg(test)]
+impl MemoryCharacterElementStore {
+    fn set(&mut self, elements: CharacterElements) {
+        self.values.insert(elements.character_id.clone(), elements);
+    }
+
+    fn get(&self, character_id: &str) -> Result<CharacterElements, CharacterElementError> {
+        self.values
+            .get(character_id)
+            .cloned()
+            .ok_or(CharacterElementError::CharacterNotFound)
+    }
+
+    fn apply_change(
+        &mut self,
+        character_id: &str,
+        change: CharacterElementChange,
+        _source: CharacterElementChangeSource,
+        _reason: Option<&str>,
+    ) -> Result<CharacterElementApplyResult, CharacterElementError> {
+        let before = self.get(character_id)?;
+        let after = before.apply_change(change)?;
+        self.values.insert(character_id.to_string(), after.clone());
+        Ok(CharacterElementApplyResult {
+            character_id: character_id.to_string(),
+            before,
+            after,
+        })
     }
 }
 

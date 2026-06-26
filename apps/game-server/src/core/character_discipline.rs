@@ -169,7 +169,7 @@ impl DisciplineService {
     }
 
     #[cfg(test)]
-    fn new_in_memory() -> Self {
+    pub(crate) fn new_in_memory() -> Self {
         Self {
             store: DisciplineStore::Memory(std::sync::Arc::new(tokio::sync::Mutex::new(
                 MemoryDisciplineStore::default(),

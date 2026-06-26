@@ -373,7 +373,7 @@ impl TitleService {
     }
 
     #[cfg(test)]
-    fn new_in_memory(title_table: Arc<TitleTable>) -> Self {
+    pub(crate) fn new_in_memory(title_table: Arc<TitleTable>) -> Self {
         Self {
             store: TitleStore::Memory(Arc::new(tokio::sync::Mutex::new(
                 MemoryTitleStore::default(),
@@ -383,10 +383,23 @@ impl TitleService {
     }
 
     #[cfg(test)]
-    async fn logs(&self) -> Vec<TitleLogEntry> {
+    pub(crate) async fn logs(&self) -> Vec<TitleLogEntry> {
         match &self.store {
             TitleStore::Memory(store) => store.lock().await.logs.clone(),
             TitleStore::Pg(_) => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn mark_expired_for_test(&self, character_id: &str, title_id: &str) {
+        if let TitleStore::Memory(store) = &self.store {
+            let mut store = store.lock().await;
+            let title = store
+                .values
+                .get_mut(&(character_id.to_string(), title_id.to_string()))
+                .expect("test title should exist");
+            title.expired = true;
+            title.expires_at = Some("expired".to_string());
         }
     }
 }
@@ -1008,17 +1021,17 @@ fn map_db_error(error: sqlx::Error) -> TitleError {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TitleLogEntry {
-    character_id: String,
-    title_id: String,
-    action: String,
-    source_type: Option<String>,
-    source_id: Option<String>,
-    operator_type: Option<String>,
-    operator_id: Option<String>,
-    before_json: Option<Value>,
-    after_json: Option<Value>,
-    reason: Option<String>,
+pub(crate) struct TitleLogEntry {
+    pub(crate) character_id: String,
+    pub(crate) title_id: String,
+    pub(crate) action: String,
+    pub(crate) source_type: Option<String>,
+    pub(crate) source_id: Option<String>,
+    pub(crate) operator_type: Option<String>,
+    pub(crate) operator_id: Option<String>,
+    pub(crate) before_json: Option<Value>,
+    pub(crate) after_json: Option<Value>,
+    pub(crate) reason: Option<String>,
 }
 
 #[cfg(test)]

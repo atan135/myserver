@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
 use crate::core::character_element::{CharacterElementService, PgCharacterElementStore};
 use crate::core::character_title::{PgTitleStore, TitleService};
+use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
@@ -500,6 +501,16 @@ pub async fn run(
     let discipline_store = PgDisciplineStore::new(config).await?;
     let title_store = PgTitleStore::new(config).await?;
     let title_config_tables = config_tables.clone();
+    let title_unlock_config_tables = config_tables.clone();
+    let character_element_service = CharacterElementService::new(character_element_store);
+    let discipline_service = DisciplineService::new(discipline_store);
+    let title_service = TitleService::new(title_store, title_config_tables);
+    let title_unlock_service = TitleUnlockService::new(
+        title_service.clone(),
+        discipline_service.clone(),
+        character_element_service.clone(),
+        title_unlock_config_tables,
+    );
 
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
@@ -512,9 +523,10 @@ pub async fn run(
         config_tables,
         item_uid_generator,
         player_manager: PlayerManager::new(db_player_store),
-        character_element_service: CharacterElementService::new(character_element_store),
-        discipline_service: DisciplineService::new(discipline_store),
-        title_service: TitleService::new(title_store, title_config_tables),
+        character_element_service,
+        discipline_service,
+        title_service,
+        title_unlock_service,
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),

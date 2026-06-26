@@ -998,6 +998,24 @@ mod tests {
             3600,
         ));
         let title_config_tables = config_tables.clone();
+        let title_unlock_config_tables = config_tables.clone();
+        let character_element_service =
+            crate::core::character_element::CharacterElementService::new(
+                crate::core::character_element::PgCharacterElementStore::new_disabled(),
+            );
+        let discipline_service = crate::core::character_discipline::DisciplineService::new(
+            crate::core::character_discipline::PgDisciplineStore::new_disabled(),
+        );
+        let title_service = crate::core::character_title::TitleService::new(
+            crate::core::character_title::PgTitleStore::new_disabled(),
+            title_config_tables,
+        );
+        let title_unlock_service = crate::core::character_title_unlock::TitleUnlockService::new(
+            title_service.clone(),
+            discipline_service.clone(),
+            character_element_service.clone(),
+            title_unlock_config_tables,
+        );
 
         ServiceContext {
             config: config.clone(),
@@ -1010,16 +1028,10 @@ mod tests {
             config_tables,
             item_uid_generator: crate::core::global_id::ItemUidGenerator::new_for_test(1),
             player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
-            character_element_service: crate::core::character_element::CharacterElementService::new(
-                crate::core::character_element::PgCharacterElementStore::new_disabled(),
-            ),
-            discipline_service: crate::core::character_discipline::DisciplineService::new(
-                crate::core::character_discipline::PgDisciplineStore::new_disabled(),
-            ),
-            title_service: crate::core::character_title::TitleService::new(
-                crate::core::character_title::PgTitleStore::new_disabled(),
-                title_config_tables,
-            ),
+            character_element_service,
+            discipline_service,
+            title_service,
+            title_unlock_service,
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),
