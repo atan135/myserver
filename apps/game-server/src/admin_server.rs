@@ -1980,7 +1980,7 @@ async fn push_item_obtain_if_online(
     source: &str,
 ) -> Result<(), std::io::Error> {
     room_manager
-        .send_to_player(
+        .send_to_character(
             character_id,
             MessageType::ItemObtainPush,
             encode_body(&ItemObtainPush {
@@ -1997,7 +1997,7 @@ async fn push_inventory_update_if_online(
     player_data: &crate::core::inventory::PlayerData,
 ) -> Result<(), std::io::Error> {
     room_manager
-        .send_to_player(
+        .send_to_character(
             character_id,
             MessageType::InventoryUpdatePush,
             encode_body(&InventoryUpdatePush {

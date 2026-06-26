@@ -9,21 +9,21 @@ use crate::protocol::{MessageType, encode_body};
 pub fn decide_corrections(
     state: &mut RoomMovementState,
     frame_id: u32,
-    all_player_ids: &[String],
+    all_character_ids: &[String],
     result: &SimulationTickResult,
 ) -> Vec<MovementCorrectionEnvelope> {
     let mut corrections = Vec::new();
     let mut targeted_characters = std::collections::BTreeSet::new();
 
     for reject in &result.rejects {
-        targeted_characters.insert(reject.player_id.clone());
+        targeted_characters.insert(reject.character_id.clone());
         corrections.push(
             state.strong_correction(
                 frame_id,
                 MovementCorrectionReason::try_from(reject.reason_code)
                     .unwrap_or(MovementCorrectionReason::MovementRejected),
-                vec![reject.player_id.clone()],
-                state.targets_for_character(&reject.player_id),
+                vec![reject.character_id.clone()],
+                state.targets_for_character(&reject.character_id),
             ),
         );
     }
@@ -32,21 +32,21 @@ pub fn decide_corrections(
         corrections.push(state.incremental_correction(
             frame_id,
             MovementCorrectionReason::ControlTimeout,
-            all_player_ids.to_vec(),
+            all_character_ids.to_vec(),
             result.control_timeout_entities.clone(),
         ));
     }
 
     for drift in &result.drifted_players {
-        if targeted_characters.contains(&drift.player_id) {
+        if targeted_characters.contains(&drift.character_id) {
             continue;
         }
-        targeted_characters.insert(drift.player_id.clone());
+        targeted_characters.insert(drift.character_id.clone());
         corrections.push(state.strong_correction(
             frame_id,
             MovementCorrectionReason::ClientDrift,
-            vec![drift.player_id.clone()],
-            state.targets_for_character(&drift.player_id),
+            vec![drift.character_id.clone()],
+            state.targets_for_character(&drift.character_id),
         ));
     }
 
@@ -54,7 +54,7 @@ pub fn decide_corrections(
         corrections.push(state.incremental_correction(
             frame_id,
             MovementCorrectionReason::Periodic,
-            all_player_ids.to_vec(),
+            all_character_ids.to_vec(),
             result.changed_entities.clone(),
         ));
     }
@@ -94,7 +94,7 @@ pub fn reject_broadcast(
     let message = MovementRejectPush {
         room_id: room_id.to_string(),
         frame_id,
-        character_id: reject.player_id.clone(),
+        character_id: reject.character_id.clone(),
         error_code: reject.error_code.clone(),
         corrected: Some(reject.corrected.clone()),
         correction_kind: MovementCorrectionKind::Strong as i32,
@@ -113,7 +113,7 @@ pub fn reject_broadcast(
     RoomLogicBroadcast::broadcast_to_characters(
         MessageType::MovementRejectPush,
         encode_body(&message),
-        vec![reject.player_id.clone()],
+        vec![reject.character_id.clone()],
     )
 }
 

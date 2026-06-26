@@ -995,7 +995,7 @@ where
                             session_id = connection.session.id,
                             account_player_id = %account_player_id,
                             error = %error,
-                            "failed to queue player message rate exceeded error"
+                            "failed to queue client message rate exceeded error"
                         );
                         break;
                     }

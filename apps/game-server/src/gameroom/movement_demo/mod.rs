@@ -70,7 +70,7 @@ impl MovementDemoLogic {
         }
     }
 
-    fn spawn_player_if_needed(&mut self, character_id: &str) {
+    fn spawn_character_if_needed(&mut self, character_id: &str) {
         let Some(config_tables) = self.config_tables.as_ref() else {
             return;
         };
@@ -100,7 +100,7 @@ impl MovementDemoLogic {
             return;
         };
 
-        movement_state.spawn_player(character_id, spawn, DEFAULT_MOVE_SPEED);
+        movement_state.spawn_character(character_id, spawn, DEFAULT_MOVE_SPEED);
         info!(
             room_id = self.room_id,
             character_id,
@@ -125,12 +125,12 @@ impl RoomLogic for MovementDemoLogic {
         {
             self.recipients.push(character_id.to_string());
         }
-        self.spawn_player_if_needed(character_id);
+        self.spawn_character_if_needed(character_id);
     }
 
     fn on_character_leave(&mut self, character_id: &str) {
         if let Some(movement_state) = self.movement_state.as_mut() {
-            movement_state.remove_player(character_id);
+            movement_state.remove_character(character_id);
         }
         self.recipients.retain(|existing| existing != character_id);
     }
@@ -143,7 +143,7 @@ impl RoomLogic for MovementDemoLogic {
         let frame_id = movement_state
             .last_snapshot_frame
             .max(self.tick_count as u32);
-        let Some(corrected) = movement_state.stop_player(character_id, frame_id) else {
+        let Some(corrected) = movement_state.stop_character(character_id, frame_id) else {
             return;
         };
 
@@ -189,7 +189,7 @@ impl RoomLogic for MovementDemoLogic {
             info!(
                 room_id = self.room_id,
                 frame_id,
-                character_id = reject.player_id,
+                character_id = reject.character_id,
                 error_code = reject.error_code,
                 "movement input rejected"
             );

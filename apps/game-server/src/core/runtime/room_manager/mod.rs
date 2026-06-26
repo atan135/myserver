@@ -280,7 +280,7 @@ fn room_rollout_route_status(room: &Room, owner_server_id: &str) -> RoomRouteSta
 
 fn log_room_entered_transferable_empty_candidate(
     room: &Room,
-    trigger_player_id: &str,
+    trigger_character_id: &str,
     trigger_action: &'static str,
 ) {
     let online_member_count = room
@@ -301,7 +301,7 @@ fn log_room_entered_transferable_empty_candidate(
             .map(|empty_since| empty_since.elapsed().as_millis() as u64)
             .unwrap_or_default(),
         room_version = room.transfer_state.room_version,
-        trigger_player_id = %trigger_player_id,
+        trigger_character_id = %trigger_character_id,
         trigger_action = trigger_action,
         "room entered empty transferable candidate state"
     );

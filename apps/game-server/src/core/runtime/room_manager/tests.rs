@@ -310,7 +310,7 @@ fn drain_messages_of_type(
     messages
 }
 
-fn combat_demo_entity_by_player<'a>(
+fn combat_demo_entity_by_character<'a>(
     game_state: &'a serde_json::Value,
     character_id: &str,
 ) -> &'a serde_json::Value {
@@ -319,7 +319,7 @@ fn combat_demo_entity_by_player<'a>(
         .expect("combat demo snapshot should contain entities")
         .iter()
         .find(|entity| entity["character_id"].as_str() == Some(character_id))
-        .expect("combat demo player entity should exist")
+        .expect("combat demo character entity should exist")
 }
 
 #[tokio::test]
@@ -1474,12 +1474,18 @@ async fn movement_demo_transfer_restores_movement_payload_consistently() {
     assert_eq!(movement_json["last_snapshot_frame"], 1);
     assert_eq!(movement_json["last_full_sync_frame"], 0);
     assert_eq!(movement_json["movement_control_stop_frames"], 3);
+    assert!(movement_json.get("latest_client_state_by_player").is_none());
+    assert!(
+        movement_json
+            .get("missing_control_frames_by_player")
+            .is_none()
+    );
     assert_eq!(
-        movement_json["latest_client_state_by_player"][0]["character_id"],
+        movement_json["latest_client_state_by_character"][0]["character_id"],
         "player-a"
     );
     assert_eq!(
-        movement_json["missing_control_frames_by_player"][0]["frame_id"],
+        movement_json["missing_control_frames_by_character"][0]["frame_id"],
         1
     );
     assert_eq!(movement_json["entities"][0]["character_id"], "player-a");
@@ -1653,7 +1659,7 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
             "player-a",
             2,
             "combat_apply_buff",
-            "{\"buffId\":2,\"targetPlayerId\":\"player-b\",\"durationFrames\":77}",
+            "{\"buffId\":2,\"targetCharacterId\":\"player-b\",\"durationFrames\":77}",
         )
         .await
         .unwrap();
@@ -1667,7 +1673,7 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
             "player-a",
             3,
             "combat_cast_skill",
-            "{\"skillId\":2,\"targetPlayerId\":\"player-b\"}",
+            "{\"skillId\":2,\"targetCharacterId\":\"player-b\"}",
         )
         .await
         .unwrap();
@@ -1676,7 +1682,7 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
         serde_json::from_str::<serde_json::Value>(&room.snapshot().game_state).unwrap()
     })
     .await;
-    let source_player_b = combat_demo_entity_by_player(&source_game_state, "player-b");
+    let source_player_b = combat_demo_entity_by_character(&source_game_state, "player-b");
     let source_player_b_hp = source_player_b["hp"].as_i64().unwrap();
     source
         .disconnect_room_member("room-combat-transfer", "player-a")
@@ -1715,8 +1721,9 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
     assert_eq!(combat_json["pending_events_replayed"], false);
     assert!(combat_json.get("pending_events").is_none());
     assert_eq!(combat_json["entities"].as_array().unwrap().len(), 4);
+    assert!(combat_json.get("player_entity_map").is_none());
     assert_eq!(
-        combat_json["player_entity_map"],
+        combat_json["character_entity_map"],
         serde_json::json!([
             {"character_id": "player-a", "entity_id": 1},
             {"character_id": "player-b", "entity_id": 2}
@@ -1839,7 +1846,7 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
         assert_eq!(advanced_game_state["tick_count"], 3);
         assert_eq!(advanced_game_state["next_snapshot_frame"], 5);
         assert_eq!(advanced_game_state["snapshot"]["frame_id"], 3);
-        let player_a = combat_demo_entity_by_player(&advanced_game_state, "player-a");
+        let player_a = combat_demo_entity_by_character(&advanced_game_state, "player-a");
         let fireball = player_a["skills"]
             .as_array()
             .unwrap()
@@ -1847,7 +1854,7 @@ async fn combat_demo_transfer_restores_combat_payload_consistently() {
             .find(|skill| skill["skill_id"] == 2)
             .expect("fireball skill should exist");
         assert_eq!(fireball["cooldown_remaining"], 90);
-        let player_b = combat_demo_entity_by_player(&advanced_game_state, "player-b");
+        let player_b = combat_demo_entity_by_character(&advanced_game_state, "player-b");
         assert!(player_b["hp"].as_i64().unwrap() < source_player_b_hp);
         assert_eq!(player_b["buffs"][0]["buff_id"], 2);
         assert_eq!(player_b["buffs"][0]["duration_remaining"], 75);
@@ -3147,7 +3154,7 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
 }
 
 #[tokio::test]
-async fn send_to_player_uses_index_and_self_heals_stale_entry() {
+async fn send_to_character_uses_index_and_self_heals_stale_entry() {
     let factory = RecordingRoomLogicFactory::default();
     let manager = RoomManager::with_match_client(
         crate::match_client::create_match_client_shared(),
@@ -3167,12 +3174,12 @@ async fn send_to_player_uses_index_and_self_heals_stale_entry() {
     while rx.try_recv().is_ok() {}
 
     manager
-        .send_to_player("player-a", MessageType::GameMessagePush, vec![1, 2, 3])
+        .send_to_character("player-a", MessageType::GameMessagePush, vec![1, 2, 3])
         .await
         .unwrap();
     let delivered = rx
         .try_recv()
-        .expect("indexed player should receive message");
+        .expect("indexed character should receive message");
     assert_eq!(delivered.message_type, MessageType::GameMessagePush);
     assert_eq!(delivered.body, vec![1, 2, 3]);
 
@@ -3181,7 +3188,7 @@ async fn send_to_player_uses_index_and_self_heals_stale_entry() {
         rooms.remove("room-test");
     }
     manager
-        .send_to_player("player-a", MessageType::GameMessagePush, vec![4, 5, 6])
+        .send_to_character("player-a", MessageType::GameMessagePush, vec![4, 5, 6])
         .await
         .unwrap();
     assert!(rx.try_recv().is_err());
@@ -3323,7 +3330,7 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
         let manager = Arc::clone(&manager);
         send_handles.push(tokio::spawn(async move {
             manager
-                .send_to_player(
+                .send_to_character(
                     &format!("indexed-player-{room_idx}"),
                     MessageType::GameMessagePush,
                     vec![room_idx as u8],

@@ -25,7 +25,7 @@ type DenseIndex = usize;
 #[derive(Debug, Clone)]
 pub struct CombatEntityBlueprint {
     pub entity_type: EntityType,
-    pub player_id: Option<String>,
+    pub character_id: Option<String>,
     pub team_id: u16,
     pub position: Position,
     pub facing: Position,
@@ -35,10 +35,10 @@ pub struct CombatEntityBlueprint {
 }
 
 impl CombatEntityBlueprint {
-    pub fn player(player_id: &str, team_id: u16, position: Position) -> Self {
+    pub fn player(character_id: &str, team_id: u16, position: Position) -> Self {
         Self {
             entity_type: EntityType::Player,
-            player_id: Some(player_id.to_string()),
+            character_id: Some(character_id.to_string()),
             team_id,
             position,
             facing: Position { x: 1.0, y: 0.0 },
@@ -57,7 +57,7 @@ impl CombatEntityBlueprint {
     pub fn monster(team_id: u16, position: Position) -> Self {
         Self {
             entity_type: EntityType::Monster,
-            player_id: None,
+            character_id: None,
             team_id,
             position,
             facing: Position { x: -1.0, y: 0.0 },
@@ -242,8 +242,7 @@ pub struct CombatBuffSnapshot {
 pub struct CombatEntitySnapshot {
     pub entity_id: EntityId,
     pub entity_type: EntityType,
-    #[serde(rename = "character_id")]
-    pub player_id: Option<String>,
+    pub character_id: Option<String>,
     pub team_id: u16,
     pub alive: bool,
     pub x: f32,
@@ -283,14 +282,13 @@ struct RoomCombatTransferSnapshot {
     move_states: Vec<MoveState>,
     skill_slots: Vec<[SkillSlot; MAX_SKILLS_PER_ENTITY]>,
     buff_slots: Vec<[BuffSlot; MAX_BUFFS_PER_ENTITY]>,
-    player_entity_map: Vec<RoomCombatTransferPlayerEntity>,
+    character_entity_map: Vec<RoomCombatTransferCharacterEntity>,
     pending_skill_requests: Vec<SkillCastRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RoomCombatTransferPlayerEntity {
-    #[serde(rename = "character_id")]
-    player_id: String,
+struct RoomCombatTransferCharacterEntity {
+    character_id: String,
     entity_id: EntityId,
 }
 
@@ -307,7 +305,7 @@ pub struct RoomCombatEcs {
     move_states: Vec<MoveState>,
     skill_slots: Vec<[SkillSlot; MAX_SKILLS_PER_ENTITY]>,
     buff_slots: Vec<[BuffSlot; MAX_BUFFS_PER_ENTITY]>,
-    player_entity_map: HashMap<String, EntityId>,
+    character_entity_map: HashMap<String, EntityId>,
     entity_index_map: HashMap<EntityId, DenseIndex>,
     index_entity_map: Vec<EntityId>,
     pending_events: Vec<CombatEvent>,
@@ -329,7 +327,7 @@ impl RoomCombatEcs {
             move_states: Vec::with_capacity(MAX_ENTITIES),
             skill_slots: Vec::with_capacity(MAX_ENTITIES),
             buff_slots: Vec::with_capacity(MAX_ENTITIES),
-            player_entity_map: HashMap::new(),
+            character_entity_map: HashMap::new(),
             entity_index_map: HashMap::new(),
             index_entity_map: Vec::with_capacity(MAX_ENTITIES),
             pending_events: Vec::new(),
@@ -350,13 +348,13 @@ impl RoomCombatEcs {
         self.entities.len()
     }
 
-    pub fn entity_id_by_player(&self, player_id: &str) -> Option<EntityId> {
-        self.player_entity_map.get(player_id).copied()
+    pub fn entity_id_by_character(&self, character_id: &str) -> Option<EntityId> {
+        self.character_entity_map.get(character_id).copied()
     }
 
-    pub fn entity_player_id(&self, entity_id: EntityId) -> Option<&str> {
+    pub fn entity_character_id(&self, entity_id: EntityId) -> Option<&str> {
         let dense_index = self.dense_index(entity_id)?;
-        self.entities.get(dense_index)?.player_id.as_deref()
+        self.entities.get(dense_index)?.character_id.as_deref()
     }
 
     pub fn entity_position(&self, entity_id: EntityId) -> Option<Position> {
@@ -372,9 +370,9 @@ impl RoomCombatEcs {
             return Err("COMBAT_ENTITY_LIMIT_REACHED");
         }
 
-        if let Some(player_id) = blueprint.player_id.as_ref() {
-            if self.player_entity_map.contains_key(player_id) {
-                return Err("COMBAT_PLAYER_ALREADY_SPAWNED");
+        if let Some(character_id) = blueprint.character_id.as_ref() {
+            if self.character_entity_map.contains_key(character_id) {
+                return Err("COMBAT_CHARACTER_ALREADY_SPAWNED");
             }
         }
 
@@ -385,7 +383,7 @@ impl RoomCombatEcs {
         self.entities.push(EntityMeta {
             entity_id,
             entity_type: blueprint.entity_type,
-            player_id: blueprint.player_id.clone(),
+            character_id: blueprint.character_id.clone(),
             team_id: blueprint.team_id,
             alive: blueprint.health.is_alive(),
         });
@@ -414,8 +412,8 @@ impl RoomCombatEcs {
         self.buff_slots
             .push([BuffSlot::empty(); MAX_BUFFS_PER_ENTITY]);
 
-        if let Some(player_id) = blueprint.player_id {
-            self.player_entity_map.insert(player_id, entity_id);
+        if let Some(character_id) = blueprint.character_id {
+            self.character_entity_map.insert(character_id, entity_id);
         }
         self.entity_index_map.insert(entity_id, dense_index);
         self.index_entity_map.push(entity_id);
@@ -441,8 +439,8 @@ impl RoomCombatEcs {
             return false;
         };
 
-        if let Some(player_id) = self.entities[dense_index].player_id.as_ref() {
-            self.player_entity_map.remove(player_id);
+        if let Some(character_id) = self.entities[dense_index].character_id.as_ref() {
+            self.character_entity_map.remove(character_id);
         }
 
         self.entities.swap_remove(dense_index);
@@ -595,7 +593,7 @@ impl RoomCombatEcs {
             entities.push(CombatEntitySnapshot {
                 entity_id: meta.entity_id,
                 entity_type: meta.entity_type,
-                player_id: meta.player_id.clone(),
+                character_id: meta.character_id.clone(),
                 team_id: meta.team_id,
                 alive: meta.alive,
                 x: position.x,
@@ -720,19 +718,19 @@ impl RoomCombatTransferSnapshot {
             validate_buff_slots(&state.buff_slots[dense_index], state.next_entity_id)?;
         }
 
-        let mut player_entity_map = state
-            .player_entity_map
+        let mut character_entity_map = state
+            .character_entity_map
             .iter()
-            .map(|(player_id, entity_id)| {
-                validate_player_id(player_id)?;
+            .map(|(character_id, entity_id)| {
+                validate_character_id(character_id)?;
                 validate_entity_id(*entity_id, state.next_entity_id)?;
-                Ok(RoomCombatTransferPlayerEntity {
-                    player_id: player_id.clone(),
+                Ok(RoomCombatTransferCharacterEntity {
+                    character_id: character_id.clone(),
                     entity_id: *entity_id,
                 })
             })
             .collect::<Result<Vec<_>, &'static str>>()?;
-        player_entity_map.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        character_entity_map.sort_by(|left, right| left.character_id.cmp(&right.character_id));
 
         for request in &state.pending_skill_requests {
             validate_skill_request(request, state.next_entity_id)?;
@@ -754,7 +752,7 @@ impl RoomCombatTransferSnapshot {
             move_states: state.move_states.clone(),
             skill_slots: state.skill_slots.clone(),
             buff_slots: state.buff_slots.clone(),
-            player_entity_map,
+            character_entity_map,
             pending_skill_requests: state.pending_skill_requests.clone(),
         })
     }
@@ -791,7 +789,7 @@ impl RoomCombatTransferSnapshot {
         let mut entity_index_map = HashMap::with_capacity(entity_count);
         let mut index_entity_map = Vec::with_capacity(entity_count);
         let mut seen_entity_ids = HashSet::with_capacity(entity_count);
-        let mut derived_player_entity_map: HashMap<String, EntityId> = HashMap::new();
+        let mut derived_character_entity_map: HashMap<String, EntityId> = HashMap::new();
 
         for (dense_index, meta) in self.entities.iter().enumerate() {
             validate_entity_meta(meta, self.next_entity_id)?;
@@ -801,10 +799,10 @@ impl RoomCombatTransferSnapshot {
             entity_index_map.insert(meta.entity_id, dense_index);
             index_entity_map.push(meta.entity_id);
 
-            if let Some(player_id) = meta.player_id.as_ref() {
-                validate_player_id(player_id)?;
-                if derived_player_entity_map
-                    .insert(player_id.clone(), meta.entity_id)
+            if let Some(character_id) = meta.character_id.as_ref() {
+                validate_character_id(character_id)?;
+                if derived_character_entity_map
+                    .insert(character_id.clone(), meta.entity_id)
                     .is_some()
                 {
                     return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
@@ -812,21 +810,21 @@ impl RoomCombatTransferSnapshot {
             }
         }
 
-        let mut player_entity_map = HashMap::new();
-        for entry in self.player_entity_map {
-            validate_player_id(&entry.player_id)?;
+        let mut character_entity_map = HashMap::new();
+        for entry in self.character_entity_map {
+            validate_character_id(&entry.character_id)?;
             validate_entity_id(entry.entity_id, self.next_entity_id)?;
-            if player_entity_map
-                .insert(entry.player_id.clone(), entry.entity_id)
+            if character_entity_map
+                .insert(entry.character_id.clone(), entry.entity_id)
                 .is_some()
             {
                 return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
             }
-            if derived_player_entity_map.get(&entry.player_id) != Some(&entry.entity_id) {
+            if derived_character_entity_map.get(&entry.character_id) != Some(&entry.entity_id) {
                 return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
             }
         }
-        if player_entity_map.len() != derived_player_entity_map.len() {
+        if character_entity_map.len() != derived_character_entity_map.len() {
             return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
         }
 
@@ -864,7 +862,7 @@ impl RoomCombatTransferSnapshot {
             move_states: self.move_states,
             skill_slots: self.skill_slots,
             buff_slots: self.buff_slots,
-            player_entity_map,
+            character_entity_map,
             entity_index_map,
             index_entity_map,
             pending_events: Vec::new(),
@@ -904,8 +902,8 @@ fn validate_transfer_parallel_lengths(
 
 fn validate_entity_meta(meta: &EntityMeta, next_entity_id: EntityId) -> Result<(), &'static str> {
     validate_entity_id(meta.entity_id, next_entity_id)?;
-    if let Some(player_id) = meta.player_id.as_ref() {
-        validate_player_id(player_id)?;
+    if let Some(character_id) = meta.character_id.as_ref() {
+        validate_character_id(character_id)?;
     }
     Ok(())
 }
@@ -917,8 +915,8 @@ fn validate_entity_id(entity_id: EntityId, next_entity_id: EntityId) -> Result<(
     Ok(())
 }
 
-fn validate_player_id(player_id: &str) -> Result<(), &'static str> {
-    if player_id.trim().is_empty() {
+fn validate_character_id(character_id: &str) -> Result<(), &'static str> {
+    if character_id.trim().is_empty() {
         return Err(ROOM_TRANSFER_INVALID_COMBAT_STATE);
     }
     Ok(())
@@ -2075,8 +2073,8 @@ mod tests {
     fn combat_transfer_roundtrip_restores_runtime_state() {
         let catalog = BuiltinCombatCatalog::default();
         let ecs = transfer_sample_ecs();
-        let player_a = ecs.entity_id_by_player("player-a").unwrap();
-        let player_b = ecs.entity_id_by_player("player-b").unwrap();
+        let player_a = ecs.entity_id_by_character("player-a").unwrap();
+        let player_b = ecs.entity_id_by_character("player-b").unwrap();
         let original_snapshot = ecs.snapshot(ecs.last_tick_frame(), &catalog);
 
         let transfer_json = ecs.export_transfer_state_json().unwrap();
@@ -2085,12 +2083,20 @@ mod tests {
         assert_eq!(transfer_value["last_tick_frame"], 2);
         assert_eq!(transfer_value["pending_events_replayed"], false);
         assert!(transfer_value.get("pending_events").is_none());
+        assert!(transfer_value.get("player_entity_map").is_none());
+        assert_eq!(
+            transfer_value["character_entity_map"],
+            serde_json::json!([
+                {"character_id": "player-a", "entity_id": player_a},
+                {"character_id": "player-b", "entity_id": player_b}
+            ])
+        );
 
         let mut restored = RoomCombatEcs::import_transfer_state_json(&transfer_json).unwrap();
         assert_eq!(restored.last_tick_frame(), 2);
         assert_eq!(restored.entity_count(), 2);
-        assert_eq!(restored.entity_id_by_player("player-a"), Some(player_a));
-        assert_eq!(restored.entity_id_by_player("player-b"), Some(player_b));
+        assert_eq!(restored.entity_id_by_character("player-a"), Some(player_a));
+        assert_eq!(restored.entity_id_by_character("player-b"), Some(player_b));
         assert!(restored.pending_events.is_empty());
         assert_eq!(restored.pending_skill_requests.len(), 1);
         assert_eq!(
@@ -2153,16 +2159,16 @@ mod tests {
         );
 
         let mut duplicate_player = transfer_sample_value();
-        let first_player_id = duplicate_player["entities"][0]["character_id"].clone();
-        duplicate_player["entities"][1]["character_id"] = first_player_id;
+        let first_character_id = duplicate_player["entities"][0]["character_id"].clone();
+        duplicate_player["entities"][1]["character_id"] = first_character_id;
         assert_eq!(
             RoomCombatEcs::import_transfer_state_json(&duplicate_player.to_string()).unwrap_err(),
             ROOM_TRANSFER_INVALID_COMBAT_STATE
         );
 
         let mut duplicate_player_map = transfer_sample_value();
-        let first_map_entry = duplicate_player_map["player_entity_map"][0].clone();
-        duplicate_player_map["player_entity_map"]
+        let first_map_entry = duplicate_player_map["character_entity_map"][0].clone();
+        duplicate_player_map["character_entity_map"]
             .as_array_mut()
             .unwrap()
             .push(first_map_entry);

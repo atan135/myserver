@@ -39,14 +39,14 @@ impl Vec2 {
 pub struct EntityMeta {
     pub entity_id: EntityId,
     pub scene_id: i32,
-    pub player_id: Option<String>,
+    pub character_id: Option<String>,
     pub alive: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct MovementEntityState {
     pub entity_id: EntityId,
-    pub player_id: String,
+    pub character_id: String,
     pub scene_id: i32,
     pub position: Vec2,
     pub direction: Vec2,
@@ -92,12 +92,12 @@ pub struct RoomMovementState {
     speeds: Vec<f32>,
     moving_flags: Vec<bool>,
     last_input_frames: Vec<u32>,
-    player_entity_map: HashMap<String, EntityId>,
+    character_entity_map: HashMap<String, EntityId>,
     entity_index_map: HashMap<EntityId, DenseIndex>,
     index_entity_map: Vec<EntityId>,
-    latest_client_state_by_player: HashMap<String, ClientStateSample>,
-    last_sent_frame_by_player: HashMap<String, u32>,
-    missing_control_frames_by_player: HashMap<String, u32>,
+    latest_client_state_by_character: HashMap<String, ClientStateSample>,
+    last_sent_frame_by_character: HashMap<String, u32>,
+    missing_control_frames_by_character: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,16 +116,15 @@ struct RoomMovementTransferSnapshot {
     aoi_enabled: bool,
     movement_control_stop_frames: u32,
     entities: Vec<RoomMovementTransferEntity>,
-    latest_client_state_by_player: Vec<RoomMovementTransferClientState>,
-    last_sent_frame_by_player: Vec<RoomMovementTransferPlayerFrame>,
-    missing_control_frames_by_player: Vec<RoomMovementTransferPlayerFrame>,
+    latest_client_state_by_character: Vec<RoomMovementTransferClientState>,
+    last_sent_frame_by_character: Vec<RoomMovementTransferCharacterFrame>,
+    missing_control_frames_by_character: Vec<RoomMovementTransferCharacterFrame>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomMovementTransferEntity {
     entity_id: EntityId,
-    #[serde(rename = "character_id")]
-    player_id: Option<String>,
+    character_id: Option<String>,
     scene_id: i32,
     position: RoomMovementTransferVec2,
     direction: RoomMovementTransferVec2,
@@ -143,17 +142,15 @@ struct RoomMovementTransferVec2 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RoomMovementTransferClientState {
-    #[serde(rename = "character_id")]
-    player_id: String,
+    character_id: String,
     frame_id: u32,
     x: f32,
     y: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RoomMovementTransferPlayerFrame {
-    #[serde(rename = "character_id")]
-    player_id: String,
+struct RoomMovementTransferCharacterFrame {
+    character_id: String,
     frame_id: u32,
 }
 
@@ -178,18 +175,18 @@ impl RoomMovementState {
             speeds: Vec::new(),
             moving_flags: Vec::new(),
             last_input_frames: Vec::new(),
-            player_entity_map: HashMap::new(),
+            character_entity_map: HashMap::new(),
             entity_index_map: HashMap::new(),
             index_entity_map: Vec::new(),
-            latest_client_state_by_player: HashMap::new(),
-            last_sent_frame_by_player: HashMap::new(),
-            missing_control_frames_by_player: HashMap::new(),
+            latest_client_state_by_character: HashMap::new(),
+            last_sent_frame_by_character: HashMap::new(),
+            missing_control_frames_by_character: HashMap::new(),
         }
     }
 
-    pub fn spawn_player(
+    pub fn spawn_character(
         &mut self,
-        player_id: &str,
+        character_id: &str,
         spawn: &SceneSpawnPointDefinition,
         speed: f32,
     ) -> MovementEntityState {
@@ -200,7 +197,7 @@ impl RoomMovementState {
         self.entities.push(EntityMeta {
             entity_id,
             scene_id: spawn.scene_id,
-            player_id: Some(player_id.to_string()),
+            character_id: Some(character_id.to_string()),
             alive: true,
         });
         self.positions_x.push(spawn.x);
@@ -210,19 +207,19 @@ impl RoomMovementState {
         self.speeds.push(speed);
         self.moving_flags.push(false);
         self.last_input_frames.push(0);
-        self.player_entity_map
-            .insert(player_id.to_string(), entity_id);
+        self.character_entity_map
+            .insert(character_id.to_string(), entity_id);
         self.entity_index_map.insert(entity_id, dense_index);
         self.index_entity_map.push(entity_id);
-        self.missing_control_frames_by_player
-            .insert(player_id.to_string(), 0);
+        self.missing_control_frames_by_character
+            .insert(character_id.to_string(), 0);
 
         self.entity_state_at(dense_index)
             .expect("spawned movement entity missing")
     }
 
-    pub fn remove_player(&mut self, player_id: &str) {
-        let Some(entity_id) = self.player_entity_map.remove(player_id) else {
+    pub fn remove_character(&mut self, character_id: &str) {
+        let Some(entity_id) = self.character_entity_map.remove(character_id) else {
             return;
         };
         let Some(dense_index) = self.entity_index_map.remove(&entity_id) else {
@@ -244,18 +241,19 @@ impl RoomMovementState {
             self.entity_index_map.insert(swapped_entity_id, dense_index);
         }
 
-        self.latest_client_state_by_player.remove(player_id);
-        self.last_sent_frame_by_player.remove(player_id);
-        self.missing_control_frames_by_player.remove(player_id);
+        self.latest_client_state_by_character.remove(character_id);
+        self.last_sent_frame_by_character.remove(character_id);
+        self.missing_control_frames_by_character
+            .remove(character_id);
     }
 
-    pub fn entity(&self, player_id: &str) -> Option<MovementEntityState> {
-        let dense_index = self.dense_index_by_player(player_id)?;
+    pub fn entity(&self, character_id: &str) -> Option<MovementEntityState> {
+        let dense_index = self.dense_index_by_character(character_id)?;
         self.entity_state_at(dense_index)
     }
 
-    pub fn dense_index_by_player(&self, player_id: &str) -> Option<DenseIndex> {
-        let entity_id = self.player_entity_map.get(player_id)?;
+    pub fn dense_index_by_character(&self, character_id: &str) -> Option<DenseIndex> {
+        let entity_id = self.character_entity_map.get(character_id)?;
         self.entity_index_map.get(entity_id).copied()
     }
 
@@ -269,10 +267,10 @@ impl RoomMovementState {
 
     pub fn entity_state_at(&self, dense_index: DenseIndex) -> Option<MovementEntityState> {
         let meta = self.entities.get(dense_index)?;
-        let player_id = meta.player_id.as_ref()?.clone();
+        let character_id = meta.character_id.as_ref()?.clone();
         Some(MovementEntityState {
             entity_id: meta.entity_id,
-            player_id,
+            character_id,
             scene_id: meta.scene_id,
             position: Vec2 {
                 x: *self.positions_x.get(dense_index)?,
@@ -293,8 +291,8 @@ impl RoomMovementState {
             .map(|entity| entity.to_proto())
     }
 
-    pub fn entity_player_id(&self, dense_index: DenseIndex) -> Option<&str> {
-        self.entities.get(dense_index)?.player_id.as_deref()
+    pub fn entity_character_id(&self, dense_index: DenseIndex) -> Option<&str> {
+        self.entities.get(dense_index)?.character_id.as_deref()
     }
 
     pub fn entity_scene_id(&self, dense_index: DenseIndex) -> Option<i32> {
@@ -392,8 +390,8 @@ impl RoomMovementState {
         }
     }
 
-    pub fn stop_player(&mut self, player_id: &str, frame_id: u32) -> Option<EntityTransform> {
-        let dense_index = self.dense_index_by_player(player_id)?;
+    pub fn stop_character(&mut self, character_id: &str, frame_id: u32) -> Option<EntityTransform> {
+        let dense_index = self.dense_index_by_character(character_id)?;
         let was_moving = self.is_moving_at(dense_index).unwrap_or(false);
         let current_frame = self
             .entity_state_at(dense_index)
@@ -406,7 +404,7 @@ impl RoomMovementState {
 
         let _ = self.set_moving_at(dense_index, false);
         let _ = self.set_last_input_frame_at(dense_index, frame_id);
-        self.reset_missing_movement_control_frames(player_id);
+        self.reset_missing_movement_control_frames(character_id);
         self.entity_proto_at(dense_index)
     }
 
@@ -416,13 +414,13 @@ impl RoomMovementState {
             .collect()
     }
 
-    pub fn set_client_state_for_player(
+    pub fn set_client_state_for_character(
         &mut self,
-        player_id: &str,
+        character_id: &str,
         client_state: ClientMovementState,
     ) {
-        self.latest_client_state_by_player.insert(
-            player_id.to_string(),
+        self.latest_client_state_by_character.insert(
+            character_id.to_string(),
             ClientStateSample {
                 frame_id: client_state.frame_id,
                 x: client_state.position.x,
@@ -431,13 +429,15 @@ impl RoomMovementState {
         );
     }
 
-    pub fn client_state_for_player(&self, player_id: &str) -> Option<ClientStateSample> {
-        self.latest_client_state_by_player.get(player_id).copied()
+    pub fn client_state_for_character(&self, character_id: &str) -> Option<ClientStateSample> {
+        self.latest_client_state_by_character
+            .get(character_id)
+            .copied()
     }
 
-    pub fn drift_distance_for_player(&self, player_id: &str) -> Option<f32> {
-        let client = self.client_state_for_player(player_id)?;
-        let entity = self.entity(player_id)?;
+    pub fn drift_distance_for_character(&self, character_id: &str) -> Option<f32> {
+        let client = self.client_state_for_character(character_id)?;
+        let entity = self.entity(character_id)?;
         Some(distance(
             entity.position,
             Vec2 {
@@ -447,15 +447,15 @@ impl RoomMovementState {
         ))
     }
 
-    pub fn should_force_correction_for_player(&self, player_id: &str) -> bool {
-        self.drift_distance_for_player(player_id)
+    pub fn should_force_correction_for_character(&self, character_id: &str) -> bool {
+        self.drift_distance_for_character(character_id)
             .map(|drift| drift >= self.correction_distance_threshold)
             .unwrap_or(false)
     }
 
-    pub fn note_sent_to_player(&mut self, player_id: &str, frame_id: u32) {
-        self.last_sent_frame_by_player
-            .insert(player_id.to_string(), frame_id);
+    pub fn note_sent_to_character(&mut self, character_id: &str, frame_id: u32) {
+        self.last_sent_frame_by_character
+            .insert(character_id.to_string(), frame_id);
     }
 
     pub fn should_periodic_sync(&self, frame_id: u32) -> bool {
@@ -480,20 +480,20 @@ impl RoomMovementState {
         self.movement_control_stop_frames = movement_control_stop_frames;
     }
 
-    pub fn reset_missing_movement_control_frames(&mut self, player_id: &str) {
-        self.missing_control_frames_by_player
-            .insert(player_id.to_string(), 0);
+    pub fn reset_missing_movement_control_frames(&mut self, character_id: &str) {
+        self.missing_control_frames_by_character
+            .insert(character_id.to_string(), 0);
     }
 
-    pub fn increment_missing_movement_control_frames(&mut self, player_id: &str) -> u32 {
+    pub fn increment_missing_movement_control_frames(&mut self, character_id: &str) -> u32 {
         let next = self
-            .missing_control_frames_by_player
-            .get(player_id)
+            .missing_control_frames_by_character
+            .get(character_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
-        self.missing_control_frames_by_player
-            .insert(player_id.to_string(), next);
+        self.missing_control_frames_by_character
+            .insert(character_id.to_string(), next);
         next
     }
 
@@ -628,30 +628,32 @@ impl RoomMovementTransferSnapshot {
         validate_non_negative_finite(state.correction_distance_threshold)?;
         validate_non_negative_finite(state.aoi_radius)?;
 
-        let mut latest_client_state_by_player = state
-            .latest_client_state_by_player
+        let mut latest_client_state_by_character = state
+            .latest_client_state_by_character
             .iter()
-            .map(|(player_id, sample)| {
-                validate_player_id(player_id)?;
+            .map(|(character_id, sample)| {
+                validate_character_id(character_id)?;
                 validate_finite(sample.x)?;
                 validate_finite(sample.y)?;
                 Ok(RoomMovementTransferClientState {
-                    player_id: player_id.clone(),
+                    character_id: character_id.clone(),
                     frame_id: sample.frame_id,
                     x: sample.x,
                     y: sample.y,
                 })
             })
             .collect::<Result<Vec<_>, &'static str>>()?;
-        latest_client_state_by_player.sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        latest_client_state_by_character
+            .sort_by(|left, right| left.character_id.cmp(&right.character_id));
 
-        let mut last_sent_frame_by_player =
-            transfer_player_frames(&state.last_sent_frame_by_player)?;
-        let mut missing_control_frames_by_player =
-            transfer_player_frames(&state.missing_control_frames_by_player)?;
-        last_sent_frame_by_player.sort_by(|left, right| left.player_id.cmp(&right.player_id));
-        missing_control_frames_by_player
-            .sort_by(|left, right| left.player_id.cmp(&right.player_id));
+        let mut last_sent_frame_by_character =
+            transfer_character_frames(&state.last_sent_frame_by_character)?;
+        let mut missing_control_frames_by_character =
+            transfer_character_frames(&state.missing_control_frames_by_character)?;
+        last_sent_frame_by_character
+            .sort_by(|left, right| left.character_id.cmp(&right.character_id));
+        missing_control_frames_by_character
+            .sort_by(|left, right| left.character_id.cmp(&right.character_id));
 
         let entities = state
             .entities
@@ -690,7 +692,7 @@ impl RoomMovementTransferSnapshot {
 
                 Ok(RoomMovementTransferEntity {
                     entity_id: meta.entity_id,
-                    player_id: meta.player_id.clone(),
+                    character_id: meta.character_id.clone(),
                     scene_id: meta.scene_id,
                     position: RoomMovementTransferVec2 {
                         x: position.x,
@@ -728,9 +730,9 @@ impl RoomMovementTransferSnapshot {
             aoi_enabled: state.aoi_enabled,
             movement_control_stop_frames: state.movement_control_stop_frames,
             entities,
-            latest_client_state_by_player,
-            last_sent_frame_by_player,
-            missing_control_frames_by_player,
+            latest_client_state_by_character,
+            last_sent_frame_by_character,
+            missing_control_frames_by_character,
         })
     }
 
@@ -763,12 +765,12 @@ impl RoomMovementTransferSnapshot {
             entity.push_into_state(&mut state)?;
         }
 
-        state.latest_client_state_by_player =
-            client_state_map_from_transfer(self.latest_client_state_by_player)?;
-        state.last_sent_frame_by_player =
-            player_frame_map_from_transfer(self.last_sent_frame_by_player)?;
-        state.missing_control_frames_by_player =
-            player_frame_map_from_transfer(self.missing_control_frames_by_player)?;
+        state.latest_client_state_by_character =
+            client_state_map_from_transfer(self.latest_client_state_by_character)?;
+        state.last_sent_frame_by_character =
+            character_frame_map_from_transfer(self.last_sent_frame_by_character)?;
+        state.missing_control_frames_by_character =
+            character_frame_map_from_transfer(self.missing_control_frames_by_character)?;
 
         Ok(state)
     }
@@ -784,8 +786,8 @@ impl RoomMovementTransferEntity {
         validate_finite(self.direction.x)?;
         validate_finite(self.direction.y)?;
         validate_non_negative_finite(self.speed)?;
-        if let Some(player_id) = self.player_id.as_deref() {
-            validate_player_id(player_id)?;
+        if let Some(character_id) = self.character_id.as_deref() {
+            validate_character_id(character_id)?;
         }
         if state.entity_index_map.contains_key(&self.entity_id) {
             return Err("ROOM_TRANSFER_INVALID_MOVEMENT_STATE");
@@ -795,7 +797,7 @@ impl RoomMovementTransferEntity {
         state.entities.push(EntityMeta {
             entity_id: self.entity_id,
             scene_id: self.scene_id,
-            player_id: self.player_id.clone(),
+            character_id: self.character_id.clone(),
             alive: self.alive,
         });
         state.positions_x.push(self.position.x);
@@ -807,10 +809,10 @@ impl RoomMovementTransferEntity {
         state.last_input_frames.push(self.last_input_frame);
         state.entity_index_map.insert(self.entity_id, dense_index);
         state.index_entity_map.push(self.entity_id);
-        if let Some(player_id) = self.player_id {
+        if let Some(character_id) = self.character_id {
             if state
-                .player_entity_map
-                .insert(player_id, self.entity_id)
+                .character_entity_map
+                .insert(character_id, self.entity_id)
                 .is_some()
             {
                 return Err("ROOM_TRANSFER_INVALID_MOVEMENT_STATE");
@@ -820,15 +822,15 @@ impl RoomMovementTransferEntity {
     }
 }
 
-fn transfer_player_frames(
+fn transfer_character_frames(
     frames: &HashMap<String, u32>,
-) -> Result<Vec<RoomMovementTransferPlayerFrame>, &'static str> {
+) -> Result<Vec<RoomMovementTransferCharacterFrame>, &'static str> {
     frames
         .iter()
-        .map(|(player_id, frame_id)| {
-            validate_player_id(player_id)?;
-            Ok(RoomMovementTransferPlayerFrame {
-                player_id: player_id.clone(),
+        .map(|(character_id, frame_id)| {
+            validate_character_id(character_id)?;
+            Ok(RoomMovementTransferCharacterFrame {
+                character_id: character_id.clone(),
                 frame_id: *frame_id,
             })
         })
@@ -840,12 +842,12 @@ fn client_state_map_from_transfer(
 ) -> Result<HashMap<String, ClientStateSample>, &'static str> {
     let mut result = HashMap::new();
     for state in states {
-        validate_player_id(&state.player_id)?;
+        validate_character_id(&state.character_id)?;
         validate_finite(state.x)?;
         validate_finite(state.y)?;
         if result
             .insert(
-                state.player_id,
+                state.character_id,
                 ClientStateSample {
                     frame_id: state.frame_id,
                     x: state.x,
@@ -860,21 +862,21 @@ fn client_state_map_from_transfer(
     Ok(result)
 }
 
-fn player_frame_map_from_transfer(
-    frames: Vec<RoomMovementTransferPlayerFrame>,
+fn character_frame_map_from_transfer(
+    frames: Vec<RoomMovementTransferCharacterFrame>,
 ) -> Result<HashMap<String, u32>, &'static str> {
     let mut result = HashMap::new();
     for frame in frames {
-        validate_player_id(&frame.player_id)?;
-        if result.insert(frame.player_id, frame.frame_id).is_some() {
+        validate_character_id(&frame.character_id)?;
+        if result.insert(frame.character_id, frame.frame_id).is_some() {
             return Err("ROOM_TRANSFER_INVALID_MOVEMENT_STATE");
         }
     }
     Ok(result)
 }
 
-fn validate_player_id(player_id: &str) -> Result<(), &'static str> {
-    if player_id.trim().is_empty() {
+fn validate_character_id(character_id: &str) -> Result<(), &'static str> {
+    if character_id.trim().is_empty() {
         return Err("ROOM_TRANSFER_INVALID_MOVEMENT_STATE");
     }
     Ok(())
@@ -900,7 +902,7 @@ impl MovementEntityState {
     pub fn to_proto(&self) -> EntityTransform {
         EntityTransform {
             entity_id: self.entity_id,
-            character_id: self.player_id.clone(),
+            character_id: self.character_id.clone(),
             scene_id: self.scene_id,
             x: self.position.x,
             y: self.position.y,
@@ -938,19 +940,19 @@ mod tests {
     }
 
     #[test]
-    fn stop_player_clears_moving_flag_and_updates_frame() {
+    fn stop_character_clears_moving_flag_and_updates_frame() {
         let mut state = RoomMovementState::new(1, 3);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
-        let dense_index = state.dense_index_by_player("player-a").unwrap();
+        let dense_index = state.dense_index_by_character("player-a").unwrap();
         state.apply_command_at(
             dense_index,
             5,
             MovementCommand::MoveDir(Vec2 { x: 1.0, y: 0.0 }),
         );
 
-        let corrected = state.stop_player("player-a", 9).unwrap();
+        let corrected = state.stop_character("player-a", 9).unwrap();
 
         assert!(!corrected.moving);
         assert_eq!(corrected.last_input_frame, 9);
@@ -966,25 +968,49 @@ mod tests {
         state.last_full_sync_frame = 6;
 
         let spawn = build_spawn();
-        let spawned = state.spawn_player("player-a", &spawn, 4.0);
-        let dense_index = state.dense_index_by_player("player-a").unwrap();
+        let spawned = state.spawn_character("player-a", &spawn, 4.0);
+        let dense_index = state.dense_index_by_character("player-a").unwrap();
         state.apply_command_at(
             dense_index,
             5,
             MovementCommand::MoveDir(Vec2 { x: 0.0, y: 1.0 }),
         );
         state.set_position_at(dense_index, Vec2 { x: 2.5, y: 3.5 });
-        state.set_client_state_for_player(
+        state.set_client_state_for_character(
             "player-a",
             ClientMovementState {
                 frame_id: 5,
                 position: Vec2 { x: 2.0, y: 3.0 },
             },
         );
-        state.note_sent_to_player("player-a", 7);
+        state.note_sent_to_character("player-a", 7);
         state.increment_missing_movement_control_frames("player-a");
 
         let exported = state.export_transfer_state_json().unwrap();
+        let exported_value: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert!(
+            exported_value
+                .get("latest_client_state_by_player")
+                .is_none()
+        );
+        assert!(exported_value.get("last_sent_frame_by_player").is_none());
+        assert!(
+            exported_value
+                .get("missing_control_frames_by_player")
+                .is_none()
+        );
+        assert_eq!(
+            exported_value["latest_client_state_by_character"][0]["character_id"],
+            "player-a"
+        );
+        assert_eq!(
+            exported_value["last_sent_frame_by_character"][0]["character_id"],
+            "player-a"
+        );
+        assert_eq!(
+            exported_value["missing_control_frames_by_character"][0]["character_id"],
+            "player-a"
+        );
         let imported = RoomMovementState::import_transfer_state_json(&exported).unwrap();
 
         assert_eq!(imported.scene_id, 1);
@@ -1007,13 +1033,16 @@ mod tests {
         assert!(entity.moving);
         assert_eq!(entity.last_input_frame, 5);
 
-        let client = imported.client_state_for_player("player-a").unwrap();
+        let client = imported.client_state_for_character("player-a").unwrap();
         assert_eq!(client.frame_id, 5);
         assert_eq!(client.x, 2.0);
         assert_eq!(client.y, 3.0);
-        assert_eq!(imported.last_sent_frame_by_player.get("player-a"), Some(&7));
         assert_eq!(
-            imported.missing_control_frames_by_player.get("player-a"),
+            imported.last_sent_frame_by_character.get("player-a"),
+            Some(&7)
+        );
+        assert_eq!(
+            imported.missing_control_frames_by_character.get("player-a"),
             Some(&1)
         );
     }
@@ -1037,7 +1066,7 @@ mod tests {
     fn transfer_state_rejects_negative_runtime_values() {
         let mut state = RoomMovementState::new(1, 3);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
         let exported = state.export_transfer_state_json().unwrap();
 
         let mut value = serde_json::from_str::<serde_json::Value>(&exported).unwrap();

@@ -24,17 +24,33 @@ pub(super) fn room_frame_inputs_from_history(
     room: &Room,
     current_frame_id: u32,
 ) -> Vec<FrameInput> {
-    room.get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
+    let mut inputs = room
+        .get_inputs_in_range(current_frame_id.saturating_sub(300), current_frame_id)
         .into_iter()
         .map(frame_input_from_record)
-        .collect()
+        .collect::<Vec<_>>();
+    sort_frame_inputs(&mut inputs);
+    inputs
 }
 
 pub(super) fn room_frame_inputs_from_pending(room: &Room, frame_id: u32) -> Vec<FrameInput> {
-    room.pending_inputs_for_frame(frame_id)
+    let mut inputs = room
+        .pending_inputs_for_frame(frame_id)
         .into_iter()
         .map(frame_input_from_record)
-        .collect()
+        .collect::<Vec<_>>();
+    sort_frame_inputs(&mut inputs);
+    inputs
+}
+
+fn sort_frame_inputs(inputs: &mut [FrameInput]) {
+    inputs.sort_by(|left, right| {
+        left.frame_id
+            .cmp(&right.frame_id)
+            .then_with(|| left.character_id.cmp(&right.character_id))
+            .then_with(|| left.action.cmp(&right.action))
+            .then_with(|| left.payload_json.cmp(&right.payload_json))
+    });
 }
 
 pub(super) fn character_input_record_from_frame_input(

@@ -14,8 +14,8 @@ pub struct CastSkillInputPayload {
     pub skill_id: u16,
     #[serde(rename = "targetEntityId")]
     pub target_entity_id: Option<EntityId>,
-    #[serde(rename = "targetPlayerId")]
-    pub target_player_id: Option<String>,
+    #[serde(rename = "targetCharacterId")]
+    pub target_character_id: Option<String>,
     #[serde(rename = "targetX")]
     pub target_x: Option<f32>,
     #[serde(rename = "targetY")]
@@ -26,8 +26,8 @@ pub struct CastSkillInputPayload {
 pub struct ApplyBuffInputPayload {
     #[serde(rename = "targetEntityId")]
     pub target_entity_id: Option<EntityId>,
-    #[serde(rename = "targetPlayerId")]
-    pub target_player_id: Option<String>,
+    #[serde(rename = "targetCharacterId")]
+    pub target_character_id: Option<String>,
     #[serde(rename = "buffId")]
     pub buff_id: u16,
     #[serde(rename = "durationFrames")]
@@ -51,13 +51,13 @@ pub fn parse_player_input(
                 })?;
             let source_entity =
                 combat
-                    .entity_id_by_player(&record.character_id)
+                    .entity_id_by_character(&record.character_id)
                     .ok_or(CombatInputError {
-                        error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
+                        error_code: "COMBAT_CHARACTER_ENTITY_NOT_FOUND",
                     })?;
             let target_entity = resolve_target_entity(
                 payload.target_entity_id,
-                payload.target_player_id.as_deref(),
+                payload.target_character_id.as_deref(),
                 combat,
             )?;
             let target_point = match (payload.target_x, payload.target_y) {
@@ -85,13 +85,13 @@ pub fn parse_player_input(
                 })?;
             let source_entity =
                 combat
-                    .entity_id_by_player(&record.character_id)
+                    .entity_id_by_character(&record.character_id)
                     .ok_or(CombatInputError {
-                        error_code: "COMBAT_PLAYER_ENTITY_NOT_FOUND",
+                        error_code: "COMBAT_CHARACTER_ENTITY_NOT_FOUND",
                     })?;
             let target_entity = resolve_target_entity(
                 payload.target_entity_id,
-                payload.target_player_id.as_deref(),
+                payload.target_character_id.as_deref(),
                 combat,
             )?
             .ok_or(CombatInputError {
@@ -112,17 +112,17 @@ pub fn parse_player_input(
 
 fn resolve_target_entity(
     target_entity_id: Option<EntityId>,
-    target_player_id: Option<&str>,
+    target_character_id: Option<&str>,
     combat: &RoomCombatEcs,
 ) -> Result<Option<EntityId>, CombatInputError> {
-    match (target_entity_id, target_player_id) {
+    match (target_entity_id, target_character_id) {
         (Some(entity_id), None) => Ok(Some(entity_id)),
-        (None, Some(player_id)) => {
+        (None, Some(character_id)) => {
             combat
-                .entity_id_by_player(player_id)
+                .entity_id_by_character(character_id)
                 .map(Some)
                 .ok_or(CombatInputError {
-                    error_code: "COMBAT_TARGET_PLAYER_NOT_FOUND",
+                    error_code: "COMBAT_TARGET_CHARACTER_NOT_FOUND",
                 })
         }
         (None, None) => Ok(None),
@@ -138,7 +138,7 @@ mod tests {
     use crate::core::system::combat::{CombatEntityBlueprint, RoomCombatEcs};
 
     #[test]
-    fn cast_skill_input_resolves_target_player_to_entity() {
+    fn cast_skill_input_resolves_target_character_to_entity() {
         let mut combat = RoomCombatEcs::new();
         let _ = combat
             .spawn_entity(
@@ -158,7 +158,7 @@ mod tests {
             frame_id: 5,
             character_id: "player-a".to_string(),
             action: ACTION_COMBAT_CAST_SKILL.to_string(),
-            payload_json: "{\"skillId\":1,\"targetPlayerId\":\"player-b\"}".to_string(),
+            payload_json: "{\"skillId\":1,\"targetCharacterId\":\"player-b\"}".to_string(),
             received_at: std::time::Instant::now(),
             is_synthetic: false,
         };

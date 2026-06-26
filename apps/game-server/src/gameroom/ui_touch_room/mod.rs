@@ -14,13 +14,13 @@ const UI_TOUCH_MAX_SAMPLES: usize = 64;
 pub struct UITouchRoomLogic {
     room_id: String,
     tick_count: u64,
-    player_states: BTreeMap<String, TouchPlayerState>,
+    character_states: BTreeMap<String, TouchCharacterState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TouchPlayerState {
-    player_id: String,
+struct TouchCharacterState {
+    character_id: String,
     frame_id: u32,
     seq: u32,
     pointer_id: u32,
@@ -63,12 +63,12 @@ impl RoomLogic for UITouchRoomLogic {
     }
 
     fn on_character_leave(&mut self, character_id: &str) {
-        self.player_states.remove(character_id);
+        self.character_states.remove(character_id);
         info!(room_id = self.room_id, character_id, "ui touch player left");
     }
 
     fn on_character_offline(&mut self, _room_id: &str, character_id: &str) {
-        if let Some(state) = self.player_states.get_mut(character_id) {
+        if let Some(state) = self.character_states.get_mut(character_id) {
             state.pressed = false;
         }
     }
@@ -97,7 +97,7 @@ impl RoomLogic for UITouchRoomLogic {
             let Ok(payload) = serde_json::from_str::<TouchInputPayload>(&input.payload_json) else {
                 warn!(
                     room_id = self.room_id,
-                    player_id = input.character_id,
+                    character_id = input.character_id,
                     frame_id,
                     "invalid ui touch payload"
                 );
@@ -105,7 +105,7 @@ impl RoomLogic for UITouchRoomLogic {
             };
 
             let Some(sample) = payload.samples.last() else {
-                self.player_states
+                self.character_states
                     .entry(input.character_id.clone())
                     .and_modify(|state| {
                         state.frame_id = frame_id;
@@ -115,10 +115,10 @@ impl RoomLogic for UITouchRoomLogic {
                 continue;
             };
 
-            self.player_states.insert(
+            self.character_states.insert(
                 input.character_id.clone(),
-                TouchPlayerState {
-                    player_id: input.character_id.clone(),
+                TouchCharacterState {
+                    character_id: input.character_id.clone(),
                     frame_id,
                     seq: payload.seq,
                     pointer_id: payload.pointer_id,
@@ -136,13 +136,13 @@ impl RoomLogic for UITouchRoomLogic {
         struct TouchRoomState<'a> {
             room_id: &'a str,
             tick_count: u64,
-            players: Vec<&'a TouchPlayerState>,
+            characters: Vec<&'a TouchCharacterState>,
         }
 
         serde_json::to_string(&TouchRoomState {
             room_id: &self.room_id,
             tick_count: self.tick_count,
-            players: self.player_states.values().collect(),
+            characters: self.character_states.values().collect(),
         })
         .unwrap_or_default()
     }

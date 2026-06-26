@@ -134,7 +134,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(character_id),
+                    subject_id: Some(character_id),
                     room_id: Some(room_id),
                     operation: "server_redirect_push",
                     ..OutboundQueueLogContext::default()
@@ -254,7 +254,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(character_id),
+                    subject_id: Some(character_id),
                     room_id: Some(room_id),
                     operation: "rollout_drain_notice",
                     ..OutboundQueueLogContext::default()

@@ -68,7 +68,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(&character_id),
+                    subject_id: Some(&character_id),
                     room_id: Some(room_id),
                     operation: "room_broadcast",
                     ..OutboundQueueLogContext::default()
@@ -141,7 +141,7 @@ impl RoomManager {
                     body: body.clone(),
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(&character_id),
+                    subject_id: Some(&character_id),
                     room_id: Some(room_id),
                     operation: "targeted_room_broadcast",
                     ..OutboundQueueLogContext::default()
@@ -192,7 +192,7 @@ impl RoomManager {
         }
     }
 
-    pub async fn send_to_player(
+    pub async fn send_to_character(
         &self,
         character_id: &str,
         message_type: MessageType,
@@ -235,8 +235,8 @@ impl RoomManager {
                     body,
                 },
                 OutboundQueueLogContext {
-                    player_id: Some(character_id),
-                    operation: "send_to_player",
+                    subject_id: Some(character_id),
+                    operation: "send_to_character",
                     ..OutboundQueueLogContext::default()
                 },
             ) {
@@ -244,7 +244,7 @@ impl RoomManager {
                     character_id = character_id,
                     message_type = ?message_type,
                     error = %error,
-                    "failed to queue player message"
+                    "failed to queue character message"
                 );
             }
         } else if stale_index {

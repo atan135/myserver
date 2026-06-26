@@ -6,7 +6,7 @@ use crate::pb::{EntityTransform, MovementCorrectionReason};
 
 #[derive(Debug, Clone)]
 pub struct MovementRejectRecord {
-    pub player_id: String,
+    pub character_id: String,
     pub error_code: String,
     pub corrected: EntityTransform,
     pub reason_code: i32,
@@ -17,7 +17,7 @@ pub struct MovementRejectRecord {
 
 #[derive(Debug, Clone)]
 pub struct MovementDriftRecord {
-    pub player_id: String,
+    pub character_id: String,
     pub client_state: ClientStateSample,
     pub authoritative: EntityTransform,
     pub drift_distance: f32,
@@ -40,11 +40,11 @@ pub fn tick_movement<S: SceneQuery>(
 ) -> SimulationTickResult {
     let mut changed_by_entity = std::collections::HashSet::new();
     let mut rejects = Vec::new();
-    let mut players_with_client_state = std::collections::BTreeSet::new();
-    let mut players_with_locomotion_control = std::collections::BTreeSet::new();
+    let mut characters_with_client_state = std::collections::BTreeSet::new();
+    let mut characters_with_locomotion_control = std::collections::BTreeSet::new();
 
     for input in inputs {
-        let Some(dense_index) = state.dense_index_by_player(&input.character_id) else {
+        let Some(dense_index) = state.dense_index_by_character(&input.character_id) else {
             continue;
         };
         let Some(before) = state.entity_proto_at(dense_index) else {
@@ -53,13 +53,13 @@ pub fn tick_movement<S: SceneQuery>(
         match parse_player_input(input) {
             Ok(parsed) => {
                 if let Some(client_state) = parsed.client_state {
-                    state.set_client_state_for_player(&input.character_id, client_state);
-                    players_with_client_state.insert(input.character_id.clone());
+                    state.set_client_state_for_character(&input.character_id, client_state);
+                    characters_with_client_state.insert(input.character_id.clone());
                 }
                 if let Some(command) = parsed.command {
                     if command.is_locomotion_control() && !input.is_synthetic {
                         state.reset_missing_movement_control_frames(&input.character_id);
-                        players_with_locomotion_control.insert(input.character_id.clone());
+                        characters_with_locomotion_control.insert(input.character_id.clone());
                     }
                     if state.apply_command_at(dense_index, input.frame_id, command) {
                         let Some(after) = state.entity_proto_at(dense_index) else {
@@ -76,11 +76,11 @@ pub fn tick_movement<S: SceneQuery>(
                     continue;
                 };
                 rejects.push(MovementRejectRecord {
-                    player_id: input.character_id.clone(),
+                    character_id: input.character_id.clone(),
                     error_code: error.error_code.to_string(),
                     corrected: corrected.clone(),
                     reason_code: MovementCorrectionReason::MovementRejected as i32,
-                    client_state: state.client_state_for_player(&input.character_id),
+                    client_state: state.client_state_for_character(&input.character_id),
                     server_x: corrected.x,
                     server_y: corrected.y,
                 });
@@ -88,16 +88,16 @@ pub fn tick_movement<S: SceneQuery>(
         }
     }
 
-    let control_timeout_entities = stop_players_without_locomotion_control(
+    let control_timeout_entities = stop_characters_without_locomotion_control(
         state,
         frame_id,
-        &players_with_locomotion_control,
+        &characters_with_locomotion_control,
         &mut changed_by_entity,
     );
     for timeout_entity in &control_timeout_entities {
         for reject in rejects
             .iter_mut()
-            .filter(|reject| reject.player_id == timeout_entity.character_id)
+            .filter(|reject| reject.character_id == timeout_entity.character_id)
         {
             reject.corrected = timeout_entity.clone();
             reject.server_x = timeout_entity.x;
@@ -137,18 +137,18 @@ pub fn tick_movement<S: SceneQuery>(
         );
         if clamped.blocked {
             let _ = state.set_moving_at(dense_index, false);
-            let Some(player_id) = state.entity_player_id(dense_index) else {
+            let Some(character_id) = state.entity_character_id(dense_index) else {
                 continue;
             };
             let Some(corrected) = state.entity_proto_at(dense_index) else {
                 continue;
             };
             rejects.push(MovementRejectRecord {
-                player_id: player_id.to_string(),
+                character_id: character_id.to_string(),
                 error_code: "MOVEMENT_BLOCKED".to_string(),
                 corrected: corrected.clone(),
                 reason_code: MovementCorrectionReason::CollisionBlocked as i32,
-                client_state: state.client_state_for_player(player_id),
+                client_state: state.client_state_for_character(character_id),
                 server_x: corrected.x,
                 server_y: corrected.y,
             });
@@ -162,17 +162,17 @@ pub fn tick_movement<S: SceneQuery>(
         }
     }
 
-    let drifted_players = players_with_client_state
+    let drifted_players = characters_with_client_state
         .into_iter()
-        .filter_map(|player_id| {
-            if !state.should_force_correction_for_player(&player_id) {
+        .filter_map(|character_id| {
+            if !state.should_force_correction_for_character(&character_id) {
                 return None;
             }
-            let client_state = state.client_state_for_player(&player_id)?;
-            let authoritative = state.entity(&player_id)?.to_proto();
-            let drift_distance = state.drift_distance_for_player(&player_id)?;
+            let client_state = state.client_state_for_character(&character_id)?;
+            let authoritative = state.entity(&character_id)?.to_proto();
+            let drift_distance = state.drift_distance_for_character(&character_id)?;
             Some(MovementDriftRecord {
-                player_id,
+                character_id,
                 client_state,
                 authoritative,
                 drift_distance,
@@ -194,41 +194,41 @@ pub fn tick_movement<S: SceneQuery>(
     }
 }
 
-fn stop_players_without_locomotion_control(
+fn stop_characters_without_locomotion_control(
     state: &mut RoomMovementState,
     frame_id: u32,
-    players_with_locomotion_control: &std::collections::BTreeSet<String>,
+    characters_with_locomotion_control: &std::collections::BTreeSet<String>,
     changed_by_entity: &mut std::collections::HashSet<u64>,
 ) -> Vec<EntityTransform> {
     if state.movement_control_stop_frames == 0 {
         return Vec::new();
     }
 
-    let player_ids = state
+    let character_ids = state
         .dense_indices()
-        .filter_map(|dense_index| state.entity_player_id(dense_index).map(str::to_string))
+        .filter_map(|dense_index| state.entity_character_id(dense_index).map(str::to_string))
         .collect::<Vec<_>>();
 
     let mut stopped_entities = Vec::new();
-    for player_id in player_ids {
-        let Some(dense_index) = state.dense_index_by_player(&player_id) else {
+    for character_id in character_ids {
+        let Some(dense_index) = state.dense_index_by_character(&character_id) else {
             continue;
         };
         let is_moving = state.is_moving_at(dense_index).unwrap_or(false);
         if !is_moving {
-            state.reset_missing_movement_control_frames(&player_id);
+            state.reset_missing_movement_control_frames(&character_id);
             continue;
         }
-        if players_with_locomotion_control.contains(&player_id) {
+        if characters_with_locomotion_control.contains(&character_id) {
             continue;
         }
 
-        let missing_frames = state.increment_missing_movement_control_frames(&player_id);
+        let missing_frames = state.increment_missing_movement_control_frames(&character_id);
         if missing_frames < state.movement_control_stop_frames {
             continue;
         }
 
-        if let Some(stopped) = state.stop_player(&player_id, frame_id) {
+        if let Some(stopped) = state.stop_character(&character_id, frame_id) {
             changed_by_entity.insert(stopped.entity_id);
             stopped_entities.push(stopped);
         }
@@ -307,14 +307,14 @@ mod tests {
 
     fn movement_input(
         frame_id: u32,
-        player_id: &str,
+        character_id: &str,
         action: &str,
         payload_json: &str,
         is_synthetic: bool,
     ) -> PlayerInputRecord {
         PlayerInputRecord {
             frame_id,
-            character_id: player_id.to_string(),
+            character_id: character_id.to_string(),
             action: action.to_string(),
             payload_json: payload_json.to_string(),
             received_at: Instant::now(),
@@ -357,7 +357,7 @@ mod tests {
 
         let mut state = RoomMovementState::new(1, 3);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
         let input = movement_input(
             1,
@@ -377,7 +377,7 @@ mod tests {
         let mut state = RoomMovementState::new(1, 3);
         state.set_correction_config(3, 0.5, 0.0, false);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
         let input = movement_input(
             1,
@@ -389,7 +389,7 @@ mod tests {
 
         let result = tick_movement(&mut state, 1, 20, &[input], &OpenScene);
         assert_eq!(result.drifted_players.len(), 1);
-        assert_eq!(result.drifted_players[0].player_id, "player-a");
+        assert_eq!(result.drifted_players[0].character_id, "player-a");
     }
 
     #[test]
@@ -397,7 +397,7 @@ mod tests {
         let mut state = RoomMovementState::new(1, 3);
         state.set_movement_control_stop_frames(2);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
         let move_dir = movement_input(
             1,
@@ -426,7 +426,7 @@ mod tests {
         let mut state = RoomMovementState::new(1, 3);
         state.set_movement_control_stop_frames(1);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
         let move_dir = movement_input(
             1,
@@ -457,7 +457,7 @@ mod tests {
         let mut state = RoomMovementState::new(1, 3);
         state.set_movement_control_stop_frames(1);
         let spawn = build_spawn();
-        state.spawn_player("player-a", &spawn, 4.0);
+        state.spawn_character("player-a", &spawn, 4.0);
 
         let move_dir = movement_input(
             1,

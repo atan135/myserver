@@ -54,13 +54,13 @@ impl CombatDemoLogic {
         self.combat.clear();
         let roster = self.roster.clone();
         for (index, character_id) in roster.iter().enumerate() {
-            self.spawn_player_with_index(index, character_id);
+            self.spawn_character_with_index(index, character_id);
         }
         self.spawn_training_dummies();
     }
 
-    fn spawn_player_with_index(&mut self, index: usize, character_id: &str) {
-        if self.combat.entity_id_by_player(character_id).is_some() {
+    fn spawn_character_with_index(&mut self, index: usize, character_id: &str) {
+        if self.combat.entity_id_by_character(character_id).is_some() {
             return;
         }
 
@@ -145,7 +145,7 @@ impl CombatDemoLogic {
     fn queue_event_push(&mut self, event: &CombatEvent) {
         let character_id = event
             .source_entity
-            .and_then(|entity_id| self.combat.entity_player_id(entity_id))
+            .and_then(|entity_id| self.combat.entity_character_id(entity_id))
             .unwrap_or_default()
             .to_string();
         self.queue_game_push("combat", event.kind.as_str(), &character_id, event);
@@ -372,11 +372,11 @@ impl RoomLogic for CombatDemoLogic {
             .iter()
             .position(|existing| existing == character_id)
             .unwrap_or_default();
-        self.spawn_player_with_index(index, character_id);
+        self.spawn_character_with_index(index, character_id);
     }
 
     fn on_character_leave(&mut self, character_id: &str) {
-        if let Some(entity_id) = self.combat.entity_id_by_player(character_id) {
+        if let Some(entity_id) = self.combat.entity_id_by_character(character_id) {
             self.combat.remove_entity(entity_id);
         }
         self.roster.retain(|existing| existing != character_id);

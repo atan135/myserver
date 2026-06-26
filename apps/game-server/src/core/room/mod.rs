@@ -165,7 +165,7 @@ impl Error for OutboundQueueError {}
 #[derive(Clone, Copy, Debug)]
 pub struct OutboundQueueLogContext<'a> {
     pub session_id: Option<u64>,
-    pub player_id: Option<&'a str>,
+    pub subject_id: Option<&'a str>,
     pub peer_addr: Option<&'a str>,
     pub room_id: Option<&'a str>,
     pub operation: &'static str,
@@ -175,7 +175,7 @@ impl Default for OutboundQueueLogContext<'_> {
     fn default() -> Self {
         Self {
             session_id: None,
-            player_id: None,
+            subject_id: None,
             peer_addr: None,
             room_id: None,
             operation: "outbound",
@@ -198,7 +198,7 @@ pub fn try_send_outbound(
             close_state.request_close(OUTBOUND_QUEUE_FULL_CLOSE_REASON);
             warn!(
                 session_id = ?context.session_id,
-                player_id = ?context.player_id,
+                subject_id = ?context.subject_id,
                 peer = ?context.peer_addr,
                 room_id = ?context.room_id,
                 operation = context.operation,
@@ -213,7 +213,7 @@ pub fn try_send_outbound(
         Err(mpsc::error::TrySendError::Closed(_)) => {
             warn!(
                 session_id = ?context.session_id,
-                player_id = ?context.player_id,
+                subject_id = ?context.subject_id,
                 peer = ?context.peer_addr,
                 room_id = ?context.room_id,
                 operation = context.operation,

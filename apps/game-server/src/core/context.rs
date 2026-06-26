@@ -218,7 +218,7 @@ impl ConnectionContext {
             },
             OutboundQueueLogContext {
                 session_id: Some(self.session.id),
-                player_id: self.session.account_player_id.as_deref(),
+                subject_id: self.session.account_player_id.as_deref(),
                 peer_addr: Some(&self.peer_addr),
                 room_id: self.session.room_id.as_deref(),
                 operation: "connection_queue_message",

@@ -268,7 +268,7 @@ pub async fn broadcast_gm_message_to_online_players(
                 body: body.clone(),
             },
             OutboundQueueLogContext {
-                player_id: Some(&account_player_id),
+                subject_id: Some(&account_player_id),
                 operation: "gm_broadcast",
                 ..OutboundQueueLogContext::default()
             },
@@ -277,7 +277,6 @@ pub async fn broadcast_gm_message_to_online_players(
             Err(error) => {
                 warn!(
                     account_player_id = %account_player_id,
-                    player_id = %account_player_id,
                     character_id = %character_id,
                     error = %error,
                     "failed to queue gm broadcast"
