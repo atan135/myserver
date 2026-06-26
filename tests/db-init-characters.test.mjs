@@ -26,6 +26,9 @@ const connectionAuditTableMatch = gameSection.match(
 const roomEventTableMatch = gameSection.match(
   /CREATE TABLE IF NOT EXISTS room_event_logs \([\s\S]*?\n\);/
 );
+const characterElementLogsTableMatch = gameSection.match(
+  /CREATE TABLE IF NOT EXISTS character_element_logs \([\s\S]*?\n\);/
+);
 
 test("db init creates characters table in the game database section", () => {
   assert.notEqual(charactersTableMatch, null, "characters table should be created in myserver_game");
@@ -70,7 +73,7 @@ test("characters table contains P0 identity split base fields and defaults", () 
   }
 });
 
-test("characters table enforces character_id uniqueness and affinity total only", () => {
+test("characters table enforces character_id uniqueness and element value boundaries", () => {
   assert.notEqual(charactersTableMatch, null);
   const tableSql = charactersTableMatch[0];
   const compactTableSql = compact(tableSql);
@@ -79,7 +82,15 @@ test("characters table enforces character_id uniqueness and affinity total only"
   assert.equal(/UNIQUE\s*\(\s*world_id\s*,\s*name\s*\)/i.test(tableSql), false);
   assert.match(
     compactTableSql,
+    /CONSTRAINT ck_characters_affinity_non_negative CHECK \( affinity_earth >= 0 AND affinity_fire >= 0 AND affinity_water >= 0 AND affinity_wind >= 0 \)/
+  );
+  assert.match(
+    compactTableSql,
     /CONSTRAINT ck_characters_affinity_total CHECK \( affinity_earth \+ affinity_fire \+ affinity_water \+ affinity_wind = 10000 \)/
+  );
+  assert.match(
+    compactTableSql,
+    /CONSTRAINT ck_characters_mastery_non_negative CHECK \( mastery_earth >= 0 AND mastery_fire >= 0 AND mastery_water >= 0 AND mastery_wind >= 0 \)/
   );
 });
 
@@ -93,6 +104,58 @@ test("characters table has lookup indexes required by P0", () => {
     assert.match(
       gameSection,
       new RegExp(`CREATE INDEX IF NOT EXISTS ${indexName}\\s+ON characters \\(${columnName}\\);`)
+    );
+  }
+});
+
+test("character element logs capture P1 source, operator, deltas, snapshots, and reason", () => {
+  assert.notEqual(
+    characterElementLogsTableMatch,
+    null,
+    "character_element_logs table should be created in myserver_game"
+  );
+  const tableSql = characterElementLogsTableMatch[0];
+
+  for (const pattern of [
+    /character_id varchar\(64\) NOT NULL/,
+    /source_type varchar\(32\) NOT NULL/,
+    /source_id varchar\(128\) NULL/,
+    /operator_type varchar\(32\) NULL/,
+    /operator_id varchar\(128\) NULL/,
+    /affinity_earth_delta integer NOT NULL DEFAULT 0/,
+    /affinity_fire_delta integer NOT NULL DEFAULT 0/,
+    /affinity_water_delta integer NOT NULL DEFAULT 0/,
+    /affinity_wind_delta integer NOT NULL DEFAULT 0/,
+    /mastery_earth_delta integer NOT NULL DEFAULT 0/,
+    /mastery_fire_delta integer NOT NULL DEFAULT 0/,
+    /mastery_water_delta integer NOT NULL DEFAULT 0/,
+    /mastery_wind_delta integer NOT NULL DEFAULT 0/,
+    /before_json jsonb NOT NULL/,
+    /after_json jsonb NOT NULL/,
+    /reason varchar\(255\) NULL/,
+    /created_at timestamptz NOT NULL DEFAULT current_timestamp/
+  ]) {
+    assert.match(tableSql, pattern);
+  }
+
+  assert.match(
+    compact(tableSql),
+    /CONSTRAINT fk_character_element_logs_character_id FOREIGN KEY \(character_id\) REFERENCES characters\(character_id\)/
+  );
+});
+
+test("character element logs have lookup and reverse-time indexes", () => {
+  for (const [indexName, indexColumns] of [
+    ["idx_character_element_logs_character_id", "character_id"],
+    ["idx_character_element_logs_created_at_desc", "created_at DESC"],
+    ["idx_character_element_logs_character_created_at_desc", "character_id, created_at DESC"],
+    ["idx_character_element_logs_source", "source_type, source_id"]
+  ]) {
+    assert.match(
+      gameSection,
+      new RegExp(
+        `CREATE INDEX IF NOT EXISTS ${indexName}\\s+ON character_element_logs \\(${indexColumns}\\);`
+      )
     );
   }
 });
