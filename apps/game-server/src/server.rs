@@ -22,7 +22,9 @@ use crate::core::room::{
     ConnectionCloseState, OutboundMessage, outbound_queue_error_kind_from_error,
 };
 use crate::core::runtime::RoomManager;
-use crate::core::service::{core_service, inventory_service, room_service};
+use crate::core::service::{
+    character_element_service, core_service, inventory_service, room_service,
+};
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
 use crate::gameservice::room_query;
@@ -1188,6 +1190,16 @@ async fn dispatch_packet(
         }
         Some(MessageType::GetInventoryReq) => {
             inventory_service::handle_get_inventory(services, connection, packet).await
+        }
+        Some(MessageType::GetCharacterElementsReq) => {
+            character_element_service::handle_get_character_elements(services, connection, packet)
+                .await
+        }
+        Some(MessageType::DebugApplyCharacterElementChangeReq) => {
+            character_element_service::handle_debug_apply_character_element_change(
+                services, connection, packet,
+            )
+            .await
         }
         Some(_) => {
             connection.queue_error(

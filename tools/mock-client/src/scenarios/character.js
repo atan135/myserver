@@ -1,6 +1,10 @@
 import { MESSAGE_TYPE } from "../constants.js";
 import { TcpProtocolClient } from "../client.js";
-import { encodeRoomJoinReq } from "../messages.js";
+import {
+  encodeDebugApplyCharacterElementChangeReq,
+  encodeGetCharacterElementsReq,
+  encodeRoomJoinReq
+} from "../messages.js";
 import {
   buildCharacterCreateInput,
   buildGeneratedCharacterName,
@@ -68,6 +72,15 @@ function printResult(label, envelope, options) {
   }
 
   console.log(`${label}:`, JSON.stringify(envelope, null, 2));
+}
+
+function buildElementDeltaOptions(options, prefix) {
+  return {
+    earth: options[`${prefix}EarthDelta`] || 0,
+    fire: options[`${prefix}FireDelta`] || 0,
+    water: options[`${prefix}WaterDelta`] || 0,
+    wind: options[`${prefix}WindDelta`] || 0
+  };
 }
 
 async function withJsonQuiet(options, fn) {
@@ -266,5 +279,76 @@ export async function runCharacterRoomJoin(options) {
     }
   });
   printResult("character.roomJoin", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterElementsDebug(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      await client.send(
+        MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_REQ,
+        2,
+        encodeGetCharacterElementsReq()
+      );
+      const before = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES && packet.seq === 2,
+        "getCharacterElements(before)"
+      );
+
+      const affinityDelta = buildElementDeltaOptions(options, "elementAffinity");
+      const masteryDelta = buildElementDeltaOptions(options, "elementMastery");
+      await client.send(
+        MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_REQ,
+        3,
+        encodeDebugApplyCharacterElementChangeReq(
+          affinityDelta,
+          masteryDelta,
+          options.elementChangeReason,
+          options.elementDebugToken
+        )
+      );
+      const change = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES && packet.seq === 3,
+        "debugApplyCharacterElementChange"
+      );
+
+      await client.send(
+        MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_REQ,
+        4,
+        encodeGetCharacterElementsReq()
+      );
+      const after = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES && packet.seq === 4,
+        "getCharacterElements(after)"
+      );
+
+      const ok = Boolean(before.ok && change.ok && after.ok);
+      return buildEnvelope("character-elements-debug", ok, {
+        login: formatLoginSummary(login),
+        request: {
+          affinityDelta,
+          masteryDelta,
+          reason: options.elementChangeReason || "",
+          debugTokenProvided: Boolean(options.elementDebugToken)
+        },
+        before,
+        change,
+        after
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.elementsDebug", envelope, options);
   return envelope;
 }

@@ -645,6 +645,43 @@ message GetInventoryRes {
   repeated Item warehouse_items = 4;
 }
 
+message ElementValues {
+  int32 earth = 1;
+  int32 fire = 2;
+  int32 water = 3;
+  int32 wind = 4;
+}
+
+message CharacterElements {
+  ElementValues affinity = 1;
+  ElementValues mastery = 2;
+}
+
+message GetCharacterElementsReq {
+}
+
+message GetCharacterElementsRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterElements elements = 4;
+}
+
+message DebugApplyCharacterElementChangeReq {
+  ElementValues affinity_delta = 1;
+  ElementValues mastery_delta = 2;
+  string reason = 3;
+  string debug_token = 4;
+}
+
+message DebugApplyCharacterElementChangeRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterElements before = 4;
+  CharacterElements after = 5;
+}
+
 // ========== 推送消息 ==========
 
 message InventoryUpdatePush {

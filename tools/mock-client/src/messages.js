@@ -1,5 +1,6 @@
 import {
   encodeStringField,
+  encodeMessageField,
   encodeBoolField,
   encodeInt64Field,
   encodeUInt32Field,
@@ -11,6 +12,7 @@ import {
   readStringList,
   readBool,
   readInt64,
+  readInt32,
   readInt32List,
   readUInt32,
   readFloat
@@ -206,6 +208,35 @@ export function encodeGetInventoryReq() {
   return Buffer.alloc(0);
 }
 
+// ============ Character Element Encoders ============
+
+function encodeElementValues(value = {}) {
+  return Buffer.concat([
+    encodeInt32Field(1, value.earth || 0),
+    encodeInt32Field(2, value.fire || 0),
+    encodeInt32Field(3, value.water || 0),
+    encodeInt32Field(4, value.wind || 0)
+  ]);
+}
+
+export function encodeGetCharacterElementsReq() {
+  return Buffer.alloc(0);
+}
+
+export function encodeDebugApplyCharacterElementChangeReq(
+  affinityDelta = {},
+  masteryDelta = {},
+  reason = "",
+  debugToken = ""
+) {
+  return Buffer.concat([
+    encodeMessageField(1, encodeElementValues(affinityDelta)),
+    encodeMessageField(2, encodeElementValues(masteryDelta)),
+    encodeStringField(3, reason),
+    encodeStringField(4, debugToken)
+  ]);
+}
+
 // ============ Message Decoders ============
 
 function decodeFrameInput(buffer) {
@@ -315,6 +346,24 @@ function decodeAttrRecord(buffer) {
     source: readString(fields, 1),
     attrType: readString(fields, 2),
     value: readUInt32(fields, 3)
+  };
+}
+
+function decodeElementValues(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    earth: readInt32(fields, 1),
+    fire: readInt32(fields, 2),
+    water: readInt32(fields, 3),
+    wind: readInt32(fields, 4)
+  };
+}
+
+function decodeCharacterElements(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    affinity: fields.get(1) ? decodeElementValues(fields.get(1)) : null,
+    mastery: fields.get(2) ? decodeElementValues(fields.get(2)) : null
   };
 }
 
@@ -507,6 +556,21 @@ export function decodeByMessageType(messageType, body) {
         warehouseItems: whRaw ? (Array.isArray(whRaw) ? whRaw.map(decodeItem) : [decodeItem(whRaw)]) : []
       };
     }
+    case MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        elements: fields.get(4) ? decodeCharacterElements(fields.get(4)) : null
+      };
+    case MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        before: fields.get(4) ? decodeCharacterElements(fields.get(4)) : null,
+        after: fields.get(5) ? decodeCharacterElements(fields.get(5)) : null
+      };
     // Inventory push messages
     case MESSAGE_TYPE.INVENTORY_UPDATE_PUSH: {
       const invRaw = fields.get(1);

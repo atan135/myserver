@@ -47,6 +47,11 @@ export function encodeStringField(fieldNumber, value) {
   return Buffer.concat([encodeVarint(fieldKey), encodeVarint(data.length), data]);
 }
 
+export function encodeMessageField(fieldNumber, value) {
+  const fieldKey = (fieldNumber << 3) | 2;
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value.length), value]);
+}
+
 export function encodeBoolField(fieldNumber, value) {
   const fieldKey = fieldNumber << 3;
   return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value ? 1 : 0)]);
@@ -64,7 +69,10 @@ export function encodeUInt32Field(fieldNumber, value) {
 
 export function encodeInt32Field(fieldNumber, value) {
   const fieldKey = fieldNumber << 3;
-  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(value)]);
+  const encodedValue = value < 0
+    ? BigInt.asUintN(64, BigInt(value))
+    : BigInt(value);
+  return Buffer.concat([encodeVarint(fieldKey), encodeVarint(encodedValue)]);
 }
 
 export function encodeFloatField(fieldNumber, value) {
@@ -174,6 +182,10 @@ export function readInt32List(fields, fieldNumber) {
 
 export function readBool(fields, fieldNumber) {
   return Number(fields.get(fieldNumber) || 0n) !== 0;
+}
+
+export function readInt32(fields, fieldNumber) {
+  return Number(BigInt.asIntN(32, BigInt(fields.get(fieldNumber) || 0n)));
 }
 
 export function readInt64(fields, fieldNumber) {

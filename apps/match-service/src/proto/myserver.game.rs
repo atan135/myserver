@@ -940,6 +940,61 @@ pub struct GetInventoryRes {
     #[prost(message, repeated, tag = "4")]
     pub warehouse_items: ::prost::alloc::vec::Vec<Item>,
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ElementValues {
+    #[prost(int32, tag = "1")]
+    pub earth: i32,
+    #[prost(int32, tag = "2")]
+    pub fire: i32,
+    #[prost(int32, tag = "3")]
+    pub water: i32,
+    #[prost(int32, tag = "4")]
+    pub wind: i32,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct CharacterElements {
+    #[prost(message, optional, tag = "1")]
+    pub affinity: ::core::option::Option<ElementValues>,
+    #[prost(message, optional, tag = "2")]
+    pub mastery: ::core::option::Option<ElementValues>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetCharacterElementsReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCharacterElementsRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub elements: ::core::option::Option<CharacterElements>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DebugApplyCharacterElementChangeReq {
+    #[prost(message, optional, tag = "1")]
+    pub affinity_delta: ::core::option::Option<ElementValues>,
+    #[prost(message, optional, tag = "2")]
+    pub mastery_delta: ::core::option::Option<ElementValues>,
+    #[prost(string, tag = "3")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub debug_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DebugApplyCharacterElementChangeRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub before: ::core::option::Option<CharacterElements>,
+    #[prost(message, optional, tag = "5")]
+    pub after: ::core::option::Option<CharacterElements>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InventoryUpdatePush {
     #[prost(message, repeated, tag = "1")]

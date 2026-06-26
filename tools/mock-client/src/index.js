@@ -84,6 +84,7 @@ import {
   runCharacterSelect,
   runCharacterLoginAuth,
   runCharacterRoomJoin,
+  runCharacterElementsDebug,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./scenarios/index.js";
@@ -417,6 +418,17 @@ async function main() {
     if (options.jsonOutput && !result.ok) {
       process.exitCode = 1;
       return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_ELEMENTS_DEBUG) {
+    const result = await runCharacterElementsDebug(options);
+    if (!result.ok) {
+      process.exitCode = 1;
     }
     if (!options.jsonOutput) {
       console.log(`scenario completed: ${options.scenario}`);

@@ -54,6 +54,16 @@ const DEFAULT_OPTIONS = {
   autoCreateCharacter: false,
   createCharacterIfMissing: false,
   characterNamePrefix: "MockRole",
+  elementAffinityEarthDelta: -100,
+  elementAffinityFireDelta: 100,
+  elementAffinityWaterDelta: 0,
+  elementAffinityWindDelta: 0,
+  elementMasteryEarthDelta: 0,
+  elementMasteryFireDelta: 10,
+  elementMasteryWaterDelta: 0,
+  elementMasteryWindDelta: 0,
+  elementChangeReason: "mock-client character element debug",
+  elementDebugToken: process.env.MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
   timeoutMs: 5000,
   scenario: SCENARIO.HAPPY,
   maxBodyLen: 4096,
@@ -227,6 +237,44 @@ export function parseArgs(argv) {
         break;
       case "--character-name-prefix":
         ({ value: result.characterNamePrefix, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--element-affinity-earth-delta":
+        result.elementAffinityEarthDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-affinity-fire-delta":
+        result.elementAffinityFireDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-affinity-water-delta":
+        result.elementAffinityWaterDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-affinity-wind-delta":
+        result.elementAffinityWindDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-mastery-earth-delta":
+        result.elementMasteryEarthDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-mastery-fire-delta":
+        result.elementMasteryFireDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-mastery-water-delta":
+        result.elementMasteryWaterDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-mastery-wind-delta":
+        result.elementMasteryWindDelta = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--element-change-reason":
+        ({ value: result.elementChangeReason, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--element-debug-token":
+        ({ value: result.elementDebugToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--no-service-discovery":
         result.useServiceDiscovery = false;
