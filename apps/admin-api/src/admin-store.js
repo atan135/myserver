@@ -251,8 +251,9 @@ function readTotal(rows) {
 }
 
 export class AdminStore {
-  constructor(pool, redis = null, config = {}) {
+  constructor(pool, redis = null, config = {}, gamePool = null) {
     this.pool = pool;
+    this.gamePool = gamePool || pool;
     this.redis = redis;
     this.redisKeyPrefix = config.redisKeyPrefix || "";
   }
@@ -586,7 +587,7 @@ export class AdminStore {
 
   async findCharacterTitleOverview({ characterId, logLimit = 20 } = {}) {
     const [titleResult, disciplineResult, logResult] = await Promise.all([
-      this.pool.query(
+      this.gamePool.query(
         `SELECT
            ct.character_id,
            ct.title_id,
@@ -616,14 +617,14 @@ export class AdminStore {
          ORDER BY ct.is_equipped DESC, expired ASC, ct.unlocked_at DESC, ct.title_id ASC`,
         [characterId]
       ),
-      this.pool.query(
+      this.gamePool.query(
         `SELECT discipline_id, points, tier, active, learned_at, updated_at
          FROM character_disciplines
          WHERE character_id = $1
          ORDER BY active DESC, updated_at DESC, discipline_id ASC`,
         [characterId]
       ),
-      this.pool.query(
+      this.gamePool.query(
         `SELECT id, character_id, title_id, action, source_type, source_id, operator_type, operator_id,
                 before_json, after_json, reason, created_at
          FROM character_title_logs

@@ -159,3 +159,25 @@ export async function createDbPool(config) {
 
   return pool;
 }
+
+export async function createGameDbPool(config) {
+  const pool = new Pool({
+    connectionString: config.gameDatabaseUrl,
+    max: config.gameDbPoolSize || config.dbPoolSize || 10
+  });
+
+  let client = null;
+  try {
+    client = await pool.connect();
+    await client.query("SELECT 1");
+  } catch (error) {
+    client?.release();
+    client = null;
+    await pool.end();
+    throw error;
+  } finally {
+    client?.release();
+  }
+
+  return pool;
+}

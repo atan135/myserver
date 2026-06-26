@@ -7,6 +7,8 @@ import test from "node:test";
 const CONFIG_ENV_KEYS = [
   "NODE_ENV",
   "DATABASE_URL",
+  "GAME_DATABASE_URL",
+  "ADMIN_GAME_DATABASE_URL",
   "DB_POOL_SIZE",
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
@@ -147,6 +149,33 @@ test("admin-api game admin network limits read positive values", async () => {
     assert.equal(config.gameAdminWriteTimeoutMs, 200);
     assert.equal(config.gameAdminReadTimeoutMs, 300);
     assert.equal(config.gameAdminMaxResponseBytes, 4096);
+  });
+});
+
+test("admin-api derives game database URL from main database URL by default", async () => {
+  await withEnv({
+    DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/myserver_auth"
+  }, (config) => {
+    assert.equal(config.databaseUrl, "postgresql://postgres:password@127.0.0.1:5432/myserver_auth");
+    assert.equal(config.gameDatabaseUrl, "postgresql://postgres:password@127.0.0.1:5432/myserver_game");
+    assert.equal(config.gameDbPoolSize, config.dbPoolSize);
+  });
+});
+
+test("admin-api game database URL supports primary and legacy env names", async () => {
+  await withEnv({
+    DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
+    GAME_DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/game_read",
+    ADMIN_GAME_DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/game_legacy"
+  }, (config) => {
+    assert.equal(config.gameDatabaseUrl, "postgresql://postgres:password@127.0.0.1:5432/game_read");
+  });
+
+  await withEnv({
+    DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
+    ADMIN_GAME_DATABASE_URL: "postgresql://postgres:password@127.0.0.1:5432/game_legacy"
+  }, (config) => {
+    assert.equal(config.gameDatabaseUrl, "postgresql://postgres:password@127.0.0.1:5432/game_legacy");
   });
 });
 

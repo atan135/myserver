@@ -89,6 +89,31 @@ function normalizeAdvertisedHost(host) {
     : host;
 }
 
+function deriveDatabaseUrl(databaseUrl, databaseName) {
+  const value = typeof databaseUrl === "string" ? databaseUrl.trim() : "";
+  if (!value) {
+    return value;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+      return value;
+    }
+
+    url.pathname = `/${databaseName}`;
+    return url.toString();
+  } catch {
+    const derived = value.replace(/myserver_auth(?=([?#]|$))/, databaseName);
+    return derived || value;
+  }
+}
+
+function resolveGameDatabaseUrl(databaseUrl) {
+  return firstNonEmptyEnv(["GAME_DATABASE_URL", "ADMIN_GAME_DATABASE_URL"])
+    || deriveDatabaseUrl(databaseUrl, "myserver_game");
+}
+
 function parseDurationSeconds(value, fallbackSeconds) {
   if (value === undefined || value === null || value === "") {
     return fallbackSeconds;
@@ -221,6 +246,8 @@ export function getConfig() {
   const registryDiscoveryEnabled = parseBoolean(process.env.REGISTRY_ENABLED, false);
   const registryDiscoveryRequired = parseBoolean(process.env.DISCOVERY_REQUIRED, false) || isStrictDiscoveryEnv();
   const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
+  const databaseUrl = process.env.DATABASE_URL || "postgresql://postgres:password@127.0.0.1:5432/myserver_auth";
+  const dbPoolSize = parsePositiveInteger("DB_POOL_SIZE", process.env.DB_POOL_SIZE, 10);
   validateLegacyDirectConfig(
     "admin-api",
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
@@ -251,10 +278,10 @@ export function getConfig() {
     serviceName: process.env.SERVICE_NAME || "admin-api",
     serviceZone: process.env.SERVICE_ZONE || "local",
     serviceBuildVersion: process.env.SERVICE_BUILD_VERSION || "dev",
-    databaseUrl:
-      process.env.DATABASE_URL ||
-      "postgresql://postgres:password@127.0.0.1:5432/myserver_auth",
-    dbPoolSize: parsePositiveInteger("DB_POOL_SIZE", process.env.DB_POOL_SIZE, 10),
+    databaseUrl,
+    gameDatabaseUrl: resolveGameDatabaseUrl(databaseUrl),
+    dbPoolSize,
+    gameDbPoolSize: dbPoolSize,
     jwtSecret: process.env.JWT_SECRET || "dev-only-change-this-jwt-secret",
     jwtExpiresIn,
     adminSessionTtlSeconds: parsePositiveInteger(

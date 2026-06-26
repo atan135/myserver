@@ -1,4 +1,4 @@
-import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+import { Inject, MiddlewareConsumer, Module, NestModule, OnModuleDestroy } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 
 import { AdminStore } from "./admin-store.js";
@@ -7,7 +7,7 @@ import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
 import { RegistryClient } from "./registry-client.js";
-import { createDbPool } from "./db-client.js";
+import { createDbPool, createGameDbPool } from "./db-client.js";
 import { createNatsClient } from "./nats-client.js";
 import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
@@ -27,6 +27,7 @@ import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
   ADMIN_DB_POOL,
+  ADMIN_GAME_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
   ADMIN_METRICS,
   ADMIN_NATS,
@@ -35,6 +36,14 @@ import {
   ADMIN_SESSION_STORE,
   ADMIN_STORE
 } from "./tokens.js";
+
+class GameDbPoolShutdown implements OnModuleDestroy {
+  constructor(@Inject(ADMIN_GAME_DB_POOL) private readonly gamePool: any) {}
+
+  async onModuleDestroy() {
+    await this.gamePool?.end?.();
+  }
+}
 
 @Module({
   imports: [
@@ -55,6 +64,7 @@ import {
     AuthService,
     JwtAuthGuard,
     RolesGuard,
+    GameDbPoolShutdown,
     MonitoringService,
     {
       provide: ADMIN_CONFIG,
@@ -76,10 +86,15 @@ import {
       useFactory: (config: any) => createDbPool(config)
     },
     {
+      provide: ADMIN_GAME_DB_POOL,
+      inject: [ADMIN_CONFIG],
+      useFactory: (config: any) => createGameDbPool(config)
+    },
+    {
       provide: ADMIN_STORE,
-      inject: [ADMIN_DB_POOL, ADMIN_REDIS, ADMIN_CONFIG],
-      useFactory: async (pool: any, redis: any, config: any) => {
-        const adminStore = new AdminStore(pool, redis, config);
+      inject: [ADMIN_DB_POOL, ADMIN_REDIS, ADMIN_CONFIG, ADMIN_GAME_DB_POOL],
+      useFactory: async (pool: any, redis: any, config: any, gamePool: any) => {
+        const adminStore = new AdminStore(pool, redis, config, gamePool);
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
       }

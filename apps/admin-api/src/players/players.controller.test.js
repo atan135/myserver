@@ -159,10 +159,21 @@ test("invalid character title query writes failed audit", async () => {
 });
 
 test("AdminStore maps character title overview by character_id", async () => {
-  const queries = [];
-  const store = new AdminStore({
+  const mainQueries = [];
+  const gameQueries = [];
+  const mainPool = {
     async query(query, params) {
-      queries.push({ query, params });
+      mainQueries.push({ query, params });
+      if (query.includes("INSERT INTO admin_audit_logs")) {
+        return { rowCount: 1 };
+      }
+
+      throw new Error("UNEXPECTED_MAIN_DB_QUERY");
+    }
+  };
+  const gamePool = {
+    async query(query, params) {
+      gameQueries.push({ query, params });
 
       if (query.includes("FROM character_titles ct")) {
         return {
@@ -216,19 +227,34 @@ test("AdminStore maps character title overview by character_id", async () => {
         }]
       };
     }
-  });
+  };
+  const store = new AdminStore(mainPool, null, {}, gamePool);
 
   const overview = await store.findCharacterTitleOverview({ characterId: "char_1", logLimit: 5 });
 
-  assert.equal(queries.length, 3);
-  assert.ok(queries.every((entry) => entry.params[0] === "char_1"));
-  assert.deepEqual(queries[2].params, ["char_1", 5]);
+  assert.equal(mainQueries.length, 0);
+  assert.equal(gameQueries.length, 3);
+  assert.ok(gameQueries.every((entry) => entry.params[0] === "char_1"));
+  assert.deepEqual(gameQueries[2].params, ["char_1", 5]);
   assert.equal(overview.titles[0].expired, true);
   assert.equal(overview.titles[0].operator_id, "title-service");
   assert.equal(overview.equippedTitle, null);
   assert.equal(overview.disciplines[0].points, 30);
   assert.deepEqual(overview.titleLogs[0].before_json, { is_equipped: true });
   assert.deepEqual(overview.titleLogs[0].after_json, { is_equipped: false });
+
+  await store.appendAuditLog({
+    adminId: 1,
+    adminUsername: "worker",
+    action: "character_titles_query",
+    targetType: "character",
+    targetValue: "char_1",
+    details: { result: "success" },
+    ip: "127.0.0.1"
+  });
+  assert.equal(mainQueries.length, 1);
+  assert.match(mainQueries[0].query, /INSERT INTO admin_audit_logs/);
+  assert.equal(gameQueries.length, 3);
 });
 
 test("operator can update non-ban player status", async () => {
