@@ -211,6 +211,8 @@ Protobuf 风格的编解码工具：
 | `character-login-auth` | 登录、选角、连接 `game-proxy` 并完成 `AuthReq` |
 | `character-room-join` | 登录、选角、连接游戏入口并加入房间 |
 | `character-elements-debug` | 登录、选角、查询四属性、执行受控 debug 变更、再次查询并输出 before/change/after |
+| `character-titles-debug` | 登录、选角、查询称号、debug 授予称号、装备称号、再次查询并输出 JSON 摘要 |
+| `character-disciplines-debug` | 登录、选角、设置职业阶位、触发称号解锁检查、确认职业阶位称号授予 |
 | `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
 | `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
 
@@ -286,6 +288,29 @@ node tools/mock-client/src/index.js --scenario character-elements-debug \
   --json-output
 
 `character-elements-debug` 依次发送 `GetCharacterElementsReq(1413)`、`DebugApplyCharacterElementChangeReq(1415)` 和 `GetCharacterElementsReq(1413)`，输出 `before`、`change`、`after`。debug 变更需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--element-debug-token`，仅用于测试或 GM 调试；真实客户端应把四属性查询结果或后续变化推送作为异步状态更新处理。
+
+# 查询、授予并装备角色称号
+node tools/mock-client/src/index.js --scenario character-titles-debug \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --title-id 9001 \
+  --title-debug-token "$GAME_ADMIN_TOKEN" \
+  --json-output
+
+# 设置职业阶位并触发称号解锁检查
+node tools/mock-client/src/index.js --scenario character-disciplines-debug \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --discipline-id forging \
+  --discipline-tier novice \
+  --title-debug-token "$GAME_ADMIN_TOKEN" \
+  --json-output
+
+`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle` 和 `discipline`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -400,6 +425,11 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--element-mastery-wind-delta` | `character-elements-debug` 的风掌握 delta | `0` |
 | `--element-change-reason` | `character-elements-debug` 写入日志的原因 | `mock-client character element debug` |
 | `--element-debug-token` | 四属性 debug 变更 token，默认读取 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
+| `--title-id` | `character-titles-debug` 授予/装备的称号 ID | `9001` |
+| `--discipline-id` | `character-disciplines-debug` 设置的职业 ID | `forging` |
+| `--discipline-tier` | `character-disciplines-debug` 设置的职业阶位 | `novice` |
+| `--title-change-reason` | 称号/职业 debug 写入日志的原因 | `mock-client character title debug` |
+| `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |
 | `--login-name-a` | 客户端A登录用户名 | - |
 | `--password-a` | 客户端A登录密码 | - |

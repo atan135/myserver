@@ -26,7 +26,8 @@ use crate::core::room::{
 };
 use crate::core::runtime::RoomManager;
 use crate::core::service::{
-    character_element_service, core_service, inventory_service, room_service,
+    character_element_service, character_title_service, core_service, inventory_service,
+    room_service,
 };
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
@@ -1221,6 +1222,22 @@ async fn dispatch_packet(
                 services, connection, packet,
             )
             .await
+        }
+        Some(MessageType::GetCharacterTitlesReq) => {
+            character_title_service::handle_get_character_titles(services, connection, packet)
+                .await
+        }
+        Some(MessageType::EquipCharacterTitleReq) => {
+            character_title_service::handle_equip_character_title(services, connection, packet)
+                .await
+        }
+        Some(MessageType::GetCharacterDisciplinesReq) => {
+            character_title_service::handle_get_character_disciplines(services, connection, packet)
+                .await
+        }
+        Some(MessageType::DebugCharacterTitleReq) => {
+            character_title_service::handle_debug_character_title(services, connection, packet)
+                .await
         }
         Some(_) => {
             connection.queue_error(

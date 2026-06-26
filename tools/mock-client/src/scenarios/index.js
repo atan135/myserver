@@ -109,6 +109,8 @@ export {
   runCharacterLoginAuth,
   runCharacterRoomJoin,
   runCharacterElementsDebug,
+  runCharacterTitlesDebug,
+  runCharacterDisciplinesDebug,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./character.js";

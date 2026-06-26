@@ -237,6 +237,46 @@ export function encodeDebugApplyCharacterElementChangeReq(
   ]);
 }
 
+// ============ Character Title / Discipline Encoders ============
+
+export function encodeGetCharacterTitlesReq() {
+  return Buffer.alloc(0);
+}
+
+export function encodeEquipCharacterTitleReq(titleId) {
+  return encodeStringField(1, titleId);
+}
+
+export function encodeGetCharacterDisciplinesReq() {
+  return Buffer.alloc(0);
+}
+
+export function encodeDebugCharacterTitleReq({
+  action = "",
+  titleId = "",
+  disciplineId = "",
+  disciplineTier = "",
+  disciplinePoints = 0,
+  disciplineActive = true,
+  triggerUnlockCheck = false,
+  reason = "",
+  debugToken = "",
+  expiresAt = ""
+} = {}) {
+  return Buffer.concat([
+    encodeStringField(1, action),
+    encodeStringField(2, titleId),
+    encodeStringField(3, disciplineId),
+    encodeStringField(4, disciplineTier),
+    encodeInt64Field(5, disciplinePoints),
+    encodeBoolField(6, disciplineActive),
+    encodeBoolField(7, triggerUnlockCheck),
+    encodeStringField(8, reason),
+    encodeStringField(9, debugToken),
+    encodeStringField(10, expiresAt)
+  ]);
+}
+
 // ============ Message Decoders ============
 
 function decodeFrameInput(buffer) {
@@ -364,6 +404,48 @@ function decodeCharacterElements(buffer) {
   return {
     affinity: fields.get(1) ? decodeElementValues(fields.get(1)) : null,
     mastery: fields.get(2) ? decodeElementValues(fields.get(2)) : null
+  };
+}
+
+function decodeCharacterTitleDefinitionSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    id: readString(fields, 1),
+    name: readString(fields, 2),
+    type: readString(fields, 3),
+    rarity: readString(fields, 4),
+    icon: readString(fields, 5),
+    color: readString(fields, 6),
+    tags: readStringList(fields, 7),
+    hidden: readBool(fields, 8),
+    limited: readBool(fields, 9),
+    sortOrder: readInt32(fields, 10)
+  };
+}
+
+function decodeCharacterTitleSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    definition: fields.get(1) ? decodeCharacterTitleDefinitionSummary(fields.get(1)) : null,
+    owned: readBool(fields, 2),
+    equipped: readBool(fields, 3),
+    sourceType: readString(fields, 4),
+    sourceId: readString(fields, 5),
+    unlockedAt: readString(fields, 6),
+    expiresAt: readString(fields, 7),
+    expired: readBool(fields, 8)
+  };
+}
+
+function decodeCharacterDisciplineSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    disciplineId: readString(fields, 1),
+    points: readInt64(fields, 2),
+    tier: readString(fields, 3),
+    active: readBool(fields, 4),
+    learnedAt: readString(fields, 5),
+    updatedAt: readString(fields, 6)
   };
 }
 
@@ -570,6 +652,38 @@ export function decodeByMessageType(messageType, body) {
         characterId: readString(fields, 3),
         before: fields.get(4) ? decodeCharacterElements(fields.get(4)) : null,
         after: fields.get(5) ? decodeCharacterElements(fields.get(5)) : null
+      };
+    case MESSAGE_TYPE.GET_CHARACTER_TITLES_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        titles: decodeRepeatedMessage(fields, 4, decodeCharacterTitleSummary),
+        equippedTitle: fields.get(5) ? decodeCharacterTitleSummary(fields.get(5)) : null
+      };
+    case MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        equippedTitle: fields.get(4) ? decodeCharacterTitleSummary(fields.get(4)) : null
+      };
+    case MESSAGE_TYPE.GET_CHARACTER_DISCIPLINES_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        disciplines: decodeRepeatedMessage(fields, 4, decodeCharacterDisciplineSummary)
+      };
+    case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        action: readString(fields, 4),
+        title: fields.get(5) ? decodeCharacterTitleSummary(fields.get(5)) : null,
+        discipline: fields.get(6) ? decodeCharacterDisciplineSummary(fields.get(6)) : null,
+        unlockedTitles: decodeRepeatedMessage(fields, 7, decodeCharacterTitleSummary)
       };
     // Inventory push messages
     case MESSAGE_TYPE.INVENTORY_UPDATE_PUSH: {

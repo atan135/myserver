@@ -682,6 +682,94 @@ message DebugApplyCharacterElementChangeRes {
   CharacterElements after = 5;
 }
 
+message CharacterTitleDefinitionSummary {
+  string id = 1;
+  string name = 2;
+  string type = 3;
+  string rarity = 4;
+  string icon = 5;
+  string color = 6;
+  repeated string tags = 7;
+  bool hidden = 8;
+  bool limited = 9;
+  int32 sort_order = 10;
+}
+
+message CharacterTitleSummary {
+  CharacterTitleDefinitionSummary definition = 1;
+  bool owned = 2;
+  bool equipped = 3;
+  string source_type = 4;
+  string source_id = 5;
+  string unlocked_at = 6;
+  string expires_at = 7;
+  bool expired = 8;
+}
+
+message GetCharacterTitlesReq {
+}
+
+message GetCharacterTitlesRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  repeated CharacterTitleSummary titles = 4;
+  CharacterTitleSummary equipped_title = 5;
+}
+
+message EquipCharacterTitleReq {
+  string title_id = 1;
+}
+
+message EquipCharacterTitleRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterTitleSummary equipped_title = 4;
+}
+
+message CharacterDisciplineSummary {
+  string discipline_id = 1;
+  int64 points = 2;
+  string tier = 3;
+  bool active = 4;
+  string learned_at = 5;
+  string updated_at = 6;
+}
+
+message GetCharacterDisciplinesReq {
+}
+
+message GetCharacterDisciplinesRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  repeated CharacterDisciplineSummary disciplines = 4;
+}
+
+message DebugCharacterTitleReq {
+  string action = 1;
+  string title_id = 2;
+  string discipline_id = 3;
+  string discipline_tier = 4;
+  int64 discipline_points = 5;
+  bool discipline_active = 6;
+  bool trigger_unlock_check = 7;
+  string reason = 8;
+  string debug_token = 9;
+  string expires_at = 10;
+}
+
+message DebugCharacterTitleRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  string action = 4;
+  CharacterTitleSummary title = 5;
+  CharacterDisciplineSummary discipline = 6;
+  repeated CharacterTitleSummary unlocked_titles = 7;
+}
+
 // ========== 推送消息 ==========
 
 message InventoryUpdatePush {

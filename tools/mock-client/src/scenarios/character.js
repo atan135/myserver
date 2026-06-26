@@ -1,8 +1,12 @@
 import { MESSAGE_TYPE } from "../constants.js";
 import { TcpProtocolClient } from "../client.js";
 import {
+  encodeDebugCharacterTitleReq,
   encodeDebugApplyCharacterElementChangeReq,
+  encodeEquipCharacterTitleReq,
+  encodeGetCharacterDisciplinesReq,
   encodeGetCharacterElementsReq,
+  encodeGetCharacterTitlesReq,
   encodeRoomJoinReq
 } from "../messages.js";
 import {
@@ -81,6 +85,79 @@ function buildElementDeltaOptions(options, prefix) {
     water: options[`${prefix}WaterDelta`] || 0,
     wind: options[`${prefix}WindDelta`] || 0
   };
+}
+
+function findTitleById(titlesRes, titleId) {
+  return (titlesRes?.titles || []).find((title) => title.definition?.id === String(titleId)) || null;
+}
+
+function summarizeTitle(title) {
+  if (!title) {
+    return null;
+  }
+  return {
+    id: title.definition?.id || "",
+    name: title.definition?.name || "",
+    type: title.definition?.type || "",
+    rarity: title.definition?.rarity || "",
+    owned: Boolean(title.owned),
+    equipped: Boolean(title.equipped),
+    sourceType: title.sourceType || "",
+    sourceId: title.sourceId || "",
+    expiresAt: title.expiresAt || "",
+    expired: Boolean(title.expired),
+    sortOrder: title.definition?.sortOrder ?? 0
+  };
+}
+
+function summarizeTitlesResponse(response, titleId = "") {
+  return {
+    ok: Boolean(response?.ok),
+    errorCode: response?.errorCode || "",
+    characterId: response?.characterId || "",
+    ownedCount: (response?.titles || []).filter((title) => title.owned).length,
+    targetTitle: titleId ? summarizeTitle(findTitleById(response, titleId)) : null,
+    equippedTitle: summarizeTitle(response?.equippedTitle)
+  };
+}
+
+function summarizeDiscipline(discipline) {
+  if (!discipline) {
+    return null;
+  }
+  return {
+    disciplineId: discipline.disciplineId || "",
+    points: discipline.points ?? 0,
+    tier: discipline.tier || "",
+    active: Boolean(discipline.active),
+    updatedAt: discipline.updatedAt || ""
+  };
+}
+
+function findDisciplineById(disciplinesRes, disciplineId) {
+  return (disciplinesRes?.disciplines || []).find((discipline) => discipline.disciplineId === disciplineId) || null;
+}
+
+function summarizeUnlockedTitles(titles) {
+  return (titles || []).map(summarizeTitle).filter(Boolean);
+}
+
+async function queryTitles(client, options, seq, label) {
+  await client.send(MESSAGE_TYPE.GET_CHARACTER_TITLES_REQ, seq, encodeGetCharacterTitlesReq());
+  return client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_TITLES_RES && packet.seq === seq,
+    label
+  );
+}
+
+async function queryDisciplines(client, options, seq, label) {
+  await client.send(MESSAGE_TYPE.GET_CHARACTER_DISCIPLINES_REQ, seq, encodeGetCharacterDisciplinesReq());
+  return client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_DISCIPLINES_RES && packet.seq === seq,
+    label
+  );
 }
 
 async function withJsonQuiet(options, fn) {
@@ -350,5 +427,146 @@ export async function runCharacterElementsDebug(options) {
   });
 
   printResult("character.elementsDebug", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterTitlesDebug(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryTitles(client, options, 2, "getCharacterTitles(before)");
+
+      await client.send(
+        MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_REQ,
+        3,
+        encodeDebugCharacterTitleReq({
+          action: "grant_title",
+          titleId: options.titleId,
+          reason: options.titleChangeReason,
+          debugToken: options.titleDebugToken
+        })
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES && packet.seq === 3,
+        "debugCharacterTitle(grant)"
+      );
+
+      await client.send(
+        MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_REQ,
+        4,
+        encodeEquipCharacterTitleReq(options.titleId)
+      );
+      const equip = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_RES && packet.seq === 4,
+        "equipCharacterTitle"
+      );
+
+      const after = await queryTitles(client, options, 5, "getCharacterTitles(after)");
+      const disciplines = await queryDisciplines(client, options, 6, "getCharacterDisciplines");
+
+      const ok = Boolean(before.ok && action.ok && equip.ok && after.ok && disciplines.ok);
+      return buildEnvelope("character-titles-debug", ok, {
+        login: formatLoginSummary(login),
+        before: summarizeTitlesResponse(before, options.titleId),
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          action: action.action || "grant_title",
+          title: summarizeTitle(action.title),
+          equip: {
+            ok: Boolean(equip.ok),
+            errorCode: equip.errorCode || ""
+          }
+        },
+        after: summarizeTitlesResponse(after, options.titleId),
+        unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles),
+        equippedTitle: summarizeTitle(after.equippedTitle || equip.equippedTitle),
+        discipline: summarizeDiscipline(findDisciplineById(disciplines, options.disciplineId)),
+        request: {
+          titleId: options.titleId,
+          reason: options.titleChangeReason || "",
+          debugTokenProvided: Boolean(options.titleDebugToken)
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.titlesDebug", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterDisciplinesDebug(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryTitles(client, options, 2, "getCharacterTitles(before)");
+
+      await client.send(
+        MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_REQ,
+        3,
+        encodeDebugCharacterTitleReq({
+          action: "set_discipline",
+          disciplineId: options.disciplineId,
+          disciplineTier: options.disciplineTier,
+          disciplinePoints: options.disciplinePoints,
+          disciplineActive: true,
+          triggerUnlockCheck: true,
+          reason: options.titleChangeReason,
+          debugToken: options.titleDebugToken
+        })
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES && packet.seq === 3,
+        "debugCharacterTitle(setDiscipline)"
+      );
+
+      const after = await queryTitles(client, options, 4, "getCharacterTitles(after)");
+      const disciplines = await queryDisciplines(client, options, 5, "getCharacterDisciplines(after)");
+      const discipline = findDisciplineById(disciplines, options.disciplineId) || action.discipline;
+      const equippedTitle = after.equippedTitle || null;
+
+      const ok = Boolean(before.ok && action.ok && after.ok && disciplines.ok);
+      return buildEnvelope("character-disciplines-debug", ok, {
+        login: formatLoginSummary(login),
+        before: summarizeTitlesResponse(before),
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          action: action.action || "set_discipline",
+          discipline: summarizeDiscipline(action.discipline)
+        },
+        after: summarizeTitlesResponse(after),
+        unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles),
+        equippedTitle: summarizeTitle(equippedTitle),
+        discipline: summarizeDiscipline(discipline),
+        request: {
+          disciplineId: options.disciplineId,
+          disciplineTier: options.disciplineTier,
+          disciplinePoints: options.disciplinePoints,
+          reason: options.titleChangeReason || "",
+          debugTokenProvided: Boolean(options.titleDebugToken)
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.disciplinesDebug", envelope, options);
   return envelope;
 }

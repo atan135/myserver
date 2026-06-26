@@ -64,6 +64,12 @@ const DEFAULT_OPTIONS = {
   elementMasteryWindDelta: 0,
   elementChangeReason: "mock-client character element debug",
   elementDebugToken: process.env.MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
+  titleId: "9001",
+  disciplineId: "forging",
+  disciplineTier: "novice",
+  disciplinePoints: 1,
+  titleChangeReason: "mock-client character title debug",
+  titleDebugToken: process.env.MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
   timeoutMs: 5000,
   scenario: SCENARIO.HAPPY,
   maxBodyLen: 4096,
@@ -275,6 +281,25 @@ export function parseArgs(argv) {
         break;
       case "--element-debug-token":
         ({ value: result.elementDebugToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--title-id":
+        ({ value: result.titleId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--discipline-id":
+        ({ value: result.disciplineId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--discipline-tier":
+        ({ value: result.disciplineTier, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--discipline-points":
+        result.disciplinePoints = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--title-change-reason":
+        ({ value: result.titleChangeReason, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--title-debug-token":
+        ({ value: result.titleDebugToken, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--no-service-discovery":
         result.useServiceDiscovery = false;

@@ -996,6 +996,147 @@ pub struct DebugApplyCharacterElementChangeRes {
     pub after: ::core::option::Option<CharacterElements>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CharacterTitleDefinitionSummary {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub r#type: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub rarity: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub icon: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub color: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "7")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "8")]
+    pub hidden: bool,
+    #[prost(bool, tag = "9")]
+    pub limited: bool,
+    #[prost(int32, tag = "10")]
+    pub sort_order: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CharacterTitleSummary {
+    #[prost(message, optional, tag = "1")]
+    pub definition: ::core::option::Option<CharacterTitleDefinitionSummary>,
+    #[prost(bool, tag = "2")]
+    pub owned: bool,
+    #[prost(bool, tag = "3")]
+    pub equipped: bool,
+    #[prost(string, tag = "4")]
+    pub source_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub source_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub unlocked_at: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub expires_at: ::prost::alloc::string::String,
+    #[prost(bool, tag = "8")]
+    pub expired: bool,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetCharacterTitlesReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCharacterTitlesRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "4")]
+    pub titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
+    #[prost(message, optional, tag = "5")]
+    pub equipped_title: ::core::option::Option<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipCharacterTitleReq {
+    #[prost(string, tag = "1")]
+    pub title_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EquipCharacterTitleRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub equipped_title: ::core::option::Option<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CharacterDisciplineSummary {
+    #[prost(string, tag = "1")]
+    pub discipline_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "2")]
+    pub points: i64,
+    #[prost(string, tag = "3")]
+    pub tier: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub active: bool,
+    #[prost(string, tag = "5")]
+    pub learned_at: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub updated_at: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetCharacterDisciplinesReq {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCharacterDisciplinesRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "4")]
+    pub disciplines: ::prost::alloc::vec::Vec<CharacterDisciplineSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DebugCharacterTitleReq {
+    #[prost(string, tag = "1")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub title_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub discipline_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub discipline_tier: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub discipline_points: i64,
+    #[prost(bool, tag = "6")]
+    pub discipline_active: bool,
+    #[prost(bool, tag = "7")]
+    pub trigger_unlock_check: bool,
+    #[prost(string, tag = "8")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub debug_token: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub expires_at: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DebugCharacterTitleRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub action: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub title: ::core::option::Option<CharacterTitleSummary>,
+    #[prost(message, optional, tag = "6")]
+    pub discipline: ::core::option::Option<CharacterDisciplineSummary>,
+    #[prost(message, repeated, tag = "7")]
+    pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InventoryUpdatePush {
     #[prost(message, repeated, tag = "1")]
     pub inventory_items: ::prost::alloc::vec::Vec<Item>,
