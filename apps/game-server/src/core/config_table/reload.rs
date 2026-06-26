@@ -71,6 +71,7 @@ pub fn spawn_hot_reload_task(runtime: ConfigTableRuntime, interval: Duration) ->
                         itemtable_rows = counts.itemtable,
                         skillbase_rows = counts.skillbase,
                         bufferbase_rows = counts.bufferbase,
+                        titletable_rows = counts.titletable,
                         "csv runtime config hot reload succeeded; derived catalogs replaced"
                     );
                 }

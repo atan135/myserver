@@ -1,0 +1,6 @@
+TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder
+int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int
+1001,初心者,完成初始角色创建后获得,identity,character,,"{""event"":""character_created""}",{},common,icon_title_beginner,#FFFFFF,identity|starter,0,0,100
+2001,见习锻造者,锻造修行达到见习阶位,discipline,forging,novice,"{""discipline"":""forging"",""tier"":""novice""}","{""display_badge"":""forging_novice""}",common,icon_title_forging_novice,#D98B45,discipline|forging,0,0,200
+3001,风行旅者,完成风蚀峡谷探索事件,event,wind_canyon,,"{""event"":""wind_canyon_explored""}","{""interaction_tag"":""wind_canyon_known""}",rare,icon_title_wind_traveler,#66CCFF,event|exploration,0,0,300
+9001,系统观察员,系统或 GM 授予的调试称号,system,system,,"{""grant"":""system""}",{},epic,icon_title_system_observer,#B46CFF,system|gm,1,0,900

@@ -118,9 +118,9 @@ fn collect_csv_tables(csv_dir: &Path) -> Result<Vec<CsvTable>, String> {
             return Err(format!("csv file {} has no columns", path.display()));
         }
 
-        if headers[0] != "Id" {
+        if headers[0] != "Id" && headers[0] != "TitleId" {
             return Err(format!(
-                "csv file {} must use `Id` as the first column name",
+                "csv file {} must use `Id` or `TitleId` as the first column name",
                 path.display()
             ));
         }
@@ -505,8 +505,14 @@ fn render_table(table: &CsvTable, out: &mut String) {
         ));
     }
     out.push_str("            };\n\n");
-    out.push_str("            if table.by_id.insert(row.id, table.rows.len()).is_some() {\n");
-    out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\"table {} row {} duplicate id {}\", Self::TABLE_NAME, row_offset + 3, row.id)));\n");
+    out.push_str(&format!(
+        "            if table.by_id.insert(row.{}, table.rows.len()).is_some() {{\n",
+        table.id_field.rust_name
+    ));
+    out.push_str(&format!(
+        "                return Err(CsvLoadError::InvalidRow(format!(\"table {{}} row {{}} duplicate id {{}}\", Self::TABLE_NAME, row_offset + 3, row.{})));\n",
+        table.id_field.rust_name
+    ));
     out.push_str("            }\n");
     for field in &table.secondary_indexes {
         if let Some(stmt) = field.index_insert_stmt() {
@@ -541,10 +547,14 @@ fn render_table(table: &CsvTable, out: &mut String) {
     if table.has_string_pool {
         out.push_str("    pub fn resolve_string(&self, key: StringKey) -> Option<&str> {\n");
         out.push_str("        self.string_pool.get(&key).map(|value| value.as_str())\n");
-        out.push_str("    }\n\n");
+        out.push_str("    }\n");
     }
+    let mut rendered_secondary_index = false;
     for field in &table.secondary_indexes {
         if let Some(index_key_type) = field.csv_type.index_key_type() {
+            if table.has_string_pool || rendered_secondary_index {
+                out.push('\n');
+            }
             out.push_str(&format!(
                 "    pub fn find_by_{}(&self, value: {}) -> Vec<&{}> {{\n",
                 field.rust_name, index_key_type, table.row_struct_name
@@ -560,10 +570,11 @@ fn render_table(table: &CsvTable, out: &mut String) {
             out.push_str("                    .collect()\n");
             out.push_str("            })\n");
             out.push_str("            .unwrap_or_default()\n");
-            out.push_str("    }\n\n");
+            out.push_str("    }\n");
+            rendered_secondary_index = true;
         }
     }
-    out.push_str("}\n\n");
+    out.push_str("}\n");
 }
 fn builtin_indexed_columns() -> BTreeMap<&'static str, Vec<&'static str>> {
     BTreeMap::from([

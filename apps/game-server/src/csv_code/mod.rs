@@ -11,3 +11,4 @@ pub mod scenetable;
 pub mod skillbase;
 pub mod testtable_100;
 pub mod testtable_110;
+pub mod titletable;

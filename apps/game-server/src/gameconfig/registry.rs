@@ -13,6 +13,8 @@ use crate::csv_code::scenetable::SceneTable;
 use crate::csv_code::skillbase::SkillBase;
 use crate::csv_code::testtable_100::TestTable100;
 use crate::csv_code::testtable_110::TestTable110;
+use crate::csv_code::titletable::TitleTable;
+use crate::gameconfig::title_config::validate_title_table;
 
 const SCENETABLE_FILE: &str = "SceneTable.csv";
 const SCENESPAWNPOINT_FILE: &str = "SceneSpawnPoint.csv";
@@ -24,6 +26,7 @@ const TESTTABLE_110_FILE: &str = "TestTable_110.csv";
 const ITEMTABLE_FILE: &str = "ItemTable.csv";
 const SKILLBASE_FILE: &str = "SkillBase.csv";
 const BUFFERBASE_FILE: &str = "BufferBase.csv";
+const TITLETABLE_FILE: &str = "TitleTable.csv";
 
 #[derive(Clone)]
 pub struct ConfigTables {
@@ -37,6 +40,7 @@ pub struct ConfigTables {
     pub item_table: Arc<ItemTable>,
     pub skillbase: Arc<SkillBase>,
     pub bufferbase: Arc<BufferBase>,
+    pub titletable: Arc<TitleTable>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +55,7 @@ pub struct ConfigTableRowCounts {
     pub itemtable: usize,
     pub skillbase: usize,
     pub bufferbase: usize,
+    pub titletable: usize,
 }
 
 impl ConfigTables {
@@ -66,6 +71,8 @@ impl ConfigTables {
         let itemtable = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
         let skillbase = SkillBase::load_from_csv(&csv_dir.join(SKILLBASE_FILE))?;
         let bufferbase = BufferBase::load_from_csv(&csv_dir.join(BUFFERBASE_FILE))?;
+        let titletable = TitleTable::load_from_csv(&csv_dir.join(TITLETABLE_FILE))?;
+        validate_title_table(&titletable)?;
 
         Ok(Self {
             scenetable: Arc::new(scenetable),
@@ -78,6 +85,7 @@ impl ConfigTables {
             item_table: Arc::new(itemtable),
             skillbase: Arc::new(skillbase),
             bufferbase: Arc::new(bufferbase),
+            titletable: Arc::new(titletable),
         })
     }
 
@@ -154,6 +162,14 @@ impl ConfigTables {
             self.bufferbase.clone()
         };
 
+        let titletable = if changed_files.contains(TITLETABLE_FILE) {
+            let table = TitleTable::load_from_csv(&csv_dir.join(TITLETABLE_FILE))?;
+            validate_title_table(&table)?;
+            Arc::new(table)
+        } else {
+            self.titletable.clone()
+        };
+
         Ok(Self {
             scenetable,
             scenespawnpoint,
@@ -165,6 +181,7 @@ impl ConfigTables {
             item_table: itemtable,
             skillbase,
             bufferbase,
+            titletable,
         })
     }
 
@@ -180,6 +197,7 @@ impl ConfigTables {
             csv_dir.join(ITEMTABLE_FILE),
             csv_dir.join(SKILLBASE_FILE),
             csv_dir.join(BUFFERBASE_FILE),
+            csv_dir.join(TITLETABLE_FILE),
         ]
     }
 
@@ -195,6 +213,7 @@ impl ConfigTables {
             itemtable: self.item_table.rows.len(),
             skillbase: self.skillbase.rows.len(),
             bufferbase: self.bufferbase.rows.len(),
+            titletable: self.titletable.rows.len(),
         }
     }
 }
