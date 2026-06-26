@@ -77,7 +77,7 @@ Protobuf 风格的编解码工具：
 - `refreshTicketIfNeeded(options, login)` - ticket 快过期时通过 access token 重新签发
 - `applyDiscoveredServices(options, login)` - 使用 auth-http 返回的 `services` 自动更新测试目标地址
 - `resolveAccountCredentials()` - 解析账号密码
-- `formatLoginSummary()` - 格式化登录信息，包含 ticket payload 中的 `playerId`、`characterId`、`worldId`、`exp`
+- `formatLoginSummary()` - 格式化登录信息，清晰输出账号 `accountPlayerId`、游戏内 `characterId`、`worldId`、`exp`
 
 当前登录后必须先选择角色才能拿到可用于游戏入口的 ticket。`fetchTicket()` 会在登录后按 `--character-id`、已有角色列表、`--auto-create-character` / `--create-character-if-missing` 选择或创建角色；无角色且未请求自动创建时会提示先创建或选择角色，不会直接进入游戏。
 
@@ -135,7 +135,7 @@ Protobuf 风格的编解码工具：
 | 场景 | 说明 |
 |------|------|
 | `create-matched-room` | 创建匹配房间并通知 MatchService |
-| `create-matched-room-and-join` | 创建匹配房间并让所有玩家加入，验证完整回调 |
+| `create-matched-room-and-join` | 创建匹配房间并让所有角色加入，验证完整回调 |
 
 ### 游戏场景 (game.js)
 | 场景 | 说明 |

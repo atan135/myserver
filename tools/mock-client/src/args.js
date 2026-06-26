@@ -82,7 +82,7 @@ const DEFAULT_OPTIONS = {
   limit: 20,
   beforeTime: 0,
   matchId: "",
-  playerIds: [],
+  characterIds: [],
   mode: "1v1",
   policyId: "",
   moveFrames: [1, 2, 3, 4, 5],
@@ -442,8 +442,8 @@ export function parseArgs(argv) {
       case "--match-id":
         ({ value: result.matchId, nextIndex: index } = collectOptionValue(argv, index));
         break;
-      case "--player-ids":
-        result.playerIds = collectOptionValue(argv, index).value.split(",");
+      case "--character-ids":
+        result.characterIds = collectOptionValue(argv, index).value.split(",").filter(Boolean);
         index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--mode":

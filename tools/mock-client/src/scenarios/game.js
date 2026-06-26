@@ -27,7 +27,7 @@ function formatFrameBundle(label, framePush) {
   } else {
     console.log(`${label}: frameId=${framePush.frameId}, fps=${framePush.fps}, inputs=${framePush.inputs.length}${snapshotInfo}`);
     for (const input of framePush.inputs) {
-      console.log(`  └─ [${input.playerId}] ${input.action}: ${input.payloadJson}`);
+      console.log(`  └─ [${input.characterId}] ${input.action}: ${input.payloadJson}`);
     }
   }
 }
@@ -71,8 +71,8 @@ export async function runGameplayRoundtrip(options) {
   console.log("=".repeat(60));
   console.log("FRAME SYNC TEST - START");
   console.log("=".repeat(60));
-  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
-  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+  console.log("clientA.login:", JSON.stringify({ accountPlayerId: loginA.playerId, characterId: loginA.characterId }, null, 2));
+  console.log("clientB.login:", JSON.stringify({ accountPlayerId: loginB.playerId, characterId: loginB.characterId }, null, 2));
 
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");

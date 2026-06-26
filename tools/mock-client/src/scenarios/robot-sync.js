@@ -46,7 +46,7 @@ function summarizeFrameBundle(bundle) {
     isSilentFrame: bundle.isSilentFrame,
     inputs: bundle.inputs.map((input) => ({
       frameId: input.frameId,
-      playerId: input.playerId,
+      characterId: input.characterId,
       action: input.action,
       payloadJson: input.payloadJson
     }))
@@ -165,7 +165,7 @@ function findExpectedRobotInputs(bundle, expectedInputs) {
   return expectedInputs.map((expected) =>
     bundle.inputs.find(
       (input) =>
-        input.playerId === expected.playerId &&
+        input.characterId === expected.characterId &&
         input.action === ROBOT_MOVE_ACTION &&
         input.payloadJson === expected.payloadJson
     ) || null
@@ -341,8 +341,14 @@ export async function runRobotSyncRoom(options) {
       {
         roomId,
         policyId,
-        clientA: loginA.playerId,
-        clientB: loginB.playerId
+        clientA: {
+          accountPlayerId: loginA.playerId,
+          characterId: loginA.characterId
+        },
+        clientB: {
+          accountPlayerId: loginB.playerId,
+          characterId: loginB.characterId
+        }
       },
       null,
       2
@@ -397,8 +403,8 @@ export async function runRobotSyncRoom(options) {
       JSON.stringify(
         {
           targetFrameId,
-          clientA: { playerId: loginA.playerId, payloadJson: payloadA },
-          clientB: { playerId: loginB.playerId, payloadJson: payloadB }
+          clientA: { characterId: loginA.characterId, payloadJson: payloadA },
+          clientB: { characterId: loginB.characterId, payloadJson: payloadB }
         },
         null,
         2
@@ -406,8 +412,8 @@ export async function runRobotSyncRoom(options) {
     );
 
     const expectedInputs = [
-      { playerId: loginA.playerId, payloadJson: payloadA },
-      { playerId: loginB.playerId, payloadJson: payloadB }
+      { characterId: loginA.characterId, payloadJson: payloadA },
+      { characterId: loginB.characterId, payloadJson: payloadB }
     ];
     await Promise.all([
       clientA.send(

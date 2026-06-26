@@ -52,7 +52,8 @@ export function summarizeRedirectReconnectResult({
 
   return {
     ok: true,
-    playerId: login.playerId,
+    accountPlayerId: login.playerId,
+    characterId: login.characterId,
     redirect: {
       reason: redirect.reason,
       roomId: redirect.roomId,

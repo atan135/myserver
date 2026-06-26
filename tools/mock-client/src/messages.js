@@ -462,7 +462,7 @@ export function decodeByMessageType(messageType, body) {
     case MESSAGE_TYPE.AUTH_RES:
       return {
         ok: readBool(fields, 1),
-        playerId: readString(fields, 2),
+        accountPlayerId: readString(fields, 2),
         errorCode: readString(fields, 3)
       };
     case MESSAGE_TYPE.PING_RES:

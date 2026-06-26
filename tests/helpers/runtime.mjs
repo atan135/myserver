@@ -12,6 +12,12 @@ import Redis from "ioredis";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..", "..");
+const AUTH_HTTP_LEGACY_DIRECT_CONFIG_ENV_NAMES = [
+  "GAME_PROXY_HOST",
+  "GAME_PROXY_PORT",
+  "GAME_SERVER_ADMIN_HOST",
+  "GAME_SERVER_ADMIN_PORT"
+];
 
 export function randomId(prefix = "test") {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
@@ -76,7 +82,11 @@ function setEnvVars(nextEnv) {
 
   for (const [key, value] of Object.entries(nextEnv)) {
     previous.set(key, process.env[key]);
-    process.env[key] = value;
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
   }
 
   return () => {
@@ -100,7 +110,7 @@ export async function startAuthHttpServer({
   gameServerAdminPort = 7001,
   envOverrides = {}
 }) {
-  const restoreEnv = setEnvVars({
+  const nextEnv = {
     NODE_ENV: "test",
     HOST: host,
     PORT: String(port),
@@ -117,7 +127,13 @@ export async function startAuthHttpServer({
     GAME_SERVER_ADMIN_HOST: gameServerAdminHost,
     GAME_SERVER_ADMIN_PORT: String(gameServerAdminPort),
     ...envOverrides
-  });
+  };
+  if (isExplicitStrictDiscovery(nextEnv)) {
+    for (const name of AUTH_HTTP_LEGACY_DIRECT_CONFIG_ENV_NAMES) {
+      nextEnv[name] = undefined;
+    }
+  }
+  const restoreEnv = setEnvVars(nextEnv);
 
   let context;
 
@@ -555,6 +571,14 @@ export async function startNatsServer({ host = "127.0.0.1", port } = {}) {
   };
 }
 
+function isExplicitStrictDiscovery(env) {
+  if (["1", "true"].includes(String(env.DISCOVERY_REQUIRED || "").trim().toLowerCase())) {
+    return true;
+  }
+
+  return ["1", "true"].includes(String(env.DISALLOW_LEGACY_DIRECT_CONFIG || "").trim().toLowerCase());
+}
+
 async function runProcess({ command, args, cwd, env, timeoutMs = 240000 }) {
   const child = spawn(command, args, {
     cwd,
@@ -798,7 +822,7 @@ export async function runMatchFlowProbe({
   addr,
   scenario = "matched",
   mode = "1v1",
-  playerIds = [],
+  characterIds = [],
   timeoutSecs = 15,
   jsonOutput = false,
   processTimeoutMs = 120000
@@ -821,8 +845,8 @@ export async function runMatchFlowProbe({
     String(timeoutSecs)
   ];
 
-  for (const playerId of playerIds) {
-    args.push("--player-id", playerId);
+  for (const characterId of characterIds) {
+    args.push("--character-id", characterId);
   }
   if (jsonOutput) {
     args.push("--json-output");
@@ -853,6 +877,8 @@ export async function runMockClientScenario({
   passwordA,
   loginNameB,
   passwordB,
+  ticket,
+  characterId,
   timeoutMs = 5000,
   maxBodyLen = 4096,
   gameHost,
@@ -913,6 +939,14 @@ export async function runMockClientScenario({
 
   if (passwordB) {
     args.push("--password-b", passwordB);
+  }
+
+  if (ticket) {
+    args.push("--ticket", ticket);
+  }
+
+  if (characterId) {
+    args.push("--character-id", characterId);
   }
 
   const child = spawn(process.execPath, args, {
@@ -981,6 +1015,10 @@ export async function startGameProxy({
     CARGO_TARGET_DIR: cargoTargetDir,
     ...envOverrides
   };
+  if (isExplicitStrictDiscovery(cargoEnv)) {
+    delete cargoEnv.UPSTREAM_SERVER_ID;
+    delete cargoEnv.UPSTREAM_LOCAL_SOCKET_NAME;
+  }
 
   await runProcess({
     command: cargoBin,

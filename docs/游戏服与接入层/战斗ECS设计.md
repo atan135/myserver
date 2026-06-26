@@ -133,7 +133,7 @@ pub struct RoomCombatEcs {
     buff_slots: Vec<[BuffSlot; 6]>,     // 每实体6个Buff槽
 
     // 映射表
-    player_entity_map: HashMap<String, EntityId>,
+    character_entity_map: HashMap<String, EntityId>,
     entity_index_map: HashMap<EntityId, DenseIndex>,
     index_entity_map: Vec<EntityId>,
 
@@ -145,12 +145,12 @@ pub struct RoomCombatEcs {
 
 ### 2.4 实体标识与索引映射
 
-当场景规模提升到 `100` 玩家，并同时存在 NPC / 怪物 / 投射物时，ECS 不建议直接使用 `player_id` 作为组件数组下标。
+当场景规模提升到 `100` 玩家，并同时存在 NPC / 怪物 / 投射物时，ECS 不建议直接使用 `character_id` 作为组件数组下标。
 
 推荐拆成三层身份：
 
-- `player_id`
-  - 业务层身份，仅玩家拥有
+- `character_id`
+  - 游戏内角色身份，仅玩家角色实体拥有
 - `entity_id`
   - 统一实体身份，玩家 / NPC / 怪物 / 投射物都拥有
 - `dense_index`
@@ -165,7 +165,7 @@ type DenseIndex = usize;
 struct EntityMeta {
     entity_id: EntityId,
     entity_type: EntityType,
-    player_id: Option<String>,
+    character_id: Option<String>,
     alive: bool,
 }
 
@@ -182,7 +182,7 @@ pub struct RoomCombatEcs {
     positions: Vec<Position>,
     move_states: Vec<MoveState>,
 
-    player_entity_map: HashMap<String, EntityId>,
+    character_entity_map: HashMap<String, EntityId>,
     entity_index_map: HashMap<EntityId, DenseIndex>,
     index_entity_map: Vec<EntityId>,
 }
@@ -191,12 +191,12 @@ pub struct RoomCombatEcs {
 访问路径应为：
 
 ```text
-player_id -> entity_id -> dense_index -> move_states[dense_index]
+character_id -> entity_id -> dense_index -> move_states[dense_index]
 ```
 
 这样可以同时满足：
 
-- 玩家输入入口仍使用 `player_id`
+- 玩家输入入口使用 `character_id`
 - ECS tick 时仍可连续遍历 `Vec`
 - NPC / 怪物 / 投射物可共享同一套组件结构
 - 删除实体时可通过 `swap_remove` 维护紧凑数组
@@ -469,7 +469,7 @@ for event in events {
 
 ### 7.3 迁移状态边界
 
-当前 `RoomCombatEcs` 的 `combat_state_json` 使用 `room-combat-ecs.v1`，导出所有 ECS 实体的基础战斗状态，包括玩家和 Monster 的 entity meta、位置、朝向、血量、基础属性、移动状态、技能冷却、Buff slot、玩家实体映射和待处理技能请求。`pending_events` 不迁移，避免导入后重复广播已经产生过的副作用。
+当前 `RoomCombatEcs` 的 `combat_state_json` 使用 `room-combat-ecs.v1`，导出所有 ECS 实体的基础战斗状态，包括玩家和 Monster 的 entity meta、位置、朝向、血量、基础属性、移动状态、技能冷却、Buff slot、角色实体映射和待处理技能请求。`pending_events` 不迁移，避免导入后重复广播已经产生过的副作用。
 
 NPC / Monster 的非玩家运行态通过 `RoomLogicTransferState.npc_state_json` 承载，当前通用 schema 为 `room-transfer.npc-state.v1`。该契约可表达 entity id、entity kind、position、hp/max hp、target、threat/aggro、behavior node、blackboard/context、rng、path、wait timer 和技能冷却。`combat_demo` 目前只把 training dummy / Monster 导出为 demo 级 `training_dummy.idle`，并在导入时与 `combat_state_json` 恢复出的 ECS 实体做 entity id、类型、位置和血量一致性校验。
 

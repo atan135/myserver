@@ -30,7 +30,7 @@ function formatSnapshot(label, push) {
   lines.push(`${label}: frame=${push.frameId} reason=${push.reason} entities=${push.entities.length}`);
   for (const entity of push.entities) {
     lines.push(
-      `  [${entity.playerId.slice(0, 8)}] pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(1)},${entity.dirY.toFixed(1)}) moving=${entity.moving}`
+      `  [${entity.characterId.slice(0, 8)}] pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(1)},${entity.dirY.toFixed(1)}) moving=${entity.moving}`
     );
   }
   return lines.join("\n");
@@ -79,8 +79,8 @@ export async function runMovementInteractive(options) {
   console.log("MOVEMENT INTERACTIVE - Dual Client Movement Sync");
   console.log("=".repeat(60));
   console.log("Room ID:", roomId);
-  console.log("clientA.playerId:", loginA.playerId);
-  console.log("clientB.playerId:", loginB.playerId);
+  console.log("clientA.identity:", JSON.stringify({ accountPlayerId: loginA.playerId, characterId: loginA.characterId }));
+  console.log("clientB.identity:", JSON.stringify({ accountPlayerId: loginB.playerId, characterId: loginB.characterId }));
   console.log("");
   console.log("Controls:");
   console.log("  w / ArrowUp    - Move up");

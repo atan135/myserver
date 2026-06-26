@@ -13,8 +13,8 @@ export async function runChatInteractive(options) {
   const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
-  console.log("clientA.playerId:", loginA.playerId);
-  console.log("clientB.playerId:", loginB.playerId);
+  console.log("clientA.accountPlayerId:", loginA.playerId);
+  console.log("clientB.accountPlayerId:", loginB.playerId);
   console.log("");
   console.log("=== Interactive Chat ===");
   console.log("clientA (you) <---> clientB");
@@ -40,12 +40,12 @@ export async function runChatInteractive(options) {
   });
 
   let seq = 2;
-  const clientBPlayerId = loginB.playerId;
+  const clientBAccountPlayerId = loginB.playerId;
   let replyingToSeq = 1;
 
   // Helper to send message from clientA to clientB
   async function sendMessage(content) {
-    await clientA.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, seq, encodeChatPrivateReq(clientBPlayerId, content));
+    await clientA.send(MESSAGE_TYPE.CHAT_PRIVATE_REQ, seq, encodeChatPrivateReq(clientBAccountPlayerId, content));
     seq++;
   }
 

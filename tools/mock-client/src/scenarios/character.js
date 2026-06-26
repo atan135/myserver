@@ -200,7 +200,7 @@ export async function runCharacterList(options) {
   const session = await loginSession(options, "character-list");
   const payload = await listCharacters(options, session.accessToken);
   const envelope = buildEnvelope("character-list", true, {
-    playerId: payload.playerId || session.playerId,
+    accountPlayerId: payload.playerId || session.playerId,
     characterCount: payload.characters.length,
     characters: summarizeCharacters(payload.characters)
   });
@@ -213,7 +213,7 @@ export async function runCharacterCreate(options) {
   const input = buildCharacterCreateInput(options);
   const character = await createCharacter(options, session.accessToken, input);
   const envelope = buildEnvelope("character-create", true, {
-    playerId: session.playerId,
+    accountPlayerId: session.playerId,
     character: summarizeCharacter(character)
   });
   printResult("character.create", envelope, options);
@@ -248,7 +248,7 @@ export async function runCharacterDuplicateName(options) {
   const second = await createCharacter(options, session.accessToken, input);
 
   const envelope = buildEnvelope("character-duplicate-name", true, {
-    playerId: session.playerId,
+    accountPlayerId: session.playerId,
     duplicateName: name,
     characters: [summarizeCharacter(first), summarizeCharacter(second)]
   });
@@ -288,7 +288,7 @@ export async function runCharacterLimit(options) {
     existingCount + created.length === 6
   );
   const envelope = buildEnvelope("character-limit", ok, {
-    playerId: session.playerId,
+    accountPlayerId: session.playerId,
     existingCount,
     createdCount: created.length,
     created,
@@ -348,7 +348,7 @@ export async function runCharacterRoomJoin(options) {
           roomId: joinRes.roomId,
           event: push.event || null,
           memberCount: push.snapshot?.members?.length ?? null,
-          ownerPlayerId: push.snapshot?.ownerPlayerId || null
+          ownerCharacterId: push.snapshot?.ownerCharacterId || null
         }
       });
     } finally {

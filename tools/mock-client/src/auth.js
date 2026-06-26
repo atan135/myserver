@@ -58,7 +58,7 @@ export function summarizeTicketPayload(ticket) {
   }
 
   return {
-    playerId: payload.playerId || null,
+    accountPlayerId: payload.playerId || null,
     characterId: payload.characterId || null,
     worldId: payload.worldId ?? null,
     exp: payload.exp || null
@@ -73,7 +73,8 @@ function attachTicketSummary(login) {
 
   return {
     ...login,
-    playerId: login.playerId || ticketPayload.playerId,
+    playerId: login.playerId || ticketPayload.accountPlayerId,
+    accountPlayerId: login.accountPlayerId || login.playerId || ticketPayload.accountPlayerId,
     characterId: login.characterId || ticketPayload.characterId,
     worldId: login.worldId ?? ticketPayload.worldId,
     ticketPayload
@@ -148,7 +149,7 @@ export function formatLoginSummary(login) {
   const ticketPayload = login.ticketPayload || summarizeTicketPayload(login.ticket);
 
   return {
-    playerId: login.playerId,
+    accountPlayerId: login.accountPlayerId || login.playerId || ticketPayload?.accountPlayerId || null,
     characterId: login.characterId || ticketPayload?.characterId || null,
     worldId: login.worldId ?? ticketPayload?.worldId ?? null,
     loginName: login.loginName || null,
@@ -157,7 +158,7 @@ export function formatLoginSummary(login) {
     ticketPreview: login.ticket ? `${login.ticket.slice(0, 16)}...` : null,
     ticketPayload: ticketPayload
       ? {
-          playerId: ticketPayload.playerId || null,
+          accountPlayerId: ticketPayload.accountPlayerId || null,
           characterId: ticketPayload.characterId || null,
           worldId: ticketPayload.worldId ?? null,
           exp: ticketPayload.exp || null
@@ -641,7 +642,7 @@ export async function runKickSession(options) {
     if (!authRes.ok) {
       throw new Error(`TCP auth failed: ${authRes.errorCode}`);
     }
-    console.log("[kick-session] TCP auth OK, playerId:", authRes.playerId);
+    console.log("[kick-session] TCP auth OK, accountPlayerId:", authRes.accountPlayerId);
 
     // Step 8: Second login via HTTP (triggers kick on the TCP connection)
     console.log("[kick-session] step 8: second login to trigger TCP kick...");

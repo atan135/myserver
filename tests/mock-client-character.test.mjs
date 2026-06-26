@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import test from "node:test";
+import { afterEach, test } from "node:test";
 
 import { parseArgs } from "../tools/mock-client/src/args.js";
 import {
@@ -37,6 +37,12 @@ function createTicket(payload) {
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 function response(status, payload) {
   return {
@@ -481,9 +487,10 @@ test("fetchTicket selects an existing character and summarizes ticket payload", 
 
   assert.equal(login.playerId, "player-001");
   assert.equal(login.characterId, existing.character_id);
+  assert.equal(summary.accountPlayerId, "player-001");
   assert.equal(summary.characterId, existing.character_id);
   assert.equal(summary.worldId, 9);
-  assert.equal(summary.ticketPayload.playerId, "player-001");
+  assert.equal(summary.ticketPayload.accountPlayerId, "player-001");
   assert.equal(summary.ticketPayload.characterId, existing.character_id);
   assert.equal(summary.ticketPayload.worldId, 9);
   assert.equal(summary.ticketPayload.exp, "2026-06-25T12:15:00.000Z");
@@ -593,9 +600,9 @@ test("character-login-auth auto-creates, selects, and authenticates with a chara
     assert.equal(result.ok, true);
     assert.equal(payload.ok, true);
     assert.equal(payload.scenario, "character-login-auth");
-    assert.equal(payload.login.playerId, "player-001");
+    assert.equal(payload.login.accountPlayerId, "player-001");
     assert.equal(payload.login.characterId, "chr_0000000000001");
-    assert.equal(payload.login.ticketPayload.playerId, "player-001");
+    assert.equal(payload.login.ticketPayload.accountPlayerId, "player-001");
     assert.equal(payload.login.ticketPayload.characterId, "chr_0000000000001");
     assert.equal(payload.login.ticketPayload.worldId, 9);
     assert.deepEqual(

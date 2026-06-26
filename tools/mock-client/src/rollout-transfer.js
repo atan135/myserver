@@ -837,9 +837,9 @@ export class ProxyAdminClient {
     return { ok: true };
   }
 
-  async upsertPlayerRoute(route) {
+  async upsertCharacterRoute(route) {
     const params = new URLSearchParams();
-    params.set("player_id", route.playerId);
+    params.set("character_id", route.characterId);
     if (route.currentRoomId) {
       params.set("current_room_id", route.currentRoomId);
     }
@@ -848,7 +848,7 @@ export class ProxyAdminClient {
     }
     params.set("rollout_epoch", route.rolloutEpoch || "");
 
-    await this.requestText(`/player-route/upsert?${params.toString()}`, { method: "POST" });
+    await this.requestText(`/character-route/upsert?${params.toString()}`, { method: "POST" });
     return { ok: true };
   }
 

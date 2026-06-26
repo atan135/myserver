@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { after, before, test } from "node:test";
 
 import Redis from "ioredis";
@@ -29,10 +30,9 @@ import {
   startMatchService,
   startNatsServer
 } from "./helpers/runtime.mjs";
-import { fetchTicket } from "../tools/mock-client/src/auth.js";
 import { TcpProtocolClient } from "../tools/mock-client/src/client.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
-import { encodeRoomJoinReq, encodeRoomReconnectReq } from "../tools/mock-client/src/messages.js";
+import { decodeByMessageType, encodePingReq, encodeRoomJoinReq, encodeRoomReconnectReq } from "../tools/mock-client/src/messages.js";
 import { authenticateClient } from "../tools/mock-client/src/scenarios/room.js";
 
 const redisUrl = process.env.TEST_REDIS_URL || "redis://127.0.0.1:6379";
@@ -69,6 +69,116 @@ const manualRegistryInstances = [
   { serviceName: "game-server", instanceId: mixedEndpointGameServerInstanceId }
 ];
 const allRegistryInstances = [...registryInstances, ...manualRegistryInstances];
+
+function base64UrlEncode(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function hashTicket(ticket) {
+  return crypto.createHash("sha256").update(ticket).digest("hex");
+}
+
+function signTicketPayload(payloadB64, secret) {
+  return crypto
+    .createHmac("sha256", secret)
+    .update(payloadB64)
+    .digest("base64url");
+}
+
+function createTestLogin({ accountPlayerId, characterId, worldId = 0 }) {
+  const expiresAt = new Date(Date.now() + 300_000).toISOString();
+  const payload = {
+    playerId: accountPlayerId,
+    characterId,
+    nonce: crypto.randomBytes(12).toString("hex"),
+    ver: 1,
+    exp: expiresAt,
+    worldId
+  };
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const ticket = `${payloadB64}.${signTicketPayload(payloadB64, ticketSecret)}`;
+  return {
+    playerId: accountPlayerId,
+    accountPlayerId,
+    characterId,
+    worldId,
+    accessToken: "",
+    ticket,
+    ticketExpiresAt: expiresAt,
+    ticketPayload: {
+      accountPlayerId,
+      characterId,
+      worldId,
+      exp: expiresAt
+    }
+  };
+}
+
+async function writeTestTicket(login) {
+  const redis = new Redis(redisUrl, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true
+  });
+
+  await redis.connect();
+  try {
+    await redis.set(
+      `${redisKeyPrefix}ticket:${hashTicket(login.ticket)}`,
+      login.accountPlayerId,
+      "EX",
+      300
+    );
+    await redis.set(`${redisKeyPrefix}player-ticket-version:${login.accountPlayerId}`, "1", "EX", 300);
+  } finally {
+    await redis.quit();
+  }
+}
+
+async function createWritableTestLogin(prefix) {
+  const login = createTestLogin({
+    accountPlayerId: randomId(`${prefix}-account`),
+    characterId: `chr_${randomId(prefix).replace(/[^0-9a-hjkmnp-tv-z]/g, "").slice(-16) || "0000000000000001"}`
+  });
+  await writeTestTicket(login);
+  return login;
+}
+
+async function readUntilWithPing(client, {
+  timeoutMs,
+  readSliceMs = 1000,
+  pingIntervalMs = 2000,
+  predicate,
+  label
+}) {
+  const startedAt = Date.now();
+  let lastPingAt = 0;
+  let pingSeq = 800000;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const now = Date.now();
+    if (now - lastPingAt >= pingIntervalMs) {
+      await client.send(MESSAGE_TYPE.PING_REQ, pingSeq, encodePingReq(now));
+      pingSeq += 1;
+      lastPingAt = now;
+    }
+
+    try {
+      const packet = await client.readNextPacket(Math.min(readSliceMs, Math.max(1, timeoutMs - (Date.now() - startedAt))));
+      const decoded = decodeByMessageType(packet.messageType, packet.body);
+      console.log(`${client.label}.${label}:`, JSON.stringify({ messageType: packet.messageType, seq: packet.seq, decoded }, null, 2));
+      if (predicate(packet, decoded)) {
+        return decoded;
+      }
+    } catch (error) {
+      if (!/Timed out waiting/.test(error.message)) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`Timed out waiting for ${client.label}.${label} after ${timeoutMs}ms`);
+}
 
 const manualEndpoints = {
   gameServer: {
@@ -786,6 +896,7 @@ test("auth-http discovers game-proxy.client and mock-client connects through pro
   assert.notEqual(login.services.game.port, gameServer.port);
   assert.notEqual(login.gameProxyPort, gameServer.port);
 
+  const testLogin = await createWritableTestLogin("registry-happy");
   await runMockClientScenario({
     scenario: "happy",
     httpBaseUrl: authServer.baseUrl,
@@ -793,6 +904,8 @@ test("auth-http discovers game-proxy.client and mock-client connects through pro
     gameHost: gameProxy.host,
     port: gameProxy.tcpFallbackPort,
     roomId: randomId("registry-room"),
+    ticket: testLogin.ticket,
+    characterId: testLogin.characterId,
     noServiceDiscovery: true,
     timeoutMs: 10000,
     processTimeoutMs: 45000
@@ -851,14 +964,14 @@ test("M7 drills match-service create-room then players join through registry-dis
     maxBodyLen: 4096,
     useServiceDiscovery: false
   };
-  const loginA = await fetchTicket({ ...baseClientOptions, guestId: randomId("m7-match-a") });
-  const loginB = await fetchTicket({ ...baseClientOptions, guestId: randomId("m7-match-b") });
+  const loginA = await createWritableTestLogin("m7-match-a");
+  const loginB = await createWritableTestLogin("m7-match-b");
 
   const probe = await runMatchFlowProbe({
     addr: matchService.addr,
     scenario: "matched",
     mode: "1v1",
-    playerIds: [loginA.playerId, loginB.playerId],
+    characterIds: [loginA.characterId, loginB.characterId],
     timeoutSecs: 20,
     jsonOutput: true,
     processTimeoutMs: 90000
@@ -867,7 +980,7 @@ test("M7 drills match-service create-room then players join through registry-dis
   assert.equal(matchResult.ok, true);
   assert.equal(matchResult.scenario, "matched");
   assert.equal(matchResult.mode, "1v1");
-  assert.deepEqual(matchResult.playerIds, [loginA.playerId, loginB.playerId]);
+  assert.deepEqual(matchResult.characterIds, [loginA.characterId, loginB.characterId]);
   assert.ok(matchResult.matchId);
   assert.ok(matchResult.roomId);
   assert.deepEqual(matchResult.statuses, ["matched", "matched"]);
@@ -905,24 +1018,24 @@ test("M7 drills match-service create-room then players join through registry-dis
       (packet, decoded) =>
         packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH &&
         decoded.snapshot?.roomId === matchResult.roomId &&
-        decoded.snapshot.members?.some((member) => member.playerId === loginB.playerId),
+        decoded.snapshot.members?.some((member) => member.characterId === loginB.characterId),
       "m7RoomStateB"
     );
     assert.equal(stateB.snapshot.members.length, 2);
 
     clientA.close();
-    await clientB.readUntil(
-      baseClientOptions.timeoutMs * 2,
-      (packet, decoded) =>
+    await readUntilWithPing(clientB, {
+      timeoutMs: baseClientOptions.timeoutMs * 2,
+      predicate: (packet, decoded) =>
         packet.messageType === MESSAGE_TYPE.ROOM_STATE_PUSH &&
-        decoded.snapshot?.members?.some((member) => member.playerId === loginA.playerId && member.offline),
-      "m7MemberOfflineA"
-    );
+        decoded.snapshot?.members?.some((member) => member.characterId === loginA.characterId && member.offline),
+      label: "m7MemberOfflineA"
+    });
 
     reconnectClientA = new TcpProtocolClient(baseClientOptions, "m7ClientAReconnect");
     await reconnectClientA.connect();
     await authenticateClient(reconnectClientA, baseClientOptions, loginA, 3);
-    await reconnectClientA.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(loginA.playerId));
+    await reconnectClientA.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq());
     const reconnectA = await reconnectClientA.readUntil(
       baseClientOptions.timeoutMs,
       (packet) => packet.messageType === MESSAGE_TYPE.ROOM_RECONNECT_RES && packet.seq === 4,
@@ -932,7 +1045,7 @@ test("M7 drills match-service create-room then players join through registry-dis
     assert.equal(reconnectA.roomId, matchResult.roomId);
     assert.equal(reconnectA.snapshot?.roomId, matchResult.roomId);
     assert.equal(
-      reconnectA.snapshot?.members?.some((member) => member.playerId === loginA.playerId && !member.offline),
+      reconnectA.snapshot?.members?.some((member) => member.characterId === loginA.characterId && !member.offline),
       true
     );
   } finally {
@@ -1140,7 +1253,7 @@ test("registry consumers discover correct endpoints across multiple service inst
 
 test("game-proxy keeps route-store bindings while discovering multiple upstreams and proxies", { timeout: 90000 }, async () => {
   const roomId = randomId("multi-upstream-room");
-  const playerId = randomId("multi-upstream-player");
+  const characterId = randomId("multi-upstream-character");
 
   await cleanupRegistryInstances(redisUrl, manualRegistryInstances, registryKeyPrefix);
   await writeRegistryPayloads(createManualRegistryPayloads(), registryKeyPrefix);
@@ -1185,10 +1298,10 @@ test("game-proxy keeps route-store bindings while discovering multiple upstreams
       last_transfer_checksum: "checksum-1"
     }
   });
-  await fetchProxyAdmin("/player-route/upsert", {
+  await fetchProxyAdmin("/character-route/upsert", {
     method: "POST",
     query: {
-      player_id: playerId,
+      character_id: characterId,
       current_room_id: roomId,
       preferred_server_id: manualGameServerInstanceId
     }
@@ -1211,15 +1324,15 @@ test("game-proxy keeps route-store bindings while discovering multiple upstreams
     }
   );
 
-  const playerRoutes = await fetchProxyAdmin("/player-routes");
+  const characterRoutes = await fetchProxyAdmin("/character-routes");
   assert.deepEqual(
-    playerRoutes.routes.find((route) => route.player_id === playerId),
+    characterRoutes.routes.find((route) => route.character_id === characterId),
     {
-      player_id: playerId,
+      character_id: characterId,
       current_room_id: roomId,
       preferred_server_id: manualGameServerInstanceId,
       rollout_epoch: "",
-      updated_at_ms: playerRoutes.routes.find((route) => route.player_id === playerId).updated_at_ms
+      updated_at_ms: characterRoutes.routes.find((route) => route.character_id === characterId).updated_at_ms
     }
   );
 
@@ -1234,10 +1347,10 @@ test("game-proxy keeps route-store bindings while discovering multiple upstreams
     roomRoutesAfterRefresh.routes.find((route) => route.room_id === roomId)?.owner_server_id,
     manualGameServerInstanceId
   );
-  const playerRoutesAfterRefresh = await fetchProxyAdmin("/player-routes");
-  const playerRouteAfterRefresh = playerRoutesAfterRefresh.routes.find((route) => route.player_id === playerId);
-  assert.equal(playerRouteAfterRefresh?.current_room_id, roomId);
-  assert.equal(playerRouteAfterRefresh?.preferred_server_id, manualGameServerInstanceId);
+  const characterRoutesAfterRefresh = await fetchProxyAdmin("/character-routes");
+  const characterRouteAfterRefresh = characterRoutesAfterRefresh.routes.find((route) => route.character_id === characterId);
+  assert.equal(characterRouteAfterRefresh?.current_room_id, roomId);
+  assert.equal(characterRouteAfterRefresh?.preferred_server_id, manualGameServerInstanceId);
 
   const redis = new Redis(redisUrl, {
     lazyConnect: true,

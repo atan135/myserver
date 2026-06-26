@@ -32,7 +32,7 @@ function formatCombatPush(client, label, decoded, payload) {
     JSON.stringify(
       {
         action: decoded.action,
-        playerId: decoded.playerId,
+        characterId: decoded.characterId,
         payload
       },
       null,
@@ -41,8 +41,8 @@ function formatCombatPush(client, label, decoded, payload) {
   );
 }
 
-function findCombatEntity(snapshotEnvelope, playerId) {
-  return snapshotEnvelope?.snapshot?.entities?.find((entity) => entity.player_id === playerId) || null;
+function findCombatEntity(snapshotEnvelope, characterId) {
+  return snapshotEnvelope?.snapshot?.entities?.find((entity) => entity.character_id === characterId) || null;
 }
 
 async function waitForRoomStatePush(client, expectedEvent, timeoutMs, label) {
@@ -151,8 +151,14 @@ export async function runCombatDualClient(options) {
         roomId,
         policyId,
         skillId,
-        clientA: loginA.playerId,
-        clientB: loginB.playerId
+        clientA: {
+          accountPlayerId: loginA.playerId,
+          characterId: loginA.characterId
+        },
+        clientB: {
+          accountPlayerId: loginB.playerId,
+          characterId: loginB.characterId
+        }
       },
       null,
       2
@@ -220,10 +226,10 @@ export async function runCombatDualClient(options) {
       "combatSnapshot(initial)"
     );
 
-    const attackerA = findCombatEntity(initialSnapshotA.payload, loginA.playerId);
-    const targetA = findCombatEntity(initialSnapshotA.payload, loginB.playerId);
-    const attackerB = findCombatEntity(initialSnapshotB.payload, loginA.playerId);
-    const targetB = findCombatEntity(initialSnapshotB.payload, loginB.playerId);
+    const attackerA = findCombatEntity(initialSnapshotA.payload, loginA.characterId);
+    const targetA = findCombatEntity(initialSnapshotA.payload, loginB.characterId);
+    const attackerB = findCombatEntity(initialSnapshotB.payload, loginA.characterId);
+    const targetB = findCombatEntity(initialSnapshotB.payload, loginB.characterId);
 
     if (!attackerA || !targetA || !attackerB || !targetB) {
       throw new Error("failed to resolve combat entity ids from initial snapshot");
@@ -232,7 +238,7 @@ export async function runCombatDualClient(options) {
     const castFrameId = Number(initialSnapshotA.payload.frame_id || 1) + 1;
     const castPayload = JSON.stringify({
       skillId,
-      targetPlayerId: loginB.playerId
+      targetCharacterId: loginB.characterId
     });
 
     console.log(
@@ -241,8 +247,8 @@ export async function runCombatDualClient(options) {
         {
           castFrameId,
           skillId,
-          sourcePlayerId: loginA.playerId,
-          targetPlayerId: loginB.playerId,
+          sourceCharacterId: loginA.characterId,
+          targetCharacterId: loginB.characterId,
           targetEntityId: targetA.entity_id
         },
         null,
@@ -313,13 +319,13 @@ export async function runCombatDualClient(options) {
         if (decoded.action !== "snapshot" || !payload.snapshot?.entities?.length) {
           return false;
         }
-        const targetEntity = findCombatEntity(payload, loginB.playerId);
+        const targetEntity = findCombatEntity(payload, loginB.characterId);
         return Boolean(targetEntity && targetEntity.hp < targetEntity.max_hp);
       },
       "combatSnapshot(afterDamage)"
     );
 
-    const targetAfterDamage = findCombatEntity(snapshotAfterDamage.payload, loginB.playerId);
+    const targetAfterDamage = findCombatEntity(snapshotAfterDamage.payload, loginB.characterId);
     if (!targetAfterDamage) {
       throw new Error("target entity missing from post-damage snapshot");
     }

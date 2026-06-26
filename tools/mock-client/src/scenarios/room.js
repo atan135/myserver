@@ -36,6 +36,13 @@ import {
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 const PROCESS_EXIT_POLL_MS = 200;
 
+function formatIdentity(login) {
+  return {
+    accountPlayerId: login.playerId,
+    characterId: login.characterId
+  };
+}
+
 /**
  * Print response and return decoded body
  * @param {string} label
@@ -494,7 +501,7 @@ async function reconnectAfterRedirect(options, login, redirect) {
   try {
     await authenticateClient(newClient, reconnectOptions, login, 3);
 
-    await newClient.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq(login.playerId));
+    await newClient.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 4, encodeRoomReconnectReq());
     const reconnectRes = await newClient.readUntil(
       reconnectOptions.timeoutMs,
       (packet) => packet.messageType === MESSAGE_TYPE.ROOM_RECONNECT_RES,
@@ -594,22 +601,22 @@ async function runRoomTransferForRedirect(options, redirect) {
   return transfer;
 }
 
-async function bindRedirectPlayerRoute(options, login, redirect, transfer) {
+async function bindRedirectCharacterRoute(options, login, redirect, transfer) {
   const proxy = new ProxyAdminClient({
     baseUrl: options.proxyAdminUrl,
     token: options.proxyAdminToken,
     actor: options.proxyAdminActor,
     timeoutMs: options.timeoutMs
   });
-  const result = await proxy.upsertPlayerRoute({
-    playerId: login.playerId,
+  const result = await proxy.upsertCharacterRoute({
+    characterId: login.characterId,
     currentRoomId: options.roomId,
     preferredServerId: options.newServerId,
     rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
   });
-  console.log("serverRedirectPlayerRouteResult:", JSON.stringify({
+  console.log("serverRedirectCharacterRouteResult:", JSON.stringify({
     ok: result.ok,
-    playerId: login.playerId,
+    characterId: login.characterId,
     currentRoomId: options.roomId,
     preferredServerId: options.newServerId,
     rolloutEpoch: transfer.rolloutEpoch || options.rolloutEpoch || redirect.rolloutEpoch || ""
@@ -791,8 +798,8 @@ export async function runTwoClientRoom(options) {
   const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
-  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
-  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+  console.log("clientA.login:", JSON.stringify(formatIdentity(loginA), null, 2));
+  console.log("clientB.login:", JSON.stringify(formatIdentity(loginB), null, 2));
 
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");
@@ -804,7 +811,7 @@ export async function runTwoClientRoom(options) {
     await authenticateClient(clientB, options, loginB, 1);
 
     const { push: pushA1 } = await joinRoomExpectSuccess(clientA, options, options.roomId, 2, "roomJoin");
-    if (pushA1.snapshot?.ownerPlayerId !== loginA.playerId) {
+    if (pushA1.snapshot?.ownerCharacterId !== loginA.characterId) {
       throw new Error("clientA should be initial owner");
     }
 
@@ -813,7 +820,7 @@ export async function runTwoClientRoom(options) {
     if (pushA2.snapshot?.members?.length !== 2 || pushB1.snapshot?.members?.length !== 2) {
       throw new Error("expected both clients to observe two room members");
     }
-    if (pushA2.snapshot?.ownerPlayerId !== loginA.playerId) {
+    if (pushA2.snapshot?.ownerCharacterId !== loginA.characterId) {
       throw new Error("owner should remain clientA before leave");
     }
 
@@ -828,11 +835,11 @@ export async function runTwoClientRoom(options) {
     }
 
     const pushB2 = await waitForMessageType(clientB, options.timeoutMs, MESSAGE_TYPE.ROOM_STATE_PUSH, "roomStatePush(ownerTransfer)");
-    if (pushB2.snapshot?.ownerPlayerId !== loginB.playerId) {
+    if (pushB2.snapshot?.ownerCharacterId !== loginB.characterId) {
       throw new Error("expected owner to transfer to clientB");
     }
     const activeMembers = pushB2.snapshot?.members?.filter((member) => !member.offline) ?? [];
-    if (activeMembers.length !== 1 || activeMembers[0].playerId !== loginB.playerId) {
+    if (activeMembers.length !== 1 || activeMembers[0].characterId !== loginB.characterId) {
       throw new Error("expected clientB to be the only active member after owner leave");
     }
 
@@ -859,8 +866,8 @@ export async function runStartGameReadyRoom(options) {
   const loginA = await fetchTicket(options, { guestId: `${options.roomId}-owner` });
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member` });
 
-  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
-  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+  console.log("clientA.login:", JSON.stringify(formatIdentity(loginA), null, 2));
+  console.log("clientB.login:", JSON.stringify(formatIdentity(loginB), null, 2));
 
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");
@@ -992,8 +999,8 @@ export async function runReconnect(options) {
   const loginB = await fetchTicket(options, { guestId: `${options.roomId}-member-reconnect` });
   let clientA2 = null;
 
-  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
-  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+  console.log("clientA.login:", JSON.stringify(formatIdentity(loginA), null, 2));
+  console.log("clientB.login:", JSON.stringify(formatIdentity(loginB), null, 2));
 
   // ClientA connects and joins room
   const clientA = new TcpProtocolClient(options, "clientA");
@@ -1010,7 +1017,7 @@ export async function runReconnect(options) {
       throw new Error(`clientA room join failed: ${joinA.errorCode}`);
     }
     const pushA1 = printResponse("clientA.roomStatePush(join)", await clientA.readNextPacket(options.timeoutMs));
-    console.log("clientA joined room, owner:", pushA1.snapshot?.ownerPlayerId);
+    console.log("clientA joined room, owner:", pushA1.snapshot?.ownerCharacterId);
 
     // ClientB connects and joins same room
     await authenticateClient(clientB, options, loginB, 1);
@@ -1084,7 +1091,7 @@ export async function runReconnect(options) {
     await authenticateClient(clientA2, options, loginA, 6);
 
     // Send reconnect request
-    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq(loginA.playerId));
+    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq());
     const reconnectRes = printResponse("clientA2.roomReconnect", await clientA2.readNextPacket(options.timeoutMs));
 
     if (!reconnectRes.ok) {
@@ -1104,11 +1111,11 @@ export async function runReconnect(options) {
     if (reconnectRes.snapshot?.state !== "in_game") {
       throw new Error(`clientA reconnect expected in_game snapshot, got ${reconnectRes.snapshot?.state}`);
     }
-    if (![loginA.playerId, loginB.playerId].includes(reconnectRes.snapshot?.ownerPlayerId)) {
-      throw new Error(`unexpected owner after reconnect: ${reconnectRes.snapshot?.ownerPlayerId}`);
+    if (![loginA.characterId, loginB.characterId].includes(reconnectRes.snapshot?.ownerCharacterId)) {
+      throw new Error(`unexpected owner after reconnect: ${reconnectRes.snapshot?.ownerCharacterId}`);
     }
-    if (reconnectRes.snapshot?.ownerPlayerId !== loginA.playerId) {
-      console.log("Owner transferred while clientA was offline:", reconnectRes.snapshot?.ownerPlayerId);
+    if (reconnectRes.snapshot?.ownerCharacterId !== loginA.characterId) {
+      console.log("Owner transferred while clientA was offline:", reconnectRes.snapshot?.ownerCharacterId);
     }
 
     // Cleanup
@@ -1138,8 +1145,8 @@ export async function runReconnectAllDisconnected(options) {
   let clientA2 = null;
   let clientB2 = null;
 
-  console.log("clientA.login:", JSON.stringify({ playerId: loginA.playerId }, null, 2));
-  console.log("clientB.login:", JSON.stringify({ playerId: loginB.playerId }, null, 2));
+  console.log("clientA.login:", JSON.stringify(formatIdentity(loginA), null, 2));
+  console.log("clientB.login:", JSON.stringify(formatIdentity(loginB), null, 2));
 
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");
@@ -1194,7 +1201,7 @@ export async function runReconnectAllDisconnected(options) {
     clientA2 = new TcpProtocolClient(options, "clientA2");
     await clientA2.connect();
     await authenticateClient(clientA2, options, loginA, 6);
-    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq(loginA.playerId));
+    await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 7, encodeRoomReconnectReq());
     const reconnectA = printResponse("clientA2.roomReconnect", await clientA2.readNextPacket(options.timeoutMs));
     if (!reconnectA.ok) {
       throw new Error(`clientA reconnect failed: ${reconnectA.errorCode}`);
@@ -1207,7 +1214,7 @@ export async function runReconnectAllDisconnected(options) {
     clientB2 = new TcpProtocolClient(options, "clientB2");
     await clientB2.connect();
     await authenticateClient(clientB2, options, loginB, 8);
-    await clientB2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 9, encodeRoomReconnectReq(loginB.playerId));
+    await clientB2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, 9, encodeRoomReconnectReq());
     const reconnectB = printResponse("clientB2.roomReconnect", await clientB2.readNextPacket(options.timeoutMs));
     if (!reconnectB.ok) {
       throw new Error(`clientB reconnect failed: ${reconnectB.errorCode}`);
@@ -1300,8 +1307,8 @@ export async function runDrainExistingRoomJoin(options) {
   try {
     await authenticateClient(clientA, options, loginA, 1);
     const joinedA = await joinRoomExpectSuccess(clientA, options, options.roomId, 2);
-    if (joinedA.push.snapshot?.ownerPlayerId !== loginA.playerId) {
-      throw new Error(`expected ${loginA.playerId} to be room owner before drain`);
+    if (joinedA.push.snapshot?.ownerCharacterId !== loginA.characterId) {
+      throw new Error(`expected ${loginA.characterId} to be room owner before drain`);
     }
 
     await setDrainMode(options, true);
@@ -1410,7 +1417,7 @@ export async function runDrainExistingRoomReconnect(options) {
       "member_disconnected",
       "roomStatePush(disconnected)"
     );
-    if (!disconnectedPush.snapshot?.members?.some((member) => member.playerId === loginA.playerId && member.offline)) {
+    if (!disconnectedPush.snapshot?.members?.some((member) => member.characterId === loginA.characterId && member.offline)) {
       throw new Error("expected clientA to appear offline before drain reconnect");
     }
 
@@ -1424,7 +1431,7 @@ export async function runDrainExistingRoomReconnect(options) {
     let reconnectRes = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const seq = 4 + attempt;
-      await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, seq, encodeRoomReconnectReq(loginA.playerId));
+      await clientA2.send(MESSAGE_TYPE.ROOM_RECONNECT_REQ, seq, encodeRoomReconnectReq());
 
       const reconnectPacket = await clientA2.readNextPacket(options.timeoutMs);
       const currentRes = printResponse(`clientA2.roomReconnect(attempt-${attempt + 1})`, reconnectPacket);
@@ -1457,7 +1464,7 @@ export async function runDrainExistingRoomReconnect(options) {
       "member_reconnected",
       "roomStatePush(reconnected)"
     );
-    if (!reconnectedPush.snapshot?.members?.some((member) => member.playerId === loginA.playerId && !member.offline)) {
+    if (!reconnectedPush.snapshot?.members?.some((member) => member.characterId === loginA.characterId && !member.offline)) {
       throw new Error("expected clientA to be back online after drain reconnect");
     }
 
@@ -1506,7 +1513,7 @@ export async function runDrainExistingRoomObserver(options) {
     if (!observerRes.ok) {
       throw new Error(`observer join failed during drain: ${observerRes.errorCode}`);
     }
-    if (!observerRes.snapshot?.members?.some((member) => member.playerId === loginObserver.playerId && member.role === 1)) {
+    if (!observerRes.snapshot?.members?.some((member) => member.characterId === loginObserver.characterId && member.role === 1)) {
       throw new Error("expected observer snapshot to contain observer role member");
     }
 
@@ -1542,7 +1549,7 @@ export async function runDrainCreateMatchedRoomRejected(options) {
     await client.send(
       MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
       2,
-      encodeCreateMatchedRoomReq(matchId, options.roomId, [login.playerId], options.mode || "1v1")
+      encodeCreateMatchedRoomReq(matchId, options.roomId, [login.characterId], options.mode || "1v1")
     );
 
     const packet = await client.readNextPacket(options.timeoutMs);
@@ -1574,18 +1581,18 @@ export async function runCreateMatchedRoom(client, options, login) {
 
   const matchId = options.matchId || `match-${Date.now()}`;
   const roomId = options.roomId || "room-matched-001";
-  // Ensure authenticated player is always in player_ids
-  const playerIds = (options.playerIds && options.playerIds.length > 0)
-    ? [...new Set([login.playerId, ...options.playerIds])]  // Merge and dedupe
-    : [login.playerId];
+  // Ensure authenticated character is always in character_ids
+  const characterIds = (options.characterIds && options.characterIds.length > 0)
+    ? [...new Set([login.characterId, ...options.characterIds])]
+    : [login.characterId];
   const mode = options.mode || "1v1";
 
-  console.log(`${client.label}.createMatchedRoom:`, JSON.stringify({ matchId, roomId, playerIds, mode }, null, 2));
+  console.log(`${client.label}.createMatchedRoom:`, JSON.stringify({ matchId, roomId, characterIds, mode }, null, 2));
 
   await client.send(
     MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
     2,
-    encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode)
+    encodeCreateMatchedRoomReq(matchId, roomId, characterIds, mode)
   );
 
   const res = printResponse(`${client.label}.createMatchedRoomRes`, await client.readNextPacket(options.timeoutMs));
@@ -1598,19 +1605,19 @@ export async function runCreateMatchedRoom(client, options, login) {
     snapshot: res.snapshot ? {
       state: res.snapshot.state,
       memberCount: res.snapshot.members?.length,
-      owner: res.snapshot.ownerPlayerId
+      owner: res.snapshot.ownerCharacterId
     } : null
   }, null, 2));
 
   console.log(`${client.label}.create matched room success!`);
-  console.log(`  Note: In real flow, players receive MatchEventStream and join via RoomJoinReq`);
+  console.log(`  Note: In real flow, characters receive MatchEventStream and join via RoomJoinReq`);
 }
 
 /**
- * Create matched room and have all players join it - tests full flow including player_joined callbacks
+ * Create matched room and have all characters join it - tests full flow including character_joined callbacks
  */
 export async function runCreateMatchedRoomAndJoin(options) {
-  // Create guest IDs for each player
+  // Create guest IDs for each character login
   const hostGuestId = `host-${Date.now()}`;
   const guest1Id = `guest1-${Date.now()}`;
   const guest2Id = `guest2-${Date.now()}`;
@@ -1622,21 +1629,21 @@ export async function runCreateMatchedRoomAndJoin(options) {
   console.log("=== Create Matched Room And Join ===");
   console.log("Room:", JSON.stringify({ matchId, roomId, mode }, null, 2));
 
-  // Step 1: All players get tickets (with delay to ensure unique guestIds)
-  console.log("\n--- Getting tickets for all players ---");
+  // Step 1: All characters get tickets (with delay to ensure unique guestIds)
+  console.log("\n--- Getting tickets for all characters ---");
   const loginHost = await fetchTicket(options, { guestId: hostGuestId });
   await new Promise((resolve) => setTimeout(resolve, 10));
   const login1 = await fetchTicket(options, { guestId: guest1Id });
   await new Promise((resolve) => setTimeout(resolve, 10));
   const login2 = await fetchTicket(options, { guestId: guest2Id });
 
-  console.log("Host:", JSON.stringify({ playerId: loginHost.playerId }, null, 2));
-  console.log("Player1:", JSON.stringify({ playerId: login1.playerId }, null, 2));
-  console.log("Player2:", JSON.stringify({ playerId: login2.playerId }, null, 2));
+  console.log("Host:", JSON.stringify(formatIdentity(loginHost), null, 2));
+  console.log("Character1:", JSON.stringify(formatIdentity(login1), null, 2));
+  console.log("Character2:", JSON.stringify(formatIdentity(login2), null, 2));
 
-  // Build player_ids from actual authenticated player IDs
-  const playerIds = [loginHost.playerId, login1.playerId, login2.playerId];
-  console.log("Player IDs for match:", playerIds);
+  // Build character_ids from actual authenticated Character IDs
+  const characterIds = [loginHost.characterId, login1.characterId, login2.characterId];
+  console.log("Character IDs for match:", characterIds);
 
   // Step 2: Host creates matched room
   const clientHost = new TcpProtocolClient(options, "clientHost");
@@ -1647,7 +1654,7 @@ export async function runCreateMatchedRoomAndJoin(options) {
   await clientHost.send(
     MESSAGE_TYPE.CREATE_MATCHED_ROOM_REQ,
     2,
-    encodeCreateMatchedRoomReq(matchId, roomId, playerIds, mode)
+    encodeCreateMatchedRoomReq(matchId, roomId, characterIds, mode)
   );
 
   const res = printResponse("clientHost.createMatchedRoomRes", await clientHost.readNextPacket(options.timeoutMs));
@@ -1660,20 +1667,20 @@ export async function runCreateMatchedRoomAndJoin(options) {
     snapshot: res.snapshot ? {
       state: res.snapshot.state,
       memberCount: res.snapshot.members?.length,
-      owner: res.snapshot.ownerPlayerId
+      owner: res.snapshot.ownerCharacterId
     } : null
   }, null, 2));
 
-  // Step 3: All players join the room
-  console.log("\n--- All players joining room ---");
+  // Step 3: All characters join the room
+  console.log("\n--- All characters joining room ---");
 
-  const players = [
-    { login: login1, label: "Player1" },
-    { login: login2, label: "Player2" },
+  const characters = [
+    { login: login1, label: "Character1" },
+    { login: login2, label: "Character2" },
   ];
 
-  for (const { login, label } of players) {
-    console.log(`[${label}] ${login.playerId} joining...`);
+  for (const { login, label } of characters) {
+    console.log(`[${label}] ${login.characterId} joining...`);
 
     const client = new TcpProtocolClient(options, `client_${label}`);
     await client.connect();
@@ -1683,19 +1690,19 @@ export async function runCreateMatchedRoomAndJoin(options) {
     const joinRes = printResponse(`client_${label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
 
     if (!joinRes.ok) {
-      throw new Error(`player ${label} room join failed: ${joinRes.errorCode}`);
+      throw new Error(`character ${label} room join failed: ${joinRes.errorCode}`);
     }
 
     // Wait for room state push
     const pushRes = printResponse(`client_${label}.roomStatePush`, await client.readNextPacket(options.timeoutMs));
-    console.log(`[${label}] ${login.playerId} joined room, members:`, pushRes.snapshot?.members?.length);
+    console.log(`[${label}] ${login.characterId} joined room, members:`, pushRes.snapshot?.members?.length);
   }
 
-  console.log("\n--- All players joined successfully ---");
+  console.log("\n--- All characters joined successfully ---");
   console.log("Match flow complete!");
   console.log("  match_id:", matchId);
   console.log("  room_id:", roomId);
-  console.log("  player_count:", playerIds.length);
+  console.log("  character_count:", characterIds.length);
 
   // Keep host connection open briefly to see the room state
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1715,7 +1722,7 @@ export async function runServerRedirectListen(options) {
 
     console.log("redirectClient.waitingForServerRedirect:", JSON.stringify({
       roomId: joined.joinRes.roomId,
-      playerId: login.playerId,
+      characterId: login.characterId,
       timeoutMs: options.timeoutMs
     }, null, 2));
 
@@ -1727,7 +1734,7 @@ export async function runServerRedirectListen(options) {
 
     const result = {
       ok: true,
-      playerId: login.playerId,
+      characterId: login.characterId,
       roomId: redirect.roomId,
       rolloutEpoch: redirect.rolloutEpoch,
       reason: redirect.reason,
@@ -1759,7 +1766,7 @@ export async function runServerRedirectReconnect(options) {
 
     console.log("redirectOldClient.waitingForServerRedirect:", JSON.stringify({
       roomId: joined.joinRes.roomId,
-      playerId: login.playerId,
+      characterId: login.characterId,
       timeoutMs: options.timeoutMs
     }, null, 2));
 
@@ -1792,7 +1799,7 @@ export async function runServerRedirectTransferReconnect(options) {
 
     console.log("redirectOldClient.waitingForServerRedirect:", JSON.stringify({
       roomId: joined.joinRes.roomId,
-      playerId: login.playerId,
+      characterId: login.characterId,
       timeoutMs: options.timeoutMs
     }, null, 2));
 
@@ -1807,7 +1814,7 @@ export async function runServerRedirectTransferReconnect(options) {
 
     oldClient.close();
     const transfer = await runRoomTransferForRedirect(options, redirect);
-    await bindRedirectPlayerRoute(options, login, redirect, transfer);
+    await bindRedirectCharacterRoute(options, login, redirect, transfer);
     const reconnect = await reconnectAfterRedirect(options, login, redirect);
 
     const result = {

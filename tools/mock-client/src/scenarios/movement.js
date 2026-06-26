@@ -32,11 +32,11 @@ export const SERVER_FPS = 20;
 
 export function formatMovementSnapshot(label, push) {
   console.log(
-    `${label}: frameId=${push.frameId}, entities=${push.entities.length}, fullSync=${push.fullSync}, reason=${push.reason}, correctionKind=${push.correctionKind}, reasonCode=${push.reasonCode}, referenceFrameId=${push.referenceFrameId}, targets=${push.targetPlayerIds.join(",")}`
+    `${label}: frameId=${push.frameId}, entities=${push.entities.length}, fullSync=${push.fullSync}, reason=${push.reason}, correctionKind=${push.correctionKind}, reasonCode=${push.reasonCode}, referenceFrameId=${push.referenceFrameId}, targets=${push.targetCharacterIds.join(",")}`
   );
   for (const entity of push.entities) {
     console.log(
-      `  └─ [${entity.playerId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
+      `  └─ [${entity.characterId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
     );
   }
 }
@@ -47,7 +47,7 @@ export function formatMovementRecovery(label, recovery) {
   );
   for (const entity of recovery.entities) {
     console.log(
-      `  └─ [${entity.playerId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
+      `  └─ [${entity.characterId}] entity=${entity.entityId} scene=${entity.sceneId} pos=(${entity.x.toFixed(2)}, ${entity.y.toFixed(2)}) dir=(${entity.dirX.toFixed(2)}, ${entity.dirY.toFixed(2)}) moving=${entity.moving}`
     );
   }
 }
@@ -379,7 +379,7 @@ export async function runMovementDemo(client, options, login) {
 
 export async function runMovementSyncValidation(options) {
   const login = await fetchTicket(options, { guestId: `sync-val-${Date.now()}` });
-  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+  console.log("login:", JSON.stringify({ characterId: login.characterId }, null, 2));
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -407,8 +407,8 @@ export async function runMovementSyncValidation(options) {
 
     // Collect first full-sync snapshot to get spawn position
     const firstSnap = await waitForMovementSnapshot(client, options.timeoutMs);
-    const selfEntity = firstSnap.entities.find((e) => e.playerId === login.playerId);
-    if (!selfEntity) throw new Error(`Spawn entity not found for player ${login.playerId}`);
+    const selfEntity = firstSnap.entities.find((e) => e.characterId === login.characterId);
+    if (!selfEntity) throw new Error(`Spawn entity not found for character ${login.characterId}`);
 
     const spawnX = selfEntity.x;
     const spawnY = selfEntity.y;
@@ -427,7 +427,7 @@ export async function runMovementSyncValidation(options) {
     if (!moveRes1.ok) throw new Error(`MoveDir frame 1 failed: ${moveRes1.errorCode}`);
 
     const snapAfterMove = await waitForMovementSnapshot(client, options.timeoutMs * 3);
-    const afterMove = snapAfterMove.entities.find((e) => e.playerId === login.playerId);
+    const afterMove = snapAfterMove.entities.find((e) => e.characterId === login.characterId);
     if (!afterMove) throw new Error("Entity not found in snapshot after move");
 
     console.log(`[ASSERT] After 1 MoveDir(1,0): pos=(${afterMove.x.toFixed(3)}, ${afterMove.y.toFixed(3)}) moving=${afterMove.moving}`);
@@ -467,7 +467,7 @@ export async function runMovementSyncValidation(options) {
       if (packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
         const fb = decodeByMessageType(packet.messageType, packet.body);
         const hasMoveStop = fb.inputs.some(
-          (i) => i.playerId === login.playerId && i.action === "move_stop"
+          (i) => i.characterId === login.characterId && i.action === "move_stop"
         );
         if (hasMoveStop) {
           console.log(`[ASSERT] MoveStop confirmed in frame bundle frameId=${fb.frameId}`);
@@ -494,7 +494,7 @@ export async function runMovementSyncValidation(options) {
     if (!moveRes2.ok) throw new Error(`MoveDir(0,1) failed: ${moveRes2.errorCode}`);
 
     const snapAfterMove2 = await waitForMovementSnapshot(client, options.timeoutMs * 3);
-    const afterMove2 = snapAfterMove2.entities.find((e) => e.playerId === login.playerId);
+    const afterMove2 = snapAfterMove2.entities.find((e) => e.characterId === login.characterId);
     if (!afterMove2) throw new Error("Entity not found in snapshot after MoveDir(0,1)");
     console.log(`[ASSERT] After MoveDir(0,1): pos=(${afterMove2.x.toFixed(3)},${afterMove2.y.toFixed(3)}) dir=(${afterMove2.dirX.toFixed(3)},${afterMove2.dirY.toFixed(3)}) moving=${afterMove2.moving}`);
 
@@ -541,8 +541,8 @@ export async function runMovementDualClientSync(options) {
   console.log("=".repeat(60));
   console.log("MOVEMENT_DUAL_CLIENT_SYNC - START");
   console.log("=".repeat(60));
-  console.log("clientA.playerId:", loginA.playerId);
-  console.log("clientB.playerId:", loginB.playerId);
+  console.log("clientA.characterId:", loginA.characterId);
+  console.log("clientB.characterId:", loginB.characterId);
 
   const clientA = new TcpProtocolClient(options, "clientA");
   const clientB = new TcpProtocolClient(options, "clientB");
@@ -587,8 +587,8 @@ export async function runMovementDualClientSync(options) {
     const snapA0 = await waitForMovementSnapshot(clientA, options.timeoutMs * 3);
     const snapB0 = await waitForMovementSnapshot(clientB, options.timeoutMs * 3);
 
-    const entityA0 = snapA0.entities.find((e) => e.playerId === loginA.playerId);
-    const entityB0 = snapB0.entities.find((e) => e.playerId === loginB.playerId);
+    const entityA0 = snapA0.entities.find((e) => e.characterId === loginA.characterId);
+    const entityB0 = snapB0.entities.find((e) => e.characterId === loginB.characterId);
     if (!entityA0 || !entityB0) throw new Error("Initial spawn entities not found");
 
     console.log(`[ASSERT] clientA spawn: (${entityA0.x.toFixed(3)}, ${entityA0.y.toFixed(3)})`);
@@ -624,35 +624,35 @@ export async function runMovementDualClientSync(options) {
     );
     const snapA1 = firstAfterMoveA;
 
-    const posA = Object.fromEntries(snapA1.entities.map((e) => [e.playerId, { x: e.x, y: e.y }]));
-    const posB = Object.fromEntries(snapB1.entities.map((e) => [e.playerId, { x: e.x, y: e.y }]));
+    const posA = Object.fromEntries(snapA1.entities.map((e) => [e.characterId, { x: e.x, y: e.y }]));
+    const posB = Object.fromEntries(snapB1.entities.map((e) => [e.characterId, { x: e.x, y: e.y }]));
 
     console.log(`\n[SYNC CHECK] Comparing frameId=${targetFrameId}`);
     console.log(`\n[SYNC CHECK] ClientA snapshot entities:`);
     for (const e of snapA1.entities) {
-      console.log(`  ${e.playerId}: (${e.x.toFixed(3)}, ${e.y.toFixed(3)}) moving=${e.moving}`);
+      console.log(`  ${e.characterId}: (${e.x.toFixed(3)}, ${e.y.toFixed(3)}) moving=${e.moving}`);
     }
     console.log(`\n[SYNC CHECK] ClientB snapshot entities:`);
     for (const e of snapB1.entities) {
-      console.log(`  ${e.playerId}: (${e.x.toFixed(3)}, ${e.y.toFixed(3)}) moving=${e.moving}`);
+      console.log(`  ${e.characterId}: (${e.x.toFixed(3)}, ${e.y.toFixed(3)}) moving=${e.moving}`);
     }
 
-    const playersA = new Set(Object.keys(posA));
-    const playersB = new Set(Object.keys(posB));
-    if (playersA.size !== playersB.size) {
-      throw new Error(`Entity count mismatch: clientA has ${playersA.size}, clientB has ${playersB.size}`);
+    const charactersA = new Set(Object.keys(posA));
+    const charactersB = new Set(Object.keys(posB));
+    if (charactersA.size !== charactersB.size) {
+      throw new Error(`Entity count mismatch: clientA has ${charactersA.size}, clientB has ${charactersB.size}`);
     }
 
     const EPS = 0.05;
-    for (const playerId of playersA) {
-      if (!playersB.has(playerId)) {
-        throw new Error(`Entity ${playerId} missing in clientB snapshot`);
+    for (const characterId of charactersA) {
+      if (!charactersB.has(characterId)) {
+        throw new Error(`Entity ${characterId} missing in clientB snapshot`);
       }
-      const a = posA[playerId];
-      const b = posB[playerId];
+      const a = posA[characterId];
+      const b = posB[characterId];
       if (Math.abs(a.x - b.x) > EPS || Math.abs(a.y - b.y) > EPS) {
         throw new Error(
-          `Position mismatch for ${playerId}: clientA=(${a.x.toFixed(3)},${a.y.toFixed(3)}) ` +
+          `Position mismatch for ${characterId}: clientA=(${a.x.toFixed(3)},${a.y.toFixed(3)}) ` +
             `clientB=(${b.x.toFixed(3)},${b.y.toFixed(3)}) delta=(${Math.abs(a.x-b.x).toFixed(3)},${Math.abs(a.y-b.y).toFixed(3)})`
         );
       }
@@ -812,7 +812,7 @@ export async function runMovementFaceTo(options) {
         if (packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
           const fb = decodeByMessageType(packet.messageType, packet.body);
           const found = fb.inputs.some(
-            (i) => i.playerId === login.playerId && i.action === expectedAction
+            (i) => i.characterId === login.characterId && i.action === expectedAction
           );
           if (found) {
             console.log(`[ASSERT] ${expectedAction} confirmed in frameId=${fb.frameId}`);
@@ -850,7 +850,7 @@ export async function runMovementFaceTo(options) {
     if (!res2.ok) throw new Error(`MoveDir(1,0) failed: ${res2.errorCode}`);
 
     const snap2 = await waitForMovementSnapshot(client, options.timeoutMs * 3);
-    const ent2 = snap2.entities.find((e) => e.playerId === login.playerId);
+    const ent2 = snap2.entities.find((e) => e.characterId === login.characterId);
     if (!ent2) throw new Error("Entity not found after MoveDir");
     console.log(`[ASSERT] MoveDir(1,0) snap: dir=(${ent2.dirX.toFixed(3)},${ent2.dirY.toFixed(3)}) moving=${ent2.moving}`);
 
@@ -888,7 +888,7 @@ export async function runMovementFaceTo(options) {
       if (packet.messageType === MESSAGE_TYPE.FRAME_BUNDLE_PUSH) {
         const fb = decodeByMessageType(packet.messageType, packet.body);
         confirmedStop = fb.inputs.some(
-          (i) => i.playerId === login.playerId && i.action === "move_stop"
+          (i) => i.characterId === login.characterId && i.action === "move_stop"
         );
       }
     }
@@ -917,7 +917,7 @@ export async function runMovementFaceTo(options) {
     if (!res4.ok) throw new Error(`MoveDir(0,1) after FaceTo(-1,0) failed: ${res4.errorCode}`);
 
     const snap4 = await waitForMovementSnapshot(client, options.timeoutMs * 3);
-    const ent4 = snap4.entities.find((e) => e.playerId === login.playerId);
+    const ent4 = snap4.entities.find((e) => e.characterId === login.characterId);
     if (!ent4) throw new Error("Entity not found after MoveDir following FaceTo(-1,0)");
     console.log(`[ASSERT] MoveDir(0,1) snap: dir=(${ent4.dirX.toFixed(3)},${ent4.dirY.toFixed(3)}) moving=${ent4.moving}`);
 
@@ -952,15 +952,15 @@ export async function runMovementAuthoritativeCorrection(options) {
   console.log("=".repeat(60));
   console.log("MOVEMENT_AUTHORITATIVE_CORRECTION - START");
   console.log("=".repeat(60));
-  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+  console.log("login:", JSON.stringify({ characterId: login.characterId }, null, 2));
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
   try {
     const initialSnapshot = await setupMovementRoom(client, options, login, "client");
-    const selfEntity = initialSnapshot.entities.find((entity) => entity.playerId === login.playerId);
+    const selfEntity = initialSnapshot.entities.find((entity) => entity.characterId === login.characterId);
     if (!selfEntity) {
-      throw new Error(`initial entity not found for player ${login.playerId}`);
+      throw new Error(`initial entity not found for character ${login.characterId}`);
     }
     const inputFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "authoritativeCorrection");
 
@@ -989,11 +989,11 @@ export async function runMovementAuthoritativeCorrection(options) {
       (snapshot) =>
         snapshot.correctionKind === MOVEMENT_CORRECTION_KIND.STRONG &&
         snapshot.reasonCode === MOVEMENT_CORRECTION_REASON.CLIENT_DRIFT &&
-        snapshot.targetPlayerIds.includes(login.playerId),
+        snapshot.targetCharacterIds.includes(login.characterId),
       "authoritativeCorrection"
     );
 
-    const correctedSelf = correction.entities.find((entity) => entity.playerId === login.playerId);
+    const correctedSelf = correction.entities.find((entity) => entity.characterId === login.characterId);
     if (!correctedSelf) {
       throw new Error("strong correction snapshot missing self entity");
     }
@@ -1007,7 +1007,7 @@ export async function runMovementAuthoritativeCorrection(options) {
       frameId: correction.frameId,
       correctionKind: correction.correctionKind,
       reasonCode: correction.reasonCode,
-      targetPlayerIds: correction.targetPlayerIds,
+      targetCharacterIds: correction.targetCharacterIds,
       correctedPosition: {
         x: correctedSelf.x,
         y: correctedSelf.y
@@ -1034,16 +1034,16 @@ export async function runMovementReconnectRecovery(options) {
   console.log("=".repeat(60));
   console.log("MOVEMENT_RECONNECT_RECOVERY - START");
   console.log("=".repeat(60));
-  console.log("login:", JSON.stringify({ playerId: login.playerId }, null, 2));
+  console.log("login:", JSON.stringify({ characterId: login.characterId }, null, 2));
 
   const client = new TcpProtocolClient(options, "client");
   let reconnectClient = null;
   await client.connect();
   try {
     const initialSnapshot = await setupMovementRoom(client, options, login, "client");
-    const selfEntity = initialSnapshot.entities.find((entity) => entity.playerId === login.playerId);
+    const selfEntity = initialSnapshot.entities.find((entity) => entity.characterId === login.characterId);
     if (!selfEntity) {
-      throw new Error(`initial entity not found for player ${login.playerId}`);
+      throw new Error(`initial entity not found for character ${login.characterId}`);
     }
     const inputFrameId = await reserveFutureInputFrame(client, options.timeoutMs * 2, "reconnectRecovery");
 
@@ -1070,7 +1070,7 @@ export async function runMovementReconnectRecovery(options) {
       client,
       options.timeoutMs * 4,
       (snapshot) =>
-        snapshot.entities.some((entity) => entity.playerId === login.playerId && entity.x > selfEntity.x),
+        snapshot.entities.some((entity) => entity.characterId === login.characterId && entity.x > selfEntity.x),
       "preReconnectSnapshot"
     );
 
@@ -1084,7 +1084,7 @@ export async function runMovementReconnectRecovery(options) {
     await reconnectClient.send(
       MESSAGE_TYPE.ROOM_RECONNECT_REQ,
       201,
-      encodeRoomReconnectReq(login.playerId)
+      encodeRoomReconnectReq()
     );
     const reconnectRes = await reconnectClient.readUntil(
       options.timeoutMs * 2,
@@ -1112,9 +1112,9 @@ export async function runMovementReconnectRecovery(options) {
       throw new Error("expected movement recovery entities");
     }
 
-    const recoveredSelf = recovery.entities.find((entity) => entity.playerId === login.playerId);
+    const recoveredSelf = recovery.entities.find((entity) => entity.characterId === login.characterId);
     if (!recoveredSelf) {
-      throw new Error(`movement recovery missing self entity ${login.playerId}`);
+      throw new Error(`movement recovery missing self entity ${login.characterId}`);
     }
 
     console.log("[ASSERT] reconnect movement recovery received:", JSON.stringify({

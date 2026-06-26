@@ -6,12 +6,14 @@ import { parseArgs } from "../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
 import {
   decodeByMessageType,
+  encodeCreateMatchedRoomReq,
   encodeDebugCharacterTitleReq,
   encodeDebugApplyCharacterElementChangeReq,
   encodeEquipCharacterTitleReq,
   encodeGetCharacterDisciplinesReq,
   encodeGetCharacterTitlesReq,
-  encodeGetCharacterElementsReq
+  encodeGetCharacterElementsReq,
+  encodeRoomReconnectReq
 } from "../tools/mock-client/src/messages.js";
 import { runAnnounceGet } from "../tools/mock-client/src/scenarios/announce.js";
 import { connectToChatServer } from "../tools/mock-client/src/scenarios/chat.js";
@@ -114,6 +116,15 @@ test("mock-client defaults to public player entrypoints only", () => {
   assert.equal(options.chatPort, 0);
   assert.equal(options.mailBaseUrl, "");
   assert.equal(options.announceBaseUrl, "");
+  assert.deepEqual(options.characterIds, []);
+  assert.equal(Object.prototype.hasOwnProperty.call(options, "playerIds"), false);
+});
+
+test("mock-client parses matched room participants as character ids", () => {
+  const options = parseArgs(["--character-ids", "chr_1,chr_2"]);
+
+  assert.deepEqual(options.characterIds, ["chr_1", "chr_2"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(options, "playerIds"), false);
 });
 
 test("mock-client rollout player examples stay on proxy TCP fallback", () => {
@@ -176,6 +187,32 @@ test("mock-client decodes proto3 packed repeated int32 fields", () => {
   assert.deepEqual(decodeByMessageType(MESSAGE_TYPE.VISUAL_CHANGE_PUSH, visualChangeBody), {
     appearance: 7,
     activeBuffIds: [301, 302]
+  });
+});
+
+test("mock-client encodes character-id room and auth protocol fields", () => {
+  assert.equal(encodeRoomReconnectReq().length, 0);
+
+  const matchedRoomFields = decodeFieldsWithRepeated(
+    encodeCreateMatchedRoomReq("match-1", "room-1", ["chr_1", "chr_2"], "2v2")
+  );
+  assert.equal(readString(matchedRoomFields, 1), "match-1");
+  assert.equal(readString(matchedRoomFields, 2), "room-1");
+  assert.deepEqual(
+    matchedRoomFields.get(3).map((value) => value.toString("utf8")),
+    ["chr_1", "chr_2"]
+  );
+  assert.equal(readString(matchedRoomFields, 4), "2v2");
+
+  const authResBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeStringField(2, "plr_1"),
+    encodeStringField(3, "")
+  ]);
+  assert.deepEqual(decodeByMessageType(MESSAGE_TYPE.AUTH_RES, authResBody), {
+    ok: true,
+    accountPlayerId: "plr_1",
+    errorCode: ""
   });
 });
 

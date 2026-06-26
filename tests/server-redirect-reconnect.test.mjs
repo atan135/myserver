@@ -75,7 +75,7 @@ test("server redirect join fallback requires explicit opt-in and known error", (
 
 test("server redirect reconnect summary exposes redirect and final room", () => {
   const summary = summarizeRedirectReconnectResult({
-    login: { playerId: "player-a" },
+    login: { playerId: "player-a", characterId: "chr-a" },
     redirect,
     reconnectRes: { ok: false, errorCode: "ROOM_NOT_FOUND" },
     joinRes: { ok: true, roomId: "room-a" },
@@ -83,7 +83,8 @@ test("server redirect reconnect summary exposes redirect and final room", () => 
   });
 
   assert.equal(summary.ok, true);
-  assert.equal(summary.playerId, "player-a");
+  assert.equal(summary.accountPlayerId, "player-a");
+  assert.equal(summary.characterId, "chr-a");
   assert.equal(summary.finalMode, "join");
   assert.equal(summary.finalRoomId, "room-a");
   assert.deepEqual(summary.redirect, redirect);
