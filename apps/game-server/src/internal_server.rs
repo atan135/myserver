@@ -997,6 +997,7 @@ mod tests {
             config_tables.room_policy_registry(),
             3600,
         ));
+        let title_config_tables = config_tables.clone();
 
         ServiceContext {
             config: config.clone(),
@@ -1011,6 +1012,13 @@ mod tests {
             player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
             character_element_service: crate::core::character_element::CharacterElementService::new(
                 crate::core::character_element::PgCharacterElementStore::new_disabled(),
+            ),
+            discipline_service: crate::core::character_discipline::DisciplineService::new(
+                crate::core::character_discipline::PgDisciplineStore::new_disabled(),
+            ),
+            title_service: crate::core::character_title::TitleService::new(
+                crate::core::character_title::PgTitleStore::new_disabled(),
+                title_config_tables,
             ),
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),

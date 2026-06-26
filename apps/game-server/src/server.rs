@@ -13,7 +13,9 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 use crate::config::Config;
+use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
 use crate::core::character_element::{CharacterElementService, PgCharacterElementStore};
+use crate::core::character_title::{PgTitleStore, TitleService};
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
@@ -495,6 +497,9 @@ pub async fn run(
     // Initialize PostgreSQL-backed gameplay stores.
     let db_player_store = PgPlayerStore::new(config).await?;
     let character_element_store = PgCharacterElementStore::new(config).await?;
+    let discipline_store = PgDisciplineStore::new(config).await?;
+    let title_store = PgTitleStore::new(config).await?;
+    let title_config_tables = config_tables.clone();
 
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
@@ -508,6 +513,8 @@ pub async fn run(
         item_uid_generator,
         player_manager: PlayerManager::new(db_player_store),
         character_element_service: CharacterElementService::new(character_element_store),
+        discipline_service: DisciplineService::new(discipline_store),
+        title_service: TitleService::new(title_store, title_config_tables),
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
@@ -633,6 +640,8 @@ pub async fn run(
 
     services.player_manager.close().await;
     services.character_element_service.close().await;
+    services.discipline_service.close().await;
+    services.title_service.close().await;
 
     info!("game server shutdown completed");
     Ok(())

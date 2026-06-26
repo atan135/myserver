@@ -6,7 +6,9 @@ use redis::aio::MultiplexedConnection;
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::config::Config;
+use crate::core::character_discipline::DisciplineService;
 use crate::core::character_element::CharacterElementService;
+use crate::core::character_title::TitleService;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::global_id::ItemUidGenerator;
 use crate::core::player::PlayerManager;
@@ -126,6 +128,8 @@ pub struct ServiceContext {
     pub item_uid_generator: ItemUidGenerator,
     pub player_manager: PlayerManager,
     pub character_element_service: CharacterElementService,
+    pub discipline_service: DisciplineService,
+    pub title_service: TitleService,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,

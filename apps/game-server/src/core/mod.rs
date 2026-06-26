@@ -1,4 +1,6 @@
+pub mod character_discipline;
 pub mod character_element;
+pub mod character_title;
 pub mod config_table;
 pub mod context;
 pub mod global_id;
