@@ -10,6 +10,7 @@ import {
 } from "../tools/mock-client/src/auth.js";
 import {
   runCharacterDuplicateName,
+  runCharacterElementsDebug,
   runCharacterLoginAuth,
   runCharacterLimit,
   runCharacterList,
@@ -21,8 +22,11 @@ import { encodePacket } from "../tools/mock-client/src/packet.js";
 import {
   decodeFieldsWithRepeated,
   encodeBoolField,
+  encodeInt32Field,
+  encodeMessageField,
   encodeUInt32Field,
   encodeStringField,
+  readInt32,
   readString
 } from "../tools/mock-client/src/protocol.js";
 
@@ -59,6 +63,84 @@ function createCharacter(index, overrides = {}) {
       affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
       mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
     }
+  };
+}
+
+function encodeElementValues(value) {
+  return Buffer.concat([
+    encodeInt32Field(1, value.earth),
+    encodeInt32Field(2, value.fire),
+    encodeInt32Field(3, value.water),
+    encodeInt32Field(4, value.wind)
+  ]);
+}
+
+function encodeCharacterElements(elements) {
+  return Buffer.concat([
+    encodeMessageField(1, encodeElementValues(elements.affinity)),
+    encodeMessageField(2, encodeElementValues(elements.mastery))
+  ]);
+}
+
+function encodeGetCharacterElementsRes({ ok, errorCode = "", characterId, elements = null }) {
+  const fields = [
+    encodeBoolField(1, ok),
+    encodeStringField(2, errorCode),
+    encodeStringField(3, characterId)
+  ];
+  if (elements) {
+    fields.push(encodeMessageField(4, encodeCharacterElements(elements)));
+  }
+  return Buffer.concat(fields);
+}
+
+function encodeDebugApplyCharacterElementChangeRes({
+  ok,
+  errorCode = "",
+  characterId,
+  before = null,
+  after = null
+}) {
+  const fields = [
+    encodeBoolField(1, ok),
+    encodeStringField(2, errorCode),
+    encodeStringField(3, characterId)
+  ];
+  if (before) {
+    fields.push(encodeMessageField(4, encodeCharacterElements(before)));
+  }
+  if (after) {
+    fields.push(encodeMessageField(5, encodeCharacterElements(after)));
+  }
+  return Buffer.concat(fields);
+}
+
+function decodeElementValues(buffer) {
+  if (!buffer) {
+    return { earth: 0, fire: 0, water: 0, wind: 0 };
+  }
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    earth: readInt32(fields, 1),
+    fire: readInt32(fields, 2),
+    water: readInt32(fields, 3),
+    wind: readInt32(fields, 4)
+  };
+}
+
+function addElementDelta(value, delta) {
+  return {
+    earth: value.earth + delta.earth,
+    fire: value.fire + delta.fire,
+    water: value.water + delta.water,
+    wind: value.wind + delta.wind
+  };
+}
+
+function applyElementChange(elements, affinityDelta, masteryDelta) {
+  return {
+    affinity: addElementDelta(elements.affinity, affinityDelta),
+    mastery: addElementDelta(elements.mastery, masteryDelta)
   };
 }
 
@@ -173,9 +255,19 @@ function installMockAuthFetch({
   };
 }
 
-async function startFakeGameAuthServer({ roomJoin = false, frameRateBeforeJoin = false } = {}) {
+async function startFakeGameAuthServer({
+  roomJoin = false,
+  frameRateBeforeJoin = false,
+  characterElementsDebug = false
+} = {}) {
   const authRequests = [];
   const roomJoinRequests = [];
+  const characterElementRequests = [];
+  const characterElementDebugRequests = [];
+  let currentElements = {
+    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+  };
   const sockets = new Set();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -211,6 +303,59 @@ async function startFakeGameAuthServer({ roomJoin = false, frameRateBeforeJoin =
                 encodeStringField(2, ticketPayload.playerId),
                 encodeStringField(3, "")
               ])
+            )
+          );
+          continue;
+        }
+
+        if (messageType === MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_REQ) {
+          assert.equal(characterElementsDebug, true);
+          assert.equal(body.length, 0);
+          characterElementRequests.push({ seq });
+          const characterId = authRequests.at(-1)?.ticketPayload.characterId || "chr_0000000000001";
+          socket.write(
+            encodePacket(
+              MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES,
+              seq,
+              encodeGetCharacterElementsRes({
+                ok: true,
+                characterId,
+                elements: currentElements
+              })
+            )
+          );
+          continue;
+        }
+
+        if (messageType === MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_REQ) {
+          assert.equal(characterElementsDebug, true);
+          const request = decodeFieldsWithRepeated(body);
+          const affinityDelta = decodeElementValues(request.get(1));
+          const masteryDelta = decodeElementValues(request.get(2));
+          const reason = readString(request, 3);
+          const debugToken = readString(request, 4);
+          characterElementDebugRequests.push({
+            seq,
+            affinityDelta,
+            masteryDelta,
+            reason,
+            debugToken
+          });
+
+          const before = clone(currentElements);
+          currentElements = applyElementChange(currentElements, affinityDelta, masteryDelta);
+          const after = clone(currentElements);
+          const characterId = authRequests.at(-1)?.ticketPayload.characterId || "chr_0000000000001";
+          socket.write(
+            encodePacket(
+              MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES,
+              seq,
+              encodeDebugApplyCharacterElementChangeRes({
+                ok: true,
+                characterId,
+                before,
+                after
+              })
             )
           );
           continue;
@@ -267,6 +412,8 @@ async function startFakeGameAuthServer({ roomJoin = false, frameRateBeforeJoin =
     port: server.address().port,
     authRequests,
     roomJoinRequests,
+    characterElementRequests,
+    characterElementDebugRequests,
     async close() {
       for (const socket of sockets) {
         socket.destroy();
@@ -505,6 +652,85 @@ test("character-room-join waits for RoomJoinRes when push arrives first", async 
       seq: 2,
       roomId: "room-push-before-join"
     });
+  } finally {
+    await gameServer.close();
+  }
+});
+
+test("character-elements-debug queries, applies a controlled change, and emits JSON output", async () => {
+  const ticketExpiresAt = new Date(Date.now() + 300000).toISOString();
+  installMockAuthFetch({ ticketExpiresAt });
+  const gameServer = await startFakeGameAuthServer({ characterElementsDebug: true });
+  const options = parseArgs([
+    "--scenario", "character-elements-debug",
+    "--login-name", "test001",
+    "--password", "Passw0rd!",
+    "--auto-create-character",
+    "--character-name", "Echo",
+    "--game-host", "127.0.0.1",
+    "--port", String(gameServer.port),
+    "--no-service-discovery",
+    "--json-output",
+    "--timeout-ms", "1000",
+    "--element-debug-token", "debug-token"
+  ]);
+
+  try {
+    const { logs, result } = await captureLogs(() => runCharacterElementsDebug(options));
+    const payload = JSON.parse(logs.at(-1));
+
+    assert.equal(result.ok, true);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.scenario, "character-elements-debug");
+    assert.equal(payload.login.characterId, "chr_0000000000001");
+    assert.deepEqual(payload.request.affinityDelta, {
+      earth: -100,
+      fire: 100,
+      water: 0,
+      wind: 0
+    });
+    assert.deepEqual(payload.request.masteryDelta, {
+      earth: 0,
+      fire: 10,
+      water: 0,
+      wind: 0
+    });
+    assert.equal(payload.request.reason, "mock-client character element debug");
+    assert.equal(payload.request.debugTokenProvided, true);
+    assert.deepEqual(payload.before.elements.affinity, {
+      earth: 2500,
+      fire: 2500,
+      water: 2500,
+      wind: 2500
+    });
+    assert.deepEqual(payload.change.before.mastery, {
+      earth: 0,
+      fire: 0,
+      water: 0,
+      wind: 0
+    });
+    assert.deepEqual(payload.change.after.affinity, {
+      earth: 2400,
+      fire: 2600,
+      water: 2500,
+      wind: 2500
+    });
+    assert.deepEqual(payload.after.elements.mastery, {
+      earth: 0,
+      fire: 10,
+      water: 0,
+      wind: 0
+    });
+    assert.deepEqual(gameServer.characterElementRequests, [{ seq: 2 }, { seq: 4 }]);
+    assert.deepEqual(gameServer.characterElementDebugRequests, [
+      {
+        seq: 3,
+        affinityDelta: { earth: -100, fire: 100, water: 0, wind: 0 },
+        masteryDelta: { earth: 0, fire: 10, water: 0, wind: 0 },
+        reason: "mock-client character element debug",
+        debugToken: "debug-token"
+      }
+    ]);
   } finally {
     await gameServer.close();
   }

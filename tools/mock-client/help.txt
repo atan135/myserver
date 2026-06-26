@@ -18,6 +18,16 @@
 # --auto-create-character    登录后直接创建新角色并选择；适合一条命令创建新角色联调
 # --create-character-if-missing 无可用角色或指定名称不存在时创建角色
 # --character-name-prefix <text> 自动生成角色名的前缀 (默认 MockRole)
+# --element-affinity-earth-delta <n> character-elements-debug 地亲和 delta (默认 -100)
+# --element-affinity-fire-delta <n> character-elements-debug 火亲和 delta (默认 100)
+# --element-affinity-water-delta <n> character-elements-debug 水亲和 delta (默认 0)
+# --element-affinity-wind-delta <n> character-elements-debug 风亲和 delta (默认 0)
+# --element-mastery-earth-delta <n> character-elements-debug 地掌握 delta (默认 0)
+# --element-mastery-fire-delta <n> character-elements-debug 火掌握 delta (默认 10)
+# --element-mastery-water-delta <n> character-elements-debug 水掌握 delta (默认 0)
+# --element-mastery-wind-delta <n> character-elements-debug 风掌握 delta (默认 0)
+# --element-change-reason <text> 四属性 debug 变更日志原因
+# --element-debug-token <token> 四属性 debug 变更 token；默认读取 MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN 或 GAME_ADMIN_TOKEN
 # --json-output              输出机器可读 JSON，便于测试脚本断言
 # --timeout-ms <ms>          超时毫秒 (默认 5000)
 # --policy-id <id>           房间策略，例如 movement_demo / combat_demo
@@ -82,14 +92,19 @@ node tools/mock-client/src/index.js --scenario character-login-auth --http-base-
 # 0.5 选择角色后进入 game-server 房间基础流程 (CHARACTER_ROOM_JOIN)
 node tools/mock-client/src/index.js --scenario character-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --room-id room-character-debug
 
-# 0.6 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
+# 0.6 查询并调试修改角色四属性 (CHARACTER_ELEMENTS_DEBUG)
+# 需要玩家 ticket + GAME_ADMIN_TOKEN / --element-debug-token，仅用于测试或 GM 调试。
+node tools/mock-client/src/index.js --scenario character-elements-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --element-affinity-earth-delta -100 --element-affinity-fire-delta 100 --element-mastery-fire-delta 10 --element-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+
+# 0.7 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
 node tools/mock-client/src/index.js --scenario character-duplicate-name --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --json-output
 
-# 0.7 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
+# 0.8 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
 node tools/mock-client/src/index.js --scenario character-limit --http-base-url http://127.0.0.1:3000 --login-name fresh_limit_account --password Passw0rd! --character-name-prefix Limit --json-output
 
 # 提示：无角色账号直接执行 happy/get-room-data 等进游戏场景会提示先创建或选择角色，不会直接进入游戏。
 # 可传 --character-id 指定已有角色，或传 --auto-create-character / --create-character-if-missing 自动创建后继续联调。
+# 真实客户端应按 messageType + seq 处理四属性查询响应，并把四属性查询结果或后续变化推送作为异步状态更新。
 
 # ---------- 基础流程 ----------
 
@@ -465,6 +480,7 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # character-select        | 选择角色并展示 characterId/ticket payload
 # character-login-auth    | 选角后连接 game-proxy 完成 AuthReq
 # character-room-join     | 选角后进入房间基础流程
+# character-elements-debug | 查询/受控调试修改角色四属性
 # character-duplicate-name | 验证同名角色创建
 # character-limit         | 验证普通账号第 7 个角色创建失败
 

@@ -4,15 +4,25 @@ import test from "node:test";
 
 import { parseArgs } from "../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
-import { decodeByMessageType } from "../tools/mock-client/src/messages.js";
+import {
+  decodeByMessageType,
+  encodeDebugApplyCharacterElementChangeReq,
+  encodeGetCharacterElementsReq
+} from "../tools/mock-client/src/messages.js";
 import { runAnnounceGet } from "../tools/mock-client/src/scenarios/announce.js";
 import { connectToChatServer } from "../tools/mock-client/src/scenarios/chat.js";
 import { runMailGet } from "../tools/mock-client/src/scenarios/mail.js";
 import {
+  decodeFieldsWithRepeated,
   encodeBoolField,
   encodeInt64Field,
+  encodeInt32Field,
+  encodeMessageField,
+  encodeStringField,
   encodeUInt32Field,
-  encodeVarint
+  encodeVarint,
+  readInt32,
+  readString
 } from "../tools/mock-client/src/protocol.js";
 
 function encodePackedInt32Field(fieldNumber, values) {
@@ -22,6 +32,32 @@ function encodePackedInt32Field(fieldNumber, values) {
     encodeVarint(payload.length),
     payload
   ]);
+}
+
+function encodeElementValues(value) {
+  return Buffer.concat([
+    encodeInt32Field(1, value.earth),
+    encodeInt32Field(2, value.fire),
+    encodeInt32Field(3, value.water),
+    encodeInt32Field(4, value.wind)
+  ]);
+}
+
+function encodeCharacterElements(elements) {
+  return Buffer.concat([
+    encodeMessageField(1, encodeElementValues(elements.affinity)),
+    encodeMessageField(2, encodeElementValues(elements.mastery))
+  ]);
+}
+
+function decodeElementValues(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    earth: readInt32(fields, 1),
+    fire: readInt32(fields, 2),
+    water: readInt32(fields, 3),
+    wind: readInt32(fields, 4)
+  };
 }
 
 test("mock-client defaults to public player entrypoints only", () => {
@@ -96,4 +132,66 @@ test("mock-client decodes proto3 packed repeated int32 fields", () => {
     appearance: 7,
     activeBuffIds: [301, 302]
   });
+});
+
+test("mock-client encodes and decodes character element messages", () => {
+  assert.equal(encodeGetCharacterElementsReq().length, 0);
+
+  const changeReq = encodeDebugApplyCharacterElementChangeReq(
+    { earth: -100, fire: 100, water: 0, wind: 0 },
+    { earth: 0, fire: 10, water: 0, wind: 0 },
+    "unit test",
+    "debug-token"
+  );
+  const requestFields = decodeFieldsWithRepeated(changeReq);
+
+  assert.deepEqual(decodeElementValues(requestFields.get(1)), {
+    earth: -100,
+    fire: 100,
+    water: 0,
+    wind: 0
+  });
+  assert.deepEqual(decodeElementValues(requestFields.get(2)), {
+    earth: 0,
+    fire: 10,
+    water: 0,
+    wind: 0
+  });
+  assert.equal(readString(requestFields, 3), "unit test");
+  assert.equal(readString(requestFields, 4), "debug-token");
+
+  const elements = {
+    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 10, water: 0, wind: 0 }
+  };
+  const getResBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeStringField(2, ""),
+    encodeStringField(3, "chr_0000000000001"),
+    encodeMessageField(4, encodeCharacterElements(elements))
+  ]);
+
+  assert.deepEqual(decodeByMessageType(MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES, getResBody), {
+    ok: true,
+    errorCode: "",
+    characterId: "chr_0000000000001",
+    elements
+  });
+
+  const invalidChangeBody = Buffer.concat([
+    encodeBoolField(1, false),
+    encodeStringField(2, "INVALID_AFFINITY_TOTAL"),
+    encodeStringField(3, "chr_0000000000001")
+  ]);
+
+  assert.deepEqual(
+    decodeByMessageType(MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES, invalidChangeBody),
+    {
+      ok: false,
+      errorCode: "INVALID_AFFINITY_TOTAL",
+      characterId: "chr_0000000000001",
+      before: null,
+      after: null
+    }
+  );
 });

@@ -210,6 +210,7 @@ Protobuf 风格的编解码工具：
 | `character-select` | 选择角色并展示 `characterId` 和 ticket payload 摘要 |
 | `character-login-auth` | 登录、选角、连接 `game-proxy` 并完成 `AuthReq` |
 | `character-room-join` | 登录、选角、连接游戏入口并加入房间 |
+| `character-elements-debug` | 登录、选角、查询四属性、执行受控 debug 变更、再次查询并输出 before/change/after |
 | `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
 | `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
 
@@ -271,6 +272,20 @@ node tools/mock-client/src/index.js --scenario character-room-join \
   --room-id room-character-debug
 
 `character-room-join` 会等待 `ROOM_JOIN_RES`，中间如果先收到 `RoomFrameRatePush` 或 `RoomStatePush` 会继续读取。真实客户端也应按 `messageType + seq` 匹配请求响应，不能假设请求后的下一包一定是对应响应包。
+
+# 查询并调试修改角色四属性
+node tools/mock-client/src/index.js --scenario character-elements-debug \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --element-affinity-earth-delta -100 \
+  --element-affinity-fire-delta 100 \
+  --element-mastery-fire-delta 10 \
+  --element-debug-token "$GAME_ADMIN_TOKEN" \
+  --json-output
+
+`character-elements-debug` 依次发送 `GetCharacterElementsReq(1413)`、`DebugApplyCharacterElementChangeReq(1415)` 和 `GetCharacterElementsReq(1413)`，输出 `before`、`change`、`after`。debug 变更需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--element-debug-token`，仅用于测试或 GM 调试；真实客户端应把四属性查询结果或后续变化推送作为异步状态更新处理。
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -375,6 +390,16 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--auto-create-character` | 登录后直接创建新角色并选择 | `false` |
 | `--create-character-if-missing` | 无角色或指定角色名不存在时创建角色 | `false` |
 | `--character-name-prefix` | 自动生成角色名的前缀 | `MockRole` |
+| `--element-affinity-earth-delta` | `character-elements-debug` 的地亲和 delta | `-100` |
+| `--element-affinity-fire-delta` | `character-elements-debug` 的火亲和 delta | `100` |
+| `--element-affinity-water-delta` | `character-elements-debug` 的水亲和 delta | `0` |
+| `--element-affinity-wind-delta` | `character-elements-debug` 的风亲和 delta | `0` |
+| `--element-mastery-earth-delta` | `character-elements-debug` 的地掌握 delta | `0` |
+| `--element-mastery-fire-delta` | `character-elements-debug` 的火掌握 delta | `10` |
+| `--element-mastery-water-delta` | `character-elements-debug` 的水掌握 delta | `0` |
+| `--element-mastery-wind-delta` | `character-elements-debug` 的风掌握 delta | `0` |
+| `--element-change-reason` | `character-elements-debug` 写入日志的原因 | `mock-client character element debug` |
+| `--element-debug-token` | 四属性 debug 变更 token，默认读取 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |
 | `--login-name-a` | 客户端A登录用户名 | - |
 | `--password-a` | 客户端A登录密码 | - |
