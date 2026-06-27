@@ -41,8 +41,13 @@ const COMBAT_EFFECT_KEYS: &[&str] = &[
     "cooldown_reduction",
     "cooldownreduction",
     "combat",
+    "stat",
+    "stats",
+    "effective_elements",
+    "effectiveelements",
     "buff",
     "debuff",
+    "element_affinity",
     "element_mastery",
     "mastery",
     "affinity",
@@ -268,9 +273,24 @@ mod tests {
     #[test]
     fn title_table_rejects_combat_effects() {
         assert_invalid(
-            "TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder\n\
-             int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int\n\
-             1,测试称号,,identity,,,{}, \"{\"\"attack\"\":10}\",common,icon,#fff,test,0,0,1\n",
+            r#"TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder
+int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int
+1,测试称号,,identity,,,{},"{""attack"":10}",common,icon,#fff,test,0,0,1
+"#,
+            "combat effect",
+        );
+        assert_invalid(
+            r#"TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder
+int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int
+1,测试称号,,identity,,,{},"{""effective_elements"":{""fire"":10}}",common,icon,#fff,test,0,0,1
+"#,
+            "combat effect",
+        );
+        assert_invalid(
+            r#"TitleId,Name,Description,TitleType,SourceDomainId,TierRequired,UnlockRules,Effects,Rarity,Icon,Color,Tags,Hidden,Limited,SortOrder
+int,string,string,string,string,string,string,string,string,string,string,Array<string>,int,int,int
+1,测试称号,,identity,,,{},"[""element_mastery""]",common,icon,#fff,test,0,0,1
+"#,
             "combat effect",
         );
     }

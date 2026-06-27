@@ -1,5 +1,6 @@
 pub mod character_discipline;
 pub mod character_element;
+pub mod character_element_effective;
 pub mod character_progress;
 pub mod character_title;
 pub mod character_title_unlock;

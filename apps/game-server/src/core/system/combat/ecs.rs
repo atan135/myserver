@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::character_element_effective::{
+    EffectiveCombatAttributes, EffectiveElementsResult,
+};
+
 use super::buffs::BuffEffectType;
 use super::catalog::CombatCatalog;
 use super::components::{
@@ -55,6 +59,15 @@ impl CombatEntityBlueprint {
         }
     }
 
+    pub fn player_with_effective_elements(
+        character_id: &str,
+        team_id: u16,
+        position: Position,
+        effective_elements: &EffectiveElementsResult,
+    ) -> Self {
+        Self::player(character_id, team_id, position).with_effective_elements(effective_elements)
+    }
+
     pub fn monster(team_id: u16, position: Position) -> Self {
         Self {
             entity_type: EntityType::Monster,
@@ -76,6 +89,11 @@ impl CombatEntityBlueprint {
 
     pub fn with_health(mut self, health: Health) -> Self {
         self.health = health;
+        self
+    }
+
+    pub fn with_effective_elements(mut self, effective_elements: &EffectiveElementsResult) -> Self {
+        self.apply_effective_combat_attributes(effective_elements.combat_attributes());
         self
     }
 
@@ -109,6 +127,11 @@ impl CombatEntityBlueprint {
         catalog: &dyn CombatCatalog,
     ) -> Result<Self, &'static str> {
         self.with_skill_codes(skill_codes, catalog)
+    }
+
+    fn apply_effective_combat_attributes(&mut self, attributes: EffectiveCombatAttributes) {
+        self.health = attributes.health;
+        self.stats = attributes.stats;
     }
 }
 
@@ -1946,6 +1969,10 @@ impl RoomCombatEcs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::character_element::{CharacterElements, ElementValues};
+    use crate::core::character_element_effective::{
+        EffectiveElementsRequest, ElementModifier, calculate_effective_elements,
+    };
     use crate::core::system::combat::BuiltinCombatCatalog;
     use serde_json::json;
 
@@ -2073,6 +2100,104 @@ mod tests {
             )
             .unwrap(),
             vec![2, 5]
+        );
+    }
+
+    #[test]
+    fn player_blueprint_reads_effective_elements_for_level_free_combat_stats() {
+        let base = CharacterElements {
+            character_id: "player-a".to_string(),
+            affinity: ElementValues::new(2500, 2500, 2500, 2500),
+            mastery: ElementValues::new(0, 0, 0, 0),
+        };
+        let effective = calculate_effective_elements(
+            EffectiveElementsRequest::new(base)
+                .with_equipped_item_elements(crate::core::inventory::item::ItemElementValues::new(
+                    80, 120, 0, 40,
+                ))
+                .with_buff_modifier(ElementModifier::mastery(20, 30, 0, 10))
+                .with_scene_context_modifier(ElementModifier::affinity(250, 250, 0, 250)),
+        );
+
+        let blueprint = CombatEntityBlueprint::player_with_effective_elements(
+            "player-a",
+            1,
+            Position { x: 0.0, y: 0.0 },
+            &effective,
+        );
+
+        assert_eq!(blueprint.character_id.as_deref(), Some("player-a"));
+        assert!(blueprint.health.max > 120);
+        assert!(blueprint.stats.attack > 20);
+        assert!(blueprint.stats.defense > 10);
+        assert!(blueprint.stats.speed > 120);
+    }
+
+    #[test]
+    fn effective_elements_stats_feed_damage_formula_and_defense_reduction() {
+        let catalog = BuiltinCombatCatalog::default();
+        let mut ecs = RoomCombatEcs::new();
+        let attacker_elements = CharacterElements {
+            character_id: "attacker".to_string(),
+            affinity: ElementValues::new(2500, 3000, 2500, 2500),
+            mastery: ElementValues::new(0, 250, 0, 0),
+        };
+        let defender_elements = CharacterElements {
+            character_id: "defender".to_string(),
+            affinity: ElementValues::new(3000, 2500, 2700, 2500),
+            mastery: ElementValues::new(250, 0, 100, 0),
+        };
+        let attacker_effective =
+            calculate_effective_elements(EffectiveElementsRequest::new(attacker_elements));
+        let defender_effective =
+            calculate_effective_elements(EffectiveElementsRequest::new(defender_elements));
+
+        let attacker = ecs
+            .spawn_entity(
+                CombatEntityBlueprint::player_with_effective_elements(
+                    "attacker",
+                    1,
+                    Position { x: 0.0, y: 0.0 },
+                    &attacker_effective,
+                )
+                .with_skills(&[1]),
+            )
+            .unwrap();
+        let defender = ecs
+            .spawn_entity(CombatEntityBlueprint::player_with_effective_elements(
+                "defender",
+                2,
+                Position { x: 10.0, y: 0.0 },
+                &defender_effective,
+            ))
+            .unwrap();
+
+        ecs.request_skill(SkillCastRequest {
+            frame_id: 1,
+            source_entity: attacker,
+            skill_id: 1,
+            target_entity: Some(defender),
+            target_point: None,
+        });
+
+        let mut hooks = NoopCombatHooks;
+        ecs.tick(1, 30, &catalog, &mut hooks);
+        let damage = ecs
+            .drain_events()
+            .into_iter()
+            .find(|event| event.kind == CombatEventKind::Damage)
+            .expect("effective combat stats should still allow damage")
+            .value;
+
+        assert!(damage > 0);
+        assert_eq!(
+            ecs.snapshot(1, &catalog)
+                .entities
+                .into_iter()
+                .find(|entity| entity.entity_id == attacker)
+                .unwrap()
+                .base_stats,
+            attacker_effective.combat_attributes().stats
         );
     }
 

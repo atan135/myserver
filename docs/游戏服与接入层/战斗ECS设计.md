@@ -245,7 +245,26 @@ struct SkillEffect {
 
 `CombatEntityBlueprint` 支持通过 active 职业 / 流派技能池装载技能：服务端先从 `DisciplineService::active_skill_pool_for_identity` 读取当前 `active=true` 职业 / 流派的 `SkillPool`，再用 `SkillBase.Code` 解析为战斗技能 ID。该路径不会读取 inactive 或仅已学习但未激活的职业技能。
 
-### 3.4 技能释放流程
+### 3.4 有效属性与无等级战斗
+
+当前战斗属性不读取传统角色 `level`。玩家实体进入战斗前应先通过 `EffectiveElementsService` 计算临时 `effective_elements`：
+
+```text
+base CharacterElements
++ active discipline modifiers
++ equipped item elements
++ Buff element modifiers
++ scene context modifiers
++ temporary system modifiers
+```
+
+`CombatEntityBlueprint::player_with_effective_elements` / `with_effective_elements` 会把 `EffectiveElementsResult::combat_attributes` 写入初始 `Health` 和 `Stats`。当前派生规则集中在 `character_element_effective.rs`，由有效 `mastery` 和 `affinity` 产生 max hp、attack、defense、speed、crit rate 和 crit damage。装备道具、Buff、场景上下文和系统临时修正都只影响本次有效值，不写回永久四属性。
+
+战斗伤害、暴击和防御减伤读取 ECS 中的 `effective_stats`，`effective_stats` 再叠加战斗 Buff 的 `ModifyAttack` / `ModifyDefense` / `ModifySpeed`。技能学习 / 装载使用当前激活职业 / 流派 `SkillPool`，区域开放由场景条件 DSL 判断四属性、职业、称号和进度状态；这些路径都不得以传统角色等级作为判定来源。
+
+称号第一阶段不提供直接战斗属性。`TitleTable.Effects` 的校验会拒绝 `combat`、`stats`、`effective_elements`、`affinity`、`mastery` 等战斗 / 四属性效果键；若后续开放称号战斗效果，必须先更新称号效果白名单和本节战斗设计。
+
+### 3.5 技能释放流程
 
 ```
 请求 → 冷却检查 → 距离检查 → 消耗冷却 → 应用效果 → 产生事件
