@@ -116,6 +116,28 @@ function toCharacter(row) {
   };
 }
 
+function toEquippedTitle(row) {
+  return {
+    title_id: row.title_id,
+    source_type: row.source_type,
+    source_id: row.source_id || null,
+    unlocked_at: toIsoString(row.unlocked_at),
+    expires_at: toIsoString(row.expires_at),
+    expired: row.expired === true
+  };
+}
+
+function toDiscipline(row) {
+  return {
+    discipline_id: row.discipline_id,
+    points: toNumericId(row.points),
+    tier: row.tier,
+    active: row.active === true,
+    learned_at: toIsoString(row.learned_at),
+    updated_at: toIsoString(row.updated_at)
+  };
+}
+
 function readTotal(rows) {
   return Number.parseInt(String(rows[0]?.total ?? "0"), 10);
 }
@@ -249,6 +271,78 @@ export class CharacterStore {
     return rows.length > 0 ? toCharacter(rows[0]) : null;
   }
 
+  async getCharacterProfileExtras(characterId) {
+    const empty = {
+      equippedTitle: null,
+      discipline: null,
+      sources: {
+        equippedTitle: "character_titles",
+        discipline: "character_disciplines"
+      }
+    };
+
+    if (!this.enabled) {
+      return {
+        ...empty,
+        sources: {
+          equippedTitle: "not_connected",
+          discipline: "not_connected"
+        }
+      };
+    }
+
+    try {
+      const [titleResult, disciplineResult] = await Promise.all([
+        this.pool.query(
+          `SELECT title_id,
+                  source_type,
+                  source_id,
+                  unlocked_at,
+                  expires_at,
+                  (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired
+           FROM character_titles
+           WHERE character_id = $1
+             AND is_equipped = true
+             AND (expires_at IS NULL OR expires_at > current_timestamp)
+           ORDER BY updated_at DESC, title_id ASC
+           LIMIT 1`,
+          [characterId]
+        ),
+        this.pool.query(
+          `SELECT discipline_id,
+                  points,
+                  tier,
+                  active,
+                  learned_at,
+                  updated_at
+           FROM character_disciplines
+           WHERE character_id = $1
+             AND active = true
+           ORDER BY updated_at DESC, discipline_id ASC
+           LIMIT 1`,
+          [characterId]
+        )
+      ]);
+
+      return {
+        equippedTitle: titleResult.rows.length > 0 ? toEquippedTitle(titleResult.rows[0]) : null,
+        discipline: disciplineResult.rows.length > 0 ? toDiscipline(disciplineResult.rows[0]) : null,
+        sources: empty.sources
+      };
+    } catch (error) {
+      if (error?.code === "42P01") {
+        return {
+          ...empty,
+          sources: {
+            equippedTitle: "unavailable",
+            discipline: "unavailable"
+          }
+        };
+      }
+      throw error;
+    }
+  }
+
   async searchByCharacterName(name, options = {}) {
     if (!this.enabled) {
       return [];
@@ -343,12 +437,84 @@ export class CharacterStore {
 
     const result = await this.pool.query(
       `UPDATE characters
-       SET deleted_at = current_timestamp
+       SET status = 'deleted',
+           deleted_at = current_timestamp
        WHERE character_id = $1
          AND deleted_at IS NULL`,
       [characterId]
     );
     return result.rowCount > 0;
+  }
+
+  async restoreCharacter(characterId, options = {}) {
+    if (!this.enabled) {
+      throw createCharacterStoreError("CHARACTER_STORE_DISABLED", "character store is disabled");
+    }
+
+    const accountPlayerId = normalizeOptionalString(options.accountPlayerId);
+    if (!accountPlayerId) {
+      throw createCharacterStoreError("CHARACTER_ACCOUNT_REQUIRED", "restore requires accountPlayerId");
+    }
+
+    const maxEffectiveCharacters = normalizePositiveInteger(
+      options.maxEffectiveCharactersPerAccount ?? options.maxEffectiveCharacters,
+      this.maxEffectiveCharactersPerAccount
+    );
+    const client = await this.#checkoutClient();
+    const transactional = client !== this.pool;
+    let transactionClosed = false;
+
+    try {
+      if (transactional) {
+        await client.query("BEGIN");
+        await client.query("LOCK TABLE characters IN SHARE ROW EXCLUSIVE MODE");
+      }
+
+      const current = await this.#countEffectiveByAccountPlayerIdOn(client, accountPlayerId);
+      if (current >= maxEffectiveCharacters) {
+        if (transactional) {
+          await client.query("ROLLBACK");
+          transactionClosed = true;
+        }
+        throw createCharacterStoreError(
+          "CHARACTER_LIMIT_EXCEEDED",
+          "effective character limit exceeded",
+          {
+            accountPlayerId,
+            current,
+            limit: maxEffectiveCharacters
+          }
+        );
+      }
+
+      const { rows } = await client.query(
+        `UPDATE characters
+         SET status = 'active',
+             deleted_at = NULL
+         WHERE character_id = $1
+           AND account_player_id = $2
+           AND deleted_at IS NOT NULL
+           AND status = 'deleted'
+         RETURNING ${characterSelectColumns()}`,
+        [characterId, accountPlayerId]
+      );
+
+      if (transactional) {
+        await client.query("COMMIT");
+        transactionClosed = true;
+      }
+
+      return rows.length > 0 ? toCharacter(rows[0]) : null;
+    } catch (error) {
+      if (transactional && !transactionClosed) {
+        await client.query("ROLLBACK");
+      }
+      throw error;
+    } finally {
+      if (transactional) {
+        client.release();
+      }
+    }
   }
 
   async updateLastLoginAt(characterId) {

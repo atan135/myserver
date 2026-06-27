@@ -207,6 +207,9 @@ Protobuf 风格的编解码工具：
 |------|------|
 | `character-list` | 查询当前账号角色列表，可输出 JSON |
 | `character-create` | 创建角色，支持角色名和外观 JSON |
+| `character-profile` | 查询当前账号指定或首个角色的 auth-http 基础资料、四属性、称号 / 职业空态和同名区分信息 |
+| `character-delete` | 软删除当前账号指定或首个角色，输出恢复窗口和硬删冷却信息 |
+| `character-restore` | 恢复当前账号指定软删除角色，必须传 `--character-id` |
 | `character-select` | 选择角色并展示 `characterId` 和 ticket payload 摘要 |
 | `character-login-auth` | 登录、选角、连接 `game-proxy` 并完成 `AuthReq` |
 | `character-room-join` | 登录、选角、连接游戏入口并加入房间 |
@@ -253,6 +256,26 @@ node tools/mock-client/src/index.js --scenario character-create \
 
 # 选择角色并展示 ticket payload 摘要
 node tools/mock-client/src/index.js --scenario character-select \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --json-output
+
+# 查询角色资料
+node tools/mock-client/src/index.js --scenario character-profile \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --json-output
+
+# 软删除和恢复角色
+node tools/mock-client/src/index.js --scenario character-delete \
+  --http-base-url http://127.0.0.1:3000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --json-output
+
+node tools/mock-client/src/index.js --scenario character-restore \
   --http-base-url http://127.0.0.1:3000 \
   --login-name test001 --password Passw0rd! \
   --character-id chr_0000000000001 \

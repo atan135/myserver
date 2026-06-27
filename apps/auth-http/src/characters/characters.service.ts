@@ -6,6 +6,8 @@ import { badRequest, forbidden, serviceUnavailable, unauthorized } from "../comm
 import { AUTH_CHARACTER_STORE, AUTH_CONFIG, AUTH_STORE } from "../tokens.js";
 
 const LOGINABLE_CHARACTER_STATUSES = new Set(["active"]);
+const DELETABLE_CHARACTER_STATUSES = new Set(["active"]);
+const RESTORABLE_CHARACTER_STATUSES = new Set(["deleted"]);
 const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
 const CHARACTER_NAME_PATTERN = /^[\p{Script=Han}A-Za-z0-9_-]+$/u;
 const CHARACTER_ID_SHORT_LENGTH = 8;
@@ -14,6 +16,8 @@ const MAX_APPEARANCE_DEPTH = 4;
 const MAX_APPEARANCE_ARRAY_ITEMS = 16;
 const MAX_APPEARANCE_OBJECT_KEYS = 32;
 const MAX_APPEARANCE_STRING_LENGTH = 64;
+const DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS = 2592000;
+const DEFAULT_CHARACTER_DELETE_COOLDOWN_SECONDS = DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS;
 
 function getBearerToken(req: any): string | null {
   const authorization = req.headers.authorization;
@@ -39,6 +43,19 @@ function shortCharacterId(characterId: string) {
   return suffix.length <= CHARACTER_ID_SHORT_LENGTH ? suffix : suffix.slice(-CHARACTER_ID_SHORT_LENGTH);
 }
 
+function addSeconds(isoString: string | null, seconds: number) {
+  if (!isoString) {
+    return null;
+  }
+
+  const ms = Date.parse(isoString);
+  if (!Number.isFinite(ms)) {
+    return null;
+  }
+
+  return new Date(ms + seconds * 1000).toISOString();
+}
+
 function toSnakeCharacter(character: any) {
   const characterIdShort = shortCharacterId(character.characterId);
   return {
@@ -54,7 +71,9 @@ function toSnakeCharacter(character: any) {
     world_id: character.worldId,
     status: character.status,
     appearance_json: character.appearance,
+    created_at: character.createdAt || null,
     last_login_at: character.lastLoginAt || null,
+    deleted_at: character.deletedAt || null,
     position: {
       scene_id: character.position.sceneId,
       x: character.position.x,
@@ -65,6 +84,17 @@ function toSnakeCharacter(character: any) {
     attributes: {
       affinity: character.affinity,
       mastery: character.mastery
+    }
+  };
+}
+
+function buildUnconnectedProfileExtras() {
+  return {
+    equipped_title: null,
+    discipline: null,
+    sources: {
+      equipped_title: "not_connected",
+      discipline: "not_connected"
     }
   };
 }
@@ -134,6 +164,143 @@ export class CharactersService {
       }
       throw error;
     }
+  }
+
+  async deleteCharacter(req: any, body: any) {
+    const session = await this.requireSession(req);
+    this.assertCharacterStoreEnabled();
+
+    await this.authService.assertNotInMaintenance();
+
+    const characterId = this.normalizeCharacterId(body?.character_id ?? body?.characterId);
+    const clientIp = getClientIp(req, this.config);
+    await this.assertAccountCanUseCharacters(session.playerId, clientIp, "character_delete");
+
+    const character = await this.characterStore.getByCharacterId(characterId, { includeDeleted: true });
+    if (!character) {
+      throw forbidden("CHARACTER_NOT_FOUND", "character is not available to the current account");
+    }
+
+    if (character.accountPlayerId !== session.playerId) {
+      throw forbidden("CHARACTER_OWNER_MISMATCH", "character does not belong to current account");
+    }
+
+    if (character.deletedAt) {
+      throw forbidden("CHARACTER_ALREADY_DELETED", "character is already deleted");
+    }
+
+    if (!DELETABLE_CHARACTER_STATUSES.has(character.status)) {
+      throw forbidden("CHARACTER_NOT_DELETABLE", "character status does not allow deletion");
+    }
+
+    const deleted = await this.characterStore.softDeleteCharacter(character.characterId);
+    if (!deleted) {
+      throw forbidden("CHARACTER_ALREADY_DELETED", "character is already deleted");
+    }
+
+    const refreshedCharacter = await this.characterStore.getByCharacterId(character.characterId, { includeDeleted: true }) || {
+      ...character,
+      status: "deleted",
+      deletedAt: new Date().toISOString()
+    };
+
+    return {
+      ok: true,
+      character: toSnakeCharacter(refreshedCharacter),
+      lifecycle: this.buildDeletedLifecycle(refreshedCharacter)
+    };
+  }
+
+  async restoreCharacter(req: any, body: any) {
+    const session = await this.requireSession(req);
+    this.assertCharacterStoreEnabled();
+
+    await this.authService.assertNotInMaintenance();
+
+    const characterId = this.normalizeCharacterId(body?.character_id ?? body?.characterId);
+    const clientIp = getClientIp(req, this.config);
+    await this.assertAccountCanUseCharacters(session.playerId, clientIp, "character_restore");
+
+    const character = await this.characterStore.getByCharacterId(characterId, { includeDeleted: true });
+    if (!character) {
+      throw forbidden("CHARACTER_NOT_FOUND", "character is not available to the current account");
+    }
+
+    if (character.accountPlayerId !== session.playerId) {
+      throw forbidden("CHARACTER_OWNER_MISMATCH", "character does not belong to current account");
+    }
+
+    if (!character.deletedAt || !RESTORABLE_CHARACTER_STATUSES.has(character.status)) {
+      throw forbidden("CHARACTER_NOT_RESTORABLE", "character is not in a restorable deleted state");
+    }
+
+    this.assertCharacterRestoreWindow(character);
+
+    try {
+      const restored = await this.characterStore.restoreCharacter(character.characterId, {
+        accountPlayerId: session.playerId,
+        maxEffectiveCharactersPerAccount: this.config.characterMaxEffectivePerAccount
+      });
+
+      if (!restored) {
+        throw forbidden("CHARACTER_NOT_RESTORABLE", "character is not in a restorable deleted state");
+      }
+
+      return {
+        ok: true,
+        character: toSnakeCharacter(restored),
+        lifecycle: this.buildActiveLifecycle(restored)
+      };
+    } catch (error: any) {
+      if (error?.code === "CHARACTER_LIMIT_EXCEEDED") {
+        throw forbidden(
+          "CHARACTER_LIMIT_EXCEEDED",
+          `ordinary accounts can restore at most ${error.limit || 6} effective characters`
+        );
+      }
+      if (error?.code === "CHARACTER_STORE_DISABLED") {
+        throw serviceUnavailable("CHARACTER_STORE_UNAVAILABLE", "character store is unavailable");
+      }
+      throw error;
+    }
+  }
+
+  async getProfile(req: any, characterIdInput: unknown) {
+    const session = await this.requireSession(req);
+    this.assertCharacterStoreEnabled();
+
+    const characterId = this.normalizeCharacterId(characterIdInput);
+    const clientIp = getClientIp(req, this.config);
+    await this.assertAccountCanUseCharacters(session.playerId, clientIp, "character_profile");
+
+    const character = await this.characterStore.getByCharacterId(characterId);
+    if (!character) {
+      throw forbidden("CHARACTER_NOT_FOUND", "character is not available to the current account");
+    }
+
+    if (character.accountPlayerId !== session.playerId) {
+      throw forbidden("CHARACTER_OWNER_MISMATCH", "character does not belong to current account");
+    }
+
+    if (!LOGINABLE_CHARACTER_STATUSES.has(character.status)) {
+      throw forbidden("CHARACTER_NOT_QUERYABLE", "character status does not allow profile query");
+    }
+
+    const extras = await this.getProfileExtras(character.characterId);
+    const sameName = await this.getSameNameInfo(character);
+    const snakeCharacter = toSnakeCharacter(character);
+
+    return {
+      ok: true,
+      profile: {
+        ...snakeCharacter,
+        same_name: sameName,
+        lifecycle: this.buildActiveLifecycle(character),
+        equipped_title: extras.equipped_title,
+        discipline: extras.discipline,
+        profile_sources: extras.sources
+      }
+    };
   }
 
   async select(req: any, body: any) {
@@ -260,6 +427,72 @@ export class CharactersService {
     return name;
   }
 
+  assertCharacterRestoreWindow(character: any) {
+    const deletedAtMs = Date.parse(character.deletedAt);
+    if (!Number.isFinite(deletedAtMs)) {
+      throw forbidden("CHARACTER_NOT_RESTORABLE", "character deletion time is invalid");
+    }
+
+    const restoreWindowSeconds = toInteger(
+      this.config.characterRestoreWindowSeconds,
+      DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS
+    );
+    const nowMs = typeof this.config.nowMs === "function"
+      ? this.config.nowMs()
+      : toFiniteNumber(this.config.nowMs, Date.now());
+    if (nowMs - deletedAtMs > restoreWindowSeconds * 1000) {
+      throw forbidden("CHARACTER_RESTORE_WINDOW_EXPIRED", "character restore window has expired");
+    }
+  }
+
+  buildDeletedLifecycle(character: any) {
+    const restoreWindowSeconds = toInteger(
+      this.config.characterRestoreWindowSeconds,
+      DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS
+    );
+    const deleteCooldownSeconds = toInteger(
+      this.config.characterDeleteCooldownSeconds,
+      DEFAULT_CHARACTER_DELETE_COOLDOWN_SECONDS
+    );
+    const deletedAt = character.deletedAt || null;
+
+    return {
+      state: "deleted",
+      deleted_at: deletedAt,
+      restore_window_seconds: restoreWindowSeconds,
+      restore_expires_at: addSeconds(deletedAt, restoreWindowSeconds),
+      delete_cooldown_seconds: deleteCooldownSeconds,
+      hard_delete_eligible_at: addSeconds(deletedAt, deleteCooldownSeconds)
+    };
+  }
+
+  buildActiveLifecycle(character: any) {
+    return {
+      state: character.deletedAt ? "deleted" : "active",
+      deleted_at: character.deletedAt || null,
+      restore_window_seconds: toInteger(
+        this.config.characterRestoreWindowSeconds,
+        DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS
+      ),
+      restore_expires_at: character.deletedAt
+        ? addSeconds(character.deletedAt, toInteger(
+          this.config.characterRestoreWindowSeconds,
+          DEFAULT_CHARACTER_RESTORE_WINDOW_SECONDS
+        ))
+        : null,
+      delete_cooldown_seconds: toInteger(
+        this.config.characterDeleteCooldownSeconds,
+        DEFAULT_CHARACTER_DELETE_COOLDOWN_SECONDS
+      ),
+      hard_delete_eligible_at: character.deletedAt
+        ? addSeconds(character.deletedAt, toInteger(
+          this.config.characterDeleteCooldownSeconds,
+          DEFAULT_CHARACTER_DELETE_COOLDOWN_SECONDS
+        ))
+        : null
+    };
+  }
+
   normalizeCharacterId(input: unknown) {
     if (typeof input !== "string" || input.trim().length === 0) {
       throw badRequest("INVALID_CHARACTER_ID", "character_id must be a non-empty string");
@@ -375,6 +608,55 @@ export class CharactersService {
       },
       affinity,
       mastery
+    };
+  }
+
+  async getProfileExtras(characterId: string) {
+    if (typeof this.characterStore.getCharacterProfileExtras !== "function") {
+      return buildUnconnectedProfileExtras();
+    }
+
+    const extras = await this.characterStore.getCharacterProfileExtras(characterId);
+    return {
+      equipped_title: extras?.equippedTitle ?? null,
+      discipline: extras?.discipline ?? null,
+      sources: {
+        equipped_title: extras?.sources?.equippedTitle || "not_connected",
+        discipline: extras?.sources?.discipline || "not_connected"
+      }
+    };
+  }
+
+  async getSameNameInfo(character: any) {
+    const characterIdShort = shortCharacterId(character.characterId);
+    const fallback = {
+      scope: "world",
+      world_id: character.worldId,
+      name: character.name,
+      count: 1,
+      has_duplicates: false,
+      discriminator: {
+        type: "character_id_short",
+        value: characterIdShort,
+        source: "characters.character_id"
+      }
+    };
+
+    if (typeof this.characterStore.searchByCharacterName !== "function") {
+      return fallback;
+    }
+
+    const candidates = await this.characterStore.searchByCharacterName(character.name, {
+      worldId: character.worldId,
+      includeDeleted: false,
+      limit: 100
+    });
+    const count = candidates.filter((candidate: any) => candidate.worldId === character.worldId).length;
+
+    return {
+      ...fallback,
+      count: Math.max(1, count),
+      has_duplicates: count > 1
     };
   }
 

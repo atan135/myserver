@@ -13,11 +13,14 @@ import {
   buildCharacterCreateInput,
   buildGeneratedCharacterName,
   createCharacter,
+  deleteCharacter,
   fetchLoginSession,
   fetchTicket,
   formatLoginSummary,
+  getCharacterProfile,
   listCharacters,
   requestCreateCharacter,
+  restoreCharacter,
   selectCharacter
 } from "../auth.js";
 import {
@@ -53,7 +56,39 @@ function summarizeCharacter(character) {
     name: character.name || "",
     worldId: getCharacterWorldId(character),
     status: character.status || "",
-    displayDiscriminator: character.display_discriminator || character.displayDiscriminator || ""
+    displayDiscriminator: character.display_discriminator || character.displayDiscriminator || "",
+    deletedAt: character.deleted_at || character.deletedAt || null
+  };
+}
+
+function summarizeLifecycle(lifecycle) {
+  if (!lifecycle) {
+    return null;
+  }
+
+  return {
+    state: lifecycle.state || "",
+    deletedAt: lifecycle.deleted_at || null,
+    restoreWindowSeconds: lifecycle.restore_window_seconds ?? null,
+    restoreExpiresAt: lifecycle.restore_expires_at || null,
+    deleteCooldownSeconds: lifecycle.delete_cooldown_seconds ?? null,
+    hardDeleteEligibleAt: lifecycle.hard_delete_eligible_at || null
+  };
+}
+
+function summarizeProfile(profile) {
+  if (!profile) {
+    return null;
+  }
+
+  return {
+    character: summarizeCharacter(profile),
+    sameName: profile.same_name || null,
+    attributes: profile.attributes || null,
+    equippedTitle: profile.equipped_title || null,
+    discipline: profile.discipline || null,
+    profileSources: profile.profile_sources || null,
+    lifecycle: summarizeLifecycle(profile.lifecycle)
   };
 }
 
@@ -237,6 +272,65 @@ export async function runCharacterSelect(options) {
     login: formatLoginSummary(login)
   });
   printResult("character.select", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterProfile(options) {
+  const session = await loginSession(options, "character-profile");
+  let characterId = options.characterId;
+  if (!characterId) {
+    const payload = await listCharacters(options, session.accessToken);
+    const selected = payload.characters[0];
+    if (!selected) {
+      throw new Error("account has no characters; create one first with --scenario character-create");
+    }
+    characterId = getCharacterId(selected);
+  }
+
+  const payload = await getCharacterProfile(options, session.accessToken, characterId);
+  const envelope = buildEnvelope("character-profile", true, {
+    accountPlayerId: session.playerId,
+    profile: summarizeProfile(payload.profile)
+  });
+  printResult("character.profile", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterDelete(options) {
+  const session = await loginSession(options, "character-delete");
+  let characterId = options.characterId;
+  if (!characterId) {
+    const payload = await listCharacters(options, session.accessToken);
+    const selected = payload.characters[0];
+    if (!selected) {
+      throw new Error("account has no characters; create one first with --scenario character-create");
+    }
+    characterId = getCharacterId(selected);
+  }
+
+  const payload = await deleteCharacter(options, session.accessToken, characterId);
+  const envelope = buildEnvelope("character-delete", true, {
+    accountPlayerId: session.playerId,
+    character: summarizeCharacter(payload.character),
+    lifecycle: summarizeLifecycle(payload.lifecycle)
+  });
+  printResult("character.delete", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterRestore(options) {
+  const session = await loginSession(options, "character-restore");
+  if (!options.characterId) {
+    throw new Error("character-restore requires --character-id because deleted characters are hidden from ordinary list");
+  }
+
+  const payload = await restoreCharacter(options, session.accessToken, options.characterId);
+  const envelope = buildEnvelope("character-restore", true, {
+    accountPlayerId: session.playerId,
+    character: summarizeCharacter(payload.character),
+    lifecycle: summarizeLifecycle(payload.lifecycle)
+  });
+  printResult("character.restore", envelope, options);
   return envelope;
 }
 

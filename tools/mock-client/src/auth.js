@@ -362,6 +362,51 @@ export async function requestSelectCharacter(options, accessToken, characterId) 
   });
 }
 
+export async function requestDeleteCharacter(options, accessToken, characterId) {
+  return requestAuthJson(options, "/api/v1/characters/delete", {
+    method: "POST",
+    headers: buildAuthHeaders(accessToken, true),
+    body: JSON.stringify({ character_id: characterId })
+  });
+}
+
+export async function deleteCharacter(options, accessToken, characterId) {
+  return assertAuthJsonOk(
+    "character delete",
+    await requestDeleteCharacter(options, accessToken, characterId)
+  );
+}
+
+export async function requestRestoreCharacter(options, accessToken, characterId) {
+  return requestAuthJson(options, "/api/v1/characters/restore", {
+    method: "POST",
+    headers: buildAuthHeaders(accessToken, true),
+    body: JSON.stringify({ character_id: characterId })
+  });
+}
+
+export async function restoreCharacter(options, accessToken, characterId) {
+  return assertAuthJsonOk(
+    "character restore",
+    await requestRestoreCharacter(options, accessToken, characterId)
+  );
+}
+
+export async function requestCharacterProfile(options, accessToken, characterId) {
+  const encodedCharacterId = encodeURIComponent(characterId);
+  return requestAuthJson(options, `/api/v1/characters/${encodedCharacterId}/profile`, {
+    method: "GET",
+    headers: buildAuthHeaders(accessToken)
+  });
+}
+
+export async function getCharacterProfile(options, accessToken, characterId) {
+  return assertAuthJsonOk(
+    "character profile",
+    await requestCharacterProfile(options, accessToken, characterId)
+  );
+}
+
 export async function selectCharacter(options, session, characterId) {
   const payload = assertAuthJsonOk(
     "character select",

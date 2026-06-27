@@ -59,6 +59,28 @@ class FakeCharacterStore {
     return row ? structuredClone(row) : null;
   }
 
+  async getCharacterProfileExtras(characterId) {
+    const row = this.rows.find((candidate) => candidate.characterId === characterId);
+    return {
+      equippedTitle: row?.equippedTitle ?? null,
+      discipline: row?.discipline ?? null,
+      sources: {
+        equippedTitle: "character_titles",
+        discipline: "character_disciplines"
+      }
+    };
+  }
+
+  async searchByCharacterName(name, options = {}) {
+    return this.rows
+      .filter((row) => row.name === name)
+      .filter((row) => options.worldId === undefined || options.worldId === null || row.worldId === options.worldId)
+      .filter((row) => options.accountPlayerId === undefined || row.accountPlayerId === options.accountPlayerId)
+      .filter((row) => options.includeDeleted === true || row.deletedAt === null)
+      .slice(0, options.limit ?? 100)
+      .map((row) => structuredClone(row));
+  }
+
   async createCharacter(input) {
     this.createdInputs.push(structuredClone(input));
     const effectiveCount = this.rows.filter(
@@ -84,6 +106,47 @@ class FakeCharacterStore {
     });
     this.rows.push(character);
     return structuredClone(character);
+  }
+
+  async softDeleteCharacter(characterId) {
+    const row = this.rows.find(
+      (candidate) => candidate.characterId === characterId && candidate.deletedAt === null
+    );
+    if (!row) {
+      return false;
+    }
+    row.status = "deleted";
+    row.deletedAt = "2026-06-25T12:00:00.000Z";
+    return true;
+  }
+
+  async restoreCharacter(characterId, options = {}) {
+    const effectiveCount = this.rows.filter(
+      (row) => row.accountPlayerId === options.accountPlayerId && row.deletedAt === null
+    ).length;
+    const limit = options.maxEffectiveCharactersPerAccount ?? 6;
+    if (effectiveCount >= limit) {
+      const error = new Error("effective character limit exceeded");
+      error.code = "CHARACTER_LIMIT_EXCEEDED";
+      error.current = effectiveCount;
+      error.limit = limit;
+      throw error;
+    }
+
+    const row = this.rows.find(
+      (candidate) =>
+        candidate.characterId === characterId &&
+        candidate.accountPlayerId === options.accountPlayerId &&
+        candidate.deletedAt !== null &&
+        candidate.status === "deleted"
+    );
+    if (!row) {
+      return null;
+    }
+
+    row.status = "active";
+    row.deletedAt = null;
+    return structuredClone(row);
   }
 
   async updateLastLoginAt(characterId) {
@@ -127,7 +190,9 @@ function createCharacter(overrides = {}) {
     },
     createdAt: "2026-06-25T11:00:00.000Z",
     lastLoginAt: overrides.lastLoginAt ?? null,
-    deletedAt: overrides.deletedAt ?? null
+    deletedAt: overrides.deletedAt ?? null,
+    equippedTitle: overrides.equippedTitle ?? null,
+    discipline: overrides.discipline ?? null
   };
 }
 
@@ -158,6 +223,10 @@ function createContext(overrides = {}) {
     characterDefaultDirX: 0,
     characterDefaultDirY: 1,
     characterAppearanceMaxJsonBytes: 4096,
+    characterMaxEffectivePerAccount: 6,
+    characterRestoreWindowSeconds: 2592000,
+    characterDeleteCooldownSeconds: 2592000,
+    nowMs: () => Date.parse("2026-06-25T12:00:00.000Z"),
     ticketSecret: "test-secret",
     ...overrides.config
   };
@@ -423,6 +492,254 @@ test("empty account list returns empty array without auto creation", async () =>
 
   assert.deepEqual(result.characters, []);
   assert.equal(characterStore.rows.length, 0);
+});
+
+test("delete soft-deletes only the current account character and hides it from selection", async () => {
+  const characterStore = new FakeCharacterStore();
+  characterStore.rows.push(
+    createCharacter({ characterId: "chr_0000000000001", accountPlayerId: "player-001", name: "Echo" }),
+    createCharacter({ characterId: "chr_0000000000002", accountPlayerId: "player-001", name: "Echo" }),
+    createCharacter({ characterId: "chr_0000000000003", accountPlayerId: "player-002", name: "Echo" })
+  );
+  const { service, blocklistChecks } = createContext({ characterStore });
+
+  const result = await service.deleteCharacter(createRequest(), { character_id: "chr_0000000000002" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.character.character_id, "chr_0000000000002");
+  assert.equal(result.character.name, "Echo");
+  assert.equal(result.character.status, "deleted");
+  assert.equal(result.character.deleted_at, "2026-06-25T12:00:00.000Z");
+  assert.deepEqual(result.lifecycle, {
+    state: "deleted",
+    deleted_at: "2026-06-25T12:00:00.000Z",
+    restore_window_seconds: 2592000,
+    restore_expires_at: "2026-07-25T12:00:00.000Z",
+    delete_cooldown_seconds: 2592000,
+    hard_delete_eligible_at: "2026-07-25T12:00:00.000Z"
+  });
+  assert.deepEqual(
+    (await service.list(createRequest())).characters.map((character) => character.character_id),
+    ["chr_0000000000001"]
+  );
+  await assertApiError(service.select(createRequest(), { character_id: "chr_0000000000002" }), 403, "CHARACTER_NOT_FOUND");
+  assert.deepEqual(blocklistChecks.map((entry) => entry.source), ["character_delete", "character_select"]);
+});
+
+test("restore returns a soft-deleted character to active state within restore window", async () => {
+  const characterStore = new FakeCharacterStore();
+  characterStore.rows.push(
+    createCharacter({
+      characterId: "chr_0000000000001",
+      accountPlayerId: "player-001",
+      name: "Echo",
+      status: "deleted",
+      deletedAt: "2026-06-25T11:59:00.000Z"
+    }),
+    createCharacter({ characterId: "chr_0000000000002", accountPlayerId: "player-001", name: "Echo" })
+  );
+  const { service } = createContext({ characterStore });
+
+  const result = await service.restoreCharacter(createRequest(), { characterId: "chr_0000000000001" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.character.character_id, "chr_0000000000001");
+  assert.equal(result.character.status, "active");
+  assert.equal(result.character.deleted_at, null);
+  assert.deepEqual(result.lifecycle, {
+    state: "active",
+    deleted_at: null,
+    restore_window_seconds: 2592000,
+    restore_expires_at: null,
+    delete_cooldown_seconds: 2592000,
+    hard_delete_eligible_at: null
+  });
+  assert.deepEqual(
+    (await service.list(createRequest())).characters.map((character) => character.character_id),
+    ["chr_0000000000001", "chr_0000000000002"]
+  );
+});
+
+test("delete and restore reject cross-account and non-restorable character operations", async () => {
+  const characterStore = new FakeCharacterStore();
+  characterStore.rows.push(
+    createCharacter({ characterId: "chr_0000000000001", accountPlayerId: "player-002" }),
+    createCharacter({ characterId: "chr_0000000000002", accountPlayerId: "player-001" }),
+    createCharacter({
+      characterId: "chr_0000000000003",
+      accountPlayerId: "player-001",
+      status: "disabled",
+      deletedAt: "2026-06-25T11:59:00.000Z"
+    }),
+    createCharacter({
+      characterId: "chr_0000000000004",
+      accountPlayerId: "player-001",
+      status: "deleted",
+      deletedAt: "2026-06-25T11:59:00.000Z"
+    }),
+    createCharacter({ characterId: "chr_0000000000005", accountPlayerId: "player-001", status: "disabled" })
+  );
+  const { service } = createContext({ characterStore });
+
+  await assertApiError(service.deleteCharacter(createRequest(), { character_id: "bad-id" }), 400, "INVALID_CHARACTER_ID");
+  await assertApiError(service.deleteCharacter(createRequest(), { character_id: "chr_0000000000001" }), 403, "CHARACTER_OWNER_MISMATCH");
+  await assertApiError(service.restoreCharacter(createRequest(), { character_id: "chr_0000000000001" }), 403, "CHARACTER_OWNER_MISMATCH");
+  await assertApiError(service.restoreCharacter(createRequest(), { character_id: "chr_0000000000002" }), 403, "CHARACTER_NOT_RESTORABLE");
+  await assertApiError(service.restoreCharacter(createRequest(), { character_id: "chr_0000000000003" }), 403, "CHARACTER_NOT_RESTORABLE");
+  await assertApiError(service.deleteCharacter(createRequest(), { character_id: "chr_0000000000005" }), 403, "CHARACTER_NOT_DELETABLE");
+
+  const restored = await service.restoreCharacter(createRequest(), { character_id: "chr_0000000000004" });
+  assert.equal(restored.character.character_id, "chr_0000000000004");
+});
+
+test("restore rejects expired restore window and ordinary character limit overflow", async () => {
+  const expiredStore = new FakeCharacterStore();
+  expiredStore.rows.push(
+    createCharacter({
+      characterId: "chr_0000000000001",
+      accountPlayerId: "player-001",
+      status: "deleted",
+      deletedAt: "2026-06-25T11:00:00.000Z"
+    })
+  );
+  const expiredContext = createContext({
+    characterStore: expiredStore,
+    config: { characterRestoreWindowSeconds: 60 }
+  });
+
+  await assertApiError(
+    expiredContext.service.restoreCharacter(createRequest(), { character_id: "chr_0000000000001" }),
+    403,
+    "CHARACTER_RESTORE_WINDOW_EXPIRED"
+  );
+
+  const limitedStore = new FakeCharacterStore();
+  limitedStore.rows.push(
+    createCharacter({
+      characterId: "chr_0000000000001",
+      accountPlayerId: "player-001",
+      status: "deleted",
+      deletedAt: "2026-06-25T11:59:00.000Z"
+    })
+  );
+  for (let index = 2; index <= 7; index += 1) {
+    limitedStore.rows.push(createCharacter({
+      characterId: `chr_${String(index).padStart(13, "0")}`,
+      accountPlayerId: "player-001",
+      name: "Active"
+    }));
+  }
+  const limitedContext = createContext({ characterStore: limitedStore });
+
+  await assertApiError(
+    limitedContext.service.restoreCharacter(createRequest(), { character_id: "chr_0000000000001" }),
+    403,
+    "CHARACTER_LIMIT_EXCEEDED"
+  );
+});
+
+test("profile returns owned active character base data, attributes, title and discipline", async () => {
+  const characterStore = new FakeCharacterStore();
+  characterStore.rows.push(
+    createCharacter({
+      characterId: "chr_0000000000001",
+      accountPlayerId: "player-001",
+      worldId: 9,
+      name: "Echo",
+      equippedTitle: {
+        title_id: "9001",
+        source_type: "achievement",
+        source_id: "first_login",
+        unlocked_at: "2026-06-25T10:00:00.000Z",
+        expires_at: null,
+        expired: false
+      },
+      discipline: {
+        discipline_id: "forging",
+        points: 12,
+        tier: "novice",
+        active: true,
+        learned_at: "2026-06-25T10:00:00.000Z",
+        updated_at: "2026-06-25T11:00:00.000Z"
+      }
+    }),
+    createCharacter({ characterId: "chr_0000000000002", accountPlayerId: "player-002", worldId: 9, name: "Echo" })
+  );
+  const { service, blocklistChecks } = createContext({ characterStore });
+
+  const result = await service.getProfile(createRequest(), "chr_0000000000001");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.profile.character_id, "chr_0000000000001");
+  assert.equal(result.profile.character_id_short, "00000001");
+  assert.equal(result.profile.display_discriminator, "00000001");
+  assert.deepEqual(result.profile.same_name, {
+    scope: "world",
+    world_id: 9,
+    name: "Echo",
+    count: 2,
+    has_duplicates: true,
+    discriminator: {
+      type: "character_id_short",
+      value: "00000001",
+      source: "characters.character_id"
+    }
+  });
+  assert.deepEqual(result.profile.lifecycle, {
+    state: "active",
+    deleted_at: null,
+    restore_window_seconds: 2592000,
+    restore_expires_at: null,
+    delete_cooldown_seconds: 2592000,
+    hard_delete_eligible_at: null
+  });
+  assert.deepEqual(result.profile.attributes, {
+    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+  });
+  assert.deepEqual(result.profile.equipped_title, {
+    title_id: "9001",
+    source_type: "achievement",
+    source_id: "first_login",
+    unlocked_at: "2026-06-25T10:00:00.000Z",
+    expires_at: null,
+    expired: false
+  });
+  assert.deepEqual(result.profile.discipline, {
+    discipline_id: "forging",
+    points: 12,
+    tier: "novice",
+    active: true,
+    learned_at: "2026-06-25T10:00:00.000Z",
+    updated_at: "2026-06-25T11:00:00.000Z"
+  });
+  assert.deepEqual(result.profile.profile_sources, {
+    equipped_title: "character_titles",
+    discipline: "character_disciplines"
+  });
+  assert.deepEqual(blocklistChecks, [
+    { playerId: "player-001", clientIp: "127.0.0.1", source: "character_profile" }
+  ]);
+});
+
+test("profile rejects cross-account and deleted character queries", async () => {
+  const characterStore = new FakeCharacterStore();
+  characterStore.rows.push(
+    createCharacter({ characterId: "chr_0000000000001", accountPlayerId: "player-002" }),
+    createCharacter({
+      characterId: "chr_0000000000002",
+      accountPlayerId: "player-001",
+      status: "deleted",
+      deletedAt: "2026-06-25T11:59:00.000Z"
+    }),
+    createCharacter({ characterId: "chr_0000000000003", accountPlayerId: "player-001", status: "disabled" })
+  );
+  const { service } = createContext({ characterStore });
+
+  await assertApiError(service.getProfile(createRequest(), "bad-id"), 400, "INVALID_CHARACTER_ID");
+  await assertApiError(service.getProfile(createRequest(), "chr_0000000000001"), 403, "CHARACTER_OWNER_MISMATCH");
+  await assertApiError(service.getProfile(createRequest(), "chr_0000000000002"), 403, "CHARACTER_NOT_FOUND");
+  await assertApiError(service.getProfile(createRequest(), "chr_0000000000003"), 403, "CHARACTER_NOT_QUERYABLE");
 });
 
 test("select own active character updates last login and issues character-bound ticket", async () => {

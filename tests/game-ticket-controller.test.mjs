@@ -194,6 +194,28 @@ test("game-ticket validate rejects legacy account-only ticket with explicit erro
   await assertApiError(controller.validate({ ticket: legacyTicket }), 401, "MISSING_CHARACTER_ID");
 });
 
+test("game-ticket issue rejects soft-deleted characters before signing", async () => {
+  const { controller } = createContext({
+    characterStore: {
+      enabled: true,
+      async getByCharacterId(characterId) {
+        return {
+          characterId,
+          accountPlayerId: "player-001",
+          worldId: 9,
+          status: "deleted",
+          deletedAt: "2026-06-25T12:00:00.000Z"
+        };
+      }
+    }
+  });
+
+  await assertApiError(
+    controller.issue(createRequest(), { character_id: "chr_0000000000001" }),
+    403,
+    "CHARACTER_NOT_FOUND"
+  );
+});
 test("game-ticket issue rejects missing characterId before signing", async () => {
   const { controller } = createContext();
 

@@ -89,31 +89,40 @@ node tools/mock-client/src/index.js --scenario character-list --http-base-url ht
 # 0.2 创建角色 (CHARACTER_CREATE)
 node tools/mock-client/src/index.js --scenario character-create --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --character-appearance-json '{"body":"default","palette":"blue"}'
 
-# 0.3 选择角色并展示 character-bound ticket 摘要 (CHARACTER_SELECT)
+# 0.3 查询角色资料 (CHARACTER_PROFILE)
+node tools/mock-client/src/index.js --scenario character-profile --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --json-output
+
+# 0.4 软删除角色 (CHARACTER_DELETE)
+node tools/mock-client/src/index.js --scenario character-delete --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --json-output
+
+# 0.5 恢复软删除角色 (CHARACTER_RESTORE)
+node tools/mock-client/src/index.js --scenario character-restore --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --json-output
+
+# 0.6 选择角色并展示 character-bound ticket 摘要 (CHARACTER_SELECT)
 node tools/mock-client/src/index.js --scenario character-select --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --json-output
 
-# 0.4 一条命令完成登录、创建角色、选择角色并连接 game-proxy 完成 AuthReq (CHARACTER_LOGIN_AUTH)
+# 0.7 一条命令完成登录、创建角色、选择角色并连接 game-proxy 完成 AuthReq (CHARACTER_LOGIN_AUTH)
 node tools/mock-client/src/index.js --scenario character-login-auth --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --auto-create-character --character-name Echo
 
-# 0.5 选择角色后进入 game-server 房间基础流程 (CHARACTER_ROOM_JOIN)
+# 0.8 选择角色后进入 game-server 房间基础流程 (CHARACTER_ROOM_JOIN)
 node tools/mock-client/src/index.js --scenario character-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --room-id room-character-debug
 
-# 0.6 查询并调试修改角色四属性 (CHARACTER_ELEMENTS_DEBUG)
+# 0.9 查询并调试修改角色四属性 (CHARACTER_ELEMENTS_DEBUG)
 # 需要玩家 ticket + GAME_ADMIN_TOKEN / --element-debug-token，仅用于测试或 GM 调试。
 node tools/mock-client/src/index.js --scenario character-elements-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --element-affinity-earth-delta -100 --element-affinity-fire-delta 100 --element-mastery-fire-delta 10 --element-debug-token "%GAME_ADMIN_TOKEN%" --json-output
 
-# 0.7 查询、debug 授予并装备角色称号 (CHARACTER_TITLES_DEBUG)
+# 0.10 查询、debug 授予并装备角色称号 (CHARACTER_TITLES_DEBUG)
 # 需要玩家 ticket + GAME_ADMIN_TOKEN / --title-debug-token，仅用于测试或 GM 调试。
 node tools/mock-client/src/index.js --scenario character-titles-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --title-id 9001 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
 
-# 0.8 设置职业阶位并触发称号解锁检查 (CHARACTER_DISCIPLINES_DEBUG)
+# 0.11 设置职业阶位并触发称号解锁检查 (CHARACTER_DISCIPLINES_DEBUG)
 # --discipline-points 默认 1；输出包含 before/action/after/unlockedTitles/equippedTitle/discipline/request。
 node tools/mock-client/src/index.js --scenario character-disciplines-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --discipline-id forging --discipline-tier novice --discipline-points 1 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
 
-# 0.9 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
+# 0.12 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
 node tools/mock-client/src/index.js --scenario character-duplicate-name --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --json-output
 
-# 0.10 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
+# 0.13 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
 node tools/mock-client/src/index.js --scenario character-limit --http-base-url http://127.0.0.1:3000 --login-name fresh_limit_account --password Passw0rd! --character-name-prefix Limit --json-output
 
 # 提示：无角色账号直接执行 happy/get-room-data 等进游戏场景会提示先创建或选择角色，不会直接进入游戏。
@@ -492,6 +501,9 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # inventory-full          | 完整背包流程
 # character-list          | 查询账号角色列表
 # character-create        | 创建角色
+# character-profile       | 查询账号角色基础资料
+# character-delete        | 软删除账号角色
+# character-restore       | 恢复软删除账号角色
 # character-select        | 选择角色并展示 characterId/ticket payload
 # character-login-auth    | 选角后连接 game-proxy 完成 AuthReq
 # character-room-join     | 选角后进入房间基础流程

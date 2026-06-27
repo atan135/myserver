@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Put, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
@@ -12,6 +12,8 @@ import { getTitleDefinitions } from "./title-table.js";
 const PLAYER_STATUSES = ["active", "disabled", "banned", "pending_review"];
 const DEFAULT_TITLE_LOG_LIMIT = 20;
 const MAX_TITLE_LOG_LIMIT = 100;
+const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
+const CHARACTER_NAME_PATTERN = /^[\p{Script=Han}A-Za-z0-9_-]+$/u;
 
 function pageLimit(value: any) {
   return Math.min(Number(value) || 50, 100);
@@ -34,6 +36,74 @@ function requiredCharacterId(value: any) {
     throw badRequest("INVALID_CHARACTER_ID", "characterId must be 64 characters or fewer");
   }
   return characterId;
+}
+
+function requiredGlobalCharacterId(value: any) {
+  const characterId = requiredCharacterId(value);
+  if (!CHARACTER_ID_PATTERN.test(characterId)) {
+    throw badRequest("INVALID_CHARACTER_ID", "characterId has invalid format");
+  }
+  return characterId;
+}
+
+function requiredReason(value: any) {
+  if (typeof value !== "string") {
+    throw badRequest("MISSING_REASON", "reason is required");
+  }
+
+  const reason = value.trim();
+  if (reason.length === 0) {
+    throw badRequest("MISSING_REASON", "reason is required");
+  }
+  if (reason.length > 255) {
+    throw badRequest("INVALID_REASON", "reason must be 255 characters or fewer");
+  }
+  return reason;
+}
+
+function optionalSafeObject(value: any, fallback: Record<string, unknown> = {}) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("INVALID_CHARACTER_PAYLOAD", "character object fields must be JSON objects");
+  }
+  return value;
+}
+
+function optionalInteger(value: any, fallback: number, fieldName: string) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isSafeInteger(parsed)) {
+    throw badRequest("INVALID_CHARACTER_PAYLOAD", `${fieldName} must be an integer`);
+  }
+  return parsed;
+}
+
+function normalizeCharacterName(value: any) {
+  if (typeof value !== "string") {
+    throw badRequest("INVALID_CHARACTER_NAME", "name is required");
+  }
+
+  const name = value.trim();
+  if (name.length === 0) {
+    throw badRequest("INVALID_CHARACTER_NAME", "name is required");
+  }
+  if (Array.from(name).length > 64) {
+    throw badRequest("INVALID_CHARACTER_NAME", "name must be 64 characters or fewer");
+  }
+  if (/\s/u.test(name) || !CHARACTER_NAME_PATTERN.test(name)) {
+    throw badRequest("INVALID_CHARACTER_NAME", "name may only contain Chinese characters, letters, numbers, underscore, and hyphen");
+  }
+  return name;
+}
+
+function errorCodeOf(error: any) {
+  return error?.getResponse?.().error || error?.code || error?.message || "UNKNOWN_ERROR";
 }
 
 function titleLogLimit(value: any) {
@@ -167,6 +237,132 @@ export class PlayersController {
     return { ok: true, player };
   }
 
+  @Post(":playerId/characters")
+  @Permissions("players.status.update")
+  async createCharacterForPlayer(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
+    let reason: string | null = null;
+    let targetCharacterId: string | null = null;
+
+    try {
+      reason = this.getRequiredReasonForAudit(body);
+      const player = await this.adminStore.findPlayerById(playerId);
+      if (!player) {
+        throw notFound("PLAYER_NOT_FOUND", "Player not found");
+      }
+
+      const input = this.normalizeAdminCharacterCreateInput(playerId, body);
+      const character = await this.adminStore.createCharacterForAdmin(input);
+      targetCharacterId = character.character_id || character.characterId;
+
+      await this.appendCharacterLifecycleAudit(req, {
+        action: "admin_character_create",
+        targetValue: targetCharacterId,
+        details: {
+          result: "success",
+          reason,
+          targetAccountPlayerId: playerId,
+          bypassCharacterLimit: true,
+          characterId: targetCharacterId,
+          characterName: character.name,
+          worldId: character.world_id ?? character.worldId,
+          permission: "players.status.update"
+        }
+      });
+
+      return {
+        ok: true,
+        character,
+        audit: {
+          action: "admin_character_create",
+          targetType: "character",
+          targetValue: targetCharacterId
+        }
+      };
+    } catch (error: any) {
+      await this.appendCharacterLifecycleAudit(req, {
+        action: "admin_character_create_failed",
+        targetValue: targetCharacterId,
+        details: {
+          result: "failed",
+          reason,
+          targetAccountPlayerId: playerId,
+          bypassCharacterLimit: true,
+          error: errorCodeOf(error),
+          permission: "players.status.update"
+        }
+      });
+      throw error;
+    }
+  }
+
+  @Post("characters/:characterId/restore")
+  @Permissions("players.status.update")
+  async restoreCharacter(@Param("characterId") characterIdParam: string, @Body() body: any, @Req() req: any) {
+    let reason: string | null = null;
+    let characterId: string | null = null;
+
+    try {
+      reason = this.getRequiredReasonForAudit(body);
+      characterId = requiredGlobalCharacterId(characterIdParam);
+      const existing = await this.adminStore.findCharacterById(characterId, { includeDeleted: true });
+      if (!existing) {
+        throw notFound("CHARACTER_NOT_FOUND", "Character not found");
+      }
+
+      if (!existing.deleted_at && !existing.deletedAt) {
+        throw badRequest("CHARACTER_NOT_DELETED", "character is not deleted");
+      }
+      if (existing.status !== "deleted") {
+        throw badRequest("CHARACTER_NOT_RESTORABLE", "character status is not restorable");
+      }
+
+      const fromStatus = existing.status;
+      const restored = await this.adminStore.restoreCharacterForAdmin(characterId);
+      if (!restored) {
+        throw badRequest("CHARACTER_NOT_RESTORABLE", "character is not restorable");
+      }
+
+      await this.appendCharacterLifecycleAudit(req, {
+        action: "admin_character_restore",
+        targetValue: characterId,
+        details: {
+          result: "success",
+          reason,
+          targetAccountPlayerId: restored.account_player_id ?? restored.accountPlayerId,
+          bypassCharacterLimit: true,
+          characterId,
+          fromStatus,
+          toStatus: restored.status,
+          permission: "players.status.update"
+        }
+      });
+
+      return {
+        ok: true,
+        character: restored,
+        audit: {
+          action: "admin_character_restore",
+          targetType: "character",
+          targetValue: characterId
+        }
+      };
+    } catch (error: any) {
+      await this.appendCharacterLifecycleAudit(req, {
+        action: "admin_character_restore_failed",
+        targetValue: characterId,
+        details: {
+          result: "failed",
+          reason,
+          bypassCharacterLimit: true,
+          characterId,
+          error: errorCodeOf(error),
+          permission: "players.status.update"
+        }
+      });
+      throw error;
+    }
+  }
+
   @Put(":playerId/status")
   @Permissions("players.status.update")
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
@@ -241,6 +437,61 @@ export class PlayersController {
         titleLogCount,
         error
       },
+      ip: getClientIp(req, this.config)
+    });
+  }
+
+  private getRequiredReasonForAudit(body: any) {
+    return requiredReason(body?.reason);
+  }
+
+  private normalizeAdminCharacterCreateInput(playerId: string, body: any) {
+    return {
+      accountPlayerId: playerId,
+      name: normalizeCharacterName(body?.name),
+      worldId: optionalInteger(body?.worldId ?? body?.world_id, 0, "worldId"),
+      appearance: optionalSafeObject(body?.appearance ?? body?.appearance_json, {}),
+      position: optionalSafeObject(body?.position, {
+        scene_id: 100,
+        x: 0,
+        y: 0,
+        dir_x: 0,
+        dir_y: 1
+      }),
+      affinity: optionalSafeObject(body?.affinity, {
+        earth: 2500,
+        fire: 2500,
+        water: 2500,
+        wind: 2500
+      }),
+      mastery: optionalSafeObject(body?.mastery, {
+        earth: 0,
+        fire: 0,
+        water: 0,
+        wind: 0
+      })
+    };
+  }
+
+  private async appendCharacterLifecycleAudit(
+    req: any,
+    {
+      action,
+      targetValue,
+      details
+    }: {
+      action: string;
+      targetValue: string | null;
+      details: Record<string, unknown>;
+    }
+  ) {
+    await this.adminStore.appendAuditLog({
+      adminId: req.admin.sub,
+      adminUsername: req.admin.username,
+      action,
+      targetType: "character",
+      targetValue,
+      details,
       ip: getClientIp(req, this.config)
     });
   }

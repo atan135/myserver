@@ -82,6 +82,9 @@ import {
   runCharacterList,
   runCharacterCreate,
   runCharacterSelect,
+  runCharacterProfile,
+  runCharacterDelete,
+  runCharacterRestore,
   runCharacterLoginAuth,
   runCharacterRoomJoin,
   runCharacterElementsDebug,
@@ -370,6 +373,42 @@ async function main() {
 
   if (options.scenario === SCENARIO.CHARACTER_SELECT) {
     const result = await runCharacterSelect(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_PROFILE) {
+    const result = await runCharacterProfile(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DELETE) {
+    const result = await runCharacterDelete(options);
+    if (options.jsonOutput && !result.ok) {
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_RESTORE) {
+    const result = await runCharacterRestore(options);
     if (options.jsonOutput && !result.ok) {
       process.exitCode = 1;
       return;

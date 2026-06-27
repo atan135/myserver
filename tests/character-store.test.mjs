@@ -10,6 +10,8 @@ import { encodeGlobalId } from "../packages/global-id/node/index.js";
 class MemoryCharacterPool {
   constructor() {
     this.rows = [];
+    this.titleRows = [];
+    this.disciplineRows = [];
     this.queries = [];
     this.now = 0;
     this.releaseCount = 0;
@@ -132,6 +134,39 @@ class MemoryCharacterPool {
       return { rows: row ? [{ ...row }] : [], rowCount: row ? 1 : 0 };
     }
 
+    if (normalizedSql.startsWith("SELECT title_id, source_type, source_id")) {
+      const [characterId] = params;
+      const row = this.titleRows
+        .filter((candidate) => candidate.character_id === characterId)
+        .filter((candidate) => candidate.is_equipped === true)
+        .filter((candidate) => candidate.expires_at === null || candidate.expires_at > this.currentDate())
+        .sort((left, right) => right.updated_at - left.updated_at || left.title_id.localeCompare(right.title_id))
+        .at(0);
+      return {
+        rows: row
+          ? [{
+              title_id: row.title_id,
+              source_type: row.source_type,
+              source_id: row.source_id,
+              unlocked_at: row.unlocked_at,
+              expires_at: row.expires_at,
+              expired: row.expires_at !== null && row.expires_at <= this.currentDate()
+            }]
+          : [],
+        rowCount: row ? 1 : 0
+      };
+    }
+
+    if (normalizedSql.startsWith("SELECT discipline_id, points, tier, active")) {
+      const [characterId] = params;
+      const row = this.disciplineRows
+        .filter((candidate) => candidate.character_id === characterId)
+        .filter((candidate) => candidate.active === true)
+        .sort((left, right) => right.updated_at - left.updated_at || left.discipline_id.localeCompare(right.discipline_id))
+        .at(0);
+      return { rows: row ? [{ ...row }] : [], rowCount: row ? 1 : 0 };
+    }
+
     if (normalizedSql.startsWith("SELECT character_id FROM characters WHERE world_id = $1 AND name = $2")) {
       const [worldId, name] = params;
       const row = this.rows.find(
@@ -143,7 +178,7 @@ class MemoryCharacterPool {
       return { rows: row ? [{ character_id: row.character_id }] : [], rowCount: row ? 1 : 0 };
     }
 
-    if (normalizedSql.startsWith("UPDATE characters SET deleted_at = current_timestamp")) {
+    if (normalizedSql.startsWith("UPDATE characters SET status = 'deleted', deleted_at = current_timestamp")) {
       const [characterId] = params;
       const row = this.rows.find(
         (candidate) => candidate.character_id === characterId && candidate.deleted_at === null
@@ -151,8 +186,26 @@ class MemoryCharacterPool {
       if (!row) {
         return { rows: [], rowCount: 0 };
       }
+      row.status = "deleted";
       row.deleted_at = this.nextDate();
       return { rows: [], rowCount: 1 };
+    }
+
+    if (normalizedSql.startsWith("UPDATE characters SET status = 'active', deleted_at = NULL")) {
+      const [characterId, accountPlayerId] = params;
+      const row = this.rows.find(
+        (candidate) =>
+          candidate.character_id === characterId &&
+          candidate.account_player_id === accountPlayerId &&
+          candidate.deleted_at !== null &&
+          candidate.status === "deleted"
+      );
+      if (!row) {
+        return { rows: [], rowCount: 0 };
+      }
+      row.status = "active";
+      row.deleted_at = null;
+      return { rows: [{ ...row }], rowCount: 1 };
     }
 
     if (normalizedSql.startsWith("UPDATE characters SET last_login_at = current_timestamp")) {
@@ -188,6 +241,10 @@ class MemoryCharacterPool {
 
   nextDate() {
     this.now += 1;
+    return new Date(Date.UTC(2026, 0, 1, 0, 0, this.now));
+  }
+
+  currentDate() {
     return new Date(Date.UTC(2026, 0, 1, 0, 0, this.now));
   }
 }
@@ -321,6 +378,7 @@ test("CharacterStore soft delete hides ordinary list and get while admin query c
   const adminFetched = await store.getByCharacterId(first.characterId, { includeDeleted: true });
   const adminList = await store.listByAccountPlayerId("player-001", { includeDeleted: true });
   assert.equal(adminFetched.characterId, first.characterId);
+  assert.equal(adminFetched.status, "deleted");
   assert.ok(adminFetched.deletedAt);
   assert.deepEqual(adminList.map((character) => character.characterId), [
     first.characterId,
@@ -328,6 +386,124 @@ test("CharacterStore soft delete hides ordinary list and get while admin query c
   ]);
 });
 
+test("CharacterStore restores a soft-deleted character and counts it as effective", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool);
+
+  const first = await store.createCharacter(createInput("player-001", { name: "Echo" }));
+  const second = await store.createCharacter(createInput("player-001", { name: "Echo" }));
+  await store.softDeleteCharacter(first.characterId);
+
+  assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 1);
+
+  const restored = await store.restoreCharacter(first.characterId, {
+    accountPlayerId: "player-001"
+  });
+
+  assert.equal(restored.characterId, first.characterId);
+  assert.equal(restored.status, "active");
+  assert.equal(restored.deletedAt, null);
+  assert.deepEqual(
+    (await store.listByAccountPlayerId("player-001")).map((character) => character.characterId),
+    [first.characterId, second.characterId]
+  );
+  assert.equal(await store.countEffectiveByAccountPlayerId("player-001"), 2);
+  assert.equal(pool.queries.some((query) => query.sql === "BEGIN"), true);
+  assert.equal(pool.queries.some((query) => query.sql === "COMMIT"), true);
+});
+
+test("CharacterStore reads profile title and active discipline extras", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool);
+  const created = await store.createCharacter(createInput("player-001", { name: "Echo" }));
+
+  pool.titleRows.push(
+    {
+      character_id: created.characterId,
+      title_id: "9001",
+      source_type: "achievement",
+      source_id: "first_login",
+      is_equipped: true,
+      unlocked_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 10)),
+      expires_at: null,
+      updated_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 11))
+    },
+    {
+      character_id: created.characterId,
+      title_id: "9002",
+      source_type: "event",
+      source_id: "expired",
+      is_equipped: true,
+      unlocked_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 12)),
+      expires_at: new Date(Date.UTC(2025, 11, 31, 0, 0, 0)),
+      updated_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 12))
+    }
+  );
+  pool.disciplineRows.push({
+    character_id: created.characterId,
+    discipline_id: "forging",
+    points: 12,
+    tier: "novice",
+    active: true,
+    learned_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 9)),
+    updated_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 12))
+  });
+
+  const extras = await store.getCharacterProfileExtras(created.characterId);
+
+  assert.deepEqual(extras, {
+    equippedTitle: {
+      title_id: "9001",
+      source_type: "achievement",
+      source_id: "first_login",
+      unlocked_at: "2026-01-01T00:00:10.000Z",
+      expires_at: null,
+      expired: false
+    },
+    discipline: {
+      discipline_id: "forging",
+      points: 12,
+      tier: "novice",
+      active: true,
+      learned_at: "2026-01-01T00:00:09.000Z",
+      updated_at: "2026-01-01T00:00:12.000Z"
+    },
+    sources: {
+      equippedTitle: "character_titles",
+      discipline: "character_disciplines"
+    }
+  });
+});
+
+test("CharacterStore restore enforces account ownership, deleted state, and effective limit", async () => {
+  const pool = new MemoryCharacterPool();
+  const store = createStore(pool, { maxEffectiveCharactersPerAccount: 2 });
+
+  const first = await store.createCharacter(createInput("player-001"));
+  const second = await store.createCharacter(createInput("player-001"));
+  await store.softDeleteCharacter(first.characterId);
+
+  assert.equal(
+    await store.restoreCharacter(first.characterId, { accountPlayerId: "player-002" }),
+    null
+  );
+  assert.equal(
+    await store.restoreCharacter(second.characterId, { accountPlayerId: "player-001" }),
+    null
+  );
+
+  const replacement = await store.createCharacter(createInput("player-001"));
+  assert.ok(replacement.characterId);
+  await assert.rejects(
+    () => store.restoreCharacter(first.characterId, { accountPlayerId: "player-001" }),
+    (error) => {
+      assert.equal(error.code, "CHARACTER_LIMIT_EXCEEDED");
+      assert.equal(error.current, 2);
+      assert.equal(error.limit, 2);
+      return true;
+    }
+  );
+});
 test("CharacterStore updates last_login_at and current position for active characters only", async () => {
   const pool = new MemoryCharacterPool();
   const store = createStore(pool);

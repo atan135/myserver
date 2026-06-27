@@ -14,6 +14,9 @@ function storeFixture() {
   return {
     status: null,
     audits: [],
+    createdCharacters: [],
+    restoredCharacters: [],
+    characters: new Map(),
     titleQuery: null,
     async findPlayerById() {
       return { id: "player-1", status: "active", banExpiresAt: null };
@@ -83,6 +86,37 @@ function storeFixture() {
     },
     async updatePlayerStatus(playerId, status) {
       this.status = { playerId, status };
+    },
+    async createCharacterForAdmin(input) {
+      this.createdCharacters.push(input);
+      const character = {
+        characterId: "chr_0000000000009",
+        character_id: "chr_0000000000009",
+        accountPlayerId: input.accountPlayerId,
+        account_player_id: input.accountPlayerId,
+        worldId: input.worldId,
+        world_id: input.worldId,
+        name: input.name,
+        status: "active",
+        deletedAt: null,
+        deleted_at: null
+      };
+      this.characters.set(character.character_id, character);
+      return character;
+    },
+    async findCharacterById(characterId) {
+      return this.characters.get(characterId) ?? null;
+    },
+    async restoreCharacterForAdmin(characterId) {
+      this.restoredCharacters.push(characterId);
+      const character = this.characters.get(characterId);
+      if (!character || character.status !== "deleted" || !character.deleted_at) {
+        return null;
+      }
+      character.status = "active";
+      character.deletedAt = null;
+      character.deleted_at = null;
+      return character;
     },
     async appendAuditLog(entry) {
       this.audits.push(entry);
@@ -156,6 +190,177 @@ test("invalid character title query writes failed audit", async () => {
   assert.equal(store.audits[0].targetType, "character");
   assert.equal(store.audits[0].targetValue, null);
   assert.equal(store.audits[0].details.error, "INVALID_CHARACTER_ID");
+});
+
+test("operator can create character for player bypassing ordinary limit and writes audit", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.createCharacterForPlayer(
+    "player-1",
+    {
+      name: "Echo",
+      reason: "support restore",
+      worldId: 9,
+      appearance: { body: "default" }
+    },
+    request("operator")
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.character.character_id, "chr_0000000000009");
+  assert.deepEqual(store.createdCharacters, [{
+    accountPlayerId: "player-1",
+    name: "Echo",
+    worldId: 9,
+    appearance: { body: "default" },
+    position: { scene_id: 100, x: 0, y: 0, dir_x: 0, dir_y: 1 },
+    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+  }]);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "admin_character_create");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, "chr_0000000000009");
+  assert.equal(store.audits[0].adminId, 1);
+  assert.equal(store.audits[0].adminUsername, "worker");
+  assert.equal(store.audits[0].ip, "127.0.0.1");
+  assert.deepEqual(store.audits[0].details, {
+    result: "success",
+    reason: "support restore",
+    targetAccountPlayerId: "player-1",
+    bypassCharacterLimit: true,
+    characterId: "chr_0000000000009",
+    characterName: "Echo",
+    worldId: 9,
+    permission: "players.status.update"
+  });
+});
+
+test("operator can restore deleted character bypassing ordinary limit and writes audit", async () => {
+  const store = storeFixture();
+  store.characters.set("chr_0000000000008", {
+    characterId: "chr_0000000000008",
+    character_id: "chr_0000000000008",
+    accountPlayerId: "player-1",
+    account_player_id: "player-1",
+    status: "deleted",
+    deletedAt: "2026-06-25T12:00:00.000Z",
+    deleted_at: "2026-06-25T12:00:00.000Z"
+  });
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.restoreCharacter(
+    "chr_0000000000008",
+    { reason: "support restore" },
+    request("operator")
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.character.status, "active");
+  assert.deepEqual(store.restoredCharacters, ["chr_0000000000008"]);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "admin_character_restore");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, "chr_0000000000008");
+  assert.deepEqual(store.audits[0].details, {
+    result: "success",
+    reason: "support restore",
+    targetAccountPlayerId: "player-1",
+    bypassCharacterLimit: true,
+    characterId: "chr_0000000000008",
+    fromStatus: "deleted",
+    toStatus: "active",
+    permission: "players.status.update"
+  });
+});
+
+test("admin character create missing reason writes failed audit", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  await assert.rejects(
+    () => controller.createCharacterForPlayer("player-1", { name: "Echo" }, request("operator")),
+    (error) => {
+      assert.equal(error.getStatus(), 400);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "MISSING_REASON",
+        message: "reason is required"
+      });
+      return true;
+    }
+  );
+
+  assert.equal(store.createdCharacters.length, 0);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "admin_character_create_failed");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, null);
+  assert.equal(store.audits[0].details.error, "MISSING_REASON");
+  assert.equal(store.audits[0].details.bypassCharacterLimit, true);
+});
+
+test("admin character restore invalid state writes failed audit", async () => {
+  const store = storeFixture();
+  store.characters.set("chr_0000000000007", {
+    characterId: "chr_0000000000007",
+    character_id: "chr_0000000000007",
+    accountPlayerId: "player-1",
+    account_player_id: "player-1",
+    status: "active",
+    deletedAt: null,
+    deleted_at: null
+  });
+  const controller = new PlayersController({}, store);
+
+  await assert.rejects(
+    () => controller.restoreCharacter("chr_0000000000007", { reason: "support restore" }, request("operator")),
+    (error) => {
+      assert.equal(error.getStatus(), 400);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "CHARACTER_NOT_DELETED",
+        message: "character is not deleted"
+      });
+      return true;
+    }
+  );
+
+  assert.deepEqual(store.restoredCharacters, []);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "admin_character_restore_failed");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, "chr_0000000000007");
+  assert.equal(store.audits[0].details.error, "CHARACTER_NOT_DELETED");
+  assert.equal(store.audits[0].details.reason, "support restore");
+  assert.equal(store.audits[0].details.bypassCharacterLimit, true);
+});
+
+test("admin character restore missing reason writes failed audit", async () => {
+  const store = storeFixture();
+  const controller = new PlayersController({}, store);
+
+  await assert.rejects(
+    () => controller.restoreCharacter("chr_0000000000007", {}, request("operator")),
+    (error) => {
+      assert.equal(error.getStatus(), 400);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "MISSING_REASON",
+        message: "reason is required"
+      });
+      return true;
+    }
+  );
+
+  assert.deepEqual(store.restoredCharacters, []);
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "admin_character_restore_failed");
+  assert.equal(store.audits[0].targetType, "character");
+  assert.equal(store.audits[0].targetValue, null);
+  assert.equal(store.audits[0].details.error, "MISSING_REASON");
+  assert.equal(store.audits[0].details.bypassCharacterLimit, true);
 });
 
 test("AdminStore maps character title overview by character_id", async () => {
@@ -255,6 +460,172 @@ test("AdminStore maps character title overview by character_id", async () => {
   assert.equal(mainQueries.length, 1);
   assert.match(mainQueries[0].query, /INSERT INTO admin_audit_logs/);
   assert.equal(gameQueries.length, 3);
+});
+
+test("AdminStore admin character create writes characters table without ordinary limit query and allows duplicate names", async () => {
+  const mainQueries = [];
+  const gameQueries = [];
+  const mainPool = {
+    async query(query, params) {
+      mainQueries.push({ query, params });
+      if (query.includes("INSERT INTO admin_audit_logs")) {
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error("UNEXPECTED_MAIN_DB_QUERY");
+    }
+  };
+  const gamePool = {
+    rows: [],
+    async query(query, params) {
+      gameQueries.push({ query, params });
+      if (query.includes("INSERT INTO characters")) {
+        const row = {
+          character_id: params[0],
+          account_player_id: params[1],
+          world_id: params[2],
+          name: params[3],
+          status: params[4],
+          appearance_json: JSON.parse(params[5]),
+          scene_id: params[6],
+          x: params[7],
+          y: params[8],
+          dir_x: params[9],
+          dir_y: params[10],
+          affinity_earth: params[11],
+          affinity_fire: params[12],
+          affinity_water: params[13],
+          affinity_wind: params[14],
+          mastery_earth: params[15],
+          mastery_fire: params[16],
+          mastery_water: params[17],
+          mastery_wind: params[18],
+          created_at: new Date("2026-06-25T12:00:00.000Z"),
+          last_login_at: null,
+          deleted_at: null
+        };
+        this.rows.push(row);
+        return { rows: [row], rowCount: 1 };
+      }
+      throw new Error(`UNEXPECTED_GAME_DB_QUERY: ${query}`);
+    }
+  };
+  const store = new AdminStore(mainPool, null, {
+    characterIdGenerator: (() => {
+      let next = 0;
+      return () => `chr_${String(++next).padStart(13, "0")}`;
+    })()
+  }, gamePool);
+
+  const first = await store.createCharacterForAdmin({
+    accountPlayerId: "player-1",
+    name: "Echo",
+    worldId: 9,
+    appearance: { body: "default" }
+  });
+  const second = await store.createCharacterForAdmin({
+    accountPlayerId: "player-1",
+    name: "Echo",
+    worldId: 9
+  });
+
+  assert.equal(mainQueries.length, 0);
+  assert.equal(gameQueries.length, 2);
+  assert.ok(gameQueries.every((entry) => entry.query.includes("INSERT INTO characters")));
+  assert.equal(gameQueries.some((entry) => entry.query.includes("COUNT(*)")), false);
+  assert.equal(first.character_id, "chr_0000000000001");
+  assert.equal(second.character_id, "chr_0000000000002");
+  assert.equal(first.account_player_id, "player-1");
+  assert.equal(first.name, "Echo");
+  assert.deepEqual(first.attributes.affinity, {
+    earth: 2500,
+    fire: 2500,
+    water: 2500,
+    wind: 2500
+  });
+  assert.equal(gamePool.rows.length, 2);
+});
+
+test("AdminStore admin character restore updates deleted character without ordinary limit query", async () => {
+  const mainPool = {
+    async query() {
+      throw new Error("UNEXPECTED_MAIN_DB_QUERY");
+    }
+  };
+  const gameQueries = [];
+  const gamePool = {
+    async query(query, params) {
+      gameQueries.push({ query, params });
+      if (query.includes("SELECT") && query.includes("FROM characters")) {
+        return {
+          rows: [{
+            character_id: params[0],
+            account_player_id: "player-1",
+            world_id: 9,
+            name: "Echo",
+            status: "deleted",
+            appearance_json: {},
+            scene_id: 100,
+            x: 0,
+            y: 0,
+            dir_x: 0,
+            dir_y: 1,
+            affinity_earth: 2500,
+            affinity_fire: 2500,
+            affinity_water: 2500,
+            affinity_wind: 2500,
+            mastery_earth: 0,
+            mastery_fire: 0,
+            mastery_water: 0,
+            mastery_wind: 0,
+            created_at: new Date("2026-06-25T11:00:00.000Z"),
+            last_login_at: null,
+            deleted_at: new Date("2026-06-25T12:00:00.000Z")
+          }]
+        };
+      }
+      if (query.includes("UPDATE characters") && query.includes("deleted_at = NULL")) {
+        return {
+          rows: [{
+            character_id: params[0],
+            account_player_id: "player-1",
+            world_id: 9,
+            name: "Echo",
+            status: "active",
+            appearance_json: {},
+            scene_id: 100,
+            x: 0,
+            y: 0,
+            dir_x: 0,
+            dir_y: 1,
+            affinity_earth: 2500,
+            affinity_fire: 2500,
+            affinity_water: 2500,
+            affinity_wind: 2500,
+            mastery_earth: 0,
+            mastery_fire: 0,
+            mastery_water: 0,
+            mastery_wind: 0,
+            created_at: new Date("2026-06-25T11:00:00.000Z"),
+            last_login_at: null,
+            deleted_at: null
+          }],
+          rowCount: 1
+        };
+      }
+      throw new Error(`UNEXPECTED_GAME_DB_QUERY: ${query}`);
+    }
+  };
+  const store = new AdminStore(mainPool, null, {}, gamePool);
+
+  const before = await store.findCharacterById("chr_0000000000001", { includeDeleted: true });
+  const restored = await store.restoreCharacterForAdmin("chr_0000000000001");
+
+  assert.equal(before.status, "deleted");
+  assert.equal(restored.status, "active");
+  assert.equal(restored.deleted_at, null);
+  assert.equal(gameQueries.length, 2);
+  assert.equal(gameQueries.some((entry) => entry.query.includes("COUNT(*)")), false);
+  assert.equal(gameQueries[1].query.includes("UPDATE characters"), true);
 });
 
 test("operator can update non-ban player status", async () => {

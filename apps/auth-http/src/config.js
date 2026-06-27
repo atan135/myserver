@@ -228,6 +228,22 @@ function collectCharacterConfigErrors(config) {
     errors.push("CHARACTER_APPEARANCE_MAX_JSON_BYTES must be a positive integer");
   }
 
+  if (!isSafeInteger(config.characterRestoreWindowSeconds) || config.characterRestoreWindowSeconds <= 0) {
+    errors.push("CHARACTER_RESTORE_WINDOW_SECONDS must be a positive integer");
+  }
+
+  if (!isSafeInteger(config.characterDeleteCooldownSeconds) || config.characterDeleteCooldownSeconds <= 0) {
+    errors.push("CHARACTER_DELETE_COOLDOWN_SECONDS must be a positive integer");
+  }
+
+  if (
+    isSafeInteger(config.characterDeleteCooldownSeconds) &&
+    isSafeInteger(config.characterRestoreWindowSeconds) &&
+    config.characterDeleteCooldownSeconds < config.characterRestoreWindowSeconds
+  ) {
+    errors.push("CHARACTER_DELETE_COOLDOWN_SECONDS must be greater than or equal to CHARACTER_RESTORE_WINDOW_SECONDS");
+  }
+
   return errors;
 }
 
@@ -408,6 +424,13 @@ export function getConfig() {
     characterDefaultDirX: Number.parseFloat(process.env.CHARACTER_DEFAULT_DIR_X || "0"),
     characterDefaultDirY: Number.parseFloat(process.env.CHARACTER_DEFAULT_DIR_Y || "1"),
     characterAppearanceMaxJsonBytes: Number.parseInt(process.env.CHARACTER_APPEARANCE_MAX_JSON_BYTES || "4096", 10),
+    characterRestoreWindowSeconds: Number.parseInt(process.env.CHARACTER_RESTORE_WINDOW_SECONDS || "2592000", 10),
+    characterDeleteCooldownSeconds: Number.parseInt(
+      process.env.CHARACTER_DELETE_COOLDOWN_SECONDS ||
+      process.env.CHARACTER_RESTORE_WINDOW_SECONDS ||
+      "2592000",
+      10
+    ),
 
     // Ticket Validation
     ticketValidateEnabled: parseBoolean(process.env.TICKET_VALIDATE_ENABLED, true),
