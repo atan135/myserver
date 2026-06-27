@@ -262,6 +262,8 @@ export const SCENARIO = {
   CHARACTER_DISCIPLINE_SWITCH: "character-discipline-switch",
   CHARACTER_DISCIPLINE_POINTS: "character-discipline-points",
   CHARACTER_PROGRESS_APPLY: "character-progress-apply",
+  CHARACTER_ROLE_SYSTEM_CHECK: "character-role-system-check",
+  ADMIN_CHARACTER_READONLY_CHECK: "admin-character-readonly-check",
   CHARACTER_DUPLICATE_NAME: "character-duplicate-name",
   CHARACTER_LIMIT: "character-limit",
   // Auth scenarios

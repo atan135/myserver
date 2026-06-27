@@ -96,6 +96,8 @@ import {
   runCharacterDisciplineSwitch,
   runCharacterDisciplinePoints,
   runCharacterProgressApply,
+  runCharacterRoleSystemCheck,
+  runAdminCharacterReadonlyCheck,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./scenarios/index.js";
@@ -562,6 +564,28 @@ async function main() {
 
   if (options.scenario === SCENARIO.CHARACTER_PROGRESS_APPLY) {
     const result = await runCharacterProgressApply(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_ROLE_SYSTEM_CHECK) {
+    const result = await runCharacterRoleSystemCheck(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.ADMIN_CHARACTER_READONLY_CHECK) {
+    const result = await runAdminCharacterReadonlyCheck(options);
     if (!result.ok) {
       process.exitCode = 1;
     }

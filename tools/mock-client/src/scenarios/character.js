@@ -260,11 +260,36 @@ async function readCharacterPush(client, options, label, expected = {}) {
   };
 }
 
+async function readOptionalCharacterPush(client, options, label, expected = {}) {
+  try {
+    return await readCharacterPush(client, options, label, expected);
+  } catch (error) {
+    if (String(error?.message || "").includes("Timed out waiting")) {
+      return {
+        messageType: expected.messageType || 0,
+        push: null,
+        skipped: true,
+        reason: error.message
+      };
+    }
+    throw error;
+  }
+}
+
 async function queryTitles(client, options, seq, label) {
   await client.send(MESSAGE_TYPE.GET_CHARACTER_TITLES_REQ, seq, encodeGetCharacterTitlesReq());
   return client.readUntil(
     options.timeoutMs,
     (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_TITLES_RES && packet.seq === seq,
+    label
+  );
+}
+
+async function queryElements(client, options, seq, label) {
+  await client.send(MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_REQ, seq, encodeGetCharacterElementsReq());
+  return client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_RES && packet.seq === seq,
     label
   );
 }
@@ -307,11 +332,174 @@ async function loginSession(options, suffix = "character") {
   return session;
 }
 
+function summarizeElementsResponse(response) {
+  return {
+    ok: Boolean(response?.ok),
+    errorCode: response?.errorCode || "",
+    characterId: response?.characterId || "",
+    elements: response?.elements || null
+  };
+}
+
+function summarizeDisciplineList(response) {
+  return {
+    ok: Boolean(response?.ok),
+    errorCode: response?.errorCode || "",
+    characterId: response?.characterId || "",
+    disciplines: (response?.disciplines || []).map(summarizeDiscipline)
+  };
+}
+
 function createCharacterInputForIndex(options, index) {
   return buildCharacterCreateInput(options, {
     name: options.characterName || buildGeneratedCharacterName(options, String(index + 1).padStart(2, "0")),
     suffix: String(index + 1).padStart(2, "0")
   });
+}
+
+async function createRoleSystemCharacter(options, session) {
+  if (options.characterId) {
+    const profile = await getCharacterProfile(options, session.accessToken, options.characterId);
+    return {
+      characterId: options.characterId,
+      created: null,
+      profileBeforeLifecycle: summarizeProfile(profile.profile),
+      deleteRestore: {
+        skipped: true,
+        reason: "explicit characterId supplied; lifecycle destructive check is only run for a temporary character"
+      },
+      profileAfterLifecycle: summarizeProfile(profile.profile)
+    };
+  }
+
+  const input = buildCharacterCreateInput(options, {
+    name: options.characterName || buildGeneratedCharacterName(options, "rolesys"),
+    suffix: "rolesys"
+  });
+  const created = await createCharacter(options, session.accessToken, input);
+  const characterId = getCharacterId(created);
+  const profileBefore = await getCharacterProfile(options, session.accessToken, characterId);
+
+  if (options.roleSystemSkipDeleteRestore) {
+    return {
+      characterId,
+      created: summarizeCharacter(created),
+      profileBeforeLifecycle: summarizeProfile(profileBefore.profile),
+      deleteRestore: {
+        skipped: true,
+        reason: "--role-system-skip-delete-restore"
+      },
+      profileAfterLifecycle: summarizeProfile(profileBefore.profile)
+    };
+  }
+
+  const deleted = await deleteCharacter(options, session.accessToken, characterId);
+  const restored = await restoreCharacter(options, session.accessToken, characterId);
+  const profileAfter = await getCharacterProfile(options, session.accessToken, characterId);
+
+  return {
+    characterId,
+    created: summarizeCharacter(created),
+    profileBeforeLifecycle: summarizeProfile(profileBefore.profile),
+    deleteRestore: {
+      skipped: false,
+      deleted: {
+        character: summarizeCharacter(deleted.character),
+        lifecycle: summarizeLifecycle(deleted.lifecycle)
+      },
+      restored: {
+        character: summarizeCharacter(restored.character),
+        lifecycle: summarizeLifecycle(restored.lifecycle)
+      }
+    },
+    profileAfterLifecycle: summarizeProfile(profileAfter.profile)
+  };
+}
+
+function normalizeAdminBaseUrl(options) {
+  return String(options.adminBaseUrl || "").replace(/\/+$/, "");
+}
+
+function buildAdminHeaders(options) {
+  if (!options.adminToken) {
+    throw new Error("admin-character-readonly-check requires --admin-token or MYSERVER_ADMIN_TOKEN/ADMIN_API_TOKEN");
+  }
+
+  return {
+    authorization: `Bearer ${options.adminToken}`
+  };
+}
+
+async function readHttpJson(response) {
+  if (typeof response.text === "function") {
+    const text = await response.text();
+    if (!text) {
+      return null;
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { rawText: text };
+    }
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function requestAdminReadOnly(options, pathname) {
+  const response = await fetch(`${normalizeAdminBaseUrl(options)}${pathname}`, {
+    method: "GET",
+    headers: buildAdminHeaders(options),
+    signal: AbortSignal.timeout(options.timeoutMs)
+  });
+  const payload = await readHttpJson(response);
+
+  return {
+    ok: response.ok && payload?.ok !== false,
+    status: response.status,
+    pathname,
+    payload
+  };
+}
+
+function summarizeAdminProfile(payload) {
+  if (!payload) {
+    return null;
+  }
+
+  return {
+    ok: Boolean(payload.ok),
+    characterId: payload.characterId || "",
+    status: payload.character?.status || "",
+    attributes: payload.attributes || null,
+    titleCount: Array.isArray(payload.titles) ? payload.titles.length : 0,
+    equippedTitleId: payload.equippedTitle?.title_id || payload.equippedTitle?.titleId || null,
+    disciplineCount: Array.isArray(payload.disciplines) ? payload.disciplines.length : 0,
+    logCounts: {
+      elements: Array.isArray(payload.logs?.elements) ? payload.logs.elements.length : 0,
+      titles: Array.isArray(payload.logs?.titles) ? payload.logs.titles.length : 0,
+      disciplines: Array.isArray(payload.logs?.disciplines) ? payload.logs.disciplines.length : 0
+    }
+  };
+}
+
+function summarizeAdminTitles(payload) {
+  if (!payload) {
+    return null;
+  }
+
+  return {
+    ok: Boolean(payload.ok),
+    characterId: payload.characterId || "",
+    titleCount: Array.isArray(payload.titles) ? payload.titles.length : 0,
+    equippedTitleId: payload.equippedTitle?.title_id || payload.equippedTitle?.titleId || null,
+    disciplineCount: Array.isArray(payload.disciplines) ? payload.disciplines.length : 0,
+    titleLogCount: Array.isArray(payload.titleLogs) ? payload.titleLogs.length : 0
+  };
 }
 
 export async function runCharacterList(options) {
@@ -1103,5 +1291,292 @@ export async function runCharacterProgressApply(options) {
   });
 
   printResult("character.progressApply", envelope, options);
+  return envelope;
+}
+
+export async function runAdminCharacterReadonlyCheck(options) {
+  const characterId = options.characterId;
+  if (!characterId) {
+    throw new Error("admin-character-readonly-check requires --character-id");
+  }
+
+  const logLimit = Number.isFinite(options.adminLogLimit) && options.adminLogLimit > 0
+    ? options.adminLogLimit
+    : 20;
+  const encodedCharacterId = encodeURIComponent(characterId);
+  const query = `?logLimit=${encodeURIComponent(String(logLimit))}`;
+  const profile = await requestAdminReadOnly(
+    options,
+    `/api/v1/players/characters/${encodedCharacterId}/profile${query}`
+  );
+  const titles = await requestAdminReadOnly(
+    options,
+    `/api/v1/players/characters/${encodedCharacterId}/titles${query}`
+  );
+
+  const ok = Boolean(profile.ok && titles.ok);
+  const envelope = buildEnvelope("admin-character-readonly-check", ok, {
+    adminBaseUrl: normalizeAdminBaseUrl(options),
+    characterId,
+    tokenProvided: Boolean(options.adminToken),
+    requests: [
+      {
+        endpoint: profile.pathname,
+        status: profile.status,
+        ok: profile.ok,
+        error: profile.payload?.error || profile.payload?.errorCode || ""
+      },
+      {
+        endpoint: titles.pathname,
+        status: titles.status,
+        ok: titles.ok,
+        error: titles.payload?.error || titles.payload?.errorCode || ""
+      }
+    ],
+    profile: summarizeAdminProfile(profile.payload),
+    titles: summarizeAdminTitles(titles.payload)
+  });
+
+  printResult("admin.characterReadonlyCheck", envelope, options);
+  if (!ok && !options.jsonOutput) {
+    throw new Error(`admin read-only check failed: ${JSON.stringify(envelope.requests)}`);
+  }
+  return envelope;
+}
+
+export async function runCharacterRoleSystemCheck(options) {
+  const session = await loginSession(options, "character-role-system-check");
+  const lifecycle = await createRoleSystemCharacter(options, session);
+  const roleOptions = {
+    ...options,
+    characterId: lifecycle.characterId,
+    autoCreateCharacter: false,
+    createCharacterIfMissing: false
+  };
+  const login = await selectCharacter(roleOptions, session, lifecycle.characterId);
+
+  const tcp = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(roleOptions, "characterRoleSystemClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, roleOptions, login, 1);
+      const elements = await queryElements(client, roleOptions, 2, "getCharacterElements(roleSystem)");
+      const titlesBefore = await queryTitles(client, roleOptions, 3, "getCharacterTitles(roleSystemBefore)");
+      const disciplinesBefore = await queryDisciplines(client, roleOptions, 4, "getCharacterDisciplines(roleSystemBefore)");
+
+      await client.send(
+        MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_REQ,
+        5,
+        encodeLearnCharacterDisciplineReq(roleOptions.disciplineId)
+      );
+      const learn = await client.readUntil(
+        roleOptions.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES && packet.seq === 5,
+        "learnCharacterDiscipline(roleSystem)"
+      );
+      const learnPush = learn.ok
+        ? await readCharacterPush(client, roleOptions, "characterDisciplineChangePush(roleSystemLearn)", {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: "learn",
+          characterId: login.characterId
+        })
+        : null;
+
+      let activate = null;
+      let activatePush = null;
+      if (learn.ok) {
+        await client.send(
+          MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_REQ,
+          6,
+          encodeSetCharacterDisciplineActiveReq(roleOptions.disciplineId, true)
+        );
+        activate = await client.readUntil(
+          roleOptions.timeoutMs,
+          (packet) => packet.messageType === MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES && packet.seq === 6,
+          "setCharacterDisciplineActive(roleSystem)"
+        );
+        activatePush = activate.ok
+          ? await readCharacterPush(client, roleOptions, "characterDisciplineChangePush(roleSystemActivate)", {
+            messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+            action: "activate",
+            characterId: login.characterId
+          })
+          : null;
+      }
+
+      let progress = null;
+      let progressPush = null;
+      if (activate?.ok) {
+        await client.send(
+          MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_REQ,
+          7,
+          encodeApplyCharacterProgressReq(roleOptions.progressId)
+        );
+        progress = await client.readUntil(
+          roleOptions.timeoutMs,
+          (packet) => packet.messageType === MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES && packet.seq === 7,
+          "applyCharacterProgress(roleSystem)"
+        );
+        progressPush = progress.ok && progress.applied
+          ? await readOptionalCharacterPush(client, roleOptions, "characterProgressRewardPush(roleSystem)", {
+            characterId: login.characterId
+          })
+          : null;
+      }
+
+      const titlesAfter = await queryTitles(client, roleOptions, 8, "getCharacterTitles(roleSystemAfter)");
+      const disciplinesAfter = await queryDisciplines(client, roleOptions, 9, "getCharacterDisciplines(roleSystemAfter)");
+
+      let debug = {
+        skipped: true,
+        reason: "debug token not supplied or --role-system-skip-debug"
+      };
+      if (!roleOptions.roleSystemSkipDebug && roleOptions.titleDebugToken) {
+        await client.send(
+          MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_REQ,
+          10,
+          encodeDebugCharacterTitleReq({
+            action: "grant_title",
+            titleId: roleOptions.titleId,
+            reason: roleOptions.titleChangeReason,
+            debugToken: roleOptions.titleDebugToken
+          })
+        );
+        const grant = await client.readUntil(
+          roleOptions.timeoutMs,
+          (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES && packet.seq === 10,
+          "debugCharacterTitle(roleSystemGrant)"
+        );
+        const grantPush = grant.ok
+          ? await readCharacterPush(client, roleOptions, "characterTitleChangePush(roleSystemGrant)", {
+            messageType: MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+            action: "grant",
+            characterId: login.characterId
+          })
+          : null;
+
+        await client.send(
+          MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_REQ,
+          11,
+          encodeEquipCharacterTitleReq(roleOptions.titleId)
+        );
+        const equip = await client.readUntil(
+          roleOptions.timeoutMs,
+          (packet) => packet.messageType === MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_RES && packet.seq === 11,
+          "equipCharacterTitle(roleSystem)"
+        );
+        const equipPush = equip.ok
+          ? await readCharacterPush(client, roleOptions, "characterTitleChangePush(roleSystemEquip)", {
+            messageType: MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+            action: "equip",
+            characterId: login.characterId
+          })
+          : null;
+
+        debug = {
+          skipped: false,
+          grant: {
+            ok: Boolean(grant.ok),
+            errorCode: grant.errorCode || "",
+            title: summarizeTitle(grant.title)
+          },
+          equip: {
+            ok: Boolean(equip.ok),
+            errorCode: equip.errorCode || "",
+            equippedTitle: summarizeTitle(equip.equippedTitle)
+          },
+          pushes: [grantPush?.push, equipPush?.push].filter(Boolean)
+        };
+      }
+
+      return {
+        elements: summarizeElementsResponse(elements),
+        titlesBefore: summarizeTitlesResponse(titlesBefore),
+        disciplinesBefore: summarizeDisciplineList(disciplinesBefore),
+        learn: {
+          ok: Boolean(learn.ok),
+          errorCode: learn.errorCode || "",
+          discipline: summarizeDiscipline(learn.discipline),
+          definition: summarizeDisciplineDefinition(learn.definition),
+          consumedItems: learn.consumedItems || [],
+          activeSkillPool: learn.activeSkillPool || [],
+          unlockedTitles: summarizeUnlockedTitles(learn.unlockedTitles)
+        },
+        activate: activate
+          ? {
+            ok: Boolean(activate.ok),
+            errorCode: activate.errorCode || "",
+            discipline: summarizeDiscipline(activate.discipline),
+            activeSkillPool: activate.activeSkillPool || [],
+            unlockedTitles: summarizeUnlockedTitles(activate.unlockedTitles)
+          }
+          : null,
+        progress: progress
+          ? {
+            ok: Boolean(progress.ok),
+            errorCode: progress.errorCode || "",
+            applied: Boolean(progress.applied),
+            progressId: progress.progressId || "",
+            sourceType: progress.sourceType || "",
+            sourceId: progress.sourceId || "",
+            rewards: (progress.rewards || []).map(summarizeProgressReward)
+          }
+          : null,
+        titlesAfter: summarizeTitlesResponse(titlesAfter),
+        disciplinesAfter: summarizeDisciplineList(disciplinesAfter),
+        pushes: [learnPush?.push, activatePush?.push, progressPush?.push].filter(Boolean),
+        debug
+      };
+    } finally {
+      client.close();
+    }
+  });
+
+  const adminReadonly = options.adminToken
+    ? await withJsonQuiet({ ...options, jsonOutput: true }, async () =>
+      runAdminCharacterReadonlyCheck({
+        ...options,
+        characterId: lifecycle.characterId,
+        jsonOutput: true
+      })
+    )
+    : {
+      ok: true,
+      skipped: true,
+      reason: "admin token not supplied"
+    };
+
+  const ok = Boolean(
+    lifecycle.characterId &&
+    tcp.elements.ok &&
+    tcp.titlesBefore.ok &&
+    tcp.disciplinesBefore.ok &&
+    tcp.learn.ok &&
+    tcp.activate?.ok &&
+    tcp.progress?.ok &&
+    tcp.titlesAfter.ok &&
+    tcp.disciplinesAfter.ok &&
+    adminReadonly.ok
+  );
+
+  const envelope = buildEnvelope("character-role-system-check", ok, {
+    login: formatLoginSummary(login),
+    lifecycle,
+    tcp,
+    adminReadonly,
+    request: {
+      disciplineId: roleOptions.disciplineId,
+      progressId: roleOptions.progressId,
+      titleId: roleOptions.titleId,
+      debugTokenProvided: Boolean(roleOptions.titleDebugToken),
+      adminTokenProvided: Boolean(roleOptions.adminToken)
+    }
+  });
+
+  printResult("character.roleSystemCheck", envelope, options);
+  if (!ok && !options.jsonOutput) {
+    throw new Error("character role system check failed");
+  }
   return envelope;
 }

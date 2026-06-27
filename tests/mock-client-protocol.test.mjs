@@ -5,6 +5,9 @@ import test from "node:test";
 import { parseArgs } from "../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
 import {
+  parseMockClientFieldUsages
+} from "../tools/check-mock-client-protocol.js";
+import {
   decodeByMessageType,
   encodeAddCharacterDisciplinePointsReq,
   encodeApplyCharacterProgressReq,
@@ -398,6 +401,50 @@ test("mock-client defines and decodes character push messages", () => {
   );
 });
 
+test("mock-client protocol checker maps delegated decoder helpers to messageType cases", () => {
+  const source = `
+function decodeNestedSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    name: readString(fields, 1)
+  };
+}
+
+function decodeSharedRoleChangeRes(fields) {
+  return {
+    ok: readBool(fields, 1),
+    errorCode: readString(fields, 2),
+    summary: fields.get(3) ? decodeNestedSummary(fields.get(3)) : null
+  };
+}
+
+export function decodeByMessageType(messageType, body) {
+  const fields = decodeFieldsWithRepeated(body);
+  switch (messageType) {
+    case MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES:
+    case MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES:
+      return decodeSharedRoleChangeRes(fields);
+    default:
+      return { rawHex: body.toString("hex") };
+  }
+}
+`;
+
+  const usages = parseMockClientFieldUsages(source);
+
+  assert.equal(usages.has("SharedRoleChangeRes"), false);
+  assert.deepEqual([...usages.get("SetCharacterDisciplineActiveRes").entries()], [
+    [1, new Set(["bool"])],
+    [2, new Set(["string"])],
+    [3, new Set(["message"])]
+  ]);
+  assert.deepEqual([...usages.get("SwitchCharacterDisciplineRes").entries()], [
+    [1, new Set(["bool"])],
+    [2, new Set(["string"])],
+    [3, new Set(["message"])]
+  ]);
+});
+
 test("mock-client encodes character title and discipline requests", () => {
   assert.equal(encodeGetCharacterTitlesReq().length, 0);
   assert.equal(encodeGetCharacterDisciplinesReq().length, 0);
@@ -707,6 +754,15 @@ test("mock-client character title scenarios document async response matching and
   assert.match(scenarioSource, /ADD_CHARACTER_DISCIPLINE_POINTS_REQ/);
   assert.match(scenarioSource, /APPLY_CHARACTER_PROGRESS_REQ/);
   assert.match(scenarioSource, /APPLY_CHARACTER_PROGRESS_RES/);
+  assert.match(scenarioSource, /runCharacterRoleSystemCheck/);
+  assert.match(scenarioSource, /createRoleSystemCharacter/);
+  assert.match(scenarioSource, /runAdminCharacterReadonlyCheck/);
+  assert.match(scenarioSource, /requestAdminReadOnly/);
+  assert.match(scenarioSource, /characterDisciplineChangePush\(roleSystemLearn\)/);
+  assert.match(scenarioSource, /characterDisciplineChangePush\(roleSystemActivate\)/);
+  assert.match(scenarioSource, /characterProgressRewardPush\(roleSystem\)/);
+  assert.match(scenarioSource, /\/api\/v1\/players\/characters\/\$\{encodedCharacterId\}\/profile/);
+  assert.match(scenarioSource, /\/api\/v1\/players\/characters\/\$\{encodedCharacterId\}\/titles/);
   assert.match(
     scenarioSource,
     /packet\.messageType === MESSAGE_TYPE\.LEARN_CHARACTER_DISCIPLINE_RES && packet\.seq === 3/
@@ -730,10 +786,16 @@ test("mock-client character title scenarios document async response matching and
   assert.match(help, /character-discipline-switch/);
   assert.match(help, /--progress-id <id>/);
   assert.match(help, /character-progress-apply/);
+  assert.match(help, /--admin-base-url <url>/);
+  assert.match(help, /--admin-token <token>/);
+  assert.match(help, /character-role-system-check/);
+  assert.match(help, /admin-character-readonly-check/);
   assert.match(readme, /--discipline-points/);
   assert.match(readme, /character-discipline-learn/);
   assert.match(readme, /character-discipline-activate/);
   assert.match(readme, /character-progress-apply/);
+  assert.match(readme, /character-role-system-check/);
+  assert.match(readme, /admin-character-readonly-check/);
   assert.match(readme, /messageType \+ seq/);
 });
 

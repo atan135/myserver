@@ -9,6 +9,7 @@ import {
   parseCharacterAppearance
 } from "../tools/mock-client/src/auth.js";
 import {
+  runAdminCharacterReadonlyCheck,
   runCharacterDuplicateName,
   runCharacterElementsDebug,
   runCharacterLoginAuth,
@@ -22,6 +23,7 @@ import { encodePacket } from "../tools/mock-client/src/packet.js";
 import {
   decodeFieldsWithRepeated,
   encodeBoolField,
+  encodeInt64Field,
   encodeInt32Field,
   encodeMessageField,
   encodeUInt32Field,
@@ -85,6 +87,19 @@ function encodeCharacterElements(elements) {
   return Buffer.concat([
     encodeMessageField(1, encodeElementValues(elements.affinity)),
     encodeMessageField(2, encodeElementValues(elements.mastery))
+  ]);
+}
+
+function encodeCharacterPushMeta(meta) {
+  return Buffer.concat([
+    encodeStringField(1, meta.characterId),
+    encodeInt64Field(2, meta.sequence),
+    encodeInt64Field(3, meta.revision),
+    encodeStringField(4, meta.sourceType),
+    encodeStringField(5, meta.sourceId),
+    encodeStringField(6, meta.action),
+    encodeStringField(7, meta.summary),
+    encodeBoolField(8, meta.snapshotCompensation)
   ]);
 }
 
@@ -353,16 +368,36 @@ async function startFakeGameAuthServer({
           const after = clone(currentElements);
           const characterId = authRequests.at(-1)?.ticketPayload.characterId || "chr_0000000000001";
           socket.write(
-            encodePacket(
-              MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES,
-              seq,
-              encodeDebugApplyCharacterElementChangeRes({
-                ok: true,
-                characterId,
-                before,
-                after
-              })
-            )
+            Buffer.concat([
+              encodePacket(
+                MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES,
+                seq,
+                encodeDebugApplyCharacterElementChangeRes({
+                  ok: true,
+                  characterId,
+                  before,
+                  after
+                })
+              ),
+              encodePacket(
+                MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH,
+                0,
+                Buffer.concat([
+                  encodeMessageField(1, encodeCharacterPushMeta({
+                    characterId,
+                    sequence: 1,
+                    revision: 1,
+                    sourceType: "gm",
+                    sourceId: "debug-character-elements",
+                    action: "element_change",
+                    summary: "unit test",
+                    snapshotCompensation: false
+                  })),
+                  encodeMessageField(2, encodeCharacterElements(before)),
+                  encodeMessageField(3, encodeCharacterElements(after))
+                ])
+              )
+            ])
           );
           continue;
         }
@@ -460,6 +495,11 @@ test("mock-client parses character flags", () => {
     "--auto-create-character",
     "--create-character-if-missing",
     "--character-name-prefix", "DebugRole",
+    "--admin-base-url", "http://127.0.0.1:3001",
+    "--admin-token", "admin-token",
+    "--admin-log-limit", "5",
+    "--role-system-skip-debug",
+    "--role-system-skip-delete-restore",
     "--json-output"
   ]);
 
@@ -470,6 +510,11 @@ test("mock-client parses character flags", () => {
   assert.equal(options.autoCreateCharacter, true);
   assert.equal(options.createCharacterIfMissing, true);
   assert.equal(options.characterNamePrefix, "DebugRole");
+  assert.equal(options.adminBaseUrl, "http://127.0.0.1:3001");
+  assert.equal(options.adminToken, "admin-token");
+  assert.equal(options.adminLogLimit, 5);
+  assert.equal(options.roleSystemSkipDebug, true);
+  assert.equal(options.roleSystemSkipDeleteRestore, true);
   assert.equal(options.jsonOutput, true);
 });
 
@@ -801,4 +846,92 @@ test("character-limit counts existing characters before probing the 7th failure"
   assert.equal(result.failure.attempt, 2);
   assert.equal(result.failure.overallCharacterNumber, 7);
   assert.equal(result.failure.error, "CHARACTER_LIMIT_EXCEEDED");
+});
+
+test("admin-character-readonly-check calls only admin-api read-only character endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const parsedUrl = new URL(String(url));
+    calls.push({
+      method: init.method || "GET",
+      pathname: parsedUrl.pathname,
+      search: parsedUrl.search,
+      authorization: init.headers?.authorization || "",
+      hasBody: Object.prototype.hasOwnProperty.call(init, "body")
+    });
+
+    if (parsedUrl.pathname.endsWith("/profile")) {
+      return response(200, {
+        ok: true,
+        characterId: "chr_0000000000001",
+        character: createCharacter(1),
+        attributes: {
+          affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+          mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+        },
+        titles: [{ title_id: "2001" }],
+        equippedTitle: { title_id: "2001" },
+        disciplines: [{ discipline_id: "forging" }],
+        logs: {
+          elements: [{ id: 1 }],
+          titles: [{ id: 2 }],
+          disciplines: [{ id: 3 }]
+        }
+      });
+    }
+
+    if (parsedUrl.pathname.endsWith("/titles")) {
+      return response(200, {
+        ok: true,
+        characterId: "chr_0000000000001",
+        titles: [{ title_id: "2001" }],
+        equippedTitle: { title_id: "2001" },
+        disciplines: [{ discipline_id: "forging" }],
+        titleLogs: [{ id: 2 }]
+      });
+    }
+
+    return response(404, { ok: false, error: "NOT_FOUND" });
+  };
+
+  const options = parseArgs([
+    "--scenario", "admin-character-readonly-check",
+    "--admin-base-url", "http://127.0.0.1:3001/",
+    "--admin-token", "admin-token",
+    "--admin-log-limit", "3",
+    "--character-id", "chr_0000000000001",
+    "--json-output"
+  ]);
+
+  const { logs, result } = await captureLogs(() => runAdminCharacterReadonlyCheck(options));
+  const payload = JSON.parse(logs.at(-1));
+
+  assert.equal(result.ok, true);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.adminBaseUrl, "http://127.0.0.1:3001");
+  assert.equal(payload.tokenProvided, true);
+  assert.equal(payload.profile.titleCount, 1);
+  assert.equal(payload.profile.disciplineCount, 1);
+  assert.deepEqual(payload.profile.logCounts, {
+    elements: 1,
+    titles: 1,
+    disciplines: 1
+  });
+  assert.equal(payload.titles.titleLogCount, 1);
+  assert.deepEqual(calls, [
+    {
+      method: "GET",
+      pathname: "/api/v1/players/characters/chr_0000000000001/profile",
+      search: "?logLimit=3",
+      authorization: "Bearer admin-token",
+      hasBody: false
+    },
+    {
+      method: "GET",
+      pathname: "/api/v1/players/characters/chr_0000000000001/titles",
+      search: "?logLimit=3",
+      authorization: "Bearer admin-token",
+      hasBody: false
+    }
+  ]);
 });

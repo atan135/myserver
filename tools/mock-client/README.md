@@ -226,6 +226,8 @@ Protobuf 风格的编解码工具：
 | `character-discipline-switch` | 登录、选角、切换当前激活职业 / 流派、监听职业 push，并输出切换后的 activeSkillPool |
 | `character-discipline-points` | 登录、选角、给已学习职业 / 流派增加 points、监听职业 push，并观察自动阶位推进 |
 | `character-progress-apply` | 登录、选角、触发正式任务 / 成就 / 活动 / 排行 / 世界事件进度奖励，并监听首个角色状态 push |
+| `character-role-system-check` | 聚合验收角色创建 / profile / 删除 / 恢复、正式职业学习 / 激活、任务称号触发、push 监听和可选后台只读校验 |
+| `admin-character-readonly-check` | 仅调用 `admin-api` 角色 profile / titles 只读端点并输出摘要，不执行 GM 写操作 |
 | `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
 | `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
 
@@ -390,7 +392,29 @@ node tools/mock-client/src/index.js --scenario character-progress-apply \
   --progress-id achievement_first_forge \
   --json-output
 
+# 角色体系聚合验收：生命周期 + profile + 职业 + 任务称号 + push + 可选后台只读
+node tools/mock-client/src/index.js --scenario character-role-system-check \
+  --http-base-url http://127.0.0.1:3000 \
+  --admin-base-url http://127.0.0.1:3001 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-name RoleStage11 \
+  --discipline-id forging \
+  --progress-id achievement_first_forge \
+  --admin-token "$MYSERVER_ADMIN_TOKEN" \
+  --json-output
+
+# 后台只读校验；只访问 admin-api GET profile/titles，不内置管理员 token
+node tools/mock-client/src/index.js --scenario admin-character-readonly-check \
+  --admin-base-url http://127.0.0.1:3001 \
+  --admin-token "$MYSERVER_ADMIN_TOKEN" \
+  --character-id chr_0000000000001 \
+  --admin-log-limit 20 \
+  --json-output
+
 `character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。激活、停用、切换和 points 推进分别使用正式玩家协议，不需要 debug token，响应包含 `activeSkillPool` 和本次 `unlockedTitles` 摘要。`character-progress-apply` 只发送 `ApplyCharacterProgressReq(1433)` 的 `progress_id`，由服务端按 CSV 解析任务、成就、活动、排行榜或世界事件来源并返回 `ApplyCharacterProgressRes(1434)`，响应包含 `applied`、`sourceType/sourceId` 和奖励摘要。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
+
+`character-role-system-check` 默认创建临时角色并执行软删除 / 恢复，用于覆盖生命周期和 profile 闭环；如果传入 `--character-id`，场景只使用指定角色并跳过破坏性生命周期步骤。该场景会正式学习并激活 `--discipline-id`，随后触发 `--progress-id`，按 `messageType + seq` 匹配响应，并监听 `CharacterDisciplineChangePush` 和进度奖励产生的角色状态 push。提供 `--admin-token` 时，它会额外调用 `admin-character-readonly-check` 的只读后台接口；token 仅来自参数或 `MYSERVER_ADMIN_TOKEN` / `ADMIN_API_TOKEN` 环境变量，不写死在工具中。
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -477,6 +501,9 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 |------|------|--------|
 | `--scenario` | 测试场景名称 | `happy` |
 | `--http-base-url` | 认证服务地址 | `http://127.0.0.1:3000` |
+| `--admin-base-url` | 管理后台 API 地址，用于 `admin-character-readonly-check` 或聚合场景可选后台校验 | `http://127.0.0.1:3001` |
+| `--admin-token` | admin-api Bearer token，默认读取 `MYSERVER_ADMIN_TOKEN` 或 `ADMIN_API_TOKEN`，不内置真实 token | 空 |
+| `--admin-log-limit` | admin-api 角色 profile / titles 只读查询日志条数 | `20` |
 | `--announce-base-url` | 公告服务地址，内部联调场景必须显式传入 | 空 |
 | `--mail-base-url` | 邮件服务地址，内部联调场景必须显式传入 | 空 |
 | `--host` | 玩家入口地址 | `127.0.0.1` |
@@ -510,6 +537,8 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--discipline-tier` | `character-disciplines-debug` 设置的职业阶位 | `novice` |
 | `--discipline-points` | `character-disciplines-debug` 设置的职业点数，或 `character-discipline-points` 的 points 增量 | `1` |
 | `--progress-id` | `character-progress-apply` 触发的正式进度配置 ID | `achievement_first_forge` |
+| `--role-system-skip-debug` | `character-role-system-check` 跳过 debug 授称号 / 装备称号步骤 | `false` |
+| `--role-system-skip-delete-restore` | `character-role-system-check` 创建临时角色时跳过软删除 / 恢复生命周期步骤 | `false` |
 | `--title-change-reason` | 称号/职业 debug 写入日志的原因 | `mock-client character title debug` |
 | `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |

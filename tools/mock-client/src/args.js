@@ -35,6 +35,9 @@ const DEFAULT_OPTIONS = {
   chatHost: "",
   chatPort: 0,
   httpBaseUrl: "http://127.0.0.1:3000",
+  adminBaseUrl: "http://127.0.0.1:3001",
+  adminToken: process.env.MYSERVER_ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "",
+  adminLogLimit: 20,
   announceBaseUrl: "",
   mailBaseUrl: "",
   roomId: "room-default",
@@ -69,6 +72,8 @@ const DEFAULT_OPTIONS = {
   disciplineTier: "novice",
   disciplinePoints: 1,
   progressId: "achievement_first_forge",
+  roleSystemSkipDebug: false,
+  roleSystemSkipDeleteRestore: false,
   titleChangeReason: "mock-client character title debug",
   titleDebugToken: process.env.MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
   timeoutMs: 5000,
@@ -188,6 +193,16 @@ export function parseArgs(argv) {
       case "--http-base-url":
         ({ value: result.httpBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
+      case "--admin-base-url":
+        ({ value: result.adminBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--admin-token":
+        ({ value: result.adminToken, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--admin-log-limit":
+        result.adminLogLimit = Number.parseInt(collectOptionValue(argv, index).value, 10);
+        index = collectOptionValue(argv, index).nextIndex;
+        break;
       case "--announce-base-url":
         ({ value: result.announceBaseUrl, nextIndex: index } = collectOptionValue(argv, index));
         break;
@@ -298,6 +313,12 @@ export function parseArgs(argv) {
         break;
       case "--progress-id":
         ({ value: result.progressId, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--role-system-skip-debug":
+        result.roleSystemSkipDebug = true;
+        break;
+      case "--role-system-skip-delete-restore":
+        result.roleSystemSkipDeleteRestore = true;
         break;
       case "--title-change-reason":
         ({ value: result.titleChangeReason, nextIndex: index } = collectOptionValue(argv, index));

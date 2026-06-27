@@ -4,6 +4,9 @@
 # ========== 通用参数 ==========
 # --scenario <name>          测试场景 (见下方场景列表)
 # --http-base-url <url>      认证服务地址 (默认 http://127.0.0.1:3000)
+# --admin-base-url <url>     管理后台 API 地址 (默认 http://127.0.0.1:3001)
+# --admin-token <token>      admin-api Bearer token；默认读取 MYSERVER_ADMIN_TOKEN 或 ADMIN_API_TOKEN，不内置真实 token
+# --admin-log-limit <n>      admin-api 角色只读查询日志条数 (默认 20)
 # --announce-base-url <url>  公告服务地址；内部联调场景必须显式传入
 # --mail-base-url <url>      邮件服务地址；内部联调场景必须显式传入
 # --host <ip>                玩家入口地址 (默认 127.0.0.1)
@@ -33,6 +36,8 @@
 # --discipline-tier <tier>   character-disciplines-debug 设置的职业阶位 (默认 novice)
 # --discipline-points <n>    character-disciplines-debug 设置的职业点数，或 character-discipline-points 的 points 增量 (默认 1)
 # --progress-id <id>         character-progress-apply 触发的正式任务/成就/活动/排行/世界事件进度 ID
+# --role-system-skip-debug   character-role-system-check 跳过 debug 授称号/装备称号步骤
+# --role-system-skip-delete-restore 跳过临时角色软删除/恢复步骤
 # --title-change-reason <text> 称号/职业 debug 写入日志的原因
 # --title-debug-token <token> 称号/职业 debug token；默认读取 MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN 或 GAME_ADMIN_TOKEN
 # --json-output              输出机器可读 JSON，便于测试脚本断言
@@ -141,10 +146,18 @@ node tools/mock-client/src/index.js --scenario character-discipline-points --htt
 # 只使用当前 ticket 绑定角色，不接受客户端传 character_id 或 debug token。
 node tools/mock-client/src/index.js --scenario character-progress-apply --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --progress-id achievement_first_forge --json-output
 
-# 0.18 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
+# 0.18 角色体系聚合验收：临时角色创建 -> profile -> 删除/恢复 -> 正式学习/激活职业 -> 任务称号触发 -> push 监听 -> 可选后台只读校验
+# 默认创建临时角色并执行删除/恢复；传 --character-id 时只使用指定角色并跳过破坏性生命周期步骤。
+# 若提供 --admin-token，会额外调用 admin-api 只读 profile/titles 端点；不会内置管理员 token。
+node tools/mock-client/src/index.js --scenario character-role-system-check --http-base-url http://127.0.0.1:3000 --admin-base-url http://127.0.0.1:3001 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-name RoleStage11 --discipline-id forging --progress-id achievement_first_forge --admin-token "%MYSERVER_ADMIN_TOKEN%" --json-output
+
+# 0.19 后台只读角色校验：只调用 admin-api GET profile/titles，不执行 GM 写操作
+node tools/mock-client/src/index.js --scenario admin-character-readonly-check --admin-base-url http://127.0.0.1:3001 --admin-token "%MYSERVER_ADMIN_TOKEN%" --character-id chr_0000000000001 --admin-log-limit 20 --json-output
+
+# 0.20 验证同名角色可创建 (CHARACTER_DUPLICATE_NAME)
 node tools/mock-client/src/index.js --scenario character-duplicate-name --http-base-url http://127.0.0.1:3000 --login-name test001 --password Passw0rd! --character-name Echo --json-output
 
-# 0.19 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
+# 0.21 验证普通账号第 7 个角色创建失败 (CHARACTER_LIMIT)
 node tools/mock-client/src/index.js --scenario character-limit --http-base-url http://127.0.0.1:3000 --login-name fresh_limit_account --password Passw0rd! --character-name-prefix Limit --json-output
 
 # 提示：无角色账号直接执行 happy/get-room-data 等进游戏场景会提示先创建或选择角色，不会直接进入游戏。
@@ -539,6 +552,8 @@ node tools/mock-client/src/index.js --scenario two-client-room --http-base-url h
 # character-discipline-switch | 正式切换当前激活职业 / 流派
 # character-discipline-points | 正式增加 points 并自动推进阶位
 # character-progress-apply | 正式触发任务/成就/活动/排行/世界事件进度奖励
+# character-role-system-check | 聚合角色删除/恢复/profile、职业学习/激活、任务称号触发、push 和可选后台只读校验
+# admin-character-readonly-check | 调用 admin-api 角色 profile/titles 只读端点并输出摘要
 # character-duplicate-name | 验证同名角色创建
 # character-limit         | 验证普通账号第 7 个角色创建失败
 

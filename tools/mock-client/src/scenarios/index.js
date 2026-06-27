@@ -120,6 +120,8 @@ export {
   runCharacterDisciplineSwitch,
   runCharacterDisciplinePoints,
   runCharacterProgressApply,
+  runCharacterRoleSystemCheck,
+  runAdminCharacterReadonlyCheck,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./character.js";

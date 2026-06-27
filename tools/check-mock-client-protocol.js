@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
 import {
@@ -321,8 +321,13 @@ function parseDecodeByMessageTypeCases(body) {
     if (!/\breturn\b/.test(segment)) {
       continue;
     }
+    const delegateMatch = segment.match(/\breturn\s+(decode[A-Za-z0-9_]+)\s*\(\s*fields\s*\)\s*;?/);
     for (const label of pendingLabels) {
-      cases.push({ messageName: pascalCaseFromConstantName(label), body: segment });
+      cases.push({
+        messageName: pascalCaseFromConstantName(label),
+        body: segment,
+        delegatedDecoder: delegateMatch?.[1] ?? null
+      });
     }
     pendingLabels = [];
   }
@@ -330,11 +335,14 @@ function parseDecodeByMessageTypeCases(body) {
   return cases;
 }
 
-function parseMockClientFieldUsages(source) {
+export function parseMockClientFieldUsages(source) {
   const cleanSource = stripComments(source);
   const usages = new Map();
   const functionBodies = parseJsFunctionBodies(cleanSource, /\b(?:export\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{/g);
   const decoderMessages = new Map();
+  const decodeByMessageType = functionBodies.get("decodeByMessageType");
+  const messageCases = decodeByMessageType ? parseDecodeByMessageTypeCases(decodeByMessageType) : [];
+  const delegatedDecoders = new Set(messageCases.map((messageCase) => messageCase.delegatedDecoder).filter(Boolean));
 
   for (const [functionName] of functionBodies.entries()) {
     const decoderMatch = functionName.match(/^decode(.+)$/);
@@ -355,17 +363,23 @@ function parseMockClientFieldUsages(source) {
     }
 
     const messageName = decoderMessages.get(functionName);
-    if (messageName) {
+    if (messageName && !delegatedDecoders.has(functionName)) {
       for (const usage of extractFieldUsagesFromBody(body, "fields", decoderMessages)) {
         addFieldUsage(usages, messageName, usage.fieldNumber, usage.category);
       }
     }
   }
 
-  const decodeByMessageType = functionBodies.get("decodeByMessageType");
-  if (decodeByMessageType) {
-    for (const messageCase of parseDecodeByMessageTypeCases(decodeByMessageType)) {
-      for (const usage of extractFieldUsagesFromBody(messageCase.body, "fields", decoderMessages)) {
+  for (const messageCase of messageCases) {
+    for (const usage of extractFieldUsagesFromBody(messageCase.body, "fields", decoderMessages)) {
+      addFieldUsage(usages, messageCase.messageName, usage.fieldNumber, usage.category);
+    }
+    if (messageCase.delegatedDecoder) {
+      const delegatedBody = functionBodies.get(messageCase.delegatedDecoder);
+      if (!delegatedBody) {
+        continue;
+      }
+      for (const usage of extractFieldUsagesFromBody(delegatedBody, "fields", decoderMessages)) {
         addFieldUsage(usages, messageCase.messageName, usage.fieldNumber, usage.category);
       }
     }
@@ -626,4 +640,6 @@ function main() {
   );
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main();
+}
