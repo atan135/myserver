@@ -1227,6 +1227,10 @@ async fn dispatch_packet(
             character_title_service::handle_get_character_disciplines(services, connection, packet)
                 .await
         }
+        Some(MessageType::LearnCharacterDisciplineReq) => {
+            character_title_service::handle_learn_character_discipline(services, connection, packet)
+                .await
+        }
         Some(MessageType::DebugCharacterTitleReq) => {
             character_title_service::handle_debug_character_title(services, connection, packet)
                 .await

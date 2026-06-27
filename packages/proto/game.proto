@@ -750,6 +750,23 @@ message CharacterDisciplineSummary {
   string updated_at = 6;
 }
 
+message CharacterDisciplineDefinitionSummary {
+  string discipline_id = 1;
+  string name = 2;
+  string description = 3;
+  string initial_tier = 4;
+  int64 initial_points = 5;
+  repeated string skill_pool = 6;
+  repeated string interaction_permissions = 7;
+  string display_fields_json = 8;
+}
+
+message DisciplineItemCost {
+  uint64 item_uid = 1;
+  int32 item_id = 2;
+  uint32 count = 3;
+}
+
 message GetCharacterDisciplinesReq {
 }
 
@@ -758,6 +775,19 @@ message GetCharacterDisciplinesRes {
   string error_code = 2;
   string character_id = 3;
   repeated CharacterDisciplineSummary disciplines = 4;
+}
+
+message LearnCharacterDisciplineReq {
+  string discipline_id = 1;
+}
+
+message LearnCharacterDisciplineRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterDisciplineSummary discipline = 4;
+  CharacterDisciplineDefinitionSummary definition = 5;
+  repeated DisciplineItemCost consumed_items = 6;
 }
 
 message DebugCharacterTitleReq {

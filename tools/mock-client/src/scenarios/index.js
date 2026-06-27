@@ -114,6 +114,7 @@ export {
   runCharacterElementsDebug,
   runCharacterTitlesDebug,
   runCharacterDisciplinesDebug,
+  runCharacterDisciplineLearn,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./character.js";

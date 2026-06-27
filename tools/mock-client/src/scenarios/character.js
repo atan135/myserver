@@ -7,6 +7,7 @@ import {
   encodeGetCharacterDisciplinesReq,
   encodeGetCharacterElementsReq,
   encodeGetCharacterTitlesReq,
+  encodeLearnCharacterDisciplineReq,
   encodeRoomJoinReq
 } from "../messages.js";
 import {
@@ -166,6 +167,21 @@ function summarizeDiscipline(discipline) {
     tier: discipline.tier || "",
     active: Boolean(discipline.active),
     updatedAt: discipline.updatedAt || ""
+  };
+}
+
+function summarizeDisciplineDefinition(definition) {
+  if (!definition) {
+    return null;
+  }
+  return {
+    disciplineId: definition.disciplineId || "",
+    name: definition.name || "",
+    initialTier: definition.initialTier || "",
+    initialPoints: definition.initialPoints ?? 0,
+    skillPool: definition.skillPool || [],
+    interactionPermissions: definition.interactionPermissions || [],
+    displayFieldsJson: definition.displayFieldsJson || ""
   };
 }
 
@@ -662,5 +678,63 @@ export async function runCharacterDisciplinesDebug(options) {
   });
 
   printResult("character.disciplinesDebug", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterDisciplineLearn(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryDisciplines(client, options, 2, "getCharacterDisciplines(before)");
+
+      await client.send(
+        MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_REQ,
+        3,
+        encodeLearnCharacterDisciplineReq(options.disciplineId)
+      );
+      const learn = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES && packet.seq === 3,
+        "learnCharacterDiscipline"
+      );
+
+      const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
+      const discipline = findDisciplineById(after, options.disciplineId) || learn.discipline;
+
+      const ok = Boolean(before.ok && learn.ok && after.ok);
+      return buildEnvelope("character-discipline-learn", ok, {
+        login: formatLoginSummary(login),
+        before: {
+          ok: Boolean(before.ok),
+          errorCode: before.errorCode || "",
+          discipline: summarizeDiscipline(findDisciplineById(before, options.disciplineId))
+        },
+        learn: {
+          ok: Boolean(learn.ok),
+          errorCode: learn.errorCode || "",
+          discipline: summarizeDiscipline(learn.discipline),
+          definition: summarizeDisciplineDefinition(learn.definition),
+          consumedItems: learn.consumedItems || []
+        },
+        after: {
+          ok: Boolean(after.ok),
+          errorCode: after.errorCode || "",
+          discipline: summarizeDiscipline(discipline)
+        },
+        request: {
+          disciplineId: options.disciplineId
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.disciplineLearn", envelope, options);
   return envelope;
 }

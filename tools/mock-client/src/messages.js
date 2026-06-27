@@ -251,6 +251,10 @@ export function encodeGetCharacterDisciplinesReq() {
   return Buffer.alloc(0);
 }
 
+export function encodeLearnCharacterDisciplineReq(disciplineId) {
+  return encodeStringField(1, disciplineId);
+}
+
 export function encodeDebugCharacterTitleReq({
   action = "",
   titleId = "",
@@ -446,6 +450,29 @@ function decodeCharacterDisciplineSummary(buffer) {
     active: readBool(fields, 4),
     learnedAt: readString(fields, 5),
     updatedAt: readString(fields, 6)
+  };
+}
+
+function decodeCharacterDisciplineDefinitionSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    disciplineId: readString(fields, 1),
+    name: readString(fields, 2),
+    description: readString(fields, 3),
+    initialTier: readString(fields, 4),
+    initialPoints: readInt64(fields, 5),
+    skillPool: readStringList(fields, 6),
+    interactionPermissions: readStringList(fields, 7),
+    displayFieldsJson: readString(fields, 8)
+  };
+}
+
+function decodeDisciplineItemCost(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    itemUid: readInt64(fields, 1),
+    itemId: readInt32(fields, 2),
+    count: readUInt32(fields, 3)
   };
 }
 
@@ -674,6 +701,15 @@ export function decodeByMessageType(messageType, body) {
         errorCode: readString(fields, 2),
         characterId: readString(fields, 3),
         disciplines: decodeRepeatedMessage(fields, 4, decodeCharacterDisciplineSummary)
+      };
+    case MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        discipline: fields.get(4) ? decodeCharacterDisciplineSummary(fields.get(4)) : null,
+        definition: fields.get(5) ? decodeCharacterDisciplineDefinitionSummary(fields.get(5)) : null,
+        consumedItems: decodeRepeatedMessage(fields, 6, decodeDisciplineItemCost)
       };
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {

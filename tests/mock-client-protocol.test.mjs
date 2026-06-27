@@ -13,6 +13,7 @@ import {
   encodeGetCharacterDisciplinesReq,
   encodeGetCharacterTitlesReq,
   encodeGetCharacterElementsReq,
+  encodeLearnCharacterDisciplineReq,
   encodeRoomReconnectReq
 } from "../tools/mock-client/src/messages.js";
 import { runAnnounceGet } from "../tools/mock-client/src/scenarios/announce.js";
@@ -94,6 +95,27 @@ function encodeCharacterDisciplineSummary(discipline) {
     encodeBoolField(4, discipline.active),
     encodeStringField(5, discipline.learnedAt),
     encodeStringField(6, discipline.updatedAt)
+  ]);
+}
+
+function encodeCharacterDisciplineDefinitionSummary(definition) {
+  return Buffer.concat([
+    encodeStringField(1, definition.disciplineId),
+    encodeStringField(2, definition.name),
+    encodeStringField(3, definition.description),
+    encodeStringField(4, definition.initialTier),
+    encodeInt64Field(5, definition.initialPoints),
+    ...definition.skillPool.map((skill) => encodeStringField(6, skill)),
+    ...definition.interactionPermissions.map((permission) => encodeStringField(7, permission)),
+    encodeStringField(8, definition.displayFieldsJson)
+  ]);
+}
+
+function encodeDisciplineItemCost(cost) {
+  return Buffer.concat([
+    encodeInt64Field(1, cost.itemUid),
+    encodeInt32Field(2, cost.itemId),
+    encodeUInt32Field(3, cost.count)
   ]);
 }
 
@@ -288,15 +310,20 @@ test("mock-client defines contiguous character title and discipline message type
       MESSAGE_TYPE.GET_CHARACTER_DISCIPLINES_REQ,
       MESSAGE_TYPE.GET_CHARACTER_DISCIPLINES_RES,
       MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_REQ,
-      MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES
+      MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES,
+      MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_REQ,
+      MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES
     ],
-    [1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424]
+    [1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426]
   );
 });
 
 test("mock-client encodes character title and discipline requests", () => {
   assert.equal(encodeGetCharacterTitlesReq().length, 0);
   assert.equal(encodeGetCharacterDisciplinesReq().length, 0);
+
+  const learnFields = decodeFieldsWithRepeated(encodeLearnCharacterDisciplineReq("fire_art"));
+  assert.equal(readString(learnFields, 1), "fire_art");
 
   const equipFields = decodeFieldsWithRepeated(encodeEquipCharacterTitleReq("9001"));
   assert.equal(readString(equipFields, 1), "9001");
@@ -379,6 +406,21 @@ test("mock-client decodes character title, equip, discipline, and debug response
     learnedAt: "2026-06-26T10:00:00Z",
     updatedAt: "2026-06-26T10:01:00Z"
   };
+  const definition = {
+    disciplineId: "forging",
+    name: "锻造",
+    description: "基础锻造流派",
+    initialTier: "novice",
+    initialPoints: 0,
+    skillPool: ["forge_basic", "temper_edge"],
+    interactionPermissions: ["learn", "craft"],
+    displayFieldsJson: "{\"icon\":\"icon_discipline_forging\"}"
+  };
+  const itemCost = {
+    itemUid: 7,
+    itemId: 4101,
+    count: 1
+  };
 
   const titlesResBody = Buffer.concat([
     encodeBoolField(1, true),
@@ -425,6 +467,26 @@ test("mock-client decodes character title, equip, discipline, and debug response
     }
   );
 
+  const learnDisciplineResBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeStringField(2, ""),
+    encodeStringField(3, "chr_0000000000001"),
+    encodeMessageField(4, encodeCharacterDisciplineSummary(discipline)),
+    encodeMessageField(5, encodeCharacterDisciplineDefinitionSummary(definition)),
+    encodeMessageField(6, encodeDisciplineItemCost(itemCost))
+  ]);
+  assert.deepEqual(
+    decodeByMessageType(MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES, learnDisciplineResBody),
+    {
+      ok: true,
+      errorCode: "",
+      characterId: "chr_0000000000001",
+      discipline,
+      definition,
+      consumedItems: [itemCost]
+    }
+  );
+
   const debugResBody = Buffer.concat([
     encodeBoolField(1, true),
     encodeStringField(2, ""),
@@ -463,16 +525,24 @@ test("mock-client character title scenarios document async response matching and
   );
   assert.match(scenarioSource, /action: "grant_title"/);
   assert.match(scenarioSource, /action: "set_discipline"/);
+  assert.match(scenarioSource, /LEARN_CHARACTER_DISCIPLINE_REQ/);
+  assert.match(
+    scenarioSource,
+    /packet\.messageType === MESSAGE_TYPE\.LEARN_CHARACTER_DISCIPLINE_RES && packet\.seq === 3/
+  );
   assert.match(scenarioSource, /triggerUnlockCheck: true/);
   assert.match(scenarioSource, /before: summarizeTitlesResponse/);
   assert.match(scenarioSource, /unlockedTitles: summarizeUnlockedTitles/);
   assert.match(scenarioSource, /equippedTitle: summarizeTitle/);
   assert.match(scenarioSource, /disciplinePoints: options\.disciplinePoints/);
+  assert.match(scenarioSource, /summarizeDisciplineDefinition/);
 
   assert.match(help, /--discipline-points <n>/);
   assert.match(help, /character-titles-debug/);
   assert.match(help, /character-disciplines-debug/);
+  assert.match(help, /character-discipline-learn/);
   assert.match(readme, /--discipline-points/);
+  assert.match(readme, /character-discipline-learn/);
   assert.match(readme, /messageType \+ seq/);
 });
 

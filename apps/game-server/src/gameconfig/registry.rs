@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::core::config_table::{CsvLoadError, CsvTableLoader};
 use crate::csv_code::bufferbase::BufferBase;
+use crate::csv_code::disciplinetable::DisciplineTable;
 use crate::csv_code::itemtable::ItemTable;
 use crate::csv_code::scenemonsterspawn::SceneMonsterSpawn;
 use crate::csv_code::sceneportal::ScenePortal;
@@ -14,6 +15,7 @@ use crate::csv_code::skillbase::SkillBase;
 use crate::csv_code::testtable_100::TestTable100;
 use crate::csv_code::testtable_110::TestTable110;
 use crate::csv_code::titletable::TitleTable;
+use crate::gameconfig::discipline_config::validate_discipline_table;
 use crate::gameconfig::title_config::validate_title_table;
 
 const SCENETABLE_FILE: &str = "SceneTable.csv";
@@ -27,6 +29,7 @@ const ITEMTABLE_FILE: &str = "ItemTable.csv";
 const SKILLBASE_FILE: &str = "SkillBase.csv";
 const BUFFERBASE_FILE: &str = "BufferBase.csv";
 const TITLETABLE_FILE: &str = "TitleTable.csv";
+const DISCIPLINETABLE_FILE: &str = "DisciplineTable.csv";
 
 #[derive(Clone)]
 pub struct ConfigTables {
@@ -41,6 +44,7 @@ pub struct ConfigTables {
     pub skillbase: Arc<SkillBase>,
     pub bufferbase: Arc<BufferBase>,
     pub titletable: Arc<TitleTable>,
+    pub disciplinetable: Arc<DisciplineTable>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +60,7 @@ pub struct ConfigTableRowCounts {
     pub skillbase: usize,
     pub bufferbase: usize,
     pub titletable: usize,
+    pub disciplinetable: usize,
 }
 
 impl ConfigTables {
@@ -73,6 +78,8 @@ impl ConfigTables {
         let bufferbase = BufferBase::load_from_csv(&csv_dir.join(BUFFERBASE_FILE))?;
         let titletable = TitleTable::load_from_csv(&csv_dir.join(TITLETABLE_FILE))?;
         validate_title_table(&titletable)?;
+        let disciplinetable = DisciplineTable::load_from_csv(&csv_dir.join(DISCIPLINETABLE_FILE))?;
+        validate_discipline_table(&disciplinetable)?;
 
         Ok(Self {
             scenetable: Arc::new(scenetable),
@@ -86,6 +93,7 @@ impl ConfigTables {
             skillbase: Arc::new(skillbase),
             bufferbase: Arc::new(bufferbase),
             titletable: Arc::new(titletable),
+            disciplinetable: Arc::new(disciplinetable),
         })
     }
 
@@ -169,6 +177,13 @@ impl ConfigTables {
         } else {
             self.titletable.clone()
         };
+        let disciplinetable = if changed_files.contains(DISCIPLINETABLE_FILE) {
+            let table = DisciplineTable::load_from_csv(&csv_dir.join(DISCIPLINETABLE_FILE))?;
+            validate_discipline_table(&table)?;
+            Arc::new(table)
+        } else {
+            self.disciplinetable.clone()
+        };
 
         Ok(Self {
             scenetable,
@@ -182,6 +197,7 @@ impl ConfigTables {
             skillbase,
             bufferbase,
             titletable,
+            disciplinetable,
         })
     }
 
@@ -198,6 +214,7 @@ impl ConfigTables {
             csv_dir.join(SKILLBASE_FILE),
             csv_dir.join(BUFFERBASE_FILE),
             csv_dir.join(TITLETABLE_FILE),
+            csv_dir.join(DISCIPLINETABLE_FILE),
         ]
     }
 
@@ -214,6 +231,7 @@ impl ConfigTables {
             skillbase: self.skillbase.rows.len(),
             bufferbase: self.bufferbase.rows.len(),
             titletable: self.titletable.rows.len(),
+            disciplinetable: self.disciplinetable.rows.len(),
         }
     }
 }

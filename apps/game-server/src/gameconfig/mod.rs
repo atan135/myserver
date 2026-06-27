@@ -1,3 +1,4 @@
+mod discipline_config;
 pub mod generated;
 mod registry;
 mod title_config;
