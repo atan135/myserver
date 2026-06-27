@@ -65,6 +65,8 @@ pub struct CharacterProgressRewardOutcome {
     pub reward_type: String,
     pub reward_id: String,
     pub status: String,
+    pub element_before: Option<crate::core::character_element::CharacterElements>,
+    pub element_after: Option<crate::core::character_element::CharacterElements>,
     pub title: Option<CharacterTitle>,
     pub discipline: Option<CharacterDiscipline>,
     pub eligibility: Option<String>,
@@ -362,7 +364,8 @@ impl CharacterProgressService {
         match reward {
             ProgressReward::Affinity(delta) => {
                 let reason = format!("character progress {progress_id} affinity reward");
-                self.character_element_service
+                let applied = self
+                    .character_element_service
                     .apply_change(
                         &identity.character_id,
                         CharacterElementChange::new(*delta, ElementDeltas::zero()),
@@ -375,6 +378,8 @@ impl CharacterProgressService {
                     reward_type: "affinity".to_string(),
                     reward_id: "element_affinity".to_string(),
                     status: "applied".to_string(),
+                    element_before: Some(applied.before),
+                    element_after: Some(applied.after),
                     title: None,
                     discipline: None,
                     eligibility: None,
@@ -382,7 +387,8 @@ impl CharacterProgressService {
             }
             ProgressReward::Mastery(delta) => {
                 let reason = format!("character progress {progress_id} mastery reward");
-                self.character_element_service
+                let applied = self
+                    .character_element_service
                     .apply_change(
                         &identity.character_id,
                         CharacterElementChange::new(ElementDeltas::zero(), *delta),
@@ -395,6 +401,8 @@ impl CharacterProgressService {
                     reward_type: "mastery".to_string(),
                     reward_id: "element_mastery".to_string(),
                     status: "applied".to_string(),
+                    element_before: Some(applied.before),
+                    element_after: Some(applied.after),
                     title: None,
                     discipline: None,
                     eligibility: None,
@@ -419,6 +427,8 @@ impl CharacterProgressService {
                     reward_type: "discipline_points".to_string(),
                     reward_id: discipline_id.clone(),
                     status: "applied".to_string(),
+                    element_before: None,
+                    element_after: None,
                     title: None,
                     discipline: Some(result.discipline),
                     eligibility: None,
@@ -458,6 +468,8 @@ impl CharacterProgressService {
                     reward_type: "title".to_string(),
                     reward_id: title_id.clone(),
                     status: status.to_string(),
+                    element_before: None,
+                    element_after: None,
                     title: Some(grant.title),
                     discipline: None,
                     eligibility: None,
@@ -472,6 +484,8 @@ impl CharacterProgressService {
                     reward_type: "discipline_eligibility".to_string(),
                     reward_id: discipline_id.clone(),
                     status: "granted".to_string(),
+                    element_before: None,
+                    element_after: None,
                     title: None,
                     discipline: None,
                     eligibility: Some(discipline_id.clone()),

@@ -6,6 +6,7 @@ use crate::core::character_discipline::{
     CharacterDiscipline, DisciplineDefinitionSummary, DisciplineItemCost,
     DisciplineOperationContext, DisciplineUpsert, LearnDisciplineRequest,
 };
+use crate::core::character_push::{CharacterPushSource, queue_character_push};
 use crate::core::character_title::{
     CharacterTitle, EquipTitleOptions, GrantTitleRequest, TitleOperationContext,
 };
@@ -15,7 +16,8 @@ use crate::core::character_title_unlock::{
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::csv_code::titletable::{TitleTable, TitleTableRow};
 use crate::pb::{
-    AddCharacterDisciplinePointsReq, AddCharacterDisciplinePointsRes, CharacterDisciplineSummary,
+    AddCharacterDisciplinePointsReq, AddCharacterDisciplinePointsRes,
+    CharacterDisciplineChangePush, CharacterDisciplineSummary, CharacterTitleChangePush,
     CharacterTitleDefinitionSummary, CharacterTitleSummary, DebugCharacterTitleReq,
     DebugCharacterTitleRes, DisciplineItemCost as PbDisciplineItemCost, EquipCharacterTitleReq,
     EquipCharacterTitleRes, GetCharacterDisciplinesRes, GetCharacterTitlesRes,
@@ -56,6 +58,8 @@ pub async fn handle_get_character_titles(
         world_id = ?identity.world_id,
         "handle_get_character_titles"
     );
+
+    queue_expired_title_pushes(services, connection, &identity).await?;
 
     let response = match services
         .title_service
@@ -143,6 +147,12 @@ pub async fn handle_equip_character_title(
         "handle_equip_character_title"
     );
 
+    queue_expired_title_pushes(services, connection, &identity).await?;
+    let before_equipped = services
+        .title_service
+        .equipped_for_identity(&identity, player_title_context(&identity, "equip_before"))
+        .await?;
+
     let result = services
         .title_service
         .equip_for_identity(
@@ -161,14 +171,51 @@ pub async fn handle_equip_character_title(
                 .await
                 .titletable
                 .clone();
+            let title_summary = to_title_summary(&table, Some(&title), &title.title_id);
             queue_equip_title_response(
                 connection,
                 packet.header.seq,
                 true,
                 "",
                 &identity.character_id,
-                Some(to_title_summary(&table, Some(&title), &title.title_id)),
+                Some(title_summary.clone()),
             )?;
+            let owned = services
+                .title_service
+                .list_for_identity(&identity, player_title_context(&identity, "push_snapshot"))
+                .await?;
+            if let Some(before) = before_equipped
+                .as_ref()
+                .filter(|before| before.title_id != title.title_id)
+            {
+                let unequipped_summary = to_title_summary(&table, Some(before), &before.title_id);
+                queue_title_push_with_owned_snapshot(
+                    services,
+                    connection,
+                    &identity,
+                    "unequip",
+                    TITLE_PLAYER_SOURCE_TYPE,
+                    TITLE_PLAYER_SOURCE_ID,
+                    "title unequipped",
+                    Some(unequipped_summary),
+                    &owned,
+                    &table,
+                )
+                .await?;
+            }
+            queue_title_push_with_owned_snapshot(
+                services,
+                connection,
+                &identity,
+                "equip",
+                TITLE_PLAYER_SOURCE_TYPE,
+                TITLE_PLAYER_SOURCE_ID,
+                "title equipped",
+                Some(title_summary),
+                &owned,
+                &table,
+            )
+            .await?;
         }
         Err(error) => {
             queue_equip_title_response(
@@ -331,22 +378,45 @@ pub async fn handle_learn_character_discipline(
             )
             .await?;
             let active_skill_pool = active_skill_pool(services, &identity).await?;
+            let discipline_summary = to_discipline_summary(&result.discipline);
             queue_learn_discipline_response(
                 connection,
                 packet.header.seq,
                 true,
                 "",
                 &identity.character_id,
-                Some(to_discipline_summary(&result.discipline)),
+                Some(discipline_summary.clone()),
                 definition.map(to_discipline_definition_summary),
                 result
                     .consumed_items
                     .iter()
                     .map(to_pb_discipline_item_cost)
                     .collect(),
-                active_skill_pool,
-                unlocked,
+                active_skill_pool.clone(),
+                unlocked.clone(),
             )?;
+            queue_discipline_push(
+                services,
+                connection,
+                &identity,
+                "learn",
+                TITLE_PLAYER_SOURCE_TYPE,
+                DISCIPLINE_PLAYER_SOURCE_ID,
+                "discipline learned",
+                Some(discipline_summary),
+                Vec::new(),
+                active_skill_pool,
+                unlocked.clone(),
+            )
+            .await?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                &identity,
+                &unlocked,
+                DISCIPLINE_PLAYER_SOURCE_ID,
+            )
+            .await?;
         }
         Err(error) => {
             queue_learn_discipline_response(
@@ -453,17 +523,50 @@ pub async fn handle_set_character_discipline_active(
         Ok(result) => {
             let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
             let active_skill_pool = active_skill_pool(services, &identity).await?;
+            let discipline_summary = to_discipline_summary(&result.discipline);
+            let discipline_summaries = to_discipline_summaries(&result.disciplines);
             queue_set_discipline_active_response(
                 connection,
                 packet.header.seq,
                 true,
                 "",
                 &identity.character_id,
-                Some(to_discipline_summary(&result.discipline)),
-                to_discipline_summaries(&result.disciplines),
-                active_skill_pool,
-                unlocked,
+                Some(discipline_summary.clone()),
+                discipline_summaries.clone(),
+                active_skill_pool.clone(),
+                unlocked.clone(),
             )?;
+            let action = if request.active {
+                "activate"
+            } else {
+                "deactivate"
+            };
+            queue_discipline_push(
+                services,
+                connection,
+                &identity,
+                action,
+                TITLE_PLAYER_SOURCE_TYPE,
+                DISCIPLINE_ACTIVE_SOURCE_ID,
+                if request.active {
+                    "discipline activated"
+                } else {
+                    "discipline deactivated"
+                },
+                Some(discipline_summary),
+                discipline_summaries,
+                active_skill_pool,
+                unlocked.clone(),
+            )
+            .await?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                &identity,
+                &unlocked,
+                DISCIPLINE_ACTIVE_SOURCE_ID,
+            )
+            .await?;
         }
         Err(error) => queue_set_discipline_active_response(
             connection,
@@ -549,17 +652,41 @@ pub async fn handle_switch_character_discipline(
         Ok(result) => {
             let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
             let active_skill_pool = active_skill_pool(services, &identity).await?;
+            let discipline_summary = to_discipline_summary(&result.discipline);
+            let discipline_summaries = to_discipline_summaries(&result.disciplines);
             queue_switch_discipline_response(
                 connection,
                 packet.header.seq,
                 true,
                 "",
                 &identity.character_id,
-                Some(to_discipline_summary(&result.discipline)),
-                to_discipline_summaries(&result.disciplines),
-                active_skill_pool,
-                unlocked,
+                Some(discipline_summary.clone()),
+                discipline_summaries.clone(),
+                active_skill_pool.clone(),
+                unlocked.clone(),
             )?;
+            queue_discipline_push(
+                services,
+                connection,
+                &identity,
+                "switch",
+                TITLE_PLAYER_SOURCE_TYPE,
+                DISCIPLINE_SWITCH_SOURCE_ID,
+                "discipline switched",
+                Some(discipline_summary),
+                discipline_summaries,
+                active_skill_pool,
+                unlocked.clone(),
+            )
+            .await?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                &identity,
+                &unlocked,
+                DISCIPLINE_SWITCH_SOURCE_ID,
+            )
+            .await?;
         }
         Err(error) => queue_switch_discipline_response(
             connection,
@@ -652,17 +779,41 @@ pub async fn handle_add_character_discipline_points(
         Ok(result) => {
             let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
             let active_skill_pool = active_skill_pool(services, &identity).await?;
+            let discipline_summary = to_discipline_summary(&result.discipline);
+            let discipline_summaries = to_discipline_summaries(&result.disciplines);
             queue_add_discipline_points_response(
                 connection,
                 packet.header.seq,
                 true,
                 "",
                 &identity.character_id,
-                Some(to_discipline_summary(&result.discipline)),
-                to_discipline_summaries(&result.disciplines),
-                active_skill_pool,
-                unlocked,
+                Some(discipline_summary.clone()),
+                discipline_summaries.clone(),
+                active_skill_pool.clone(),
+                unlocked.clone(),
             )?;
+            queue_discipline_push(
+                services,
+                connection,
+                &identity,
+                "points_change",
+                TITLE_PLAYER_SOURCE_TYPE,
+                DISCIPLINE_POINTS_SOURCE_ID,
+                "discipline points changed",
+                Some(discipline_summary),
+                discipline_summaries,
+                active_skill_pool,
+                unlocked.clone(),
+            )
+            .await?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                &identity,
+                &unlocked,
+                DISCIPLINE_POINTS_SOURCE_ID,
+            )
+            .await?;
         }
         Err(error) => queue_add_discipline_points_response(
             connection,
@@ -836,6 +987,21 @@ async fn handle_debug_grant_title(
                 None,
                 unlocked,
             )?;
+            queue_title_push(
+                services,
+                connection,
+                identity,
+                "grant",
+                TITLE_DEBUG_SOURCE_TYPE,
+                TITLE_DEBUG_SOURCE_ID,
+                "title granted",
+                Some(to_title_summary(
+                    &table,
+                    Some(&result.title),
+                    &result.title.title_id,
+                )),
+            )
+            .await?;
         }
         Err(error) => queue_debug_title_response(
             connection,
@@ -876,22 +1042,73 @@ async fn handle_debug_revoke_title(
         return Ok(());
     }
 
+    queue_expired_title_pushes(services, connection, identity).await?;
+    let before_equipped = services
+        .title_service
+        .equipped_for_identity(identity, player_title_context(identity, "revoke_before"))
+        .await?;
+
     match services
         .title_service
         .revoke_for_identity(identity, title_id, debug_title_context(identity, request))
         .await
     {
-        Ok(()) => queue_debug_title_response(
-            connection,
-            seq,
-            true,
-            "",
-            &identity.character_id,
-            "revoke_title",
-            None,
-            None,
-            Vec::new(),
-        )?,
+        Ok(()) => {
+            queue_debug_title_response(
+                connection,
+                seq,
+                true,
+                "",
+                &identity.character_id,
+                "revoke_title",
+                None,
+                None,
+                Vec::new(),
+            )?;
+            let table = services
+                .config_tables
+                .tables_snapshot()
+                .await
+                .titletable
+                .clone();
+            let owned = services
+                .title_service
+                .list_for_identity(identity, player_title_context(identity, "push_snapshot"))
+                .await?;
+            if before_equipped
+                .as_ref()
+                .is_some_and(|before| before.title_id == title_id)
+            {
+                let unequipped_summary =
+                    to_title_summary(&table, before_equipped.as_ref(), title_id);
+                queue_title_push_with_owned_snapshot(
+                    services,
+                    connection,
+                    identity,
+                    "unequip",
+                    TITLE_DEBUG_SOURCE_TYPE,
+                    TITLE_DEBUG_SOURCE_ID,
+                    "title unequipped",
+                    Some(unequipped_summary),
+                    &owned,
+                    &table,
+                )
+                .await?;
+            }
+            queue_title_push_with_owned_snapshot(
+                services,
+                connection,
+                identity,
+                "revoke",
+                TITLE_DEBUG_SOURCE_TYPE,
+                TITLE_DEBUG_SOURCE_ID,
+                "title revoked",
+                None,
+                &owned,
+                &table,
+            )
+            .await?;
+        }
         Err(error) => queue_debug_title_response(
             connection,
             seq,
@@ -939,6 +1156,13 @@ async fn handle_debug_set_discipline(
             } else {
                 Vec::new()
             };
+            let active_skill_pool = active_skill_pool(services, identity).await?;
+            let disciplines = services
+                .discipline_service
+                .list_for_identity(identity)
+                .await?;
+            let discipline_summary = to_discipline_summary(&discipline);
+            let discipline_summaries = to_discipline_summaries(&disciplines);
             queue_debug_title_response(
                 connection,
                 seq,
@@ -947,9 +1171,31 @@ async fn handle_debug_set_discipline(
                 &identity.character_id,
                 "set_discipline",
                 None,
-                Some(to_discipline_summary(&discipline)),
-                unlocked,
+                Some(discipline_summary.clone()),
+                unlocked.clone(),
             )?;
+            queue_discipline_push(
+                services,
+                connection,
+                identity,
+                "upsert",
+                DISCIPLINE_DEBUG_SOURCE_TYPE,
+                DISCIPLINE_DEBUG_SOURCE_ID,
+                "discipline debug updated",
+                Some(discipline_summary),
+                discipline_summaries,
+                active_skill_pool,
+                unlocked.clone(),
+            )
+            .await?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                identity,
+                &unlocked,
+                DISCIPLINE_DEBUG_SOURCE_ID,
+            )
+            .await?;
         }
         Err(error) => queue_debug_title_response(
             connection,
@@ -975,17 +1221,27 @@ async fn handle_debug_check_unlock(
     request: &DebugCharacterTitleReq,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match run_unlock_check(services, identity, request).await {
-        Ok(unlocked) => queue_debug_title_response(
-            connection,
-            seq,
-            true,
-            "",
-            &identity.character_id,
-            "check_unlock",
-            None,
-            None,
-            unlocked,
-        )?,
+        Ok(unlocked) => {
+            queue_debug_title_response(
+                connection,
+                seq,
+                true,
+                "",
+                &identity.character_id,
+                "check_unlock",
+                None,
+                None,
+                unlocked.clone(),
+            )?;
+            queue_unlocked_title_pushes(
+                services,
+                connection,
+                identity,
+                &unlocked,
+                TITLE_DEBUG_SOURCE_ID,
+            )
+            .await?;
+        }
         Err(error) => queue_debug_title_response(
             connection,
             seq,
@@ -1329,6 +1585,197 @@ fn to_discipline_definition_summary(
     }
 }
 
+pub(crate) async fn queue_title_push(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+    action: &str,
+    source_type: &str,
+    source_id: &str,
+    summary: &str,
+    title: Option<CharacterTitleSummary>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let table = services
+        .config_tables
+        .tables_snapshot()
+        .await
+        .titletable
+        .clone();
+    let owned = services
+        .title_service
+        .list_for_identity(identity, player_title_context(identity, "push_snapshot"))
+        .await?;
+    queue_title_push_with_owned_snapshot(
+        services,
+        connection,
+        identity,
+        action,
+        source_type,
+        source_id,
+        summary,
+        title,
+        &owned,
+        &table,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn queue_title_push_with_owned_snapshot(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+    action: &str,
+    source_type: &str,
+    source_id: &str,
+    summary: &str,
+    title: Option<CharacterTitleSummary>,
+    owned: &[CharacterTitle],
+    table: &TitleTable,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = record_title_push_with_owned_snapshot(
+        &services.character_push_service,
+        &identity.character_id,
+        action,
+        source_type,
+        source_id,
+        summary,
+        title,
+        owned,
+        table,
+    )
+    .await;
+    queue_character_push(connection, &identity.character_id, &record)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_title_push_with_owned_snapshot(
+    character_push_service: &crate::core::character_push::CharacterPushService,
+    character_id: &str,
+    action: &str,
+    source_type: &str,
+    source_id: &str,
+    summary: &str,
+    title: Option<CharacterTitleSummary>,
+    owned: &[CharacterTitle],
+    table: &TitleTable,
+) -> crate::core::character_push::CharacterPushRecord {
+    let titles = to_title_summaries(table, owned);
+    let equipped_title = titles.iter().find(|title| title.equipped).cloned();
+    character_push_service
+        .record_title_change(
+            character_id,
+            CharacterPushSource::new(source_type, source_id, action, summary),
+            CharacterTitleChangePush {
+                meta: None,
+                title,
+                titles,
+                equipped_title,
+            },
+        )
+        .await
+}
+
+async fn queue_expired_title_pushes(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expired = services
+        .title_service
+        .process_expired(
+            &identity.character_id,
+            player_title_context(identity, "expire"),
+        )
+        .await?;
+    if expired.is_empty() {
+        return Ok(());
+    }
+
+    let table = services
+        .config_tables
+        .tables_snapshot()
+        .await
+        .titletable
+        .clone();
+    let owned = services
+        .title_service
+        .list_for_identity(identity, player_title_context(identity, "push_snapshot"))
+        .await?;
+    for title in expired {
+        queue_title_push_with_owned_snapshot(
+            services,
+            connection,
+            identity,
+            "expire",
+            "system",
+            "character_title_expiry",
+            "title expired",
+            Some(to_title_summary(&table, Some(&title), &title.title_id)),
+            &owned,
+            &table,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn queue_discipline_push(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+    action: &str,
+    source_type: &str,
+    source_id: &str,
+    summary: &str,
+    discipline: Option<CharacterDisciplineSummary>,
+    disciplines: Vec<CharacterDisciplineSummary>,
+    active_skill_pool: Vec<String>,
+    unlocked_titles: Vec<CharacterTitleSummary>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = services
+        .character_push_service
+        .record_discipline_change(
+            &identity.character_id,
+            CharacterPushSource::new(source_type, source_id, action, summary),
+            CharacterDisciplineChangePush {
+                meta: None,
+                discipline,
+                disciplines,
+                active_skill_pool,
+                unlocked_titles,
+            },
+        )
+        .await;
+    queue_character_push(connection, &identity.character_id, &record)?;
+    Ok(())
+}
+
+async fn queue_unlocked_title_pushes(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+    unlocked_titles: &[CharacterTitleSummary],
+    source_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for title in unlocked_titles {
+        queue_title_push(
+            services,
+            connection,
+            identity,
+            "auto_unlock",
+            "system",
+            source_id,
+            "title auto unlocked",
+            Some(title.clone()),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn to_pb_discipline_item_cost(cost: &DisciplineItemCost) -> PbDisciplineItemCost {
     PbDisciplineItemCost {
         item_uid: cost.item_uid,
@@ -1500,9 +1947,13 @@ mod tests {
 
     use crate::core::character_discipline::DisciplineService;
     use crate::core::character_element::CharacterElementService;
+    use crate::core::character_push::CharacterPushService;
     use crate::core::character_title::TitleService;
     use crate::core::character_title_unlock::TitleUnlockService;
     use crate::gameconfig::ConfigTables;
+    use prost::Message;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn identity() -> AuthenticatedSessionIdentity {
         AuthenticatedSessionIdentity {
@@ -1510,6 +1961,33 @@ mod tests {
             character_id: "chr_0000000000001".to_string(),
             world_id: Some(1),
         }
+    }
+
+    fn title_table() -> Arc<TitleTable> {
+        let rows = vec![
+            TitleTableRow {
+                titleid: 1001,
+                hidden: 0,
+                limited: 0,
+                ..TitleTableRow::default()
+            },
+            TitleTableRow {
+                titleid: 9001,
+                hidden: 1,
+                limited: 0,
+                ..TitleTableRow::default()
+            },
+        ];
+        let by_id = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.titleid, index))
+            .collect();
+        Arc::new(TitleTable {
+            string_pool: HashMap::new(),
+            rows,
+            by_id,
+        })
     }
 
     #[test]
@@ -1565,5 +2043,171 @@ mod tests {
                 .iter()
                 .any(|grant| grant.title_id == "2001" && grant.source_type == "discipline")
         );
+    }
+
+    #[tokio::test]
+    async fn title_push_records_unequip_with_changed_snapshot() {
+        let identity = identity();
+        let table = title_table();
+        let title_service = TitleService::new_in_memory(table.clone());
+        title_service
+            .grant_for_identity(
+                &identity,
+                GrantTitleRequest::new("1001"),
+                title_context("grant"),
+            )
+            .await
+            .unwrap();
+        title_service
+            .grant_for_identity(
+                &identity,
+                GrantTitleRequest::new("9001"),
+                title_context("grant"),
+            )
+            .await
+            .unwrap();
+        let before = title_service
+            .equip_for_identity(
+                &identity,
+                "1001",
+                EquipTitleOptions::visible_only(),
+                title_context("equip"),
+            )
+            .await
+            .unwrap();
+        title_service
+            .equip_for_identity(
+                &identity,
+                "9001",
+                EquipTitleOptions::allow_hidden(),
+                title_context("equip"),
+            )
+            .await
+            .unwrap();
+        let owned = title_service
+            .list_for_identity(&identity, title_context("snapshot"))
+            .await
+            .unwrap();
+        let push_service = CharacterPushService::new();
+
+        let record = record_title_push_with_owned_snapshot(
+            &push_service,
+            &identity.character_id,
+            "unequip",
+            TITLE_PLAYER_SOURCE_TYPE,
+            TITLE_PLAYER_SOURCE_ID,
+            "title unequipped",
+            Some(to_title_summary(&table, Some(&before), &before.title_id)),
+            &owned,
+            &table,
+        )
+        .await;
+
+        let push = CharacterTitleChangePush::decode(record.body.as_slice()).unwrap();
+        assert_eq!(push.meta.as_ref().unwrap().action, "unequip");
+        assert_eq!(
+            push.title
+                .as_ref()
+                .and_then(|title| title.definition.as_ref())
+                .map(|definition| definition.id.as_str()),
+            Some("1001")
+        );
+        assert_eq!(
+            push.equipped_title
+                .as_ref()
+                .and_then(|title| title.definition.as_ref())
+                .map(|definition| definition.id.as_str()),
+            Some("9001")
+        );
+        assert!(push.titles.iter().any(|title| {
+            title
+                .definition
+                .as_ref()
+                .is_some_and(|definition| definition.id == "1001")
+                && title.owned
+                && !title.equipped
+        }));
+    }
+
+    #[tokio::test]
+    async fn title_push_records_expire_with_changed_snapshot() {
+        let identity = identity();
+        let table = title_table();
+        let title_service = TitleService::new_in_memory(table.clone());
+        title_service
+            .grant_for_identity(
+                &identity,
+                GrantTitleRequest::new("1001"),
+                title_context("grant"),
+            )
+            .await
+            .unwrap();
+        title_service
+            .equip_for_identity(
+                &identity,
+                "1001",
+                EquipTitleOptions::visible_only(),
+                title_context("equip"),
+            )
+            .await
+            .unwrap();
+        title_service
+            .mark_expired_for_test(&identity.character_id, "1001")
+            .await;
+
+        let expired = title_service
+            .process_expired(&identity.character_id, title_context("expire"))
+            .await
+            .unwrap();
+        let owned = title_service
+            .list_for_identity(&identity, title_context("snapshot"))
+            .await
+            .unwrap();
+        let push_service = CharacterPushService::new();
+
+        let record = record_title_push_with_owned_snapshot(
+            &push_service,
+            &identity.character_id,
+            "expire",
+            "system",
+            "character_title_expiry",
+            "title expired",
+            Some(to_title_summary(
+                &table,
+                Some(&expired[0]),
+                &expired[0].title_id,
+            )),
+            &owned,
+            &table,
+        )
+        .await;
+
+        let push = CharacterTitleChangePush::decode(record.body.as_slice()).unwrap();
+        assert_eq!(push.meta.as_ref().unwrap().action, "expire");
+        assert!(push.equipped_title.is_none());
+        assert_eq!(
+            push.title
+                .as_ref()
+                .and_then(|title| title.definition.as_ref())
+                .map(|definition| definition.id.as_str()),
+            Some("1001")
+        );
+        assert!(push.title.as_ref().unwrap().expired);
+        assert!(push.titles.iter().any(|title| {
+            title
+                .definition
+                .as_ref()
+                .is_some_and(|definition| definition.id == "1001")
+                && title.owned
+                && title.expired
+                && !title.equipped
+        }));
+    }
+
+    fn title_context(action: &str) -> TitleOperationContext {
+        TitleOperationContext::new("unit-test")
+            .with_source_id(action)
+            .with_operator("account", "plr_0000000000001")
+            .with_reason("test")
     }
 }

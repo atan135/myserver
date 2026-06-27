@@ -270,7 +270,11 @@ message RoomJoinAsObserverRes {
 }
 
 // Reconnect uses the authenticated ticket-bound character; no identity is supplied by the client.
-message RoomReconnectReq {}
+message RoomReconnectReq {
+  // Last applied CharacterPushMeta.sequence for the authenticated character.
+  // The server only uses this as a cursor for the current ticket-bound character.
+  uint64 last_character_push_sequence = 1;
+}
 
 message RoomReconnectRes {
   bool ok = 1;
@@ -670,6 +674,18 @@ message CharacterElements {
   ElementValues mastery = 2;
 }
 
+message CharacterPushMeta {
+  // Ticket-bound gameplay character id. Clients cannot choose this receiver.
+  string character_id = 1;
+  uint64 sequence = 2;
+  uint64 revision = 3;
+  string source_type = 4;
+  string source_id = 5;
+  string action = 6;
+  string summary = 7;
+  bool snapshot_compensation = 8;
+}
+
 message GetCharacterElementsReq {
 }
 
@@ -888,6 +904,27 @@ message DebugCharacterTitleRes {
 message InventoryUpdatePush {
   repeated Item inventory_items = 1;
   repeated Item warehouse_items = 2;
+}
+
+message CharacterElementsChangePush {
+  CharacterPushMeta meta = 1;
+  CharacterElements before = 2;
+  CharacterElements after = 3;
+}
+
+message CharacterTitleChangePush {
+  CharacterPushMeta meta = 1;
+  CharacterTitleSummary title = 2;
+  repeated CharacterTitleSummary titles = 3;
+  CharacterTitleSummary equipped_title = 4;
+}
+
+message CharacterDisciplineChangePush {
+  CharacterPushMeta meta = 1;
+  CharacterDisciplineSummary discipline = 2;
+  repeated CharacterDisciplineSummary disciplines = 3;
+  repeated string active_skill_pool = 4;
+  repeated CharacterTitleSummary unlocked_titles = 5;
 }
 
 message AttrChangePush {

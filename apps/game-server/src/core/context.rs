@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::core::character_discipline::DisciplineService;
 use crate::core::character_element::CharacterElementService;
 use crate::core::character_progress::CharacterProgressService;
+use crate::core::character_push::CharacterPushService;
 use crate::core::character_title::TitleService;
 use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
@@ -134,6 +135,7 @@ pub struct ServiceContext {
     pub title_service: TitleService,
     pub character_progress_service: CharacterProgressService,
     pub title_unlock_service: TitleUnlockService,
+    pub character_push_service: CharacterPushService,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
@@ -210,6 +212,15 @@ impl ConnectionContext {
         message: M,
     ) -> Result<(), std::io::Error> {
         let body = encode_body(&message);
+        self.queue_raw_message(message_type, seq, body)
+    }
+
+    pub fn queue_raw_message(
+        &self,
+        message_type: MessageType,
+        seq: u32,
+        body: Vec<u8>,
+    ) -> Result<(), std::io::Error> {
         try_send_outbound(
             &self.tx,
             &self.close_state,

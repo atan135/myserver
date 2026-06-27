@@ -518,6 +518,7 @@ pub async fn run(
         discipline_service.clone(),
         title_service.clone(),
     );
+    let character_push_service = crate::core::character_push::CharacterPushService::new();
 
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
@@ -535,6 +536,7 @@ pub async fn run(
         title_service,
         character_progress_service,
         title_unlock_service,
+        character_push_service,
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),

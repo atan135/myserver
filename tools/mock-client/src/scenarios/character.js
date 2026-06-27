@@ -208,6 +208,58 @@ function summarizeProgressReward(reward) {
   };
 }
 
+function summarizeCharacterPush(push) {
+  if (!push?.meta) {
+    return null;
+  }
+  return {
+    messageType: push.messageType,
+    characterId: push.meta.characterId || "",
+    sequence: push.meta.sequence ?? 0,
+    revision: push.meta.revision ?? 0,
+    sourceType: push.meta.sourceType || "",
+    sourceId: push.meta.sourceId || "",
+    action: push.meta.action || "",
+    summary: push.meta.summary || "",
+    snapshotCompensation: Boolean(push.meta.snapshotCompensation)
+  };
+}
+
+function isCharacterPush(packet) {
+  return [
+    MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH,
+    MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+    MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH
+  ].includes(packet.messageType);
+}
+
+async function readCharacterPush(client, options, label, expected = {}) {
+  const push = await client.readUntil(
+    options.timeoutMs,
+    (packet, decoded) => {
+      if (!isCharacterPush(packet)) {
+        return false;
+      }
+      if (expected.messageType && packet.messageType !== expected.messageType) {
+        return false;
+      }
+      if (expected.action && decoded.meta?.action !== expected.action) {
+        return false;
+      }
+      if (expected.characterId && decoded.meta?.characterId !== expected.characterId) {
+        return false;
+      }
+      return true;
+    },
+    label
+  );
+  const decodedPush = { ...push, messageType: expected.messageType || push.messageType };
+  return {
+    ...decodedPush,
+    push: summarizeCharacterPush(decodedPush)
+  };
+}
+
 async function queryTitles(client, options, seq, label) {
   await client.send(MESSAGE_TYPE.GET_CHARACTER_TITLES_REQ, seq, encodeGetCharacterTitlesReq());
   return client.readUntil(
@@ -521,6 +573,13 @@ export async function runCharacterElementsDebug(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_APPLY_CHARACTER_ELEMENT_CHANGE_RES && packet.seq === 3,
         "debugApplyCharacterElementChange"
       );
+      const elementPush = change.ok
+        ? await readCharacterPush(client, options, "characterElementsChangePush", {
+          messageType: MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH,
+          action: "element_change",
+          characterId: login.characterId
+        })
+        : null;
 
       await client.send(
         MESSAGE_TYPE.GET_CHARACTER_ELEMENTS_REQ,
@@ -544,6 +603,7 @@ export async function runCharacterElementsDebug(options) {
         },
         before,
         change,
+        push: elementPush?.push || null,
         after
       });
     } finally {
@@ -581,6 +641,13 @@ export async function runCharacterTitlesDebug(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES && packet.seq === 3,
         "debugCharacterTitle(grant)"
       );
+      const grantPush = action.ok
+        ? await readCharacterPush(client, options, "characterTitleChangePush(grant)", {
+          messageType: MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+          action: "grant",
+          characterId: login.characterId
+        })
+        : null;
 
       await client.send(
         MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_REQ,
@@ -592,6 +659,13 @@ export async function runCharacterTitlesDebug(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.EQUIP_CHARACTER_TITLE_RES && packet.seq === 4,
         "equipCharacterTitle"
       );
+      const equipPush = equip.ok
+        ? await readCharacterPush(client, options, "characterTitleChangePush(equip)", {
+          messageType: MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+          action: "equip",
+          characterId: login.characterId
+        })
+        : null;
 
       const after = await queryTitles(client, options, 5, "getCharacterTitles(after)");
       const disciplines = await queryDisciplines(client, options, 6, "getCharacterDisciplines");
@@ -610,6 +684,7 @@ export async function runCharacterTitlesDebug(options) {
             errorCode: equip.errorCode || ""
           }
         },
+        pushes: [grantPush?.push, equipPush?.push].filter(Boolean),
         after: summarizeTitlesResponse(after, options.titleId),
         unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles),
         equippedTitle: summarizeTitle(after.equippedTitle || equip.equippedTitle),
@@ -659,6 +734,13 @@ export async function runCharacterDisciplinesDebug(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES && packet.seq === 3,
         "debugCharacterTitle(setDiscipline)"
       );
+      const disciplinePush = action.ok
+        ? await readCharacterPush(client, options, "characterDisciplineChangePush(debug)", {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: "upsert",
+          characterId: login.characterId
+        })
+        : null;
 
       const after = await queryTitles(client, options, 4, "getCharacterTitles(after)");
       const disciplines = await queryDisciplines(client, options, 5, "getCharacterDisciplines(after)");
@@ -675,6 +757,7 @@ export async function runCharacterDisciplinesDebug(options) {
           action: action.action || "set_discipline",
           discipline: summarizeDiscipline(action.discipline)
         },
+        push: disciplinePush?.push || null,
         after: summarizeTitlesResponse(after),
         unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles),
         equippedTitle: summarizeTitle(equippedTitle),
@@ -717,6 +800,13 @@ export async function runCharacterDisciplineLearn(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES && packet.seq === 3,
         "learnCharacterDiscipline"
       );
+      const learnPush = learn.ok
+        ? await readCharacterPush(client, options, "characterDisciplineChangePush(learn)", {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: "learn",
+          characterId: login.characterId
+        })
+        : null;
 
       const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
       const discipline = findDisciplineById(after, options.disciplineId) || learn.discipline;
@@ -738,6 +828,7 @@ export async function runCharacterDisciplineLearn(options) {
           activeSkillPool: learn.activeSkillPool || [],
           unlockedTitles: summarizeUnlockedTitles(learn.unlockedTitles)
         },
+        push: learnPush?.push || null,
         after: {
           ok: Boolean(after.ok),
           errorCode: after.errorCode || "",
@@ -777,6 +868,13 @@ async function runCharacterDisciplineActiveChange(options, active) {
         (packet) => packet.messageType === MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES && packet.seq === 3,
         "setCharacterDisciplineActive"
       );
+      const actionPush = action.ok
+        ? await readCharacterPush(client, options, `characterDisciplineChangePush(${active ? "activate" : "deactivate"})`, {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: active ? "activate" : "deactivate",
+          characterId: login.characterId
+        })
+        : null;
       const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
       const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
 
@@ -795,6 +893,7 @@ async function runCharacterDisciplineActiveChange(options, active) {
           activeSkillPool: action.activeSkillPool || [],
           unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
         },
+        push: actionPush?.push || null,
         after: {
           ok: Boolean(after.ok),
           errorCode: after.errorCode || "",
@@ -842,6 +941,13 @@ export async function runCharacterDisciplineSwitch(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES && packet.seq === 3,
         "switchCharacterDiscipline"
       );
+      const switchPush = action.ok
+        ? await readCharacterPush(client, options, "characterDisciplineChangePush(switch)", {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: "switch",
+          characterId: login.characterId
+        })
+        : null;
       const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
       const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
 
@@ -860,6 +966,7 @@ export async function runCharacterDisciplineSwitch(options) {
           activeSkillPool: action.activeSkillPool || [],
           unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
         },
+        push: switchPush?.push || null,
         after: {
           ok: Boolean(after.ok),
           errorCode: after.errorCode || "",
@@ -899,6 +1006,13 @@ export async function runCharacterDisciplinePoints(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES && packet.seq === 3,
         "addCharacterDisciplinePoints"
       );
+      const pointsPush = action.ok
+        ? await readCharacterPush(client, options, "characterDisciplineChangePush(points)", {
+          messageType: MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH,
+          action: "points_change",
+          characterId: login.characterId
+        })
+        : null;
       const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
       const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
 
@@ -917,6 +1031,7 @@ export async function runCharacterDisciplinePoints(options) {
           activeSkillPool: action.activeSkillPool || [],
           unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
         },
+        push: pointsPush?.push || null,
         after: {
           ok: Boolean(after.ok),
           errorCode: after.errorCode || "",
@@ -955,6 +1070,11 @@ export async function runCharacterProgressApply(options) {
         (packet) => packet.messageType === MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES && packet.seq === 2,
         "applyCharacterProgress"
       );
+      const progressPush = action.ok && action.applied
+        ? await readCharacterPush(client, options, "characterProgressRewardPush", {
+          characterId: login.characterId
+        })
+        : null;
       const titles = await queryTitles(client, options, 3, "getCharacterTitles(afterProgress)");
       const disciplines = await queryDisciplines(client, options, 4, "getCharacterDisciplines(afterProgress)");
 
@@ -970,6 +1090,7 @@ export async function runCharacterProgressApply(options) {
           sourceId: action.sourceId || "",
           rewards: (action.rewards || []).map(summarizeProgressReward)
         },
+        push: progressPush?.push || null,
         titles: summarizeTitlesResponse(titles),
         disciplines: (disciplines.disciplines || []).map(summarizeDiscipline),
         request: {

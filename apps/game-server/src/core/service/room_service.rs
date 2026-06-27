@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
+use crate::core::character_push::queue_character_push;
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::room::MemberRole;
 use crate::core::system::movement::player_input_from_move_req;
@@ -1252,13 +1253,14 @@ pub async fn handle_room_reconnect(
     let character_id = identity.character_id;
     let world_id = identity.world_id;
 
-    match packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY") {
-        Ok(_) => {}
+    let request = match packet.decode_body::<RoomReconnectReq>("INVALID_ROOM_RECONNECT_BODY") {
+        Ok(value) => value,
         Err(error_code) => {
             connection.queue_error(packet.header.seq, error_code, "invalid room reconnect body")?;
             return Ok(());
         }
     };
+    let last_character_push_sequence = request.last_character_push_sequence;
 
     // If already in a room, cannot reconnect
     if connection.session.room_id.is_some() {
@@ -1352,6 +1354,13 @@ pub async fn handle_room_reconnect(
                 .room_manager
                 .broadcast_snapshot(&room_id, "member_reconnected", snapshot)
                 .await?;
+            replay_character_push_compensation(
+                services,
+                connection,
+                &character_id,
+                last_character_push_sequence,
+            )
+            .await?;
         }
         Err(error_code) => {
             connection.queue_message(
@@ -1374,6 +1383,24 @@ pub async fn handle_room_reconnect(
     }
 
     Ok(())
+}
+
+async fn replay_character_push_compensation(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    character_id: &str,
+    last_sequence: u64,
+) -> Result<usize, std::io::Error> {
+    let events = services
+        .character_push_service
+        .compensation_events_after(character_id, last_sequence)
+        .await;
+    let mut delivered = 0;
+    for event in events {
+        queue_character_push(connection, character_id, &event)?;
+        delivered += 1;
+    }
+    Ok(delivered)
 }
 
 async fn find_reconnect_room_for_character(
@@ -2079,6 +2106,7 @@ mod tests {
             character_element_service.clone(),
             title_unlock_config_tables,
         );
+        let character_push_service = crate::core::character_push::CharacterPushService::new();
 
         ServiceContext {
             config,
@@ -2096,6 +2124,7 @@ mod tests {
             title_service,
             character_progress_service,
             title_unlock_service,
+            character_push_service,
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(

@@ -1024,6 +1024,7 @@ mod tests {
             character_element_service.clone(),
             title_unlock_config_tables,
         );
+        let character_push_service = crate::core::character_push::CharacterPushService::new();
 
         ServiceContext {
             config: config.clone(),
@@ -1041,6 +1042,7 @@ mod tests {
             title_service,
             character_progress_service,
             title_unlock_service,
+            character_push_service,
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(PlayerMessageRateLimiter::new())),

@@ -60,6 +60,8 @@ Protobuf 风格的编解码工具：
 - **解码器**: `decodeByMessageType()` - 根据消息类型自动解码响应
   - 已支持解码 `MovementSnapshotPush` / `MovementRejectPush` 的校正字段
   - 已支持解码 `RoomReconnectRes` / `RoomJoinAsObserverRes` 的 `movementRecovery`
+  - 已支持解码角色状态 push：`CharacterElementsChangePush(1505)`、`CharacterTitleChangePush(1506)`、`CharacterDisciplineChangePush(1507)`
+  - `encodeRoomReconnectReq(lastCharacterPushSequence)` 可携带当前角色已应用的 push sequence；默认不传仍编码为空 body
 
 ### client.js
 `TcpProtocolClient` 类：
@@ -215,15 +217,15 @@ Protobuf 风格的编解码工具：
 | `character-select` | 选择角色并展示 `characterId` 和 ticket payload 摘要 |
 | `character-login-auth` | 登录、选角、连接 `game-proxy` 并完成 `AuthReq` |
 | `character-room-join` | 登录、选角、连接游戏入口并加入房间 |
-| `character-elements-debug` | 登录、选角、查询四属性、执行受控 debug 变更、再次查询并输出 before/change/after |
-| `character-titles-debug` | 登录、选角、查询称号、debug 授予称号、装备称号、再次查询并输出 JSON 摘要 |
-| `character-disciplines-debug` | 登录、选角、设置职业阶位、触发称号解锁检查、确认职业阶位称号授予 |
-| `character-discipline-learn` | 登录、选角、调用正式职业学习协议、再次查询职业列表并输出定义和消耗摘要 |
-| `character-discipline-activate` | 登录、选角、激活已学习职业 / 流派并输出 activeSkillPool 和称号解锁摘要 |
-| `character-discipline-deactivate` | 登录、选角、停用已激活职业 / 流派并输出 activeSkillPool |
-| `character-discipline-switch` | 登录、选角、切换当前激活职业 / 流派并输出切换后的 activeSkillPool |
-| `character-discipline-points` | 登录、选角、给已学习职业 / 流派增加 points 并观察自动阶位推进 |
-| `character-progress-apply` | 登录、选角、触发正式任务 / 成就 / 活动 / 排行 / 世界事件进度奖励 |
+| `character-elements-debug` | 登录、选角、查询四属性、执行受控 debug 变更、监听 `CharacterElementsChangePush`、再次查询并输出 before/change/after |
+| `character-titles-debug` | 登录、选角、查询称号、debug 授予称号、装备称号、监听称号 push、再次查询并输出 JSON 摘要 |
+| `character-disciplines-debug` | 登录、选角、设置职业阶位、触发称号解锁检查、监听职业 push、确认职业阶位称号授予 |
+| `character-discipline-learn` | 登录、选角、调用正式职业学习协议、监听职业 push、再次查询职业列表并输出定义和消耗摘要 |
+| `character-discipline-activate` | 登录、选角、激活已学习职业 / 流派、监听职业 push，并输出 activeSkillPool 和称号解锁摘要 |
+| `character-discipline-deactivate` | 登录、选角、停用已激活职业 / 流派、监听职业 push，并输出 activeSkillPool |
+| `character-discipline-switch` | 登录、选角、切换当前激活职业 / 流派、监听职业 push，并输出切换后的 activeSkillPool |
+| `character-discipline-points` | 登录、选角、给已学习职业 / 流派增加 points、监听职业 push，并观察自动阶位推进 |
+| `character-progress-apply` | 登录、选角、触发正式任务 / 成就 / 活动 / 排行 / 世界事件进度奖励，并监听首个角色状态 push |
 | `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
 | `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
 
@@ -239,6 +241,8 @@ Protobuf 风格的编解码工具：
 ### ID 格式
 
 当前服务端使用全局唯一 ID 机制。登录返回的玩家 ID 为 `plr_<base32>`；邮件、公告、聊天消息和聊天群分别使用 `mail_`、`ann_`、`msg_`、`grp_` 前缀；物品实例 `uid` 为可解码的 `uint64` 数字 ID。
+
+角色状态 push 的 `push` 摘要包含 `characterId`、`sequence`、`revision`、`sourceType/sourceId`、`action` 和 `summary`。场景会断言 push 的 `characterId` 等于当前登录 ticket 绑定角色；真实客户端应按 `characterId + revision` 去重，并在断线重连后重新查询四属性、称号和职业快照。重连时可把已应用的最近角色 push sequence 传给 `encodeRoomReconnectReq(lastCharacterPushSequence)`；服务端补偿回放的 push 会带 `snapshotCompensation: true`。
 
 ### 基础用法
 

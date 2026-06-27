@@ -43,8 +43,11 @@ export function encodeRoomJoinReq(roomId, policyId = "") {
   return Buffer.concat(fields);
 }
 
-export function encodeRoomReconnectReq() {
-  return Buffer.alloc(0);
+export function encodeRoomReconnectReq(lastCharacterPushSequence = 0) {
+  if (!lastCharacterPushSequence) {
+    return Buffer.alloc(0);
+  }
+  return encodeInt64Field(1, lastCharacterPushSequence);
 }
 
 export function encodeRoomJoinAsObserverReq(roomId) {
@@ -433,6 +436,20 @@ function decodeCharacterElements(buffer) {
   };
 }
 
+function decodeCharacterPushMeta(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    characterId: readString(fields, 1),
+    sequence: readInt64(fields, 2),
+    revision: readInt64(fields, 3),
+    sourceType: readString(fields, 4),
+    sourceId: readString(fields, 5),
+    action: readString(fields, 6),
+    summary: readString(fields, 7),
+    snapshotCompensation: readBool(fields, 8)
+  };
+}
+
 function decodeCharacterTitleDefinitionSummary(buffer) {
   const fields = decodeFieldsWithRepeated(buffer);
   return {
@@ -805,6 +822,27 @@ export function decodeByMessageType(messageType, body) {
         activeBuffIds: readInt32List(fields, 2)
       };
     }
+    case MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH:
+      return {
+        meta: fields.get(1) ? decodeCharacterPushMeta(fields.get(1)) : null,
+        before: fields.get(2) ? decodeCharacterElements(fields.get(2)) : null,
+        after: fields.get(3) ? decodeCharacterElements(fields.get(3)) : null
+      };
+    case MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH:
+      return {
+        meta: fields.get(1) ? decodeCharacterPushMeta(fields.get(1)) : null,
+        title: fields.get(2) ? decodeCharacterTitleSummary(fields.get(2)) : null,
+        titles: decodeRepeatedMessage(fields, 3, decodeCharacterTitleSummary),
+        equippedTitle: fields.get(4) ? decodeCharacterTitleSummary(fields.get(4)) : null
+      };
+    case MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH:
+      return {
+        meta: fields.get(1) ? decodeCharacterPushMeta(fields.get(1)) : null,
+        discipline: fields.get(2) ? decodeCharacterDisciplineSummary(fields.get(2)) : null,
+        disciplines: decodeRepeatedMessage(fields, 3, decodeCharacterDisciplineSummary),
+        activeSkillPool: readStringList(fields, 4),
+        unlockedTitles: decodeRepeatedMessage(fields, 5, decodeCharacterTitleSummary)
+      };
     case MESSAGE_TYPE.GROUP_CREATE_RES:
       return {
         ok: readBool(fields, 1),

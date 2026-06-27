@@ -1,11 +1,13 @@
 use tracing::{info, warn};
 
 use crate::core::character_element::{
-    CharacterElementChangeSource, CharacterElementError, CharacterElementService,
+    CharacterElementApplyResult, CharacterElementChangeSource, CharacterElementError,
+    CharacterElementService,
 };
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::inventory::player_data::PreparedItemUseEffect;
 use crate::core::inventory::{EquipSlot, ItemError, PlayerData};
+use crate::core::service::character_element_service::queue_character_element_push;
 use crate::pb::{
     AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryRes,
     InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq, ItemDiscardRes,
@@ -172,7 +174,7 @@ pub async fn handle_item_use(
         }
     };
 
-    if let Err(error) = apply_prepared_item_element_change(
+    let element_change_result = match apply_prepared_item_element_change(
         &services.character_element_service,
         &character_id,
         &account_player_id,
@@ -180,18 +182,21 @@ pub async fn handle_item_use(
     )
     .await
     {
-        connection.queue_message(
-            MessageType::ItemUseRes,
-            packet.header.seq,
-            ItemUseRes {
-                ok: false,
-                error_code: error.error_code().to_string(),
-                hp_change: 0,
-                new_buff_ids: vec![],
-            },
-        )?;
-        return Ok(());
-    }
+        Ok(result) => result,
+        Err(error) => {
+            connection.queue_message(
+                MessageType::ItemUseRes,
+                packet.header.seq,
+                ItemUseRes {
+                    ok: false,
+                    error_code: error.error_code().to_string(),
+                    hp_change: 0,
+                    new_buff_ids: vec![],
+                },
+            )?;
+            return Ok(());
+        }
+    };
 
     let result = player_data.finalize_prepared_item_use(&prepared_use, &config_tables.item_table);
 
@@ -222,6 +227,29 @@ pub async fn handle_item_use(
 
             // 发送背包更新
             send_inventory_update_push(connection, &player_data).await;
+
+            if let Some(result) = element_change_result.as_ref() {
+                queue_character_element_push(
+                    services,
+                    connection,
+                    &crate::session::AuthenticatedSessionIdentity {
+                        account_player_id: account_player_id.clone(),
+                        character_id: character_id.clone(),
+                        world_id,
+                    },
+                    result,
+                    crate::core::character_push::CharacterPushSource::new(
+                        "item_use",
+                        format!(
+                            "item_id:{}:uid:{}",
+                            prepared_use.item_id, prepared_use.item_uid
+                        ),
+                        "element_change",
+                        format!("use item {}", prepared_use.item_id),
+                    ),
+                )
+                .await?;
+            }
         }
         Err(e) => {
             connection.queue_message(
@@ -245,9 +273,9 @@ async fn apply_prepared_item_element_change(
     character_id: &str,
     account_player_id: &str,
     prepared_use: &crate::core::inventory::player_data::PreparedItemUse,
-) -> Result<(), CharacterElementError> {
+) -> Result<Option<CharacterElementApplyResult>, CharacterElementError> {
     let PreparedItemUseEffect::CharacterElementChange { change } = &prepared_use.effect else {
-        return Ok(());
+        return Ok(None);
     };
 
     let source = CharacterElementChangeSource::new("item_use")
@@ -258,11 +286,11 @@ async fn apply_prepared_item_element_change(
         .with_operator("player", account_player_id.to_string());
     let reason = format!("use item {}", prepared_use.item_id);
 
-    character_element_service
+    let result = character_element_service
         .apply_change(character_id, *change, source, Some(reason.as_str()))
         .await?;
 
-    Ok(())
+    Ok(Some(result))
 }
 
 /// 处理物品丢弃请求

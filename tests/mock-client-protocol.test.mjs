@@ -63,6 +63,19 @@ function encodeCharacterElements(elements) {
   ]);
 }
 
+function encodeCharacterPushMeta(meta) {
+  return Buffer.concat([
+    encodeStringField(1, meta.characterId),
+    encodeInt64Field(2, meta.sequence),
+    encodeInt64Field(3, meta.revision),
+    encodeStringField(4, meta.sourceType),
+    encodeStringField(5, meta.sourceId),
+    encodeStringField(6, meta.action),
+    encodeStringField(7, meta.summary),
+    encodeBoolField(8, meta.snapshotCompensation)
+  ]);
+}
+
 function encodeCharacterTitleDefinitionSummary(definition) {
   return Buffer.concat([
     encodeStringField(1, definition.id),
@@ -229,6 +242,8 @@ test("mock-client decodes proto3 packed repeated int32 fields", () => {
 
 test("mock-client encodes character-id room and auth protocol fields", () => {
   assert.equal(encodeRoomReconnectReq().length, 0);
+  const reconnectFields = decodeFieldsWithRepeated(encodeRoomReconnectReq(42));
+  assert.equal(Number(reconnectFields.get(1)), 42);
 
   const matchedRoomFields = decodeFieldsWithRepeated(
     encodeCreateMatchedRoomReq("match-1", "room-1", ["chr_1", "chr_2"], "2v2")
@@ -341,6 +356,45 @@ test("mock-client defines contiguous character title and discipline message type
       1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426, 1427, 1428, 1429, 1430,
       1431, 1432, 1433, 1434
     ]
+  );
+});
+
+test("mock-client defines and decodes character push messages", () => {
+  assert.deepEqual(
+    [
+      MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH,
+      MESSAGE_TYPE.CHARACTER_TITLE_CHANGE_PUSH,
+      MESSAGE_TYPE.CHARACTER_DISCIPLINE_CHANGE_PUSH
+    ],
+    [1505, 1506, 1507]
+  );
+
+  const meta = {
+    characterId: "chr_0000000000001",
+    sequence: 7,
+    revision: 7,
+    sourceType: "gm",
+    sourceId: "debug-character-elements",
+    action: "element_change",
+    summary: "unit test",
+    snapshotCompensation: true
+  };
+  const elements = {
+    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 10, water: 0, wind: 0 }
+  };
+  const elementPushBody = Buffer.concat([
+    encodeMessageField(1, encodeCharacterPushMeta(meta)),
+    encodeMessageField(2, encodeCharacterElements(elements)),
+    encodeMessageField(3, encodeCharacterElements(elements))
+  ]);
+  assert.deepEqual(
+    decodeByMessageType(MESSAGE_TYPE.CHARACTER_ELEMENTS_CHANGE_PUSH, elementPushBody),
+    {
+      meta,
+      before: elements,
+      after: elements
+    }
   );
 });
 

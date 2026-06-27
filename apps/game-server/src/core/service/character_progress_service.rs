@@ -3,7 +3,9 @@ use tracing::info;
 use crate::core::character_progress::{
     ApplyCharacterProgressRequest, CharacterProgressOutcome, CharacterProgressRewardOutcome,
 };
+use crate::core::character_push::CharacterPushSource;
 use crate::core::context::{ConnectionContext, ServiceContext};
+use crate::core::service::character_element_service::queue_character_element_push;
 use crate::core::service::character_title_service::{to_discipline_summary, to_title_summary};
 use crate::pb::{
     ApplyCharacterProgressReq, ApplyCharacterProgressRes, CharacterProgressRewardSummary,
@@ -96,6 +98,9 @@ pub async fn handle_apply_character_progress(
                 &identity.character_id,
                 Some((&outcome, rewards)),
             )?;
+            if outcome.applied {
+                queue_progress_pushes(services, connection, &identity, &outcome).await?;
+            }
         }
         Err(error) => queue_apply_progress_response(
             connection,
@@ -108,6 +113,107 @@ pub async fn handle_apply_character_progress(
     }
 
     Ok(())
+}
+
+async fn queue_progress_pushes(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &crate::session::AuthenticatedSessionIdentity,
+    outcome: &CharacterProgressOutcome,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let title_table = services
+        .config_tables
+        .tables_snapshot()
+        .await
+        .titletable
+        .clone();
+    for reward in &outcome.rewards {
+        match reward.reward_type.as_str() {
+            "affinity" | "mastery" => {
+                if let (Some(before), Some(after)) = (
+                    reward.element_before.as_ref(),
+                    reward.element_after.as_ref(),
+                ) {
+                    queue_character_element_push(
+                        services,
+                        connection,
+                        identity,
+                        &crate::core::character_element::CharacterElementApplyResult {
+                            character_id: identity.character_id.clone(),
+                            before: before.clone(),
+                            after: after.clone(),
+                        },
+                        CharacterPushSource::new(
+                            outcome.source_type.as_str(),
+                            outcome.source_id.as_str(),
+                            "progress_reward",
+                            format!(
+                                "progress {} {} reward",
+                                outcome.progress_id, reward.reward_type
+                            ),
+                        ),
+                    )
+                    .await?;
+                }
+            }
+            "title" => {
+                if let Some(title) = reward.title.as_ref() {
+                    crate::core::service::character_title_service::queue_title_push(
+                        services,
+                        connection,
+                        identity,
+                        if reward.status == "renewed" {
+                            "renew"
+                        } else {
+                            "grant"
+                        },
+                        outcome.source_type.as_str(),
+                        outcome.source_id.as_str(),
+                        "progress title reward",
+                        Some(to_title_summary(&title_table, Some(title), &title.title_id)),
+                    )
+                    .await?;
+                }
+            }
+            "discipline_points" => {
+                if let Some(discipline) = reward.discipline.as_ref() {
+                    let disciplines = services
+                        .discipline_service
+                        .list_for_identity(identity)
+                        .await?;
+                    let active_skill_pool =
+                        active_skill_pool_for_progress_push(services, identity).await?;
+                    crate::core::service::character_title_service::queue_discipline_push(
+                        services,
+                        connection,
+                        identity,
+                        "points_change",
+                        outcome.source_type.as_str(),
+                        outcome.source_id.as_str(),
+                        "progress discipline points reward",
+                        Some(to_discipline_summary(discipline)),
+                        disciplines.iter().map(to_discipline_summary).collect(),
+                        active_skill_pool,
+                        Vec::new(),
+                    )
+                    .await?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn active_skill_pool_for_progress_push(
+    services: &ServiceContext,
+    identity: &crate::session::AuthenticatedSessionIdentity,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let tables = services.config_tables.tables_snapshot().await;
+    Ok(services
+        .discipline_service
+        .active_skill_pool_for_identity(identity, &tables.disciplinetable)
+        .await?)
 }
 
 fn queue_apply_progress_response(

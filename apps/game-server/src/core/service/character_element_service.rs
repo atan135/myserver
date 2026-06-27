@@ -4,10 +4,12 @@ use crate::core::character_element::{
     CharacterElementApplyResult, CharacterElementChange, CharacterElementChangeSource,
     CharacterElementError, ElementDeltas,
 };
+use crate::core::character_push::{CharacterPushSource, queue_character_push};
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::pb::{
-    CharacterElements as PbCharacterElements, DebugApplyCharacterElementChangeReq,
-    DebugApplyCharacterElementChangeRes, ElementValues as PbElementValues, GetCharacterElementsRes,
+    CharacterElements as PbCharacterElements, CharacterElementsChangePush,
+    DebugApplyCharacterElementChangeReq, DebugApplyCharacterElementChangeRes,
+    ElementValues as PbElementValues, GetCharacterElementsRes,
 };
 use crate::protocol::{MessageType, Packet};
 use crate::session::AuthenticatedSessionIdentity;
@@ -137,14 +139,29 @@ pub async fn handle_debug_apply_character_element_change(
         .await;
 
     match result {
-        Ok(result) => queue_debug_apply_response(
-            connection,
-            packet.header.seq,
-            true,
-            "",
-            &result.character_id,
-            Some(&result),
-        )?,
+        Ok(result) => {
+            queue_debug_apply_response(
+                connection,
+                packet.header.seq,
+                true,
+                "",
+                &result.character_id,
+                Some(&result),
+            )?;
+            queue_character_element_push(
+                services,
+                connection,
+                &identity,
+                &result,
+                CharacterPushSource::new(
+                    DEBUG_SOURCE_TYPE,
+                    DEBUG_SOURCE_ID,
+                    "element_change",
+                    reason.as_str(),
+                ),
+            )
+            .await?;
+        }
         Err(error) => queue_debug_apply_error(connection, packet.header.seq, &identity, error)?,
     }
 
@@ -231,6 +248,28 @@ fn to_pb_elements(
         affinity: Some(to_pb_values(elements.affinity)),
         mastery: Some(to_pb_values(elements.mastery)),
     }
+}
+
+pub(crate) async fn queue_character_element_push(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    identity: &AuthenticatedSessionIdentity,
+    result: &CharacterElementApplyResult,
+    source: CharacterPushSource,
+) -> Result<(), std::io::Error> {
+    let record = services
+        .character_push_service
+        .record_elements_change(
+            &identity.character_id,
+            source,
+            CharacterElementsChangePush {
+                meta: None,
+                before: Some(to_pb_elements(&result.before)),
+                after: Some(to_pb_elements(&result.after)),
+            },
+        )
+        .await;
+    queue_character_push(connection, &identity.character_id, &record)
 }
 
 #[cfg(test)]

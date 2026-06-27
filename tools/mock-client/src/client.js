@@ -166,6 +166,8 @@ export class TcpProtocolClient {
     while (true) {
       const packet = await this.readNextPacket(timeoutMs);
       const decoded = decodeByMessageType(packet.messageType, packet.body);
+      decoded.messageType = packet.messageType;
+      decoded.seq = packet.seq;
       console.log(`${this.label}.${label}:`, JSON.stringify({ messageType: packet.messageType, seq: packet.seq, decoded }, null, 2));
       if (predicate(packet, decoded)) {
         return decoded;
