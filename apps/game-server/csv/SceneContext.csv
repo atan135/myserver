@@ -1,0 +1,5 @@
+Id,SceneId,Code,ContextType,RegionId,Conditions,ElementEffects,Priority,Enabled,PromptKey
+int,int,string,string,int,string,string,int,int,string
+8001,1,grassland_rain,weather,0,"{""type"":""always""}","[{""target"":""affinity"",""element"":""water"",""delta"":120,""source"":""weather""},{""target"":""mastery"",""element"":""fire"",""delta"":-2,""source"":""weather""}]",10,1,scene.context.rain
+8002,1,grassland_wolf_field_wind,region,3002,"{""type"":""always""}","[{""target"":""mastery"",""element"":""wind"",""delta"":3,""source"":""region""}]",20,1,scene.context.wolf_field
+8003,2,relic_surge,world_event,4002,"{""type"":""world_event"",""event_id"":""relic_surge"",""status"":""active""}","[{""target"":""mastery"",""element"":""fire"",""delta"":8,""source"":""world_event""}]",100,1,scene.context.relic_surge

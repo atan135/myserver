@@ -7,7 +7,10 @@ use crate::csv_code::bufferbase::BufferBase;
 use crate::csv_code::characterprogresstable::CharacterProgressTable;
 use crate::csv_code::disciplinetable::DisciplineTable;
 use crate::csv_code::itemtable::ItemTable;
+use crate::csv_code::scenecontext::SceneContext;
+use crate::csv_code::sceneinteraction::SceneInteraction;
 use crate::csv_code::scenemonsterspawn::SceneMonsterSpawn;
+use crate::csv_code::scenenpc::SceneNpc;
 use crate::csv_code::sceneportal::ScenePortal;
 use crate::csv_code::sceneregion::SceneRegion;
 use crate::csv_code::scenespawnpoint::SceneSpawnPoint;
@@ -27,6 +30,9 @@ const SCENESPAWNPOINT_FILE: &str = "SceneSpawnPoint.csv";
 const SCENEPORTAL_FILE: &str = "ScenePortal.csv";
 const SCENEREGION_FILE: &str = "SceneRegion.csv";
 const SCENEMONSTERSPAWN_FILE: &str = "SceneMonsterSpawn.csv";
+const SCENEINTERACTION_FILE: &str = "SceneInteraction.csv";
+const SCENENPC_FILE: &str = "SceneNpc.csv";
+const SCENECONTEXT_FILE: &str = "SceneContext.csv";
 const TESTTABLE_100_FILE: &str = "TestTable_100.csv";
 const TESTTABLE_110_FILE: &str = "TestTable_110.csv";
 const ITEMTABLE_FILE: &str = "ItemTable.csv";
@@ -43,6 +49,9 @@ pub struct ConfigTables {
     pub sceneportal: Arc<ScenePortal>,
     pub sceneregion: Arc<SceneRegion>,
     pub scenemonsterspawn: Arc<SceneMonsterSpawn>,
+    pub sceneinteraction: Arc<SceneInteraction>,
+    pub scenenpc: Arc<SceneNpc>,
+    pub scenecontext: Arc<SceneContext>,
     pub testtable_100: Arc<TestTable100>,
     pub testtable_110: Arc<TestTable110>,
     pub item_table: Arc<ItemTable>,
@@ -60,6 +69,9 @@ pub struct ConfigTableRowCounts {
     pub sceneportal: usize,
     pub sceneregion: usize,
     pub scenemonsterspawn: usize,
+    pub sceneinteraction: usize,
+    pub scenenpc: usize,
+    pub scenecontext: usize,
     pub testtable_100: usize,
     pub testtable_110: usize,
     pub itemtable: usize,
@@ -78,6 +90,10 @@ impl ConfigTables {
         let sceneregion = SceneRegion::load_from_csv(&csv_dir.join(SCENEREGION_FILE))?;
         let scenemonsterspawn =
             SceneMonsterSpawn::load_from_csv(&csv_dir.join(SCENEMONSTERSPAWN_FILE))?;
+        let sceneinteraction =
+            SceneInteraction::load_from_csv(&csv_dir.join(SCENEINTERACTION_FILE))?;
+        let scenenpc = SceneNpc::load_from_csv(&csv_dir.join(SCENENPC_FILE))?;
+        let scenecontext = SceneContext::load_from_csv(&csv_dir.join(SCENECONTEXT_FILE))?;
         let testtable_100 = TestTable100::load_from_csv(&csv_dir.join(TESTTABLE_100_FILE))?;
         let testtable_110 = TestTable110::load_from_csv(&csv_dir.join(TESTTABLE_110_FILE))?;
         let itemtable = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
@@ -103,6 +119,9 @@ impl ConfigTables {
             sceneportal: Arc::new(sceneportal),
             sceneregion: Arc::new(sceneregion),
             scenemonsterspawn: Arc::new(scenemonsterspawn),
+            sceneinteraction: Arc::new(sceneinteraction),
+            scenenpc: Arc::new(scenenpc),
+            scenecontext: Arc::new(scenecontext),
             testtable_100: Arc::new(testtable_100),
             testtable_110: Arc::new(testtable_110),
             item_table: Arc::new(itemtable),
@@ -151,6 +170,28 @@ impl ConfigTables {
             )?)
         } else {
             self.scenemonsterspawn.clone()
+        };
+
+        let sceneinteraction = if changed_files.contains(SCENEINTERACTION_FILE) {
+            Arc::new(SceneInteraction::load_from_csv(
+                &csv_dir.join(SCENEINTERACTION_FILE),
+            )?)
+        } else {
+            self.sceneinteraction.clone()
+        };
+
+        let scenenpc = if changed_files.contains(SCENENPC_FILE) {
+            Arc::new(SceneNpc::load_from_csv(&csv_dir.join(SCENENPC_FILE))?)
+        } else {
+            self.scenenpc.clone()
+        };
+
+        let scenecontext = if changed_files.contains(SCENECONTEXT_FILE) {
+            Arc::new(SceneContext::load_from_csv(
+                &csv_dir.join(SCENECONTEXT_FILE),
+            )?)
+        } else {
+            self.scenecontext.clone()
         };
 
         let testtable_100 = if changed_files.contains(TESTTABLE_100_FILE) {
@@ -222,6 +263,9 @@ impl ConfigTables {
             sceneportal,
             sceneregion,
             scenemonsterspawn,
+            sceneinteraction,
+            scenenpc,
+            scenecontext,
             testtable_100,
             testtable_110,
             item_table: itemtable,
@@ -240,6 +284,9 @@ impl ConfigTables {
             csv_dir.join(SCENEPORTAL_FILE),
             csv_dir.join(SCENEREGION_FILE),
             csv_dir.join(SCENEMONSTERSPAWN_FILE),
+            csv_dir.join(SCENEINTERACTION_FILE),
+            csv_dir.join(SCENENPC_FILE),
+            csv_dir.join(SCENECONTEXT_FILE),
             csv_dir.join(TESTTABLE_100_FILE),
             csv_dir.join(TESTTABLE_110_FILE),
             csv_dir.join(ITEMTABLE_FILE),
@@ -258,6 +305,9 @@ impl ConfigTables {
             sceneportal: self.sceneportal.rows.len(),
             sceneregion: self.sceneregion.rows.len(),
             scenemonsterspawn: self.scenemonsterspawn.rows.len(),
+            sceneinteraction: self.sceneinteraction.rows.len(),
+            scenenpc: self.scenenpc.rows.len(),
+            scenecontext: self.scenecontext.rows.len(),
             testtable_100: self.testtable_100.rows.len(),
             testtable_110: self.testtable_110.rows.len(),
             itemtable: self.item_table.rows.len(),

@@ -5,33 +5,34 @@ use crate::config_table::{CsvLoadError, CsvRowReader, CsvTableLoader, StringPool
 
 pub type StringKey = u32;
 
-pub const SCENEREGION_SCHEMA_SIGNATURE: &str = "Id:int|SceneId:int|Code:string|RegionType:string|MinX:float|MinY:float|MaxX:float|MaxY:float|Tags:Array<string>|EntryConditions:string|PromptKey:string";
+pub const SCENENPC_SCHEMA_SIGNATURE: &str = "Id:int|SceneId:int|NpcId:string|Code:string|RegionId:int|BranchType:string|Conditions:string|Attitude:string|ServiceFlags:Array<string>|PromptKey:string|Priority:int|Enabled:int";
 
 #[derive(Debug, Clone, Default)]
-pub struct SceneRegionRow {
+pub struct SceneNpcRow {
     pub id: i32,
     pub sceneid: i32,
+    pub npcid: StringKey,
     pub code: StringKey,
-    pub regiontype: StringKey,
-    pub minx: f32,
-    pub miny: f32,
-    pub maxx: f32,
-    pub maxy: f32,
-    pub tags: Vec<StringKey>,
-    pub entryconditions: StringKey,
+    pub regionid: i32,
+    pub branchtype: StringKey,
+    pub conditions: StringKey,
+    pub attitude: StringKey,
+    pub serviceflags: Vec<StringKey>,
     pub promptkey: StringKey,
+    pub priority: i32,
+    pub enabled: i32,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SceneRegion {
+pub struct SceneNpc {
     pub string_pool: std::collections::HashMap<StringKey, String>,
-    pub rows: Vec<SceneRegionRow>,
+    pub rows: Vec<SceneNpcRow>,
     pub by_id: std::collections::HashMap<i32, usize>,
 }
 
-impl CsvTableLoader for SceneRegion {
-    const TABLE_NAME: &'static str = "SceneRegion";
-    const SCHEMA_SIGNATURE: &'static str = SCENEREGION_SCHEMA_SIGNATURE;
+impl CsvTableLoader for SceneNpc {
+    const TABLE_NAME: &'static str = "SceneNpc";
+    const SCHEMA_SIGNATURE: &'static str = SCENENPC_SCHEMA_SIGNATURE;
 
     fn load_from_csv(path: &std::path::Path) -> Result<Self, CsvLoadError> {
         let contents = std::fs::read_to_string(path)?;
@@ -73,18 +74,19 @@ impl CsvTableLoader for SceneRegion {
                 )));
             }
             let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);
-            let row = SceneRegionRow {
+            let row = SceneNpcRow {
                 id: reader.parse_i32(0, "Id")?,
                 sceneid: reader.parse_i32(1, "SceneId")?,
-                code: reader.parse_string_key(2, "Code", &mut string_pool)?,
-                regiontype: reader.parse_string_key(3, "RegionType", &mut string_pool)?,
-                minx: reader.parse_f32(4, "MinX")?,
-                miny: reader.parse_f32(5, "MinY")?,
-                maxx: reader.parse_f32(6, "MaxX")?,
-                maxy: reader.parse_f32(7, "MaxY")?,
-                tags: reader.parse_string_array(8, "Tags", &mut string_pool)?,
-                entryconditions: reader.parse_string_key(9, "EntryConditions", &mut string_pool)?,
-                promptkey: reader.parse_string_key(10, "PromptKey", &mut string_pool)?,
+                npcid: reader.parse_string_key(2, "NpcId", &mut string_pool)?,
+                code: reader.parse_string_key(3, "Code", &mut string_pool)?,
+                regionid: reader.parse_i32(4, "RegionId")?,
+                branchtype: reader.parse_string_key(5, "BranchType", &mut string_pool)?,
+                conditions: reader.parse_string_key(6, "Conditions", &mut string_pool)?,
+                attitude: reader.parse_string_key(7, "Attitude", &mut string_pool)?,
+                serviceflags: reader.parse_string_array(8, "ServiceFlags", &mut string_pool)?,
+                promptkey: reader.parse_string_key(9, "PromptKey", &mut string_pool)?,
+                priority: reader.parse_i32(10, "Priority")?,
+                enabled: reader.parse_i32(11, "Enabled")?,
             };
 
             if table.by_id.insert(row.id, table.rows.len()).is_some() {
@@ -103,14 +105,14 @@ impl CsvTableLoader for SceneRegion {
     }
 }
 
-impl SceneRegion {
-    pub fn get(&self, id: i32) -> Option<&SceneRegionRow> {
+impl SceneNpc {
+    pub fn get(&self, id: i32) -> Option<&SceneNpcRow> {
         self.by_id
             .get(&id)
             .and_then(|&row_index| self.rows.get(row_index))
     }
 
-    pub fn all(&self) -> &[SceneRegionRow] {
+    pub fn all(&self) -> &[SceneNpcRow] {
         &self.rows
     }
 

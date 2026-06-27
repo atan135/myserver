@@ -1,0 +1,5 @@
+Id,SceneId,NpcId,Code,RegionId,BranchType,Conditions,Attitude,ServiceFlags,PromptKey,Priority,Enabled
+int,int,string,string,int,string,string,string,Array<string>,string,int,int
+7001,1,npc_blacksmith,blacksmith_friendly,3001,dialogue,"{""all_of"":[{""type"":""title"",""title_id"":""2001""},{""type"":""discipline_tier"",""discipline_id"":""forging"",""tier"":""novice""}]}",friendly,repair|forge,scene.npc.blacksmith.friendly,100,1
+7002,1,npc_blacksmith,blacksmith_guild,3001,service,"{""all_of"":[{""type"":""organization"",""organization_id"":""forging_guild"",""rank"":""member""},{""type"":""reputation"",""region_id"":""grassland"",""min"":10}]}",trusted,forge|trade|guild_shop,scene.npc.blacksmith.guild,200,1
+7003,2,npc_relic_guard,guard_respect,4002,attitude,"{""all_of"":[{""type"":""discipline_tier"",""discipline_id"":""fire_art"",""tier"":""apprentice""},{""type"":""title"",""title_id"":""3001""}]}",respect,quest_hint,scene.npc.guard.respect,100,1

@@ -1,8 +1,8 @@
-Id,SceneId,Code,RegionType,MinX,MinY,MaxX,MaxY,Tags
-int,int,string,string,float,float,float,float,Array<string>
-3001,1,grassland_safe_zone,safe_zone,0.0,0.0,4.0,4.0,safe|newbie
-3002,1,grassland_wolf_field,combat_zone,7.0,2.0,14.0,12.0,combat|monster
-3003,1,grassland_to_dungeon,portal_zone,13.0,7.0,15.0,9.0,portal|scene_change
-4001,2,dungeon_entry_safe,safe_zone,0.0,0.0,4.0,4.0,safe|entry
-4002,2,dungeon_boss_hall,combat_zone,6.0,6.0,14.0,14.0,combat|elite
-4003,2,dungeon_return_portal,portal_zone,12.0,12.0,14.0,14.0,portal|scene_change
+Id,SceneId,Code,RegionType,MinX,MinY,MaxX,MaxY,Tags,EntryConditions,PromptKey
+int,int,string,string,float,float,float,float,Array<string>,string,string
+3001,1,grassland_safe_zone,safe_zone,0.0,0.0,4.0,4.0,safe|newbie,"{""type"":""always""}",scene.region.safe
+3002,1,grassland_wolf_field,combat_zone,7.0,2.0,14.0,12.0,combat|monster,"{""all_of"":[{""type"":""affinity"",""element"":""earth"",""min"":2000},{""type"":""mastery"",""element"":""fire"",""min"":0}]}",scene.region.combat
+3003,1,grassland_to_dungeon,portal_zone,13.0,7.0,15.0,9.0,portal|scene_change,"{""all_of"":[{""type"":""discipline_tier"",""discipline_id"":""forging"",""tier"":""novice""},{""type"":""title"",""title_id"":""2001""},{""type"":""progress"",""progress_id"":""quest_1"",""status"":""completed""}]}",scene.region.portal.locked
+4001,2,dungeon_entry_safe,safe_zone,0.0,0.0,4.0,4.0,safe|entry,"{""type"":""always""}",scene.region.safe
+4002,2,dungeon_boss_hall,combat_zone,6.0,6.0,14.0,14.0,combat|elite,"{""all_of"":[{""type"":""mastery"",""element"":""fire"",""min"":10},{""type"":""quest"",""quest_id"":""relic_gate_opened"",""status"":""completed""}]}",scene.region.boss.locked
+4003,2,dungeon_return_portal,portal_zone,12.0,12.0,14.0,14.0,portal|scene_change,"{""type"":""always""}",scene.region.portal.return

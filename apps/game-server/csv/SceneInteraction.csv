@@ -1,0 +1,4 @@
+Id,SceneId,Code,InteractionType,RegionId,X,Y,Radius,Conditions,ContextEffects,PromptKey,Enabled
+int,int,string,string,int,float,float,float,string,string,string,int
+6001,1,grassland_fire_totem,mechanism,3002,8.0,4.0,1.5,"{""all_of"":[{""type"":""mastery"",""element"":""fire"",""min"":10},{""type"":""discipline"",""discipline_id"":""forging"",""active"":true},{""type"":""title"",""title_id"":""2001""}]}","[{""target"":""mastery"",""element"":""fire"",""delta"":5,""source"":""mechanism""}]",scene.interaction.fire_totem,1
+6002,2,dungeon_growth_seal,mechanism,4002,8.0,8.0,2.0,"{""all_of"":[{""type"":""affinity"",""element"":""earth"",""min"":2000},{""type"":""item_growth"",""item_id"":1002,""element"":""fire"",""min"":1},{""type"":""title"",""title_id"":""3001""}]}","[{""target"":""affinity"",""element"":""earth"",""delta"":100,""source"":""seal""}]",scene.interaction.growth_seal,1

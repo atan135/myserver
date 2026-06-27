@@ -5,33 +5,34 @@ use crate::config_table::{CsvLoadError, CsvRowReader, CsvTableLoader, StringPool
 
 pub type StringKey = u32;
 
-pub const SCENEREGION_SCHEMA_SIGNATURE: &str = "Id:int|SceneId:int|Code:string|RegionType:string|MinX:float|MinY:float|MaxX:float|MaxY:float|Tags:Array<string>|EntryConditions:string|PromptKey:string";
+pub const SCENEINTERACTION_SCHEMA_SIGNATURE: &str = "Id:int|SceneId:int|Code:string|InteractionType:string|RegionId:int|X:float|Y:float|Radius:float|Conditions:string|ContextEffects:string|PromptKey:string|Enabled:int";
 
 #[derive(Debug, Clone, Default)]
-pub struct SceneRegionRow {
+pub struct SceneInteractionRow {
     pub id: i32,
     pub sceneid: i32,
     pub code: StringKey,
-    pub regiontype: StringKey,
-    pub minx: f32,
-    pub miny: f32,
-    pub maxx: f32,
-    pub maxy: f32,
-    pub tags: Vec<StringKey>,
-    pub entryconditions: StringKey,
+    pub interactiontype: StringKey,
+    pub regionid: i32,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub conditions: StringKey,
+    pub contexteffects: StringKey,
     pub promptkey: StringKey,
+    pub enabled: i32,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SceneRegion {
+pub struct SceneInteraction {
     pub string_pool: std::collections::HashMap<StringKey, String>,
-    pub rows: Vec<SceneRegionRow>,
+    pub rows: Vec<SceneInteractionRow>,
     pub by_id: std::collections::HashMap<i32, usize>,
 }
 
-impl CsvTableLoader for SceneRegion {
-    const TABLE_NAME: &'static str = "SceneRegion";
-    const SCHEMA_SIGNATURE: &'static str = SCENEREGION_SCHEMA_SIGNATURE;
+impl CsvTableLoader for SceneInteraction {
+    const TABLE_NAME: &'static str = "SceneInteraction";
+    const SCHEMA_SIGNATURE: &'static str = SCENEINTERACTION_SCHEMA_SIGNATURE;
 
     fn load_from_csv(path: &std::path::Path) -> Result<Self, CsvLoadError> {
         let contents = std::fs::read_to_string(path)?;
@@ -73,18 +74,19 @@ impl CsvTableLoader for SceneRegion {
                 )));
             }
             let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);
-            let row = SceneRegionRow {
+            let row = SceneInteractionRow {
                 id: reader.parse_i32(0, "Id")?,
                 sceneid: reader.parse_i32(1, "SceneId")?,
                 code: reader.parse_string_key(2, "Code", &mut string_pool)?,
-                regiontype: reader.parse_string_key(3, "RegionType", &mut string_pool)?,
-                minx: reader.parse_f32(4, "MinX")?,
-                miny: reader.parse_f32(5, "MinY")?,
-                maxx: reader.parse_f32(6, "MaxX")?,
-                maxy: reader.parse_f32(7, "MaxY")?,
-                tags: reader.parse_string_array(8, "Tags", &mut string_pool)?,
-                entryconditions: reader.parse_string_key(9, "EntryConditions", &mut string_pool)?,
+                interactiontype: reader.parse_string_key(3, "InteractionType", &mut string_pool)?,
+                regionid: reader.parse_i32(4, "RegionId")?,
+                x: reader.parse_f32(5, "X")?,
+                y: reader.parse_f32(6, "Y")?,
+                radius: reader.parse_f32(7, "Radius")?,
+                conditions: reader.parse_string_key(8, "Conditions", &mut string_pool)?,
+                contexteffects: reader.parse_string_key(9, "ContextEffects", &mut string_pool)?,
                 promptkey: reader.parse_string_key(10, "PromptKey", &mut string_pool)?,
+                enabled: reader.parse_i32(11, "Enabled")?,
             };
 
             if table.by_id.insert(row.id, table.rows.len()).is_some() {
@@ -103,14 +105,14 @@ impl CsvTableLoader for SceneRegion {
     }
 }
 
-impl SceneRegion {
-    pub fn get(&self, id: i32) -> Option<&SceneRegionRow> {
+impl SceneInteraction {
+    pub fn get(&self, id: i32) -> Option<&SceneInteractionRow> {
         self.by_id
             .get(&id)
             .and_then(|&row_index| self.rows.get(row_index))
     }
 
-    pub fn all(&self) -> &[SceneRegionRow] {
+    pub fn all(&self) -> &[SceneInteractionRow] {
         &self.rows
     }
 
