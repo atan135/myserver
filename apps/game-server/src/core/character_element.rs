@@ -272,6 +272,14 @@ impl CharacterElementService {
             store.lock().await.set(elements);
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn applied_change_logs(&self) -> Vec<MemoryCharacterElementLog> {
+        match &self.store {
+            CharacterElementStore::Memory(store) => store.lock().await.logs.clone(),
+            CharacterElementStore::Pg(_) => Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -615,6 +623,18 @@ fn map_db_error(error: sqlx::Error) -> CharacterElementError {
 #[derive(Default)]
 struct MemoryCharacterElementStore {
     values: std::collections::BTreeMap<String, CharacterElements>,
+    logs: Vec<MemoryCharacterElementLog>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoryCharacterElementLog {
+    pub character_id: String,
+    pub change: CharacterElementChange,
+    pub source: CharacterElementChangeSource,
+    pub reason: Option<String>,
+    pub before: CharacterElements,
+    pub after: CharacterElements,
 }
 
 #[cfg(test)]
@@ -634,12 +654,20 @@ impl MemoryCharacterElementStore {
         &mut self,
         character_id: &str,
         change: CharacterElementChange,
-        _source: CharacterElementChangeSource,
-        _reason: Option<&str>,
+        source: CharacterElementChangeSource,
+        reason: Option<&str>,
     ) -> Result<CharacterElementApplyResult, CharacterElementError> {
         let before = self.get(character_id)?;
         let after = before.apply_change(change)?;
         self.values.insert(character_id.to_string(), after.clone());
+        self.logs.push(MemoryCharacterElementLog {
+            character_id: character_id.to_string(),
+            change,
+            source,
+            reason: reason.map(str::to_string),
+            before: before.clone(),
+            after: after.clone(),
+        });
         Ok(CharacterElementApplyResult {
             character_id: character_id.to_string(),
             before,

@@ -82,7 +82,7 @@ impl ItemContainer {
             // 找相同 item_id 的物品堆叠
             for slot in &mut self.slots {
                 if let Some(existing) = slot {
-                    if existing.item_id == item.item_id && existing.binded == item.binded {
+                    if existing.can_stack_with(&item) {
                         // 可以堆叠
                         existing.count += item.count;
                         return Ok(());
@@ -118,12 +118,10 @@ impl ItemContainer {
             Ok(item)
         } else {
             item.count -= count;
-            Ok(Item {
-                uid,
-                item_id: item.item_id,
-                count,
-                binded: item.binded,
-            })
+            let mut removed = item.clone();
+            removed.uid = uid;
+            removed.count = count;
+            Ok(removed)
         }
     }
 
@@ -198,5 +196,20 @@ mod tests {
 
         let result = container.add_item(Item::new(3, 1003, 1, false));
         assert_eq!(result, Err(ItemError::InventoryFull));
+    }
+
+    #[test]
+    fn test_container_does_not_stack_items_with_different_growth_elements() {
+        let mut container = ItemContainer::new(4);
+        let first = Item::new(1, 1001, 2, false);
+        let mut second = Item::new(2, 1001, 3, false);
+        second.growth_elements = super::super::item::ItemElementValues::new(0, 1, 0, 0);
+
+        container.add_item(first).unwrap();
+        container.add_item(second).unwrap();
+
+        assert_eq!(container.item_count(), 2);
+        assert_eq!(container.find_item(1).unwrap().count, 2);
+        assert_eq!(container.find_item(2).unwrap().count, 3);
     }
 }

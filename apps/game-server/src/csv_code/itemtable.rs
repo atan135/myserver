@@ -5,7 +5,7 @@ use crate::config_table::{CsvLoadError, CsvRowReader, CsvTableLoader, StringPool
 
 pub type StringKey = u32;
 
-pub const ITEMTABLE_SCHEMA_SIGNATURE: &str = "Id:int|Code:string|Name:string|Type:string|Quality:string|MaxStack:int|Price:int|EquipSlot:string|BindType:string|Attack:int|Defense:int|MaxHp:int|CritRate:float|MoveSpeed:float|UseEffect:string|UseTarget:string|UseValue:int|CoolDownMs:int|Description:string";
+pub const ITEMTABLE_SCHEMA_SIGNATURE: &str = "Id:int|Code:string|Name:string|Type:string|Quality:string|MaxStack:int|Price:int|EquipSlot:string|BindType:string|Attack:int|Defense:int|MaxHp:int|CritRate:float|MoveSpeed:float|TemplateElementEarth:int|TemplateElementFire:int|TemplateElementWater:int|TemplateElementWind:int|UseEffect:string|UseTarget:string|UseValue:int|UseAffinityEarthDelta:int|UseAffinityFireDelta:int|UseAffinityWaterDelta:int|UseAffinityWindDelta:int|UseMasteryEarthDelta:int|UseMasteryFireDelta:int|UseMasteryWaterDelta:int|UseMasteryWindDelta:int|CoolDownMs:int|GrowthEnabled:int|GrowthSource:string|TradeRule:string|DecomposeRule:string|InheritRule:string|DisciplineConditionKey:string|TitleUnlockSource:string|Description:string";
 
 #[derive(Debug, Clone, Default)]
 pub struct ItemTableRow {
@@ -23,10 +23,29 @@ pub struct ItemTableRow {
     pub maxhp: i32,
     pub critrate: f32,
     pub movespeed: f32,
+    pub templateelementearth: i32,
+    pub templateelementfire: i32,
+    pub templateelementwater: i32,
+    pub templateelementwind: i32,
     pub useeffect: StringKey,
     pub usetarget: StringKey,
     pub usevalue: i32,
+    pub useaffinityearthdelta: i32,
+    pub useaffinityfiredelta: i32,
+    pub useaffinitywaterdelta: i32,
+    pub useaffinitywinddelta: i32,
+    pub usemasteryearthdelta: i32,
+    pub usemasteryfiredelta: i32,
+    pub usemasterywaterdelta: i32,
+    pub usemasterywinddelta: i32,
     pub cooldownms: i32,
+    pub growthenabled: i32,
+    pub growthsource: StringKey,
+    pub traderule: StringKey,
+    pub decomposerule: StringKey,
+    pub inheritrule: StringKey,
+    pub disciplineconditionkey: StringKey,
+    pub titleunlocksource: StringKey,
     pub description: StringKey,
 }
 
@@ -81,11 +100,30 @@ impl CsvTableLoader for ItemTable {
                 maxhp: reader.parse_i32(11, "MaxHp")?,
                 critrate: reader.parse_f32(12, "CritRate")?,
                 movespeed: reader.parse_f32(13, "MoveSpeed")?,
-                useeffect: reader.parse_string_key(14, "UseEffect", &mut string_pool)?,
-                usetarget: reader.parse_string_key(15, "UseTarget", &mut string_pool)?,
-                usevalue: reader.parse_i32(16, "UseValue")?,
-                cooldownms: reader.parse_i32(17, "CoolDownMs")?,
-                description: reader.parse_string_key(18, "Description", &mut string_pool)?,
+                templateelementearth: reader.parse_i32(14, "TemplateElementEarth")?,
+                templateelementfire: reader.parse_i32(15, "TemplateElementFire")?,
+                templateelementwater: reader.parse_i32(16, "TemplateElementWater")?,
+                templateelementwind: reader.parse_i32(17, "TemplateElementWind")?,
+                useeffect: reader.parse_string_key(18, "UseEffect", &mut string_pool)?,
+                usetarget: reader.parse_string_key(19, "UseTarget", &mut string_pool)?,
+                usevalue: reader.parse_i32(20, "UseValue")?,
+                useaffinityearthdelta: reader.parse_i32(21, "UseAffinityEarthDelta")?,
+                useaffinityfiredelta: reader.parse_i32(22, "UseAffinityFireDelta")?,
+                useaffinitywaterdelta: reader.parse_i32(23, "UseAffinityWaterDelta")?,
+                useaffinitywinddelta: reader.parse_i32(24, "UseAffinityWindDelta")?,
+                usemasteryearthdelta: reader.parse_i32(25, "UseMasteryEarthDelta")?,
+                usemasteryfiredelta: reader.parse_i32(26, "UseMasteryFireDelta")?,
+                usemasterywaterdelta: reader.parse_i32(27, "UseMasteryWaterDelta")?,
+                usemasterywinddelta: reader.parse_i32(28, "UseMasteryWindDelta")?,
+                cooldownms: reader.parse_i32(29, "CoolDownMs")?,
+                growthenabled: reader.parse_i32(30, "GrowthEnabled")?,
+                growthsource: reader.parse_string_key(31, "GrowthSource", &mut string_pool)?,
+                traderule: reader.parse_string_key(32, "TradeRule", &mut string_pool)?,
+                decomposerule: reader.parse_string_key(33, "DecomposeRule", &mut string_pool)?,
+                inheritrule: reader.parse_string_key(34, "InheritRule", &mut string_pool)?,
+                disciplineconditionkey: reader.parse_string_key(35, "DisciplineConditionKey", &mut string_pool)?,
+                titleunlocksource: reader.parse_string_key(36, "TitleUnlockSource", &mut string_pool)?,
+                description: reader.parse_string_key(37, "Description", &mut string_pool)?,
             };
 
             if table.by_id.insert(row.id, table.rows.len()).is_some() {

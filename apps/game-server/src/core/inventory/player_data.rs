@@ -2,9 +2,10 @@ use super::attr::PlayerAttr;
 use super::buff::Buff;
 use super::container::ItemContainer;
 use super::equipment::{EquipSlot, EquipmentSlots};
-use super::item::{Item, ItemError};
+use super::item::{Item, ItemElementValues, ItemError};
 use super::visual::PlayerVisual;
-use crate::csv_code::itemtable::ItemTable;
+use crate::core::character_element::{CharacterElementChange, ElementDeltas};
+use crate::csv_code::itemtable::{ItemTable, ItemTableRow};
 
 /// 角色完整玩法数据
 #[derive(Debug, Clone)]
@@ -199,44 +200,132 @@ impl PlayerData {
 
     /// 使用物品
     pub fn use_item(&mut self, item_uid: u64, item_table: &ItemTable) -> Result<(), ItemError> {
-        let item = self
-            .inventory
-            .find_item(item_uid)
-            .ok_or(ItemError::ItemNotFound)?
-            .clone();
-
-        let row = item_table
-            .get(item.item_id)
-            .ok_or(ItemError::ItemNotFound)?;
+        let plan = self.prepare_item_use(item_uid, item_table)?;
 
         // 检查使用效果类型
-        let effect_str = item_table.resolve_string(row.useeffect).unwrap_or("");
-
-        match effect_str {
-            "Heal" => {
-                // 消耗品：直接移除，产生效果
+        match plan.effect {
+            PreparedItemUseEffect::Heal { hp } => {
                 self.inventory.remove_item(item_uid, 1)?;
-                self.attr.final_.hp =
-                    (self.attr.final_.hp + row.usevalue as i64).min(self.attr.final_.max_hp);
+                self.attr.final_.hp = (self.attr.final_.hp + hp).min(self.attr.final_.max_hp);
                 self.set_attr_dirty();
             }
-            "Buff" => {
-                // 产生 Buff
+            PreparedItemUseEffect::Buff {
+                buff_id,
+                name,
+                duration_ms,
+            } => {
                 self.inventory.remove_item(item_uid, 1)?;
-                let buff = Buff::new(
-                    row.usevalue as u32,
-                    item_table
-                        .resolve_string(row.name)
-                        .unwrap_or("Unknown")
-                        .to_string(),
-                    row.cooldownms as u64,
-                );
+                let buff = Buff::new(buff_id, name, duration_ms);
                 self.buffs.push(buff);
                 self.set_attr_dirty();
                 self.set_visual_dirty();
             }
-            _ => {
+            PreparedItemUseEffect::CharacterElementChange { .. } => {
                 return Err(ItemError::CannotUse);
+            }
+        }
+
+        self.set_data_dirty();
+        Ok(())
+    }
+
+    pub fn prepare_item_use(
+        &self,
+        item_uid: u64,
+        item_table: &ItemTable,
+    ) -> Result<PreparedItemUse, ItemError> {
+        let item = self
+            .inventory
+            .find_item(item_uid)
+            .ok_or(ItemError::ItemNotFound)?;
+
+        if item.count == 0 {
+            return Err(ItemError::NotEnoughCount);
+        }
+
+        if item.is_bound_to_other_character(&self.character_id) {
+            return Err(ItemError::CharacterBindingMismatch);
+        }
+
+        let row = item_table
+            .get(item.item_id)
+            .ok_or(ItemError::ItemNotFound)?;
+        validate_item_element_config(row)?;
+
+        let effect_str = item_table.resolve_string(row.useeffect).unwrap_or("");
+        let effect = match effect_str {
+            "Heal" => PreparedItemUseEffect::Heal {
+                hp: row.usevalue as i64,
+            },
+            "Buff" => PreparedItemUseEffect::Buff {
+                buff_id: row.usevalue as u32,
+                name: item_table
+                    .resolve_string(row.name)
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                duration_ms: row.cooldownms as u64,
+            },
+            "CharacterElementChange" => {
+                let change = CharacterElementChange::new(
+                    ElementDeltas::new(
+                        row.useaffinityearthdelta,
+                        row.useaffinityfiredelta,
+                        row.useaffinitywaterdelta,
+                        row.useaffinitywinddelta,
+                    ),
+                    ElementDeltas::new(
+                        row.usemasteryearthdelta,
+                        row.usemasteryfiredelta,
+                        row.usemasterywaterdelta,
+                        row.usemasterywinddelta,
+                    ),
+                );
+
+                if change == CharacterElementChange::zero() {
+                    return Err(ItemError::InvalidElementDelta);
+                }
+
+                PreparedItemUseEffect::CharacterElementChange { change }
+            }
+            _ => return Err(ItemError::CannotUse),
+        };
+
+        Ok(PreparedItemUse {
+            item_uid,
+            item_id: item.item_id,
+            effect,
+        })
+    }
+
+    pub fn finalize_prepared_item_use(
+        &mut self,
+        plan: &PreparedItemUse,
+        item_table: &ItemTable,
+    ) -> Result<(), ItemError> {
+        let current = self.prepare_item_use(plan.item_uid, item_table)?;
+        if current.item_id != plan.item_id || current.effect != plan.effect.clone() {
+            return Err(ItemError::CannotUse);
+        }
+
+        match &plan.effect {
+            PreparedItemUseEffect::Heal { hp } => {
+                self.inventory.remove_item(plan.item_uid, 1)?;
+                self.attr.final_.hp = (self.attr.final_.hp + *hp).min(self.attr.final_.max_hp);
+                self.set_attr_dirty();
+            }
+            PreparedItemUseEffect::Buff {
+                buff_id,
+                name,
+                duration_ms,
+            } => {
+                self.inventory.remove_item(plan.item_uid, 1)?;
+                self.buffs
+                    .push(Buff::new(*buff_id, name.clone(), *duration_ms));
+                self.set_attr_dirty();
+                self.set_visual_dirty();
+            }
+            PreparedItemUseEffect::CharacterElementChange { .. } => {
+                self.inventory.remove_item(plan.item_uid, 1)?;
             }
         }
 
@@ -268,6 +357,18 @@ impl PlayerData {
     pub fn recalculate_attr(&mut self, item_table: &ItemTable) {
         self.attr
             .recalculate(&self.equipment, item_table, &self.buffs);
+    }
+
+    pub fn equipped_item_elements(&self, item_table: &ItemTable) -> ItemElementValues {
+        self.equipment
+            .iter()
+            .fold(ItemElementValues::zero(), |acc, (_, item)| {
+                acc.saturating_add(item.effective_elements(item_table.get(item.item_id)))
+            })
+    }
+
+    pub fn effective_item_elements(&self, item_table: &ItemTable) -> ItemElementValues {
+        self.equipped_item_elements(item_table)
     }
 
     // ========== 帧末处理 ==========
@@ -325,17 +426,165 @@ impl PlayerData {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedItemUse {
+    pub item_uid: u64,
+    pub item_id: i32,
+    pub effect: PreparedItemUseEffect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedItemUseEffect {
+    Heal {
+        hp: i64,
+    },
+    Buff {
+        buff_id: u32,
+        name: String,
+        duration_ms: u64,
+    },
+    CharacterElementChange {
+        change: CharacterElementChange,
+    },
+}
+
+fn validate_item_element_config(row: &ItemTableRow) -> Result<(), ItemError> {
+    let template = ItemElementValues::from_template_row(row);
+    if template.has_negative() {
+        return Err(ItemError::InvalidItemConfig);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::csv_code::itemtable::ItemTableRow;
+    use std::collections::HashMap;
 
-    fn create_test_item_table() -> ItemTable {
-        // 创建测试用 ItemTable
-        // 实际使用时应该从 CSV 加载
-        ItemTable {
-            string_pool: std::collections::HashMap::new(),
-            rows: vec![],
-            by_id: std::collections::HashMap::new(),
+    const STRING_CHARACTER_ELEMENT_CHANGE: u32 = 1;
+
+    struct ItemTableBuilder {
+        string_pool: HashMap<u32, String>,
+        rows: Vec<ItemTableRow>,
+        by_id: HashMap<i32, usize>,
+        next_key: u32,
+    }
+
+    impl ItemTableBuilder {
+        fn new() -> Self {
+            let mut string_pool = HashMap::new();
+            string_pool.insert(
+                STRING_CHARACTER_ELEMENT_CHANGE,
+                "CharacterElementChange".to_string(),
+            );
+            Self {
+                string_pool,
+                rows: Vec::new(),
+                by_id: HashMap::new(),
+                next_key: 100,
+            }
+        }
+
+        fn key(&mut self, value: &str) -> u32 {
+            if let Some((&key, _)) = self
+                .string_pool
+                .iter()
+                .find(|(_, existing)| existing.as_str() == value)
+            {
+                return key;
+            }
+
+            let key = self.next_key;
+            self.next_key += 1;
+            self.string_pool.insert(key, value.to_string());
+            key
+        }
+
+        fn add_row(&mut self, mut row: ItemTableRow) {
+            if row.code == 0 {
+                row.code = self.key("item");
+            }
+            if row.name == 0 {
+                row.name = self.key("Item");
+            }
+            if row.type_ == 0 {
+                row.type_ = self.key("Consumable");
+            }
+            if row.quality == 0 {
+                row.quality = self.key("White");
+            }
+            if row.equipslot == 0 {
+                row.equipslot = self.key("None");
+            }
+            if row.bindtype == 0 {
+                row.bindtype = self.key("Never");
+            }
+            if row.useeffect == 0 {
+                row.useeffect = self.key("None");
+            }
+            if row.usetarget == 0 {
+                row.usetarget = self.key("Self");
+            }
+            if row.growthsource == 0 {
+                row.growthsource = self.key("None");
+            }
+            if row.traderule == 0 {
+                row.traderule = self.key("Tradable");
+            }
+            if row.decomposerule == 0 {
+                row.decomposerule = self.key("None");
+            }
+            if row.inheritrule == 0 {
+                row.inheritrule = self.key("None");
+            }
+            if row.disciplineconditionkey == 0 {
+                row.disciplineconditionkey = self.key("None");
+            }
+            if row.titleunlocksource == 0 {
+                row.titleunlocksource = self.key("None");
+            }
+            if row.description == 0 {
+                row.description = self.key("desc");
+            }
+
+            self.by_id.insert(row.id, self.rows.len());
+            self.rows.push(row);
+        }
+
+        fn finish(self) -> ItemTable {
+            ItemTable {
+                string_pool: self.string_pool,
+                rows: self.rows,
+                by_id: self.by_id,
+            }
+        }
+    }
+
+    fn item_table(rows: Vec<ItemTableRow>) -> ItemTable {
+        let mut builder = ItemTableBuilder::new();
+        for row in rows {
+            builder.add_row(row);
+        }
+        builder.finish()
+    }
+
+    fn element_item_row(id: i32) -> ItemTableRow {
+        ItemTableRow {
+            id,
+            maxstack: 99,
+            useeffect: STRING_CHARACTER_ELEMENT_CHANGE,
+            usemasteryfiredelta: 10,
+            ..ItemTableRow::default()
+        }
+    }
+
+    fn equipment_row(id: i32, fire: i32) -> ItemTableRow {
+        ItemTableRow {
+            id,
+            maxstack: 1,
+            templateelementfire: fire,
+            ..ItemTableRow::default()
         }
     }
 
@@ -361,5 +610,107 @@ mod tests {
         let removed = player.remove_item(1, 2).unwrap();
         assert_eq!(removed.count, 2);
         assert_eq!(player.inventory.item_count(), 1);
+    }
+
+    #[test]
+    fn prepare_element_item_use_builds_character_element_change() {
+        let table = item_table(vec![element_item_row(4101)]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        player.add_item(Item::new(1, 4101, 1, false)).unwrap();
+
+        let plan = player.prepare_item_use(1, &table).unwrap();
+
+        assert_eq!(
+            plan.effect,
+            PreparedItemUseEffect::CharacterElementChange {
+                change: CharacterElementChange::new(
+                    ElementDeltas::zero(),
+                    ElementDeltas::new(0, 10, 0, 0)
+                )
+            }
+        );
+        assert_eq!(player.inventory.find_item(1).unwrap().count, 1);
+    }
+
+    #[test]
+    fn invalid_zero_element_delta_is_rejected_without_consuming_item() {
+        let table = item_table(vec![ItemTableRow {
+            id: 4101,
+            maxstack: 99,
+            useeffect: STRING_CHARACTER_ELEMENT_CHANGE,
+            ..ItemTableRow::default()
+        }]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        player.add_item(Item::new(1, 4101, 1, false)).unwrap();
+
+        let error = player.prepare_item_use(1, &table).unwrap_err();
+
+        assert_eq!(error, ItemError::InvalidElementDelta);
+        assert_eq!(player.inventory.find_item(1).unwrap().count, 1);
+    }
+
+    #[test]
+    fn invalid_negative_template_element_config_is_rejected() {
+        let table = item_table(vec![ItemTableRow {
+            id: 4101,
+            maxstack: 99,
+            templateelementearth: -1,
+            usemasteryfiredelta: 10,
+            ..ItemTableRow::default()
+        }]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        player.add_item(Item::new(1, 4101, 1, false)).unwrap();
+
+        let error = player.prepare_item_use(1, &table).unwrap_err();
+
+        assert_eq!(error, ItemError::InvalidItemConfig);
+        assert_eq!(player.inventory.find_item(1).unwrap().count, 1);
+    }
+
+    #[test]
+    fn bound_item_cannot_be_used_by_other_character() {
+        let table = item_table(vec![element_item_row(4101)]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        let mut item = Item::new(1, 4101, 1, true);
+        item.bound_character_id = Some("chr_0000000000002".to_string());
+        player.add_item(item).unwrap();
+
+        let error = player.prepare_item_use(1, &table).unwrap_err();
+
+        assert_eq!(error, ItemError::CharacterBindingMismatch);
+        assert_eq!(player.inventory.find_item(1).unwrap().count, 1);
+    }
+
+    #[test]
+    fn finalize_prepared_item_use_consumes_once_and_repeat_fails() {
+        let table = item_table(vec![element_item_row(4101)]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        player.add_item(Item::new(1, 4101, 1, false)).unwrap();
+        let plan = player.prepare_item_use(1, &table).unwrap();
+
+        player.finalize_prepared_item_use(&plan, &table).unwrap();
+        let repeated = player
+            .finalize_prepared_item_use(&plan, &table)
+            .unwrap_err();
+
+        assert_eq!(repeated, ItemError::ItemNotFound);
+        assert!(player.inventory.find_item(1).is_none());
+    }
+
+    #[test]
+    fn equipped_item_elements_include_template_growth_and_runtime_without_changing_base_attr() {
+        let table = item_table(vec![equipment_row(1002, 80)]);
+        let mut player = PlayerData::new("chr_0000000000001".to_string());
+        player.attr.base.attack = 12;
+        player.attr.final_.attack = 12;
+        let mut item = Item::new(1, 1002, 1, false);
+        item.growth_elements = ItemElementValues::new(1, 2, 3, 4);
+        item.runtime_elements = ItemElementValues::new(0, 5, 0, 0);
+        player.equipment.equip(EquipSlot::Weapon, item).unwrap();
+
+        let elements = player.effective_item_elements(&table);
+
+        assert_eq!(elements, ItemElementValues::new(1, 87, 3, 4));
+        assert_eq!(player.attr.base.attack, 12);
     }
 }

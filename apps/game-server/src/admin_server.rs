@@ -24,6 +24,7 @@ use crate::core::player::PlayerManager;
 use crate::core::runtime::room_manager::{
     ROLLOUT_DRAIN_STATUS_ROUTE_SAMPLE_LIMIT, RolloutDrainNotice,
 };
+use crate::csv_code::itemtable::ItemTable;
 use crate::gm_broadcast::{
     GM_BROADCAST_CONTENT_MAX_LEN, GM_BROADCAST_TITLE_MAX_LEN, GM_SENDER_MAX_LEN,
     GmBroadcastCommand, broadcast_gm_message_to_online_players, normalize_optional_string,
@@ -432,10 +433,18 @@ async fn handle_admin_connection(
                     .await?;
                     continue;
                 }
+                let tables = config_tables.tables_snapshot().await;
                 let items = match request
                     .items
                     .iter()
-                    .map(|item| grant_item_to_inventory_item(item, &item_uid_generator))
+                    .map(|item| {
+                        grant_item_to_inventory_item(
+                            item,
+                            &request.character_id,
+                            &item_uid_generator,
+                            &tables.item_table,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()
                 {
                     Ok(items) => items,
@@ -1956,14 +1965,22 @@ fn parse_item_id_value(value: serde_json::Value) -> Result<i32, Box<dyn std::err
 
 fn grant_item_to_inventory_item(
     item: &GrantItem,
+    character_id: &str,
     item_uid_generator: &ItemUidGenerator,
+    item_table: &ItemTable,
 ) -> std::io::Result<Item> {
-    Ok(Item {
-        uid: item_uid_generator.next()?,
-        item_id: item.item_id,
-        count: item.count,
-        binded: item.binded,
-    })
+    let row = item_table
+        .get(item.item_id)
+        .ok_or_else(|| std::io::Error::other("ITEM_NOT_FOUND"))?;
+    Ok(Item::from_config(
+        item_uid_generator.next()?,
+        item.item_id,
+        item.count,
+        item.binded,
+        Some(character_id),
+        row,
+        item_table,
+    ))
 }
 
 fn current_unix_ms() -> i64 {
@@ -2283,11 +2300,14 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::core::config_table::CsvTableLoader;
     use crate::core::context::{OnlinePlayerRegistry, PlayerConnectionHandle};
+    use crate::core::inventory::item::ItemElementValues;
     use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
     use crate::core::player::{PgPlayerStore, PlayerManager};
     use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
     use crate::core::runtime::RoomManager;
+    use crate::csv_code::itemtable::ItemTable;
     use crate::pb::GameMessagePush;
     use crate::protocol::PacketHeader;
 
@@ -2903,6 +2923,36 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "INVALID_CHARACTER_ID");
+    }
+
+    #[test]
+    fn grant_item_to_inventory_item_uses_config_snapshot_and_bound_character() {
+        let table = ItemTable::load_from_csv(std::path::Path::new("csv/ItemTable.csv")).unwrap();
+        let generator = ItemUidGenerator::new_for_test(10);
+        let request_item = GrantItem {
+            item_id: 1002,
+            count: 1,
+            binded: true,
+        };
+
+        let item =
+            grant_item_to_inventory_item(&request_item, "chr_0000000000001", &generator, &table)
+                .unwrap();
+
+        assert_eq!(item.uid, 10);
+        assert_eq!(item.item_id, 1002);
+        assert_eq!(item.count, 1);
+        assert!(item.binded);
+        assert_eq!(
+            item.bound_character_id.as_deref(),
+            Some("chr_0000000000001")
+        );
+        assert_eq!(item.template_elements, ItemElementValues::new(0, 80, 0, 0));
+        assert!(item.growth_rules.growth_enabled);
+        assert_eq!(item.growth_rules.growth_source.as_deref(), Some("Enhance"));
+        assert_eq!(item.growth_rules.trade_rule, "NoTradeAfterGrowth");
+        assert_eq!(item.growth_rules.decompose_rule, "ReturnMaterials");
+        assert_eq!(item.growth_rules.inherit_rule, "InheritGrowth");
     }
 
     #[test]
