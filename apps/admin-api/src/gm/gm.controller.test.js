@@ -8,6 +8,7 @@ process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
 register("ts-node/esm", pathToFileURL("./"));
 
 const { GmController } = await import("./gm.controller.ts");
+const { AdminStore } = await import("../admin-store.js");
 
 function makeReq() {
   return {
@@ -51,7 +52,8 @@ function makeController(gameAdminClient, options = {}) {
     },
     async updatePlayerStatus() {
       return true;
-    }
+    },
+    ...(options.adminStore || {})
   };
   const nats = {
     calls: natsCalls,
@@ -332,4 +334,310 @@ test("broadcast legacy fallback audit records all called game-server endpoints",
     ["game-server-a", "game-server-b"]
   );
   assert.equal(audits[0].details.legacyBroadcast.fallback, true);
+});
+
+test("GM character element set validates, writes admin audit, and returns deltas", async () => {
+  let capturedInput = null;
+  const { controller, audits } = makeController({}, {
+    adminStore: {
+      async setCharacterElementsForAdmin(input) {
+        capturedInput = input;
+        return {
+          changed: true,
+          character: {
+            character_id: input.characterId,
+            attributes: {
+              affinity: input.affinity,
+              mastery: input.mastery
+            }
+          },
+          before: {
+            character_id: input.characterId,
+            affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
+            mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+          },
+          after: {
+            character_id: input.characterId,
+            affinity: input.affinity,
+            mastery: input.mastery
+          },
+          affinityDelta: { earth: -100, fire: 100, water: 0, wind: 0 },
+          masteryDelta: { earth: 0, fire: 10, water: 0, wind: 0 }
+        };
+      }
+    }
+  });
+
+  const response = await controller.setCharacterElements(
+    " chr_1 ",
+    {
+      affinity: { earth: 2400, fire: 2600, water: 2500, wind: 2500 },
+      mastery: { earth: 0, fire: 10, water: 0, wind: 0 },
+      reason: "support adjust"
+    },
+    makeReq()
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(capturedInput.characterId, "chr_1");
+  assert.equal(capturedInput.operatorType, "admin");
+  assert.equal(capturedInput.operatorId, "1");
+  assert.equal(capturedInput.sourceId, "admin-api-character-elements");
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "gm_character_elements_set");
+  assert.equal(audits[0].targetType, "character");
+  assert.equal(audits[0].targetValue, "chr_1");
+  assert.equal(audits[0].details.permission, "gm.character_elements.write");
+  assert.equal(audits[0].details.affinityDelta.fire, 100);
+});
+
+test("GM character element set rejects invalid affinity total and writes failed audit", async () => {
+  const { controller, audits } = makeController({});
+
+  await assert.rejects(
+    controller.setCharacterElements(
+      "chr_1",
+      {
+        affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2400 },
+        reason: "bad adjust"
+      },
+      makeReq()
+    ),
+    (caught) => {
+      assert.equal(caught.getStatus(), 400);
+      assert.equal(caught.getResponse().error, "INVALID_AFFINITY_TOTAL");
+      return true;
+    }
+  );
+
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "gm_character_elements_set_failed");
+  assert.equal(audits[0].details.error, "INVALID_AFFINITY_TOTAL");
+});
+
+test("GM character title grant checks config and records audit", async () => {
+  let capturedInput = null;
+  const { controller, audits } = makeController({}, {
+    adminStore: {
+      async applyCharacterTitleForAdmin(input) {
+        capturedInput = input;
+        return {
+          action: "grant",
+          status: "granted",
+          changed: true,
+          title: { character_id: input.characterId, title_id: input.titleId, is_equipped: false },
+          before: null,
+          after: { character_id: input.characterId, title_id: input.titleId, is_equipped: false }
+        };
+      }
+    }
+  });
+
+  const response = await controller.applyCharacterTitle(
+    "chr_1",
+    { action: "grant", titleId: "9001", reason: "support title" },
+    makeReq()
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.status, "granted");
+  assert.equal(capturedInput.titleId, "9001");
+  assert.equal(capturedInput.sourceId, "admin-api-character-titles");
+  assert.equal(audits[0].action, "gm_character_title_apply");
+  assert.equal(audits[0].details.gmAction, "grant");
+  assert.equal(audits[0].details.permission, "gm.character_titles.write");
+});
+
+test("GM limited title grant requires expiresAt and writes failed audit", async () => {
+  const { controller, audits } = makeController({});
+
+  await assert.rejects(
+    controller.applyCharacterTitle(
+      "chr_1",
+      { action: "grant", titleId: "9101", reason: "support title" },
+      makeReq()
+    ),
+    (caught) => {
+      assert.equal(caught.getStatus(), 400);
+      assert.equal(caught.getResponse().error, "LIMITED_TITLE_REQUIRES_EXPIRES_AT");
+      return true;
+    }
+  );
+
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "gm_character_title_apply_failed");
+  assert.equal(audits[0].details.error, "LIMITED_TITLE_REQUIRES_EXPIRES_AT");
+});
+
+test("GM character discipline set writes admin audit", async () => {
+  let capturedInput = null;
+  const { controller, audits } = makeController({}, {
+    adminStore: {
+      async setCharacterDisciplineForAdmin(input) {
+        capturedInput = input;
+        return {
+          action: "upgrade",
+          status: "updated",
+          changed: true,
+          discipline: {
+            character_id: input.characterId,
+            discipline_id: input.disciplineId,
+            points: input.points,
+            tier: input.tier,
+            active: input.active
+          },
+          before: null,
+          after: {
+            character_id: input.characterId,
+            discipline_id: input.disciplineId,
+            points: input.points,
+            tier: input.tier,
+            active: input.active
+          }
+        };
+      }
+    }
+  });
+
+  const response = await controller.setCharacterDiscipline(
+    "chr_1",
+    {
+      disciplineId: "forging",
+      points: 120,
+      tier: "apprentice",
+      active: true,
+      reason: "support discipline"
+    },
+    makeReq()
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.changed, true);
+  assert.equal(capturedInput.disciplineId, "forging");
+  assert.equal(capturedInput.operatorId, "1");
+  assert.equal(audits[0].action, "gm_character_discipline_set");
+  assert.equal(audits[0].details.permission, "gm.character_disciplines.write");
+});
+
+test("GM unlock check requires both title and discipline audit context", async () => {
+  const { controller, audits } = makeController({}, {
+    adminStore: {
+      async runCharacterUnlockCheckForAdmin(input) {
+        assert.equal(input.characterId, "chr_1");
+        assert.equal(input.operatorId, "1");
+        assert.ok(input.titleDefinitions["2001"]);
+        return {
+          characterId: input.characterId,
+          checked: 2,
+          granted: 1,
+          results: [{ title_id: "2001", status: "granted", changed: true }]
+        };
+      }
+    }
+  });
+
+  const response = await controller.runCharacterUnlockCheck(
+    "chr_1",
+    { reason: "support unlock" },
+    makeReq()
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(response.granted, 1);
+  assert.equal(audits[0].action, "gm_character_unlock_check");
+  assert.deepEqual(audits[0].details.permission, [
+    "gm.character_titles.write",
+    "gm.character_disciplines.write"
+  ]);
+});
+
+test("AdminStore element GM update writes characters and character_element_logs transactionally", async () => {
+  const queries = [];
+  const row = {
+    character_id: "chr_1",
+    account_player_id: "player-1",
+    world_id: 0,
+    name: "Echo",
+    status: "active",
+    appearance_json: {},
+    scene_id: 100,
+    x: 0,
+    y: 0,
+    dir_x: 0,
+    dir_y: 1,
+    affinity_earth: 2500,
+    affinity_fire: 2500,
+    affinity_water: 2500,
+    affinity_wind: 2500,
+    mastery_earth: 0,
+    mastery_fire: 0,
+    mastery_water: 0,
+    mastery_wind: 0,
+    created_at: new Date("2026-06-25T11:00:00.000Z"),
+    last_login_at: null,
+    deleted_at: null
+  };
+  const client = {
+    async query(query, params = []) {
+      queries.push({ query, params });
+      if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (query.includes("FOR UPDATE") && query.includes("FROM characters")) {
+        return { rows: [row] };
+      }
+      if (query.includes("UPDATE characters")) {
+        return {
+          rows: [{
+            ...row,
+            affinity_earth: params[0],
+            affinity_fire: params[1],
+            affinity_water: params[2],
+            affinity_wind: params[3],
+            mastery_earth: params[4],
+            mastery_fire: params[5],
+            mastery_water: params[6],
+            mastery_wind: params[7]
+          }],
+          rowCount: 1
+        };
+      }
+      if (query.includes("INSERT INTO character_element_logs")) {
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`UNEXPECTED_QUERY: ${query}`);
+    },
+    release() {}
+  };
+  const gamePool = {
+    async connect() {
+      return client;
+    }
+  };
+  const store = new AdminStore({ async query() { throw new Error("UNEXPECTED_MAIN_QUERY"); } }, null, {}, gamePool);
+
+  const result = await store.setCharacterElementsForAdmin({
+    characterId: "chr_1",
+    affinity: { earth: 2400, fire: 2600, water: 2500, wind: 2500 },
+    mastery: { earth: 0, fire: 10, water: 0, wind: 0 },
+    operatorType: "admin",
+    operatorId: "1",
+    reason: "support adjust"
+  });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.affinityDelta, { earth: -100, fire: 100, water: 0, wind: 0 });
+  assert.deepEqual(result.masteryDelta, { earth: 0, fire: 10, water: 0, wind: 0 });
+  assert.equal(queries[0].query, "BEGIN");
+  assert.equal(queries.at(-1).query, "COMMIT");
+  const logQuery = queries.find((entry) => entry.query.includes("INSERT INTO character_element_logs"));
+  assert.ok(logQuery);
+  assert.equal(logQuery.params[0], "chr_1");
+  assert.equal(logQuery.params[1], "gm");
+  assert.equal(logQuery.params[4], "1");
+  assert.equal(logQuery.params[5], -100);
+  assert.equal(logQuery.params[9], 0);
+  assert.equal(logQuery.params[10], 10);
+  assert.equal(logQuery.params[15], "support adjust");
 });

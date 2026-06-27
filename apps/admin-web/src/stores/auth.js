@@ -25,7 +25,10 @@ export const useAuthStore = defineStore("auth", {
       P.PLAYERS_STATUS_UPDATE,
       P.GM_BROADCAST,
       P.GM_SEND_ITEM,
-      P.GM_KICK_PLAYER
+      P.GM_KICK_PLAYER,
+      P.GM_CHARACTER_ELEMENTS_WRITE,
+      P.GM_CHARACTER_TITLES_WRITE,
+      P.GM_CHARACTER_DISCIPLINES_WRITE
     ]),
     hasPermission: (state) => (permission) => hasPermission(state.user, permission),
     hasAnyPermission: (state) => (permissions) => hasAnyPermission(state.user, permissions)

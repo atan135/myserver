@@ -56,7 +56,15 @@ export const gmApi = {
   kickPlayer: (data) =>
     api.post("/gm/kick-player", data),
   banPlayer: (data) =>
-    api.post("/gm/ban-player", data)
+    api.post("/gm/ban-player", data),
+  setCharacterElements: (characterId, data) =>
+    api.post(`/gm/characters/${characterId}/elements`, data),
+  applyCharacterTitle: (characterId, data) =>
+    api.post(`/gm/characters/${characterId}/titles`, data),
+  setCharacterDiscipline: (characterId, data) =>
+    api.post(`/gm/characters/${characterId}/disciplines`, data),
+  runCharacterUnlockCheck: (characterId, data) =>
+    api.post(`/gm/characters/${characterId}/unlock-check`, data)
 };
 
 export const playerApi = {
@@ -64,6 +72,12 @@ export const playerApi = {
     api.get("/players", { params }),
   getPlayer: (playerId) =>
     api.get(`/players/${playerId}`),
+  getPlayerCharacters: (playerId, params) =>
+    api.get(`/players/${playerId}/characters`, { params }),
+  getCharacterProfile: (characterId, params) =>
+    api.get(`/players/characters/${characterId}/profile`, { params }),
+  getCharacterTitles: (characterId, params) =>
+    api.get(`/players/characters/${characterId}/titles`, { params }),
   updatePlayerStatus: (playerId, status) =>
     api.put(`/players/${playerId}/status`, { status })
 };

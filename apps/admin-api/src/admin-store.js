@@ -7,6 +7,16 @@ const SALT_ROUNDS = 10;
 const MAINTENANCE_STATE_KEY = "maintenance:global";
 const UNIQUE_VIOLATION = "23505";
 const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
+const ELEMENT_KEYS = ["earth", "fire", "water", "wind"];
+const AFFINITY_TOTAL = 10000;
+const DISCIPLINE_TIER_ORDER = [
+  "novice",
+  "apprentice",
+  "adept",
+  "expert",
+  "master",
+  "grandmaster"
+];
 
 function maintenanceStateKey(prefix = "") {
   return `${prefix || ""}${MAINTENANCE_STATE_KEY}`;
@@ -249,6 +259,186 @@ function normalizeCharacterCreateInput(input = {}) {
   };
 }
 
+function characterElementSnapshot(character) {
+  return {
+    character_id: character.character_id,
+    affinity: { ...character.attributes.affinity },
+    mastery: { ...character.attributes.mastery }
+  };
+}
+
+function elementsDelta(before, after) {
+  return ELEMENT_KEYS.reduce((delta, key) => {
+    delta[key] = Number(after[key]) - Number(before[key]);
+    return delta;
+  }, {});
+}
+
+function isZeroElementsDelta(delta) {
+  return ELEMENT_KEYS.every((key) => Number(delta[key]) === 0);
+}
+
+function titleSnapshot(rowOrTitle) {
+  if (!rowOrTitle) {
+    return null;
+  }
+
+  return {
+    character_id: rowOrTitle.character_id,
+    title_id: rowOrTitle.title_id,
+    source_type: rowOrTitle.source_type,
+    source_id: rowOrTitle.source_id || null,
+    is_equipped: rowOrTitle.is_equipped === true,
+    unlocked_at: toIsoString(rowOrTitle.unlocked_at),
+    expires_at: toIsoString(rowOrTitle.expires_at),
+    expired: rowOrTitle.expired === true
+  };
+}
+
+function disciplineSnapshot(rowOrDiscipline) {
+  if (!rowOrDiscipline) {
+    return null;
+  }
+
+  return {
+    character_id: rowOrDiscipline.character_id,
+    discipline_id: rowOrDiscipline.discipline_id,
+    points: toNumericId(rowOrDiscipline.points),
+    tier: rowOrDiscipline.tier,
+    active: rowOrDiscipline.active === true,
+    learned_at: toIsoString(rowOrDiscipline.learned_at),
+    updated_at: toIsoString(rowOrDiscipline.updated_at)
+  };
+}
+
+function titleGrantStatus(existing) {
+  if (!existing) {
+    return "granted";
+  }
+  return existing.expired ? "renewed" : "already_owned";
+}
+
+function disciplineActionForUpsert(before, input) {
+  if (!before) {
+    return "learn";
+  }
+
+  const beforeTierIndex = DISCIPLINE_TIER_ORDER.indexOf(before.tier);
+  const nextTierIndex = DISCIPLINE_TIER_ORDER.indexOf(input.tier);
+  if (nextTierIndex > beforeTierIndex) {
+    return "upgrade";
+  }
+  if (nextTierIndex < beforeTierIndex) {
+    return "downgrade";
+  }
+  if (Number(before.points) !== Number(input.points) || before.active !== input.active) {
+    return "update";
+  }
+  return "grant";
+}
+
+function rowsEqualDiscipline(before, input) {
+  return before &&
+    before.discipline_id === input.disciplineId &&
+    Number(before.points) === Number(input.points) &&
+    before.tier === input.tier &&
+    before.active === input.active;
+}
+
+function tierAtLeast(current, required) {
+  const currentIndex = DISCIPLINE_TIER_ORDER.indexOf(current);
+  const requiredIndex = DISCIPLINE_TIER_ORDER.indexOf(required);
+  return currentIndex >= 0 && requiredIndex >= 0 && currentIndex >= requiredIndex;
+}
+
+function evaluateTitleUnlockRule(rule, context) {
+  if (!rule || typeof rule !== "object") {
+    return {
+      eligible: false,
+      supported: false,
+      reason: "missing_rule"
+    };
+  }
+
+  if (Array.isArray(rule.all_of)) {
+    const results = rule.all_of.map((childRule) => evaluateTitleUnlockRule(childRule, context));
+    const unsupported = results.find((result) => !result.supported);
+    if (unsupported) {
+      return unsupported;
+    }
+    const failed = results.find((result) => !result.eligible);
+    return failed || { eligible: true, supported: true, reason: "all_of" };
+  }
+
+  if (Array.isArray(rule.any_of)) {
+    const results = rule.any_of.map((childRule) => evaluateTitleUnlockRule(childRule, context));
+    if (results.some((result) => result.supported && result.eligible)) {
+      return { eligible: true, supported: true, reason: "any_of" };
+    }
+    const supported = results.find((result) => result.supported);
+    return supported || {
+      eligible: false,
+      supported: false,
+      reason: "any_of_unsupported"
+    };
+  }
+
+  if (rule.discipline || rule.type === "discipline_tier") {
+    const disciplineId = String(rule.discipline || rule.discipline_id || "").trim();
+    const requiredTier = String(rule.tier || rule.min_tier || "").trim();
+    const discipline = context.disciplineById.get(disciplineId);
+    return {
+      eligible: !!discipline && tierAtLeast(discipline.tier, requiredTier),
+      supported: disciplineId.length > 0 && requiredTier.length > 0,
+      reason: "discipline_tier"
+    };
+  }
+
+  if (rule.type === "element_mastery" || rule.type === "mastery") {
+    const element = String(rule.element || "").trim();
+    const min = Number(rule.min);
+    return {
+      eligible: ELEMENT_KEYS.includes(element) && Number.isFinite(min) &&
+        Number(context.character.attributes.mastery[element]) >= min,
+      supported: ELEMENT_KEYS.includes(element) && Number.isFinite(min),
+      reason: "element_mastery"
+    };
+  }
+
+  if (rule.type === "element_affinity" || rule.type === "affinity") {
+    const element = String(rule.element || "").trim();
+    const min = Number(rule.min);
+    return {
+      eligible: ELEMENT_KEYS.includes(element) && Number.isFinite(min) &&
+        Number(context.character.attributes.affinity[element]) >= min,
+      supported: ELEMENT_KEYS.includes(element) && Number.isFinite(min),
+      reason: "element_affinity"
+    };
+  }
+
+  if (rule.event === "character_created") {
+    return {
+      eligible: true,
+      supported: true,
+      reason: "character_created"
+    };
+  }
+
+  if (rule.grant) {
+    return {
+      eligible: false,
+      supported: false,
+      reason: "explicit_grant_required"
+    };
+  }
+
+  return {
+    eligible: false,
+    supported: false,
+    reason: rule.type || rule.event || rule.grant || "unsupported_rule"
+  };
+}
+
 function toCharacterTitle(row) {
   const operator = row.latest_operator_type || row.latest_operator_id
     ? {
@@ -284,12 +474,48 @@ function toCharacterTitle(row) {
 
 function toCharacterDiscipline(row) {
   return {
+    character_id: row.character_id,
     discipline_id: row.discipline_id,
     points: toNumericId(row.points),
     tier: row.tier,
     active: row.active === true,
     learned_at: toIsoString(row.learned_at),
     updated_at: toIsoString(row.updated_at)
+  };
+}
+
+function toCharacterElementLog(row) {
+  const operator = row.operator_type || row.operator_id
+    ? {
+        type: row.operator_type || null,
+        id: row.operator_id || null
+      }
+    : null;
+
+  return {
+    id: toNumericId(row.id),
+    character_id: row.character_id,
+    source_type: row.source_type || null,
+    source_id: row.source_id || null,
+    operator_type: row.operator_type || null,
+    operator_id: row.operator_id || null,
+    operator,
+    affinity_delta: {
+      earth: Number(row.affinity_earth_delta),
+      fire: Number(row.affinity_fire_delta),
+      water: Number(row.affinity_water_delta),
+      wind: Number(row.affinity_wind_delta)
+    },
+    mastery_delta: {
+      earth: Number(row.mastery_earth_delta),
+      fire: Number(row.mastery_fire_delta),
+      water: Number(row.mastery_water_delta),
+      wind: Number(row.mastery_wind_delta)
+    },
+    before_json: normalizeJson(row.before_json),
+    after_json: normalizeJson(row.after_json),
+    reason: row.reason || null,
+    created_at: toIsoString(row.created_at)
   };
 }
 
@@ -305,6 +531,31 @@ function toCharacterTitleLog(row) {
     id: toNumericId(row.id),
     character_id: row.character_id,
     title_id: row.title_id,
+    action: row.action,
+    source_type: row.source_type || null,
+    source_id: row.source_id || null,
+    operator_type: row.operator_type || null,
+    operator_id: row.operator_id || null,
+    operator,
+    before_json: normalizeJson(row.before_json),
+    after_json: normalizeJson(row.after_json),
+    reason: row.reason || null,
+    created_at: toIsoString(row.created_at)
+  };
+}
+
+function toCharacterDisciplineLog(row) {
+  const operator = row.operator_type || row.operator_id
+    ? {
+        type: row.operator_type || null,
+        id: row.operator_id || null
+      }
+    : null;
+
+  return {
+    id: toNumericId(row.id),
+    character_id: row.character_id,
+    discipline_id: row.discipline_id,
     action: row.action,
     source_type: row.source_type || null,
     source_id: row.source_id || null,
@@ -723,6 +974,915 @@ export class AdminStore {
     );
 
     return rows.length > 0 ? toCharacter(rows[0]) : null;
+  }
+
+  async findCharactersByAccountPlayerId(accountPlayerId, { includeDeleted = true, limit = 50, offset = 0 } = {}) {
+    const { rows } = await this.gamePool.query(
+      `SELECT ${characterSelectColumns()}
+       FROM characters
+       WHERE account_player_id = $1
+         ${includeDeleted ? "" : "AND deleted_at IS NULL"}
+       ORDER BY deleted_at NULLS FIRST, last_login_at DESC NULLS LAST, created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [accountPlayerId, limit, offset]
+    );
+
+    return rows.map(toCharacter);
+  }
+
+  async countCharactersByAccountPlayerId(accountPlayerId, { includeDeleted = true } = {}) {
+    const { rows } = await this.gamePool.query(
+      `SELECT COUNT(*) as total
+       FROM characters
+       WHERE account_player_id = $1
+         ${includeDeleted ? "" : "AND deleted_at IS NULL"}`,
+      [accountPlayerId]
+    );
+
+    return readTotal(rows);
+  }
+
+  async findCharacterElementLogs({ characterId, limit = 20 } = {}) {
+    const { rows } = await this.gamePool.query(
+      `SELECT id,
+              character_id,
+              source_type,
+              source_id,
+              operator_type,
+              operator_id,
+              affinity_earth_delta,
+              affinity_fire_delta,
+              affinity_water_delta,
+              affinity_wind_delta,
+              mastery_earth_delta,
+              mastery_fire_delta,
+              mastery_water_delta,
+              mastery_wind_delta,
+              before_json,
+              after_json,
+              reason,
+              created_at
+       FROM character_element_logs
+       WHERE character_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [characterId, limit]
+    );
+
+    return rows.map(toCharacterElementLog);
+  }
+
+  async findCharacterDisciplineLogs({ characterId, limit = 20 } = {}) {
+    const { rows } = await this.gamePool.query(
+      `SELECT id,
+              character_id,
+              discipline_id,
+              action,
+              source_type,
+              source_id,
+              operator_type,
+              operator_id,
+              before_json,
+              after_json,
+              reason,
+              created_at
+       FROM character_discipline_logs
+       WHERE character_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2`,
+      [characterId, limit]
+    );
+
+    return rows.map(toCharacterDisciplineLog);
+  }
+
+  async findCharacterProfileOverview({ characterId, logLimit = 20 } = {}) {
+    const character = await this.findCharacterById(characterId, { includeDeleted: true });
+    if (!character) {
+      return null;
+    }
+
+    const [titleOverview, elementLogs, disciplineLogs] = await Promise.all([
+      this.findCharacterTitleOverview({ characterId, logLimit }),
+      this.findCharacterElementLogs({ characterId, limit: logLimit }),
+      this.findCharacterDisciplineLogs({ characterId, limit: logLimit })
+    ]);
+
+    return {
+      character,
+      titles: titleOverview.titles,
+      equippedTitle: titleOverview.equippedTitle,
+      disciplines: titleOverview.disciplines,
+      titleLogs: titleOverview.titleLogs,
+      elementLogs,
+      disciplineLogs
+    };
+  }
+
+  async withGameTransaction(callback) {
+    const client = typeof this.gamePool.connect === "function"
+      ? await this.gamePool.connect()
+      : this.gamePool;
+    const shouldRelease = typeof client.release === "function";
+
+    try {
+      await client.query("BEGIN");
+      const result = await callback(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+      throw error;
+    } finally {
+      if (shouldRelease) {
+        client.release();
+      }
+    }
+  }
+
+  async lockActiveCharacter(client, characterId) {
+    const { rows } = await client.query(
+      `SELECT ${characterSelectColumns()}
+       FROM characters
+       WHERE character_id = $1
+         AND deleted_at IS NULL
+       FOR UPDATE`,
+      [characterId]
+    );
+
+    return rows.length > 0 ? toCharacter(rows[0]) : null;
+  }
+
+  async setCharacterElementsForAdmin({
+    characterId,
+    affinity,
+    mastery,
+    operatorType = "admin",
+    operatorId,
+    sourceType = "gm",
+    sourceId = "admin-api-character-elements",
+    reason = null
+  } = {}) {
+    return this.withGameTransaction(async (client) => {
+      const beforeCharacter = await this.lockActiveCharacter(client, characterId);
+      if (!beforeCharacter) {
+        throw createAdminStoreError("CHARACTER_NOT_FOUND", "Character not found");
+      }
+
+      const beforeSnapshot = characterElementSnapshot(beforeCharacter);
+      const nextAffinity = affinity || beforeSnapshot.affinity;
+      const nextMastery = mastery || beforeSnapshot.mastery;
+      const affinityDelta = elementsDelta(beforeSnapshot.affinity, nextAffinity);
+      const masteryDelta = elementsDelta(beforeSnapshot.mastery, nextMastery);
+      const changed = !isZeroElementsDelta(affinityDelta) || !isZeroElementsDelta(masteryDelta);
+
+      let afterCharacter = beforeCharacter;
+      if (changed) {
+        const { rows } = await client.query(
+          `UPDATE characters
+           SET affinity_earth = $1,
+               affinity_fire = $2,
+               affinity_water = $3,
+               affinity_wind = $4,
+               mastery_earth = $5,
+               mastery_fire = $6,
+               mastery_water = $7,
+               mastery_wind = $8
+           WHERE character_id = $9
+           RETURNING ${characterSelectColumns()}`,
+          [
+            nextAffinity.earth,
+            nextAffinity.fire,
+            nextAffinity.water,
+            nextAffinity.wind,
+            nextMastery.earth,
+            nextMastery.fire,
+            nextMastery.water,
+            nextMastery.wind,
+            characterId
+          ]
+        );
+        afterCharacter = toCharacter(rows[0]);
+      }
+
+      const afterSnapshot = characterElementSnapshot(afterCharacter);
+      await client.query(
+        `INSERT INTO character_element_logs (
+           character_id,
+           source_type,
+           source_id,
+           operator_type,
+           operator_id,
+           affinity_earth_delta,
+           affinity_fire_delta,
+           affinity_water_delta,
+           affinity_wind_delta,
+           mastery_earth_delta,
+           mastery_fire_delta,
+           mastery_water_delta,
+           mastery_wind_delta,
+           before_json,
+           after_json,
+           reason,
+           created_at
+         ) VALUES (
+           $1, $2, $3, $4, $5,
+           $6, $7, $8, $9,
+           $10, $11, $12, $13,
+           $14::jsonb, $15::jsonb, $16,
+           current_timestamp
+         )`,
+        [
+          characterId,
+          sourceType,
+          sourceId,
+          operatorType,
+          operatorId || null,
+          affinityDelta.earth,
+          affinityDelta.fire,
+          affinityDelta.water,
+          affinityDelta.wind,
+          masteryDelta.earth,
+          masteryDelta.fire,
+          masteryDelta.water,
+          masteryDelta.wind,
+          toRequiredJsonb(beforeSnapshot),
+          toRequiredJsonb(afterSnapshot),
+          reason
+        ]
+      );
+
+      return {
+        character: afterCharacter,
+        before: beforeSnapshot,
+        after: afterSnapshot,
+        affinityDelta,
+        masteryDelta,
+        changed
+      };
+    });
+  }
+
+  async applyCharacterTitleForAdmin({
+    characterId,
+    action,
+    titleId,
+    expiresAt = null,
+    operatorType = "admin",
+    operatorId,
+    sourceType = "gm",
+    sourceId = "admin-api-character-titles",
+    reason = null
+  } = {}) {
+    return this.withGameTransaction(async (client) => {
+      const character = await this.lockActiveCharacter(client, characterId);
+      if (!character) {
+        throw createAdminStoreError("CHARACTER_NOT_FOUND", "Character not found");
+      }
+
+      if (action === "grant") {
+        return this.grantCharacterTitleInTransaction(client, {
+          characterId,
+          titleId,
+          expiresAt,
+          operatorType,
+          operatorId,
+          sourceType,
+          sourceId,
+          reason
+        });
+      }
+
+      if (action === "revoke") {
+        return this.revokeCharacterTitleInTransaction(client, {
+          characterId,
+          titleId,
+          operatorType,
+          operatorId,
+          sourceType,
+          sourceId,
+          reason
+        });
+      }
+
+      if (action === "equip") {
+        return this.equipCharacterTitleInTransaction(client, {
+          characterId,
+          titleId,
+          operatorType,
+          operatorId,
+          sourceType,
+          sourceId,
+          reason
+        });
+      }
+
+      if (action === "unequip") {
+        return this.unequipCharacterTitleInTransaction(client, {
+          characterId,
+          titleId,
+          operatorType,
+          operatorId,
+          sourceType,
+          sourceId,
+          reason
+        });
+      }
+
+      throw createAdminStoreError("INVALID_GM_TITLE_ACTION", "invalid title action");
+    });
+  }
+
+  async lockCharacterTitle(client, characterId, titleId) {
+    const { rows } = await client.query(
+      `SELECT character_id,
+              title_id,
+              source_type,
+              source_id,
+              is_equipped,
+              unlocked_at,
+              expires_at,
+              created_at,
+              updated_at,
+              (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired
+       FROM character_titles
+       WHERE character_id = $1 AND title_id = $2
+       FOR UPDATE`,
+      [characterId, titleId]
+    );
+
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  async insertCharacterTitleLog(client, {
+    characterId,
+    titleId,
+    action,
+    sourceType,
+    sourceId,
+    operatorType,
+    operatorId,
+    before,
+    after,
+    reason
+  }) {
+    await client.query(
+      `INSERT INTO character_title_logs (
+         character_id,
+         title_id,
+         action,
+         source_type,
+         source_id,
+         operator_type,
+         operator_id,
+         before_json,
+         after_json,
+         reason,
+         created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, current_timestamp)`,
+      [
+        characterId,
+        titleId,
+        action,
+        sourceType || null,
+        sourceId || null,
+        operatorType || null,
+        operatorId || null,
+        before ? toRequiredJsonb(before) : null,
+        after ? toRequiredJsonb(after) : null,
+        reason || null
+      ]
+    );
+  }
+
+  async grantCharacterTitleInTransaction(client, input) {
+    const existing = await this.lockCharacterTitle(client, input.characterId, input.titleId);
+    const status = titleGrantStatus(existing);
+
+    if (existing && !existing.expired) {
+      const snapshot = titleSnapshot(existing);
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        action: "grant",
+        before: snapshot,
+        after: snapshot
+      });
+      return {
+        action: "grant",
+        status,
+        changed: false,
+        title: toCharacterTitle(existing),
+        before: snapshot,
+        after: snapshot
+      };
+    }
+
+    const before = titleSnapshot(existing);
+    const { rows } = existing
+      ? await client.query(
+        `UPDATE character_titles
+         SET source_type = $3,
+             source_id = $4,
+             is_equipped = false,
+             unlocked_at = current_timestamp,
+             expires_at = $5::timestamptz,
+             updated_at = current_timestamp
+         WHERE character_id = $1 AND title_id = $2
+         RETURNING character_id,
+                   title_id,
+                   source_type,
+                   source_id,
+                   is_equipped,
+                   unlocked_at,
+                   expires_at,
+                   created_at,
+                   updated_at,
+                   (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired`,
+        [input.characterId, input.titleId, input.sourceType, input.sourceId || null, input.expiresAt]
+      )
+      : await client.query(
+        `INSERT INTO character_titles (
+           character_id,
+           title_id,
+           source_type,
+           source_id,
+           is_equipped,
+           unlocked_at,
+           expires_at,
+           created_at,
+           updated_at
+         ) VALUES ($1, $2, $3, $4, false, current_timestamp, $5::timestamptz, current_timestamp, current_timestamp)
+         RETURNING character_id,
+                   title_id,
+                   source_type,
+                   source_id,
+                   is_equipped,
+                   unlocked_at,
+                   expires_at,
+                   created_at,
+                   updated_at,
+                   (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired`,
+        [input.characterId, input.titleId, input.sourceType, input.sourceId || null, input.expiresAt]
+      );
+
+    const after = titleSnapshot(rows[0]);
+    await this.insertCharacterTitleLog(client, {
+      ...input,
+      action: "grant",
+      before,
+      after
+    });
+
+    return {
+      action: "grant",
+      status,
+      changed: true,
+      title: toCharacterTitle(rows[0]),
+      before,
+      after
+    };
+  }
+
+  async revokeCharacterTitleInTransaction(client, input) {
+    const existing = await this.lockCharacterTitle(client, input.characterId, input.titleId);
+    const before = titleSnapshot(existing);
+
+    if (!existing) {
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        action: "revoke",
+        before: null,
+        after: null
+      });
+      return {
+        action: "revoke",
+        status: "not_owned",
+        changed: false,
+        title: null,
+        before: null,
+        after: null
+      };
+    }
+
+    await client.query(
+      `DELETE FROM character_titles
+       WHERE character_id = $1 AND title_id = $2`,
+      [input.characterId, input.titleId]
+    );
+    await this.insertCharacterTitleLog(client, {
+      ...input,
+      action: "revoke",
+      before,
+      after: null
+    });
+
+    return {
+      action: "revoke",
+      status: "revoked",
+      changed: true,
+      title: null,
+      before,
+      after: null
+    };
+  }
+
+  async equipCharacterTitleInTransaction(client, input) {
+    const target = await this.lockCharacterTitle(client, input.characterId, input.titleId);
+    if (!target) {
+      throw createAdminStoreError("TITLE_NOT_OWNED", "title is not owned");
+    }
+    if (target.expired) {
+      throw createAdminStoreError("TITLE_EXPIRED", "title is expired");
+    }
+
+    const before = titleSnapshot(target);
+    if (target.is_equipped) {
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        action: "equip",
+        before,
+        after: before
+      });
+      return {
+        action: "equip",
+        status: "already_equipped",
+        changed: false,
+        title: toCharacterTitle(target),
+        unequipped: [],
+        before,
+        after: before
+      };
+    }
+
+    const equippedRows = await client.query(
+      `SELECT character_id,
+              title_id,
+              source_type,
+              source_id,
+              is_equipped,
+              unlocked_at,
+              expires_at,
+              created_at,
+              updated_at,
+              (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired
+       FROM character_titles
+       WHERE character_id = $1
+         AND title_id <> $2
+         AND is_equipped = true
+       FOR UPDATE`,
+      [input.characterId, input.titleId]
+    );
+
+    const unequipped = [];
+    for (const row of equippedRows.rows) {
+      const unequipBefore = titleSnapshot(row);
+      const { rows } = await client.query(
+        `UPDATE character_titles
+         SET is_equipped = false,
+             updated_at = current_timestamp
+         WHERE character_id = $1 AND title_id = $2
+         RETURNING character_id,
+                   title_id,
+                   source_type,
+                   source_id,
+                   is_equipped,
+                   unlocked_at,
+                   expires_at,
+                   created_at,
+                   updated_at,
+                   (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired`,
+        [input.characterId, row.title_id]
+      );
+      const unequipAfter = titleSnapshot(rows[0]);
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        titleId: row.title_id,
+        action: "unequip",
+        before: unequipBefore,
+        after: unequipAfter
+      });
+      unequipped.push(toCharacterTitle(rows[0]));
+    }
+
+    const { rows } = await client.query(
+      `UPDATE character_titles
+       SET is_equipped = true,
+           updated_at = current_timestamp
+       WHERE character_id = $1 AND title_id = $2
+       RETURNING character_id,
+                 title_id,
+                 source_type,
+                 source_id,
+                 is_equipped,
+                 unlocked_at,
+                 expires_at,
+                 created_at,
+                 updated_at,
+                 (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired`,
+      [input.characterId, input.titleId]
+    );
+    const after = titleSnapshot(rows[0]);
+    await this.insertCharacterTitleLog(client, {
+      ...input,
+      action: "equip",
+      before,
+      after
+    });
+
+    return {
+      action: "equip",
+      status: "equipped",
+      changed: true,
+      title: toCharacterTitle(rows[0]),
+      unequipped,
+      before,
+      after
+    };
+  }
+
+  async unequipCharacterTitleInTransaction(client, input) {
+    const target = await this.lockCharacterTitle(client, input.characterId, input.titleId);
+    const before = titleSnapshot(target);
+
+    if (!target) {
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        action: "unequip",
+        before: null,
+        after: null
+      });
+      return {
+        action: "unequip",
+        status: "not_owned",
+        changed: false,
+        title: null,
+        before: null,
+        after: null
+      };
+    }
+
+    if (!target.is_equipped) {
+      await this.insertCharacterTitleLog(client, {
+        ...input,
+        action: "unequip",
+        before,
+        after: before
+      });
+      return {
+        action: "unequip",
+        status: "already_unequipped",
+        changed: false,
+        title: toCharacterTitle(target),
+        before,
+        after: before
+      };
+    }
+
+    const { rows } = await client.query(
+      `UPDATE character_titles
+       SET is_equipped = false,
+           updated_at = current_timestamp
+       WHERE character_id = $1 AND title_id = $2
+       RETURNING character_id,
+                 title_id,
+                 source_type,
+                 source_id,
+                 is_equipped,
+                 unlocked_at,
+                 expires_at,
+                 created_at,
+                 updated_at,
+                 (expires_at IS NOT NULL AND expires_at <= current_timestamp) AS expired`,
+      [input.characterId, input.titleId]
+    );
+    const after = titleSnapshot(rows[0]);
+    await this.insertCharacterTitleLog(client, {
+      ...input,
+      action: "unequip",
+      before,
+      after
+    });
+
+    return {
+      action: "unequip",
+      status: "unequipped",
+      changed: true,
+      title: toCharacterTitle(rows[0]),
+      before,
+      after
+    };
+  }
+
+  async setCharacterDisciplineForAdmin({
+    characterId,
+    disciplineId,
+    points,
+    tier,
+    active,
+    operatorType = "admin",
+    operatorId,
+    sourceType = "gm",
+    sourceId = "admin-api-character-disciplines",
+    reason = null
+  } = {}) {
+    return this.withGameTransaction(async (client) => {
+      const character = await this.lockActiveCharacter(client, characterId);
+      if (!character) {
+        throw createAdminStoreError("CHARACTER_NOT_FOUND", "Character not found");
+      }
+
+      const existingResult = await client.query(
+        `SELECT character_id,
+                discipline_id,
+                points,
+                tier,
+                active,
+                learned_at,
+                updated_at
+         FROM character_disciplines
+         WHERE character_id = $1 AND discipline_id = $2
+         FOR UPDATE`,
+        [characterId, disciplineId]
+      );
+      const beforeRow = existingResult.rows[0] || null;
+      const before = disciplineSnapshot(beforeRow);
+      const input = { disciplineId, points, tier, active };
+      const action = disciplineActionForUpsert(beforeRow, input);
+
+      let afterRow = beforeRow;
+      const changed = !rowsEqualDiscipline(beforeRow, input);
+      if (changed) {
+        const { rows } = await client.query(
+          `INSERT INTO character_disciplines (
+             character_id,
+             discipline_id,
+             points,
+             tier,
+             active,
+             learned_at,
+             updated_at
+           ) VALUES ($1, $2, $3, $4, $5, current_timestamp, current_timestamp)
+           ON CONFLICT (character_id, discipline_id)
+           DO UPDATE SET
+             points = EXCLUDED.points,
+             tier = EXCLUDED.tier,
+             active = EXCLUDED.active,
+             updated_at = current_timestamp
+           RETURNING character_id,
+                     discipline_id,
+                     points,
+                     tier,
+                     active,
+                     learned_at,
+                     updated_at`,
+          [characterId, disciplineId, points, tier, active]
+        );
+        afterRow = rows[0];
+      }
+
+      const after = disciplineSnapshot(afterRow);
+      await client.query(
+        `INSERT INTO character_discipline_logs (
+           character_id,
+           discipline_id,
+           action,
+           source_type,
+           source_id,
+           operator_type,
+           operator_id,
+           before_json,
+           after_json,
+           reason,
+           created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, current_timestamp)`,
+        [
+          characterId,
+          disciplineId,
+          action,
+          sourceType,
+          sourceId || null,
+          operatorType,
+          operatorId || null,
+          before ? toRequiredJsonb(before) : null,
+          after ? toRequiredJsonb(after) : null,
+          reason
+        ]
+      );
+
+      return {
+        action,
+        status: changed ? "updated" : "unchanged",
+        changed,
+        discipline: toCharacterDiscipline(afterRow),
+        before,
+        after
+      };
+    });
+  }
+
+  async runCharacterUnlockCheckForAdmin({
+    characterId,
+    titleDefinitions = {},
+    operatorType = "admin",
+    operatorId,
+    sourceType = "gm",
+    sourceId = "admin-api-unlock-check",
+    reason = null
+  } = {}) {
+    const character = await this.findCharacterById(characterId, { includeDeleted: false });
+    if (!character) {
+      throw createAdminStoreError("CHARACTER_NOT_FOUND", "Character not found");
+    }
+
+    const overview = await this.findCharacterTitleOverview({ characterId, logLimit: 1 });
+    const ownedTitleIds = new Set(
+      overview.titles
+        .filter((title) => !title.expired)
+        .map((title) => String(title.title_id))
+    );
+    const disciplineById = new Map(
+      overview.disciplines.map((discipline) => [String(discipline.discipline_id), discipline])
+    );
+    const context = { character, disciplineById };
+    const candidates = Object.values(titleDefinitions)
+      .filter((definition) => definition && typeof definition === "object")
+      .sort((left, right) => Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0));
+    const results = [];
+
+    for (const definition of candidates) {
+      const titleId = String(definition.title_id || "").trim();
+      if (!titleId) {
+        continue;
+      }
+
+      if (definition.limited === true) {
+        results.push({
+          title_id: titleId,
+          status: "skipped",
+          reason: "limited_title_requires_explicit_grant"
+        });
+        continue;
+      }
+
+      if (ownedTitleIds.has(titleId)) {
+        results.push({
+          title_id: titleId,
+          status: "already_owned"
+        });
+        continue;
+      }
+
+      const evaluation = evaluateTitleUnlockRule(definition.unlock_rules, context);
+      if (!evaluation.supported) {
+        results.push({
+          title_id: titleId,
+          status: "unsupported",
+          reason: evaluation.reason
+        });
+        continue;
+      }
+
+      if (!evaluation.eligible) {
+        results.push({
+          title_id: titleId,
+          status: "not_eligible",
+          reason: evaluation.reason
+        });
+        continue;
+      }
+
+      const grant = await this.applyCharacterTitleForAdmin({
+        characterId,
+        action: "grant",
+        titleId,
+        operatorType,
+        operatorId,
+        sourceType,
+        sourceId: definition.title_type === "discipline"
+          ? `discipline/${definition.source_domain_id || "unknown"}`
+          : sourceId,
+        reason: reason || `unlock_check:${evaluation.reason}`
+      });
+      ownedTitleIds.add(titleId);
+      results.push({
+        title_id: titleId,
+        status: grant.status,
+        changed: grant.changed,
+        reason: evaluation.reason,
+        title: grant.title
+      });
+    }
+
+    return {
+      characterId,
+      checked: results.length,
+      granted: results.filter((result) => result.changed === true).length,
+      results
+    };
   }
 
   async createCharacterForAdmin(input) {

@@ -13,6 +13,9 @@ export type AdminPermission =
   | "gm.send_item"
   | "gm.kick_player"
   | "gm.ban_player"
+  | "gm.character_elements.write"
+  | "gm.character_titles.write"
+  | "gm.character_disciplines.write"
   | "maintenance.read"
   | "maintenance.write"
   | "monitoring.read"
@@ -41,7 +44,10 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*
     "id.read",
     "gm.broadcast",
     "gm.send_item",
-    "gm.kick_player"
+    "gm.kick_player",
+    "gm.character_elements.write",
+    "gm.character_titles.write",
+    "gm.character_disciplines.write"
   ],
   admin: "*",
   super_admin: "*"

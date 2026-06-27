@@ -78,6 +78,9 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
   assert.equal(roleHasPermission("operator", "players.status.update"), true);
   assert.equal(roleHasPermission("operator", "gm.kick_player"), true);
   assert.equal(roleHasPermission("operator", "gm.ban_player"), false);
+  assert.equal(roleHasPermission("operator", "gm.character_elements.write"), true);
+  assert.equal(roleHasPermission("operator", "gm.character_titles.write"), true);
+  assert.equal(roleHasPermission("operator", "gm.character_disciplines.write"), true);
   assert.equal(roleHasPermission("operator", "id.read"), true);
   assert.equal(roleHasPermission("operator", "id.manage"), false);
   assert.equal(roleHasPermission("operator", "maintenance.write"), false);
@@ -92,6 +95,9 @@ test("RolesGuard allows typical read/write operations by permission", async () =
   assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "operator", permissions: ["gm.kick_player"] });
+  assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
+
+  fixture = makeContext({ role: "operator", permissions: ["gm.character_titles.write"] });
   assert.equal(await new RolesGuard(fixture.reflector).canActivate(fixture.context), true);
 
   fixture = makeContext({ role: "admin", permissions: ["admins.revoke_tokens"] });

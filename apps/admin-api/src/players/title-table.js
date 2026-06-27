@@ -55,11 +55,28 @@ function parseInteger(value) {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function parseJsonObject(value) {
+  const normalized = String(value ?? "").trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(normalized);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function titleDefinitionFromRow(row) {
   return {
     title_id: String(row.TitleId || "").trim(),
     name: String(row.Name || "").trim(),
     title_type: String(row.TitleType || "").trim(),
+    source_domain_id: String(row.SourceDomainId || "").trim(),
+    tier_required: String(row.TierRequired || "").trim(),
+    unlock_rules: parseJsonObject(row.UnlockRules),
     rarity: String(row.Rarity || "").trim(),
     icon: String(row.Icon || "").trim(),
     color: String(row.Color || "").trim(),

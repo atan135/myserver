@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Inject, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
@@ -10,10 +10,15 @@ import { encodeSubjectToken } from "../nats-client.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
 import { computeBanExpiresAt } from "../ban-utils.js";
 import { randomUUID } from "node:crypto";
+import { getTitleDefinitions } from "../players/title-table.js";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
 const GM_BROADCAST_SUBJECT = "myserver.gm.broadcast";
 const GAME_ADMIN_ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
+const ELEMENT_KEYS = ["earth", "fire", "water", "wind"] as const;
+const AFFINITY_TOTAL = 10000;
+const TITLE_ACTIONS = ["grant", "revoke", "equip", "unequip"] as const;
+const DISCIPLINE_TIERS = ["novice", "apprentice", "adept", "expert", "master", "grandmaster"];
 
 function gameServerError(error: any) {
   const code = error?.code || "GAME_SERVER_ERROR";
@@ -26,6 +31,24 @@ function gameServerError(error: any) {
     ok: false,
     error: code,
     message: error.message
+  });
+}
+
+function adminStoreError(error: any) {
+  if (typeof error?.getStatus === "function") {
+    return error;
+  }
+
+  const code = error?.code || "GM_CHARACTER_OPERATION_FAILED";
+  const statusCode = code === "CHARACTER_NOT_FOUND" ||
+    code === "TITLE_NOT_OWNED" ||
+    code === "TITLE_CONFIG_NOT_FOUND"
+    ? 404
+    : 400;
+  return new ApiHttpException(statusCode, {
+    ok: false,
+    error: code,
+    message: error?.message || code
   });
 }
 
@@ -85,6 +108,136 @@ function normalizeCharacterId(characterId: any) {
     throw badRequest("INVALID_CHARACTER_ID", "characterId is required");
   }
   return characterId.trim();
+}
+
+function normalizeRequiredText(value: any, code: string, fieldName: string, maxLength = 255) {
+  if (typeof value !== "string") {
+    throw badRequest(code, `${fieldName} is required`);
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    throw badRequest(code, `${fieldName} is required`);
+  }
+  if (normalized.length > maxLength) {
+    throw badRequest(code, `${fieldName} must be ${maxLength} characters or fewer`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalText(value: any, code: string, fieldName: string, maxLength = 128) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw badRequest(code, `${fieldName} must be a string`);
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+  if (normalized.length > maxLength) {
+    throw badRequest(code, `${fieldName} must be ${maxLength} characters or fewer`);
+  }
+  return normalized;
+}
+
+function normalizeElementValues(value: any, fieldName: "affinity" | "mastery", { required = false } = {}) {
+  if (value === undefined || value === null) {
+    if (required) {
+      throw badRequest("INVALID_CHARACTER_ELEMENT_PAYLOAD", `${fieldName} is required`);
+    }
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest("INVALID_CHARACTER_ELEMENT_PAYLOAD", `${fieldName} must be an object`);
+  }
+
+  const normalized: Record<string, number> = {};
+  for (const key of ELEMENT_KEYS) {
+    const raw = value[key];
+    if (raw === undefined || raw === null || raw === "") {
+      throw badRequest("INVALID_CHARACTER_ELEMENT_PAYLOAD", `${fieldName}.${key} is required`);
+    }
+    const numberValue = Number(raw);
+    if (!Number.isSafeInteger(numberValue)) {
+      throw badRequest("INVALID_CHARACTER_ELEMENT_PAYLOAD", `${fieldName}.${key} must be an integer`);
+    }
+    if (numberValue < 0) {
+      throw badRequest(
+        fieldName === "affinity" ? "NEGATIVE_AFFINITY" : "NEGATIVE_MASTERY",
+        `${fieldName}.${key} must be non-negative`
+      );
+    }
+    normalized[key] = numberValue;
+  }
+
+  if (fieldName === "affinity") {
+    const total = ELEMENT_KEYS.reduce((sum, key) => sum + normalized[key], 0);
+    if (total !== AFFINITY_TOTAL) {
+      throw badRequest("INVALID_AFFINITY_TOTAL", `affinity total must be ${AFFINITY_TOTAL}`);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeTitleAction(value: any) {
+  if (typeof value !== "string" || !(TITLE_ACTIONS as readonly string[]).includes(value.trim())) {
+    throw badRequest("INVALID_GM_TITLE_ACTION", "action must be grant, revoke, equip, or unequip");
+  }
+  return value.trim();
+}
+
+function normalizeTitleId(value: any) {
+  return normalizeRequiredText(value, "INVALID_TITLE_ID", "titleId", 64);
+}
+
+function normalizeExpiresAt(value: any) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw badRequest("INVALID_EXPIRES_AT", "expiresAt must be an ISO timestamp string");
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw badRequest("INVALID_EXPIRES_AT", "expiresAt must be an ISO timestamp string");
+  }
+  return date.toISOString();
+}
+
+function normalizeDisciplineId(value: any) {
+  return normalizeRequiredText(value, "INVALID_DISCIPLINE_ID", "disciplineId", 64);
+}
+
+function normalizeDisciplinePoints(value: any) {
+  const numberValue = Number(value);
+  if (!Number.isSafeInteger(numberValue) || numberValue < 0) {
+    throw badRequest("INVALID_DISCIPLINE_POINTS", "points must be a non-negative integer");
+  }
+  return numberValue;
+}
+
+function normalizeDisciplineTier(value: any) {
+  if (typeof value !== "string" || !DISCIPLINE_TIERS.includes(value.trim())) {
+    throw badRequest("INVALID_DISCIPLINE_TIER", "tier is invalid");
+  }
+  return value.trim();
+}
+
+function normalizeBoolean(value: any, fieldName: string) {
+  if (typeof value !== "boolean") {
+    throw badRequest("INVALID_DISCIPLINE_PAYLOAD", `${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizeReason(value: any) {
+  return normalizeRequiredText(value, "MISSING_REASON", "reason", 255);
+}
+
+function auditErrorCode(error: any) {
+  return error?.getResponse?.().error || error?.code || error?.message || "UNKNOWN_ERROR";
 }
 
 function normalizeGmReason(reason: any, prefix: "gm_kick" | "gm_ban") {
@@ -454,5 +607,302 @@ export class GmController {
     }
 
     return { ok: true, message: "Player banned", banExpiresAt, globalKick, legacyBan };
+  }
+
+  @Post("characters/:characterId/elements")
+  @Permissions("gm.character_elements.write")
+  @HttpCode(HttpStatus.OK)
+  async setCharacterElements(@Param("characterId") characterIdParam: string, @Body() body: any, @Req() req: any) {
+    let characterId = typeof characterIdParam === "string" ? characterIdParam.trim() : "";
+    let reason: string | null = null;
+
+    try {
+      characterId = normalizeCharacterId(characterIdParam);
+      reason = normalizeReason(body?.reason);
+      const affinity = normalizeElementValues(body?.affinity, "affinity");
+      const mastery = normalizeElementValues(body?.mastery, "mastery");
+
+      if (!affinity && !mastery) {
+        throw badRequest("INVALID_CHARACTER_ELEMENT_PAYLOAD", "affinity or mastery is required");
+      }
+
+      const result = await this.adminStore.setCharacterElementsForAdmin({
+        characterId,
+        affinity,
+        mastery,
+        operatorType: "admin",
+        operatorId: String(req.admin.sub),
+        sourceType: "gm",
+        sourceId: "admin-api-character-elements",
+        reason
+      });
+
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_elements_set",
+        characterId,
+        details: {
+          result: "success",
+          reason,
+          changed: result.changed,
+          before: result.before,
+          after: result.after,
+          affinityDelta: result.affinityDelta,
+          masteryDelta: result.masteryDelta,
+          permission: "gm.character_elements.write"
+        }
+      });
+
+      return {
+        ok: true,
+        message: result.changed ? "Character elements updated" : "Character elements unchanged",
+        character: result.character,
+        before: result.before,
+        after: result.after,
+        affinityDelta: result.affinityDelta,
+        masteryDelta: result.masteryDelta,
+        changed: result.changed
+      };
+    } catch (error: any) {
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_elements_set_failed",
+        characterId,
+        details: {
+          result: "failed",
+          reason,
+          error: auditErrorCode(error),
+          permission: "gm.character_elements.write"
+        }
+      });
+      throw adminStoreError(error);
+    }
+  }
+
+  @Post("characters/:characterId/titles")
+  @Permissions("gm.character_titles.write")
+  @HttpCode(HttpStatus.OK)
+  async applyCharacterTitle(@Param("characterId") characterIdParam: string, @Body() body: any, @Req() req: any) {
+    let characterId = typeof characterIdParam === "string" ? characterIdParam.trim() : "";
+    let action: string | null = null;
+    let titleId: string | null = null;
+    let reason: string | null = null;
+    let expiresAt: string | null = null;
+
+    try {
+      characterId = normalizeCharacterId(characterIdParam);
+      action = normalizeTitleAction(body?.action);
+      titleId = normalizeTitleId(body?.titleId ?? body?.title_id);
+      reason = normalizeReason(body?.reason);
+      expiresAt = normalizeExpiresAt(body?.expiresAt ?? body?.expires_at);
+
+      const titleDefinition = getTitleDefinitions()[titleId];
+      if (!titleDefinition) {
+        throw notFound("TITLE_CONFIG_NOT_FOUND", "title config not found");
+      }
+
+      if (action === "grant" && titleDefinition.limited === true && !expiresAt) {
+        throw badRequest("LIMITED_TITLE_REQUIRES_EXPIRES_AT", "limited title requires expiresAt");
+      }
+
+      const result = await this.adminStore.applyCharacterTitleForAdmin({
+        characterId,
+        action,
+        titleId,
+        expiresAt,
+        operatorType: "admin",
+        operatorId: String(req.admin.sub),
+        sourceType: "gm",
+        sourceId: "admin-api-character-titles",
+        reason
+      });
+
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_title_apply",
+        characterId,
+        details: {
+          result: "success",
+          reason,
+          gmAction: action,
+          titleId,
+          expiresAt,
+          status: result.status,
+          changed: result.changed,
+          before: result.before,
+          after: result.after,
+          permission: "gm.character_titles.write"
+        }
+      });
+
+      return {
+        ok: true,
+        message: `Title ${result.status}`,
+        ...result
+      };
+    } catch (error: any) {
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_title_apply_failed",
+        characterId,
+        details: {
+          result: "failed",
+          reason,
+          gmAction: action,
+          titleId,
+          expiresAt,
+          error: auditErrorCode(error),
+          permission: "gm.character_titles.write"
+        }
+      });
+      throw adminStoreError(error);
+    }
+  }
+
+  @Post("characters/:characterId/disciplines")
+  @Permissions("gm.character_disciplines.write")
+  @HttpCode(HttpStatus.OK)
+  async setCharacterDiscipline(@Param("characterId") characterIdParam: string, @Body() body: any, @Req() req: any) {
+    let characterId = typeof characterIdParam === "string" ? characterIdParam.trim() : "";
+    let disciplineId: string | null = null;
+    let points: number | null = null;
+    let tier: string | null = null;
+    let active: boolean | null = null;
+    let reason: string | null = null;
+
+    try {
+      characterId = normalizeCharacterId(characterIdParam);
+      disciplineId = normalizeDisciplineId(body?.disciplineId ?? body?.discipline_id);
+      points = normalizeDisciplinePoints(body?.points);
+      tier = normalizeDisciplineTier(body?.tier);
+      active = normalizeBoolean(body?.active, "active");
+      reason = normalizeReason(body?.reason);
+
+      const result = await this.adminStore.setCharacterDisciplineForAdmin({
+        characterId,
+        disciplineId,
+        points,
+        tier,
+        active,
+        operatorType: "admin",
+        operatorId: String(req.admin.sub),
+        sourceType: "gm",
+        sourceId: "admin-api-character-disciplines",
+        reason
+      });
+
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_discipline_set",
+        characterId,
+        details: {
+          result: "success",
+          reason,
+          disciplineId,
+          points,
+          tier,
+          active,
+          status: result.status,
+          changed: result.changed,
+          before: result.before,
+          after: result.after,
+          permission: "gm.character_disciplines.write"
+        }
+      });
+
+      return {
+        ok: true,
+        message: result.changed ? "Character discipline updated" : "Character discipline unchanged",
+        ...result
+      };
+    } catch (error: any) {
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_discipline_set_failed",
+        characterId,
+        details: {
+          result: "failed",
+          reason,
+          disciplineId,
+          points,
+          tier,
+          active,
+          error: auditErrorCode(error),
+          permission: "gm.character_disciplines.write"
+        }
+      });
+      throw adminStoreError(error);
+    }
+  }
+
+  @Post("characters/:characterId/unlock-check")
+  @Permissions("gm.character_titles.write", "gm.character_disciplines.write")
+  @HttpCode(HttpStatus.OK)
+  async runCharacterUnlockCheck(@Param("characterId") characterIdParam: string, @Body() body: any, @Req() req: any) {
+    let characterId = typeof characterIdParam === "string" ? characterIdParam.trim() : "";
+    let reason: string | null = null;
+
+    try {
+      characterId = normalizeCharacterId(characterIdParam);
+      reason = normalizeReason(body?.reason);
+
+      const result = await this.adminStore.runCharacterUnlockCheckForAdmin({
+        characterId,
+        titleDefinitions: getTitleDefinitions(),
+        operatorType: "admin",
+        operatorId: String(req.admin.sub),
+        sourceType: "gm",
+        sourceId: "admin-api-unlock-check",
+        reason
+      });
+
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_unlock_check",
+        characterId,
+        details: {
+          result: "success",
+          reason,
+          checked: result.checked,
+          granted: result.granted,
+          results: result.results,
+          permission: ["gm.character_titles.write", "gm.character_disciplines.write"]
+        }
+      });
+
+      return {
+        ok: true,
+        message: "Unlock check completed",
+        ...result
+      };
+    } catch (error: any) {
+      await this.appendGmCharacterAudit(req, {
+        action: "gm_character_unlock_check_failed",
+        characterId,
+        details: {
+          result: "failed",
+          reason,
+          error: auditErrorCode(error),
+          permission: ["gm.character_titles.write", "gm.character_disciplines.write"]
+        }
+      });
+      throw adminStoreError(error);
+    }
+  }
+
+  private async appendGmCharacterAudit(
+    req: any,
+    {
+      action,
+      characterId,
+      details
+    }: {
+      action: string;
+      characterId: string;
+      details: Record<string, unknown>;
+    }
+  ) {
+    await this.adminStore.appendAuditLog({
+      adminId: req.admin.sub,
+      adminUsername: req.admin.username,
+      action,
+      targetType: "character",
+      targetValue: characterId,
+      details,
+      ip: getClientIp(req, this.config)
+    });
   }
 }

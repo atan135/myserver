@@ -178,6 +178,92 @@ export class PlayersController {
     };
   }
 
+  @Get(":playerId/characters")
+  @Permissions("players.read")
+  async playerCharacters(@Param("playerId") playerId: string, @Query() query: any) {
+    const player = await this.adminStore.findPlayerById(playerId);
+    if (!player) {
+      throw notFound("PLAYER_NOT_FOUND", "Player not found");
+    }
+
+    const includeDeleted = query?.includeDeleted !== "false" && query?.include_deleted !== "false";
+    const limit = pageLimit(query?.limit);
+    const offset = pageOffset(query?.offset);
+    const [characters, total] = await Promise.all([
+      this.adminStore.findCharactersByAccountPlayerId(playerId, { includeDeleted, limit, offset }),
+      this.adminStore.countCharactersByAccountPlayerId(playerId, { includeDeleted })
+    ]);
+
+    return {
+      ok: true,
+      playerId,
+      characters,
+      total,
+      limit,
+      offset
+    };
+  }
+
+  @Get("characters/:characterId/profile")
+  @Permissions("players.read")
+  async characterProfile(
+    @Param("characterId") characterIdParam: string,
+    @Query("logLimit") logLimitParam: any,
+    @Req() req: any
+  ) {
+    let characterId = typeof characterIdParam === "string" ? characterIdParam.trim() : "";
+
+    try {
+      characterId = requiredCharacterId(characterIdParam);
+      const logLimit = titleLogLimit(logLimitParam);
+      const overview = await this.adminStore.findCharacterProfileOverview({ characterId, logLimit });
+      if (!overview) {
+        throw notFound("CHARACTER_NOT_FOUND", "Character not found");
+      }
+
+      const titleDefinitions = getTitleDefinitions();
+      const titles = overview.titles.map((title: any) => enrichTitle(title, titleDefinitions));
+      const equippedTitle = overview.equippedTitle
+        ? enrichTitle(overview.equippedTitle, titleDefinitions)
+        : null;
+
+      await this.appendCharacterProfileQueryAudit(req, {
+        action: "character_profile_query",
+        characterId,
+        result: "success",
+        logLimit,
+        titleCount: titles.length,
+        disciplineCount: overview.disciplines.length,
+        elementLogCount: overview.elementLogs.length,
+        titleLogCount: overview.titleLogs.length,
+        disciplineLogCount: overview.disciplineLogs.length
+      });
+
+      return {
+        ok: true,
+        characterId,
+        character: overview.character,
+        attributes: overview.character.attributes,
+        titles,
+        equippedTitle,
+        disciplines: overview.disciplines,
+        logs: {
+          elements: overview.elementLogs,
+          titles: overview.titleLogs,
+          disciplines: overview.disciplineLogs
+        }
+      };
+    } catch (error: any) {
+      await this.appendCharacterProfileQueryAudit(req, {
+        action: "character_profile_query_failed",
+        characterId: characterId || null,
+        result: "failed",
+        error: error?.getResponse?.().error || error?.code || error?.message || "UNKNOWN_ERROR"
+      });
+      throw error;
+    }
+  }
+
   @Get("characters/:characterId/titles")
   @Permissions("players.read")
   async characterTitles(
@@ -435,6 +521,52 @@ export class PlayersController {
         titleCount,
         disciplineCount,
         titleLogCount,
+        error
+      },
+      ip: getClientIp(req, this.config)
+    });
+  }
+
+  private async appendCharacterProfileQueryAudit(
+    req: any,
+    {
+      action,
+      characterId,
+      result,
+      logLimit,
+      titleCount,
+      disciplineCount,
+      elementLogCount,
+      titleLogCount,
+      disciplineLogCount,
+      error
+    }: {
+      action: string;
+      characterId: string | null;
+      result: string;
+      logLimit?: number;
+      titleCount?: number;
+      disciplineCount?: number;
+      elementLogCount?: number;
+      titleLogCount?: number;
+      disciplineLogCount?: number;
+      error?: string;
+    }
+  ) {
+    await this.adminStore.appendAuditLog({
+      adminId: req.admin.sub,
+      adminUsername: req.admin.username,
+      action,
+      targetType: "character",
+      targetValue: characterId,
+      details: {
+        result,
+        logLimit,
+        titleCount,
+        disciplineCount,
+        elementLogCount,
+        titleLogCount,
+        disciplineLogCount,
         error
       },
       ip: getClientIp(req, this.config)

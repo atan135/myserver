@@ -18,8 +18,57 @@ function storeFixture() {
     restoredCharacters: [],
     characters: new Map(),
     titleQuery: null,
+    characterListQuery: null,
+    profileQuery: null,
     async findPlayerById() {
       return { id: "player-1", status: "active", banExpiresAt: null };
+    },
+    async findCharactersByAccountPlayerId(playerId, options) {
+      this.characterListQuery = { playerId, options };
+      return Array.from(this.characters.values())
+        .filter((character) => character.account_player_id === playerId || character.accountPlayerId === playerId);
+    },
+    async countCharactersByAccountPlayerId(playerId, options) {
+      this.characterListQuery = { playerId, options };
+      return Array.from(this.characters.values())
+        .filter((character) => character.account_player_id === playerId || character.accountPlayerId === playerId)
+        .length;
+    },
+    async findCharacterProfileOverview(input) {
+      this.profileQuery = input;
+      const character = this.characters.get(input.characterId);
+      if (!character) {
+        return null;
+      }
+      return {
+        character,
+        titles: [],
+        equippedTitle: null,
+        disciplines: [{
+          character_id: input.characterId,
+          discipline_id: "forging",
+          points: 120,
+          tier: "apprentice",
+          active: true,
+          learned_at: "2026-05-01T00:00:00.000Z",
+          updated_at: "2026-06-01T00:00:00.000Z"
+        }],
+        titleLogs: [],
+        elementLogs: [{
+          id: 1,
+          character_id: input.characterId,
+          affinity_delta: { earth: -100, fire: 100, water: 0, wind: 0 },
+          mastery_delta: { earth: 0, fire: 10, water: 0, wind: 0 },
+          reason: "gm adjust"
+        }],
+        disciplineLogs: [{
+          id: 2,
+          character_id: input.characterId,
+          discipline_id: "forging",
+          action: "upgrade",
+          reason: "gm discipline"
+        }]
+      };
     },
     async findCharacterTitleOverview(input) {
       this.titleQuery = input;
@@ -165,6 +214,66 @@ test("viewer can query character title overview with title metadata and audit", 
   assert.equal(store.audits[0].details.result, "success");
   assert.equal(store.audits[0].details.logLimit, 100);
   assert.equal(store.audits[0].details.titleCount, 1);
+});
+
+test("viewer can list account characters", async () => {
+  const store = storeFixture();
+  store.characters.set("chr_0000000000011", {
+    characterId: "chr_0000000000011",
+    character_id: "chr_0000000000011",
+    accountPlayerId: "player-1",
+    account_player_id: "player-1",
+    name: "Echo",
+    status: "active"
+  });
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.playerCharacters("player-1", {
+    includeDeleted: "false",
+    limit: "10",
+    offset: "5"
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.playerId, "player-1");
+  assert.equal(response.characters.length, 1);
+  assert.equal(response.total, 1);
+  assert.deepEqual(store.characterListQuery, {
+    playerId: "player-1",
+    options: { includeDeleted: false }
+  });
+});
+
+test("viewer can query character profile with attributes, title, discipline, and logs", async () => {
+  const store = storeFixture();
+  store.characters.set("chr_0000000000012", {
+    characterId: "chr_0000000000012",
+    character_id: "chr_0000000000012",
+    accountPlayerId: "player-1",
+    account_player_id: "player-1",
+    name: "Echo",
+    status: "active",
+    attributes: {
+      affinity: { earth: 2400, fire: 2600, water: 2500, wind: 2500 },
+      mastery: { earth: 0, fire: 10, water: 0, wind: 0 }
+    }
+  });
+  const controller = new PlayersController({}, store);
+
+  const response = await controller.characterProfile(" chr_0000000000012 ", "25", request("viewer"));
+
+  assert.equal(response.ok, true);
+  assert.equal(response.characterId, "chr_0000000000012");
+  assert.deepEqual(store.profileQuery, { characterId: "chr_0000000000012", logLimit: 25 });
+  assert.equal(response.attributes.affinity.fire, 2600);
+  assert.equal(response.disciplines[0].tier, "apprentice");
+  assert.equal(response.logs.elements[0].reason, "gm adjust");
+  assert.equal(response.logs.disciplines[0].action, "upgrade");
+  assert.equal(store.audits.length, 1);
+  assert.equal(store.audits[0].action, "character_profile_query");
+  assert.equal(store.audits[0].targetValue, "chr_0000000000012");
+  assert.equal(store.audits[0].details.elementLogCount, 1);
+  assert.equal(store.audits[0].details.disciplineLogCount, 1);
 });
 
 test("invalid character title query writes failed audit", async () => {
