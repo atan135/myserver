@@ -5,7 +5,7 @@ use crate::config_table::{CsvLoadError, CsvRowReader, CsvTableLoader, StringPool
 
 pub type StringKey = u32;
 
-pub const ITEMTABLE_SCHEMA_SIGNATURE: &str = "Id:int|Code:string|Name:string|Type:string|Quality:string|MaxStack:int|Price:int|EquipSlot:string|LevelRequired:int|BindType:string|Attack:int|Defense:int|MaxHp:int|CritRate:float|MoveSpeed:float|UseEffect:string|UseTarget:string|UseValue:int|CoolDownMs:int|Description:string";
+pub const ITEMTABLE_SCHEMA_SIGNATURE: &str = "Id:int|Code:string|Name:string|Type:string|Quality:string|MaxStack:int|Price:int|EquipSlot:string|BindType:string|Attack:int|Defense:int|MaxHp:int|CritRate:float|MoveSpeed:float|UseEffect:string|UseTarget:string|UseValue:int|CoolDownMs:int|Description:string";
 
 #[derive(Debug, Clone, Default)]
 pub struct ItemTableRow {
@@ -17,7 +17,6 @@ pub struct ItemTableRow {
     pub maxstack: i32,
     pub price: i32,
     pub equipslot: StringKey,
-    pub levelrequired: i32,
     pub bindtype: StringKey,
     pub attack: i32,
     pub defense: i32,
@@ -76,18 +75,17 @@ impl CsvTableLoader for ItemTable {
                 maxstack: reader.parse_i32(5, "MaxStack")?,
                 price: reader.parse_i32(6, "Price")?,
                 equipslot: reader.parse_string_key(7, "EquipSlot", &mut string_pool)?,
-                levelrequired: reader.parse_i32(8, "LevelRequired")?,
-                bindtype: reader.parse_string_key(9, "BindType", &mut string_pool)?,
-                attack: reader.parse_i32(10, "Attack")?,
-                defense: reader.parse_i32(11, "Defense")?,
-                maxhp: reader.parse_i32(12, "MaxHp")?,
-                critrate: reader.parse_f32(13, "CritRate")?,
-                movespeed: reader.parse_f32(14, "MoveSpeed")?,
-                useeffect: reader.parse_string_key(15, "UseEffect", &mut string_pool)?,
-                usetarget: reader.parse_string_key(16, "UseTarget", &mut string_pool)?,
-                usevalue: reader.parse_i32(17, "UseValue")?,
-                cooldownms: reader.parse_i32(18, "CoolDownMs")?,
-                description: reader.parse_string_key(19, "Description", &mut string_pool)?,
+                bindtype: reader.parse_string_key(8, "BindType", &mut string_pool)?,
+                attack: reader.parse_i32(9, "Attack")?,
+                defense: reader.parse_i32(10, "Defense")?,
+                maxhp: reader.parse_i32(11, "MaxHp")?,
+                critrate: reader.parse_f32(12, "CritRate")?,
+                movespeed: reader.parse_f32(13, "MoveSpeed")?,
+                useeffect: reader.parse_string_key(14, "UseEffect", &mut string_pool)?,
+                usetarget: reader.parse_string_key(15, "UseTarget", &mut string_pool)?,
+                usevalue: reader.parse_i32(16, "UseValue")?,
+                cooldownms: reader.parse_i32(17, "CoolDownMs")?,
+                description: reader.parse_string_key(18, "Description", &mut string_pool)?,
             };
 
             if table.by_id.insert(row.id, table.rows.len()).is_some() {

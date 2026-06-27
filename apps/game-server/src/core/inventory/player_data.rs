@@ -21,8 +21,6 @@ pub struct PlayerData {
     pub equipment: EquipmentSlots,
 
     // ========== 角色状态 ==========
-    /// 等级
-    pub level: i32,
     /// 属性
     pub attr: PlayerAttr,
     /// 外观
@@ -62,7 +60,6 @@ impl PlayerData {
             inventory: ItemContainer::new(inventory_capacity),
             warehouse: ItemContainer::new(warehouse_capacity),
             equipment: EquipmentSlots::new(),
-            level: 1,
             attr: PlayerAttr::new(),
             visual: PlayerVisual::new(0),
             buffs: Vec::new(),
@@ -347,7 +344,6 @@ mod tests {
         let player = PlayerData::new("chr_0000000000001".to_string());
 
         assert_eq!(player.character_id, "chr_0000000000001");
-        assert_eq!(player.level, 1);
         assert_eq!(player.inventory.capacity(), DEFAULT_INVENTORY_CAPACITY);
         assert_eq!(player.warehouse.capacity(), DEFAULT_WAREHOUSE_CAPACITY);
     }

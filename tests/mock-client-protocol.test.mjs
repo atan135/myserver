@@ -475,3 +475,12 @@ test("mock-client character title scenarios document async response matching and
   assert.match(readme, /--discipline-points/);
   assert.match(readme, /messageType \+ seq/);
 });
+
+test("mock-client inventory scenarios print selected character target", () => {
+  const scenarioSource = fs.readFileSync("tools/mock-client/src/scenarios/inventory.js", "utf8");
+
+  assert.match(scenarioSource, /function printInventoryTarget\(login\)/);
+  assert.match(scenarioSource, /accountPlayerId: login\.playerId/);
+  assert.match(scenarioSource, /characterId: login\.characterId/);
+  assert.match(scenarioSource, /inventory\.target/);
+});

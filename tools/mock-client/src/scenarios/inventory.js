@@ -22,6 +22,13 @@ export function printResponse(label, packet) {
   return decoded;
 }
 
+function printInventoryTarget(login) {
+  console.log("inventory.target:", JSON.stringify({
+    accountPlayerId: login.playerId,
+    characterId: login.characterId
+  }, null, 2));
+}
+
 /**
  * Wait for specific push message
  */
@@ -73,6 +80,7 @@ async function authenticateAndJoinRoom(client, options, login, roomId) {
 export async function runInventoryEquip(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -122,6 +130,7 @@ export async function runInventoryEquip(options) {
 export async function runInventoryUse(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -172,6 +181,7 @@ export async function runInventoryUse(options) {
 export async function runInventoryDiscard(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -217,6 +227,7 @@ export async function runInventoryDiscard(options) {
 export async function runInventoryWarehouse(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -263,6 +274,7 @@ export async function runInventoryWarehouse(options) {
 export async function runInventoryAdd(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -311,6 +323,7 @@ export async function runInventoryAdd(options) {
 export async function runGetInventory(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();
@@ -353,6 +366,7 @@ export async function runGetInventory(options) {
 export async function runInventoryFull(options) {
   const login = await fetchTicket(options);
   console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
+  printInventoryTarget(login);
 
   const client = new TcpProtocolClient(options, "client");
   await client.connect();

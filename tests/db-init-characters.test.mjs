@@ -38,6 +38,12 @@ const characterTitlesTableMatch = gameSection.match(
 const characterTitleLogsTableMatch = gameSection.match(
   /CREATE TABLE IF NOT EXISTS character_title_logs \([\s\S]*?\n\);/
 );
+const characterInventoryTableMatch = gameSection.match(
+  /CREATE TABLE IF NOT EXISTS character_inventory \([\s\S]*?\n\);/
+);
+const characterInventoryGrantsTableMatch = gameSection.match(
+  /CREATE TABLE IF NOT EXISTS character_inventory_grants \([\s\S]*?\n\);/
+);
 
 test("db init creates characters table in the game database section", () => {
   assert.notEqual(charactersTableMatch, null, "characters table should be created in myserver_game");
@@ -315,6 +321,57 @@ test("character title logs have reverse-time and title lookup indexes", () => {
       )
     );
   }
+});
+
+test("character inventory table is character-scoped and has no legacy level column", () => {
+  assert.notEqual(
+    characterInventoryTableMatch,
+    null,
+    "character_inventory table should be created in myserver_game"
+  );
+  const tableSql = characterInventoryTableMatch[0];
+
+  for (const pattern of [
+    /character_id varchar\(64\) NOT NULL/,
+    /hp bigint NOT NULL DEFAULT 0/,
+    /inventory_data jsonb NOT NULL/,
+    /warehouse_data jsonb NOT NULL/,
+    /equipment_data jsonb NOT NULL/,
+    /attr_base_data jsonb NOT NULL/,
+    /visual_data jsonb NOT NULL/,
+    /buffs_data jsonb NOT NULL/,
+    /CONSTRAINT uk_character_inventory_character_id UNIQUE \(character_id\)/
+  ]) {
+    assert.match(tableSql, pattern);
+  }
+
+  assert.equal(/\blevel\b/i.test(tableSql), false);
+  assert.equal(/\bplayer_id\b/i.test(tableSql), false);
+  assert.equal(/\baccount_player_id\b/i.test(tableSql), false);
+});
+
+test("character inventory grants are idempotent per request and target character ids", () => {
+  assert.notEqual(
+    characterInventoryGrantsTableMatch,
+    null,
+    "character_inventory_grants table should be created in myserver_game"
+  );
+  const tableSql = characterInventoryGrantsTableMatch[0];
+
+  for (const pattern of [
+    /request_id varchar\(128\) NOT NULL/,
+    /character_id varchar\(64\) NOT NULL/,
+    /source varchar\(64\) NOT NULL/,
+    /items_json jsonb NOT NULL/,
+    /CONSTRAINT uk_character_inventory_grants_request_id UNIQUE \(request_id\)/
+  ]) {
+    assert.match(tableSql, pattern);
+  }
+
+  assert.match(
+    gameSection,
+    /CREATE INDEX IF NOT EXISTS idx_character_inventory_grants_character_id\s+ON character_inventory_grants \(character_id\);/
+  );
 });
 
 test("game audit tables directly include account and character identity fields", () => {

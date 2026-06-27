@@ -35,7 +35,6 @@ pub enum ItemError {
     InventoryFull,
     WarehouseFull,
     CannotTrade,
-    LevelRequired,
     Cooldown,
     Unknown,
 }
@@ -51,7 +50,6 @@ impl ItemError {
             ItemError::InventoryFull => "INVENTORY_FULL",
             ItemError::WarehouseFull => "WAREHOUSE_FULL",
             ItemError::CannotTrade => "CANNOT_TRADE",
-            ItemError::LevelRequired => "LEVEL_REQUIRED",
             ItemError::Cooldown => "COOLDOWN",
             ItemError::Unknown => "UNKNOWN_ERROR",
         }

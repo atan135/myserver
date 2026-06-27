@@ -193,6 +193,7 @@ impl Default for PlayerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::inventory::{Buff, EquipSlot};
 
     fn create_disabled_store() -> PgPlayerStore {
         PgPlayerStore::new_disabled()
@@ -231,26 +232,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_account_characters_keep_inventory_isolated() {
+    async fn same_account_characters_keep_inventory_warehouse_equipment_and_buffs_isolated() {
         let manager = PlayerManager::new(create_disabled_store());
-        let item = Item::new(1, 1001, 3, false);
+        let mut first_character = PlayerData::new("chr_0000000000001".to_string());
+        first_character
+            .add_item(Item::new(1, 1001, 3, false))
+            .unwrap();
+        first_character
+            .warehouse
+            .add_item(Item::new(2, 5001, 8, false))
+            .unwrap();
+        first_character
+            .equipment
+            .equip(EquipSlot::Weapon, Item::new(3, 1001, 1, false))
+            .unwrap();
+        first_character
+            .buffs
+            .push(Buff::new(4001, "test-buff".to_string(), 30_000));
 
         manager
-            .grant_items("chr_0000000000001", std::slice::from_ref(&item))
-            .await
-            .unwrap();
+            .save_player("chr_0000000000001", first_character)
+            .await;
         let other_character = manager.get_or_create_player("chr_0000000000002").await;
+        let saved_first_character = manager.get_player("chr_0000000000001").await.unwrap();
 
-        assert_eq!(
-            manager
-                .get_player("chr_0000000000001")
-                .await
-                .unwrap()
-                .inventory
-                .item_count(),
-            1
-        );
+        assert_eq!(saved_first_character.inventory.item_count(), 1);
+        assert_eq!(saved_first_character.warehouse.item_count(), 1);
+        assert_eq!(saved_first_character.equipment.equipped_count(), 1);
+        assert_eq!(saved_first_character.buffs.len(), 1);
         assert_eq!(other_character.inventory.item_count(), 0);
+        assert_eq!(other_character.warehouse.item_count(), 0);
+        assert_eq!(other_character.equipment.equipped_count(), 0);
+        assert_eq!(other_character.buffs.len(), 0);
         assert_eq!(other_character.character_id, "chr_0000000000002");
     }
 }

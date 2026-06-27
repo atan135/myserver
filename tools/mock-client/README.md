@@ -192,6 +192,8 @@ Protobuf 风格的编解码工具：
 | `movement-interactive` | 交互式双客户端移动同步（键盘控制） |
 
 ### 背包系统场景 (inventory.js)
+背包场景会先通过账号登录和选角获取 character-bound game ticket，随后所有背包、仓库、装备和道具操作都作用于该 `characterId`。场景启动时会打印 `inventory.target`，用于确认当前账号和角色目标。
+
 | 场景 | 说明 |
 |------|------|
 | `inventory-equip` | 装备穿戴到指定槽位 |

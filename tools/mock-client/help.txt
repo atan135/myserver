@@ -359,6 +359,7 @@ node tools/mock-client/src/index.js --scenario movement-interactive --http-base-
 # 控制指令: w/a/s/d 或方向键移动, space 停止, q 退出
 
 # ========== 背包系统测试 ==========
+# 背包场景均先选角并使用当前 ticket 绑定 characterId；输出 inventory.target 用于确认目标角色。
 
 # 25. 装备穿戴测试 (INVENTORY_EQUIP)
 # 测试将物品装备到指定槽位
