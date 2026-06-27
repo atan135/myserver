@@ -836,6 +836,30 @@ message AddCharacterDisciplinePointsRes {
   repeated CharacterTitleSummary unlocked_titles = 7;
 }
 
+message ApplyCharacterProgressReq {
+  string progress_id = 1;
+}
+
+message CharacterProgressRewardSummary {
+  string reward_type = 1;
+  string reward_id = 2;
+  string status = 3;
+  CharacterTitleSummary title = 4;
+  CharacterDisciplineSummary discipline = 5;
+  string eligibility = 6;
+}
+
+message ApplyCharacterProgressRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  bool applied = 4;
+  string progress_id = 5;
+  string source_type = 6;
+  string source_id = 7;
+  repeated CharacterProgressRewardSummary rewards = 8;
+}
+
 message DebugCharacterTitleReq {
   string action = 1;
   string title_id = 2;

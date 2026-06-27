@@ -1221,7 +1221,7 @@ fn title_id(summary: &CharacterTitleSummary) -> &str {
         .unwrap_or("")
 }
 
-fn to_title_summary(
+pub(crate) fn to_title_summary(
     table: &TitleTable,
     title: Option<&CharacterTitle>,
     title_id: &str,
@@ -1297,7 +1297,9 @@ fn resolve_string(table: &TitleTable, key: u32) -> String {
         .unwrap_or_default()
 }
 
-fn to_discipline_summary(discipline: &CharacterDiscipline) -> CharacterDisciplineSummary {
+pub(crate) fn to_discipline_summary(
+    discipline: &CharacterDiscipline,
+) -> CharacterDisciplineSummary {
     CharacterDisciplineSummary {
         discipline_id: discipline.discipline_id.clone(),
         points: discipline.points,

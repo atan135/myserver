@@ -23,6 +23,8 @@ const SUPPORTED_CONDITION_TYPES: &[&str] = &[
     "discipline_tier",
     "title",
     "item",
+    "discipline_eligibility",
+    "progress_eligibility",
     "quest",
     "event",
     "npc_affection",
@@ -206,6 +208,10 @@ fn validate_typed_condition(
                 );
             }
             require_positive_u32(value, &["count", "amount"], csv_row, field_name)
+        }
+        "discipline_eligibility" | "progress_eligibility" => {
+            require_string(value, &["discipline_id", "discipline"], csv_row, field_name)?;
+            Ok(())
         }
         "quest" => {
             require_string(value, &["quest_id", "quest"], csv_row, field_name)?;
@@ -492,7 +498,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn discipline_table_accepts_base_sample() {
@@ -553,6 +559,20 @@ int,string,string,string,string,string,Array<string>,Array<string>,string
         );
     }
 
+    #[test]
+    fn discipline_table_accepts_progress_eligibility_condition() {
+        let fixture = TempCsvFile::new(
+            r#"Id,DisciplineId,Name,Description,LearnConditions,TierRules,SkillPool,InteractionPermissions,DisplayFields
+int,string,string,string,string,string,Array<string>,Array<string>,string
+1,wind_lore,Wind Lore,,"{""type"":""discipline_eligibility"",""discipline_id"":""wind_lore""}","{""initial_tier"":""novice"",""tiers"":[{""tier"":""novice"",""min_points"":0}]}",skill,learn,"{""icon"":""x""}"
+2,fire_lore,Fire Lore,,"{""type"":""progress_eligibility"",""discipline_id"":""fire_lore""}","{""initial_tier"":""novice"",""tiers"":[{""tier"":""novice"",""min_points"":0}]}",skill,learn,"{""icon"":""x""}"
+"#,
+        );
+        let table = DisciplineTable::load_from_csv(fixture.path()).expect("csv should parse");
+
+        validate_discipline_table(&table).expect("eligibility conditions should validate");
+    }
+
     fn assert_invalid(contents: &str, expected: &str) {
         let fixture = TempCsvFile::new(contents);
         let table = DisciplineTable::load_from_csv(fixture.path()).expect("csv should parse");
@@ -600,12 +620,11 @@ int,string,string,string,string,string,Array<string>,Array<string>,string
         path: PathBuf,
     }
 
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
     impl TempCsvFile {
         fn new(contents: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "game-server-discipline-table-test-{}-{unique}.csv",
                 std::process::id()

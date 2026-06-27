@@ -1082,6 +1082,9 @@ enum LearnCondition {
         count: u32,
         consume: bool,
     },
+    DisciplineEligibility {
+        discipline_id: String,
+    },
     Unsupported {
         condition_type: String,
     },
@@ -1097,6 +1100,7 @@ impl LearnCondition {
             Self::DisciplineTier { .. }
             | Self::Title { .. }
             | Self::Item { .. }
+            | Self::DisciplineEligibility { .. }
             | Self::Unsupported { .. } => false,
         }
     }
@@ -1111,6 +1115,7 @@ impl LearnCondition {
             | Self::Mastery { .. }
             | Self::DisciplineTier { .. }
             | Self::Item { .. }
+            | Self::DisciplineEligibility { .. }
             | Self::Unsupported { .. } => false,
         }
     }
@@ -1312,6 +1317,13 @@ fn parse_condition_value(value: &Value) -> Result<LearnCondition, DisciplineErro
                         consume: bool_field(value, &["consume"]).unwrap_or(false),
                     })
                 }
+                "discipline_eligibility" | "progress_eligibility" => {
+                    let discipline_id = string_field(value, &["discipline_id", "discipline"])
+                        .ok_or_else(|| {
+                            invalid_config("discipline_eligibility requires discipline_id")
+                        })?;
+                    Ok(LearnCondition::DisciplineEligibility { discipline_id })
+                }
                 "quest" | "event" | "npc_affection" | "organization" | "scene_location"
                 | "world_state" | "world_status" | "world_flag" => {
                     Ok(LearnCondition::Unsupported { condition_type })
@@ -1440,6 +1452,19 @@ fn evaluate_learn_condition(
         } => {
             let costs = collect_item_costs(player_data, *item_id, *count)?;
             if *consume { Ok(costs) } else { Ok(Vec::new()) }
+        }
+        LearnCondition::DisciplineEligibility { discipline_id } => {
+            if player_data
+                .progress
+                .discipline_learning_eligibilities
+                .contains(discipline_id)
+            {
+                Ok(Vec::new())
+            } else {
+                Err(condition_not_met(format!(
+                    "discipline eligibility {discipline_id} not granted"
+                )))
+            }
         }
         LearnCondition::Unsupported { condition_type } => {
             Err(DisciplineError::UnsupportedLearnCondition {
@@ -1924,6 +1949,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn formal_learn_consumes_progress_discipline_eligibility() {
+        let identity = identity();
+        let service = DisciplineService::new_in_memory();
+        let element_service = CharacterElementService::new_in_memory();
+        let title_service = TitleService::new_in_memory(title_table());
+        let table = discipline_table_with_eligibility();
+        let mut player_data = PlayerData::new(identity.character_id.clone());
+
+        let error = service
+            .learn_for_identity(
+                &identity,
+                LearnDisciplineRequest::new("wind_canyon_lore"),
+                &table,
+                &item_table(),
+                &element_service,
+                &title_service,
+                &mut player_data,
+                8,
+                context(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), "DISCIPLINE_LEARN_CONDITION_NOT_MET");
+        assert!(service.logs().await.is_empty());
+
+        player_data
+            .progress
+            .discipline_learning_eligibilities
+            .insert("wind_canyon_lore".to_string());
+
+        let result = service
+            .learn_for_identity(
+                &identity,
+                LearnDisciplineRequest::new("wind_canyon_lore"),
+                &table,
+                &item_table(),
+                &element_service,
+                &title_service,
+                &mut player_data,
+                8,
+                context(),
+            )
+            .await
+            .expect("progress eligibility should allow formal discipline learning");
+
+        assert_eq!(result.discipline.discipline_id, "wind_canyon_lore");
+        assert!(result.consumed_items.is_empty());
+        assert!(
+            player_data
+                .progress
+                .discipline_learning_eligibilities
+                .contains("wind_canyon_lore")
+        );
+        assert!(
+            service
+                .logs()
+                .await
+                .iter()
+                .any(|log| log.discipline_id == "wind_canyon_lore" && log.action == "learn")
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_learn_returns_stable_error() {
         let identity = identity();
         let service = DisciplineService::new_in_memory();
@@ -2204,6 +2292,17 @@ mod tests {
             3,
             "wind_canyon_lore",
             r#"{"type":"event","event_id":"wind_canyon_explored"}"#,
+            r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0}]}"#,
+        );
+        builder.finish()
+    }
+
+    fn discipline_table_with_eligibility() -> DisciplineTable {
+        let mut builder = DisciplineTableBuilder::new();
+        builder.add(
+            1,
+            "wind_canyon_lore",
+            r#"{"type":"discipline_eligibility","discipline_id":"wind_canyon_lore"}"#,
             r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0}]}"#,
         );
         builder.finish()

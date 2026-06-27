@@ -5,7 +5,18 @@ use serde_json::Value;
 use crate::config_table::CsvLoadError;
 use crate::csv_code::titletable::TitleTable;
 
-const ALLOWED_TITLE_TYPES: &[&str] = &["identity", "discipline", "event", "honor", "gm", "system"];
+const ALLOWED_TITLE_TYPES: &[&str] = &[
+    "identity",
+    "discipline",
+    "event",
+    "achievement",
+    "activity",
+    "ranking",
+    "world_event",
+    "honor",
+    "gm",
+    "system",
+];
 
 const COMBAT_EFFECT_KEYS: &[&str] = &[
     "attack",
@@ -170,7 +181,7 @@ mod tests {
     use crate::config_table::CsvTableLoader;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn title_table_accepts_supported_minimal_types() {
@@ -180,9 +191,13 @@ mod tests {
              1,身份称号,,identity,,,{}, {},common,icon,#fff,identity,0,0,1\n\
              2,职业称号,,discipline,forging,novice,\"{\"\"discipline\"\":\"\"forging\"\"}\",\"{\"\"display_badge\"\":\"\"forging\"\"}\",common,icon,#fff,discipline,0,0,2\n\
              3,活动称号,,event,event_a,,{}, {},rare,icon,#fff,event,0,0,3\n\
-             4,荣誉称号,,honor,arena,,{}, {},rare,icon,#fff,honor,0,0,4\n\
-             5,GM称号,,gm,gm,,{}, {},epic,icon,#fff,gm,1,0,5\n\
-             6,系统称号,,system,system,,{}, {},epic,icon,#fff,system,1,0,6\n",
+             4,成就称号,,achievement,first_clear,,{}, {},rare,icon,#fff,achievement,0,0,4\n\
+             5,活动称号,,activity,summer,,{}, {},rare,icon,#fff,activity,0,0,5\n\
+             6,榜单称号,,ranking,arena,,{}, {},rare,icon,#fff,ranking,0,0,6\n\
+             7,世界事件称号,,world_event,keep_guard,,{}, {},rare,icon,#fff,world_event,0,0,7\n\
+             8,荣誉称号,,honor,arena,,{}, {},rare,icon,#fff,honor,0,0,8\n\
+             9,GM称号,,gm,gm,,{}, {},epic,icon,#fff,gm,1,0,9\n\
+             10,系统称号,,system,system,,{}, {},epic,icon,#fff,system,1,0,10\n",
         );
 
         let table = TitleTable::load_from_csv(fixture.path()).expect("csv should load");
@@ -195,7 +210,7 @@ mod tests {
         let table = TitleTable::load_from_csv(&path).expect("sample TitleTable.csv should load");
         validate_title_table(&table).expect("sample TitleTable.csv should validate");
 
-        for title_id in [1001, 2001, 3001, 9001] {
+        for title_id in [1001, 2001, 3001, 9001, 9101] {
             assert!(
                 table.get(title_id).is_some(),
                 "sample TitleTable.csv should include title {title_id}"
@@ -274,12 +289,11 @@ mod tests {
         path: PathBuf,
     }
 
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
     impl TempCsvFile {
         fn new(contents: &str) -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "game-server-title-table-test-{}-{unique}.csv",
                 std::process::id()

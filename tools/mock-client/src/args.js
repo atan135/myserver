@@ -68,6 +68,7 @@ const DEFAULT_OPTIONS = {
   disciplineId: "forging",
   disciplineTier: "novice",
   disciplinePoints: 1,
+  progressId: "achievement_first_forge",
   titleChangeReason: "mock-client character title debug",
   titleDebugToken: process.env.MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
   timeoutMs: 5000,
@@ -294,6 +295,9 @@ export function parseArgs(argv) {
       case "--discipline-points":
         result.disciplinePoints = Number.parseInt(collectOptionValue(argv, index).value, 10);
         index = collectOptionValue(argv, index).nextIndex;
+        break;
+      case "--progress-id":
+        ({ value: result.progressId, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--title-change-reason":
         ({ value: result.titleChangeReason, nextIndex: index } = collectOptionValue(argv, index));

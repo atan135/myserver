@@ -1233,6 +1233,45 @@ pub struct AddCharacterDisciplinePointsRes {
     pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ApplyCharacterProgressReq {
+    #[prost(string, tag = "1")]
+    pub progress_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CharacterProgressRewardSummary {
+    #[prost(string, tag = "1")]
+    pub reward_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub reward_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub title: ::core::option::Option<CharacterTitleSummary>,
+    #[prost(message, optional, tag = "5")]
+    pub discipline: ::core::option::Option<CharacterDisciplineSummary>,
+    #[prost(string, tag = "6")]
+    pub eligibility: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ApplyCharacterProgressRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub applied: bool,
+    #[prost(string, tag = "5")]
+    pub progress_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub source_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub source_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "8")]
+    pub rewards: ::prost::alloc::vec::Vec<CharacterProgressRewardSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebugCharacterTitleReq {
     #[prost(string, tag = "1")]
     pub action: ::prost::alloc::string::String,

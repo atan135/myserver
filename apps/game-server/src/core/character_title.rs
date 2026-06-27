@@ -212,6 +212,11 @@ impl TitleService {
         self.grant(&identity.character_id, request, context).await
     }
 
+    pub(crate) async fn is_limited_title(&self, title_id: &str) -> Result<bool, TitleError> {
+        let title_config = self.resolve_title_config(title_id).await?;
+        Ok(title_config.limited != 0)
+    }
+
     pub async fn revoke_for_identity(
         &self,
         identity: &AuthenticatedSessionIdentity,

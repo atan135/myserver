@@ -273,6 +273,10 @@ export function encodeAddCharacterDisciplinePointsReq(disciplineId, pointsDelta)
   ]);
 }
 
+export function encodeApplyCharacterProgressReq(progressId) {
+  return encodeStringField(1, progressId);
+}
+
 export function encodeDebugCharacterTitleReq({
   action = "",
   titleId = "",
@@ -503,6 +507,18 @@ function decodeCharacterDisciplineChangeRes(fields) {
     disciplines: decodeRepeatedMessage(fields, 5, decodeCharacterDisciplineSummary),
     activeSkillPool: readStringList(fields, 6),
     unlockedTitles: decodeRepeatedMessage(fields, 7, decodeCharacterTitleSummary)
+  };
+}
+
+function decodeCharacterProgressRewardSummary(buffer) {
+  const fields = decodeFieldsWithRepeated(buffer);
+  return {
+    rewardType: readString(fields, 1),
+    rewardId: readString(fields, 2),
+    status: readString(fields, 3),
+    title: fields.get(4) ? decodeCharacterTitleSummary(fields.get(4)) : null,
+    discipline: fields.get(5) ? decodeCharacterDisciplineSummary(fields.get(5)) : null,
+    eligibility: readString(fields, 6)
   };
 }
 
@@ -747,6 +763,17 @@ export function decodeByMessageType(messageType, body) {
     case MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES:
     case MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES:
       return decodeCharacterDisciplineChangeRes(fields);
+    case MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES:
+      return {
+        ok: readBool(fields, 1),
+        errorCode: readString(fields, 2),
+        characterId: readString(fields, 3),
+        applied: readBool(fields, 4),
+        progressId: readString(fields, 5),
+        sourceType: readString(fields, 6),
+        sourceId: readString(fields, 7),
+        rewards: decodeRepeatedMessage(fields, 8, decodeCharacterProgressRewardSummary)
+      };
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {
         ok: readBool(fields, 1),

@@ -119,6 +119,7 @@ export {
   runCharacterDisciplineDeactivate,
   runCharacterDisciplineSwitch,
   runCharacterDisciplinePoints,
+  runCharacterProgressApply,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./character.js";

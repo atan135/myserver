@@ -95,6 +95,7 @@ import {
   runCharacterDisciplineDeactivate,
   runCharacterDisciplineSwitch,
   runCharacterDisciplinePoints,
+  runCharacterProgressApply,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./scenarios/index.js";
@@ -550,6 +551,17 @@ async function main() {
 
   if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_POINTS) {
     const result = await runCharacterDisciplinePoints(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_PROGRESS_APPLY) {
+    const result = await runCharacterProgressApply(options);
     if (!result.ok) {
       process.exitCode = 1;
     }

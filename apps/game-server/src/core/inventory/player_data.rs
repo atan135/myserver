@@ -6,6 +6,37 @@ use super::item::{Item, ItemElementValues, ItemError};
 use super::visual::PlayerVisual;
 use crate::core::character_element::{CharacterElementChange, ElementDeltas};
 use crate::csv_code::itemtable::{ItemTable, ItemTableRow};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterProgressState {
+    #[serde(default)]
+    pub completed: BTreeMap<String, CharacterProgressRecord>,
+    #[serde(default)]
+    pub discipline_learning_eligibilities: BTreeSet<String>,
+    #[serde(default)]
+    pub reward_logs: Vec<CharacterProgressRewardLog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterProgressRecord {
+    pub progress_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub completed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterProgressRewardLog {
+    pub progress_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub reward_type: String,
+    pub reward_id: String,
+    pub status: String,
+    pub created_at: String,
+}
 
 /// 角色完整玩法数据
 #[derive(Debug, Clone)]
@@ -28,6 +59,9 @@ pub struct PlayerData {
     pub visual: PlayerVisual,
     /// 当前激活的 Buff
     pub buffs: Vec<Buff>,
+
+    /// 任务/成就/活动等正式进度奖励的最小持久化状态。
+    pub progress: CharacterProgressState,
 
     // ========== 脏标记 ==========
     pub attr_dirty: bool,
@@ -64,6 +98,7 @@ impl PlayerData {
             attr: PlayerAttr::new(),
             visual: PlayerVisual::new(0),
             buffs: Vec::new(),
+            progress: CharacterProgressState::default(),
             attr_dirty: true,
             visual_dirty: false,
             data_dirty: true,

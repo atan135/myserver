@@ -2,6 +2,7 @@
 // This file is generated at compile time. Do not edit manually.
 
 pub mod bufferbase;
+pub mod characterprogresstable;
 pub mod disciplinetable;
 pub mod itemtable;
 pub mod scenemonsterspawn;

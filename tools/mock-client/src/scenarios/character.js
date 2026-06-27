@@ -8,6 +8,7 @@ import {
   encodeGetCharacterElementsReq,
   encodeGetCharacterTitlesReq,
   encodeAddCharacterDisciplinePointsReq,
+  encodeApplyCharacterProgressReq,
   encodeLearnCharacterDisciplineReq,
   encodeSetCharacterDisciplineActiveReq,
   encodeSwitchCharacterDisciplineReq,
@@ -194,6 +195,17 @@ function findDisciplineById(disciplinesRes, disciplineId) {
 
 function summarizeUnlockedTitles(titles) {
   return (titles || []).map(summarizeTitle).filter(Boolean);
+}
+
+function summarizeProgressReward(reward) {
+  return {
+    rewardType: reward?.rewardType || "",
+    rewardId: reward?.rewardId || "",
+    status: reward?.status || "",
+    title: summarizeTitle(reward?.title),
+    discipline: summarizeDiscipline(reward?.discipline),
+    eligibility: reward?.eligibility || ""
+  };
 }
 
 async function queryTitles(client, options, seq, label) {
@@ -921,5 +933,54 @@ export async function runCharacterDisciplinePoints(options) {
   });
 
   printResult("character.disciplinePoints", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterProgressApply(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      await client.send(
+        MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_REQ,
+        2,
+        encodeApplyCharacterProgressReq(options.progressId)
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES && packet.seq === 2,
+        "applyCharacterProgress"
+      );
+      const titles = await queryTitles(client, options, 3, "getCharacterTitles(afterProgress)");
+      const disciplines = await queryDisciplines(client, options, 4, "getCharacterDisciplines(afterProgress)");
+
+      const ok = Boolean(action.ok && titles.ok && disciplines.ok);
+      return buildEnvelope("character-progress-apply", ok, {
+        login: formatLoginSummary(login),
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          applied: Boolean(action.applied),
+          progressId: action.progressId || "",
+          sourceType: action.sourceType || "",
+          sourceId: action.sourceId || "",
+          rewards: (action.rewards || []).map(summarizeProgressReward)
+        },
+        titles: summarizeTitlesResponse(titles),
+        disciplines: (disciplines.disciplines || []).map(summarizeDiscipline),
+        request: {
+          progressId: options.progressId
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.progressApply", envelope, options);
   return envelope;
 }

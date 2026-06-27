@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::config::Config;
 use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
 use crate::core::character_element::{CharacterElementService, PgCharacterElementStore};
+use crate::core::character_progress::CharacterProgressService;
 use crate::core::character_title::{PgTitleStore, TitleService};
 use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
@@ -26,8 +27,8 @@ use crate::core::room::{
 };
 use crate::core::runtime::RoomManager;
 use crate::core::service::{
-    character_element_service, character_title_service, core_service, inventory_service,
-    room_service,
+    character_element_service, character_progress_service, character_title_service, core_service,
+    inventory_service, room_service,
 };
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
@@ -512,6 +513,11 @@ pub async fn run(
         character_element_service.clone(),
         title_unlock_config_tables,
     );
+    let character_progress_service = CharacterProgressService::new(
+        character_element_service.clone(),
+        discipline_service.clone(),
+        title_service.clone(),
+    );
 
     let player_registry: PlayerRegistry = PlayerRegistry::default();
 
@@ -527,6 +533,7 @@ pub async fn run(
         character_element_service,
         discipline_service,
         title_service,
+        character_progress_service,
         title_unlock_service,
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
@@ -1245,6 +1252,12 @@ async fn dispatch_packet(
         }
         Some(MessageType::AddCharacterDisciplinePointsReq) => {
             character_title_service::handle_add_character_discipline_points(
+                services, connection, packet,
+            )
+            .await
+        }
+        Some(MessageType::ApplyCharacterProgressReq) => {
+            character_progress_service::handle_apply_character_progress(
                 services, connection, packet,
             )
             .await

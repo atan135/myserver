@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use crate::config::Config;
 use crate::core::character_discipline::DisciplineService;
 use crate::core::character_element::CharacterElementService;
+use crate::core::character_progress::CharacterProgressService;
 use crate::core::character_title::TitleService;
 use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
@@ -131,6 +132,7 @@ pub struct ServiceContext {
     pub character_element_service: CharacterElementService,
     pub discipline_service: DisciplineService,
     pub title_service: TitleService,
+    pub character_progress_service: CharacterProgressService,
     pub title_unlock_service: TitleUnlockService,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,

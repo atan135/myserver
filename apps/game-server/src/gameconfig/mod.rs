@@ -1,3 +1,4 @@
+mod character_progress_config;
 mod discipline_config;
 pub mod generated;
 mod registry;

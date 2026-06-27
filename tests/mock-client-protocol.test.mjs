@@ -7,6 +7,7 @@ import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
 import {
   decodeByMessageType,
   encodeAddCharacterDisciplinePointsReq,
+  encodeApplyCharacterProgressReq,
   encodeCreateMatchedRoomReq,
   encodeDebugCharacterTitleReq,
   encodeDebugApplyCharacterElementChangeReq,
@@ -119,6 +120,17 @@ function encodeDisciplineItemCost(cost) {
     encodeInt64Field(1, cost.itemUid),
     encodeInt32Field(2, cost.itemId),
     encodeUInt32Field(3, cost.count)
+  ]);
+}
+
+function encodeCharacterProgressRewardSummary(reward) {
+  return Buffer.concat([
+    encodeStringField(1, reward.rewardType),
+    encodeStringField(2, reward.rewardId),
+    encodeStringField(3, reward.status),
+    reward.title ? encodeMessageField(4, encodeCharacterTitleSummary(reward.title)) : Buffer.alloc(0),
+    reward.discipline ? encodeMessageField(5, encodeCharacterDisciplineSummary(reward.discipline)) : Buffer.alloc(0),
+    encodeStringField(6, reward.eligibility || "")
   ]);
 }
 
@@ -321,9 +333,14 @@ test("mock-client defines contiguous character title and discipline message type
       MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_REQ,
       MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES,
       MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_REQ,
-      MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES
+      MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES,
+      MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_REQ,
+      MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES
     ],
-    [1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426, 1427, 1428, 1429, 1430, 1431, 1432]
+    [
+      1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426, 1427, 1428, 1429, 1430,
+      1431, 1432, 1433, 1434
+    ]
   );
 });
 
@@ -344,6 +361,9 @@ test("mock-client encodes character title and discipline requests", () => {
   const pointsFields = decodeFieldsWithRepeated(encodeAddCharacterDisciplinePointsReq("forging", 120));
   assert.equal(readString(pointsFields, 1), "forging");
   assert.equal(readInt64(pointsFields, 2), 120);
+
+  const progressFields = decodeFieldsWithRepeated(encodeApplyCharacterProgressReq("achievement_first_forge"));
+  assert.equal(readString(progressFields, 1), "achievement_first_forge");
 
   const equipFields = decodeFieldsWithRepeated(encodeEquipCharacterTitleReq("9001"));
   assert.equal(readString(equipFields, 1), "9001");
@@ -554,6 +574,58 @@ test("mock-client decodes character title, equip, discipline, and debug response
     discipline,
     unlockedTitles: [title2001]
   });
+
+  const progressRewards = [
+    {
+      rewardType: "title",
+      rewardId: "2001",
+      status: "granted",
+      title: title2001,
+      discipline: null,
+      eligibility: ""
+    },
+    {
+      rewardType: "discipline_points",
+      rewardId: "forging",
+      status: "applied",
+      title: null,
+      discipline,
+      eligibility: ""
+    },
+    {
+      rewardType: "discipline_eligibility",
+      rewardId: "fire_art",
+      status: "granted",
+      title: null,
+      discipline: null,
+      eligibility: "fire_art"
+    }
+  ];
+  const progressResBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeStringField(2, ""),
+    encodeStringField(3, "chr_0000000000001"),
+    encodeBoolField(4, true),
+    encodeStringField(5, "achievement_first_forge"),
+    encodeStringField(6, "achievement"),
+    encodeStringField(7, "first_forge"),
+    ...progressRewards.map((reward) =>
+      encodeMessageField(8, encodeCharacterProgressRewardSummary(reward))
+    )
+  ]);
+  assert.deepEqual(
+    decodeByMessageType(MESSAGE_TYPE.APPLY_CHARACTER_PROGRESS_RES, progressResBody),
+    {
+      ok: true,
+      errorCode: "",
+      characterId: "chr_0000000000001",
+      applied: true,
+      progressId: "achievement_first_forge",
+      sourceType: "achievement",
+      sourceId: "first_forge",
+      rewards: progressRewards
+    }
+  );
 });
 
 test("mock-client character title scenarios document async response matching and JSON shape", () => {
@@ -579,6 +651,8 @@ test("mock-client character title scenarios document async response matching and
   assert.match(scenarioSource, /SET_CHARACTER_DISCIPLINE_ACTIVE_REQ/);
   assert.match(scenarioSource, /SWITCH_CHARACTER_DISCIPLINE_REQ/);
   assert.match(scenarioSource, /ADD_CHARACTER_DISCIPLINE_POINTS_REQ/);
+  assert.match(scenarioSource, /APPLY_CHARACTER_PROGRESS_REQ/);
+  assert.match(scenarioSource, /APPLY_CHARACTER_PROGRESS_RES/);
   assert.match(
     scenarioSource,
     /packet\.messageType === MESSAGE_TYPE\.LEARN_CHARACTER_DISCIPLINE_RES && packet\.seq === 3/
@@ -600,9 +674,12 @@ test("mock-client character title scenarios document async response matching and
   assert.match(help, /character-disciplines-debug/);
   assert.match(help, /character-discipline-learn/);
   assert.match(help, /character-discipline-switch/);
+  assert.match(help, /--progress-id <id>/);
+  assert.match(help, /character-progress-apply/);
   assert.match(readme, /--discipline-points/);
   assert.match(readme, /character-discipline-learn/);
   assert.match(readme, /character-discipline-activate/);
+  assert.match(readme, /character-progress-apply/);
   assert.match(readme, /messageType \+ seq/);
 });
 

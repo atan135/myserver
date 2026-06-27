@@ -2067,6 +2067,12 @@ mod tests {
             crate::core::character_title::PgTitleStore::new_disabled(),
             title_config_tables,
         );
+        let character_progress_service =
+            crate::core::character_progress::CharacterProgressService::new(
+                character_element_service.clone(),
+                discipline_service.clone(),
+                title_service.clone(),
+            );
         let title_unlock_service = crate::core::character_title_unlock::TitleUnlockService::new(
             title_service.clone(),
             discipline_service.clone(),
@@ -2088,6 +2094,7 @@ mod tests {
             character_element_service,
             discipline_service,
             title_service,
+            character_progress_service,
             title_unlock_service,
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),

@@ -391,6 +391,7 @@ test("character inventory table is character-scoped and has no legacy level colu
     /attr_base_data jsonb NOT NULL/,
     /visual_data jsonb NOT NULL/,
     /buffs_data jsonb NOT NULL/,
+    /progress_data jsonb NOT NULL DEFAULT '\{\}'::jsonb/,
     /CONSTRAINT uk_character_inventory_character_id UNIQUE \(character_id\)/
   ]) {
     assert.match(tableSql, pattern);

@@ -4,3 +4,4 @@ int,string,string,string,string,string,string,string,string,string,string,Array<
 2001,见习锻造者,锻造修行达到见习阶位,discipline,forging,novice,"{""discipline"":""forging"",""tier"":""novice""}","{""display_badge"":""forging_novice""}",common,icon_title_forging_novice,#D98B45,discipline|forging,0,0,200
 3001,风行旅者,完成风蚀峡谷探索事件,event,wind_canyon,,"{""event"":""wind_canyon_explored""}","{""interaction_tag"":""wind_canyon_known""}",rare,icon_title_wind_traveler,#66CCFF,event|exploration,0,0,300
 9001,系统观察员,系统或 GM 授予的调试称号,system,system,,"{""grant"":""system""}",{},epic,icon_title_system_observer,#B46CFF,system|gm,1,0,900
+9101,夏季竞逐者,限时活动或排行榜授予的赛季称号,activity,summer_2026,,"{""grant"":""activity""}",{},epic,icon_title_summer_ranker,#F2C94C,activity|ranking|limited,0,1,910

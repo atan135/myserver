@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use crate::core::system::scene::SceneQuery;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TempConfigDir {
         root: PathBuf,
@@ -222,12 +222,11 @@ mod tests {
         scene_dir: PathBuf,
     }
 
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
     impl TempConfigDir {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
                 "game-server-runtime-config-test-{}-{unique}",
                 std::process::id()

@@ -476,6 +476,7 @@ CREATE TABLE IF NOT EXISTS character_inventory (
   attr_base_data jsonb NOT NULL,
   visual_data jsonb NOT NULL,
   buffs_data jsonb NOT NULL,
+  progress_data jsonb NOT NULL DEFAULT '{}'::jsonb,
   updated_at timestamptz NOT NULL DEFAULT current_timestamp,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
   CONSTRAINT uk_character_inventory_character_id UNIQUE (character_id)
