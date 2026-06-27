@@ -21,6 +21,7 @@ pub use ecs::{
     CombatCommand, CombatCommandResult, CombatEntityBlueprint, CombatEntitySnapshot, CombatEvent,
     CombatEventKind, CombatHooks, CombatSnapshot, DamageContext, EntityId, MAX_BUFFS_PER_ENTITY,
     MAX_ENTITIES, MAX_SKILLS_PER_ENTITY, NoopCombatHooks, RoomCombatEcs, SkillCastRequest,
+    resolve_skill_loadout_from_codes,
 };
 #[allow(unused_imports)]
 pub use input::{

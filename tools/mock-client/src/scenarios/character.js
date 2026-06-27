@@ -7,7 +7,10 @@ import {
   encodeGetCharacterDisciplinesReq,
   encodeGetCharacterElementsReq,
   encodeGetCharacterTitlesReq,
+  encodeAddCharacterDisciplinePointsReq,
   encodeLearnCharacterDisciplineReq,
+  encodeSetCharacterDisciplineActiveReq,
+  encodeSwitchCharacterDisciplineReq,
   encodeRoomJoinReq
 } from "../messages.js";
 import {
@@ -719,7 +722,9 @@ export async function runCharacterDisciplineLearn(options) {
           errorCode: learn.errorCode || "",
           discipline: summarizeDiscipline(learn.discipline),
           definition: summarizeDisciplineDefinition(learn.definition),
-          consumedItems: learn.consumedItems || []
+          consumedItems: learn.consumedItems || [],
+          activeSkillPool: learn.activeSkillPool || [],
+          unlockedTitles: summarizeUnlockedTitles(learn.unlockedTitles)
         },
         after: {
           ok: Boolean(after.ok),
@@ -736,5 +741,185 @@ export async function runCharacterDisciplineLearn(options) {
   });
 
   printResult("character.disciplineLearn", envelope, options);
+  return envelope;
+}
+
+async function runCharacterDisciplineActiveChange(options, active) {
+  const scenario = active ? "character-discipline-activate" : "character-discipline-deactivate";
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryDisciplines(client, options, 2, "getCharacterDisciplines(before)");
+      await client.send(
+        MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_REQ,
+        3,
+        encodeSetCharacterDisciplineActiveReq(options.disciplineId, active)
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES && packet.seq === 3,
+        "setCharacterDisciplineActive"
+      );
+      const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
+      const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
+
+      const ok = Boolean(before.ok && action.ok && after.ok);
+      return buildEnvelope(scenario, ok, {
+        login: formatLoginSummary(login),
+        before: {
+          ok: Boolean(before.ok),
+          errorCode: before.errorCode || "",
+          discipline: summarizeDiscipline(findDisciplineById(before, options.disciplineId))
+        },
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          discipline: summarizeDiscipline(action.discipline),
+          activeSkillPool: action.activeSkillPool || [],
+          unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
+        },
+        after: {
+          ok: Boolean(after.ok),
+          errorCode: after.errorCode || "",
+          discipline: summarizeDiscipline(discipline)
+        },
+        request: {
+          disciplineId: options.disciplineId,
+          active
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult(`character.discipline${active ? "Activate" : "Deactivate"}`, envelope, options);
+  return envelope;
+}
+
+export async function runCharacterDisciplineActivate(options) {
+  return runCharacterDisciplineActiveChange(options, true);
+}
+
+export async function runCharacterDisciplineDeactivate(options) {
+  return runCharacterDisciplineActiveChange(options, false);
+}
+
+export async function runCharacterDisciplineSwitch(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryDisciplines(client, options, 2, "getCharacterDisciplines(before)");
+      await client.send(
+        MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_REQ,
+        3,
+        encodeSwitchCharacterDisciplineReq(options.disciplineId)
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES && packet.seq === 3,
+        "switchCharacterDiscipline"
+      );
+      const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
+      const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
+
+      const ok = Boolean(before.ok && action.ok && after.ok);
+      return buildEnvelope("character-discipline-switch", ok, {
+        login: formatLoginSummary(login),
+        before: {
+          ok: Boolean(before.ok),
+          errorCode: before.errorCode || "",
+          activeCount: (before.disciplines || []).filter((discipline) => discipline.active).length
+        },
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          discipline: summarizeDiscipline(action.discipline),
+          activeSkillPool: action.activeSkillPool || [],
+          unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
+        },
+        after: {
+          ok: Boolean(after.ok),
+          errorCode: after.errorCode || "",
+          activeCount: (after.disciplines || []).filter((discipline) => discipline.active).length,
+          discipline: summarizeDiscipline(discipline)
+        },
+        request: {
+          disciplineId: options.disciplineId
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.disciplineSwitch", envelope, options);
+  return envelope;
+}
+
+export async function runCharacterDisciplinePoints(options) {
+  const login = await fetchTicket(options);
+  const envelope = await withJsonQuiet(options, async () => {
+    const client = new TcpProtocolClient(options, "characterClient");
+    await client.connect();
+
+    try {
+      await authenticateClient(client, options, login, 1);
+
+      const before = await queryDisciplines(client, options, 2, "getCharacterDisciplines(before)");
+      await client.send(
+        MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_REQ,
+        3,
+        encodeAddCharacterDisciplinePointsReq(options.disciplineId, options.disciplinePoints)
+      );
+      const action = await client.readUntil(
+        options.timeoutMs,
+        (packet) => packet.messageType === MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES && packet.seq === 3,
+        "addCharacterDisciplinePoints"
+      );
+      const after = await queryDisciplines(client, options, 4, "getCharacterDisciplines(after)");
+      const discipline = findDisciplineById(after, options.disciplineId) || action.discipline;
+
+      const ok = Boolean(before.ok && action.ok && after.ok);
+      return buildEnvelope("character-discipline-points", ok, {
+        login: formatLoginSummary(login),
+        before: {
+          ok: Boolean(before.ok),
+          errorCode: before.errorCode || "",
+          discipline: summarizeDiscipline(findDisciplineById(before, options.disciplineId))
+        },
+        action: {
+          ok: Boolean(action.ok),
+          errorCode: action.errorCode || "",
+          discipline: summarizeDiscipline(action.discipline),
+          activeSkillPool: action.activeSkillPool || [],
+          unlockedTitles: summarizeUnlockedTitles(action.unlockedTitles)
+        },
+        after: {
+          ok: Boolean(after.ok),
+          errorCode: after.errorCode || "",
+          discipline: summarizeDiscipline(discipline)
+        },
+        request: {
+          disciplineId: options.disciplineId,
+          pointsDelta: options.disciplinePoints
+        }
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  printResult("character.disciplinePoints", envelope, options);
   return envelope;
 }

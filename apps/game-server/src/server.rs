@@ -1231,6 +1231,24 @@ async fn dispatch_packet(
             character_title_service::handle_learn_character_discipline(services, connection, packet)
                 .await
         }
+        Some(MessageType::SetCharacterDisciplineActiveReq) => {
+            character_title_service::handle_set_character_discipline_active(
+                services, connection, packet,
+            )
+            .await
+        }
+        Some(MessageType::SwitchCharacterDisciplineReq) => {
+            character_title_service::handle_switch_character_discipline(
+                services, connection, packet,
+            )
+            .await
+        }
+        Some(MessageType::AddCharacterDisciplinePointsReq) => {
+            character_title_service::handle_add_character_discipline_points(
+                services, connection, packet,
+            )
+            .await
+        }
         Some(MessageType::DebugCharacterTitleReq) => {
             character_title_service::handle_debug_character_title(services, connection, packet)
                 .await

@@ -15,6 +15,7 @@ use crate::core::character_title::{
     CharacterTitle, TitleError, TitleOperationContext, TitleService,
 };
 use crate::core::inventory::{ItemError, PlayerData};
+use crate::core::system::combat::{CombatCatalog, resolve_skill_loadout_from_codes};
 use crate::csv_code::disciplinetable::{DisciplineTable, DisciplineTableRow};
 use crate::csv_code::itemtable::ItemTable;
 use crate::session::AuthenticatedSessionIdentity;
@@ -144,6 +145,12 @@ pub struct LearnDisciplineResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisciplineChangeResult {
+    pub discipline: CharacterDiscipline,
+    pub disciplines: Vec<CharacterDiscipline>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisciplineItemCost {
     pub item_uid: u64,
     pub item_id: i32,
@@ -192,6 +199,10 @@ pub enum DisciplineError {
     DisciplineNotFound,
     DisciplineConfigNotFound,
     DisciplineAlreadyLearned,
+    DisciplineLearnLimitExceeded,
+    DisciplineActiveLimitExceeded,
+    DisciplineAlreadyActive,
+    DisciplineAlreadyInactive,
     DisciplineLearnConditionNotMet { reason: String },
     UnsupportedLearnCondition { condition_type: String },
     InvalidDisciplineId,
@@ -212,6 +223,10 @@ impl DisciplineError {
             Self::DisciplineNotFound => "DISCIPLINE_NOT_FOUND",
             Self::DisciplineConfigNotFound => "DISCIPLINE_CONFIG_NOT_FOUND",
             Self::DisciplineAlreadyLearned => "DISCIPLINE_ALREADY_LEARNED",
+            Self::DisciplineLearnLimitExceeded => "DISCIPLINE_LEARN_LIMIT_EXCEEDED",
+            Self::DisciplineActiveLimitExceeded => "DISCIPLINE_ACTIVE_LIMIT_EXCEEDED",
+            Self::DisciplineAlreadyActive => "DISCIPLINE_ALREADY_ACTIVE",
+            Self::DisciplineAlreadyInactive => "DISCIPLINE_ALREADY_INACTIVE",
             Self::DisciplineLearnConditionNotMet { .. } => "DISCIPLINE_LEARN_CONDITION_NOT_MET",
             Self::UnsupportedLearnCondition { .. } => "UNSUPPORTED_DISCIPLINE_LEARN_CONDITION",
             Self::InvalidDisciplineId => "INVALID_DISCIPLINE_ID",
@@ -234,6 +249,14 @@ impl std::fmt::Display for DisciplineError {
             Self::DisciplineNotFound => write!(formatter, "discipline not found"),
             Self::DisciplineConfigNotFound => write!(formatter, "discipline config not found"),
             Self::DisciplineAlreadyLearned => write!(formatter, "discipline already learned"),
+            Self::DisciplineLearnLimitExceeded => {
+                write!(formatter, "discipline learn limit exceeded")
+            }
+            Self::DisciplineActiveLimitExceeded => {
+                write!(formatter, "discipline active limit exceeded")
+            }
+            Self::DisciplineAlreadyActive => write!(formatter, "discipline is already active"),
+            Self::DisciplineAlreadyInactive => write!(formatter, "discipline is already inactive"),
             Self::DisciplineLearnConditionNotMet { reason } => {
                 write!(formatter, "discipline learn condition not met: {reason}")
             }
@@ -323,9 +346,11 @@ impl DisciplineService {
         character_element_service: &CharacterElementService,
         title_service: &TitleService,
         player_data: &mut PlayerData,
+        max_learned_disciplines: usize,
         context: DisciplineOperationContext,
     ) -> Result<LearnDisciplineResult, DisciplineError> {
         validate_context(&context)?;
+        validate_limit(max_learned_disciplines, "MAX_LEARNED_DISCIPLINES")?;
         validate_discipline_id(&request.discipline_id)?;
 
         let row = resolve_discipline_row(discipline_table, &request.discipline_id)?;
@@ -343,6 +368,9 @@ impl DisciplineService {
         let raw_conditions = resolve_string(discipline_table, row.learnconditions);
         let condition = parse_learn_condition(raw_conditions.as_deref())?;
         let current_disciplines = self.list_for_identity(identity).await?;
+        if current_disciplines.len() >= max_learned_disciplines {
+            return Err(DisciplineError::DisciplineLearnLimitExceeded);
+        }
 
         let elements = if condition.requires_elements() {
             Some(
@@ -393,6 +421,187 @@ impl DisciplineService {
         })
     }
 
+    pub async fn activate_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_id: &str,
+        max_active_disciplines: usize,
+        context: DisciplineOperationContext,
+    ) -> Result<DisciplineChangeResult, DisciplineError> {
+        validate_limit(max_active_disciplines, "MAX_ACTIVE_DISCIPLINES")?;
+        validate_context(&context)?;
+        validate_discipline_id(discipline_id)?;
+
+        let target = self.get_for_identity(identity, discipline_id).await?;
+        if target.active {
+            return Err(DisciplineError::DisciplineAlreadyActive);
+        }
+
+        let disciplines = self.list_for_identity(identity).await?;
+        let active_count = disciplines
+            .iter()
+            .filter(|discipline| discipline.active)
+            .count();
+        if active_count >= max_active_disciplines {
+            return Err(DisciplineError::DisciplineActiveLimitExceeded);
+        }
+
+        let activated = self
+            .upsert_with_context_and_action(
+                &identity.character_id,
+                DisciplineUpsert::new(&target.discipline_id, target.points, &target.tier, true),
+                context,
+                Some("activate"),
+            )
+            .await?;
+        let disciplines = self.list_for_identity(identity).await?;
+        Ok(DisciplineChangeResult {
+            discipline: activated,
+            disciplines,
+        })
+    }
+
+    pub async fn deactivate_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_id: &str,
+        context: DisciplineOperationContext,
+    ) -> Result<DisciplineChangeResult, DisciplineError> {
+        validate_context(&context)?;
+        validate_discipline_id(discipline_id)?;
+
+        let target = self.get_for_identity(identity, discipline_id).await?;
+        if !target.active {
+            return Err(DisciplineError::DisciplineAlreadyInactive);
+        }
+
+        let deactivated = self
+            .upsert_with_context_and_action(
+                &identity.character_id,
+                DisciplineUpsert::new(&target.discipline_id, target.points, &target.tier, false),
+                context,
+                Some("deactivate"),
+            )
+            .await?;
+        let disciplines = self.list_for_identity(identity).await?;
+        Ok(DisciplineChangeResult {
+            discipline: deactivated,
+            disciplines,
+        })
+    }
+
+    pub async fn switch_active_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_id: &str,
+        max_active_disciplines: usize,
+        context: DisciplineOperationContext,
+    ) -> Result<DisciplineChangeResult, DisciplineError> {
+        validate_limit(max_active_disciplines, "MAX_ACTIVE_DISCIPLINES")?;
+        validate_context(&context)?;
+        validate_discipline_id(discipline_id)?;
+
+        let target = self.get_for_identity(identity, discipline_id).await?;
+        let current = self.list_for_identity(identity).await?;
+        for discipline in current.iter().filter(|discipline| discipline.active) {
+            if discipline.discipline_id == target.discipline_id {
+                continue;
+            }
+            self.upsert_with_context_and_action(
+                &identity.character_id,
+                DisciplineUpsert::new(
+                    &discipline.discipline_id,
+                    discipline.points,
+                    &discipline.tier,
+                    false,
+                ),
+                context.clone(),
+                Some("switch_deactivate"),
+            )
+            .await?;
+        }
+
+        let switched = self
+            .upsert_with_context_and_action(
+                &identity.character_id,
+                DisciplineUpsert::new(&target.discipline_id, target.points, &target.tier, true),
+                context,
+                Some("switch"),
+            )
+            .await?;
+
+        let disciplines = self.list_for_identity(identity).await?;
+        Ok(DisciplineChangeResult {
+            discipline: switched,
+            disciplines,
+        })
+    }
+
+    pub async fn add_points_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_id: &str,
+        points_delta: i64,
+        discipline_table: &DisciplineTable,
+        context: DisciplineOperationContext,
+    ) -> Result<DisciplineChangeResult, DisciplineError> {
+        validate_context(&context)?;
+        validate_discipline_id(discipline_id)?;
+        if points_delta <= 0 {
+            return Err(DisciplineError::InvalidPoints);
+        }
+
+        let target = self.get_for_identity(identity, discipline_id).await?;
+        let row = resolve_discipline_row(discipline_table, discipline_id)?;
+        let tier_rules =
+            parse_tier_rules(resolve_string(discipline_table, row.tierrules).as_deref())?;
+        let next_points = target
+            .points
+            .checked_add(points_delta)
+            .ok_or(DisciplineError::InvalidPoints)?;
+        let next_tier = tier_rules.tier_for_points(next_points)?;
+        let action = if next_tier != target.tier {
+            "points_upgrade"
+        } else {
+            "points_add"
+        };
+
+        let discipline = self
+            .upsert_with_context_and_action(
+                &identity.character_id,
+                DisciplineUpsert::new(&target.discipline_id, next_points, next_tier, target.active),
+                context,
+                Some(action),
+            )
+            .await?;
+        let disciplines = self.list_for_identity(identity).await?;
+        Ok(DisciplineChangeResult {
+            discipline,
+            disciplines,
+        })
+    }
+
+    pub async fn active_skill_pool_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_table: &DisciplineTable,
+    ) -> Result<Vec<String>, DisciplineError> {
+        let disciplines = self.list_for_identity(identity).await?;
+        active_skill_pool(discipline_table, &disciplines)
+    }
+
+    pub async fn active_combat_skill_loadout_for_identity(
+        &self,
+        identity: &AuthenticatedSessionIdentity,
+        discipline_table: &DisciplineTable,
+        combat_catalog: &dyn CombatCatalog,
+    ) -> Result<Vec<u16>, DisciplineError> {
+        let skill_codes = self
+            .active_skill_pool_for_identity(identity, discipline_table)
+            .await?;
+        resolve_skill_loadout_from_codes(&skill_codes, combat_catalog).map_err(invalid_config)
+    }
+
     pub async fn list(
         &self,
         character_id: &str,
@@ -438,13 +647,34 @@ impl DisciplineService {
         upsert: DisciplineUpsert,
         context: DisciplineOperationContext,
     ) -> Result<CharacterDiscipline, DisciplineError> {
+        self.upsert_with_context_and_action(character_id, upsert, context, None)
+            .await
+    }
+
+    async fn upsert_with_context_and_action(
+        &self,
+        character_id: &str,
+        upsert: DisciplineUpsert,
+        context: DisciplineOperationContext,
+        action_override: Option<&str>,
+    ) -> Result<CharacterDiscipline, DisciplineError> {
         validate_upsert(&upsert)?;
         validate_context(&context)?;
+        if action_override.is_some_and(|action| action.trim().is_empty()) {
+            return Err(DisciplineError::InvalidDisciplineAction);
+        }
         match &self.store {
-            DisciplineStore::Pg(store) => store.upsert(character_id, upsert, context).await,
+            DisciplineStore::Pg(store) => {
+                store
+                    .upsert(character_id, upsert, context, action_override)
+                    .await
+            }
             #[cfg(test)]
             DisciplineStore::Memory(store) => {
-                store.lock().await.upsert(character_id, upsert, context)
+                store
+                    .lock()
+                    .await
+                    .upsert(character_id, upsert, context, action_override)
             }
         }
     }
@@ -560,6 +790,7 @@ impl PgDisciplineStore {
         character_id: &str,
         upsert: DisciplineUpsert,
         context: DisciplineOperationContext,
+        action_override: Option<&str>,
     ) -> Result<CharacterDiscipline, DisciplineError> {
         let Some(pool) = &self.pool else {
             return Err(DisciplineError::DbUnavailable);
@@ -573,7 +804,7 @@ impl PgDisciplineStore {
             .await
             .map_err(map_db_error)?
             .map(CharacterDisciplineRow::into_discipline);
-        let action = action_for_upsert(before.as_ref(), &upsert);
+        let action = action_override.unwrap_or_else(|| action_for_upsert(before.as_ref(), &upsert));
 
         let after = sqlx::query_as::<_, CharacterDisciplineRow>(UPSERT_DISCIPLINE_SQL)
             .bind(character_id)
@@ -763,6 +994,13 @@ fn validate_context(context: &DisciplineOperationContext) -> Result<(), Discipli
     Ok(())
 }
 
+fn validate_limit(limit: usize, config_name: &str) -> Result<(), DisciplineError> {
+    if limit == 0 {
+        return Err(invalid_config(format!("{config_name} must be positive")));
+    }
+    Ok(())
+}
+
 fn validate_discipline_id(discipline_id: &str) -> Result<(), DisciplineError> {
     if discipline_id.trim().is_empty() {
         return Err(DisciplineError::InvalidDisciplineId);
@@ -780,6 +1018,31 @@ fn map_db_error(error: sqlx::Error) -> DisciplineError {
 struct DisciplineTierRules {
     initial_tier: String,
     initial_points: i64,
+    tiers: Vec<DisciplineTierRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisciplineTierRule {
+    tier: String,
+    min_points: i64,
+}
+
+impl DisciplineTierRules {
+    fn tier_for_points(&self, points: i64) -> Result<String, DisciplineError> {
+        if points < 0 {
+            return Err(DisciplineError::InvalidPoints);
+        }
+
+        let mut matched = None;
+        for tier in &self.tiers {
+            if points >= tier.min_points {
+                matched = Some(tier.tier.clone());
+            } else {
+                break;
+            }
+        }
+        matched.ok_or_else(|| invalid_config("TierRules tiers do not cover current points"))
+    }
 }
 
 impl Default for DisciplineTierRules {
@@ -787,6 +1050,10 @@ impl Default for DisciplineTierRules {
         Self {
             initial_tier: "novice".to_string(),
             initial_points: 0,
+            tiers: vec![DisciplineTierRule {
+                tier: "novice".to_string(),
+                min_points: 0,
+            }],
         }
     }
 }
@@ -909,10 +1176,82 @@ fn parse_tier_rules(raw: Option<&str>) -> Result<DisciplineTierRules, Discipline
     if initial_points < 0 {
         return Err(DisciplineError::InvalidPoints);
     }
+    let tiers = parse_tier_rule_entries(&value)?;
+    if !tiers.iter().any(|tier| tier.tier == initial_tier) {
+        return Err(invalid_config("TierRules tiers must include initial_tier"));
+    }
+    let initial_rule = tiers
+        .iter()
+        .find(|tier| tier.tier == initial_tier)
+        .expect("initial tier existence checked above");
+    if initial_points < initial_rule.min_points {
+        return Err(invalid_config(
+            "TierRules initial_points below initial_tier min_points",
+        ));
+    }
     Ok(DisciplineTierRules {
         initial_tier,
         initial_points,
+        tiers,
     })
+}
+
+fn parse_tier_rule_entries(value: &Value) -> Result<Vec<DisciplineTierRule>, DisciplineError> {
+    let Some(values) = value.get("tiers").and_then(Value::as_array) else {
+        return Err(invalid_config("TierRules requires tiers array"));
+    };
+    if values.is_empty() {
+        return Err(invalid_config("TierRules tiers array must not be empty"));
+    }
+
+    let mut tiers = Vec::with_capacity(values.len());
+    let mut last_min_points = None;
+    for entry in values {
+        let tier = string_field(entry, &["tier"])
+            .ok_or_else(|| invalid_config("TierRules tier entry requires tier"))?;
+        if !VALID_DISCIPLINE_TIERS.contains(&tier.as_str()) {
+            return Err(DisciplineError::InvalidDisciplineTier);
+        }
+        if tiers
+            .iter()
+            .any(|existing: &DisciplineTierRule| existing.tier == tier)
+        {
+            return Err(invalid_config("TierRules duplicate tier"));
+        }
+        let min_points = i64::from(
+            number_field(entry, &["min_points", "minPoints"])
+                .ok_or_else(|| invalid_config("TierRules tier requires min_points"))?,
+        );
+        if min_points < 0 {
+            return Err(DisciplineError::InvalidPoints);
+        }
+        if last_min_points.is_some_and(|last| min_points < last) {
+            return Err(invalid_config("TierRules min_points must be ascending"));
+        }
+        last_min_points = Some(min_points);
+        tiers.push(DisciplineTierRule { tier, min_points });
+    }
+
+    Ok(tiers)
+}
+
+fn active_skill_pool(
+    table: &DisciplineTable,
+    disciplines: &[CharacterDiscipline],
+) -> Result<Vec<String>, DisciplineError> {
+    let mut skills = Vec::new();
+    for discipline in disciplines.iter().filter(|discipline| discipline.active) {
+        let row = resolve_discipline_row(table, &discipline.discipline_id)?;
+        for key in &row.skillpool {
+            if let Some(skill) = table.resolve_string(*key) {
+                let skill = skill.trim();
+                if !skill.is_empty() && !skills.iter().any(|existing| existing == skill) {
+                    skills.push(skill.to_string());
+                }
+            }
+        }
+    }
+    Ok(skills)
 }
 
 fn parse_learn_condition(raw: Option<&str>) -> Result<LearnCondition, DisciplineError> {
@@ -1328,10 +1667,11 @@ impl MemoryDisciplineStore {
         character_id: &str,
         upsert: DisciplineUpsert,
         context: DisciplineOperationContext,
+        action_override: Option<&str>,
     ) -> Result<CharacterDiscipline, DisciplineError> {
         let key = (character_id.to_string(), upsert.discipline_id.clone());
         let before = self.values.get(&key).cloned();
-        let action = action_for_upsert(before.as_ref(), &upsert);
+        let action = action_override.unwrap_or_else(|| action_for_upsert(before.as_ref(), &upsert));
         let value = CharacterDiscipline {
             character_id: character_id.to_string(),
             discipline_id: upsert.discipline_id,
@@ -1364,6 +1704,7 @@ mod tests {
     use crate::core::character_element::{CharacterElementService, CharacterElements};
     use crate::core::character_title::TitleService;
     use crate::core::inventory::Item;
+    use crate::core::system::combat::BuiltinCombatCatalog;
     use crate::csv_code::disciplinetable::{DisciplineTable, DisciplineTableRow, StringKey};
     use crate::csv_code::itemtable::ItemTableRow;
     use crate::csv_code::titletable::{TitleTable, TitleTableRow};
@@ -1519,6 +1860,7 @@ mod tests {
                 &element_service,
                 &title_service,
                 &mut player_data,
+                8,
                 context(),
             )
             .await
@@ -1570,6 +1912,7 @@ mod tests {
                 &element_service,
                 &title_service,
                 &mut player_data,
+                8,
                 context(),
             )
             .await
@@ -1611,12 +1954,202 @@ mod tests {
                 &element_service,
                 &title_service,
                 &mut player_data,
+                8,
                 context(),
             )
             .await
             .unwrap_err();
 
         assert_eq!(error.error_code(), "DISCIPLINE_ALREADY_LEARNED");
+    }
+
+    #[tokio::test]
+    async fn formal_learn_enforces_learned_limit() {
+        let identity = identity();
+        let service = DisciplineService::new_in_memory();
+        service
+            .upsert_for_identity(
+                &identity,
+                DisciplineUpsert::new("forging", 0, "novice", false),
+            )
+            .await
+            .unwrap();
+        let element_service = CharacterElementService::new_in_memory();
+        element_service
+            .set_elements(CharacterElements {
+                character_id: identity.character_id.clone(),
+                affinity: ElementValues::new(2500, 2500, 2500, 2500),
+                mastery: ElementValues::zero(),
+            })
+            .await;
+        let title_service = TitleService::new_in_memory(title_table());
+        let mut player_data = PlayerData::new(identity.character_id.clone());
+
+        let error = service
+            .learn_for_identity(
+                &identity,
+                LearnDisciplineRequest::new("forging"),
+                &discipline_table(),
+                &item_table(),
+                &element_service,
+                &title_service,
+                &mut player_data,
+                1,
+                context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), "DISCIPLINE_ALREADY_LEARNED");
+
+        let error = service
+            .learn_for_identity(
+                &identity,
+                LearnDisciplineRequest::new("wind_canyon_lore"),
+                &discipline_table(),
+                &item_table(),
+                &element_service,
+                &title_service,
+                &mut player_data,
+                1,
+                context(),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_code(), "DISCIPLINE_LEARN_LIMIT_EXCEEDED");
+    }
+
+    #[tokio::test]
+    async fn activate_deactivate_and_switch_validate_active_limit_and_log_actions() {
+        let identity = identity();
+        let service = DisciplineService::new_in_memory();
+        for discipline_id in ["forging", "fire_art", "wind_canyon_lore"] {
+            service
+                .upsert_for_identity(
+                    &identity,
+                    DisciplineUpsert::new(discipline_id, 0, "novice", false),
+                )
+                .await
+                .unwrap();
+        }
+
+        let activated = service
+            .activate_for_identity(&identity, "forging", 1, context())
+            .await
+            .unwrap();
+        assert!(activated.discipline.active);
+        assert_eq!(
+            activated
+                .disciplines
+                .iter()
+                .filter(|discipline| discipline.active)
+                .count(),
+            1
+        );
+
+        let error = service
+            .activate_for_identity(&identity, "fire_art", 1, context())
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), "DISCIPLINE_ACTIVE_LIMIT_EXCEEDED");
+
+        let switched = service
+            .switch_active_for_identity(&identity, "fire_art", 1, context())
+            .await
+            .unwrap();
+        assert_eq!(switched.discipline.discipline_id, "fire_art");
+        assert!(switched.discipline.active);
+        assert!(
+            !switched
+                .disciplines
+                .iter()
+                .find(|discipline| discipline.discipline_id == "forging")
+                .unwrap()
+                .active
+        );
+
+        let deactivated = service
+            .deactivate_for_identity(&identity, "fire_art", context())
+            .await
+            .unwrap();
+        assert!(!deactivated.discipline.active);
+
+        let error = service
+            .deactivate_for_identity(&identity, "fire_art", context())
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), "DISCIPLINE_ALREADY_INACTIVE");
+
+        let logs = service.logs().await;
+        let actions = logs
+            .iter()
+            .filter(|log| log.discipline_id == "forging" || log.discipline_id == "fire_art")
+            .map(|log| log.action.as_str())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&"activate"));
+        assert!(actions.contains(&"switch_deactivate"));
+        assert!(actions.contains(&"switch"));
+        assert!(actions.contains(&"deactivate"));
+    }
+
+    #[tokio::test]
+    async fn points_delta_auto_advances_tier_and_skill_pool_reads_only_active_disciplines() {
+        let identity = identity();
+        let service = DisciplineService::new_in_memory();
+        service
+            .upsert_for_identity(
+                &identity,
+                DisciplineUpsert::new("forging", 0, "novice", true),
+            )
+            .await
+            .unwrap();
+        service
+            .upsert_for_identity(
+                &identity,
+                DisciplineUpsert::new("fire_art", 0, "novice", false),
+            )
+            .await
+            .unwrap();
+
+        let table = discipline_table();
+        assert_eq!(
+            service
+                .active_skill_pool_for_identity(&identity, &table)
+                .await
+                .unwrap(),
+            vec!["basic_attack".to_string(), "charge".to_string()]
+        );
+        assert_eq!(
+            service
+                .active_combat_skill_loadout_for_identity(
+                    &identity,
+                    &table,
+                    &BuiltinCombatCatalog::default(),
+                )
+                .await
+                .unwrap(),
+            vec![1, 4]
+        );
+
+        let upgraded = service
+            .add_points_for_identity(&identity, "forging", 120, &table, context())
+            .await
+            .unwrap();
+        assert_eq!(upgraded.discipline.points, 120);
+        assert_eq!(upgraded.discipline.tier, "apprentice");
+
+        let logs = service.logs().await;
+        assert!(
+            logs.iter()
+                .any(|log| log.discipline_id == "forging" && log.action == "points_upgrade")
+        );
+
+        let error = service
+            .add_points_for_identity(&identity, "forging", 0, &table, context())
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code(), "INVALID_DISCIPLINE_POINTS");
     }
 
     #[test]
@@ -1659,12 +2192,18 @@ mod tests {
             1,
             "forging",
             r#"{"type":"affinity","element":"fire","min":2000}"#,
-            r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0}]}"#,
+            r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0},{"tier":"apprentice","min_points":100},{"tier":"adept","min_points":300}]}"#,
         );
         builder.add(
             2,
             "fire_art",
             r#"{"all_of":[{"type":"mastery","element":"fire","min":10},{"type":"discipline_tier","discipline_id":"forging","tier":"novice"},{"type":"item","item_id":4101,"count":1,"consume":true}]}"#,
+            r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0},{"tier":"apprentice","min_points":80}]}"#,
+        );
+        builder.add(
+            3,
+            "wind_canyon_lore",
+            r#"{"type":"event","event_id":"wind_canyon_explored"}"#,
             r#"{"initial_tier":"novice","initial_points":0,"tiers":[{"tier":"novice","min_points":0}]}"#,
         );
         builder.finish()
@@ -1741,6 +2280,11 @@ mod tests {
         }
 
         fn add(&mut self, id: i32, discipline_id: &str, conditions: &str, tier_rules: &str) {
+            let skillpool = match discipline_id {
+                "forging" => vec![self.key("basic_attack"), self.key("charge")],
+                "fire_art" => vec![self.key("fireball"), self.key("burn")],
+                _ => vec![self.key("skill")],
+            };
             let row = DisciplineTableRow {
                 id,
                 disciplineid: self.key(discipline_id),
@@ -1748,7 +2292,7 @@ mod tests {
                 description: self.key("desc"),
                 learnconditions: self.key(conditions),
                 tierrules: self.key(tier_rules),
-                skillpool: vec![self.key("skill")],
+                skillpool,
                 interactionpermissions: vec![self.key("learn")],
                 displayfields: self.key(r#"{"icon":"x"}"#),
             };

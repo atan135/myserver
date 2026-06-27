@@ -1110,7 +1110,9 @@ pub struct CharacterDisciplineDefinitionSummary {
     #[prost(string, repeated, tag = "6")]
     pub skill_pool: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "7")]
-    pub interaction_permissions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub interaction_permissions: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
     #[prost(string, tag = "8")]
     pub display_fields_json: ::prost::alloc::string::String,
 }
@@ -1155,6 +1157,80 @@ pub struct LearnCharacterDisciplineRes {
     pub definition: ::core::option::Option<CharacterDisciplineDefinitionSummary>,
     #[prost(message, repeated, tag = "6")]
     pub consumed_items: ::prost::alloc::vec::Vec<DisciplineItemCost>,
+    #[prost(string, repeated, tag = "7")]
+    pub active_skill_pool: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "8")]
+    pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetCharacterDisciplineActiveReq {
+    #[prost(string, tag = "1")]
+    pub discipline_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub active: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetCharacterDisciplineActiveRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub discipline: ::core::option::Option<CharacterDisciplineSummary>,
+    #[prost(message, repeated, tag = "5")]
+    pub disciplines: ::prost::alloc::vec::Vec<CharacterDisciplineSummary>,
+    #[prost(string, repeated, tag = "6")]
+    pub active_skill_pool: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "7")]
+    pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SwitchCharacterDisciplineReq {
+    #[prost(string, tag = "1")]
+    pub discipline_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SwitchCharacterDisciplineRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub discipline: ::core::option::Option<CharacterDisciplineSummary>,
+    #[prost(message, repeated, tag = "5")]
+    pub disciplines: ::prost::alloc::vec::Vec<CharacterDisciplineSummary>,
+    #[prost(string, repeated, tag = "6")]
+    pub active_skill_pool: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "7")]
+    pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddCharacterDisciplinePointsReq {
+    #[prost(string, tag = "1")]
+    pub discipline_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "2")]
+    pub points_delta: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AddCharacterDisciplinePointsRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub discipline: ::core::option::Option<CharacterDisciplineSummary>,
+    #[prost(message, repeated, tag = "5")]
+    pub disciplines: ::prost::alloc::vec::Vec<CharacterDisciplineSummary>,
+    #[prost(string, repeated, tag = "6")]
+    pub active_skill_pool: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "7")]
+    pub unlocked_titles: ::prost::alloc::vec::Vec<CharacterTitleSummary>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DebugCharacterTitleReq {
@@ -1362,11 +1438,19 @@ impl MovementCorrectionReason {
             "MOVEMENT_CORRECTION_REASON_UNKNOWN" => Some(Self::Unknown),
             "MOVEMENT_CORRECTION_REASON_PERIODIC" => Some(Self::Periodic),
             "MOVEMENT_CORRECTION_REASON_CLIENT_DRIFT" => Some(Self::ClientDrift),
-            "MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED" => Some(Self::MovementRejected),
-            "MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED" => Some(Self::CollisionBlocked),
+            "MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED" => {
+                Some(Self::MovementRejected)
+            }
+            "MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED" => {
+                Some(Self::CollisionBlocked)
+            }
             "MOVEMENT_CORRECTION_REASON_GAME_STARTED" => Some(Self::GameStarted),
-            "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY" => Some(Self::ReconnectRecovery),
-            "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY" => Some(Self::ObserverRecovery),
+            "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY" => {
+                Some(Self::ReconnectRecovery)
+            }
+            "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY" => {
+                Some(Self::ObserverRecovery)
+            }
             "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE" => Some(Self::PlayerOffline),
             "MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT" => Some(Self::ControlTimeout),
             _ => None,

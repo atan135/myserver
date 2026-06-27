@@ -15,7 +15,9 @@ use crate::csv_code::skillbase::SkillBase;
 use crate::csv_code::testtable_100::TestTable100;
 use crate::csv_code::testtable_110::TestTable110;
 use crate::csv_code::titletable::TitleTable;
-use crate::gameconfig::discipline_config::validate_discipline_table;
+use crate::gameconfig::discipline_config::{
+    validate_discipline_skill_pool, validate_discipline_table,
+};
 use crate::gameconfig::title_config::validate_title_table;
 
 const SCENETABLE_FILE: &str = "SceneTable.csv";
@@ -80,6 +82,7 @@ impl ConfigTables {
         validate_title_table(&titletable)?;
         let disciplinetable = DisciplineTable::load_from_csv(&csv_dir.join(DISCIPLINETABLE_FILE))?;
         validate_discipline_table(&disciplinetable)?;
+        validate_discipline_skill_pool(&disciplinetable, &skillbase)?;
 
         Ok(Self {
             scenetable: Arc::new(scenetable),
@@ -184,6 +187,7 @@ impl ConfigTables {
         } else {
             self.disciplinetable.clone()
         };
+        validate_discipline_skill_pool(&disciplinetable, &skillbase)?;
 
         Ok(Self {
             scenetable,

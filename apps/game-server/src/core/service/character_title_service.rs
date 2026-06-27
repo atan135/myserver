@@ -15,10 +15,12 @@ use crate::core::character_title_unlock::{
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::csv_code::titletable::{TitleTable, TitleTableRow};
 use crate::pb::{
-    CharacterDisciplineSummary, CharacterTitleDefinitionSummary, CharacterTitleSummary,
-    DebugCharacterTitleReq, DebugCharacterTitleRes, DisciplineItemCost as PbDisciplineItemCost,
-    EquipCharacterTitleReq, EquipCharacterTitleRes, GetCharacterDisciplinesRes,
-    GetCharacterTitlesRes, LearnCharacterDisciplineReq, LearnCharacterDisciplineRes,
+    AddCharacterDisciplinePointsReq, AddCharacterDisciplinePointsRes, CharacterDisciplineSummary,
+    CharacterTitleDefinitionSummary, CharacterTitleSummary, DebugCharacterTitleReq,
+    DebugCharacterTitleRes, DisciplineItemCost as PbDisciplineItemCost, EquipCharacterTitleReq,
+    EquipCharacterTitleRes, GetCharacterDisciplinesRes, GetCharacterTitlesRes,
+    LearnCharacterDisciplineReq, LearnCharacterDisciplineRes, SetCharacterDisciplineActiveReq,
+    SetCharacterDisciplineActiveRes, SwitchCharacterDisciplineReq, SwitchCharacterDisciplineRes,
 };
 use crate::protocol::{MessageType, Packet};
 use crate::session::AuthenticatedSessionIdentity;
@@ -29,6 +31,9 @@ const TITLE_DEBUG_OPERATOR_TYPE: &str = "player_debug";
 const TITLE_PLAYER_SOURCE_TYPE: &str = "player";
 const TITLE_PLAYER_SOURCE_ID: &str = "character_title_protocol";
 const DISCIPLINE_PLAYER_SOURCE_ID: &str = "character_discipline_learn_protocol";
+const DISCIPLINE_ACTIVE_SOURCE_ID: &str = "character_discipline_active_protocol";
+const DISCIPLINE_SWITCH_SOURCE_ID: &str = "character_discipline_switch_protocol";
+const DISCIPLINE_POINTS_SOURCE_ID: &str = "character_discipline_points_protocol";
 const DISCIPLINE_DEBUG_SOURCE_TYPE: &str = "gm";
 const DISCIPLINE_DEBUG_SOURCE_ID: &str = "debug-character-disciplines";
 const DISCIPLINE_DEBUG_OPERATOR_TYPE: &str = "player_debug";
@@ -247,6 +252,8 @@ pub async fn handle_learn_character_discipline(
                     None,
                     None,
                     Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
                 )?;
                 return Ok(());
             }
@@ -262,6 +269,8 @@ pub async fn handle_learn_character_discipline(
             &identity.character_id,
             None,
             None,
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
         )?;
         return Ok(());
@@ -304,6 +313,7 @@ pub async fn handle_learn_character_discipline(
             &services.character_element_service,
             &services.title_service,
             &mut player_data,
+            services.config.max_learned_disciplines,
             player_discipline_context(&identity, "learn"),
         )
         .await;
@@ -314,6 +324,13 @@ pub async fn handle_learn_character_discipline(
                 .player_manager
                 .save_player(&identity.character_id, player_data)
                 .await;
+            let unlocked = run_discipline_unlock_check(
+                services,
+                &identity,
+                result.discipline.discipline_id.as_str(),
+            )
+            .await?;
+            let active_skill_pool = active_skill_pool(services, &identity).await?;
             queue_learn_discipline_response(
                 connection,
                 packet.header.seq,
@@ -327,6 +344,8 @@ pub async fn handle_learn_character_discipline(
                     .iter()
                     .map(to_pb_discipline_item_cost)
                     .collect(),
+                active_skill_pool,
+                unlocked,
             )?;
         }
         Err(error) => {
@@ -339,8 +358,323 @@ pub async fn handle_learn_character_discipline(
                 None,
                 definition.map(to_discipline_definition_summary),
                 Vec::new(),
+                Vec::new(),
+                Vec::new(),
             )?;
         }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_set_character_discipline_active(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet
+        .decode_body::<SetCharacterDisciplineActiveReq>("INVALID_SET_DISCIPLINE_ACTIVE_BODY")
+    {
+        Ok(value) => value,
+        Err(error_code) => {
+            queue_set_discipline_active_response(
+                connection,
+                packet.header.seq,
+                false,
+                error_code,
+                &identity.character_id,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?;
+            return Ok(());
+        }
+    };
+
+    let discipline_id = request.discipline_id.trim();
+    if discipline_id.is_empty() {
+        queue_set_discipline_active_response(
+            connection,
+            packet.header.seq,
+            false,
+            "DISCIPLINE_ID_REQUIRED",
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        return Ok(());
+    }
+
+    info!(
+        session_id = connection.session.id,
+        account_player_id = %identity.account_player_id,
+        player_id = %identity.account_player_id,
+        character_id = %identity.character_id,
+        world_id = ?identity.world_id,
+        discipline_id,
+        active = request.active,
+        "handle_set_character_discipline_active"
+    );
+
+    let context = player_discipline_context_with_source(
+        &identity,
+        if request.active {
+            "activate"
+        } else {
+            "deactivate"
+        },
+        DISCIPLINE_ACTIVE_SOURCE_ID,
+    );
+    let result = if request.active {
+        services
+            .discipline_service
+            .activate_for_identity(
+                &identity,
+                discipline_id,
+                services.config.max_active_disciplines,
+                context,
+            )
+            .await
+    } else {
+        services
+            .discipline_service
+            .deactivate_for_identity(&identity, discipline_id, context)
+            .await
+    };
+
+    match result {
+        Ok(result) => {
+            let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
+            let active_skill_pool = active_skill_pool(services, &identity).await?;
+            queue_set_discipline_active_response(
+                connection,
+                packet.header.seq,
+                true,
+                "",
+                &identity.character_id,
+                Some(to_discipline_summary(&result.discipline)),
+                to_discipline_summaries(&result.disciplines),
+                active_skill_pool,
+                unlocked,
+            )?;
+        }
+        Err(error) => queue_set_discipline_active_response(
+            connection,
+            packet.header.seq,
+            false,
+            error.error_code(),
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?,
+    }
+
+    Ok(())
+}
+
+pub async fn handle_switch_character_discipline(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet
+        .decode_body::<SwitchCharacterDisciplineReq>("INVALID_SWITCH_DISCIPLINE_BODY")
+    {
+        Ok(value) => value,
+        Err(error_code) => {
+            queue_switch_discipline_response(
+                connection,
+                packet.header.seq,
+                false,
+                error_code,
+                &identity.character_id,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?;
+            return Ok(());
+        }
+    };
+
+    let discipline_id = request.discipline_id.trim();
+    if discipline_id.is_empty() {
+        queue_switch_discipline_response(
+            connection,
+            packet.header.seq,
+            false,
+            "DISCIPLINE_ID_REQUIRED",
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        return Ok(());
+    }
+
+    info!(
+        session_id = connection.session.id,
+        account_player_id = %identity.account_player_id,
+        player_id = %identity.account_player_id,
+        character_id = %identity.character_id,
+        world_id = ?identity.world_id,
+        discipline_id,
+        "handle_switch_character_discipline"
+    );
+
+    match services
+        .discipline_service
+        .switch_active_for_identity(
+            &identity,
+            discipline_id,
+            services.config.max_active_disciplines,
+            player_discipline_context_with_source(&identity, "switch", DISCIPLINE_SWITCH_SOURCE_ID),
+        )
+        .await
+    {
+        Ok(result) => {
+            let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
+            let active_skill_pool = active_skill_pool(services, &identity).await?;
+            queue_switch_discipline_response(
+                connection,
+                packet.header.seq,
+                true,
+                "",
+                &identity.character_id,
+                Some(to_discipline_summary(&result.discipline)),
+                to_discipline_summaries(&result.disciplines),
+                active_skill_pool,
+                unlocked,
+            )?;
+        }
+        Err(error) => queue_switch_discipline_response(
+            connection,
+            packet.header.seq,
+            false,
+            error.error_code(),
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?,
+    }
+
+    Ok(())
+}
+
+pub async fn handle_add_character_discipline_points(
+    services: &ServiceContext,
+    connection: &ConnectionContext,
+    packet: &Packet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
+        return Ok(());
+    };
+
+    let request = match packet
+        .decode_body::<AddCharacterDisciplinePointsReq>("INVALID_ADD_DISCIPLINE_POINTS_BODY")
+    {
+        Ok(value) => value,
+        Err(error_code) => {
+            queue_add_discipline_points_response(
+                connection,
+                packet.header.seq,
+                false,
+                error_code,
+                &identity.character_id,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?;
+            return Ok(());
+        }
+    };
+
+    let discipline_id = request.discipline_id.trim();
+    if discipline_id.is_empty() {
+        queue_add_discipline_points_response(
+            connection,
+            packet.header.seq,
+            false,
+            "DISCIPLINE_ID_REQUIRED",
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        return Ok(());
+    }
+
+    info!(
+        session_id = connection.session.id,
+        account_player_id = %identity.account_player_id,
+        player_id = %identity.account_player_id,
+        character_id = %identity.character_id,
+        world_id = ?identity.world_id,
+        discipline_id,
+        points_delta = request.points_delta,
+        "handle_add_character_discipline_points"
+    );
+
+    let config_tables = services.config_tables.tables_snapshot().await;
+    match services
+        .discipline_service
+        .add_points_for_identity(
+            &identity,
+            discipline_id,
+            request.points_delta,
+            &config_tables.disciplinetable,
+            player_discipline_context_with_source(
+                &identity,
+                "points_add",
+                DISCIPLINE_POINTS_SOURCE_ID,
+            ),
+        )
+        .await
+    {
+        Ok(result) => {
+            let unlocked = run_discipline_unlock_check(services, &identity, discipline_id).await?;
+            let active_skill_pool = active_skill_pool(services, &identity).await?;
+            queue_add_discipline_points_response(
+                connection,
+                packet.header.seq,
+                true,
+                "",
+                &identity.character_id,
+                Some(to_discipline_summary(&result.discipline)),
+                to_discipline_summaries(&result.disciplines),
+                active_skill_pool,
+                unlocked,
+            )?;
+        }
+        Err(error) => queue_add_discipline_points_response(
+            connection,
+            packet.header.seq,
+            false,
+            error.error_code(),
+            &identity.character_id,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?,
     }
 
     Ok(())
@@ -696,6 +1030,54 @@ async fn run_unlock_check(
     Ok(unlocked_title_summaries(&table, &result))
 }
 
+async fn run_discipline_unlock_check(
+    services: &ServiceContext,
+    identity: &AuthenticatedSessionIdentity,
+    discipline_id: &str,
+) -> Result<Vec<CharacterTitleSummary>, &'static str> {
+    let result = run_discipline_unlock_check_with_service(
+        &services.title_unlock_service,
+        identity,
+        discipline_id,
+    )
+    .await?;
+    let table = services
+        .config_tables
+        .tables_snapshot()
+        .await
+        .titletable
+        .clone();
+    Ok(unlocked_title_summaries(&table, &result))
+}
+
+async fn run_discipline_unlock_check_with_service(
+    title_unlock_service: &crate::core::character_title_unlock::TitleUnlockService,
+    identity: &AuthenticatedSessionIdentity,
+    discipline_id: &str,
+) -> Result<TitleUnlockCheckResult, &'static str> {
+    title_unlock_service
+        .check_for_identity(
+            identity,
+            TitleUnlockTrigger::Discipline {
+                discipline_id: Some(discipline_id.to_string()),
+            },
+        )
+        .await
+        .map_err(|error| error.error_code())
+}
+
+async fn active_skill_pool(
+    services: &ServiceContext,
+    identity: &AuthenticatedSessionIdentity,
+) -> Result<Vec<String>, &'static str> {
+    let tables = services.config_tables.tables_snapshot().await;
+    services
+        .discipline_service
+        .active_skill_pool_for_identity(identity, &tables.disciplinetable)
+        .await
+        .map_err(|error| error.error_code())
+}
+
 fn unlocked_title_summaries(
     table: &TitleTable,
     result: &TitleUnlockCheckResult,
@@ -736,8 +1118,16 @@ fn player_discipline_context(
     identity: &AuthenticatedSessionIdentity,
     action: &str,
 ) -> DisciplineOperationContext {
+    player_discipline_context_with_source(identity, action, DISCIPLINE_PLAYER_SOURCE_ID)
+}
+
+fn player_discipline_context_with_source(
+    identity: &AuthenticatedSessionIdentity,
+    action: &str,
+    source_id: &str,
+) -> DisciplineOperationContext {
     DisciplineOperationContext::new(TITLE_PLAYER_SOURCE_TYPE)
-        .with_source_id(DISCIPLINE_PLAYER_SOURCE_ID)
+        .with_source_id(source_id)
         .with_operator(TITLE_PLAYER_SOURCE_TYPE, identity.account_player_id.clone())
         .with_reason(format!("character discipline {action}"))
 }
@@ -918,6 +1308,10 @@ fn to_discipline_summary(discipline: &CharacterDiscipline) -> CharacterDisciplin
     }
 }
 
+fn to_discipline_summaries(disciplines: &[CharacterDiscipline]) -> Vec<CharacterDisciplineSummary> {
+    disciplines.iter().map(to_discipline_summary).collect()
+}
+
 fn to_discipline_definition_summary(
     definition: DisciplineDefinitionSummary,
 ) -> crate::pb::CharacterDisciplineDefinitionSummary {
@@ -971,6 +1365,8 @@ fn queue_learn_discipline_response(
     discipline: Option<CharacterDisciplineSummary>,
     definition: Option<crate::pb::CharacterDisciplineDefinitionSummary>,
     consumed_items: Vec<PbDisciplineItemCost>,
+    active_skill_pool: Vec<String>,
+    unlocked_titles: Vec<CharacterTitleSummary>,
 ) -> Result<(), std::io::Error> {
     connection.queue_message(
         MessageType::LearnCharacterDisciplineRes,
@@ -982,6 +1378,89 @@ fn queue_learn_discipline_response(
             discipline,
             definition,
             consumed_items,
+            active_skill_pool,
+            unlocked_titles,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_set_discipline_active_response(
+    connection: &ConnectionContext,
+    seq: u32,
+    ok: bool,
+    error_code: &str,
+    character_id: &str,
+    discipline: Option<CharacterDisciplineSummary>,
+    disciplines: Vec<CharacterDisciplineSummary>,
+    active_skill_pool: Vec<String>,
+    unlocked_titles: Vec<CharacterTitleSummary>,
+) -> Result<(), std::io::Error> {
+    connection.queue_message(
+        MessageType::SetCharacterDisciplineActiveRes,
+        seq,
+        SetCharacterDisciplineActiveRes {
+            ok,
+            error_code: error_code.to_string(),
+            character_id: character_id.to_string(),
+            discipline,
+            disciplines,
+            active_skill_pool,
+            unlocked_titles,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_switch_discipline_response(
+    connection: &ConnectionContext,
+    seq: u32,
+    ok: bool,
+    error_code: &str,
+    character_id: &str,
+    discipline: Option<CharacterDisciplineSummary>,
+    disciplines: Vec<CharacterDisciplineSummary>,
+    active_skill_pool: Vec<String>,
+    unlocked_titles: Vec<CharacterTitleSummary>,
+) -> Result<(), std::io::Error> {
+    connection.queue_message(
+        MessageType::SwitchCharacterDisciplineRes,
+        seq,
+        SwitchCharacterDisciplineRes {
+            ok,
+            error_code: error_code.to_string(),
+            character_id: character_id.to_string(),
+            discipline,
+            disciplines,
+            active_skill_pool,
+            unlocked_titles,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_add_discipline_points_response(
+    connection: &ConnectionContext,
+    seq: u32,
+    ok: bool,
+    error_code: &str,
+    character_id: &str,
+    discipline: Option<CharacterDisciplineSummary>,
+    disciplines: Vec<CharacterDisciplineSummary>,
+    active_skill_pool: Vec<String>,
+    unlocked_titles: Vec<CharacterTitleSummary>,
+) -> Result<(), std::io::Error> {
+    connection.queue_message(
+        MessageType::AddCharacterDisciplinePointsRes,
+        seq,
+        AddCharacterDisciplinePointsRes {
+            ok,
+            error_code: error_code.to_string(),
+            character_id: character_id.to_string(),
+            discipline,
+            disciplines,
+            active_skill_pool,
+            unlocked_titles,
         },
     )
 }
@@ -1017,6 +1496,20 @@ fn queue_debug_title_response(
 mod tests {
     use super::*;
 
+    use crate::core::character_discipline::DisciplineService;
+    use crate::core::character_element::CharacterElementService;
+    use crate::core::character_title::TitleService;
+    use crate::core::character_title_unlock::TitleUnlockService;
+    use crate::gameconfig::ConfigTables;
+
+    fn identity() -> AuthenticatedSessionIdentity {
+        AuthenticatedSessionIdentity {
+            account_player_id: "plr_0000000000001".to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            world_id: Some(1),
+        }
+    }
+
     #[test]
     fn debug_token_accepts_config_or_game_admin_token() {
         unsafe {
@@ -1035,6 +1528,40 @@ mod tests {
         assert_eq!(
             normalize_debug_reason("   "),
             DEFAULT_TITLE_DEBUG_REASON.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn formal_discipline_unlock_helper_triggers_title_check() {
+        let identity = identity();
+        let tables =
+            ConfigTables::load_from_dir(std::path::Path::new("csv")).expect("csv tables load");
+        let title_table = tables.titletable.clone();
+        let discipline_service = DisciplineService::new_in_memory();
+        discipline_service
+            .upsert_for_identity(
+                &identity,
+                DisciplineUpsert::new("forging", 0, "novice", true),
+            )
+            .await
+            .unwrap();
+        let title_unlock_service = TitleUnlockService::new_for_test(
+            TitleService::new_in_memory(title_table),
+            discipline_service,
+            CharacterElementService::new_in_memory(),
+            tables.titletable.clone(),
+        );
+
+        let result =
+            run_discipline_unlock_check_with_service(&title_unlock_service, &identity, "forging")
+                .await
+                .unwrap();
+
+        assert!(
+            result
+                .unlocked
+                .iter()
+                .any(|grant| grant.title_id == "2001" && grant.source_type == "discipline")
         );
     }
 }

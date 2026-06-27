@@ -115,6 +115,10 @@ export {
   runCharacterTitlesDebug,
   runCharacterDisciplinesDebug,
   runCharacterDisciplineLearn,
+  runCharacterDisciplineActivate,
+  runCharacterDisciplineDeactivate,
+  runCharacterDisciplineSwitch,
+  runCharacterDisciplinePoints,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./character.js";

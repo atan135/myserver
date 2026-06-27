@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::config_table::CsvLoadError;
 use crate::csv_code::disciplinetable::DisciplineTable;
+use crate::csv_code::skillbase::SkillBase;
 
 const VALID_DISCIPLINE_TIERS: &[&str] = &[
     "novice",
@@ -65,6 +66,38 @@ pub fn validate_discipline_table(table: &DisciplineTable) -> Result<(), CsvLoadE
 
         let display_fields = parse_json_object(table, row.displayfields, csv_row, "DisplayFields")?;
         validate_display_fields(&display_fields, csv_row)?;
+    }
+
+    Ok(())
+}
+
+pub fn validate_discipline_skill_pool(
+    discipline_table: &DisciplineTable,
+    skill_table: &SkillBase,
+) -> Result<(), CsvLoadError> {
+    let skill_codes = skill_table
+        .all()
+        .iter()
+        .filter_map(|row| skill_table.resolve_string(row.code))
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .collect::<BTreeSet<_>>();
+
+    for (row_index, row) in discipline_table.rows.iter().enumerate() {
+        let csv_row = row_index + 3;
+        for key in &row.skillpool {
+            let skill_code = resolve_required_string(discipline_table, *key, csv_row, "SkillPool")?;
+            let skill_code = skill_code.trim();
+            if skill_code.is_empty() {
+                return invalid_row(csv_row, "SkillPool contains empty SkillBase.Code");
+            }
+            if !skill_codes.contains(skill_code) {
+                return invalid_row(
+                    csv_row,
+                    format!("SkillPool references unknown SkillBase.Code `{skill_code}`"),
+                );
+            }
+        }
     }
 
     Ok(())
@@ -455,6 +488,8 @@ mod tests {
     use super::*;
     use crate::config_table::CsvTableLoader;
     use crate::csv_code::disciplinetable::DisciplineTable;
+    use crate::csv_code::skillbase::{SkillBase, SkillBaseRow};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -468,6 +503,21 @@ mod tests {
         validate_discipline_table(&table).expect("sample DisciplineTable.csv should validate");
 
         assert_eq!(table.rows.len(), 3);
+    }
+
+    #[test]
+    fn discipline_skill_pool_must_reference_skillbase_code() {
+        let table = discipline_table_from_skill_pool("basic_attack|charge");
+        validate_discipline_skill_pool(&table, &skill_table(&["basic_attack", "charge"]))
+            .expect("known SkillBase.Code values should validate");
+
+        let table = discipline_table_from_skill_pool("unknown_skill");
+        let error = validate_discipline_skill_pool(&table, &skill_table(&["basic_attack"]))
+            .expect_err("unknown skill code should be rejected");
+        assert!(
+            error.to_string().contains("unknown SkillBase.Code"),
+            "error `{error}` should mention unknown SkillBase.Code"
+        );
     }
 
     #[test]
@@ -512,6 +562,38 @@ int,string,string,string,string,string,Array<string>,Array<string>,string
             error.to_string().contains(expected),
             "error `{error}` should contain `{expected}`"
         );
+    }
+
+    fn discipline_table_from_skill_pool(skill_pool: &str) -> DisciplineTable {
+        let fixture = TempCsvFile::new(&format!(
+            r#"Id,DisciplineId,Name,Description,LearnConditions,TierRules,SkillPool,InteractionPermissions,DisplayFields
+int,string,string,string,string,string,Array<string>,Array<string>,string
+1,test,Test,,"{{""type"":""affinity"",""element"":""fire"",""min"":1}}","{{""initial_tier"":""novice"",""tiers"":[{{""tier"":""novice"",""min_points"":0}}]}}",{skill_pool},learn,"{{""icon"":""x""}}"
+"#
+        ));
+        DisciplineTable::load_from_csv(fixture.path()).expect("csv should parse")
+    }
+
+    fn skill_table(codes: &[&str]) -> SkillBase {
+        let mut string_pool = HashMap::new();
+        let mut rows = Vec::new();
+        let mut by_id = HashMap::new();
+        for (index, code) in codes.iter().enumerate() {
+            let id = i32::try_from(index + 1).unwrap();
+            let key = u32::try_from(index + 1).unwrap();
+            string_pool.insert(key, (*code).to_string());
+            by_id.insert(id, rows.len());
+            rows.push(SkillBaseRow {
+                id,
+                code: key,
+                ..SkillBaseRow::default()
+            });
+        }
+        SkillBase {
+            string_pool,
+            rows,
+            by_id,
+        }
     }
 
     struct TempCsvFile {

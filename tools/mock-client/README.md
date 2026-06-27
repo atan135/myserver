@@ -219,6 +219,10 @@ Protobuf 风格的编解码工具：
 | `character-titles-debug` | 登录、选角、查询称号、debug 授予称号、装备称号、再次查询并输出 JSON 摘要 |
 | `character-disciplines-debug` | 登录、选角、设置职业阶位、触发称号解锁检查、确认职业阶位称号授予 |
 | `character-discipline-learn` | 登录、选角、调用正式职业学习协议、再次查询职业列表并输出定义和消耗摘要 |
+| `character-discipline-activate` | 登录、选角、激活已学习职业 / 流派并输出 activeSkillPool 和称号解锁摘要 |
+| `character-discipline-deactivate` | 登录、选角、停用已激活职业 / 流派并输出 activeSkillPool |
+| `character-discipline-switch` | 登录、选角、切换当前激活职业 / 流派并输出切换后的 activeSkillPool |
+| `character-discipline-points` | 登录、选角、给已学习职业 / 流派增加 points 并观察自动阶位推进 |
 | `character-duplicate-name` | 创建两个同名角色，验证同名角色允许创建 |
 | `character-limit` | 连续创建角色，验证普通账号第 7 个角色返回 `CHARACTER_LIMIT_EXCEEDED` |
 
@@ -346,7 +350,33 @@ node tools/mock-client/src/index.js --scenario character-discipline-learn \
   --discipline-id forging \
   --json-output
 
-`character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
+# 激活、切换、推进职业 / 流派
+node tools/mock-client/src/index.js --scenario character-discipline-activate \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --discipline-id forging \
+  --json-output
+
+node tools/mock-client/src/index.js --scenario character-discipline-switch \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --discipline-id fire_art \
+  --json-output
+
+node tools/mock-client/src/index.js --scenario character-discipline-points \
+  --http-base-url http://127.0.0.1:3000 \
+  --host 127.0.0.1 --port 14000 \
+  --login-name test001 --password Passw0rd! \
+  --character-id chr_0000000000001 \
+  --discipline-id forging \
+  --discipline-points 120 \
+  --json-output
+
+`character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。激活、停用、切换和 points 推进分别使用正式玩家协议，不需要 debug token，响应包含 `activeSkillPool` 和本次 `unlockedTitles` 摘要。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
 
 # 房间测试
 node tools/mock-client/src/index.js --scenario two-client-room \
@@ -462,9 +492,9 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--element-change-reason` | `character-elements-debug` 写入日志的原因 | `mock-client character element debug` |
 | `--element-debug-token` | 四属性 debug 变更 token，默认读取 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--title-id` | `character-titles-debug` 授予/装备的称号 ID | `9001` |
-| `--discipline-id` | `character-discipline-learn` 学习或 `character-disciplines-debug` 设置的职业 ID | `forging` |
+| `--discipline-id` | 职业学习、激活、停用、切换、points 推进或 `character-disciplines-debug` 设置的职业 ID | `forging` |
 | `--discipline-tier` | `character-disciplines-debug` 设置的职业阶位 | `novice` |
-| `--discipline-points` | `character-disciplines-debug` 设置的职业点数 | `1` |
+| `--discipline-points` | `character-disciplines-debug` 设置的职业点数，或 `character-discipline-points` 的 points 增量 | `1` |
 | `--title-change-reason` | 称号/职业 debug 写入日志的原因 | `mock-client character title debug` |
 | `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |

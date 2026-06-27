@@ -2023,6 +2023,8 @@ mod tests {
             input_timestamp_max_skew_ms: 5000,
             input_anomaly_window_ms: 10_000,
             input_anomaly_max: 0,
+            max_learned_disciplines: crate::config::DEFAULT_MAX_LEARNED_DISCIPLINES,
+            max_active_disciplines: crate::config::DEFAULT_MAX_ACTIVE_DISCIPLINES,
             registry_enabled: false,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),

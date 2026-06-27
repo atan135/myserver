@@ -18,6 +18,7 @@ const ROOM_COMBAT_TRANSFER_SCHEMA: &str = "room-combat-ecs.v1";
 const ROOM_COMBAT_TRANSFER_SCHEMA_VERSION: u32 = 1;
 const ROOM_TRANSFER_INVALID_COMBAT_STATE: &str = "ROOM_TRANSFER_INVALID_COMBAT_STATE";
 const ROOM_TRANSFER_UNSUPPORTED_SCHEMA: &str = "ROOM_TRANSFER_UNSUPPORTED_SCHEMA";
+const COMBAT_SKILL_CODE_NOT_FOUND: &str = "COMBAT_SKILL_CODE_NOT_FOUND";
 
 pub type EntityId = u32;
 type DenseIndex = usize;
@@ -92,6 +93,46 @@ impl CombatEntityBlueprint {
         self.skill_loadout = skill_ids.to_vec();
         self
     }
+
+    pub fn with_skill_codes(
+        mut self,
+        skill_codes: &[String],
+        catalog: &dyn CombatCatalog,
+    ) -> Result<Self, &'static str> {
+        self.skill_loadout = resolve_skill_loadout_from_codes(skill_codes, catalog)?;
+        Ok(self)
+    }
+
+    pub fn with_active_discipline_skill_pool(
+        self,
+        skill_codes: &[String],
+        catalog: &dyn CombatCatalog,
+    ) -> Result<Self, &'static str> {
+        self.with_skill_codes(skill_codes, catalog)
+    }
+}
+
+pub fn resolve_skill_loadout_from_codes(
+    skill_codes: &[String],
+    catalog: &dyn CombatCatalog,
+) -> Result<Vec<u16>, &'static str> {
+    let mut skill_ids = Vec::new();
+    for code in skill_codes {
+        let code = code.trim();
+        if code.is_empty() {
+            continue;
+        }
+        let Some(skill_id) = catalog.skill_id_by_code(code) else {
+            return Err(COMBAT_SKILL_CODE_NOT_FOUND);
+        };
+        if !skill_ids.contains(&skill_id) {
+            skill_ids.push(skill_id);
+        }
+        if skill_ids.len() >= MAX_SKILLS_PER_ENTITY {
+            break;
+        }
+    }
+    Ok(skill_ids)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2012,6 +2053,27 @@ mod tests {
         assert!(target.hp < target.max_hp);
         let caster = ecs.dense_index(player_a).unwrap();
         assert_eq!(ecs.skill_slots[caster][0].cooldown_remaining, 30);
+    }
+
+    #[test]
+    fn blueprint_skill_codes_resolve_to_combat_skill_loadout() {
+        let catalog = BuiltinCombatCatalog::default();
+        let blueprint = CombatEntityBlueprint::player("player-a", 1, Position { x: 0.0, y: 0.0 })
+            .with_active_discipline_skill_pool(
+                &["basic_attack".to_string(), "charge".to_string()],
+                &catalog,
+            )
+            .unwrap();
+
+        assert_eq!(blueprint.skill_loadout, vec![1, 4]);
+        assert_eq!(
+            resolve_skill_loadout_from_codes(
+                &["fireball".to_string(), "burn".to_string()],
+                &catalog
+            )
+            .unwrap(),
+            vec![2, 5]
+        );
     }
 
     #[test]

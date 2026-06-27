@@ -6,6 +6,7 @@ import { parseArgs } from "../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../tools/mock-client/src/constants.js";
 import {
   decodeByMessageType,
+  encodeAddCharacterDisciplinePointsReq,
   encodeCreateMatchedRoomReq,
   encodeDebugCharacterTitleReq,
   encodeDebugApplyCharacterElementChangeReq,
@@ -14,6 +15,8 @@ import {
   encodeGetCharacterTitlesReq,
   encodeGetCharacterElementsReq,
   encodeLearnCharacterDisciplineReq,
+  encodeSetCharacterDisciplineActiveReq,
+  encodeSwitchCharacterDisciplineReq,
   encodeRoomReconnectReq
 } from "../tools/mock-client/src/messages.js";
 import { runAnnounceGet } from "../tools/mock-client/src/scenarios/announce.js";
@@ -312,9 +315,15 @@ test("mock-client defines contiguous character title and discipline message type
       MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_REQ,
       MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES,
       MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_REQ,
-      MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES
+      MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES,
+      MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_REQ,
+      MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES,
+      MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_REQ,
+      MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES,
+      MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_REQ,
+      MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES
     ],
-    [1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426]
+    [1417, 1418, 1419, 1420, 1421, 1422, 1423, 1424, 1425, 1426, 1427, 1428, 1429, 1430, 1431, 1432]
   );
 });
 
@@ -324,6 +333,17 @@ test("mock-client encodes character title and discipline requests", () => {
 
   const learnFields = decodeFieldsWithRepeated(encodeLearnCharacterDisciplineReq("fire_art"));
   assert.equal(readString(learnFields, 1), "fire_art");
+
+  const activeFields = decodeFieldsWithRepeated(encodeSetCharacterDisciplineActiveReq("forging", true));
+  assert.equal(readString(activeFields, 1), "forging");
+  assert.equal(readBool(activeFields, 2), true);
+
+  const switchFields = decodeFieldsWithRepeated(encodeSwitchCharacterDisciplineReq("fire_art"));
+  assert.equal(readString(switchFields, 1), "fire_art");
+
+  const pointsFields = decodeFieldsWithRepeated(encodeAddCharacterDisciplinePointsReq("forging", 120));
+  assert.equal(readString(pointsFields, 1), "forging");
+  assert.equal(readInt64(pointsFields, 2), 120);
 
   const equipFields = decodeFieldsWithRepeated(encodeEquipCharacterTitleReq("9001"));
   assert.equal(readString(equipFields, 1), "9001");
@@ -412,7 +432,7 @@ test("mock-client decodes character title, equip, discipline, and debug response
     description: "基础锻造流派",
     initialTier: "novice",
     initialPoints: 0,
-    skillPool: ["forge_basic", "temper_edge"],
+    skillPool: ["basic_attack", "charge"],
     interactionPermissions: ["learn", "craft"],
     displayFieldsJson: "{\"icon\":\"icon_discipline_forging\"}"
   };
@@ -473,7 +493,9 @@ test("mock-client decodes character title, equip, discipline, and debug response
     encodeStringField(3, "chr_0000000000001"),
     encodeMessageField(4, encodeCharacterDisciplineSummary(discipline)),
     encodeMessageField(5, encodeCharacterDisciplineDefinitionSummary(definition)),
-    encodeMessageField(6, encodeDisciplineItemCost(itemCost))
+    encodeMessageField(6, encodeDisciplineItemCost(itemCost)),
+    encodeStringField(7, "basic_attack"),
+    encodeMessageField(8, encodeCharacterTitleSummary(title2001))
   ]);
   assert.deepEqual(
     decodeByMessageType(MESSAGE_TYPE.LEARN_CHARACTER_DISCIPLINE_RES, learnDisciplineResBody),
@@ -483,9 +505,37 @@ test("mock-client decodes character title, equip, discipline, and debug response
       characterId: "chr_0000000000001",
       discipline,
       definition,
-      consumedItems: [itemCost]
+      consumedItems: [itemCost],
+      activeSkillPool: ["basic_attack"],
+      unlockedTitles: [title2001]
     }
   );
+
+  const disciplineChangeResBody = Buffer.concat([
+    encodeBoolField(1, true),
+    encodeStringField(2, ""),
+    encodeStringField(3, "chr_0000000000001"),
+    encodeMessageField(4, encodeCharacterDisciplineSummary(discipline)),
+    encodeMessageField(5, encodeCharacterDisciplineSummary(discipline)),
+    encodeStringField(6, "basic_attack"),
+    encodeStringField(6, "charge"),
+    encodeMessageField(7, encodeCharacterTitleSummary(title2001))
+  ]);
+  for (const messageType of [
+    MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES,
+    MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES,
+    MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES
+  ]) {
+    assert.deepEqual(decodeByMessageType(messageType, disciplineChangeResBody), {
+      ok: true,
+      errorCode: "",
+      characterId: "chr_0000000000001",
+      discipline,
+      disciplines: [discipline],
+      activeSkillPool: ["basic_attack", "charge"],
+      unlockedTitles: [title2001]
+    });
+  }
 
   const debugResBody = Buffer.concat([
     encodeBoolField(1, true),
@@ -526,9 +576,16 @@ test("mock-client character title scenarios document async response matching and
   assert.match(scenarioSource, /action: "grant_title"/);
   assert.match(scenarioSource, /action: "set_discipline"/);
   assert.match(scenarioSource, /LEARN_CHARACTER_DISCIPLINE_REQ/);
+  assert.match(scenarioSource, /SET_CHARACTER_DISCIPLINE_ACTIVE_REQ/);
+  assert.match(scenarioSource, /SWITCH_CHARACTER_DISCIPLINE_REQ/);
+  assert.match(scenarioSource, /ADD_CHARACTER_DISCIPLINE_POINTS_REQ/);
   assert.match(
     scenarioSource,
     /packet\.messageType === MESSAGE_TYPE\.LEARN_CHARACTER_DISCIPLINE_RES && packet\.seq === 3/
+  );
+  assert.match(
+    scenarioSource,
+    /packet\.messageType === MESSAGE_TYPE\.SET_CHARACTER_DISCIPLINE_ACTIVE_RES && packet\.seq === 3/
   );
   assert.match(scenarioSource, /triggerUnlockCheck: true/);
   assert.match(scenarioSource, /before: summarizeTitlesResponse/);
@@ -536,13 +593,16 @@ test("mock-client character title scenarios document async response matching and
   assert.match(scenarioSource, /equippedTitle: summarizeTitle/);
   assert.match(scenarioSource, /disciplinePoints: options\.disciplinePoints/);
   assert.match(scenarioSource, /summarizeDisciplineDefinition/);
+  assert.match(scenarioSource, /activeSkillPool/);
 
   assert.match(help, /--discipline-points <n>/);
   assert.match(help, /character-titles-debug/);
   assert.match(help, /character-disciplines-debug/);
   assert.match(help, /character-discipline-learn/);
+  assert.match(help, /character-discipline-switch/);
   assert.match(readme, /--discipline-points/);
   assert.match(readme, /character-discipline-learn/);
+  assert.match(readme, /character-discipline-activate/);
   assert.match(readme, /messageType \+ seq/);
 });
 

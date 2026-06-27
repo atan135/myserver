@@ -255,6 +255,24 @@ export function encodeLearnCharacterDisciplineReq(disciplineId) {
   return encodeStringField(1, disciplineId);
 }
 
+export function encodeSetCharacterDisciplineActiveReq(disciplineId, active) {
+  return Buffer.concat([
+    encodeStringField(1, disciplineId),
+    encodeBoolField(2, active)
+  ]);
+}
+
+export function encodeSwitchCharacterDisciplineReq(disciplineId) {
+  return encodeStringField(1, disciplineId);
+}
+
+export function encodeAddCharacterDisciplinePointsReq(disciplineId, pointsDelta) {
+  return Buffer.concat([
+    encodeStringField(1, disciplineId),
+    encodeInt64Field(2, pointsDelta)
+  ]);
+}
+
 export function encodeDebugCharacterTitleReq({
   action = "",
   titleId = "",
@@ -473,6 +491,18 @@ function decodeDisciplineItemCost(buffer) {
     itemUid: readInt64(fields, 1),
     itemId: readInt32(fields, 2),
     count: readUInt32(fields, 3)
+  };
+}
+
+function decodeCharacterDisciplineChangeRes(fields) {
+  return {
+    ok: readBool(fields, 1),
+    errorCode: readString(fields, 2),
+    characterId: readString(fields, 3),
+    discipline: fields.get(4) ? decodeCharacterDisciplineSummary(fields.get(4)) : null,
+    disciplines: decodeRepeatedMessage(fields, 5, decodeCharacterDisciplineSummary),
+    activeSkillPool: readStringList(fields, 6),
+    unlockedTitles: decodeRepeatedMessage(fields, 7, decodeCharacterTitleSummary)
   };
 }
 
@@ -709,8 +739,14 @@ export function decodeByMessageType(messageType, body) {
         characterId: readString(fields, 3),
         discipline: fields.get(4) ? decodeCharacterDisciplineSummary(fields.get(4)) : null,
         definition: fields.get(5) ? decodeCharacterDisciplineDefinitionSummary(fields.get(5)) : null,
-        consumedItems: decodeRepeatedMessage(fields, 6, decodeDisciplineItemCost)
+        consumedItems: decodeRepeatedMessage(fields, 6, decodeDisciplineItemCost),
+        activeSkillPool: readStringList(fields, 7),
+        unlockedTitles: decodeRepeatedMessage(fields, 8, decodeCharacterTitleSummary)
       };
+    case MESSAGE_TYPE.SET_CHARACTER_DISCIPLINE_ACTIVE_RES:
+    case MESSAGE_TYPE.SWITCH_CHARACTER_DISCIPLINE_RES:
+    case MESSAGE_TYPE.ADD_CHARACTER_DISCIPLINE_POINTS_RES:
+      return decodeCharacterDisciplineChangeRes(fields);
     case MESSAGE_TYPE.DEBUG_CHARACTER_TITLE_RES:
       return {
         ok: readBool(fields, 1),

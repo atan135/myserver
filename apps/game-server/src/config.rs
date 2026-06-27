@@ -4,6 +4,8 @@ pub const DEFAULT_TICKET_SECRET: &str = "dev-only-change-this-ticket-secret";
 pub const DEFAULT_ADMIN_TOKEN: &str = "dev-only-change-this-game-admin-token";
 pub const DEFAULT_INTERNAL_TOKEN: &str = "dev-only-change-this-game-internal-token";
 pub const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+pub const DEFAULT_MAX_LEARNED_DISCIPLINES: usize = 8;
+pub const DEFAULT_MAX_ACTIVE_DISCIPLINES: usize = 2;
 const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME: &str = "DISALLOW_LEGACY_DIRECT_CONFIG";
 
 #[derive(Clone)]
@@ -49,6 +51,8 @@ pub struct Config {
     pub input_timestamp_max_skew_ms: u64,
     pub input_anomaly_window_ms: u64,
     pub input_anomaly_max: u64,
+    pub max_learned_disciplines: usize,
+    pub max_active_disciplines: usize,
     // Service Registry
     pub registry_enabled: bool,
     pub discovery_required: bool,
@@ -226,6 +230,10 @@ impl Config {
         let input_timestamp_max_skew_ms = parse_u64("INPUT_TIMESTAMP_MAX_SKEW_MS", 5000);
         let input_anomaly_window_ms = parse_u64("INPUT_ANOMALY_WINDOW_MS", 10_000);
         let input_anomaly_max = parse_u64("INPUT_ANOMALY_MAX", 0);
+        let max_learned_disciplines =
+            parse_positive_usize("MAX_LEARNED_DISCIPLINES", DEFAULT_MAX_LEARNED_DISCIPLINES);
+        let max_active_disciplines =
+            parse_positive_usize("MAX_ACTIVE_DISCIPLINES", DEFAULT_MAX_ACTIVE_DISCIPLINES);
 
         // Service Registry
         let registry_enabled = parse_bool("REGISTRY_ENABLED", false);
@@ -290,6 +298,8 @@ impl Config {
             input_timestamp_max_skew_ms,
             input_anomaly_window_ms,
             input_anomaly_max,
+            max_learned_disciplines,
+            max_active_disciplines,
             registry_enabled,
             discovery_required,
             registry_url,
@@ -571,6 +581,20 @@ mod tests {
         "GLOBAL_ID_WORKER_ID",
     ];
 
+    const DISCIPLINE_LIMIT_ENV_NAMES: &[&str] = &[
+        "NODE_ENV",
+        "APP_ENV",
+        "DISCOVERY_REQUIRED",
+        "DISALLOW_LEGACY_DIRECT_CONFIG",
+        "REGISTRY_ENABLED",
+        "REGISTRY_KEY_PREFIX",
+        "REDIS_KEY_PREFIX",
+        "MAX_LEARNED_DISCIPLINES",
+        "MAX_ACTIVE_DISCIPLINES",
+        "GLOBAL_ID_ORIGIN_ID",
+        "GLOBAL_ID_WORKER_ID",
+    ];
+
     const SERVICE_METADATA_ENV_NAMES: &[&str] = &[
         "NODE_ENV",
         "APP_ENV",
@@ -710,6 +734,49 @@ mod tests {
         assert_eq!(
             config.outbound_queue_capacity,
             DEFAULT_OUTBOUND_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn discipline_limits_default_override_and_fallback() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(DISCIPLINE_LIMIT_ENV_NAMES);
+
+        unsafe {
+            clear_production_env();
+            env::remove_var("MAX_LEARNED_DISCIPLINES");
+            env::remove_var("MAX_ACTIVE_DISCIPLINES");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.max_learned_disciplines,
+            DEFAULT_MAX_LEARNED_DISCIPLINES
+        );
+        assert_eq!(
+            config.max_active_disciplines,
+            DEFAULT_MAX_ACTIVE_DISCIPLINES
+        );
+
+        unsafe {
+            env::set_var("MAX_LEARNED_DISCIPLINES", "12");
+            env::set_var("MAX_ACTIVE_DISCIPLINES", "3");
+        }
+        let config = Config::from_env();
+        assert_eq!(config.max_learned_disciplines, 12);
+        assert_eq!(config.max_active_disciplines, 3);
+
+        unsafe {
+            env::set_var("MAX_LEARNED_DISCIPLINES", "0");
+            env::set_var("MAX_ACTIVE_DISCIPLINES", "invalid");
+        }
+        let config = Config::from_env();
+        assert_eq!(
+            config.max_learned_disciplines,
+            DEFAULT_MAX_LEARNED_DISCIPLINES
+        );
+        assert_eq!(
+            config.max_active_disciplines,
+            DEFAULT_MAX_ACTIVE_DISCIPLINES
         );
     }
 

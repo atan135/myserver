@@ -788,6 +788,52 @@ message LearnCharacterDisciplineRes {
   CharacterDisciplineSummary discipline = 4;
   CharacterDisciplineDefinitionSummary definition = 5;
   repeated DisciplineItemCost consumed_items = 6;
+  repeated string active_skill_pool = 7;
+  repeated CharacterTitleSummary unlocked_titles = 8;
+}
+
+message SetCharacterDisciplineActiveReq {
+  string discipline_id = 1;
+  bool active = 2;
+}
+
+message SetCharacterDisciplineActiveRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterDisciplineSummary discipline = 4;
+  repeated CharacterDisciplineSummary disciplines = 5;
+  repeated string active_skill_pool = 6;
+  repeated CharacterTitleSummary unlocked_titles = 7;
+}
+
+message SwitchCharacterDisciplineReq {
+  string discipline_id = 1;
+}
+
+message SwitchCharacterDisciplineRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterDisciplineSummary discipline = 4;
+  repeated CharacterDisciplineSummary disciplines = 5;
+  repeated string active_skill_pool = 6;
+  repeated CharacterTitleSummary unlocked_titles = 7;
+}
+
+message AddCharacterDisciplinePointsReq {
+  string discipline_id = 1;
+  int64 points_delta = 2;
+}
+
+message AddCharacterDisciplinePointsRes {
+  bool ok = 1;
+  string error_code = 2;
+  string character_id = 3;
+  CharacterDisciplineSummary discipline = 4;
+  repeated CharacterDisciplineSummary disciplines = 5;
+  repeated string active_skill_pool = 6;
+  repeated CharacterTitleSummary unlocked_titles = 7;
 }
 
 message DebugCharacterTitleReq {

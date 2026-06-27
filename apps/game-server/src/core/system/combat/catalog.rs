@@ -14,6 +14,7 @@ use super::skills::{SkillDefinition, SkillTargetType, parse_skill_effects};
 
 pub trait CombatCatalog: Send + Sync {
     fn skill_definition(&self, skill_id: u16) -> Option<&SkillDefinition>;
+    fn skill_id_by_code(&self, skill_code: &str) -> Option<u16>;
     fn buff_definition(&self, buff_id: u16) -> Option<&BuffDefinition>;
 }
 
@@ -22,12 +23,14 @@ pub type SharedCombatCatalog = Arc<dyn CombatCatalog>;
 #[derive(Debug, Clone, Default)]
 pub struct CsvCombatCatalog {
     skills: HashMap<u16, SkillDefinition>,
+    skill_ids_by_code: HashMap<String, u16>,
     buffs: HashMap<u16, BuffDefinition>,
 }
 
 impl CsvCombatCatalog {
     pub fn from_tables(tables: &ConfigTables) -> Result<Self, CsvLoadError> {
         let mut skills = HashMap::with_capacity(tables.skillbase.rows.len());
+        let mut skill_ids_by_code = HashMap::with_capacity(tables.skillbase.rows.len());
         let mut buffs = HashMap::with_capacity(tables.bufferbase.rows.len());
 
         for row in tables.skillbase.all() {
@@ -55,7 +58,7 @@ impl CsvCombatCatalog {
 
             let definition = SkillDefinition {
                 id,
-                code,
+                code: code.clone(),
                 name,
                 description,
                 cooldown_frames: cast_u16(row.cooldownframes, "SkillBase", "CooldownFrames")?,
@@ -68,6 +71,11 @@ impl CsvCombatCatalog {
             if skills.insert(id, definition).is_some() {
                 return Err(CsvLoadError::InvalidRow(format!(
                     "SkillBase duplicate skill id {id}"
+                )));
+            }
+            if skill_ids_by_code.insert(code.clone(), id).is_some() {
+                return Err(CsvLoadError::InvalidRow(format!(
+                    "SkillBase duplicate skill code `{code}`"
                 )));
             }
         }
@@ -115,7 +123,11 @@ impl CsvCombatCatalog {
             }
         }
 
-        Ok(Self { skills, buffs })
+        Ok(Self {
+            skills,
+            skill_ids_by_code,
+            buffs,
+        })
     }
 
     #[cfg(test)]
@@ -128,6 +140,10 @@ impl CsvCombatCatalog {
 impl CombatCatalog for CsvCombatCatalog {
     fn skill_definition(&self, skill_id: u16) -> Option<&SkillDefinition> {
         self.skills.get(&skill_id)
+    }
+
+    fn skill_id_by_code(&self, skill_code: &str) -> Option<u16> {
+        self.skill_ids_by_code.get(skill_code.trim()).copied()
     }
 
     fn buff_definition(&self, buff_id: u16) -> Option<&BuffDefinition> {
@@ -308,7 +324,14 @@ impl BuiltinCombatCatalog {
         ]);
 
         Self {
-            inner: CsvCombatCatalog { skills, buffs },
+            inner: CsvCombatCatalog {
+                skill_ids_by_code: skills
+                    .values()
+                    .map(|skill| (skill.code.clone(), skill.id))
+                    .collect(),
+                skills,
+                buffs,
+            },
         }
     }
 }
@@ -322,6 +345,10 @@ impl Default for BuiltinCombatCatalog {
 impl CombatCatalog for BuiltinCombatCatalog {
     fn skill_definition(&self, skill_id: u16) -> Option<&SkillDefinition> {
         self.inner.skill_definition(skill_id)
+    }
+
+    fn skill_id_by_code(&self, skill_code: &str) -> Option<u16> {
+        self.inner.skill_id_by_code(skill_code)
     }
 
     fn buff_definition(&self, buff_id: u16) -> Option<&BuffDefinition> {
@@ -390,6 +417,7 @@ mod tests {
         assert_eq!(fireball.code, "fireball");
         assert_eq!(fireball.effects.len(), 1);
         assert_eq!(fireball.range, 300.0);
+        assert_eq!(catalog.skill_id_by_code("fireball"), Some(2));
 
         let burn = catalog.buff_definition(1).unwrap();
         assert_eq!(burn.code, "burn");

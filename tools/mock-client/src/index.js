@@ -91,6 +91,10 @@ import {
   runCharacterTitlesDebug,
   runCharacterDisciplinesDebug,
   runCharacterDisciplineLearn,
+  runCharacterDisciplineActivate,
+  runCharacterDisciplineDeactivate,
+  runCharacterDisciplineSwitch,
+  runCharacterDisciplinePoints,
   runCharacterDuplicateName,
   runCharacterLimit
 } from "./scenarios/index.js";
@@ -502,6 +506,50 @@ async function main() {
 
   if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_LEARN) {
     const result = await runCharacterDisciplineLearn(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_ACTIVATE) {
+    const result = await runCharacterDisciplineActivate(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_DEACTIVATE) {
+    const result = await runCharacterDisciplineDeactivate(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_SWITCH) {
+    const result = await runCharacterDisciplineSwitch(options);
+    if (!result.ok) {
+      process.exitCode = 1;
+    }
+    if (!options.jsonOutput) {
+      console.log(`scenario completed: ${options.scenario}`);
+    }
+    return;
+  }
+
+  if (options.scenario === SCENARIO.CHARACTER_DISCIPLINE_POINTS) {
+    const result = await runCharacterDisciplinePoints(options);
     if (!result.ok) {
       process.exitCode = 1;
     }

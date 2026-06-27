@@ -881,8 +881,8 @@ mod tests {
 
     use super::*;
     use crate::config::{
-        Config, DEFAULT_ADMIN_TOKEN, DEFAULT_INTERNAL_TOKEN, DEFAULT_OUTBOUND_QUEUE_CAPACITY,
-        DEFAULT_TICKET_SECRET,
+        Config, DEFAULT_ADMIN_TOKEN, DEFAULT_INTERNAL_TOKEN, DEFAULT_MAX_ACTIVE_DISCIPLINES,
+        DEFAULT_MAX_LEARNED_DISCIPLINES, DEFAULT_OUTBOUND_QUEUE_CAPACITY, DEFAULT_TICKET_SECRET,
     };
     use crate::core::config_table::ConfigTableRuntime;
     use crate::core::context::PlayerRegistry;
@@ -954,6 +954,8 @@ mod tests {
             input_timestamp_max_skew_ms: 5000,
             input_anomaly_window_ms: 10_000,
             input_anomaly_max: 0,
+            max_learned_disciplines: DEFAULT_MAX_LEARNED_DISCIPLINES,
+            max_active_disciplines: DEFAULT_MAX_ACTIVE_DISCIPLINES,
             registry_enabled: false,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),

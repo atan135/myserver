@@ -207,7 +207,7 @@ character_id -> entity_id -> dense_index -> move_states[dense_index]
 
 ### 3.1 技能定义
 
-技能配置当前主要来自 `SkillBase.csv`，服务启动时由 `CsvCombatCatalog::from_tables` 转成运行时定义；`BuiltinCombatCatalog` 只作为 fallback / 测试辅助。定义形态类似：
+技能配置当前主要来自 `SkillBase.csv`，服务启动时由 `CsvCombatCatalog::from_tables` 转成运行时定义；`BuiltinCombatCatalog` 只作为 fallback / 测试辅助。`CsvCombatCatalog` 同时维护 `SkillBase.Code -> SkillBase.Id` 索引，职业 / 流派 `DisciplineTable.SkillPool` 使用 `SkillBase.Code`，战斗装载时通过 active 职业技能池解析成实体 `skill_loadout`。定义形态类似：
 
 ```rust
 struct SkillDefinition {
@@ -241,7 +241,11 @@ struct SkillEffect {
 | 4 | 冲锋 | 60帧(2s) | 150 | 伤害20 + 击退100 |
 | 5 | 灼烧 | 0 | 50 | 伤害5 + Dot 6秒 |
 
-### 3.3 技能释放流程
+### 3.3 职业技能池装载
+
+`CombatEntityBlueprint` 支持通过 active 职业 / 流派技能池装载技能：服务端先从 `DisciplineService::active_skill_pool_for_identity` 读取当前 `active=true` 职业 / 流派的 `SkillPool`，再用 `SkillBase.Code` 解析为战斗技能 ID。该路径不会读取 inactive 或仅已学习但未激活的职业技能。
+
+### 3.4 技能释放流程
 
 ```
 请求 → 冷却检查 → 距离检查 → 消耗冷却 → 应用效果 → 产生事件
