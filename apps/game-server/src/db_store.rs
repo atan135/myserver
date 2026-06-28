@@ -33,6 +33,8 @@ const AUDIT_SCHEMA_STATEMENTS: &[&str] = &[
         details_json jsonb NULL,
         created_at timestamptz NOT NULL DEFAULT current_timestamp
     )"#,
+    "ALTER TABLE IF EXISTS room_event_logs ADD COLUMN IF NOT EXISTS room_subject_id varchar(64) NULL",
+    "ALTER TABLE IF EXISTS room_event_logs ADD COLUMN IF NOT EXISTS owner_character_id varchar(64) NULL",
     "CREATE INDEX IF NOT EXISTS idx_room_event_logs_room_id ON room_event_logs (room_id)",
     "CREATE INDEX IF NOT EXISTS idx_room_event_logs_room_subject_id ON room_event_logs (room_subject_id)",
     "CREATE INDEX IF NOT EXISTS idx_room_event_logs_account_player_id ON room_event_logs (account_player_id)",
