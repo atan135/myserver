@@ -45,6 +45,7 @@
     "db:migrate": "powershell -ExecutionPolicy Bypass -File scripts/db-migrate.ps1",
     "db:migrate:dry-run": "powershell -ExecutionPolicy Bypass -File scripts/db-migrate.ps1 -DryRun",
     "check:proto": "npm run check:mock-client-protocol",
+    "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
     "global-id:decode": "node tools/global-id-decode.js",
     "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",
     "test:auth-http": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/auth-http.test.mjs",
