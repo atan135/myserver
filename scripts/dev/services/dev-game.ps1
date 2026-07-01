@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 
 $env:NODE_ENV="development"
 $env:APP_ENV="local"
@@ -34,8 +35,7 @@ if ($null -eq $AdminPort) {
 }
 
 # Clean up a possible leftover local socket file in the project root.
-$projectRoot = "$PSScriptRoot\.."
-$udsPath = Join-Path $projectRoot $udsName
+$udsPath = Join-Path $ProjectRoot $udsName
 if (Test-Path $udsPath) {
     Write-Host "Cleaning up leftover socket file: $udsPath" -ForegroundColor Yellow
     Remove-Item $udsPath -Force
@@ -47,7 +47,7 @@ Write-Host "  AdminPort: $env:ADMIN_PORT" -ForegroundColor Gray
 Write-Host "  UDS: $udsName" -ForegroundColor Gray
 
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-Push-Location "$PSScriptRoot\..\apps\game-server"
+Push-Location (Join-Path $ProjectRoot "apps\game-server")
 try {
   if (Test-Path $cargo) {
     & $cargo build

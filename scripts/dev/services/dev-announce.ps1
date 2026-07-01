@@ -35,7 +35,7 @@ if ($InstanceId) {
     $env:SERVICE_INSTANCE_ID = "announce-service-$Port"
 }
 
-$workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $workspaceNodeModules = Join-Path $workspaceRoot "node_modules"
 $serviceDir = Join-Path $workspaceRoot "apps\announce-service"
 $runScript = if ($NoWatch) { "start" } else { "dev" }

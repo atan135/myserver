@@ -1217,10 +1217,10 @@ if ($preflightErrors.Count -gt 0) {
 Write-Section "Stage 0 - Manual Service Preparation"
 Write-Host "This script never starts services. If needed, start dependencies and these processes in separate terminals." -ForegroundColor Yellow
 Write-Host "The commands below are local/manual startup hints only; execute/test/production control endpoints come from the Discovery section." -ForegroundColor Yellow
-Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-auth.ps1")
-Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $OldServerId, "-Port", [string]$OldGamePort, "-AdminPort", [string]$OldAdminPort)
-Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-game.ps1", "-InstanceId", $NewServerId, "-Port", [string]$NewGamePort, "-AdminPort", [string]$NewAdminPort)
-Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev-proxy.ps1")
+Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev/services/dev-auth.ps1")
+Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev/services/dev-game.ps1", "-InstanceId", $OldServerId, "-Port", [string]$OldGamePort, "-AdminPort", [string]$OldAdminPort)
+Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev/services/dev-game.ps1", "-InstanceId", $NewServerId, "-Port", [string]$NewGamePort, "-AdminPort", [string]$NewAdminPort)
+Write-CommandLine @("powershell", "-ExecutionPolicy", "Bypass", "-File", "scripts/dev/services/dev-proxy.ps1")
 Write-Host "Prerequisite: auth-http internal game-server admin client must resolve the old game-server admin endpoint through registry discovery or the explicit old instance id." -ForegroundColor Yellow
 Add-StageResult "manual-service-preparation" "printed"
 

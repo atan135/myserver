@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 
 $env:REGISTRY_ENABLED="true"
 $env:PROXY_ADMIN_TOKEN="dev-only-change-this-proxy-admin-token"
@@ -6,7 +7,7 @@ $env:PROXY_ADMIN_TOKEN="dev-only-change-this-proxy-admin-token"
 Write-Host "Starting game-proxy with service discovery enabled" -ForegroundColor Cyan
 
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-Push-Location "$PSScriptRoot\..\apps\game-proxy"
+Push-Location (Join-Path $ProjectRoot "apps\game-proxy")
 try {
   if (Test-Path $cargo) {
     & $cargo build

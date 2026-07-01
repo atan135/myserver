@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 
 $env:REGISTRY_ENABLED="true"
 if (-not $env:SERVICE_INSTANCE_ID) {
@@ -9,7 +10,7 @@ Write-Host "Starting chat-server with service discovery enabled" -ForegroundColo
 Write-Host "  InstanceId: $env:SERVICE_INSTANCE_ID" -ForegroundColor Gray
 
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-Push-Location "$PSScriptRoot\..\apps\chat-server"
+Push-Location (Join-Path $ProjectRoot "apps\chat-server")
 try {
   if (Test-Path $cargo) {
     & $cargo build

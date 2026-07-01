@@ -7,7 +7,7 @@ if (-not $env:REDIS_URL) {
     $env:REDIS_URL = "redis://127.0.0.1:6379"
 }
 
-$workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$workspaceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $workspaceNodeModules = Join-Path $workspaceRoot "node_modules"
 $serviceDir = Join-Path $workspaceRoot "apps\metrics-collector"
 

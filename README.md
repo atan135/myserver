@@ -161,25 +161,21 @@ npm run db:migrate:dry-run
 npm install
 ```
 
-本地启动脚本：
+本地环境检查：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check-env.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-auth.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-game.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-proxy.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-chat.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-match.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\dev-announce.ps1
 ```
 
-核心开发栈也可以一键启动：
+核心开发栈一键启动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-stack.ps1
 ```
 
-默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce` 启用；未启用 `match-service` 时，`dev-game.ps1` 会按本地开发环境允许 `game-server` 降级跳过匹配通知。`mail-service` 当前不在 `dev-stack.ps1` 的默认编排中，可用 `npm run dev:mail` 单独启动。
+默认会启动 Redis、NATS、`auth-http`、`game-server`、`game-proxy`、`admin-api`、`admin-web` 和 `metrics-collector`。`chat-server`、`match-service`、`announce-service` 需要分别通过 `-WithChat`、`-WithMatch`、`-WithAnnounce` 启用；未启用 `match-service` 时，`game-server` 会按本地开发环境允许降级跳过匹配通知。`mail-service` 当前不在 `dev-stack.ps1` 的默认编排中，可用 `npm run dev:mail` 单独启动。
+
+`scripts/dev/services/*.ps1` 是 `dev-stack.ps1` 使用的单服务启动 helper，只建议排查单服务启动问题时手工调用。
 
 Node.js 服务也可以通过根脚本启动：
 

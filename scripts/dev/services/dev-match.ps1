@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 
 $env:MATCH_BIND_ADDR="0.0.0.0:$Port"
 $env:LOG_LEVEL="$LogLevel"
@@ -21,7 +22,7 @@ Write-Host "  LogLevel: $LogLevel" -ForegroundColor Gray
 Write-Host "  InstanceId: $env:SERVICE_INSTANCE_ID" -ForegroundColor Gray
 
 $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-Push-Location "$PSScriptRoot\..\apps\match-service"
+Push-Location (Join-Path $ProjectRoot "apps\match-service")
 try {
   if (Test-Path $cargo) {
     & $cargo build

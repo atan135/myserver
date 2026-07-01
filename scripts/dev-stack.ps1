@@ -66,6 +66,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ProjectBin = Join-Path $ProjectRoot "bin"
+$ServiceScriptDir = Join-Path $PSScriptRoot "dev\services"
 $LogDir = Join-Path $ProjectRoot "logs\dev-stack"
 $PidFile = Join-Path $LogDir "dev-stack.pids.json"
 $DefaultRedisPort = 6379
@@ -748,7 +749,7 @@ try {
         $selectedServices += "auth-http"
         $authProcess = Start-ServiceScriptIfNeeded `
             -Name "auth-http" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-auth.ps1") `
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-auth.ps1") `
             -RequiredTcpPorts @($authPort)
         if ($authProcess) {
             $started += $authProcess
@@ -760,7 +761,7 @@ try {
         $selectedServices += "match-service"
         $matchProcess = Start-PowerShellScript `
             -Name "match-service" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-match.ps1")
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-match.ps1")
         $started += $matchProcess
         $serviceProcesses["match-service"] = $matchProcess
 
@@ -772,7 +773,7 @@ try {
         $selectedServices += "game-server"
         $gameProcess = Start-ServiceScriptIfNeeded `
             -Name "game-server" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-game.ps1") `
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-game.ps1") `
             -RequiredTcpPorts @($GamePort, $GameAdminPort) `
             -ScriptArguments @(
                 "-InstanceId", $GameInstanceId,
@@ -789,7 +790,7 @@ try {
         $selectedServices += "game-proxy"
         $proxyProcess = Start-ServiceScriptIfNeeded `
             -Name "game-proxy" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-proxy.ps1") `
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-proxy.ps1") `
             -RequiredTcpPorts @($proxyFallbackPort, $proxyAdminPort) `
             -ConflictPorts @($proxyPort)
         if ($proxyProcess) {
@@ -827,7 +828,7 @@ try {
         $selectedServices += "chat-server"
         $chatProcess = Start-PowerShellScript `
             -Name "chat-server" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-chat.ps1")
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-chat.ps1")
         $started += $chatProcess
         $serviceProcesses["chat-server"] = $chatProcess
     }
@@ -836,7 +837,7 @@ try {
         $selectedServices += "announce-service"
         $announceProcess = Start-PowerShellScript `
             -Name "announce-service" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-announce.ps1") `
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-announce.ps1") `
             -ScriptArguments @("-NoWatch")
         $started += $announceProcess
         $serviceProcesses["announce-service"] = $announceProcess
@@ -846,7 +847,7 @@ try {
         $selectedServices += "metrics-collector"
         $metricsCollectorProcess = Start-PowerShellScript `
             -Name "metrics-collector" `
-            -ScriptPath (Join-Path $PSScriptRoot "dev-metrics-collector.ps1")
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-metrics-collector.ps1")
         $started += $metricsCollectorProcess
         $serviceProcesses["metrics-collector"] = $metricsCollectorProcess
     }
