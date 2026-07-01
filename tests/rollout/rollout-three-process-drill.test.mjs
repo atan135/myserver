@@ -132,7 +132,7 @@ function scriptArgs(args) {
   return [
     ...common,
     "-File",
-    path.join(projectRoot, "scripts", "rollout-three-process-drill.ps1"),
+    path.join(projectRoot, "scripts", "ops", "rollout-three-process-drill.ps1"),
     ...args
   ];
 }

@@ -714,7 +714,7 @@ node tools/mock-client/src/index.js --scenario get-room-data \
 `tools/mock-client/src/rollout-transfer-cli.js` 负责单个 room 的控制面迁移顺序。完整 old/new/proxy 第一阶段演练应优先使用仓库根目录脚本：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 `
   -RolloutEpoch rollout-20260612-a `
   -RoomId room-empty-001
 ```

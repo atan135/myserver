@@ -18,12 +18,12 @@ The shutdown safety-gate request is still skipped unless -AllowShutdownRequest
 is passed.
 
 .EXAMPLE
-powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1
+powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1
 
 Print preflight results and all drill commands without changing services.
 
 .EXAMPLE
-powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 `
   -ExecuteSteps `
   -RolloutEpoch rollout-20260612-a `
   -RoomId room-empty-001 `
@@ -34,7 +34,7 @@ Execute the rollout/drain/transfer/complete steps against already-running
 services, but do not request old game-server shutdown.
 
 .EXAMPLE
-powershell -ExecutionPolicy Bypass -File scripts/rollout-three-process-drill.ps1 `
+powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 `
   -ExecuteSteps `
   -AllowShutdownRequest `
   -OldProcessPidFile .tmp\rollout-drill-pids.json `
@@ -172,7 +172,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TransferCli = Join-Path $ProjectRoot "tools\mock-client\src\rollout-transfer-cli.js"
 $MockClientIndex = Join-Path $ProjectRoot "tools\mock-client\src\index.js"
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
@@ -981,7 +981,7 @@ function New-RunReport {
         startedAt = $script:StartedAt
         completedAt = (Get-Date).ToUniversalTime().ToString("o")
         projectRoot = $ProjectRoot
-        script = "scripts/rollout-three-process-drill.ps1"
+        script = "scripts/ops/rollout-three-process-drill.ps1"
         inputs = [pscustomobject]@{
             roomId = $roomValue
             roomIdPlaceholder = if ($RoomId) { $RoomId } else { "<ROOM_ID>" }
@@ -1239,12 +1239,12 @@ if ($ExecuteSteps) {
 Write-Section "Stage 2 - Enable Old Server Drain"
 $configUri = Join-UrlPath $AuthBaseUrl "/api/v1/internal/game-server/config"
 Write-Host "POST $configUri body { key=drain_mode_reason, value=rollout-drill:$displayRolloutEpoch }" -ForegroundColor Gray
-Write-Host "POST $configUri body { key=drain_mode_source, value=scripts/rollout-three-process-drill.ps1 }" -ForegroundColor Gray
+Write-Host "POST $configUri body { key=drain_mode_source, value=scripts/ops/rollout-three-process-drill.ps1 }" -ForegroundColor Gray
 Write-Host "POST $configUri body { key=drain_mode, value=on }" -ForegroundColor Gray
 if ($ExecuteSteps) {
     $internalHeaders = New-InternalHeaders
     Invoke-JsonPost -Name "old drain reason" -Uri $configUri -Headers $internalHeaders -BodyObject @{ key = "drain_mode_reason"; value = "rollout-drill:$RolloutEpoch" } | Out-Null
-    Invoke-JsonPost -Name "old drain source" -Uri $configUri -Headers $internalHeaders -BodyObject @{ key = "drain_mode_source"; value = "scripts/rollout-three-process-drill.ps1" } | Out-Null
+    Invoke-JsonPost -Name "old drain source" -Uri $configUri -Headers $internalHeaders -BodyObject @{ key = "drain_mode_source"; value = "scripts/ops/rollout-three-process-drill.ps1" } | Out-Null
     Invoke-JsonPost -Name "old drain on" -Uri $configUri -Headers $internalHeaders -BodyObject @{ key = "drain_mode"; value = "on" } | Out-Null
     Add-StageResult "old-drain-enable" "ok"
 } else {

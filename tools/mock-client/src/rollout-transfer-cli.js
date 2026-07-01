@@ -70,7 +70,7 @@ Options:
   --timeout-ms <ms>                       default: 5000
   -h, --help
 
-For test/staging/production rollout drills, prefer scripts/rollout-three-process-drill.ps1
+For test/staging/production rollout drills, prefer scripts/ops/rollout-three-process-drill.ps1
 so auth-http, game-proxy admin, and game-server admin endpoints come from registry discovery.
 Direct host/port/url inputs are accepted only when marked as pre-resolved or local debug fallback.`);
 }

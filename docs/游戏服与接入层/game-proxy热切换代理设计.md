@@ -57,7 +57,7 @@
 - `game-server` 已通过已鉴权 admin/internal 通道提供 `RequestServerShutdownReq/Res` 受控 graceful shutdown 入口，并由 `auth-http` 暴露为 `POST /api/v1/internal/game-server/shutdown-if-drained`；入口会再次校验旧服 `drain_mode_enabled`、`connection_count == 0`、`owned_room_count == 0`、`migrating_room_count == 0`，通过后触发 game-server 自身 graceful shutdown 信号，`retired_room_count` 只作为观测字段。`tools/mock-client` 可用 `request-server-shutdown` 场景人工演练该入口。
 - `game-server` 已支持通过已鉴权 admin/internal 通道触发 `ServerRedirectPush`；push 成功进入目标连接出站队列后，旧服会以 `server_redirect_reconnect_required` 主动请求关闭旧连接。mock-client 已能认证进房后监听该 push，也已有 `server-redirect-reconnect` 场景用于收到 push 后主动断线、连接目标入口、重新 `AuthReq` 并优先 `RoomReconnectReq`。
 - `FreezeRoomForTransfer` / `ExportRoomTransfer` / `ImportRoomTransfer` / `ConfirmRoomOwnership` / `RetireTransferredRoom` 已在 `game-server` 已鉴权 internal/admin 通道形成最小闭环，并已有显式编排入口。
-- `scripts/rollout-three-process-drill.ps1` 已提供 old/new/proxy 第一阶段演练入口。默认 dry-run，只做工具检查、端口探测和步骤命令输出；显式 `-ExecuteSteps` 才调用已运行服务的 rollout start、old drain、transfer、drain status 和 complete-if-drained，旧服 shutdown 请求还需要额外 `-AllowShutdownRequest`。2026-06-13 已在真实 old/new/proxy/auth 环境中人工执行 `movement_demo` 空房迁移控制面并通过，覆盖 freeze/export、import/confirm、route upsert、retire 和 `complete-if-drained`。
+- `scripts/ops/rollout-three-process-drill.ps1` 已提供 old/new/proxy 第一阶段演练入口。默认 dry-run，只做工具检查、端口探测和步骤命令输出；显式 `-ExecuteSteps` 才调用已运行服务的 rollout start、old drain、transfer、drain status 和 complete-if-drained，旧服 shutdown 请求还需要额外 `-AllowShutdownRequest`。2026-06-13 已在真实 old/new/proxy/auth 环境中人工执行 `movement_demo` 空房迁移控制面并通过，覆盖 freeze/export、import/confirm、route upsert、retire 和 `complete-if-drained`。
 
 仍未完整落地：
 

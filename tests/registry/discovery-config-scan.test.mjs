@@ -880,7 +880,7 @@ test("script scan allows pre-resolved registry and local debug rollout direct en
   try {
     writeFile(
       tempDir,
-      "scripts/rollout-three-process-drill.ps1",
+      "scripts/ops/rollout-three-process-drill.ps1",
       [
         "$transferArgs = @(",
         "  $TransferCli,",
