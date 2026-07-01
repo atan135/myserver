@@ -390,7 +390,7 @@ export class GmController {
           normalizedSender,
           gameAdminOptions
         );
-        legacyBroadcast = { ...result, fallback: true };
+        legacyBroadcast = { ok: true, ...(result ?? {}), fallback: true };
       } catch (error: any) {
         legacyBroadcast = gameServerFailure(error);
         legacyBroadcast.fallback = true;
@@ -491,10 +491,11 @@ export class GmController {
 
     let legacyKick: any = { ok: true };
     try {
-      legacyKick = await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
+      const result = await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
         ...gameAdminOptions,
         endpoint: targetEndpoint
       });
+      legacyKick = { ok: true, ...(result ?? {}) };
     } catch (error: any) {
       if (isGameAdminTargetSelectionError(error)) {
         throw gameServerError(error);
@@ -559,7 +560,7 @@ export class GmController {
 
     let legacyBan: any = { ok: true };
     try {
-      legacyBan = await this.gameAdminClient.banPlayer(
+      const result = await this.gameAdminClient.banPlayer(
         normalizedPlayerId,
         durationSeconds,
         normalizedReason,
@@ -568,6 +569,7 @@ export class GmController {
           endpoint: targetEndpoint
         }
       );
+      legacyBan = { ok: true, ...(result ?? {}) };
     } catch (error: any) {
       if (isGameAdminTargetSelectionError(error)) {
         throw gameServerError(error);
