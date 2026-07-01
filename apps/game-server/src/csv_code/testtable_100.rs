@@ -36,13 +36,22 @@ impl CsvTableLoader for TestTable100 {
     fn load_from_csv(path: &std::path::Path) -> Result<Self, CsvLoadError> {
         let contents = std::fs::read_to_string(path)?;
         let mut lines = contents.lines();
-        let header_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!("table {} missing header line", Self::TABLE_NAME)))?;
-        let type_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!("table {} missing type line", Self::TABLE_NAME)))?;
+        let header_line = lines.next().ok_or_else(|| {
+            CsvLoadError::InvalidSchema(format!("table {} missing header line", Self::TABLE_NAME))
+        })?;
+        let type_line = lines.next().ok_or_else(|| {
+            CsvLoadError::InvalidSchema(format!("table {} missing type line", Self::TABLE_NAME))
+        })?;
         let header_columns = crate::config_table::parse_csv_columns(header_line);
         let type_columns = crate::config_table::parse_csv_columns(type_line);
         let signature = crate::config_table::schema_signature(&header_columns, &type_columns);
         if signature != Self::SCHEMA_SIGNATURE {
-            return Err(CsvLoadError::InvalidSchema(format!("table {} schema mismatch: expected {}, got {}", Self::TABLE_NAME, Self::SCHEMA_SIGNATURE, signature)));
+            return Err(CsvLoadError::InvalidSchema(format!(
+                "table {} schema mismatch: expected {}, got {}",
+                Self::TABLE_NAME,
+                Self::SCHEMA_SIGNATURE,
+                signature
+            )));
         }
 
         let mut table = Self::default();
@@ -55,7 +64,13 @@ impl CsvTableLoader for TestTable100 {
             }
             let columns = crate::config_table::parse_csv_columns(trimmed);
             if columns.len() != header_columns.len() {
-                return Err(CsvLoadError::InvalidRow(format!("table {} row {} column count mismatch: expected {}, got {}", Self::TABLE_NAME, row_offset + 3, header_columns.len(), columns.len())));
+                return Err(CsvLoadError::InvalidRow(format!(
+                    "table {} row {} column count mismatch: expected {}, got {}",
+                    Self::TABLE_NAME,
+                    row_offset + 3,
+                    header_columns.len(),
+                    columns.len()
+                )));
             }
             let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);
             let row = TestTable100Row {
@@ -71,7 +86,12 @@ impl CsvTableLoader for TestTable100 {
             };
 
             if table.by_id.insert(row.id, table.rows.len()).is_some() {
-                return Err(CsvLoadError::InvalidRow(format!("table {} row {} duplicate id {}", Self::TABLE_NAME, row_offset + 3, row.id)));
+                return Err(CsvLoadError::InvalidRow(format!(
+                    "table {} row {} duplicate id {}",
+                    Self::TABLE_NAME,
+                    row_offset + 3,
+                    row.id
+                )));
             }
             table.by_field_2.entry(row.field_2).or_default().push(table.rows.len());
             table.by_field_6.entry(row.field_6).or_default().push(table.rows.len());

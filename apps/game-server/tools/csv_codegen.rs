@@ -357,23 +357,42 @@ impl CsvField {
             CsvType::Int => format!("reader.parse_i32({}, {:?})?", index, self.original_name),
             CsvType::Int64 => format!("reader.parse_i64({}, {:?})?", index, self.original_name),
             CsvType::Float => format!("reader.parse_f32({}, {:?})?", index, self.original_name),
-            CsvType::String => format!(
-                "reader.parse_string_key({}, {:?}, &mut string_pool)?",
-                index, self.original_name
+            CsvType::String => self.loader_call_expr(
+                "parse_string_key",
+                index,
+                &["&mut string_pool"],
             ),
-            CsvType::Array(ScalarType::String) => format!(
-                "reader.parse_string_array({}, {:?}, &mut string_pool)?",
-                index, self.original_name
+            CsvType::Array(ScalarType::String) => self.loader_call_expr(
+                "parse_string_array",
+                index,
+                &["&mut string_pool"],
             ),
-            CsvType::Dict(ScalarType::String, ScalarType::Int) => format!(
-                "reader.parse_string_int_dict({}, {:?}, &mut string_pool)?",
-                index, self.original_name
+            CsvType::Dict(ScalarType::String, ScalarType::Int) => self.loader_call_expr(
+                "parse_string_int_dict",
+                index,
+                &["&mut string_pool"],
             ),
             _ => format!(
                 "unimplemented!(\"loader for field {}\")",
                 self.original_name
             ),
         }
+    }
+
+    fn loader_call_expr(&self, method: &str, index: usize, extra_args: &[&str]) -> String {
+        let mut args = vec![index.to_string(), format!("{:?}", self.original_name)];
+        args.extend(extra_args.iter().map(|arg| (*arg).to_string()));
+        let single_line = format!("reader.{}({})?", method, args.join(", "));
+        if rendered_field_line_len(&self.rust_name, &single_line) <= 100 {
+            return single_line;
+        }
+
+        let mut expr = format!("reader.{}(\n", method);
+        for arg in &args {
+            expr.push_str(&format!("                    {},\n", arg));
+        }
+        expr.push_str("                )?");
+        expr
     }
 
     fn index_insert_stmt(&self) -> Option<String> {
@@ -385,6 +404,10 @@ impl CsvField {
             )
         })
     }
+}
+
+fn rendered_field_line_len(field_name: &str, expr: &str) -> usize {
+    "                ".len() + field_name.len() + ": ".len() + expr.len() + ",".len()
 }
 
 fn render_table_module(table: &CsvTable) -> String {
@@ -467,15 +490,24 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("    fn load_from_csv(path: &std::path::Path) -> Result<Self, CsvLoadError> {\n");
     out.push_str("        let contents = std::fs::read_to_string(path)?;\n");
     out.push_str("        let mut lines = contents.lines();\n");
-    out.push_str("        let header_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!(\"table {} missing header line\", Self::TABLE_NAME)))?;\n");
-    out.push_str("        let type_line = lines.next().ok_or_else(|| CsvLoadError::InvalidSchema(format!(\"table {} missing type line\", Self::TABLE_NAME)))?;\n");
+    out.push_str("        let header_line = lines.next().ok_or_else(|| {\n");
+    out.push_str("            CsvLoadError::InvalidSchema(format!(\"table {} missing header line\", Self::TABLE_NAME))\n");
+    out.push_str("        })?;\n");
+    out.push_str("        let type_line = lines.next().ok_or_else(|| {\n");
+    out.push_str("            CsvLoadError::InvalidSchema(format!(\"table {} missing type line\", Self::TABLE_NAME))\n");
+    out.push_str("        })?;\n");
     out.push_str(
         "        let header_columns = crate::config_table::parse_csv_columns(header_line);\n",
     );
     out.push_str("        let type_columns = crate::config_table::parse_csv_columns(type_line);\n");
     out.push_str("        let signature = crate::config_table::schema_signature(&header_columns, &type_columns);\n");
     out.push_str("        if signature != Self::SCHEMA_SIGNATURE {\n");
-    out.push_str("            return Err(CsvLoadError::InvalidSchema(format!(\"table {} schema mismatch: expected {}, got {}\", Self::TABLE_NAME, Self::SCHEMA_SIGNATURE, signature)));\n");
+    out.push_str("            return Err(CsvLoadError::InvalidSchema(format!(\n");
+    out.push_str("                \"table {} schema mismatch: expected {}, got {}\",\n");
+    out.push_str("                Self::TABLE_NAME,\n");
+    out.push_str("                Self::SCHEMA_SIGNATURE,\n");
+    out.push_str("                signature\n");
+    out.push_str("            )));\n");
     out.push_str("        }\n\n");
     out.push_str("        let mut table = Self::default();\n");
     if table.has_string_pool {
@@ -489,7 +521,13 @@ fn render_table(table: &CsvTable, out: &mut String) {
     out.push_str("            }\n");
     out.push_str("            let columns = crate::config_table::parse_csv_columns(trimmed);\n");
     out.push_str("            if columns.len() != header_columns.len() {\n");
-    out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\"table {} row {} column count mismatch: expected {}, got {}\", Self::TABLE_NAME, row_offset + 3, header_columns.len(), columns.len())));\n");
+    out.push_str("                return Err(CsvLoadError::InvalidRow(format!(\n");
+    out.push_str("                    \"table {} row {} column count mismatch: expected {}, got {}\",\n");
+    out.push_str("                    Self::TABLE_NAME,\n");
+    out.push_str("                    row_offset + 3,\n");
+    out.push_str("                    header_columns.len(),\n");
+    out.push_str("                    columns.len()\n");
+    out.push_str("                )));\n");
     out.push_str("            }\n");
     out.push_str(
         "            let reader = CsvRowReader::new(Self::TABLE_NAME, row_offset + 3, &columns);\n",
@@ -511,7 +549,7 @@ fn render_table(table: &CsvTable, out: &mut String) {
         table.id_field.rust_name
     ));
     out.push_str(&format!(
-        "                return Err(CsvLoadError::InvalidRow(format!(\"table {{}} row {{}} duplicate id {{}}\", Self::TABLE_NAME, row_offset + 3, row.{})));\n",
+        "                return Err(CsvLoadError::InvalidRow(format!(\n                    \"table {{}} row {{}} duplicate id {{}}\",\n                    Self::TABLE_NAME,\n                    row_offset + 3,\n                    row.{}\n                )));\n",
         table.id_field.rust_name
     ));
     out.push_str("            }\n");
