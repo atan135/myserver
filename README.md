@@ -142,16 +142,14 @@ docs/                 # 当前正式设计文档
 
 脚本和环境检查会优先使用 `bin/` 中的可执行文件；未找到时再回退到系统 `PATH` 或常见安装目录。
 
-数据库初始化脚本与迁移现状：
+数据库初始化脚本：
 
 ```powershell
-$env:DATABASE_URL = "postgres://postgres:password@127.0.0.1:5432/myserver_auth"
 psql -U postgres -f db/init.sql
-npm run check:migrations
-npm run db:migrate:dry-run
+powershell -ExecutionPolicy Bypass -File .\scripts\reset-dev-data.ps1 -Confirm
 ```
 
-`db/init.sql` 是 PostgreSQL 本地 bootstrap 脚本。仓库已有 migration runner、`schema_migrations` 元表和检查命令；正式状态见 [数据库迁移现状](./docs/数据库/数据库迁移说明.md)。
+`db/init.sql` 是 PostgreSQL 本地 bootstrap 脚本。当前阶段没有线上持久库升级需求，不维护独立 migration runner；正式状态见 [数据库初始化说明](./docs/数据库/数据库初始化说明.md)。
 
 ## 常用命令
 

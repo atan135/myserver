@@ -1,7 +1,0 @@
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version VARCHAR(32) NOT NULL PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  checksum CHAR(64) NOT NULL,
-  applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT uk_schema_migrations_name UNIQUE (name)
-);

@@ -373,7 +373,7 @@ GET /api/v1/global-id/merge-events?world_id=&origin_id=&limit=&offset=
 
 ### 10.3 第三阶段：数据库、后台与合服表
 
-- 在数据库迁移中加入 `id_origins`、`worlds`、`world_origin_memberships`、`world_merge_events`。
+- 在 `db/init.sql` 中加入 `id_origins`、`worlds`、`world_origin_memberships`、`world_merge_events`。
 - 为玩家、邮件、公告等需要世界归属的业务表补充 `world_id` 或明确归属查询路径。
 - 在 `admin-api` 增加全局 ID 查询接口。
 - 在 `admin-web` 增加全局 ID 解码、origin/world 查询和合服事件页面。
