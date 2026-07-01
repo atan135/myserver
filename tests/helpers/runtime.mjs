@@ -111,7 +111,8 @@ export async function startAuthHttpServer({
   envOverrides = {}
 }) {
   const nextEnv = {
-    NODE_ENV: "test",
+    NODE_ENV: "development",
+    APP_ENV: "local",
     HOST: host,
     PORT: String(port),
     LOG_LEVEL: "error",
@@ -642,6 +643,11 @@ export async function startGameServer({
   let spawnError = null;
   const cargoEnv = {
     ...process.env,
+    NODE_ENV: "development",
+    APP_ENV: "local",
+    DISCOVERY_REQUIRED: "false",
+    DISALLOW_LEGACY_DIRECT_CONFIG: "false",
+    REGISTRY_ENABLED: "false",
     GAME_HOST: host,
     GAME_PORT: String(port),
     ADMIN_HOST: host,
@@ -878,6 +884,9 @@ export async function runMockClientScenario({
   loginNameB,
   passwordB,
   ticket,
+  ticketA,
+  ticketB,
+  ticketC,
   characterId,
   timeoutMs = 5000,
   maxBodyLen = 4096,
@@ -945,6 +954,18 @@ export async function runMockClientScenario({
     args.push("--ticket", ticket);
   }
 
+  if (ticketA) {
+    args.push("--ticket-a", ticketA);
+  }
+
+  if (ticketB) {
+    args.push("--ticket-b", ticketB);
+  }
+
+  if (ticketC) {
+    args.push("--ticket-c", ticketC);
+  }
+
   if (characterId) {
     args.push("--character-id", characterId);
   }
@@ -1000,6 +1021,11 @@ export async function startGameProxy({
   let spawnError = null;
   const cargoEnv = {
     ...process.env,
+    NODE_ENV: "development",
+    APP_ENV: "local",
+    DISCOVERY_REQUIRED: "false",
+    DISALLOW_LEGACY_DIRECT_CONFIG: "false",
+    REGISTRY_ENABLED: "false",
     PROXY_HOST: host,
     PROXY_PORT: String(port),
     PROXY_ADMIN_HOST: host,

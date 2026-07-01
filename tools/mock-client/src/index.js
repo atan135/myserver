@@ -599,6 +599,7 @@ async function main() {
   const needsLogin = [
     SCENARIO.HAPPY,
     SCENARIO.INVALID_TICKET,
+    SCENARIO.UNKNOWN_MESSAGE,
     SCENARIO.OVERSIZED_ROOM_JOIN,
     SCENARIO.START_GAME_SINGLE_CLIENT,
     SCENARIO.GET_ROOM_DATA,
@@ -626,7 +627,7 @@ async function main() {
         await runUnauthRoomJoin(client, options);
         break;
       case SCENARIO.UNKNOWN_MESSAGE:
-        await runUnknownMessage(client, options);
+        await runUnknownMessage(client, options, login);
         break;
       case SCENARIO.OVERSIZED_ROOM_JOIN:
         await runOversizedRoomJoin(client, options, login);

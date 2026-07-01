@@ -44,9 +44,9 @@
     "check:proto": "npm run check:mock-client-protocol",
     "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
     "global-id:decode": "node tools/global-id-decode.js",
-    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/*.test.mjs",
-    "test:auth-http": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/auth-http.test.mjs",
-    "test:integration": "node --test --experimental-test-isolation=none --test-concurrency=1 tests/integration-flow.test.mjs",
+    "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
+    "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
+    "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
     "test:security": "node tools/test-security-and-ticket.js",
     "count:lines": "node tools/checkfile/count-lines.js"
   },

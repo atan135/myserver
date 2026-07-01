@@ -880,6 +880,11 @@ export async function fetchLoginSession(options, overrides = {}) {
  * @returns {Promise<Object>} Login response with playerId, characterId, ticket, accessToken
  */
 export async function fetchTicket(options, overrides = {}) {
+  const manualTicket = overrides.ticket || resolveManualTicketForGuest(options, overrides.guestId);
+  if (manualTicket) {
+    return attachTicketSummary({ playerId: "manual-ticket", accessToken: "", ticket: manualTicket, manualTicket: true });
+  }
+
   const session = await fetchLoginSession(options, overrides);
   if (session.manualTicket) {
     return attachTicketSummary(session);
@@ -894,4 +899,23 @@ export async function fetchTicket(options, overrides = {}) {
   }
 
   return resolveCharacterLogin(options, session);
+}
+
+function resolveManualTicketForGuest(options, guestId) {
+  if (!guestId) {
+    return "";
+  }
+
+  const normalized = String(guestId);
+  if (options.ticketA && /(?:^|-)a(?:$|-)|owner|host|all-offline-a|reconnect-a/.test(normalized)) {
+    return options.ticketA;
+  }
+  if (options.ticketB && /(?:^|-)b(?:$|-)|member|joiner|client|all-offline-b|reconnect-b/.test(normalized)) {
+    return options.ticketB;
+  }
+  if (options.ticketC && /guest2|character2|third/.test(normalized)) {
+    return options.ticketC;
+  }
+
+  return options.ticket || "";
 }

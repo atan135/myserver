@@ -28,11 +28,11 @@ P1 完成后应达到：服务端可以按 `character_id` 查询角色 `affinity
 - 开始时间：2026-06-26 11:26:37 +08:00
 - 结束时间：2026-06-26 11:32:23 +08:00
 - 开发总结：完成 P1 四属性基础数据库模型确认；`characters` 保留 affinity/mastery 八字段并补充非负与总和约束，新增 `character_element_logs` 作为永久四属性变更日志表，并补齐查询索引。
-- 验证记录：`node --test --experimental-test-isolation=none --test-concurrency=1 tests/db-init-characters.test.mjs` 通过，8/8 tests passed。
+- 验证记录：`node --test --experimental-test-isolation=none --test-concurrency=1 tests/characters/db-init-characters.test.mjs` 通过，8/8 tests passed。
 
-- [x] 确认 `characters` 表中的 `affinity_earth/fire/water/wind` 与 `mastery_earth/fire/water/wind` 字段满足 P1 需求，并在 `db/init.sql` 中直接维护目标结构。（验证：`db/init.sql` 的 `characters` 表包含八个字段及默认值；`tests/db-init-characters.test.mjs` 的 `characters table contains P0 identity split base fields and defaults` 通过）
-- [x] 新增 `character_element_logs` 初始化结构，字段包含 `character_id`、来源、操作者、八个 delta、`before_json`、`after_json`、`reason` 和 `created_at`。（验证：`db/init.sql` 新增 `character_element_logs` 表；`tests/db-init-characters.test.mjs` 的 `character element logs capture P1 source, operator, deltas, snapshots, and reason` 通过）
-- [x] 增加必要索引和约束，至少覆盖 `character_id` 查询、按时间倒序查看日志、`affinity` 总和固定为 `10000`。（验证：`db/init.sql` 包含 `ck_characters_affinity_total`、四属性非负约束和 `idx_character_element_logs_character_created_at_desc` 等索引；`tests/db-init-characters.test.mjs` 的索引与约束用例通过）
+- [x] 确认 `characters` 表中的 `affinity_earth/fire/water/wind` 与 `mastery_earth/fire/water/wind` 字段满足 P1 需求，并在 `db/init.sql` 中直接维护目标结构。（验证：`db/init.sql` 的 `characters` 表包含八个字段及默认值；`tests/characters/db-init-characters.test.mjs` 的 `characters table contains P0 identity split base fields and defaults` 通过）
+- [x] 新增 `character_element_logs` 初始化结构，字段包含 `character_id`、来源、操作者、八个 delta、`before_json`、`after_json`、`reason` 和 `created_at`。（验证：`db/init.sql` 新增 `character_element_logs` 表；`tests/characters/db-init-characters.test.mjs` 的 `character element logs capture P1 source, operator, deltas, snapshots, and reason` 通过）
+- [x] 增加必要索引和约束，至少覆盖 `character_id` 查询、按时间倒序查看日志、`affinity` 总和固定为 `10000`。（验证：`db/init.sql` 包含 `ck_characters_affinity_total`、四属性非负约束和 `idx_character_element_logs_character_created_at_desc` 等索引；`tests/characters/db-init-characters.test.mjs` 的索引与约束用例通过）
 
 ## 阶段 2：四属性读取和统一变更服务
 
@@ -61,9 +61,9 @@ P1 完成后应达到：服务端可以按 `character_id` 查询角色 `affinity
 - 开始时间：2026-06-26 12:30:07 +08:00
 - 结束时间：2026-06-26 12:50:19 +08:00
 - 开发总结：补齐 mock-client 四属性协议编解码和 `character-elements-debug` 场景自动化测试；同步角色体系、协议、外部客户端接入和 mock-client 文档，明确 P1 范围、异步状态处理要求、debug token 边界和手动联调依赖。
-- 验证记录：`node --test --experimental-test-isolation=none --test-concurrency=1 tests/db-init-characters.test.mjs tests/mock-client-protocol.test.mjs tests/mock-client-character.test.mjs` 通过，26/26 tests passed；`node --check tools/mock-client/src/messages.js` 与 `node --check tools/mock-client/src/scenarios/character.js` 通过；`cargo test character_element --manifest-path apps/game-server/Cargo.toml` 通过，8/8 targeted tests passed。未启动服务或执行联调。
+- 验证记录：`node --test --experimental-test-isolation=none --test-concurrency=1 tests/characters/db-init-characters.test.mjs tests/mock-client/mock-client-protocol.test.mjs tests/mock-client/mock-client-character.test.mjs` 通过，26/26 tests passed；`node --check tools/mock-client/src/messages.js` 与 `node --check tools/mock-client/src/scenarios/character.js` 通过；`cargo test character_element --manifest-path apps/game-server/Cargo.toml` 通过，8/8 targeted tests passed。未启动服务或执行联调。
 
-- [x] 增加自动化测试，覆盖空库初始化结构、四属性查询、合法变更、非法变更、日志写入和 mock-client 输出。（验证：`tests/db-init-characters.test.mjs` 覆盖表结构和日志字段；`apps/game-server/src/core/character_element.rs` 测试覆盖合法/非法变更；`tests/mock-client-protocol.test.mjs` 覆盖四属性协议编解码；`tests/mock-client-character.test.mjs` 覆盖 `character-elements-debug` JSON 输出）
+- [x] 增加自动化测试，覆盖空库初始化结构、四属性查询、合法变更、非法变更、日志写入和 mock-client 输出。（验证：`tests/characters/db-init-characters.test.mjs` 覆盖表结构和日志字段；`apps/game-server/src/core/character_element.rs` 测试覆盖合法/非法变更；`tests/mock-client/mock-client-protocol.test.mjs` 覆盖四属性协议编解码；`tests/mock-client/mock-client-character.test.mjs` 覆盖 `character-elements-debug` JSON 输出）
 - [x] 同步更新角色体系、协议、外部客户端接入和 mock-client 文档，明确真实 client 需要把四属性变化推送或查询结果作为异步状态处理。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md`、`docs/协议与客户端/协议设计.md`、`docs/协议与客户端/外部客户端接入说明.md`、`tools/mock-client/README.md` 和 `help.txt` 已写明 `1413-1416`、P1 范围与异步状态处理）
 - [x] 完成最终验收前整理手动联调步骤，列出需要启动的 PostgreSQL、Redis、NATS、auth-http、game-proxy 和 game-server 依赖，并等待用户确认后再执行。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md` 的 “P1 手动联调步骤” 列出 PostgreSQL、Redis、Core NATS、`auth-http`、`game-proxy`、`game-server` 依赖和等待确认要求）
 
@@ -75,9 +75,9 @@ P1 完成后应达到：服务端可以按 `character_id` 查询角色 `affinity
 - 结束时间：2026-06-26 13:33:13 +08:00
 - 验收总结：P1 四属性基础的数据库结构、game-server 统一服务、玩家协议、mock-client 调试流程、自动化测试和文档已完成并提交。经用户确认后已启动 PostgreSQL、Redis、Core NATS、auth-http、match-service、game-server 和 game-proxy 完成真实服务联调；合法四属性变更成功落库并写入完整日志，bad token 与非法 affinity 总和负例均被拒绝且未写入成功日志。
 
-- [x] 空库执行 `db/init.sql` 后包含目标四属性字段和 `character_element_logs`。（验证：`db/init.sql` 包含 `characters` 八个四属性字段和 `character_element_logs`；`tests/db-init-characters.test.mjs` 静态结构测试通过。未启动真实 PostgreSQL 执行建库）
-- [x] 已选角进入游戏的连接可以按 `character_id` 查询当前四属性。（验证：`GetCharacterElementsReq/Res` 使用当前鉴权 `identity.character_id`，`tests/mock-client-character.test.mjs` fake TCP 场景验证选角后按 `seq=2/4` 查询四属性输出）
+- [x] 空库执行 `db/init.sql` 后包含目标四属性字段和 `character_element_logs`。（验证：`db/init.sql` 包含 `characters` 八个四属性字段和 `character_element_logs`；`tests/characters/db-init-characters.test.mjs` 静态结构测试通过。未启动真实 PostgreSQL 执行建库）
+- [x] 已选角进入游戏的连接可以按 `character_id` 查询当前四属性。（验证：`GetCharacterElementsReq/Res` 使用当前鉴权 `identity.character_id`，`tests/mock-client/mock-client-character.test.mjs` fake TCP 场景验证选角后按 `seq=2/4` 查询四属性输出）
 - [x] 合法四属性变更可以成功落库，并写入完整变更日志。（验证：真实服务栈下 `node tools/mock-client/src/index.js --scenario character-elements-debug ... --character-id chr_1rq2yxb40020 --json-output` 返回 `ok=true`；PostgreSQL 查询确认 `characters` 更新为 `affinity_earth=2400, affinity_fire=2600, affinity_water=2500, affinity_wind=2500, mastery_fire=10`，`character_element_logs` 写入 `source_type=gm`、`source_id=debug-character-elements`、`operator_id=plr_1rq2yvpg0020`、八个 delta、`before_json`、`after_json` 和 `reason=p1-server-integration-20260626`）
 - [x] 非法 `affinity` 总和和非法负数 `mastery` 变更会被拒绝。（验证：`apps/game-server/src/core/character_element.rs` 单元测试覆盖 `INVALID_AFFINITY_TOTAL` 与 `NEGATIVE_MASTERY`，`cargo test character_element --manifest-path apps/game-server/Cargo.toml` 通过）
-- [x] mock-client 可以完成查询、测试变更和结果验证流程。（验证：`tests/mock-client-character.test.mjs` 的 `character-elements-debug queries, applies a controlled change, and emits JSON output` 通过；真实服务栈下 `character-elements-debug` 经 `auth-http -> game-proxy TCP fallback 14000 -> game-server` 返回 before/change/after，合法变更 `ok=true`）
+- [x] mock-client 可以完成查询、测试变更和结果验证流程。（验证：`tests/mock-client/mock-client-character.test.mjs` 的 `character-elements-debug queries, applies a controlled change, and emits JSON output` 通过；真实服务栈下 `character-elements-debug` 经 `auth-http -> game-proxy TCP fallback 14000 -> game-server` 返回 before/change/after，合法变更 `ok=true`）
 - [x] 文档明确 P1 范围，以及背包、职业、称号、战斗联动属于后续阶段。（验证：`docs/游戏服与接入层/角色体系与四属性设计.md` 的 P1 当前范围 / P1 不包含章节已明确边界）

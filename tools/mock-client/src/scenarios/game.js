@@ -1,7 +1,5 @@
 import { MESSAGE_TYPE } from "../constants.js";
 import {
-  encodePingReq,
-  encodeRoomJoinReq,
   encodeRoomLeaveReq,
   encodeRoomReadyReq,
   encodeRoomStartReq,
@@ -10,7 +8,7 @@ import {
 } from "../messages.js";
 import { fetchTicket } from "../auth.js";
 import { TcpProtocolClient } from "../client.js";
-import { authenticateClient, printResponse, delayBeforeFinalLeave } from "./room.js";
+import { authenticateClient, printResponse, delayBeforeFinalLeave, joinRoomExpectSuccess } from "./room.js";
 import { decodeByMessageType } from "../messages.js";
 
 /**
@@ -61,6 +59,14 @@ async function waitForRoomStatePush(client, expectedEvent, timeoutMs, label = "r
   throw new Error(`Timeout waiting for ${expectedEvent} from ${client.label}`);
 }
 
+async function waitForMessageType(client, expectedMessageType, timeoutMs, label, seq = null) {
+  return client.readUntil(
+    timeoutMs,
+    (packet) => packet.messageType === expectedMessageType && (seq === null || packet.seq === seq),
+    label
+  );
+}
+
 /**
  * Gameplay roundtrip: two clients join, start game, exchange inputs, end game
  */
@@ -83,32 +89,33 @@ export async function runGameplayRoundtrip(options) {
     await authenticateClient(clientA, options, loginA, 1);
     await authenticateClient(clientB, options, loginB, 1);
 
-    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
-
-    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+    await joinRoomExpectSuccess(clientA, options, options.roomId, 2, "roomJoin");
+    await joinRoomExpectSuccess(clientB, options, options.roomId, 2, "roomJoin");
+    await waitForRoomStatePush(clientA, "member_joined", options.timeoutMs, "roomStatePush(join2)");
 
     await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-    printResponse("clientA.roomReady", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(ready1)", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(ready1)", await clientB.readNextPacket(options.timeoutMs));
+    const readyA = await waitForMessageType(clientA, MESSAGE_TYPE.ROOM_READY_RES, options.timeoutMs, "roomReady", 3);
+    if (!readyA.ok) {
+      throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, "ready_changed", options.timeoutMs, "roomStatePush(ready1)");
+    await waitForRoomStatePush(clientB, "ready_changed", options.timeoutMs, "roomStatePush(ready1)");
 
     await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-    printResponse("clientB.roomReady", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(ready2)", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(ready2)", await clientA.readNextPacket(options.timeoutMs));
+    const readyB = await waitForMessageType(clientB, MESSAGE_TYPE.ROOM_READY_RES, options.timeoutMs, "roomReady", 3);
+    if (!readyB.ok) {
+      throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    }
+    await waitForRoomStatePush(clientB, "ready_changed", options.timeoutMs, "roomStatePush(ready2)");
+    await waitForRoomStatePush(clientA, "ready_changed", options.timeoutMs, "roomStatePush(ready2)");
 
     await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-    const startRes = printResponse("clientA.roomStart", await clientA.readNextPacket(options.timeoutMs));
+    const startRes = await waitForMessageType(clientA, MESSAGE_TYPE.ROOM_START_RES, options.timeoutMs, "roomStart", 4);
     if (!startRes.ok) {
       throw new Error(`clientA room start failed: ${startRes.errorCode}`);
     }
-    printResponse("clientA.roomStatePush(gameStarted)", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
+    await waitForRoomStatePush(clientA, "game_started", options.timeoutMs, "roomStatePush(gameStarted)");
+    await waitForRoomStatePush(clientB, "game_started", options.timeoutMs, "roomStatePush(gameStarted)");
 
     console.log("\n--- FRAME SYNC START ---\n");
 
@@ -177,7 +184,7 @@ export async function runGameplayRoundtrip(options) {
 
     // End game
     await clientA.send(MESSAGE_TYPE.ROOM_END_REQ, 100, encodeRoomEndReq("round-complete"));
-    const endRes = printResponse("clientA.roomEnd", await clientA.readNextPacket(options.timeoutMs));
+    const endRes = await waitForMessageType(clientA, MESSAGE_TYPE.ROOM_END_RES, options.timeoutMs, "roomEnd", 100);
     if (!endRes.ok) {
       throw new Error(`clientA room end failed: ${endRes.errorCode}`);
     }
@@ -193,7 +200,7 @@ export async function runGameplayRoundtrip(options) {
     }
 
     await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 7, encodeRoomLeaveReq());
-    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    const leaveA = await waitForMessageType(clientA, MESSAGE_TYPE.ROOM_LEAVE_RES, options.timeoutMs, "roomLeave", 7);
     if (!leaveA.ok) {
       throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
     }
@@ -201,7 +208,7 @@ export async function runGameplayRoundtrip(options) {
 
     await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 7, encodeRoomLeaveReq());
-    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    const leaveB = await waitForMessageType(clientB, MESSAGE_TYPE.ROOM_LEAVE_RES, options.timeoutMs, "roomLeave", 7);
     if (!leaveB.ok) {
       throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
     }

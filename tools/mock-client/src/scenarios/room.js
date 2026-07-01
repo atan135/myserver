@@ -438,7 +438,7 @@ async function setDrainMode(options, enabled) {
   return status;
 }
 
-async function joinRoomExpectSuccess(client, options, roomId, seq, label = "roomJoin") {
+export async function joinRoomExpectSuccess(client, options, roomId, seq, label = "roomJoin") {
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, seq, encodeRoomJoinReq(roomId, options.policyId || ""));
   const joinRes = await client.readUntil(
     options.timeoutMs,
@@ -730,20 +730,18 @@ export async function runGetRoomData(client, options, login) {
 export async function runGetRoomDataInRoom(client, options, login) {
   await authenticateClient(client, options, login, 1);
 
-  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-  const joinRes = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
-  if (!joinRes.ok) {
-    throw new Error(`room join failed: ${joinRes.errorCode}`);
-  }
-
-  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+  await joinRoomExpectSuccess(client, options, options.roomId, 2, "roomJoin");
 
   await client.send(
     MESSAGE_TYPE.GET_ROOM_DATA_REQ,
     3,
     encodeGetRoomDataReq(options.idStart, options.idEnd)
   );
-  const response = printResponse(`${client.label}.getRoomData`, await client.readNextPacket(options.timeoutMs));
+  const response = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.GET_ROOM_DATA_RES && packet.seq === 3,
+    "getRoomData"
+  );
   if (!response.ok) {
     throw new Error(`get room data failed: ${response.errorCode}`);
   }
@@ -755,7 +753,11 @@ export async function runGetRoomDataInRoom(client, options, login) {
 
   await delayBeforeFinalLeave(client, options.timeoutMs);
   await client.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 4, encodeRoomLeaveReq());
-  const leaveRes = printResponse(`${client.label}.roomLeave`, await client.readNextPacket(options.timeoutMs));
+  const leaveRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 4,
+    "roomLeave"
+  );
   if (!leaveRes.ok) {
     throw new Error(`room leave failed: ${leaveRes.errorCode}`);
   }
@@ -767,22 +769,21 @@ export async function runGetRoomDataInRoom(client, options, login) {
 export async function runStartGameSingleClient(client, options, login) {
   await authenticateClient(client, options, login, 1);
 
-  await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-  const joinRes = printResponse(`${client.label}.roomJoin`, await client.readNextPacket(options.timeoutMs));
-  if (!joinRes.ok) {
-    throw new Error(`room join failed: ${joinRes.errorCode}`);
-  }
-  printResponse(`${client.label}.roomStatePush(join)`, await client.readNextPacket(options.timeoutMs));
+  await joinRoomExpectSuccess(client, options, options.roomId, 2, "roomJoin");
 
   await client.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-  const readyRes = printResponse(`${client.label}.roomReady`, await client.readNextPacket(options.timeoutMs));
+  const readyRes = await client.readUntil(
+    options.timeoutMs,
+    (packet) => packet.messageType === MESSAGE_TYPE.ROOM_READY_RES && packet.seq === 3,
+    "roomReady"
+  );
   if (!readyRes.ok) {
     throw new Error(`room ready failed: ${readyRes.errorCode}`);
   }
-  printResponse(`${client.label}.roomStatePush(ready)`, await client.readNextPacket(options.timeoutMs));
+  await waitForRoomStatePush(client, options.timeoutMs, "ready_changed", "roomStatePush(ready)");
 
   await client.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-  const startRes = printResponse(`${client.label}.roomStart`, await client.readNextPacket(options.timeoutMs));
+  const startRes = await waitForRoomStartRes(client, options.timeoutMs, "roomStart");
   if (startRes.ok) {
     throw new Error("expected single-client start game to fail");
   }
@@ -878,36 +879,46 @@ export async function runStartGameReadyRoom(options) {
     await authenticateClient(clientA, options, loginA, 1);
     await authenticateClient(clientB, options, loginB, 1);
 
-    await clientA.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    printResponse("clientA.roomJoin", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(join1)", await clientA.readNextPacket(options.timeoutMs));
+    await joinRoomExpectSuccess(clientA, options, options.roomId, 2, "roomJoin");
 
-    await clientB.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 2, encodeRoomJoinReq(options.roomId));
-    printResponse("clientB.roomJoin", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(join)", await clientB.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(join2)", await clientA.readNextPacket(options.timeoutMs));
+    await joinRoomExpectSuccess(clientB, options, options.roomId, 2, "roomJoin");
+    await waitForRoomStatePush(clientA, options.timeoutMs, "member_joined", "roomStatePush(join2)");
 
     await clientA.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-    printResponse("clientA.roomReady", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientA.roomStatePush(ready1)", await clientA.readNextPacket(options.timeoutMs));
-    printResponse("clientB.roomStatePush(ready1)", await clientB.readNextPacket(options.timeoutMs));
+    const readyA = await clientA.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_READY_RES && packet.seq === 3,
+      "roomReady"
+    );
+    if (!readyA.ok) {
+      throw new Error(`clientA ready failed: ${readyA.errorCode}`);
+    }
+    await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
+    await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready1)");
 
     await clientB.send(MESSAGE_TYPE.ROOM_READY_REQ, 3, encodeRoomReadyReq(true));
-    printResponse("clientB.roomReady", await clientB.readNextPacket(options.timeoutMs));
-    const readyPushB = printResponse("clientB.roomStatePush(ready2)", await clientB.readNextPacket(options.timeoutMs));
-    const readyPushA = printResponse("clientA.roomStatePush(ready2)", await clientA.readNextPacket(options.timeoutMs));
+    const readyB = await clientB.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_READY_RES && packet.seq === 3,
+      "roomReady"
+    );
+    if (!readyB.ok) {
+      throw new Error(`clientB ready failed: ${readyB.errorCode}`);
+    }
+    const readyPushB = await waitForRoomStatePush(clientB, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
+    const readyPushA = await waitForRoomStatePush(clientA, options.timeoutMs, "ready_changed", "roomStatePush(ready2)");
     if (readyPushA.snapshot?.state !== "ready" || readyPushB.snapshot?.state !== "ready") {
       throw new Error("expected room state to become ready before start");
     }
 
     await clientA.send(MESSAGE_TYPE.ROOM_START_REQ, 4, encodeRoomStartReq());
-    const startRes = printResponse("clientA.roomStart", await clientA.readNextPacket(options.timeoutMs));
+    const startRes = await waitForRoomStartRes(clientA, options.timeoutMs, "roomStart");
     if (!startRes.ok) {
       throw new Error(`clientA room start failed: ${startRes.errorCode}`);
     }
 
-    const startPushA = printResponse("clientA.roomStatePush(gameStarted)", await clientA.readNextPacket(options.timeoutMs));
-    const startPushB = printResponse("clientB.roomStatePush(gameStarted)", await clientB.readNextPacket(options.timeoutMs));
+    const startPushA = await waitForRoomStatePush(clientA, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
+    const startPushB = await waitForRoomStatePush(clientB, options.timeoutMs, "game_started", "roomStatePush(gameStarted)");
     if (startPushA.event !== "game_started" || startPushB.event !== "game_started") {
       throw new Error("expected game_started room state push");
     }
@@ -916,15 +927,23 @@ export async function runStartGameReadyRoom(options) {
     }
 
     await clientA.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
-    const leaveA = printResponse("clientA.roomLeave", await clientA.readNextPacket(options.timeoutMs));
+    const leaveA = await clientA.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 5,
+      "roomLeave"
+    );
     if (!leaveA.ok) {
       throw new Error(`clientA room leave failed: ${leaveA.errorCode}`);
     }
-    printResponse("clientB.roomStatePush(afterOwnerLeave)", await clientB.readNextPacket(options.timeoutMs));
+    await waitForRoomStatePush(clientB, options.timeoutMs, "member_left", "roomStatePush(afterOwnerLeave)");
 
     await delayBeforeFinalLeave(clientB, options.timeoutMs);
     await clientB.send(MESSAGE_TYPE.ROOM_LEAVE_REQ, 5, encodeRoomLeaveReq());
-    const leaveB = printResponse("clientB.roomLeave", await clientB.readNextPacket(options.timeoutMs));
+    const leaveB = await clientB.readUntil(
+      options.timeoutMs,
+      (packet) => packet.messageType === MESSAGE_TYPE.ROOM_LEAVE_RES && packet.seq === 5,
+      "roomLeave"
+    );
     if (!leaveB.ok) {
       throw new Error(`clientB room leave failed: ${leaveB.errorCode}`);
     }
@@ -955,13 +974,16 @@ export async function runInvalidTicket(client, options, login) {
  */
 export async function runUnauthRoomJoin(client, options) {
   await client.send(MESSAGE_TYPE.ROOM_JOIN_REQ, 1, encodeRoomJoinReq(options.roomId));
-  await expectErrorPacket(client, options.timeoutMs, "NOT_AUTHENTICATED");
+  await expectErrorPacket(client, options.timeoutMs, "PREAUTH_MESSAGE_NOT_ALLOWED");
 }
 
 /**
  * Unknown message type test
  */
-export async function runUnknownMessage(client, options) {
+export async function runUnknownMessage(client, options, login) {
+  if (login) {
+    await authenticateClient(client, options, login, 1);
+  }
   await client.send(7777, 1, Buffer.alloc(0));
   await expectErrorPacket(client, options.timeoutMs, "UNKNOWN_MESSAGE_TYPE");
 }

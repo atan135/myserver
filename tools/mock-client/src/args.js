@@ -51,6 +51,9 @@ const DEFAULT_OPTIONS = {
   loginNameB: "",
   passwordB: "",
   ticket: "",
+  ticketA: "",
+  ticketB: "",
+  ticketC: "",
   characterId: "",
   characterName: "",
   characterAppearanceJson: "",
@@ -241,6 +244,15 @@ export function parseArgs(argv) {
         break;
       case "--ticket":
         ({ value: result.ticket, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--ticket-a":
+        ({ value: result.ticketA, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--ticket-b":
+        ({ value: result.ticketB, nextIndex: index } = collectOptionValue(argv, index));
+        break;
+      case "--ticket-c":
+        ({ value: result.ticketC, nextIndex: index } = collectOptionValue(argv, index));
         break;
       case "--character-id":
         ({ value: result.characterId, nextIndex: index } = collectOptionValue(argv, index));
