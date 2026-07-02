@@ -14,17 +14,37 @@ use tokio::sync::mpsc;
 
 use super::audit::{AdminAuditTarget, AdminWritePreflightError, audit_admin_write_result};
 use super::auth::{AdminAuthContext, authenticate_admin_packet};
+use super::gm::{
+    GmBanPlayerCommand, GmKickPlayerCommand, KickOnlineOutcome, decode_gm_ban_player_request,
+    decode_gm_broadcast_request, decode_gm_kick_player_request, decode_grant_items_request,
+    gm_disconnect_reason, grant_item_to_inventory_item, kick_online_player,
+};
+use super::rollout_status::build_rollout_drain_status_response;
+use super::runtime_config::apply_runtime_config;
 use super::*;
+use crate::admin_pb::{GrantItem, GrantItemsReq, UpdateConfigReq};
 use crate::core::config_table::CsvTableLoader;
-use crate::core::context::{OnlinePlayerRegistry, PlayerConnectionHandle};
+use crate::core::context::{
+    OnlinePlayerRegistry, PlayerConnectionHandle, PlayerRegistry, SharedRuntimeConfig,
+};
+use crate::core::global_id::ItemUidGenerator;
 use crate::core::inventory::item::ItemElementValues;
 use crate::core::logic::{RoomLogic, RoomLogicFactory, RoomLogicTransfer};
 use crate::core::player::{PgPlayerStore, PlayerManager};
 use crate::core::room::{ConnectionCloseState, MemberRole, OutboundChannel, OutboundMessage};
 use crate::core::runtime::RoomManager;
 use crate::csv_code::itemtable::ItemTable;
-use crate::pb::GameMessagePush;
-use crate::protocol::{HEADER_LEN, PacketHeader, encode_packet, parse_header};
+use crate::gm_broadcast::{
+    GM_BROADCAST_TITLE_MAX_LEN, GmBroadcastCommand, broadcast_gm_message_to_online_players,
+};
+use crate::pb::{
+    GameMessagePush, RequestServerShutdownReq, RequestServerShutdownRes,
+    TriggerRolloutDrainNoticeReq, TriggerServerRedirectReq,
+};
+use crate::protocol::{
+    HEADER_LEN, MessageType, Packet, PacketHeader, encode_body, encode_packet, parse_header,
+};
+use crate::server::{DEFAULT_DRAIN_MODE_REASON, DEFAULT_DRAIN_MODE_SOURCE, RuntimeConfig};
 
 struct NoopRoomLogic;
 
@@ -294,7 +314,10 @@ async fn gm_send_item_audit_event_targets_character() {
         reason: "unit-test".to_string(),
     };
     let packet = bytes_packet(MessageType::GmSendItemReq, 11, encode_body(&request));
-    let target = character_target(request.character_id.clone());
+    let target = AdminAuditTarget {
+        character_id: request.character_id.clone(),
+        ..Default::default()
+    };
 
     audit_admin_write_result(
         &audit_logger,
