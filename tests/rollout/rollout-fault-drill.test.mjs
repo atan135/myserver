@@ -6,16 +6,16 @@ import {
   createSimulatedTransferClients,
   ROLLOUT_FAULT_DRILL,
   runRolloutFaultDrills
-} from "../../tools/mock-client/src/rollout-fault-drill.js";
+} from "../../tools/rollout/rollout-fault-drill.js";
 import {
   ROOM_TRANSFER_FAILURE_INJECTION,
   ROOM_TRANSFER_STAGE,
   encodeRoomTransferPayloadForTest,
   orchestrateRoomTransfer
-} from "../../tools/mock-client/src/rollout-transfer.js";
+} from "../../tools/rollout/rollout-transfer.js";
 
 test("rollout fault drill cli help uses registry targets before direct endpoints", () => {
-  const result = spawnSync(process.execPath, ["tools/mock-client/src/rollout-fault-drill-cli.js", "--help"], {
+  const result = spawnSync(process.execPath, ["tools/rollout/rollout-fault-drill-cli.js", "--help"], {
     cwd: process.cwd(),
     encoding: "utf8"
   });

@@ -8,7 +8,7 @@ import {
   applyResolvedRolloutControlTargets,
   resolveRolloutControlTargets,
   validateControlTargetOptions
-} from "../../tools/mock-client/src/rollout-targets.js";
+} from "../../tools/rollout/rollout-targets.js";
 import { MemoryRedis } from "../../tools/check-registry-canary-lifecycle.js";
 
 function endpoint(name, protocol, host, port, visibility) {

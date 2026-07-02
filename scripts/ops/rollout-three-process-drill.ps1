@@ -173,7 +173,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$TransferCli = Join-Path $ProjectRoot "tools\mock-client\src\rollout-transfer-cli.js"
+$TransferCli = Join-Path $ProjectRoot "tools\rollout\rollout-transfer-cli.js"
 $MockClientIndex = Join-Path $ProjectRoot "tools\mock-client\src\index.js"
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path $ProjectRoot ".tmp\rollout-three-process-drill-report.json"
@@ -1311,7 +1311,7 @@ $transferDryRunArgs = @(
 )
 $transferDisplayArgs = @(
     "node",
-    "tools/mock-client/src/rollout-transfer-cli.js",
+    "tools/rollout/rollout-transfer-cli.js",
     "--resolved-control-targets",
     "--rollout-epoch", $displayRolloutEpoch,
     "--room-id", $displayRoomId,

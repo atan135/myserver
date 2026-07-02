@@ -8,7 +8,7 @@ import {
   ROOM_TRANSFER_STAGE,
   encodeRoomTransferPayloadForTest,
   orchestrateRoomTransfer
-} from "../../tools/mock-client/src/rollout-transfer.js";
+} from "../../tools/rollout/rollout-transfer.js";
 
 function createClients(overrides = {}) {
   const calls = [];

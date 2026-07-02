@@ -833,7 +833,7 @@ test("script scan rejects rollout fixed default control targets and unmarked dir
   try {
     writeFile(
       tempDir,
-      "tools/mock-client/src/rollout-transfer-cli.js",
+      "tools/rollout/rollout-transfer-cli.js",
       [
         "const options = {",
         "  oldAdminPort: 7500,",
@@ -846,7 +846,7 @@ test("script scan rejects rollout fixed default control targets and unmarked dir
       tempDir,
       "tools/mock-client/help_rollout.txt",
       [
-        "node tools/mock-client/src/rollout-transfer-cli.js ^",
+        "node tools/rollout/rollout-transfer-cli.js ^",
         "  --rollout-epoch rollout-test ^",
         "  --old-admin-host 127.0.0.1 --old-admin-port 7500 ^",
         "  --proxy-admin-url http://127.0.0.1:7101"
@@ -897,7 +897,7 @@ test("script scan allows pre-resolved registry and local debug rollout direct en
       tempDir,
       "tools/mock-client/help_rollout.txt",
       [
-        "node tools/mock-client/src/rollout-transfer-cli.js ^",
+        "node tools/rollout/rollout-transfer-cli.js ^",
         "  --local-debug-targets ^",
         "  --old-admin-host 127.0.0.1 --old-admin-port 7500 ^",
         "  --proxy-admin-url http://127.0.0.1:7101"

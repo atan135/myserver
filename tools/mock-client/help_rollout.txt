@@ -24,7 +24,7 @@
 # 3. 同连接迁移 / L7 relay
 #
 # 当前新增的控制流工具:
-# - tools/mock-client/src/rollout-transfer-cli.js 可显式编排
+# - tools/rollout/rollout-transfer-cli.js 可显式编排
 #   old freeze/export -> new import -> proxy room route upsert -> old retire。
 # - 该工具只调用已鉴权 game-server admin TCP 包协议和 game-proxy admin HTTP，
 #   不实现同连接迁移、L7 relay，也不会替代客户端 redirect/reconnect。
@@ -32,10 +32,10 @@
 #   默认 dry-run，通过 registry discovery 解析控制面 endpoint，再做 preflight、
 #   端口探测和步骤命令输出；显式 -ExecuteSteps
 #   才调用已运行服务的控制面接口，request-server-shutdown 还需要额外
-#   -AllowShutdownRequest。详见 docs/rollout-three-process-drill-runbook.md。
-# - tools/mock-client/src/rollout-fault-drill-cli.js 是故障演练入口，
+#   -AllowShutdownRequest。详见 docs/后台与运维/三进程灰度演练手册.md。
+# - tools/rollout/rollout-fault-drill-cli.js 是故障演练入口，
 #   默认 dry-run 只输出 JSON 计划；--simulate 使用纯 mock client 验证停止点；
-#   --execute 才调用控制面。详见 docs/rollout-fault-drill-runbook.md。
+#   --execute 才调用控制面。详见 docs/后台与运维/灰度故障演练手册.md。
 
 # ========== 测试 GM / 控制面 ==========
 
@@ -170,7 +170,7 @@ node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-
 #
 # 本地 manual drill 示例；测试/线上演练应优先通过 scripts/ops/rollout-three-process-drill.ps1
 # 从 registry discovery 解析 auth/proxy/game-server admin endpoint。
-node tools/mock-client/src/rollout-transfer-cli.js ^
+node tools/rollout/rollout-transfer-cli.js ^
   --local-debug-targets ^
   --rollout-epoch rollout-20260611-a ^
   --room-id room-empty-001 ^
@@ -184,7 +184,7 @@ node tools/mock-client/src/rollout-transfer-cli.js ^
 # 这个命令只调用 old game-server admin TriggerServerRedirectReq(1611)，不会执行 freeze/export/import/retire，
 # 也不会自动断开旧服连接。可配合 server-redirect-listen 验证 push，或配合
 # server-redirect-reconnect 验证 mock-client 主动断线、重连 proxy、AuthReq + RoomReconnectReq/RoomJoinReq。
-node tools/mock-client/src/rollout-transfer-cli.js ^
+node tools/rollout/rollout-transfer-cli.js ^
   --local-debug-targets ^
   --trigger-redirect-only ^
   --rollout-epoch rollout-20260611-a ^
@@ -220,15 +220,15 @@ powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill
 # ========== rollout 故障演练入口 ==========
 
 # 默认 dry-run，不访问服务、不调用写接口、不请求停服:
-node tools/mock-client/src/rollout-fault-drill-cli.js
+node tools/rollout/rollout-fault-drill-cli.js
 
 # 纯内存模拟验证，不依赖 old/new/proxy/auth-http:
-node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
+node tools/rollout/rollout-fault-drill-cli.js --simulate
 
 # 指定单个故障:
-node tools/mock-client/src/rollout-fault-drill-cli.js --drill import-failure
-node tools/mock-client/src/rollout-fault-drill-cli.js --drill route-upsert-failure
-node tools/mock-client/src/rollout-fault-drill-cli.js --drill redirect-no-reconnect
+node tools/rollout/rollout-fault-drill-cli.js --drill import-failure
+node tools/rollout/rollout-fault-drill-cli.js --drill route-upsert-failure
+node tools/rollout/rollout-fault-drill-cli.js --drill redirect-no-reconnect
 
 # 当前覆盖:
 # - import-failure: old freeze/export 后篡改 payload，预期停在 new_import，
@@ -240,7 +240,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js --drill redirect-no-reconn
 
 # 显式执行模式只作为本地 manual drill 使用；测试/线上故障演练应先从 registry discovery
 # 解析 endpoint，再把解析结果传入 CLI，或优先使用外层 rollout-three-process 脚本:
-node tools/mock-client/src/rollout-fault-drill-cli.js ^
+node tools/rollout/rollout-fault-drill-cli.js ^
   --execute ^
   --local-debug-targets ^
   --drill import-failure ^
@@ -253,7 +253,7 @@ node tools/mock-client/src/rollout-fault-drill-cli.js ^
   --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>"
 
 # redirect-no-reconnect 执行模式只触发 push，不自动重连；下面是本地 manual drill 示例:
-node tools/mock-client/src/rollout-fault-drill-cli.js ^
+node tools/rollout/rollout-fault-drill-cli.js ^
   --execute ^
   --local-debug-targets ^
   --drill redirect-no-reconnect ^

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node src/index.js",
     "flow": "node src/index.js",
-    "rollout-transfer": "node src/rollout-transfer-cli.js",
-    "rollout-fault-drill": "node src/rollout-fault-drill-cli.js"
+    "rollout-transfer": "node ../rollout/rollout-transfer-cli.js",
+    "rollout-fault-drill": "node ../rollout/rollout-fault-drill-cli.js"
   }
 }

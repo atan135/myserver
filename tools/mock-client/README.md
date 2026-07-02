@@ -711,7 +711,7 @@ node tools/mock-client/src/index.js --scenario get-room-data \
 
 ### Rollout 演练入口
 
-`tools/mock-client/src/rollout-transfer-cli.js` 负责单个 room 的控制面迁移顺序。完整 old/new/proxy 第一阶段演练应优先使用仓库根目录脚本：
+`tools/rollout/rollout-transfer-cli.js` 负责单个 room 的控制面迁移顺序。`tools/mock-client/src/rollout-transfer-cli.js` 仍保留为兼容入口。完整 old/new/proxy 第一阶段演练应优先使用仓库根目录脚本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 `
@@ -719,21 +719,21 @@ powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill
   -RoomId room-empty-001
 ```
 
-该脚本默认 dry-run，不启动服务、不调用写接口；它会优先通过 registry discovery 解析 auth-http、game-proxy admin 和 game-server admin endpoint。确认 old/new game-server、game-proxy 和 auth-http 已运行并注册后，才传 `-ExecuteSteps`。详细流程见 `docs/rollout-three-process-drill-runbook.md`。
+该脚本默认 dry-run，不启动服务、不调用写接口；它会优先通过 registry discovery 解析 auth-http、game-proxy admin 和 game-server admin endpoint。确认 old/new game-server、game-proxy 和 auth-http 已运行并注册后，才传 `-ExecuteSteps`。详细流程见 `docs/后台与运维/三进程灰度演练手册.md`。
 
-故障演练入口使用 `tools/mock-client/src/rollout-fault-drill-cli.js`。默认同样是 dry-run，只输出 JSON 计划，不访问服务：
+故障演练入口使用 `tools/rollout/rollout-fault-drill-cli.js`。`tools/mock-client/src/rollout-fault-drill-cli.js` 仍保留为兼容入口。默认同样是 dry-run，只输出 JSON 计划，不访问服务：
 
 ```bash
-node tools/mock-client/src/rollout-fault-drill-cli.js
+node tools/rollout/rollout-fault-drill-cli.js
 ```
 
 当前覆盖 `import-failure`、`route-upsert-failure`、`redirect-no-reconnect` 三类脚本级演练。可用 `--simulate` 运行纯内存 mock 验证，确认预期故障停在 `new_import` / `proxy_route_upsert` / `redirect_no_reconnect`，且不会继续 confirm/upsert/retire 或执行 reconnect：
 
 ```bash
-node tools/mock-client/src/rollout-fault-drill-cli.js --simulate
+node tools/rollout/rollout-fault-drill-cli.js --simulate
 ```
 
-只有显式 `--execute` 才调用已运行服务的控制面接口；默认目标是 registry 中的 `game-server.admin` / `game-proxy.admin`，固定 `127.0.0.1:7500/7501/7101` 只适合带 `--local-debug-targets` 的本地 manual drill。测试/线上应先通过 registry discovery 解析 endpoint，或传 instance id 让 CLI 解析。该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/rollout-fault-drill-runbook.md`。
+只有显式 `--execute` 才调用已运行服务的控制面接口；默认目标是 registry 中的 `game-server.admin` / `game-proxy.admin`，固定 `127.0.0.1:7500/7501/7101` 只适合带 `--local-debug-targets` 的本地 manual drill。测试/线上应先通过 registry discovery 解析 endpoint，或传 instance id 让 CLI 解析。该入口不启动服务、不请求停服，不代表真实 old/new/proxy 三进程故障联调或 mybevy 适配已经完成。详细流程见 `docs/后台与运维/灰度故障演练手册.md`。
 
 ## 扩展开发
 

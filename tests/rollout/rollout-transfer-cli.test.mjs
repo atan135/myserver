@@ -9,8 +9,8 @@ import {
   buildTransferCliDryRunPlan,
   parseArgs,
   validateTransferCliOptions
-} from "../../tools/mock-client/src/rollout-transfer-cli.js";
-import { ROOM_TRANSFER_STAGE } from "../../tools/mock-client/src/rollout-transfer.js";
+} from "../../tools/rollout/rollout-transfer-cli.js";
+import { ROOM_TRANSFER_STAGE } from "../../tools/rollout/rollout-transfer.js";
 
 test("rollout transfer cli dry-run builds a safe three-process plan", () => {
   const options = parseArgs([
@@ -73,7 +73,7 @@ test("rollout transfer cli dry-run builds a safe three-process plan", () => {
 });
 
 test("rollout transfer cli help uses registry targets before direct endpoints", () => {
-  const result = spawnSync(process.execPath, ["tools/mock-client/src/rollout-transfer-cli.js", "--help"], {
+  const result = spawnSync(process.execPath, ["tools/rollout/rollout-transfer-cli.js", "--help"], {
     cwd: process.cwd(),
     encoding: "utf8"
   });

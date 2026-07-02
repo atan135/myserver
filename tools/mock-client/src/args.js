@@ -2,7 +2,7 @@ import { SCENARIO } from "./constants.js";
 import {
   applyLocalDebugTargetEnvDefaults,
   createDefaultRolloutTargetOptions
-} from "./rollout-targets.js";
+} from "../../rollout/rollout-targets.js";
 
 function collectOptionValue(argv, startIndex) {
   const valueIndex = startIndex + 1;

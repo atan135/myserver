@@ -27,11 +27,11 @@ import {
   GameServerTransferClient,
   ProxyAdminClient,
   orchestrateRoomTransfer
-} from "../rollout-transfer.js";
+} from "../../../rollout/rollout-transfer.js";
 import {
   resolveAndApplyRolloutControlTargets,
   validateControlTargetOptions
-} from "../rollout-targets.js";
+} from "../../../rollout/rollout-targets.js";
 
 const DRAIN_MODE_REJECT_NEW_ROOM_ERROR = "SERVER_DRAINING_REJECT_NEW_ROOM";
 const PROCESS_EXIT_POLL_MS = 200;

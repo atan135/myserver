@@ -94,7 +94,7 @@ const SCANNABLE_EXTENSIONS = new Set([
 const CONFIG_PATH_HINT_PATTERN =
   /(^|[\\/])(apps|scripts|tools|deploy|deployment|deployments|config|configs|helm|k8s|kubernetes|docker)([\\/]|$)/i;
 const SCRIPT_TARGET_SCAN_PATTERN =
-  /(^|\/)(scripts\/.*|tools\/mock-client\/src\/.*|tools\/mock-client\/help_rollout\.txt|package\.json)$/i;
+  /(^|\/)(scripts\/.*|tools\/rollout\/.*|tools\/mock-client\/src\/.*|tools\/mock-client\/help_rollout\.txt|package\.json)$/i;
 const DOCUMENT_POLICY_SCAN_PATTERN =
   /^(README\.md|AGENTS\.md|CLAUDE\.md|docs\/.*\.md|tools\/mock-client\/[^/]+\.(?:md|txt)|help[^/]*\.txt)$/i;
 const ROLLOUT_DIRECT_TARGET_ARGS = [

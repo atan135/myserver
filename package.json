@@ -47,7 +47,8 @@
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
-    "test:security": "node tools/test-security-and-ticket.js",
+    "smoke:security": "node tools/smoke-security-and-ticket.js",
+    "test:security": "npm run smoke:security --",
     "count:lines": "node tools/checkfile/count-lines.js"
   },
   "dependencies": {
