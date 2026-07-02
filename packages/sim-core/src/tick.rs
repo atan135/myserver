@@ -1,6 +1,6 @@
 //! Simulation tick advancement.
 
-use crate::hash::SimHash;
+use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
 use crate::input::{SimCommand, SimInput, ordered_inputs, select_latest_movement_inputs};
 use crate::math::{FP_SCALE, Fp, QuantizedDir, Vec2Fp};
@@ -126,7 +126,7 @@ pub fn step(
     Ok(SimStepResult {
         frame,
         events: Vec::new(),
-        state_hash: SimHash::placeholder(frame),
+        state_hash: hash_world(world),
     })
 }
 
@@ -312,7 +312,7 @@ mod tests {
 
         assert_eq!(result.frame, FrameId::new(1));
         assert!(result.events.is_empty());
-        assert_eq!(result.state_hash, SimHash::placeholder(FrameId::new(1)));
+        assert_eq!(result.state_hash, hash_world(&world));
         assert_eq!(world.frame, FrameId::new(1));
         assert_eq!(entity_pos(&world, 100), (100, 0));
         let entity = world.entity(EntityId::new(100)).unwrap();
@@ -324,6 +324,34 @@ mod tests {
 
         assert_eq!(world.frame, FrameId::new(2));
         assert_eq!(entity_pos(&world, 100), (200, 0));
+    }
+
+    #[test]
+    fn step_hash_is_stable_across_matching_worlds_and_frames() {
+        let mut world_a =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let mut world_b = world_a.clone();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        let first_a = step(&mut world_a, FrameId::new(1), &inputs, &test_config()).unwrap();
+        let first_b = step(&mut world_b, FrameId::new(1), &inputs, &test_config()).unwrap();
+
+        assert_eq!(first_a.state_hash, first_b.state_hash);
+
+        let second_a = step(&mut world_a, FrameId::new(2), &[], &test_config()).unwrap();
+        let second_b = step(&mut world_b, FrameId::new(2), &[], &test_config()).unwrap();
+
+        assert_eq!(second_a.state_hash, second_b.state_hash);
+        assert_ne!(second_a.state_hash, first_a.state_hash);
+        assert_eq!(second_a.state_hash, hash_world(&world_a));
     }
 
     #[test]
