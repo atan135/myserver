@@ -11,6 +11,7 @@ pub mod hash;
 pub mod ids;
 pub mod input;
 pub mod math;
+pub mod snapshot;
 pub mod state;
 pub mod tick;
 
