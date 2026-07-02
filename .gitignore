@@ -11,5 +11,6 @@ logs/
 coverage/
 .tmp/
 bin/
+.vscode/
 .DS_Store
 Thumbs.db
