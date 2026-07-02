@@ -1,0 +1,1 @@
+//! Frame input model placeholders.

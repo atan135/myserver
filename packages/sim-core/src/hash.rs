@@ -1,0 +1,1 @@
+//! Deterministic state hashing placeholders.

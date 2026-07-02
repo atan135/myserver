@@ -1,0 +1,1 @@
+//! Simulation world state placeholders.
