@@ -2034,7 +2034,12 @@ mod tests {
             .await
             .unwrap();
 
-        let packet = packet_with_body(MessageType::RoomReconnectReq, &RoomReconnectReq {});
+        let packet = packet_with_body(
+            MessageType::RoomReconnectReq,
+            &RoomReconnectReq {
+                last_character_push_sequence: 0,
+            },
+        );
 
         let route = select_route_for_packet(&store, &packet, Some("chr_0000000000001"))
             .await
@@ -2063,7 +2068,12 @@ mod tests {
             .await
             .unwrap();
 
-        let packet = packet_with_body(MessageType::RoomReconnectReq, &RoomReconnectReq {});
+        let packet = packet_with_body(
+            MessageType::RoomReconnectReq,
+            &RoomReconnectReq {
+                last_character_push_sequence: 0,
+            },
+        );
 
         let route = select_route_for_packet(&store, &packet, Some("chr_0000000000002"))
             .await
