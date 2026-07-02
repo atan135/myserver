@@ -84,6 +84,11 @@ pub struct SimRngState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Deterministic simulation world advanced by sequential frames.
+///
+/// The world stores only simulation state: schema, frame, RNG state, and
+/// entities. Entity storage is kept sorted by `EntityId` for stable lookup and
+/// hashing.
 pub struct SimWorld {
     pub schema_version: u16,
     pub frame: FrameId,

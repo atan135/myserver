@@ -38,6 +38,11 @@ impl SimCommand {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Deterministic command submitted for one entity on one simulation frame.
+///
+/// Inputs carry a source marker so callers can distinguish real player input
+/// from synthesized lockstep input; ordering is resolved by frame, character,
+/// sequence, and original slice index.
 pub struct SimInput {
     pub frame: FrameId,
     pub character_id: String,

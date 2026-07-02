@@ -15,6 +15,10 @@ pub const QUANTIZED_DIR_MAX_LEN_SQUARED: i32 = 1_000_000;
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
+/// Fixed-point simulation scalar backed by raw milli-units.
+///
+/// `FP_SCALE` raw units represent one simulation unit. Core simulation code
+/// should keep values as `Fp`; floating-point conversion is for rendering only.
 pub struct Fp(i64);
 
 impl Fp {
@@ -94,6 +98,9 @@ impl Fp {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Two-dimensional fixed-point vector used for simulation-space positions.
+///
+/// Both axes use the same raw milli-unit scale as `Fp`.
 pub struct Vec2Fp {
     pub x: Fp,
     pub y: Fp,
@@ -186,6 +193,10 @@ impl fmt::Display for QuantizedDirError {
 impl std::error::Error for QuantizedDirError {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Quantized 2D direction accepted by deterministic input and movement.
+///
+/// Each component is constrained to `-1000..=1000`, and the squared length must
+/// not exceed one unit direction at the same scale.
 pub struct QuantizedDir {
     x: i16,
     y: i16,

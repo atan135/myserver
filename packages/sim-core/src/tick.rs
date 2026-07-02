@@ -70,6 +70,11 @@ impl fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
+/// Advances `world` by exactly one sequential frame using deterministic P0 rules.
+///
+/// P0 applies movement and facing inputs, advances controlled movement, clamps
+/// positions to scene bounds, and returns a state hash. It does not resolve full
+/// combat or collision.
 pub fn step(
     world: &mut SimWorld,
     frame: FrameId,
