@@ -3,6 +3,7 @@ pub(super) use std::sync::{Arc, Mutex as StdMutex};
 pub(super) use prost::Message;
 pub(super) use tokio::sync::mpsc;
 
+pub(super) use crate::core::config_table::ConfigTableRuntime;
 pub(super) use crate::core::logic::{
     ROOM_TRANSFER_SCHEMA_VERSION, RoomLogic, RoomLogicFactory, RoomLogicTransfer,
     RoomLogicTransferState, RoomNpcTransferState, RoomRuntimeTimerTransferState,
@@ -12,7 +13,7 @@ pub(super) use crate::core::room::PlayerInputRecord;
 pub(super) use crate::core::runtime::room_policy::{MissingInputStrategy, RoomRuntimePolicy};
 pub(super) use crate::gameroom::GameRoomLogicFactory;
 pub(super) use crate::pb::{
-    GameMessagePush, RoomFrameRatePush, RoomMigrationState, ServerRedirectPush,
+    GameMessagePush, RoomFrameRatePush, RoomMigrationState, RoomTransferPayload, ServerRedirectPush,
 };
 pub(super) use crate::protocol::MessageType;
 

@@ -3,15 +3,15 @@ use super::*;
 #[tokio::test]
 async fn import_room_transfer_rejects_bad_checksum() {
     let (source, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let mut payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     payload.checksum = "bad-checksum".to_string();
@@ -25,21 +25,21 @@ async fn import_room_transfer_rejects_bad_checksum() {
     let result = target.import_room_transfer(payload).await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_CHECKSUM_MISMATCH"));
-    assert!(!target.room_exists("room-test").await);
+    assert!(!target.room_exists(TEST_ROOM_ID).await);
 }
 
 #[tokio::test]
 async fn import_room_transfer_rejects_logic_without_transfer_contract() {
     let (source, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
@@ -51,21 +51,21 @@ async fn import_room_transfer_rejects_logic_without_transfer_contract() {
     let result = target.import_room_transfer(payload).await;
 
     assert_eq!(result, Err("UNSUPPORTED_ROOM_TRANSFER"));
-    assert!(!target.room_exists("room-test").await);
+    assert!(!target.room_exists(TEST_ROOM_ID).await);
 }
 
 #[tokio::test]
 async fn import_room_transfer_rejects_unsupported_schema_without_creating_room() {
     let (source, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let mut payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let mut logic_state =
@@ -83,21 +83,21 @@ async fn import_room_transfer_rejects_unsupported_schema_without_creating_room()
     let result = target.import_room_transfer(payload).await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_UNSUPPORTED_SCHEMA"));
-    assert!(!target.room_exists("room-test").await);
+    assert!(!target.room_exists(TEST_ROOM_ID).await);
 }
 
 #[tokio::test]
 async fn import_room_transfer_rejects_invalid_timer_wrapper_contract() {
     let (source, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let base_timers =
@@ -195,22 +195,22 @@ async fn import_room_transfer_rejects_invalid_timer_wrapper_contract() {
             target.import_room_transfer(bad_payload).await,
             Err(expected)
         );
-        assert!(!target.room_exists("room-test").await);
+        assert!(!target.room_exists(TEST_ROOM_ID).await);
     }
 }
 
 #[tokio::test]
 async fn import_room_transfer_accepts_empty_timer_state_json() {
     let (source, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let mut payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let mut timers =
@@ -235,15 +235,15 @@ async fn import_room_transfer_accepts_empty_timer_state_json() {
 #[tokio::test]
 async fn import_room_transfer_restores_basic_room_state() {
     let (source, _source_factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    source.disconnect_room_member("room-test", "player-a").await;
-    source.disconnect_room_member("room-test", "player-b").await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    source.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     source
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let payload = source
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let checksum = payload.checksum.clone();
@@ -257,7 +257,7 @@ async fn import_room_transfer_restores_basic_room_state() {
     let imported = target.import_room_transfer(payload).await.unwrap();
 
     assert_eq!(imported.0, checksum);
-    assert!(target.room_exists("room-test").await);
+    assert!(target.room_exists(TEST_ROOM_ID).await);
     let imported_states = target_factory.imported_transfer_states();
     assert_eq!(imported_states.len(), 1);
     let imported_state = &imported_states[0];
@@ -287,9 +287,9 @@ async fn import_room_transfer_restores_basic_room_state() {
 
     let (tx, _rx) = mpsc::channel(1024);
     let snapshot = target
-        .reconnect_room("room-test", "player-a", tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_A, tx)
         .await
         .unwrap()
         .snapshot;
-    assert_eq!(snapshot.room_id, "room-test");
+    assert_eq!(snapshot.room_id, TEST_ROOM_ID);
 }

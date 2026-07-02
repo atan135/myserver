@@ -9,26 +9,26 @@ async fn export_room_transfer_rejects_logic_without_transfer_contract() {
     let (tx, _rx) = mpsc::channel(1024);
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
-    let result = manager.export_room_transfer("epoch-1", "room-test").await;
+    let result = manager
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
+        .await;
 
     assert_eq!(result, Err("UNSUPPORTED_ROOM_TRANSFER"));
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
         assert!(room.transfer_state.last_transfer_checksum.is_none());
     })
@@ -44,12 +44,12 @@ async fn export_room_transfer_rejects_invalid_epoch_or_missing_room() {
     );
 
     assert_eq!(
-        manager.export_room_transfer("", "room-test").await,
+        manager.export_room_transfer("", TEST_ROOM_ID).await,
         Err("INVALID_ROLLOUT_EPOCH")
     );
     assert_eq!(
         manager
-            .export_room_transfer("epoch-1", "room-missing")
+            .export_room_transfer(ROLLOUT_EPOCH, "room-missing")
             .await,
         Err("ROOM_NOT_FOUND")
     );
@@ -65,16 +65,18 @@ async fn export_room_transfer_rejects_room_that_was_not_frozen() {
     let (tx, _rx) = mpsc::channel(1024);
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
 
-    let result = manager.export_room_transfer("epoch-1", "room-test").await;
+    let result = manager
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
+        .await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_NOT_FROZEN"));
 }
@@ -82,19 +84,15 @@ async fn export_room_transfer_rejects_room_that_was_not_frozen() {
 #[tokio::test]
 async fn export_room_transfer_rejects_mismatched_epoch() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
-    let result = manager.export_room_transfer("epoch-2", "room-test").await;
+    let result = manager.export_room_transfer("epoch-2", TEST_ROOM_ID).await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_EPOCH_MISMATCH"));
 }
@@ -102,20 +100,16 @@ async fn export_room_transfer_rejects_mismatched_epoch() {
 #[tokio::test]
 async fn export_room_transfer_checksum_is_deterministic() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
     let payload = manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
@@ -147,30 +141,26 @@ async fn export_room_transfer_checksum_is_deterministic() {
         timer_state.metadata.get("fixture").map(String::as_str),
         Some("recording-v1")
     );
-    assert_eq!(payload.snapshot.as_ref().unwrap().room_id, "room-test");
+    assert_eq!(payload.snapshot.as_ref().unwrap().room_id, TEST_ROOM_ID);
 }
 
 #[tokio::test]
 async fn repeated_export_room_transfer_is_idempotent() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
     let first = manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let second = manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 

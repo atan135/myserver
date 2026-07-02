@@ -30,11 +30,11 @@ async fn rollout_drain_snapshot_counts_owned_room() {
     let (tx, _rx) = mpsc::channel(1024);
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
@@ -48,7 +48,7 @@ async fn rollout_drain_snapshot_counts_owned_room() {
     assert_eq!(snapshot.retired_room_count, 0);
     assert_eq!(snapshot.routes.len(), 1);
     let route = &snapshot.routes[0];
-    assert_eq!(route.room_id, "room-test");
+    assert_eq!(route.room_id, TEST_ROOM_ID);
     assert_eq!(route.owner_server_id, "game-server-old");
     assert_eq!(route.migration_state, RoomMigrationState::OwnedByOld as i32);
     assert_eq!(route.member_count, 1);
@@ -67,8 +67,8 @@ async fn rollout_drain_snapshot_counts_empty_owned_rooms_as_transferable() {
     let empty_room = Room::new(
         "room-empty".to_string(),
         "owner".to_string(),
-        "default_match".to_string(),
-        factory.create("default_match"),
+        DEFAULT_POLICY.to_string(),
+        factory.create(DEFAULT_POLICY),
     );
     insert_room_for_test(&manager, "room-empty", empty_room).await;
 
@@ -79,7 +79,7 @@ async fn rollout_drain_snapshot_counts_empty_owned_rooms_as_transferable() {
             "player-offline",
             offline_tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
@@ -94,7 +94,7 @@ async fn rollout_drain_snapshot_counts_empty_owned_rooms_as_transferable() {
             "player-online",
             online_tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
@@ -139,11 +139,11 @@ async fn rollout_drain_snapshot_counts_transfer_states_as_migrating() {
         let mut room = Room::new(
             room_id.to_string(),
             "owner".to_string(),
-            "default_match".to_string(),
-            factory.create("default_match"),
+            DEFAULT_POLICY.to_string(),
+            factory.create(DEFAULT_POLICY),
         );
         room.mark_empty();
-        room.transfer_state.rollout_epoch = Some("epoch-1".to_string());
+        room.transfer_state.rollout_epoch = Some(ROLLOUT_EPOCH.to_string());
         room.transfer_state.status = match room_id {
             "room-frozen" => RoomTransferStatus::Frozen,
             "room-exported" => RoomTransferStatus::Exported,
@@ -155,7 +155,7 @@ async fn rollout_drain_snapshot_counts_transfer_states_as_migrating() {
 
     let snapshot = manager.rollout_drain_snapshot("game-server-old", 50).await;
 
-    assert_eq!(snapshot.rollout_epoch, "epoch-1");
+    assert_eq!(snapshot.rollout_epoch, ROLLOUT_EPOCH);
     assert_eq!(snapshot.owned_room_count, 0);
     assert_eq!(snapshot.migrating_room_count, 3);
     assert_eq!(snapshot.transferable_empty_room_count, 0);
@@ -198,10 +198,10 @@ async fn rollout_drain_snapshot_excludes_transferred_rooms_from_blockers_and_cou
         let mut room = Room::new(
             room_id.to_string(),
             "owner".to_string(),
-            "default_match".to_string(),
-            factory.create("default_match"),
+            DEFAULT_POLICY.to_string(),
+            factory.create(DEFAULT_POLICY),
         );
-        room.transfer_state.rollout_epoch = Some("epoch-1".to_string());
+        room.transfer_state.rollout_epoch = Some(ROLLOUT_EPOCH.to_string());
         room.transfer_state.status = status;
         insert_room_for_test(&manager, room_id, room).await;
     }
@@ -230,24 +230,22 @@ async fn rollout_drain_snapshot_excludes_transferred_rooms_from_blockers_and_cou
 #[tokio::test]
 async fn trigger_server_redirect_only_pushes_online_members_in_target_room() {
     let (manager, _factory, mut receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
 
-    with_room_for_test(&manager, "room-test", |room| {
-        assert_eq!(room.members["player-a"].close_state.reason(), None);
-        assert_eq!(room.members["player-b"].close_state.reason(), None);
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert_eq!(room.members[PLAYER_A].close_state.reason(), None);
+        assert_eq!(room.members[PLAYER_B].close_state.reason(), None);
     })
     .await;
 
     let delivery = manager
         .trigger_server_redirect(
-            "room-test",
+            TEST_ROOM_ID,
             ServerRedirectPush {
                 reason: "rollout".to_string(),
-                room_id: "room-test".to_string(),
-                rollout_epoch: "epoch-1".to_string(),
+                room_id: TEST_ROOM_ID.to_string(),
+                rollout_epoch: ROLLOUT_EPOCH.to_string(),
                 reconnect_required: true,
                 retry_after_ms: 250,
                 target_host: "127.0.0.1".to_string(),
@@ -273,19 +271,19 @@ async fn trigger_server_redirect_only_pushes_online_members_in_target_room() {
         .expect("online member push");
     assert_eq!(pushed.message_type, MessageType::ServerRedirectPush);
     let push = ServerRedirectPush::decode(pushed.body.as_slice()).unwrap();
-    assert_eq!(push.room_id, "room-test");
-    assert_eq!(push.rollout_epoch, "epoch-1");
+    assert_eq!(push.room_id, TEST_ROOM_ID);
+    assert_eq!(push.rollout_epoch, ROLLOUT_EPOCH);
     assert_eq!(push.target_host, "127.0.0.1");
     assert_eq!(push.target_port, 4000);
     assert!(push.reconnect_required);
     assert!(drain_messages_of_type(&mut receivers[1], MessageType::ServerRedirectPush).is_empty());
 
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(
-            room.members["player-a"].close_state.reason().as_deref(),
+            room.members[PLAYER_A].close_state.reason().as_deref(),
             Some(SERVER_REDIRECT_CLOSE_REASON)
         );
-        assert_eq!(room.members["player-b"].close_state.reason(), None);
+        assert_eq!(room.members[PLAYER_B].close_state.reason(), None);
     })
     .await;
 }
@@ -293,7 +291,7 @@ async fn trigger_server_redirect_only_pushes_online_members_in_target_room() {
 #[tokio::test]
 async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
     let (full_tx, _full_rx) = mpsc::channel(1);
     full_tx
         .try_send(OutboundMessage {
@@ -305,8 +303,8 @@ async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason()
     let close_state = ConnectionCloseState::new();
     assert!(close_state.request_close("existing_reason"));
 
-    with_room_mut_for_test(&manager, "room-test", |room| {
-        let member = room.members.get_mut("player-a").unwrap();
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
+        let member = room.members.get_mut(PLAYER_A).unwrap();
         member.sender = full_tx;
         member.close_state = close_state;
     })
@@ -314,11 +312,11 @@ async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason()
 
     let delivery = manager
         .trigger_server_redirect(
-            "room-test",
+            TEST_ROOM_ID,
             ServerRedirectPush {
                 reason: "rollout".to_string(),
-                room_id: "room-test".to_string(),
-                rollout_epoch: "epoch-1".to_string(),
+                room_id: TEST_ROOM_ID.to_string(),
+                rollout_epoch: ROLLOUT_EPOCH.to_string(),
                 reconnect_required: true,
                 retry_after_ms: 250,
                 target_host: "127.0.0.1".to_string(),
@@ -339,13 +337,13 @@ async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason()
         }
     );
 
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(
-            room.members["player-a"].close_state.reason().as_deref(),
+            room.members[PLAYER_A].close_state.reason().as_deref(),
             Some("existing_reason")
         );
         assert_eq!(
-            room.members["player-b"].close_state.reason().as_deref(),
+            room.members[PLAYER_B].close_state.reason().as_deref(),
             Some(SERVER_REDIRECT_CLOSE_REASON)
         );
     })
@@ -355,19 +353,17 @@ async fn trigger_server_redirect_queue_failure_does_not_overwrite_close_reason()
 #[tokio::test]
 async fn rollout_drain_notice_pushes_game_message_to_online_non_syncing_room_members() {
     let (manager, _factory, mut receivers) =
-        setup_started_room("default_match", &["player-a", "player-b", "player-c"]).await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    with_room_mut_for_test(&manager, "room-test", |room| {
-        room.members.get_mut("player-c").unwrap().syncing = true;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B, PLAYER_C]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
+        room.members.get_mut(PLAYER_C).unwrap().syncing = true;
     })
     .await;
 
     let delivery = manager
         .trigger_rollout_drain_notice(RolloutDrainNotice {
-            room_id: "room-test".to_string(),
-            rollout_epoch: "epoch-1".to_string(),
+            room_id: TEST_ROOM_ID.to_string(),
+            rollout_epoch: ROLLOUT_EPOCH.to_string(),
             reason: "rollout".to_string(),
             message: "Please leave after this match".to_string(),
             retry_after_ms: 500,
@@ -390,12 +386,12 @@ async fn rollout_drain_notice_pushes_game_message_to_online_non_syncing_room_mem
         .expect("online member notice");
     let push = GameMessagePush::decode(pushed.body.as_slice()).unwrap();
     assert_eq!(push.event, "rollout_drain_notice");
-    assert_eq!(push.room_id, "room-test");
+    assert_eq!(push.room_id, TEST_ROOM_ID);
     assert_eq!(push.action, "leave_room");
     assert!(push.character_id.is_empty());
     let payload: serde_json::Value = serde_json::from_str(&push.payload_json).unwrap();
-    assert_eq!(payload["room_id"], "room-test");
-    assert_eq!(payload["rollout_epoch"], "epoch-1");
+    assert_eq!(payload["room_id"], TEST_ROOM_ID);
+    assert_eq!(payload["rollout_epoch"], ROLLOUT_EPOCH);
     assert_eq!(payload["reason"], "rollout");
     assert_eq!(payload["message"], "Please leave after this match");
     assert_eq!(payload["retry_after_ms"], 500);
@@ -403,7 +399,7 @@ async fn rollout_drain_notice_pushes_game_message_to_online_non_syncing_room_mem
     assert!(drain_messages_of_type(&mut receivers[1], MessageType::GameMessagePush).is_empty());
     assert!(drain_messages_of_type(&mut receivers[2], MessageType::GameMessagePush).is_empty());
 
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert!(
             room.members
                 .values()
@@ -431,18 +427,18 @@ async fn rollout_drain_notice_counts_queue_failure_without_closing_connection() 
     let close_state = ConnectionCloseState::new();
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             OutboundChannel::new(full_tx, close_state.clone()),
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
     let delivery = manager
         .trigger_rollout_drain_notice(RolloutDrainNotice {
-            room_id: "room-test".to_string(),
-            rollout_epoch: "epoch-1".to_string(),
+            room_id: TEST_ROOM_ID.to_string(),
+            rollout_epoch: ROLLOUT_EPOCH.to_string(),
             reason: "rollout".to_string(),
             message: "Leave room".to_string(),
             retry_after_ms: 0,

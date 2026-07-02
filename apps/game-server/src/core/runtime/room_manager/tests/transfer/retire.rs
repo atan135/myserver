@@ -3,61 +3,53 @@ use super::*;
 #[tokio::test]
 async fn retire_transfer_rejects_checksum_mismatch() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
     let result = manager
-        .retire_transferred_room("epoch-1", "room-test", "wrong")
+        .retire_transferred_room(ROLLOUT_EPOCH, TEST_ROOM_ID, "wrong")
         .await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_CHECKSUM_MISMATCH"));
-    assert!(manager.room_exists("room-test").await);
+    assert!(manager.room_exists(TEST_ROOM_ID).await);
 }
 
 #[tokio::test]
 async fn retired_room_rejects_later_mutations() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let payload = manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     manager
-        .retire_transferred_room("epoch-1", "room-test", &payload.checksum)
+        .retire_transferred_room(ROLLOUT_EPOCH, TEST_ROOM_ID, &payload.checksum)
         .await
         .unwrap();
 
     let (tx, _rx) = mpsc::channel(1024);
     let join_result = manager
         .join_room(
-            "room-test",
-            "player-b",
+            TEST_ROOM_ID,
+            PLAYER_B,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await;
     assert_eq!(join_result.unwrap_err(), "ROOM_TRANSFER_RETIRED");
@@ -65,7 +57,7 @@ async fn retired_room_rejects_later_mutations() {
     let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
     assert_eq!(
         manager
-            .reconnect_room("room-test", "player-a", reconnect_tx)
+            .reconnect_room(TEST_ROOM_ID, PLAYER_A, reconnect_tx)
             .await
             .unwrap_err(),
         "ROOM_TRANSFER_RETIRED"
@@ -73,7 +65,7 @@ async fn retired_room_rejects_later_mutations() {
 
     assert_eq!(
         manager
-            .accept_player_input("room-test", "player-a", 1, "move", "{}")
+            .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{}")
             .await,
         Err("ROOM_TRANSFER_RETIRED")
     );

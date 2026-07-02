@@ -3,16 +3,12 @@ use super::*;
 #[tokio::test]
 async fn freeze_empty_or_offline_room_for_transfer_succeeds() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
 
     let result = manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
@@ -20,7 +16,7 @@ async fn freeze_empty_or_offline_room_for_transfer_succeeds() {
     assert!(result.1 > 1);
     assert_eq!(
         manager
-            .accept_player_input("room-test", "player-a", 1, "move", "{}")
+            .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{}")
             .await,
         Err("ROOM_TRANSFER_FROZEN")
     );
@@ -36,17 +32,17 @@ async fn freeze_online_room_for_transfer_is_rejected() {
     let (tx, _rx) = mpsc::channel(1024);
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
 
     let result = manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_HAS_ONLINE_MEMBERS"));
@@ -61,12 +57,12 @@ async fn freeze_room_for_transfer_rejects_invalid_epoch_or_missing_room() {
     );
 
     assert_eq!(
-        manager.freeze_room_for_transfer("", "room-test").await,
+        manager.freeze_room_for_transfer("", TEST_ROOM_ID).await,
         Err("INVALID_ROLLOUT_EPOCH")
     );
     assert_eq!(
         manager
-            .freeze_room_for_transfer("epoch-1", "room-missing")
+            .freeze_room_for_transfer(ROLLOUT_EPOCH, "room-missing")
             .await,
         Err("ROOM_NOT_FOUND")
     );
@@ -75,20 +71,16 @@ async fn freeze_room_for_transfer_rejects_invalid_epoch_or_missing_room() {
 #[tokio::test]
 async fn freeze_room_for_transfer_rejects_mismatched_epoch_after_freeze() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
     let result = manager
-        .freeze_room_for_transfer("epoch-2", "room-test")
+        .freeze_room_for_transfer("epoch-2", TEST_ROOM_ID)
         .await;
 
     assert_eq!(result, Err("ROOM_TRANSFER_EPOCH_MISMATCH"));
@@ -102,54 +94,50 @@ async fn timer_freeze_stops_runtime_tick_and_clears_wait_started() {
         Arc::new(factory),
     );
 
-    for character_id in ["player-a", "player-b"] {
+    for character_id in [PLAYER_A, PLAYER_B] {
         let (tx, _rx) = mpsc::channel(1024);
         manager
             .join_room(
-                "room-test",
+                TEST_ROOM_ID,
                 character_id,
                 tx,
                 MemberRole::Player,
-                Some("default_match"),
+                Some(DEFAULT_POLICY),
             )
             .await
             .unwrap();
         manager
-            .set_ready_state("room-test", character_id, true)
+            .set_ready_state(TEST_ROOM_ID, character_id, true)
             .await
             .unwrap();
     }
-    manager.start_game("room-test", "player-a").await.unwrap();
+    manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
 
-    with_runtime_for_test(&manager, "room-test", |runtime| {
+    with_runtime_for_test(&manager, TEST_ROOM_ID, |runtime| {
         assert!(runtime.tick_running);
         assert!(runtime.tick_handle.is_some());
     })
     .await;
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    with_room_mut_for_test(&manager, "room-test", |room| {
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(room.phase, RoomPhase::InGame);
         room.wait_started_at = Some(Instant::now());
     })
     .await;
 
     manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
-    with_runtime_for_test(&manager, "room-test", |runtime| {
+    with_runtime_for_test(&manager, TEST_ROOM_ID, |runtime| {
         assert!(!runtime.tick_running);
         assert!(runtime.tick_handle.is_none());
     })
     .await;
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(room.transfer_state.status, RoomTransferStatus::Frozen);
         assert!(room.wait_started_at.is_none());
     })
@@ -159,35 +147,31 @@ async fn timer_freeze_stops_runtime_tick_and_clears_wait_started() {
 #[tokio::test]
 async fn timer_freeze_export_blocks_later_tick_and_emits_runtime_summary() {
     let (manager, factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
 
     manager
-        .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{\"x\":1}")
         .await
         .unwrap();
     manager
-        .accept_player_input("room-test", "player-b", 1, "move", "{\"x\":2}")
+        .accept_player_input(TEST_ROOM_ID, PLAYER_B, 1, "move", "{\"x\":2}")
         .await
         .unwrap();
-    assert!(manager.process_room_tick("room-test", 10).await.is_some());
+    assert!(manager.process_room_tick(TEST_ROOM_ID, 10).await.is_some());
     assert_eq!(factory.recorded_ticks().len(), 1);
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
-    with_room_mut_for_test(&manager, "room-test", |room| {
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
         room.wait_started_at = Some(Instant::now());
     })
     .await;
     manager
-        .freeze_room_for_transfer("epoch-1", "room-test")
+        .freeze_room_for_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
     let payload = manager
-        .export_room_transfer("epoch-1", "room-test")
+        .export_room_transfer(ROLLOUT_EPOCH, TEST_ROOM_ID)
         .await
         .unwrap();
 
@@ -227,10 +211,10 @@ async fn timer_freeze_export_blocks_later_tick_and_emits_runtime_summary() {
     );
 
     let last_active_before_tick =
-        with_room_for_test(&manager, "room-test", |room| room.last_active_at).await;
-    assert!(manager.process_room_tick("room-test", 10).await.is_none());
+        with_room_for_test(&manager, TEST_ROOM_ID, |room| room.last_active_at).await;
+    assert!(manager.process_room_tick(TEST_ROOM_ID, 10).await.is_none());
     assert_eq!(factory.recorded_ticks().len(), 1);
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(room.current_frame, 1);
         assert_eq!(room.last_active_at, last_active_before_tick);
         assert!(room.wait_started_at.is_none());

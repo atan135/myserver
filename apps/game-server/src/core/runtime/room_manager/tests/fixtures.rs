@@ -1,5 +1,16 @@
 use super::*;
 
+pub(super) const TEST_ROOM_ID: &str = "room-test";
+pub(super) const PLAYER_A: &str = "player-a";
+pub(super) const PLAYER_B: &str = "player-b";
+pub(super) const PLAYER_C: &str = "player-c";
+pub(super) const OBSERVER_1: &str = "observer-1";
+pub(super) const ROLLOUT_EPOCH: &str = "epoch-1";
+pub(super) const DEFAULT_POLICY: &str = "default_match";
+pub(super) const MOVEMENT_DEMO_POLICY: &str = "movement_demo";
+pub(super) const COMBAT_DEMO_POLICY: &str = "combat_demo";
+pub(super) const DISPOSABLE_MATCH_POLICY: &str = "disposable_match";
+
 #[derive(Clone, Default)]
 pub(super) struct RecordingRoomLogicFactory {
     pub(super) ticks: Arc<StdMutex<Vec<(u32, Vec<PlayerInputRecord>)>>>,
@@ -135,7 +146,7 @@ pub(super) async fn setup_started_room(
         receivers.push(rx);
         manager
             .join_room(
-                "room-test",
+                TEST_ROOM_ID,
                 character_id,
                 tx,
                 MemberRole::Player,
@@ -144,15 +155,15 @@ pub(super) async fn setup_started_room(
             .await
             .unwrap();
         manager
-            .set_ready_state("room-test", character_id, true)
+            .set_ready_state(TEST_ROOM_ID, character_id, true)
             .await
             .unwrap();
     }
     manager
-        .start_game("room-test", characters[0])
+        .start_game(TEST_ROOM_ID, characters[0])
         .await
         .unwrap();
-    stop_runtime_for_test(&manager, "room-test").await;
+    stop_runtime_for_test(&manager, TEST_ROOM_ID).await;
 
     (manager, factory, receivers)
 }
@@ -265,7 +276,7 @@ pub(super) async fn setup_started_room_with_id(
                 character_id,
                 tx,
                 MemberRole::Player,
-                Some("default_match"),
+                Some(DEFAULT_POLICY),
             )
             .await
             .unwrap();

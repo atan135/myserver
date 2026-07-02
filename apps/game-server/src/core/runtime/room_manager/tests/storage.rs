@@ -11,19 +11,17 @@ async fn disconnect_path_releases_previous_outbound_sender() {
 
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
     while rx.try_recv().is_ok() {}
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
 
     let closed = tokio::time::timeout(Duration::from_millis(50), rx.recv())
         .await
@@ -34,63 +32,56 @@ async fn disconnect_path_releases_previous_outbound_sender() {
 #[tokio::test]
 async fn offline_player_index_tracks_disconnect_leave_and_reconnect() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
-        Some("room-test".to_string())
+        character_room_index_for_test(&manager, PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
-        Some("room-test".to_string())
+        offline_character_index_for_test(&manager, PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
     assert_eq!(
-        manager.find_room_by_offline_character("player-a").await,
-        Some("room-test".to_string())
+        manager.find_room_by_offline_character(PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
 
     let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
     manager
-        .reconnect_room("room-test", "player-a", reconnect_tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_A, reconnect_tx)
         .await
         .unwrap();
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
-        Some("room-test".to_string())
+        character_room_index_for_test(&manager, PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, PLAYER_A).await,
         None
     );
-    assert_eq!(
-        manager.find_room_by_offline_character("player-a").await,
-        None
-    );
+    assert_eq!(manager.find_room_by_offline_character(PLAYER_A).await, None);
 
-    manager.leave_room("room-test", "player-a").await;
+    manager.leave_room(TEST_ROOM_ID, PLAYER_A).await;
     assert_eq!(
-        manager.find_room_by_offline_character("player-a").await,
-        Some("room-test".to_string())
+        manager.find_room_by_offline_character(PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
-        Some("room-test".to_string())
+        offline_character_index_for_test(&manager, PLAYER_A).await,
+        Some(TEST_ROOM_ID.to_string())
     );
 }
 
 #[tokio::test]
 async fn cleanup_expired_offline_characters_removes_character_indexes() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    with_room_mut_for_test(&manager, "room-test", |room| {
-        let member = room.members.get_mut("player-a").unwrap();
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
+        let member = room.members.get_mut(PLAYER_A).unwrap();
         member.offline_since = Some(Instant::now() - Duration::from_secs(120));
     })
     .await;
@@ -98,20 +89,17 @@ async fn cleanup_expired_offline_characters_removes_character_indexes() {
     manager.cleanup_expired_offline_characters().await;
 
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, PLAYER_A).await,
         None
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, PLAYER_A).await,
         None
     );
-    assert_eq!(
-        manager.find_room_by_offline_character("player-a").await,
-        None
-    );
-    with_room_for_test(&manager, "room-test", |room| {
-        assert!(!room.members.contains_key("player-a"));
-        assert!(room.members.contains_key("player-b"));
+    assert_eq!(manager.find_room_by_offline_character(PLAYER_A).await, None);
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert!(!room.members.contains_key(PLAYER_A));
+        assert!(room.members.contains_key(PLAYER_B));
     })
     .await;
 }
@@ -129,14 +117,14 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
     manager
         .join_room(
             "room-reused-index",
-            "player-a",
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("disposable_match"),
+            Some(DISPOSABLE_MATCH_POLICY),
         )
         .await
         .unwrap();
-    manager.leave_room("room-reused-index", "player-a").await;
+    manager.leave_room("room-reused-index", PLAYER_A).await;
 
     for _ in 0..30 {
         if !manager.room_exists("room-reused-index").await {
@@ -146,11 +134,11 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
     }
     assert!(!manager.room_exists("room-reused-index").await);
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, PLAYER_A).await,
         None
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, PLAYER_A).await,
         None
     );
 
@@ -158,19 +146,19 @@ async fn cleanup_task_removes_player_index_before_room_id_reuse() {
     manager
         .join_room(
             "room-reused-index",
-            "player-a",
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, PLAYER_A).await,
         Some("room-reused-index".to_string())
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, PLAYER_A).await,
         None
     );
 }
@@ -185,18 +173,18 @@ async fn send_to_character_uses_index_and_self_heals_stale_entry() {
     let (tx, mut rx) = mpsc::channel(1024);
     manager
         .join_room(
-            "room-test",
-            "player-a",
+            TEST_ROOM_ID,
+            PLAYER_A,
             tx,
             MemberRole::Player,
-            Some("default_match"),
+            Some(DEFAULT_POLICY),
         )
         .await
         .unwrap();
     while rx.try_recv().is_ok() {}
 
     manager
-        .send_to_character("player-a", MessageType::GameMessagePush, vec![1, 2, 3])
+        .send_to_character(PLAYER_A, MessageType::GameMessagePush, vec![1, 2, 3])
         .await
         .unwrap();
     let delivered = rx
@@ -207,19 +195,19 @@ async fn send_to_character_uses_index_and_self_heals_stale_entry() {
 
     {
         let mut rooms = manager.rooms.write().await;
-        rooms.remove("room-test");
+        rooms.remove(TEST_ROOM_ID);
     }
     manager
-        .send_to_character("player-a", MessageType::GameMessagePush, vec![4, 5, 6])
+        .send_to_character(PLAYER_A, MessageType::GameMessagePush, vec![4, 5, 6])
         .await
         .unwrap();
     assert!(rx.try_recv().is_err());
     assert_eq!(
-        character_room_index_for_test(&manager, "player-a").await,
+        character_room_index_for_test(&manager, PLAYER_A).await,
         None
     );
     assert_eq!(
-        offline_character_index_for_test(&manager, "player-a").await,
+        offline_character_index_for_test(&manager, PLAYER_A).await,
         None
     );
 }
@@ -336,7 +324,7 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
                 &character_id,
                 tx,
                 MemberRole::Player,
-                Some("movement_demo"),
+                Some(MOVEMENT_DEMO_POLICY),
             )
             .await
             .unwrap();
@@ -404,14 +392,10 @@ async fn indexed_player_lookup_scales_without_cross_room_scan_fallback() {
 #[tokio::test]
 async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
     let (manager, _factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    let disconnected = manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    let disconnected = manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
     assert_eq!(
         disconnected.snapshot.expect("disconnect snapshot").state,
         "in_game"
@@ -421,14 +405,14 @@ async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
 
     let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
     let reconnect_a = manager
-        .reconnect_room("room-test", "player-a", reconnect_a_tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_A, reconnect_a_tx)
         .await
         .unwrap();
     assert_eq!(reconnect_a.snapshot.state, "in_game");
 
     let (reconnect_b_tx, _reconnect_b_rx) = mpsc::channel(1024);
     let reconnect_b = manager
-        .reconnect_room("room-test", "player-b", reconnect_b_tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_B, reconnect_b_tx)
         .await
         .unwrap();
     assert_eq!(reconnect_b.snapshot.state, "in_game");
@@ -436,21 +420,20 @@ async fn all_players_disconnected_can_reconnect_before_offline_ttl_expires() {
 
 #[tokio::test]
 async fn room_tick_pauses_when_all_players_are_offline() {
-    let (manager, factory, _receivers) = setup_started_room("movement_demo", &["player-a"]).await;
+    let (manager, factory, _receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A]).await;
 
-    let disconnected = manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
+    let disconnected = manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
     assert_eq!(
         disconnected.snapshot.expect("disconnect snapshot").state,
         "in_game"
     );
 
-    let progressed = manager.process_room_tick("room-test", 10).await;
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 10).await;
     assert!(progressed.is_none());
     assert!(factory.recorded_ticks().is_empty());
 
-    with_room_for_test(&manager, "room-test", |room| {
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
         assert_eq!(room.current_frame, 0);
     })
     .await;
@@ -459,42 +442,38 @@ async fn room_tick_pauses_when_all_players_are_offline() {
 #[tokio::test]
 async fn reconnect_after_global_disconnect_restarts_wait_timeout_window() {
     let (manager, factory, _receivers) =
-        setup_started_room("default_match", &["player-a", "player-b"]).await;
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
 
     manager
-        .accept_player_input("room-test", "player-a", 1, "move", "{\"x\":1}")
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{\"x\":1}")
         .await
         .unwrap();
-    let progressed = manager.process_room_tick("room-test", 10).await;
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 10).await;
     assert!(progressed.is_none());
 
-    with_room_mut_for_test(&manager, "room-test", |room| {
+    with_room_mut_for_test(&manager, TEST_ROOM_ID, |room| {
         room.wait_started_at = Some(Instant::now() - Duration::from_millis(500));
     })
     .await;
 
-    manager
-        .disconnect_room_member("room-test", "player-a")
-        .await;
-    manager
-        .disconnect_room_member("room-test", "player-b")
-        .await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_B).await;
 
-    let offline_tick = manager.process_room_tick("room-test", 10).await;
+    let offline_tick = manager.process_room_tick(TEST_ROOM_ID, 10).await;
     assert!(offline_tick.is_none());
 
     let (reconnect_a_tx, _reconnect_a_rx) = mpsc::channel(1024);
     manager
-        .reconnect_room("room-test", "player-a", reconnect_a_tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_A, reconnect_a_tx)
         .await
         .unwrap();
     let (reconnect_b_tx, _reconnect_b_rx) = mpsc::channel(1024);
     manager
-        .reconnect_room("room-test", "player-b", reconnect_b_tx)
+        .reconnect_room(TEST_ROOM_ID, PLAYER_B, reconnect_b_tx)
         .await
         .unwrap();
 
-    let progressed_after_reconnect = manager.process_room_tick("room-test", 10).await;
+    let progressed_after_reconnect = manager.process_room_tick(TEST_ROOM_ID, 10).await;
     assert!(progressed_after_reconnect.is_none());
     assert!(factory.recorded_ticks().is_empty());
 }
@@ -505,9 +484,9 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
     let ticks = Arc::new(StdMutex::new(Vec::new()));
     let inputs = Arc::new(StdMutex::new(Vec::new()));
     let mut room = Room::new(
-        "room-test".to_string(),
-        "player-a".to_string(),
-        "default_match".to_string(),
+        TEST_ROOM_ID.to_string(),
+        PLAYER_A.to_string(),
+        DEFAULT_POLICY.to_string(),
         Box::new(RecordingRoomLogic {
             ticks,
             inputs,
@@ -516,9 +495,9 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
         }),
     );
     room.members.insert(
-        "player-a".to_string(),
+        PLAYER_A.to_string(),
         RoomMemberState {
-            character_id: "player-a".to_string(),
+            character_id: PLAYER_A.to_string(),
             ready: true,
             sender,
             close_state: ConnectionCloseState::new(),
@@ -529,7 +508,7 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
         },
     );
 
-    let participants = vec!["player-a".to_string()];
+    let participants = vec![PLAYER_A.to_string()];
     let policy = RoomRuntimePolicy {
         missing_input_strategy: MissingInputStrategy::DropAfterMisses,
         ..RoomRuntimePolicy::default_match()
@@ -543,14 +522,14 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
         if frame_id < MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
             assert!(newly_offline_characters.is_empty());
         } else {
-            assert_eq!(newly_offline_characters, vec!["player-a".to_string()]);
+            assert_eq!(newly_offline_characters, vec![PLAYER_A.to_string()]);
         }
     }
 
-    let member = room.members.get("player-a").expect("player should exist");
+    let member = room.members.get(PLAYER_A).expect("player should exist");
     assert!(member.offline);
     assert_eq!(
-        room.missing_input_streaks.get("player-a").copied(),
+        room.missing_input_streaks.get(PLAYER_A).copied(),
         Some(MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE)
     );
 }
