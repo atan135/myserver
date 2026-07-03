@@ -132,15 +132,18 @@ mod tests {
     use crate::state::{
         CombatState, EntityKind, MovementMode, MovementState, SimEntity, SimRngState, SimTransform,
     };
-    use crate::tick::SceneBounds;
+    use crate::tick::{MovementConfig, SceneBounds};
 
     fn test_config() -> SimConfig {
         SimConfig {
-            tick_rate: 60,
-            default_move_speed_per_second: Fp::from_i32(6),
-            bounds: SceneBounds {
-                min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
-                max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
+            movement: MovementConfig {
+                tick_rate: 60,
+                default_speed_per_second: Fp::from_i32(6),
+                max_speed_per_second: Fp::from_i32(10),
+                bounds: SceneBounds {
+                    min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
+                    max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
+                },
             },
         }
     }

@@ -13,6 +13,11 @@ pub enum SimInputSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Movement command for one simulation frame.
+///
+/// `speed_per_second` is measured in simulation units per second represented as
+/// `Fp` raw milli-units. When omitted, tick logic resolves speed from the
+/// entity's current positive movement speed, then from config default speed.
 pub struct MoveCommand {
     pub dir: QuantizedDir,
     pub speed_per_second: Option<Fp>,

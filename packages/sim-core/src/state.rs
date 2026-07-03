@@ -43,6 +43,7 @@ pub enum MovementMode {
 pub struct MovementState {
     pub mode: MovementMode,
     pub move_dir: QuantizedDir,
+    /// Simulation units per second represented as `Fp` raw milli-units.
     pub speed_per_second: Fp,
 }
 

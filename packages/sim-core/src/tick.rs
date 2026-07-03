@@ -16,28 +16,66 @@ pub struct SceneBounds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SimConfig {
+    pub movement: MovementConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MovementConfig {
     pub tick_rate: u16,
-    pub default_move_speed_per_second: Fp,
+    /// Simulation units per second represented as `Fp` raw milli-units.
+    pub default_speed_per_second: Fp,
+    /// Simulation units per second represented as `Fp` raw milli-units.
+    pub max_speed_per_second: Fp,
     pub bounds: SceneBounds,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SimEvent;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedMoveCommand {
+    dir: QuantizedDir,
+    speed_per_second: Fp,
+}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SimStepResult {
-    pub frame: FrameId,
-    pub events: Vec<SimEvent>,
-    pub state_hash: SimHash,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MovementSelection {
+    Move(ResolvedMoveCommand),
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedMovementInput {
+    entity_id: EntityId,
+    selection: MovementSelection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepError {
-    NonSequentialFrame { expected: FrameId, actual: FrameId },
-    FrameOverflow { current: FrameId, actual: FrameId },
+    NonSequentialFrame {
+        expected: FrameId,
+        actual: FrameId,
+    },
+    FrameOverflow {
+        current: FrameId,
+        actual: FrameId,
+    },
     ZeroTickRate,
-    EntityNotFound { entity_id: EntityId },
-    MovementDeltaOverflow { entity_id: EntityId },
+    InvalidMovementSpeed {
+        entity_id: EntityId,
+        speed_per_second: Fp,
+    },
+    MovementSpeedTooHigh {
+        entity_id: EntityId,
+        speed_per_second: Fp,
+        max_speed_per_second: Fp,
+    },
+    ZeroDirectionMove {
+        entity_id: EntityId,
+    },
+    EntityNotFound {
+        entity_id: EntityId,
+    },
+    MovementDeltaOverflow {
+        entity_id: EntityId,
+    },
 }
 
 impl fmt::Display for StepError {
@@ -56,6 +94,31 @@ impl fmt::Display for StepError {
                 actual.raw()
             ),
             Self::ZeroTickRate => write!(f, "simulation tick rate must be greater than zero"),
+            Self::InvalidMovementSpeed {
+                entity_id,
+                speed_per_second,
+            } => write!(
+                f,
+                "movement speed must be greater than zero for simulation entity {}: {}",
+                entity_id.raw(),
+                speed_per_second.raw()
+            ),
+            Self::MovementSpeedTooHigh {
+                entity_id,
+                speed_per_second,
+                max_speed_per_second,
+            } => write!(
+                f,
+                "movement speed is above max for simulation entity {}: {} > {}",
+                entity_id.raw(),
+                speed_per_second.raw(),
+                max_speed_per_second.raw()
+            ),
+            Self::ZeroDirectionMove { entity_id } => write!(
+                f,
+                "positive movement speed requires a non-zero direction for simulation entity: {}",
+                entity_id.raw()
+            ),
             Self::EntityNotFound { entity_id } => {
                 write!(f, "simulation entity not found: {}", entity_id.raw())
             }
@@ -70,6 +133,16 @@ impl fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SimEvent;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimStepResult {
+    pub frame: FrameId,
+    pub events: Vec<SimEvent>,
+    pub state_hash: SimHash,
+}
+
 /// Advances `world` by exactly one sequential frame using deterministic P0 rules.
 ///
 /// P0 applies movement and facing inputs, advances controlled movement, clamps
@@ -81,30 +154,27 @@ pub fn step(
     inputs: &[SimInput],
     config: &SimConfig,
 ) -> Result<SimStepResult, StepError> {
-    validate_step(world, frame, inputs, config)?;
+    let movement_inputs = validate_step(world, frame, inputs, config)?;
 
-    for indexed in select_latest_movement_inputs(inputs) {
-        let input = indexed.input;
-        let entity = world
-            .entity_mut(input.entity_id)
-            .ok_or(StepError::EntityNotFound {
-                entity_id: input.entity_id,
-            })?;
+    for movement_input in movement_inputs {
+        let entity =
+            world
+                .entity_mut(movement_input.entity_id)
+                .ok_or(StepError::EntityNotFound {
+                    entity_id: movement_input.entity_id,
+                })?;
 
-        match input.command {
-            SimCommand::Move(command) => {
+        match movement_input.selection {
+            MovementSelection::Move(command) => {
                 entity.movement.mode = MovementMode::Controlled;
                 entity.movement.move_dir = command.dir;
-                entity.movement.speed_per_second = command
-                    .speed_per_second
-                    .unwrap_or(config.default_move_speed_per_second);
+                entity.movement.speed_per_second = command.speed_per_second;
             }
-            SimCommand::Stop => {
+            MovementSelection::Stop => {
                 entity.movement.mode = MovementMode::Idle;
                 entity.movement.move_dir = QuantizedDir::ZERO;
                 entity.movement.speed_per_second = Fp::ZERO;
             }
-            SimCommand::Face(_) | SimCommand::Noop => {}
         }
     }
 
@@ -140,7 +210,7 @@ fn validate_step(
     frame: FrameId,
     inputs: &[SimInput],
     config: &SimConfig,
-) -> Result<(), StepError> {
+) -> Result<Vec<ResolvedMovementInput>, StepError> {
     let expected =
         world
             .frame
@@ -159,15 +229,18 @@ fn validate_step(
         });
     }
 
-    if config.tick_rate == 0 {
+    if config.movement.tick_rate == 0 {
         return Err(StepError::ZeroTickRate);
     }
 
+    let mut movement_inputs = Vec::new();
     for indexed in select_latest_movement_inputs(inputs) {
         let entity_id = indexed.input.entity_id;
-        if world.entity(entity_id).is_none() {
-            return Err(StepError::EntityNotFound { entity_id });
-        }
+        let entity = world
+            .entity(entity_id)
+            .ok_or(StepError::EntityNotFound { entity_id })?;
+
+        movement_inputs.push(resolve_movement_input(indexed.input, entity, config)?);
     }
 
     for indexed in ordered_inputs(inputs) {
@@ -177,6 +250,68 @@ fn validate_step(
                 entity_id: input.entity_id,
             });
         }
+    }
+
+    Ok(movement_inputs)
+}
+
+fn resolve_movement_input(
+    input: &SimInput,
+    entity: &SimEntity,
+    config: &SimConfig,
+) -> Result<ResolvedMovementInput, StepError> {
+    let selection = match input.command {
+        SimCommand::Move(command) => {
+            let speed_per_second = command.speed_per_second.unwrap_or_else(|| {
+                if entity.movement.speed_per_second > Fp::ZERO {
+                    entity.movement.speed_per_second
+                } else {
+                    config.movement.default_speed_per_second
+                }
+            });
+
+            validate_move_speed(input.entity_id, command.dir, speed_per_second, config)?;
+
+            MovementSelection::Move(ResolvedMoveCommand {
+                dir: command.dir,
+                speed_per_second,
+            })
+        }
+        SimCommand::Stop => MovementSelection::Stop,
+        SimCommand::Face(_) | SimCommand::Noop => {
+            unreachable!("resolve_movement_input is only called for movement selection commands")
+        }
+    };
+
+    Ok(ResolvedMovementInput {
+        entity_id: input.entity_id,
+        selection,
+    })
+}
+
+fn validate_move_speed(
+    entity_id: EntityId,
+    dir: QuantizedDir,
+    speed_per_second: Fp,
+    config: &SimConfig,
+) -> Result<(), StepError> {
+    if speed_per_second <= Fp::ZERO {
+        return Err(StepError::InvalidMovementSpeed {
+            entity_id,
+            speed_per_second,
+        });
+    }
+
+    if dir == QuantizedDir::ZERO {
+        return Err(StepError::ZeroDirectionMove { entity_id });
+    }
+
+    if speed_per_second > config.movement.max_speed_per_second {
+        return Err(StepError::MovementSpeedTooHigh {
+            entity_id,
+            speed_per_second,
+            max_speed_per_second: config.movement.max_speed_per_second,
+        });
     }
 
     Ok(())
@@ -190,26 +325,26 @@ fn advance_controlled_entity(entity: &mut SimEntity, config: &SimConfig) -> Resu
     let delta_x = movement_delta_raw(
         entity.movement.move_dir.x(),
         entity.movement.speed_per_second,
-        config.tick_rate,
+        config.movement.tick_rate,
         entity.id,
     )?;
     let delta_y = movement_delta_raw(
         entity.movement.move_dir.y(),
         entity.movement.speed_per_second,
-        config.tick_rate,
+        config.movement.tick_rate,
         entity.id,
     )?;
 
     entity.transform.pos = Vec2Fp::new(
         clamp_axis_i128(
             entity.transform.pos.x.raw() as i128 + delta_x as i128,
-            config.bounds.min.x.raw(),
-            config.bounds.max.x.raw(),
+            config.movement.bounds.min.x.raw(),
+            config.movement.bounds.max.x.raw(),
         ),
         clamp_axis_i128(
             entity.transform.pos.y.raw() as i128 + delta_y as i128,
-            config.bounds.min.y.raw(),
-            config.bounds.max.y.raw(),
+            config.movement.bounds.min.y.raw(),
+            config.movement.bounds.max.y.raw(),
         ),
     );
 
@@ -243,11 +378,14 @@ mod tests {
 
     fn test_config() -> SimConfig {
         SimConfig {
-            tick_rate: 60,
-            default_move_speed_per_second: Fp::from_i32(6),
-            bounds: SceneBounds {
-                min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
-                max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
+            movement: MovementConfig {
+                tick_rate: 60,
+                default_speed_per_second: Fp::from_i32(6),
+                max_speed_per_second: Fp::from_i32(10),
+                bounds: SceneBounds {
+                    min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
+                    max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
+                },
             },
         }
     }
@@ -332,6 +470,60 @@ mod tests {
     }
 
     #[test]
+    fn step_move_without_speed_uses_config_default_when_entity_is_stopped() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: None,
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap();
+
+        assert_eq!(entity_pos(&world, 100), (100, 0));
+        assert_eq!(
+            world
+                .entity(EntityId::new(100))
+                .unwrap()
+                .movement
+                .speed_per_second,
+            Fp::from_i32(6)
+        );
+    }
+
+    #[test]
+    fn step_move_without_speed_reuses_entity_positive_speed() {
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.movement = MovementState {
+            mode: MovementMode::Controlled,
+            move_dir: QuantizedDir::RIGHT,
+            speed_per_second: Fp::from_i32(8),
+        };
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::DOWN,
+                speed_per_second: None,
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap();
+
+        assert_eq!(entity_pos(&world, 100), (0, 133));
+        let entity = world.entity(EntityId::new(100)).unwrap();
+        assert_eq!(entity.movement.move_dir, QuantizedDir::DOWN);
+        assert_eq!(entity.movement.speed_per_second, Fp::from_i32(8));
+    }
+
+    #[test]
     fn step_hash_is_stable_across_matching_worlds_and_frames() {
         let mut world_a =
             SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
@@ -385,6 +577,14 @@ mod tests {
             world.entity(EntityId::new(100)).unwrap().movement.mode,
             MovementMode::Idle
         );
+        assert_eq!(
+            world
+                .entity(EntityId::new(100))
+                .unwrap()
+                .movement
+                .speed_per_second,
+            Fp::ZERO
+        );
     }
 
     #[test]
@@ -428,5 +628,139 @@ mod tests {
         );
         assert_eq!(world.frame, FrameId::new(2));
         assert_eq!(entity_pos(&world, 100), (0, 0));
+    }
+
+    #[test]
+    fn step_rejects_zero_or_negative_move_speed_without_updating_world() {
+        let cases = [Fp::ZERO, Fp::from_milli(-1)];
+
+        for speed_per_second in cases {
+            let mut world =
+                SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+            let inputs = vec![input(
+                1,
+                100,
+                1,
+                SimCommand::Move(MoveCommand {
+                    dir: QuantizedDir::RIGHT,
+                    speed_per_second: Some(speed_per_second),
+                }),
+            )];
+
+            let error = step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap_err();
+
+            assert_eq!(
+                error,
+                StepError::InvalidMovementSpeed {
+                    entity_id: EntityId::new(100),
+                    speed_per_second,
+                }
+            );
+            assert_eq!(world.frame, FrameId::new(0));
+            assert_eq!(entity_pos(&world, 100), (0, 0));
+            assert_eq!(
+                world.entity(EntityId::new(100)).unwrap().movement,
+                MovementState::default()
+            );
+        }
+    }
+
+    #[test]
+    fn step_rejects_speed_above_config_max_without_updating_world() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(11)),
+            }),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::MovementSpeedTooHigh {
+                entity_id: EntityId::new(100),
+                speed_per_second: Fp::from_i32(11),
+                max_speed_per_second: Fp::from_i32(10),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().movement,
+            MovementState::default()
+        );
+    }
+
+    #[test]
+    fn step_rejects_resolved_speed_above_config_max_without_updating_world() {
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.movement = MovementState {
+            mode: MovementMode::Controlled,
+            move_dir: QuantizedDir::RIGHT,
+            speed_per_second: Fp::from_i32(12),
+        };
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity.clone()]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::DOWN,
+                speed_per_second: None,
+            }),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::MovementSpeedTooHigh {
+                entity_id: EntityId::new(100),
+                speed_per_second: Fp::from_i32(12),
+                max_speed_per_second: Fp::from_i32(10),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().movement,
+            entity.movement
+        );
+    }
+
+    #[test]
+    fn step_rejects_positive_speed_with_zero_direction_without_updating_world() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::ZERO,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::ZeroDirectionMove {
+                entity_id: EntityId::new(100),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().movement,
+            MovementState::default()
+        );
     }
 }
