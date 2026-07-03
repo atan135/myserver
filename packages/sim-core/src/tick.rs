@@ -1,5 +1,6 @@
 //! Simulation tick advancement.
 
+use crate::combat::CombatConfig;
 use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
 use crate::input::{SimCommand, SimInput, ordered_inputs, select_latest_movement_inputs};
@@ -54,6 +55,7 @@ impl SceneBounds {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SimConfig {
     pub movement: MovementConfig,
+    pub combat: CombatConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -464,6 +466,7 @@ mod tests {
                 },
                 static_obstacles: Vec::new(),
             },
+            combat: CombatConfig::default(),
         }
     }
 
@@ -906,6 +909,7 @@ mod tests {
                 },
                 static_obstacles: Vec::new(),
             },
+            combat: CombatConfig::default(),
         };
         let mut entity = test_entity(100, Vec2Fp::zero());
         entity.transform.radius = Fp::from_i32(1);

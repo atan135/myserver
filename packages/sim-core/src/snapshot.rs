@@ -127,6 +127,7 @@ pub fn restore(snapshot: &SimSnapshot) -> Result<SimWorld, SnapshotError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::CombatConfig;
     use crate::ids::{EntityId, TeamId};
     use crate::math::{Fp, QuantizedDir, Vec2Fp};
     use crate::state::{
@@ -146,6 +147,7 @@ mod tests {
                 },
                 static_obstacles: Vec::new(),
             },
+            combat: CombatConfig::default(),
         }
     }
 

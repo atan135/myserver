@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod combat;
 pub mod hash;
 pub mod ids;
 pub mod input;
@@ -18,6 +19,10 @@ pub mod snapshot;
 pub mod state;
 pub mod tick;
 
+pub use combat::{
+    BuffCatalog, BuffDefinition, BuffId, CombatConfig, CombatConfigError, CombatEffect,
+    CombatEffectOwner, DamageFormula, SkillCatalog, SkillDefinition, SkillId, SkillTargetType,
+};
 pub use hash::{SimHash, hash_world};
 pub use ids::{EntityId, FrameId, TeamId};
 pub use input::{FaceCommand, MoveCommand, SimCommand, SimInput, SimInputSource};

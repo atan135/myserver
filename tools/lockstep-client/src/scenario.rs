@@ -5,9 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    CombatState, EntityId, EntityKind, FaceCommand, Fp, FrameId, MoveCommand, MovementConfig,
-    MovementState, QuantizedDir, SIM_CORE_SCHEMA_VERSION, SceneBounds, SimCommand, SimConfig,
-    SimEntity, SimHash, SimInput, SimInputSource, SimRngState, SimTransform, SimWorld,
+    CombatConfig, CombatState, EntityId, EntityKind, FaceCommand, Fp, FrameId, MoveCommand,
+    MovementConfig, MovementState, QuantizedDir, SIM_CORE_SCHEMA_VERSION, SceneBounds, SimCommand,
+    SimConfig, SimEntity, SimHash, SimInput, SimInputSource, SimRngState, SimTransform, SimWorld,
     StaticObstacle, TeamId, Vec2Fp,
 };
 use std::collections::BTreeSet;
@@ -72,6 +72,7 @@ impl Scenario {
                 bounds: self.config.movement.bounds.to_scene_bounds(),
                 static_obstacles: Vec::<StaticObstacle>::new(),
             },
+            combat: CombatConfig::default(),
         }
     }
 
