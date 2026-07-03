@@ -1,6 +1,6 @@
-use crate::scenario::{Scenario, ScenarioError};
+use crate::scenario::{Scenario, ScenarioError, ScenarioEventAssertion};
 use sim_core::{
-    EntityId, FrameId, MovementMode, SimCommand, SimEntity, SimHash, SimInput, SimWorld,
+    EntityId, FrameId, MovementMode, SimCommand, SimEntity, SimEvent, SimHash, SimInput, SimWorld,
     SkillTarget, StepError, hash_world, step,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -175,6 +175,7 @@ fn default_scenario_dir() -> PathBuf {
 pub struct ReplayResult {
     pub final_frame: u32,
     pub final_hash: SimHash,
+    pub events: Vec<SimEvent>,
 }
 
 pub fn replay_scenario(scenario: &Scenario) -> Result<ReplayResult, OfflineError> {
@@ -186,28 +187,43 @@ pub fn replay_scenario(scenario: &Scenario) -> Result<ReplayResult, OfflineError
     let inputs = scenario.to_sim_inputs().map_err(OfflineError::Scenario)?;
     let initial_frame = scenario.initial.frame;
     let final_frame = scenario.assertions.final_frame;
+    let mut events = Vec::new();
 
     if final_frame > initial_frame {
         for frame in (initial_frame + 1)..=final_frame {
             let frame_id = FrameId::new(frame);
             let frame_inputs = collect_frame_inputs(&inputs, frame_id);
 
-            let server_result =
-                step(&mut server_sim, frame_id, &frame_inputs, &config).map_err(|source| {
-                    OfflineError::Step {
-                        side: SimSide::Server,
+            let server_result = match step(&mut server_sim, frame_id, &frame_inputs, &config) {
+                Ok(result) => result,
+                Err(source) => {
+                    return handle_step_error(
+                        scenario,
+                        &server_sim,
+                        &client_sim,
                         frame,
+                        SimSide::Server,
                         source,
-                    }
-                })?;
-            let client_result =
-                step(&mut client_sim, frame_id, &frame_inputs, &config).map_err(|source| {
-                    OfflineError::Step {
-                        side: SimSide::Client,
+                        &events,
+                    );
+                }
+            };
+            let client_result = match step(&mut client_sim, frame_id, &frame_inputs, &config) {
+                Ok(result) => result,
+                Err(source) => {
+                    return handle_step_error(
+                        scenario,
+                        &server_sim,
+                        &client_sim,
                         frame,
+                        SimSide::Client,
                         source,
-                    }
-                })?;
+                        &events,
+                    );
+                }
+            };
+
+            events.extend(server_result.events.clone());
 
             if server_result.state_hash != client_result.state_hash {
                 let diff = MismatchDiff::new(
@@ -221,6 +237,10 @@ pub fn replay_scenario(scenario: &Scenario) -> Result<ReplayResult, OfflineError
                 return Err(OfflineError::FrameHashMismatch { diff });
             }
         }
+    }
+
+    if scenario.assertions.expected_error.is_some() {
+        return Err(OfflineError::ExpectedErrorNotRaised);
     }
 
     let final_hash = hash_world(&server_sim);
@@ -250,10 +270,98 @@ pub fn replay_scenario(scenario: &Scenario) -> Result<ReplayResult, OfflineError
         });
     }
 
+    assert_events(&scenario.assertions.events, &events)?;
+
     Ok(ReplayResult {
         final_frame,
         final_hash,
+        events,
     })
+}
+
+fn handle_step_error(
+    scenario: &Scenario,
+    server_sim: &SimWorld,
+    client_sim: &SimWorld,
+    frame: u32,
+    side: SimSide,
+    source: StepError,
+    events: &[SimEvent],
+) -> Result<ReplayResult, OfflineError> {
+    let Some(expected_error) = &scenario.assertions.expected_error else {
+        return Err(OfflineError::Step {
+            side,
+            frame,
+            source,
+        });
+    };
+
+    if !expected_error.matches(frame, &source) {
+        return Err(OfflineError::UnexpectedStepError {
+            side,
+            frame,
+            expected: expected_error.error_type,
+            actual: source,
+        });
+    }
+
+    let final_hash = hash_world(server_sim);
+    let client_final_hash = hash_world(client_sim);
+    if final_hash != client_final_hash {
+        let frame_inputs = Vec::new();
+        let diff = MismatchDiff::new(
+            final_hash.frame.raw(),
+            final_hash,
+            client_final_hash,
+            server_sim,
+            client_sim,
+            &frame_inputs,
+        );
+        return Err(OfflineError::FrameHashMismatch { diff });
+    }
+
+    let expected_final_hash = scenario
+        .expected_final_hash()
+        .map_err(OfflineError::Scenario)?;
+
+    if expected_final_hash.value != 0 && expected_final_hash.value != final_hash.value {
+        return Err(OfflineError::FinalHashMismatch {
+            expected: expected_final_hash,
+            actual: final_hash,
+        });
+    }
+
+    assert_events(&scenario.assertions.events, events)?;
+
+    Ok(ReplayResult {
+        final_frame: final_hash.frame.raw(),
+        final_hash,
+        events: events.to_vec(),
+    })
+}
+
+fn assert_events(
+    expected_events: &[ScenarioEventAssertion],
+    actual_events: &[SimEvent],
+) -> Result<(), OfflineError> {
+    let mut search_from = 0;
+
+    for (index, expected) in expected_events.iter().enumerate() {
+        let Some(relative_index) = actual_events[search_from..]
+            .iter()
+            .position(|actual| expected.matches(actual))
+        else {
+            return Err(OfflineError::EventAssertionMismatch {
+                index,
+                expected: expected.clone(),
+                actual_events: actual_events.to_vec(),
+            });
+        };
+
+        search_from += relative_index + 1;
+    }
+
+    Ok(())
 }
 
 fn collect_frame_inputs(inputs: &[SimInput], frame_id: FrameId) -> Vec<SimInput> {
@@ -628,6 +736,18 @@ pub enum OfflineError {
         expected: SimHash,
         actual: SimHash,
     },
+    EventAssertionMismatch {
+        index: usize,
+        expected: ScenarioEventAssertion,
+        actual_events: Vec<SimEvent>,
+    },
+    UnexpectedStepError {
+        side: SimSide,
+        frame: u32,
+        expected: crate::scenario::ScenarioStepErrorType,
+        actual: StepError,
+    },
+    ExpectedErrorNotRaised,
 }
 
 impl OfflineError {
@@ -669,6 +789,32 @@ impl fmt::Display for OfflineError {
                 expected.value,
                 actual.value
             ),
+            Self::EventAssertionMismatch {
+                index,
+                expected,
+                actual_events,
+            } => {
+                write!(f, "event assertion {index} was not found: {expected:?}")?;
+                if actual_events.is_empty() {
+                    write!(f, "\nactual events: none")?;
+                } else {
+                    write!(f, "\nactual events:")?;
+                    for event in actual_events {
+                        write!(f, "\n  - {event:?}")?;
+                    }
+                }
+                Ok(())
+            }
+            Self::UnexpectedStepError {
+                side,
+                frame,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{side} failed at frame {frame} with unexpected step error: expected {expected:?}, got {actual}"
+            ),
+            Self::ExpectedErrorNotRaised => write!(f, "expected step error was not raised"),
         }
     }
 }

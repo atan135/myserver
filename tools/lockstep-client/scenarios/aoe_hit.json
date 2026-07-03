@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "tickRate": 20,
+  "config": {
+    "movement": {
+      "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+      "defaultSpeedPerSecondMilli": 6000,
+      "maxSpeedPerSecondMilli": 10000
+    },
+    "combat": {
+      "skills": [
+        {
+          "id": 200,
+          "cooldownFrames": 12,
+          "castRangeMilli": 3000,
+          "targetType": "position",
+          "effects": [
+            { "type": "damage", "formula": { "type": "trueDamage", "amount": 12 } }
+          ]
+        }
+      ]
+    }
+  },
+  "initial": {
+    "frame": 0,
+    "seed": 9003,
+    "entities": [
+      {
+        "id": 1001,
+        "kind": "player",
+        "characterId": "mage",
+        "teamId": 1,
+        "x": 0,
+        "y": 0,
+        "radius": 500,
+        "hp": 100,
+        "combat": {
+          "maxHp": 100,
+          "attack": 20,
+          "skills": [{ "skillId": 200 }]
+        }
+      },
+      {
+        "id": 2001,
+        "kind": "monster",
+        "characterId": "slime_a",
+        "teamId": 2,
+        "x": 1000,
+        "y": 0,
+        "radius": 400,
+        "hp": 50
+      },
+      {
+        "id": 2002,
+        "kind": "monster",
+        "characterId": "slime_b",
+        "teamId": 2,
+        "x": 2500,
+        "y": 0,
+        "radius": 400,
+        "hp": 50
+      },
+      {
+        "id": 3001,
+        "kind": "player",
+        "characterId": "ally",
+        "teamId": 1,
+        "x": 1000,
+        "y": 1000,
+        "radius": 400,
+        "hp": 50
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "frame": 1,
+      "characterId": "mage",
+      "entityId": 1001,
+      "seq": 1,
+      "command": {
+        "type": "CastSkill",
+        "skillId": 200,
+        "target": { "type": "Position", "x": 1000, "y": 0 }
+      }
+    }
+  ],
+  "assertions": {
+    "finalFrame": 3,
+    "finalHash": "786129b1d444f47f",
+    "events": [
+      {
+        "frame": 1,
+        "type": "skillCast",
+        "sourceEntity": 1001,
+        "targetEntity": 2001,
+        "skillId": 200,
+        "value": 2
+      },
+      {
+        "frame": 1,
+        "type": "damageApplied",
+        "sourceEntity": 1001,
+        "targetEntity": 2001,
+        "skillId": 200,
+        "value": 12
+      },
+      {
+        "frame": 1,
+        "type": "damageApplied",
+        "sourceEntity": 1001,
+        "targetEntity": 2002,
+        "skillId": 200,
+        "value": 12
+      }
+    ]
+  }
+}

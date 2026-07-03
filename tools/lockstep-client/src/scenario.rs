@@ -5,10 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    CombatConfig, CombatState, EntityId, EntityKind, FaceCommand, Fp, FrameId, MoveCommand,
-    MovementConfig, MovementState, QuantizedDir, SIM_CORE_SCHEMA_VERSION, SceneBounds, SimCommand,
-    SimConfig, SimEntity, SimHash, SimInput, SimInputSource, SimRngState, SimTransform, SimWorld,
-    StaticObstacle, TeamId, Vec2Fp,
+    BuffDefinition, BuffId, BuffSlot, CastSkillCommand, CombatConfig, CombatConfigError,
+    CombatEffect, CombatState, DamageFormula, EntityId, EntityKind, FaceCommand, Fp, FrameId,
+    MoveCommand, MovementConfig, MovementState, QuantizedDir, SIM_CORE_SCHEMA_VERSION, SceneBounds,
+    SimCommand, SimConfig, SimEntity, SimEvent, SimHash, SimInput, SimInputSource, SimRngState,
+    SimTransform, SimWorld, SkillDefinition, SkillId, SkillSlot, SkillTarget, SkillTargetType,
+    StaticObstacle, StepError, TeamId, Vec2Fp,
 };
 use std::collections::BTreeSet;
 use std::fmt;
@@ -72,7 +74,7 @@ impl Scenario {
                 bounds: self.config.movement.bounds.to_scene_bounds(),
                 static_obstacles: Vec::<StaticObstacle>::new(),
             },
-            combat: CombatConfig::default(),
+            combat: self.config.to_combat_config(),
         }
     }
 
@@ -188,11 +190,201 @@ impl Scenario {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScenarioConfig {
     pub movement: ScenarioMovementConfig,
+    #[serde(default)]
+    pub combat: Option<ScenarioCombatConfig>,
 }
 
 impl ScenarioConfig {
     fn validate(&self) -> Result<(), ScenarioError> {
-        self.movement.validate()
+        self.movement.validate()?;
+
+        if let Some(combat) = &self.combat {
+            combat.validate()?;
+        }
+
+        Ok(())
+    }
+
+    fn to_combat_config(&self) -> CombatConfig {
+        self.combat
+            .as_ref()
+            .map(ScenarioCombatConfig::to_combat_config)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioCombatConfig {
+    #[serde(default)]
+    pub skills: Vec<ScenarioSkillDefinition>,
+    #[serde(default)]
+    pub buffs: Vec<ScenarioBuffDefinition>,
+}
+
+impl ScenarioCombatConfig {
+    fn validate(&self) -> Result<(), ScenarioError> {
+        self.try_to_combat_config()
+            .map(|_| ())
+            .map_err(|error| ScenarioError::InvalidConfig {
+                field: "config.combat",
+                message: error.to_string(),
+            })
+    }
+
+    fn try_to_combat_config(&self) -> Result<CombatConfig, CombatConfigError> {
+        let skills = self
+            .skills
+            .iter()
+            .map(ScenarioSkillDefinition::to_skill_definition)
+            .collect::<Vec<_>>();
+        let buffs = self
+            .buffs
+            .iter()
+            .map(ScenarioBuffDefinition::to_buff_definition)
+            .collect::<Vec<_>>();
+
+        CombatConfig::from_definitions(skills, buffs)
+    }
+
+    fn to_combat_config(&self) -> CombatConfig {
+        self.try_to_combat_config()
+            .expect("scenario combat config is validated before conversion")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioSkillDefinition {
+    pub id: u32,
+    pub cooldown_frames: u32,
+    pub cast_range_milli: i64,
+    pub target_type: ScenarioSkillTargetType,
+    #[serde(default)]
+    pub effects: Vec<ScenarioCombatEffect>,
+}
+
+impl ScenarioSkillDefinition {
+    fn to_skill_definition(&self) -> SkillDefinition {
+        SkillDefinition {
+            id: SkillId::new(self.id),
+            cooldown_frames: self.cooldown_frames,
+            cast_range: Fp::from_milli(self.cast_range_milli),
+            target_type: self.target_type.into(),
+            effects: self
+                .effects
+                .iter()
+                .map(ScenarioCombatEffect::to_combat_effect)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioBuffDefinition {
+    pub id: u32,
+    pub duration_frames: u32,
+    pub interval_frames: u32,
+    pub max_stacks: u16,
+    #[serde(default)]
+    pub effects: Vec<ScenarioCombatEffect>,
+}
+
+impl ScenarioBuffDefinition {
+    fn to_buff_definition(&self) -> BuffDefinition {
+        BuffDefinition {
+            id: BuffId::new(self.id),
+            duration_frames: self.duration_frames,
+            interval_frames: self.interval_frames,
+            max_stacks: self.max_stacks,
+            effects: self
+                .effects
+                .iter()
+                .map(ScenarioCombatEffect::to_combat_effect)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScenarioSkillTargetType {
+    None,
+    SelfOnly,
+    Ally,
+    Enemy,
+    AnyEntity,
+    Position,
+    Direction,
+}
+
+impl From<ScenarioSkillTargetType> for SkillTargetType {
+    fn from(value: ScenarioSkillTargetType) -> Self {
+        match value {
+            ScenarioSkillTargetType::None => Self::None,
+            ScenarioSkillTargetType::SelfOnly => Self::SelfOnly,
+            ScenarioSkillTargetType::Ally => Self::Ally,
+            ScenarioSkillTargetType::Enemy => Self::Enemy,
+            ScenarioSkillTargetType::AnyEntity => Self::AnyEntity,
+            ScenarioSkillTargetType::Position => Self::Position,
+            ScenarioSkillTargetType::Direction => Self::Direction,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ScenarioCombatEffect {
+    Damage {
+        formula: ScenarioDamageFormula,
+    },
+    Heal {
+        formula: ScenarioDamageFormula,
+    },
+    AddBuff {
+        #[serde(rename = "buffId")]
+        buff_id: u32,
+    },
+}
+
+impl ScenarioCombatEffect {
+    fn to_combat_effect(&self) -> CombatEffect {
+        match self {
+            Self::Damage { formula } => CombatEffect::Damage {
+                formula: formula.to_damage_formula(),
+            },
+            Self::Heal { formula } => CombatEffect::Heal {
+                formula: formula.to_damage_formula(),
+            },
+            Self::AddBuff { buff_id } => CombatEffect::AddBuff {
+                buff_id: BuffId::new(*buff_id),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ScenarioDamageFormula {
+    Fixed { amount: i32 },
+    Scaling { base: i32, attack_scale_bps: i32 },
+    TrueDamage { amount: i32 },
+}
+
+impl ScenarioDamageFormula {
+    fn to_damage_formula(&self) -> DamageFormula {
+        match *self {
+            Self::Fixed { amount } => DamageFormula::Fixed { amount },
+            Self::Scaling {
+                base,
+                attack_scale_bps,
+            } => DamageFormula::Scaling {
+                base,
+                attack_scale_bps,
+            },
+            Self::TrueDamage { amount } => DamageFormula::TrueDamage { amount },
+        }
     }
 }
 
@@ -305,6 +497,8 @@ pub struct ScenarioInitialEntity {
     /// Collision radius in raw milli-units.
     pub radius: i64,
     pub hp: i32,
+    #[serde(default)]
+    pub combat: Option<ScenarioInitialCombat>,
 }
 
 impl ScenarioInitialEntity {
@@ -337,6 +531,7 @@ impl ScenarioInitialEntity {
     }
 
     fn to_sim_entity(&self) -> SimEntity {
+        let combat = self.to_combat_state();
         SimEntity {
             id: EntityId::new(self.id),
             kind: self.kind.into(),
@@ -348,14 +543,104 @@ impl ScenarioInitialEntity {
                 radius: Fp::from_milli(self.radius),
             },
             movement: MovementState::default(),
-            combat: CombatState {
-                hp: self.hp,
-                max_hp: self.hp,
-                ..CombatState::default()
-            },
+            combat,
             alive: self.hp > 0,
         }
     }
+
+    fn to_combat_state(&self) -> CombatState {
+        let mut state = CombatState {
+            hp: self.hp,
+            max_hp: self.hp,
+            ..CombatState::default()
+        };
+
+        if let Some(combat) = &self.combat {
+            state.max_hp = combat.max_hp.unwrap_or(self.hp);
+            state.attack = combat.attack.unwrap_or_default();
+            state.defense = combat.defense.unwrap_or_default();
+            state.speed = combat.speed.unwrap_or_default();
+            state.crit_rate_bps = combat.crit.unwrap_or_default();
+            state.crit_damage_bps = combat.crit_damage.unwrap_or_default();
+            state.skill_slots = combat
+                .skill_slots
+                .iter()
+                .map(ScenarioSkillSlot::to_skill_slot)
+                .collect();
+            state.buffs = combat
+                .buff_slots
+                .iter()
+                .map(ScenarioBuffSlot::to_buff_slot)
+                .collect();
+        }
+
+        state
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioInitialCombat {
+    #[serde(default)]
+    pub max_hp: Option<i32>,
+    #[serde(default)]
+    pub attack: Option<i32>,
+    #[serde(default)]
+    pub defense: Option<i32>,
+    #[serde(default)]
+    pub speed: Option<i32>,
+    #[serde(default)]
+    pub crit: Option<u16>,
+    #[serde(default)]
+    pub crit_damage: Option<u16>,
+    #[serde(default, alias = "skills")]
+    pub skill_slots: Vec<ScenarioSkillSlot>,
+    #[serde(default, alias = "buffs")]
+    pub buff_slots: Vec<ScenarioBuffSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioSkillSlot {
+    pub skill_id: u32,
+    #[serde(default)]
+    pub cooldown_remaining: u32,
+}
+
+impl ScenarioSkillSlot {
+    fn to_skill_slot(&self) -> SkillSlot {
+        SkillSlot {
+            skill_id: SkillId::new(self.skill_id),
+            cooldown_remaining: self.cooldown_remaining,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioBuffSlot {
+    pub buff_id: u32,
+    pub duration_remaining: u32,
+    pub interval_remaining: u32,
+    #[serde(default = "default_buff_stacks")]
+    pub stacks: u16,
+    pub source_entity: u32,
+}
+
+impl ScenarioBuffSlot {
+    fn to_buff_slot(&self) -> BuffSlot {
+        BuffSlot {
+            buff_id: BuffId::new(self.buff_id),
+            duration_remaining: self.duration_remaining,
+            interval_remaining: self.interval_remaining,
+            stacks: self.stacks,
+            source_entity: EntityId::new(self.source_entity),
+        }
+    }
+}
+
+fn default_buff_stacks() -> u16 {
+    1
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +709,12 @@ pub enum ScenarioCommand {
         #[serde(rename = "dirY")]
         dir_y: i16,
     },
+    #[serde(alias = "castSkill")]
+    CastSkill {
+        #[serde(rename = "skillId")]
+        skill_id: u32,
+        target: ScenarioSkillTarget,
+    },
 }
 
 impl ScenarioCommand {
@@ -463,6 +754,7 @@ impl ScenarioCommand {
                     ));
                 }
             }
+            Self::CastSkill { target, .. } => target.validate(index, input)?,
         }
 
         Ok(())
@@ -486,6 +778,66 @@ impl ScenarioCommand {
             Self::Face { dir_x, dir_y } => Ok(SimCommand::Face(FaceCommand {
                 dir: parse_dir(index, input, dir_x, dir_y)?,
             })),
+            Self::CastSkill { skill_id, target } => Ok(SimCommand::CastSkill(CastSkillCommand {
+                skill_id: SkillId::new(skill_id),
+                target: target.to_skill_target(index, input)?,
+            })),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ScenarioSkillTarget {
+    #[serde(alias = "none")]
+    None,
+    #[serde(alias = "entity")]
+    Entity {
+        #[serde(rename = "entityId")]
+        entity_id: u32,
+    },
+    #[serde(alias = "position")]
+    Position { x: i64, y: i64 },
+    #[serde(alias = "direction")]
+    Direction {
+        #[serde(rename = "dirX")]
+        dir_x: i16,
+        #[serde(rename = "dirY")]
+        dir_y: i16,
+    },
+}
+
+impl ScenarioSkillTarget {
+    fn validate(&self, index: usize, input: &ScenarioInput) -> Result<(), ScenarioError> {
+        if let Self::Direction { dir_x, dir_y } = *self {
+            let dir = parse_dir(index, input, dir_x, dir_y)?;
+            if dir == QuantizedDir::ZERO {
+                return Err(ScenarioError::invalid_input(
+                    index,
+                    input,
+                    "CastSkill direction target must be non-zero".to_owned(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn to_skill_target(
+        self,
+        index: usize,
+        input: &ScenarioInput,
+    ) -> Result<SkillTarget, ScenarioError> {
+        match self {
+            Self::None => Ok(SkillTarget::None),
+            Self::Entity { entity_id } => Ok(SkillTarget::Entity(EntityId::new(entity_id))),
+            Self::Position { x, y } => Ok(SkillTarget::Position(Vec2Fp::new(
+                Fp::from_milli(x),
+                Fp::from_milli(y),
+            ))),
+            Self::Direction { dir_x, dir_y } => Ok(SkillTarget::Direction(parse_dir(
+                index, input, dir_x, dir_y,
+            )?)),
         }
     }
 }
@@ -536,6 +888,10 @@ pub struct ScenarioAssertions {
     pub final_hash: String,
     #[serde(default)]
     pub entity_positions: Vec<ScenarioEntityPositionAssertion>,
+    #[serde(default)]
+    pub events: Vec<ScenarioEventAssertion>,
+    #[serde(default)]
+    pub expected_error: Option<ScenarioExpectedError>,
 }
 
 impl ScenarioAssertions {
@@ -551,6 +907,10 @@ impl ScenarioAssertions {
         }
 
         parse_final_hash(&self.final_hash)?;
+
+        for (index, event) in self.events.iter().enumerate() {
+            event.validate(index, initial)?;
+        }
 
         for (index, position) in self.entity_positions.iter().enumerate() {
             if !initial
@@ -578,6 +938,304 @@ impl ScenarioAssertions {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioEventAssertion {
+    pub frame: u32,
+    #[serde(rename = "type")]
+    pub event_type: ScenarioEventType,
+    #[serde(default)]
+    pub source_entity: Option<u32>,
+    #[serde(default)]
+    pub target_entity: Option<u32>,
+    #[serde(default)]
+    pub skill_id: Option<u32>,
+    #[serde(default)]
+    pub buff_id: Option<u32>,
+    #[serde(default)]
+    pub value: Option<i32>,
+}
+
+impl ScenarioEventAssertion {
+    fn validate(&self, index: usize, initial: &ScenarioInitial) -> Result<(), ScenarioError> {
+        if let Some(entity_id) = self.source_entity {
+            validate_assertion_entity_exists(
+                initial,
+                "assertions.events.sourceEntity",
+                index,
+                entity_id,
+            )?;
+        }
+
+        if let Some(entity_id) = self.target_entity {
+            validate_assertion_entity_exists(
+                initial,
+                "assertions.events.targetEntity",
+                index,
+                entity_id,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn matches(&self, event: &SimEvent) -> bool {
+        self.event_type == ScenarioEventType::from(event)
+            && self.frame == event_frame(event).raw()
+            && self
+                .source_entity
+                .is_none_or(|expected| event_source_entity(event).raw() == expected)
+            && self.target_entity.is_none_or(|expected| {
+                event_target_entity(event).is_some_and(|actual| actual.raw() == expected)
+            })
+            && self.skill_id.is_none_or(|expected| {
+                event_skill_id(event).is_some_and(|actual| actual.raw() == expected)
+            })
+            && self.buff_id.is_none_or(|expected| {
+                event_buff_id(event).is_some_and(|actual| actual.raw() == expected)
+            })
+            && self
+                .value
+                .is_none_or(|expected| event_value(event) == expected)
+    }
+}
+
+fn validate_assertion_entity_exists(
+    initial: &ScenarioInitial,
+    field: &'static str,
+    index: usize,
+    entity_id: u32,
+) -> Result<(), ScenarioError> {
+    if !initial.entities.iter().any(|entity| entity.id == entity_id) {
+        return Err(ScenarioError::InvalidAssertion {
+            field,
+            message: format!(
+                "events[{index}] entity {entity_id} does not exist in initial.entities"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScenarioEventType {
+    SkillCast,
+    DamageApplied,
+    HealApplied,
+    BuffApplied,
+    BuffExpired,
+    EntityDied,
+    BuffTick,
+}
+
+impl From<&SimEvent> for ScenarioEventType {
+    fn from(value: &SimEvent) -> Self {
+        match value {
+            SimEvent::SkillCast { .. } => Self::SkillCast,
+            SimEvent::DamageApplied { .. } => Self::DamageApplied,
+            SimEvent::HealApplied { .. } => Self::HealApplied,
+            SimEvent::BuffApplied { .. } => Self::BuffApplied,
+            SimEvent::BuffExpired { .. } => Self::BuffExpired,
+            SimEvent::EntityDied { .. } => Self::EntityDied,
+            SimEvent::BuffTick { .. } => Self::BuffTick,
+        }
+    }
+}
+
+fn event_frame(event: &SimEvent) -> FrameId {
+    match event {
+        SimEvent::SkillCast { frame, .. }
+        | SimEvent::DamageApplied { frame, .. }
+        | SimEvent::HealApplied { frame, .. }
+        | SimEvent::BuffApplied { frame, .. }
+        | SimEvent::BuffExpired { frame, .. }
+        | SimEvent::EntityDied { frame, .. }
+        | SimEvent::BuffTick { frame, .. } => *frame,
+    }
+}
+
+fn event_source_entity(event: &SimEvent) -> EntityId {
+    match event {
+        SimEvent::SkillCast { source_entity, .. }
+        | SimEvent::DamageApplied { source_entity, .. }
+        | SimEvent::HealApplied { source_entity, .. }
+        | SimEvent::BuffApplied { source_entity, .. }
+        | SimEvent::BuffExpired { source_entity, .. }
+        | SimEvent::EntityDied { source_entity, .. }
+        | SimEvent::BuffTick { source_entity, .. } => *source_entity,
+    }
+}
+
+fn event_target_entity(event: &SimEvent) -> Option<EntityId> {
+    match event {
+        SimEvent::SkillCast { target_entity, .. } => *target_entity,
+        SimEvent::DamageApplied { target_entity, .. }
+        | SimEvent::HealApplied { target_entity, .. }
+        | SimEvent::BuffApplied { target_entity, .. }
+        | SimEvent::BuffExpired { target_entity, .. }
+        | SimEvent::EntityDied { target_entity, .. }
+        | SimEvent::BuffTick { target_entity, .. } => Some(*target_entity),
+    }
+}
+
+fn event_skill_id(event: &SimEvent) -> Option<SkillId> {
+    match event {
+        SimEvent::SkillCast { skill_id, .. } => Some(*skill_id),
+        SimEvent::DamageApplied { skill_id, .. }
+        | SimEvent::HealApplied { skill_id, .. }
+        | SimEvent::EntityDied { skill_id, .. } => *skill_id,
+        SimEvent::BuffApplied { .. } | SimEvent::BuffExpired { .. } | SimEvent::BuffTick { .. } => {
+            None
+        }
+    }
+}
+
+fn event_buff_id(event: &SimEvent) -> Option<BuffId> {
+    match event {
+        SimEvent::DamageApplied { buff_id, .. }
+        | SimEvent::HealApplied { buff_id, .. }
+        | SimEvent::EntityDied { buff_id, .. } => *buff_id,
+        SimEvent::BuffApplied { buff_id, .. }
+        | SimEvent::BuffExpired { buff_id, .. }
+        | SimEvent::BuffTick { buff_id, .. } => Some(*buff_id),
+        SimEvent::SkillCast { .. } => None,
+    }
+}
+
+fn event_value(event: &SimEvent) -> i32 {
+    match event {
+        SimEvent::SkillCast { value, .. }
+        | SimEvent::DamageApplied { value, .. }
+        | SimEvent::HealApplied { value, .. }
+        | SimEvent::BuffApplied { value, .. }
+        | SimEvent::BuffExpired { value, .. }
+        | SimEvent::EntityDied { value, .. }
+        | SimEvent::BuffTick { value, .. } => *value,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScenarioExpectedError {
+    #[serde(default)]
+    pub frame: Option<u32>,
+    #[serde(rename = "type")]
+    pub error_type: ScenarioStepErrorType,
+    #[serde(default)]
+    pub entity_id: Option<u32>,
+    #[serde(default)]
+    pub skill_id: Option<u32>,
+    #[serde(default)]
+    pub target_entity_id: Option<u32>,
+}
+
+impl ScenarioExpectedError {
+    pub fn matches(&self, frame: u32, error: &StepError) -> bool {
+        self.frame.is_none_or(|expected| expected == frame)
+            && self.error_type == ScenarioStepErrorType::from(error)
+            && self.entity_id.is_none_or(|expected| {
+                step_error_entity_id(error).is_some_and(|id| id.raw() == expected)
+            })
+            && self.skill_id.is_none_or(|expected| {
+                step_error_skill_id(error).is_some_and(|id| id.raw() == expected)
+            })
+            && self.target_entity_id.is_none_or(|expected| {
+                step_error_target_entity_id(error).is_some_and(|id| id.raw() == expected)
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScenarioStepErrorType {
+    NonSequentialFrame,
+    FrameOverflow,
+    ZeroTickRate,
+    InvalidMovementSpeed,
+    MovementSpeedTooHigh,
+    ZeroDirectionMove,
+    EntityNotFound,
+    UnknownSkill,
+    UnknownBuff,
+    SkillNotEquipped,
+    SkillOnCooldown,
+    SkillTargetTypeMismatch,
+    InvalidSkillTarget,
+    SkillTargetOutOfRange,
+    SkillTargetDistanceOverflow,
+    MovementDeltaOverflow,
+}
+
+impl From<&StepError> for ScenarioStepErrorType {
+    fn from(value: &StepError) -> Self {
+        match value {
+            StepError::NonSequentialFrame { .. } => Self::NonSequentialFrame,
+            StepError::FrameOverflow { .. } => Self::FrameOverflow,
+            StepError::ZeroTickRate => Self::ZeroTickRate,
+            StepError::InvalidMovementSpeed { .. } => Self::InvalidMovementSpeed,
+            StepError::MovementSpeedTooHigh { .. } => Self::MovementSpeedTooHigh,
+            StepError::ZeroDirectionMove { .. } => Self::ZeroDirectionMove,
+            StepError::EntityNotFound { .. } => Self::EntityNotFound,
+            StepError::UnknownSkill { .. } => Self::UnknownSkill,
+            StepError::UnknownBuff { .. } => Self::UnknownBuff,
+            StepError::SkillNotEquipped { .. } => Self::SkillNotEquipped,
+            StepError::SkillOnCooldown { .. } => Self::SkillOnCooldown,
+            StepError::SkillTargetTypeMismatch { .. } => Self::SkillTargetTypeMismatch,
+            StepError::InvalidSkillTarget { .. } => Self::InvalidSkillTarget,
+            StepError::SkillTargetOutOfRange { .. } => Self::SkillTargetOutOfRange,
+            StepError::SkillTargetDistanceOverflow { .. } => Self::SkillTargetDistanceOverflow,
+            StepError::MovementDeltaOverflow { .. } => Self::MovementDeltaOverflow,
+        }
+    }
+}
+
+fn step_error_entity_id(error: &StepError) -> Option<EntityId> {
+    match error {
+        StepError::InvalidMovementSpeed { entity_id, .. }
+        | StepError::MovementSpeedTooHigh { entity_id, .. }
+        | StepError::ZeroDirectionMove { entity_id }
+        | StepError::EntityNotFound { entity_id }
+        | StepError::UnknownSkill { entity_id, .. }
+        | StepError::UnknownBuff { entity_id, .. }
+        | StepError::SkillNotEquipped { entity_id, .. }
+        | StepError::SkillOnCooldown { entity_id, .. }
+        | StepError::SkillTargetTypeMismatch { entity_id, .. }
+        | StepError::InvalidSkillTarget { entity_id, .. }
+        | StepError::SkillTargetOutOfRange { entity_id, .. }
+        | StepError::SkillTargetDistanceOverflow { entity_id, .. }
+        | StepError::MovementDeltaOverflow { entity_id } => Some(*entity_id),
+        StepError::NonSequentialFrame { .. }
+        | StepError::FrameOverflow { .. }
+        | StepError::ZeroTickRate => None,
+    }
+}
+
+fn step_error_skill_id(error: &StepError) -> Option<SkillId> {
+    match error {
+        StepError::UnknownSkill { skill_id, .. }
+        | StepError::SkillNotEquipped { skill_id, .. }
+        | StepError::SkillOnCooldown { skill_id, .. }
+        | StepError::SkillTargetTypeMismatch { skill_id, .. }
+        | StepError::InvalidSkillTarget { skill_id, .. }
+        | StepError::SkillTargetOutOfRange { skill_id, .. }
+        | StepError::SkillTargetDistanceOverflow { skill_id, .. } => Some(*skill_id),
+        _ => None,
+    }
+}
+
+fn step_error_target_entity_id(error: &StepError) -> Option<EntityId> {
+    match error {
+        StepError::InvalidSkillTarget {
+            target_entity_id, ..
+        }
+        | StepError::SkillTargetOutOfRange {
+            target_entity_id, ..
+        } => Some(*target_entity_id),
+        _ => None,
     }
 }
 
@@ -879,6 +1537,46 @@ mod tests {
 
         assert_error_contains(&error, "invalid direction");
         assert_error_contains(&error, "length squared is too large");
+    }
+
+    #[test]
+    fn invalid_combat_config_returns_error_instead_of_panicking() {
+        let json = VALID_SCENARIO.replace(
+            r#""movement": {
+                "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+                "defaultSpeedPerSecondMilli": 6000,
+                "maxSpeedPerSecondMilli": 10000
+            }"#,
+            r#""movement": {
+                "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+                "defaultSpeedPerSecondMilli": 6000,
+                "maxSpeedPerSecondMilli": 10000
+            },
+            "combat": {
+                "skills": [
+                    {
+                        "id": 10,
+                        "cooldownFrames": 30,
+                        "castRangeMilli": 5000,
+                        "targetType": "enemy",
+                        "effects": [{ "type": "addBuff", "buffId": 999 }]
+                    }
+                ],
+                "buffs": []
+            }"#,
+        );
+
+        let error = Scenario::from_json_str(&json).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScenarioError::InvalidConfig {
+                field: "config.combat",
+                ..
+            }
+        ));
+        assert_error_contains(&error, "invalid scenario config config.combat");
+        assert_error_contains(&error, "references unknown buff id: 999");
     }
 
     fn assert_error_contains(error: &ScenarioError, expected: &str) {

@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "tickRate": 20,
+  "config": {
+    "movement": {
+      "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+      "defaultSpeedPerSecondMilli": 6000,
+      "maxSpeedPerSecondMilli": 10000
+    },
+    "combat": {
+      "skills": [
+        {
+          "id": 400,
+          "cooldownFrames": 8,
+          "castRangeMilli": 0,
+          "targetType": "selfOnly",
+          "effects": [
+            { "type": "heal", "formula": { "type": "fixed", "amount": 30 } }
+          ]
+        }
+      ]
+    }
+  },
+  "initial": {
+    "frame": 0,
+    "seed": 9005,
+    "entities": [
+      {
+        "id": 1001,
+        "kind": "player",
+        "characterId": "cleric",
+        "teamId": 1,
+        "x": 0,
+        "y": 0,
+        "radius": 500,
+        "hp": 85,
+        "combat": {
+          "maxHp": 100,
+          "attack": 12,
+          "skills": [{ "skillId": 400 }]
+        }
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "frame": 1,
+      "characterId": "cleric",
+      "entityId": 1001,
+      "seq": 1,
+      "command": {
+        "type": "CastSkill",
+        "skillId": 400,
+        "target": { "type": "None" }
+      }
+    }
+  ],
+  "assertions": {
+    "finalFrame": 3,
+    "finalHash": "d4b38fbea41e708d",
+    "events": [
+      {
+        "frame": 1,
+        "type": "skillCast",
+        "sourceEntity": 1001,
+        "targetEntity": 1001,
+        "skillId": 400,
+        "value": 1
+      },
+      {
+        "frame": 1,
+        "type": "healApplied",
+        "sourceEntity": 1001,
+        "targetEntity": 1001,
+        "skillId": 400,
+        "value": 15
+      }
+    ]
+  }
+}

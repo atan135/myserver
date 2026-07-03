@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "tickRate": 20,
+  "config": {
+    "movement": {
+      "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+      "defaultSpeedPerSecondMilli": 6000,
+      "maxSpeedPerSecondMilli": 10000
+    },
+    "combat": {
+      "skills": [
+        {
+          "id": 90,
+          "cooldownFrames": 10,
+          "castRangeMilli": 0,
+          "targetType": "selfOnly",
+          "effects": [
+            { "type": "heal", "formula": { "type": "fixed", "amount": 10 } }
+          ]
+        },
+        {
+          "id": 100,
+          "cooldownFrames": 10,
+          "castRangeMilli": 2000,
+          "targetType": "enemy",
+          "effects": [
+            { "type": "damage", "formula": { "type": "fixed", "amount": 30 } }
+          ]
+        }
+      ]
+    }
+  },
+  "initial": {
+    "frame": 0,
+    "seed": 9002,
+    "entities": [
+      {
+        "id": 1001,
+        "kind": "player",
+        "characterId": "hero",
+        "teamId": 1,
+        "x": 0,
+        "y": 0,
+        "radius": 500,
+          "hp": 100,
+          "combat": {
+            "maxHp": 100,
+            "attack": 10,
+          "skills": [{ "skillId": 90 }, { "skillId": 100 }]
+          }
+        },
+      {
+        "id": 2001,
+        "kind": "monster",
+        "characterId": "ogre",
+        "teamId": 2,
+        "x": 2500,
+        "y": 0,
+        "radius": 500,
+        "hp": 100
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "frame": 1,
+      "characterId": "hero",
+      "entityId": 1001,
+      "seq": 1,
+      "command": {
+        "type": "CastSkill",
+        "skillId": 90,
+        "target": { "type": "None" }
+      }
+    },
+    {
+      "frame": 2,
+      "characterId": "hero",
+      "entityId": 1001,
+      "seq": 2,
+      "command": {
+        "type": "CastSkill",
+        "skillId": 100,
+        "target": { "type": "Entity", "entityId": 2001 }
+      }
+    }
+  ],
+  "assertions": {
+    "finalFrame": 2,
+    "finalHash": "7330eab0eeb1e8d4",
+    "expectedError": {
+      "frame": 2,
+      "type": "SkillTargetOutOfRange",
+      "entityId": 1001,
+      "skillId": 100,
+      "targetEntityId": 2001
+    },
+    "events": [
+      {
+        "frame": 1,
+        "type": "skillCast",
+        "sourceEntity": 1001,
+        "targetEntity": 1001,
+        "skillId": 90,
+        "value": 1
+      }
+    ]
+  }
+}

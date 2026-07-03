@@ -35,7 +35,7 @@
   ],
   "assertions": {
     "finalFrame": 3,
-    "finalHash": "3d50c94ac9d52792",
+    "finalHash": "6f16a48901efbe32",
     "entityPositions": [
       { "entityId": 1001, "x": 900, "y": 0, "toleranceMilli": 0 }
     ]
