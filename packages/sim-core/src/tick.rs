@@ -1,6 +1,8 @@
 //! Simulation tick advancement.
 
-use crate::combat::{CombatConfig, SkillDefinition, SkillId, SkillTargetType};
+use crate::combat::{
+    CombatConfig, CombatEffect, DamageFormula, SkillDefinition, SkillId, SkillTargetType,
+};
 use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
 use crate::input::{
@@ -11,6 +13,8 @@ use crate::math::{FP_SCALE, Fp, QuantizedDir, Vec2Fp};
 use crate::state::{MovementMode, SimEntity, SimWorld};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+const BASIS_POINTS_DENOMINATOR: i128 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// Axis-aligned rectangular scene bounds.
@@ -120,6 +124,19 @@ enum MovementSelection {
 struct ResolvedMovementInput {
     entity_id: EntityId,
     selection: MovementSelection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedStepInputs {
+    movement_inputs: Vec<ResolvedMovementInput>,
+    cast_skills: Vec<ResolvedCastSkill>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedCastSkill {
+    caster_id: EntityId,
+    skill_id: SkillId,
+    targets: ResolvedSkillTargets,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -358,18 +375,18 @@ pub struct SimStepResult {
 
 /// Advances `world` by exactly one sequential frame using deterministic P0 rules.
 ///
-/// P0 applies movement and facing inputs, advances controlled movement, clamps
-/// positions to scene bounds, and returns a state hash. It does not resolve full
-/// combat or collision.
+/// Applies deterministic movement, facing, and the currently implemented direct
+/// combat effects, then returns a state hash. Buff runtime effects, collision,
+/// and full event emission are handled by later phases.
 pub fn step(
     world: &mut SimWorld,
     frame: FrameId,
     inputs: &[SimInput],
     config: &SimConfig,
 ) -> Result<SimStepResult, StepError> {
-    let movement_inputs = validate_step(world, frame, inputs, config)?;
+    let resolved_inputs = validate_step(world, frame, inputs, config)?;
 
-    for movement_input in movement_inputs {
+    for movement_input in resolved_inputs.movement_inputs {
         let entity =
             world
                 .entity_mut(movement_input.entity_id)
@@ -409,6 +426,13 @@ pub fn step(
         advance_controlled_entity(entity, config)?;
     }
 
+    // Same-frame skill effects are deterministic and stable:
+    // selected cast input order, then resolved target order, then effect vector
+    // order. Stage 7 events should preserve this application order.
+    for cast_skill in &resolved_inputs.cast_skills {
+        apply_resolved_cast_skill(world, cast_skill, config)?;
+    }
+
     for entity in &mut world.entities {
         advance_combat_timers(entity);
     }
@@ -427,7 +451,7 @@ fn validate_step(
     frame: FrameId,
     inputs: &[SimInput],
     config: &SimConfig,
-) -> Result<Vec<ResolvedMovementInput>, StepError> {
+) -> Result<ResolvedStepInputs, StepError> {
     let expected =
         world
             .frame
@@ -469,6 +493,7 @@ fn validate_step(
         }
     }
 
+    let mut cast_skills = Vec::new();
     for indexed in select_latest_cast_skill_inputs(inputs) {
         let input = indexed.input;
         let entity = world
@@ -481,10 +506,19 @@ fn validate_step(
             unreachable!("select_latest_cast_skill_inputs only returns cast skill commands")
         };
 
-        validate_cast_skill_input(input.entity_id, command, entity, world, config)?;
+        cast_skills.push(resolve_cast_skill_input(
+            input.entity_id,
+            command,
+            entity,
+            world,
+            config,
+        )?);
     }
 
-    Ok(movement_inputs)
+    Ok(ResolvedStepInputs {
+        movement_inputs,
+        cast_skills,
+    })
 }
 
 fn resolve_movement_input(
@@ -549,13 +583,13 @@ fn validate_move_speed(
     Ok(())
 }
 
-fn validate_cast_skill_input(
+fn resolve_cast_skill_input(
     entity_id: EntityId,
     command: CastSkillCommand,
     entity: &SimEntity,
     world: &SimWorld,
     config: &SimConfig,
-) -> Result<(), StepError> {
+) -> Result<ResolvedCastSkill, StepError> {
     let skill = config
         .combat
         .skills
@@ -592,9 +626,13 @@ fn validate_cast_skill_input(
         });
     }
 
-    let _resolved_targets = resolve_skill_targets(entity_id, command.target, entity, skill, world)?;
+    let targets = resolve_skill_targets(entity_id, command.target, entity, skill, world)?;
 
-    Ok(())
+    Ok(ResolvedCastSkill {
+        caster_id: entity_id,
+        skill_id: command.skill_id,
+        targets,
+    })
 }
 
 fn resolve_skill_targets(
@@ -605,6 +643,12 @@ fn resolve_skill_targets(
     world: &SimWorld,
 ) -> Result<ResolvedSkillTargets, StepError> {
     match (skill.target_type, target) {
+        (SkillTargetType::SelfOnly, SkillTarget::None) => Ok(ResolvedSkillTargets {
+            targets: vec![HitTarget {
+                entity_id: caster_id,
+                distance_squared: 0,
+            }],
+        }),
         (
             SkillTargetType::Ally | SkillTargetType::Enemy | SkillTargetType::AnyEntity,
             SkillTarget::Entity(target_entity_id),
@@ -705,6 +749,158 @@ fn resolve_position_skill_targets(
     targets.sort_by_key(|target| (target.distance_squared, target.entity_id));
 
     Ok(ResolvedSkillTargets { targets })
+}
+
+fn apply_resolved_cast_skill(
+    world: &mut SimWorld,
+    cast_skill: &ResolvedCastSkill,
+    config: &SimConfig,
+) -> Result<(), StepError> {
+    let skill = config
+        .combat
+        .skills
+        .get(cast_skill.skill_id)
+        .ok_or(StepError::UnknownSkill {
+            entity_id: cast_skill.caster_id,
+            skill_id: cast_skill.skill_id,
+        })?;
+    let caster_attack = world
+        .entity(cast_skill.caster_id)
+        .ok_or(StepError::EntityNotFound {
+            entity_id: cast_skill.caster_id,
+        })?
+        .combat
+        .attack;
+
+    let caster = world
+        .entity_mut(cast_skill.caster_id)
+        .ok_or(StepError::EntityNotFound {
+            entity_id: cast_skill.caster_id,
+        })?;
+    let slot = caster
+        .combat
+        .skill_slots
+        .iter_mut()
+        .find(|slot| slot.skill_id == cast_skill.skill_id)
+        .ok_or(StepError::SkillNotEquipped {
+            entity_id: cast_skill.caster_id,
+            skill_id: cast_skill.skill_id,
+        })?;
+    slot.cooldown_remaining = skill.cooldown_frames;
+
+    for target in &cast_skill.targets.targets {
+        for effect in &skill.effects {
+            apply_combat_effect(world, caster_attack, target.entity_id, effect)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_combat_effect(
+    world: &mut SimWorld,
+    caster_attack: i32,
+    target_id: EntityId,
+    effect: &CombatEffect,
+) -> Result<(), StepError> {
+    match effect {
+        CombatEffect::Damage { formula } => {
+            let raw_damage = evaluate_formula(formula, caster_attack);
+            let ignores_defense = matches!(formula, DamageFormula::TrueDamage { .. });
+            let target = world
+                .entity_mut(target_id)
+                .ok_or(StepError::EntityNotFound {
+                    entity_id: target_id,
+                })?;
+            apply_damage(target, raw_damage, ignores_defense);
+        }
+        CombatEffect::Heal { formula } => {
+            let raw_heal = evaluate_formula(formula, caster_attack);
+            let target = world
+                .entity_mut(target_id)
+                .ok_or(StepError::EntityNotFound {
+                    entity_id: target_id,
+                })?;
+            apply_heal(target, raw_heal);
+        }
+        CombatEffect::AddBuff { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn evaluate_formula(formula: &DamageFormula, caster_attack: i32) -> i128 {
+    match *formula {
+        DamageFormula::Fixed { amount } | DamageFormula::TrueDamage { amount } => amount as i128,
+        DamageFormula::Scaling {
+            base,
+            attack_scale_bps,
+        } => {
+            base as i128
+                + caster_attack as i128 * attack_scale_bps as i128 / BASIS_POINTS_DENOMINATOR
+        }
+    }
+}
+
+fn apply_damage(target: &mut SimEntity, raw_damage: i128, ignores_defense: bool) {
+    if !target.alive {
+        return;
+    }
+
+    if target.combat.hp <= 0 {
+        kill_entity(target);
+        return;
+    }
+
+    let damage = effective_damage(raw_damage, target.combat.defense, ignores_defense);
+    if damage == 0 {
+        return;
+    }
+
+    let remaining_hp = target.combat.hp as i128 - damage;
+    if remaining_hp <= 0 {
+        kill_entity(target);
+    } else {
+        target.combat.hp = remaining_hp as i32;
+    }
+}
+
+fn effective_damage(raw_damage: i128, defense: i32, ignores_defense: bool) -> i128 {
+    let damage = raw_damage.max(0);
+    if ignores_defense {
+        damage
+    } else {
+        (damage - (defense as i128).max(0)).max(0)
+    }
+}
+
+fn apply_heal(target: &mut SimEntity, raw_heal: i128) {
+    if !target.alive || target.combat.hp <= 0 {
+        if target.combat.hp <= 0 {
+            kill_entity(target);
+        }
+        return;
+    }
+
+    let heal = raw_heal.max(0);
+    if heal == 0 {
+        return;
+    }
+
+    let max_hp = target.combat.max_hp.max(0) as i128;
+    if max_hp == 0 {
+        target.combat.hp = 0;
+        target.alive = false;
+        return;
+    }
+
+    let current_hp = (target.combat.hp as i128).clamp(0, max_hp);
+    target.combat.hp = (current_hp + heal).min(max_hp) as i32;
+}
+
+fn kill_entity(entity: &mut SimEntity) {
+    entity.combat.hp = 0;
+    entity.alive = false;
 }
 
 fn entity_target_filter(target_type: SkillTargetType) -> Option<SkillTargetFilter> {
@@ -862,7 +1058,9 @@ fn clamp_axis_with_radius(value: i128, min: i64, max: i64, radius: i64) -> Fp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::{BuffId, SkillDefinition, SkillId, SkillTargetType};
+    use crate::combat::{
+        BuffId, CombatEffect, DamageFormula, SkillDefinition, SkillId, SkillTargetType,
+    };
     use crate::ids::TeamId;
     use crate::input::{FaceCommand, MoveCommand, SimInputSource};
     use crate::state::{BuffSlot, CombatState, EntityKind, MovementState, SimTransform, SkillSlot};
@@ -923,6 +1121,25 @@ mod tests {
             target_type,
             effects: Vec::new(),
         }
+    }
+
+    fn skill_with_effects(
+        id: u32,
+        target_type: SkillTargetType,
+        effects: Vec<CombatEffect>,
+    ) -> SkillDefinition {
+        SkillDefinition {
+            effects,
+            ..skill(id, target_type)
+        }
+    }
+
+    fn damage_effect(formula: DamageFormula) -> CombatEffect {
+        CombatEffect::Damage { formula }
+    }
+
+    fn heal_effect(formula: DamageFormula) -> CombatEffect {
+        CombatEffect::Heal { formula }
     }
 
     fn test_config_with_skills(skills: Vec<SkillDefinition>) -> SimConfig {
@@ -1127,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn step_accepts_valid_cast_skill_input_without_resolving_effects() {
+    fn step_accepts_valid_cast_skill_input_and_starts_cooldown() {
         let config = test_config_with_skills(vec![skill(10, SkillTargetType::Enemy)]);
         let mut caster = test_entity(100, Vec2Fp::zero());
         caster.combat.skill_slots = vec![SkillSlot {
@@ -1149,9 +1366,298 @@ mod tests {
         assert!(result.events.is_empty());
         assert_eq!(world.frame, FrameId::new(1));
         assert_eq!(
-            entity_combat(&world, 100).skill_slots,
-            caster.combat.skill_slots
+            entity_combat(&world, 100).skill_slots[0].cooldown_remaining,
+            29
         );
+    }
+
+    #[test]
+    fn step_applies_fixed_damage_after_defense_reduction() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![damage_effect(DamageFormula::Fixed { amount: 20 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 100;
+        target.combat.max_hp = 100;
+        target.combat.defense = 3;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_combat(&world, 200).hp, 83);
+    }
+
+    #[test]
+    fn step_applies_scaling_damage_with_basis_points_and_integer_truncation() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![damage_effect(DamageFormula::Scaling {
+                base: 5,
+                attack_scale_bps: 3_333,
+            })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.attack = 11;
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 100;
+        target.combat.max_hp = 100;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_combat(&world, 200).hp, 92);
+    }
+
+    #[test]
+    fn step_applies_true_damage_without_defense_reduction() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![damage_effect(DamageFormula::TrueDamage { amount: 20 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 100;
+        target.combat.max_hp = 100;
+        target.combat.defense = 100;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_combat(&world, 200).hp, 80);
+    }
+
+    #[test]
+    fn step_clamps_defense_reduced_damage_to_zero() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![damage_effect(DamageFormula::Fixed { amount: 15 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 100;
+        target.combat.max_hp = 100;
+        target.combat.defense = 40;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_combat(&world, 200).hp, 100);
+    }
+
+    #[test]
+    fn step_applies_heal_without_exceeding_max_hp() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::SelfOnly,
+            vec![heal_effect(DamageFormula::Fixed { amount: 20 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.hp = 95;
+        caster.combat.max_hp = 100;
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.hp, 100);
+        assert_eq!(combat.skill_slots[0].cooldown_remaining, 29);
+    }
+
+    #[test]
+    fn step_does_not_revive_dead_entity_with_heal() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::SelfOnly,
+            vec![heal_effect(DamageFormula::Fixed { amount: 20 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.alive = false;
+        caster.combat.hp = 0;
+        caster.combat.max_hp = 100;
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let caster = world.entity(EntityId::new(100)).unwrap();
+        assert_eq!(caster.combat.hp, 0);
+        assert!(!caster.alive);
+    }
+
+    #[test]
+    fn step_sets_alive_false_and_clamps_hp_to_zero_when_damage_kills() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![damage_effect(DamageFormula::Fixed { amount: 15 })],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 10;
+        target.combat.max_hp = 100;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let target = world.entity(EntityId::new(200)).unwrap();
+        assert_eq!(target.combat.hp, 0);
+        assert!(!target.alive);
+    }
+
+    #[test]
+    fn step_applies_same_frame_casts_in_selected_input_order() {
+        let config = test_config_with_skills(vec![
+            skill_with_effects(
+                10,
+                SkillTargetType::Enemy,
+                vec![heal_effect(DamageFormula::Fixed { amount: 10 })],
+            ),
+            skill_with_effects(
+                20,
+                SkillTargetType::Enemy,
+                vec![damage_effect(DamageFormula::Fixed { amount: 15 })],
+            ),
+        ]);
+        let mut first_caster = test_entity(100, Vec2Fp::zero());
+        first_caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut second_caster = test_entity(300, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        second_caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(20),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(2), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 10;
+        target.combat.max_hp = 20;
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![second_caster, target, first_caster]).unwrap();
+        let inputs = vec![
+            input(
+                1,
+                300,
+                1,
+                cast_skill(20, SkillTarget::Entity(EntityId::new(200))),
+            ),
+            input(
+                1,
+                100,
+                1,
+                cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+            ),
+        ];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let target = world.entity(EntityId::new(200)).unwrap();
+        assert_eq!(target.combat.hp, 5);
+        assert!(target.alive);
+    }
+
+    #[test]
+    fn step_applies_skill_effects_in_vector_order() {
+        let config = test_config_with_skills(vec![skill_with_effects(
+            10,
+            SkillTargetType::Enemy,
+            vec![
+                damage_effect(DamageFormula::Fixed { amount: 15 }),
+                heal_effect(DamageFormula::Fixed { amount: 10 }),
+            ],
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 10;
+        target.combat.max_hp = 20;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let target = world.entity(EntityId::new(200)).unwrap();
+        assert_eq!(target.combat.hp, 0);
+        assert!(!target.alive);
     }
 
     #[test]
