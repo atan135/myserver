@@ -1,7 +1,7 @@
 //! Simulation tick advancement.
 
 use crate::combat::{
-    CombatConfig, CombatEffect, DamageFormula, SkillDefinition, SkillId, SkillTargetType,
+    BuffId, CombatConfig, CombatEffect, DamageFormula, SkillDefinition, SkillId, SkillTargetType,
 };
 use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
@@ -10,7 +10,7 @@ use crate::input::{
     select_latest_cast_skill_inputs, select_latest_movement_inputs,
 };
 use crate::math::{FP_SCALE, Fp, QuantizedDir, Vec2Fp};
-use crate::state::{MovementMode, SimEntity, SimWorld};
+use crate::state::{BuffSlot, MovementMode, SimEntity, SimWorld};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -159,6 +159,14 @@ struct HitTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingBuffTick {
+    target_id: EntityId,
+    buff_id: BuffId,
+    source_entity: EntityId,
+    stacks: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SkillTargetFilter {
     Ally,
     Enemy,
@@ -194,6 +202,10 @@ pub enum StepError {
     UnknownSkill {
         entity_id: EntityId,
         skill_id: SkillId,
+    },
+    UnknownBuff {
+        entity_id: EntityId,
+        buff_id: BuffId,
     },
     SkillNotEquipped {
         entity_id: EntityId,
@@ -284,6 +296,12 @@ impl fmt::Display for StepError {
                 entity_id.raw(),
                 skill_id.raw()
             ),
+            Self::UnknownBuff { entity_id, buff_id } => write!(
+                f,
+                "simulation entity {} references unknown buff {}",
+                entity_id.raw(),
+                buff_id.raw()
+            ),
             Self::SkillNotEquipped {
                 entity_id,
                 skill_id,
@@ -364,7 +382,20 @@ impl fmt::Display for StepError {
 impl std::error::Error for StepError {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SimEvent;
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SimEvent {
+    BuffTick {
+        entity_id: EntityId,
+        buff_id: BuffId,
+        source_entity: EntityId,
+        stacks: u16,
+    },
+    BuffExpired {
+        entity_id: EntityId,
+        buff_id: BuffId,
+        source_entity: EntityId,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimStepResult {
@@ -375,9 +406,9 @@ pub struct SimStepResult {
 
 /// Advances `world` by exactly one sequential frame using deterministic P0 rules.
 ///
-/// Applies deterministic movement, facing, and the currently implemented direct
-/// combat effects, then returns a state hash. Buff runtime effects, collision,
-/// and full event emission are handled by later phases.
+/// Applies deterministic movement, facing, direct combat effects, and the P2
+/// minimal buff runtime effects, then returns a state hash. Collision and full
+/// combat event emission are handled by later phases.
 pub fn step(
     world: &mut SimWorld,
     frame: FrameId,
@@ -433,15 +464,13 @@ pub fn step(
         apply_resolved_cast_skill(world, cast_skill, config)?;
     }
 
-    for entity in &mut world.entities {
-        advance_combat_timers(entity);
-    }
+    let events = advance_combat_timers(world, &config.combat)?;
 
     world.frame = frame;
 
     Ok(SimStepResult {
         frame,
-        events: Vec::new(),
+        events,
         state_hash: hash_world(world),
     })
 }
@@ -790,7 +819,15 @@ fn apply_resolved_cast_skill(
 
     for target in &cast_skill.targets.targets {
         for effect in &skill.effects {
-            apply_combat_effect(world, caster_attack, target.entity_id, effect)?;
+            apply_combat_effect(
+                world,
+                cast_skill.caster_id,
+                caster_attack,
+                target.entity_id,
+                effect,
+                &config.combat,
+                1,
+            )?;
         }
     }
 
@@ -799,13 +836,17 @@ fn apply_resolved_cast_skill(
 
 fn apply_combat_effect(
     world: &mut SimWorld,
+    source_entity: EntityId,
     caster_attack: i32,
     target_id: EntityId,
     effect: &CombatEffect,
+    combat_config: &CombatConfig,
+    stacks: u16,
 ) -> Result<(), StepError> {
+    let stack_multiplier = stacks as i128;
     match effect {
         CombatEffect::Damage { formula } => {
-            let raw_damage = evaluate_formula(formula, caster_attack);
+            let raw_damage = evaluate_formula(formula, caster_attack) * stack_multiplier;
             let ignores_defense = matches!(formula, DamageFormula::TrueDamage { .. });
             let target = world
                 .entity_mut(target_id)
@@ -815,7 +856,7 @@ fn apply_combat_effect(
             apply_damage(target, raw_damage, ignores_defense);
         }
         CombatEffect::Heal { formula } => {
-            let raw_heal = evaluate_formula(formula, caster_attack);
+            let raw_heal = evaluate_formula(formula, caster_attack) * stack_multiplier;
             let target = world
                 .entity_mut(target_id)
                 .ok_or(StepError::EntityNotFound {
@@ -823,8 +864,59 @@ fn apply_combat_effect(
                 })?;
             apply_heal(target, raw_heal);
         }
-        CombatEffect::AddBuff { .. } => {}
+        CombatEffect::AddBuff { buff_id } => {
+            add_or_refresh_buff(world, target_id, source_entity, *buff_id, combat_config)?;
+        }
     }
+
+    Ok(())
+}
+
+fn add_or_refresh_buff(
+    world: &mut SimWorld,
+    target_id: EntityId,
+    source_entity: EntityId,
+    buff_id: BuffId,
+    combat_config: &CombatConfig,
+) -> Result<(), StepError> {
+    let buff_definition = combat_config
+        .buffs
+        .get(buff_id)
+        .ok_or(StepError::UnknownBuff {
+            entity_id: target_id,
+            buff_id,
+        })?;
+
+    let target = world
+        .entity_mut(target_id)
+        .ok_or(StepError::EntityNotFound {
+            entity_id: target_id,
+        })?;
+
+    if let Some(slot) = target
+        .combat
+        .buffs
+        .iter_mut()
+        .find(|slot| slot.buff_id == buff_id && slot.source_entity == source_entity)
+    {
+        // Fixed stacking rule for P2: one slot per (target, buff_id, source).
+        // Reapplying that key refreshes timers and adds one stack up to max.
+        slot.stacks = slot
+            .stacks
+            .saturating_add(1)
+            .min(buff_definition.max_stacks);
+        slot.duration_remaining = buff_definition.duration_frames;
+        slot.interval_remaining = buff_definition.interval_frames;
+        return Ok(());
+    }
+
+    target.combat.buffs.push(BuffSlot {
+        buff_id,
+        duration_remaining: buff_definition.duration_frames,
+        interval_remaining: buff_definition.interval_frames,
+        stacks: 1,
+        source_entity,
+    });
 
     Ok(())
 }
@@ -1008,20 +1100,135 @@ fn advance_controlled_entity(entity: &mut SimEntity, config: &SimConfig) -> Resu
     Ok(())
 }
 
-fn advance_combat_timers(entity: &mut SimEntity) {
-    for slot in &mut entity.combat.skill_slots {
-        slot.cooldown_remaining = slot.cooldown_remaining.saturating_sub(1);
+fn advance_combat_timers(
+    world: &mut SimWorld,
+    combat_config: &CombatConfig,
+) -> Result<Vec<SimEvent>, StepError> {
+    let mut events = Vec::new();
+    let mut pending_ticks = Vec::new();
+
+    for entity in &mut world.entities {
+        for slot in &mut entity.combat.skill_slots {
+            slot.cooldown_remaining = slot.cooldown_remaining.saturating_sub(1);
+        }
     }
 
-    for buff in &mut entity.combat.buffs {
-        buff.duration_remaining = buff.duration_remaining.saturating_sub(1);
-        buff.interval_remaining = buff.interval_remaining.saturating_sub(1);
+    for entity in &mut world.entities {
+        let entity_id = entity.id;
+        let mut buff_index = 0;
+
+        while buff_index < entity.combat.buffs.len() {
+            let expired = {
+                let buff = &mut entity.combat.buffs[buff_index];
+                let buff_definition =
+                    combat_config
+                        .buffs
+                        .get(buff.buff_id)
+                        .ok_or(StepError::UnknownBuff {
+                            entity_id,
+                            buff_id: buff.buff_id,
+                        })?;
+
+                buff.duration_remaining = buff.duration_remaining.saturating_sub(1);
+                buff.interval_remaining = buff.interval_remaining.saturating_sub(1);
+
+                let tick_due = buff.interval_remaining == 0;
+                let expired = buff.duration_remaining == 0;
+
+                if tick_due {
+                    events.push(SimEvent::BuffTick {
+                        entity_id,
+                        buff_id: buff.buff_id,
+                        source_entity: buff.source_entity,
+                        stacks: buff.stacks,
+                    });
+                    pending_ticks.push(PendingBuffTick {
+                        target_id: entity_id,
+                        buff_id: buff.buff_id,
+                        source_entity: buff.source_entity,
+                        stacks: buff.stacks,
+                    });
+
+                    if !expired {
+                        buff.interval_remaining = buff_definition.interval_frames;
+                    }
+                }
+
+                if expired {
+                    events.push(SimEvent::BuffExpired {
+                        entity_id,
+                        buff_id: buff.buff_id,
+                        source_entity: buff.source_entity,
+                    });
+                }
+
+                expired
+            };
+
+            if expired {
+                entity.combat.buffs.remove(buff_index);
+            } else {
+                buff_index += 1;
+            }
+        }
     }
 
-    entity
-        .combat
+    // Buff ticks are collected before applying effects. This freezes entity id
+    // order and each entity's slot vector order for the whole frame; buffs
+    // created by a tick start participating on the next frame.
+    for tick in &pending_ticks {
+        apply_pending_buff_tick(world, tick, combat_config)?;
+    }
+
+    Ok(events)
+}
+
+fn apply_pending_buff_tick(
+    world: &mut SimWorld,
+    tick: &PendingBuffTick,
+    combat_config: &CombatConfig,
+) -> Result<(), StepError> {
+    let buff_definition = combat_config
         .buffs
-        .retain(|buff| buff.duration_remaining > 0);
+        .get(tick.buff_id)
+        .ok_or(StepError::UnknownBuff {
+            entity_id: tick.target_id,
+            buff_id: tick.buff_id,
+        })?;
+    let mut source_attack = None;
+
+    for effect in &buff_definition.effects {
+        let caster_attack = match effect {
+            CombatEffect::Damage { .. } | CombatEffect::Heal { .. } => {
+                if let Some(attack) = source_attack {
+                    attack
+                } else {
+                    let attack = world
+                        .entity(tick.source_entity)
+                        .ok_or(StepError::EntityNotFound {
+                            entity_id: tick.source_entity,
+                        })?
+                        .combat
+                        .attack;
+                    source_attack = Some(attack);
+                    attack
+                }
+            }
+            CombatEffect::AddBuff { .. } => 0,
+        };
+
+        apply_combat_effect(
+            world,
+            tick.source_entity,
+            caster_attack,
+            tick.target_id,
+            effect,
+            combat_config,
+            tick.stacks,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn movement_delta_raw(
@@ -1059,7 +1266,8 @@ fn clamp_axis_with_radius(value: i128, min: i64, max: i64, radius: i64) -> Fp {
 mod tests {
     use super::*;
     use crate::combat::{
-        BuffId, CombatEffect, DamageFormula, SkillDefinition, SkillId, SkillTargetType,
+        BuffDefinition, BuffId, CombatEffect, DamageFormula, SkillDefinition, SkillId,
+        SkillTargetType,
     };
     use crate::ids::TeamId;
     use crate::input::{FaceCommand, MoveCommand, SimInputSource};
@@ -1142,9 +1350,38 @@ mod tests {
         CombatEffect::Heal { formula }
     }
 
+    fn add_buff_effect(buff_id: u32) -> CombatEffect {
+        CombatEffect::AddBuff {
+            buff_id: BuffId::new(buff_id),
+        }
+    }
+
+    fn buff_with_effects(
+        id: u32,
+        duration_frames: u32,
+        interval_frames: u32,
+        max_stacks: u16,
+        effects: Vec<CombatEffect>,
+    ) -> BuffDefinition {
+        BuffDefinition {
+            id: BuffId::new(id),
+            duration_frames,
+            interval_frames,
+            max_stacks,
+            effects,
+        }
+    }
+
     fn test_config_with_skills(skills: Vec<SkillDefinition>) -> SimConfig {
+        test_config_with_combat(skills, Vec::new())
+    }
+
+    fn test_config_with_combat(
+        skills: Vec<SkillDefinition>,
+        buffs: Vec<BuffDefinition>,
+    ) -> SimConfig {
         SimConfig {
-            combat: CombatConfig::from_definitions(skills, Vec::new()).unwrap(),
+            combat: CombatConfig::from_definitions(skills, buffs).unwrap(),
             ..test_config()
         }
     }
@@ -1321,14 +1558,21 @@ mod tests {
             BuffSlot {
                 buff_id: BuffId::new(20),
                 duration_remaining: 1,
-                interval_remaining: 0,
+                interval_remaining: 2,
                 stacks: 2,
                 source_entity: EntityId::new(201),
             },
         ];
         let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let config = test_config_with_combat(
+            Vec::new(),
+            vec![
+                buff_with_effects(10, 10, 3, 1, Vec::new()),
+                buff_with_effects(20, 10, 2, 2, Vec::new()),
+            ],
+        );
 
-        step(&mut world, FrameId::new(1), &[], &test_config()).unwrap();
+        let result = step(&mut world, FrameId::new(1), &[], &config).unwrap();
 
         let combat = entity_combat(&world, 100);
         assert_eq!(combat.buffs.len(), 1);
@@ -1337,10 +1581,350 @@ mod tests {
         assert_eq!(combat.buffs[0].interval_remaining, 2);
         assert_eq!(combat.buffs[0].stacks, 1);
         assert_eq!(combat.buffs[0].source_entity, EntityId::new(200));
+        assert_eq!(
+            result.events,
+            vec![SimEvent::BuffExpired {
+                entity_id: EntityId::new(100),
+                buff_id: BuffId::new(20),
+                source_entity: EntityId::new(201),
+            }]
+        );
 
-        step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
+        let result = step(&mut world, FrameId::new(2), &[], &config).unwrap();
 
         assert!(entity_combat(&world, 100).buffs.is_empty());
+        assert_eq!(
+            result.events,
+            vec![SimEvent::BuffExpired {
+                entity_id: EntityId::new(100),
+                buff_id: BuffId::new(10),
+                source_entity: EntityId::new(200),
+            }]
+        );
+    }
+
+    #[test]
+    fn step_adds_buff_from_skill_and_decrements_new_slot_same_frame() {
+        let config = test_config_with_combat(
+            vec![skill_with_effects(
+                10,
+                SkillTargetType::SelfOnly,
+                vec![add_buff_effect(100)],
+            )],
+            vec![buff_with_effects(100, 5, 3, 2, Vec::new())],
+        );
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        let result = step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert!(result.events.is_empty());
+        assert_eq!(combat.buffs.len(), 1);
+        assert_eq!(combat.buffs[0].buff_id, BuffId::new(100));
+        assert_eq!(combat.buffs[0].duration_remaining, 4);
+        assert_eq!(combat.buffs[0].interval_remaining, 2);
+        assert_eq!(combat.buffs[0].stacks, 1);
+        assert_eq!(combat.buffs[0].source_entity, EntityId::new(100));
+    }
+
+    #[test]
+    fn step_can_tick_cast_added_one_frame_interval_buff_after_same_frame_decrement() {
+        let config = test_config_with_combat(
+            vec![skill_with_effects(
+                10,
+                SkillTargetType::SelfOnly,
+                vec![add_buff_effect(100)],
+            )],
+            vec![buff_with_effects(100, 3, 1, 1, Vec::new())],
+        );
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        let result = step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(
+            result.events,
+            vec![SimEvent::BuffTick {
+                entity_id: EntityId::new(100),
+                buff_id: BuffId::new(100),
+                source_entity: EntityId::new(100),
+                stacks: 1,
+            }]
+        );
+        assert_eq!(combat.buffs.len(), 1);
+        assert_eq!(combat.buffs[0].duration_remaining, 2);
+        assert_eq!(combat.buffs[0].interval_remaining, 1);
+    }
+
+    #[test]
+    fn step_reapplies_same_source_buff_refreshes_duration_interval_and_caps_stacks() {
+        let config = test_config_with_combat(
+            vec![skill_with_effects(
+                10,
+                SkillTargetType::SelfOnly,
+                vec![add_buff_effect(100)],
+            )],
+            vec![buff_with_effects(100, 6, 4, 2, Vec::new())],
+        );
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        caster.combat.buffs = vec![BuffSlot {
+            buff_id: BuffId::new(100),
+            duration_remaining: 1,
+            interval_remaining: 1,
+            stacks: 1,
+            source_entity: EntityId::new(100),
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster]).unwrap();
+
+        step(
+            &mut world,
+            FrameId::new(1),
+            &[input(1, 100, 1, cast_skill(10, SkillTarget::None))],
+            &config,
+        )
+        .unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.buffs.len(), 1);
+        assert_eq!(combat.buffs[0].stacks, 2);
+        assert_eq!(combat.buffs[0].duration_remaining, 5);
+        assert_eq!(combat.buffs[0].interval_remaining, 3);
+
+        world
+            .entity_mut(EntityId::new(100))
+            .unwrap()
+            .combat
+            .skill_slots[0]
+            .cooldown_remaining = 0;
+
+        step(
+            &mut world,
+            FrameId::new(2),
+            &[input(2, 100, 1, cast_skill(10, SkillTarget::None))],
+            &config,
+        )
+        .unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.buffs.len(), 1);
+        assert_eq!(combat.buffs[0].stacks, 2);
+        assert_eq!(combat.buffs[0].duration_remaining, 5);
+        assert_eq!(combat.buffs[0].interval_remaining, 3);
+    }
+
+    #[test]
+    fn step_keeps_same_buff_from_different_sources_in_separate_slots() {
+        let config = test_config_with_combat(
+            vec![skill_with_effects(
+                10,
+                SkillTargetType::Enemy,
+                vec![add_buff_effect(100)],
+            )],
+            vec![buff_with_effects(100, 5, 3, 2, Vec::new())],
+        );
+        let mut previous_source = test_entity(100, Vec2Fp::zero());
+        previous_source.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut new_source = test_entity(300, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        new_source.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(2), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.buffs = vec![BuffSlot {
+            buff_id: BuffId::new(100),
+            duration_remaining: 5,
+            interval_remaining: 3,
+            stacks: 1,
+            source_entity: EntityId::new(100),
+        }];
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![target, new_source, previous_source]).unwrap();
+        let inputs = vec![input(
+            1,
+            300,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let buffs = &entity_combat(&world, 200).buffs;
+        assert_eq!(buffs.len(), 2);
+        assert_eq!(buffs[0].source_entity, EntityId::new(100));
+        assert_eq!(buffs[0].duration_remaining, 4);
+        assert_eq!(buffs[0].interval_remaining, 2);
+        assert_eq!(buffs[1].source_entity, EntityId::new(300));
+        assert_eq!(buffs[1].duration_remaining, 4);
+        assert_eq!(buffs[1].interval_remaining, 2);
+    }
+
+    #[test]
+    fn step_applies_dot_periodic_damage_multiplied_by_stacks() {
+        let config = test_config_with_combat(
+            Vec::new(),
+            vec![buff_with_effects(
+                100,
+                5,
+                1,
+                3,
+                vec![damage_effect(DamageFormula::Fixed { amount: 5 })],
+            )],
+        );
+        let source = test_entity(100, Vec2Fp::zero());
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.combat.hp = 100;
+        target.combat.max_hp = 100;
+        target.combat.buffs = vec![BuffSlot {
+            buff_id: BuffId::new(100),
+            duration_remaining: 3,
+            interval_remaining: 1,
+            stacks: 2,
+            source_entity: EntityId::new(100),
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![target, source]).unwrap();
+
+        let result = step(&mut world, FrameId::new(1), &[], &config).unwrap();
+
+        let combat = entity_combat(&world, 200);
+        assert_eq!(
+            result.events,
+            vec![SimEvent::BuffTick {
+                entity_id: EntityId::new(200),
+                buff_id: BuffId::new(100),
+                source_entity: EntityId::new(100),
+                stacks: 2,
+            }]
+        );
+        assert_eq!(combat.hp, 90);
+        assert_eq!(combat.buffs[0].duration_remaining, 2);
+        assert_eq!(combat.buffs[0].interval_remaining, 1);
+    }
+
+    #[test]
+    fn step_applies_hot_periodic_heal_multiplied_by_stacks_and_clamped_to_max_hp() {
+        let config = test_config_with_combat(
+            Vec::new(),
+            vec![buff_with_effects(
+                100,
+                5,
+                1,
+                3,
+                vec![heal_effect(DamageFormula::Fixed { amount: 15 })],
+            )],
+        );
+        let source = test_entity(100, Vec2Fp::zero());
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.combat.hp = 80;
+        target.combat.max_hp = 100;
+        target.combat.buffs = vec![BuffSlot {
+            buff_id: BuffId::new(100),
+            duration_remaining: 3,
+            interval_remaining: 1,
+            stacks: 2,
+            source_entity: EntityId::new(100),
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![target, source]).unwrap();
+
+        let result = step(&mut world, FrameId::new(1), &[], &config).unwrap();
+
+        let combat = entity_combat(&world, 200);
+        assert_eq!(
+            result.events,
+            vec![SimEvent::BuffTick {
+                entity_id: EntityId::new(200),
+                buff_id: BuffId::new(100),
+                source_entity: EntityId::new(100),
+                stacks: 2,
+            }]
+        );
+        assert_eq!(combat.hp, 100);
+        assert_eq!(combat.buffs[0].duration_remaining, 2);
+        assert_eq!(combat.buffs[0].interval_remaining, 1);
+    }
+
+    #[test]
+    fn step_emits_buff_tick_events_by_entity_id_then_slot_order() {
+        let config = test_config_with_combat(
+            Vec::new(),
+            vec![
+                buff_with_effects(10, 5, 1, 1, Vec::new()),
+                buff_with_effects(20, 5, 1, 1, Vec::new()),
+                buff_with_effects(30, 5, 1, 1, Vec::new()),
+            ],
+        );
+        let mut later_entity = test_entity(200, Vec2Fp::zero());
+        later_entity.combat.buffs = vec![
+            BuffSlot {
+                buff_id: BuffId::new(20),
+                duration_remaining: 3,
+                interval_remaining: 1,
+                stacks: 1,
+                source_entity: EntityId::new(900),
+            },
+            BuffSlot {
+                buff_id: BuffId::new(10),
+                duration_remaining: 3,
+                interval_remaining: 1,
+                stacks: 1,
+                source_entity: EntityId::new(901),
+            },
+        ];
+        let mut earlier_entity = test_entity(100, Vec2Fp::zero());
+        earlier_entity.combat.buffs = vec![BuffSlot {
+            buff_id: BuffId::new(30),
+            duration_remaining: 3,
+            interval_remaining: 1,
+            stacks: 1,
+            source_entity: EntityId::new(902),
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![later_entity, earlier_entity]).unwrap();
+
+        let result = step(&mut world, FrameId::new(1), &[], &config).unwrap();
+
+        assert_eq!(
+            result.events,
+            vec![
+                SimEvent::BuffTick {
+                    entity_id: EntityId::new(100),
+                    buff_id: BuffId::new(30),
+                    source_entity: EntityId::new(902),
+                    stacks: 1,
+                },
+                SimEvent::BuffTick {
+                    entity_id: EntityId::new(200),
+                    buff_id: BuffId::new(20),
+                    source_entity: EntityId::new(900),
+                    stacks: 1,
+                },
+                SimEvent::BuffTick {
+                    entity_id: EntityId::new(200),
+                    buff_id: BuffId::new(10),
+                    source_entity: EntityId::new(901),
+                    stacks: 1,
+                },
+            ]
+        );
     }
 
     #[test]

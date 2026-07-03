@@ -35,8 +35,8 @@ pub use state::{
     SimTransform, SimWorld, SkillSlot,
 };
 pub use tick::{
-    MovementConfig, SceneBounds, SimConfig, SimStepResult, StaticObstacle, StaticObstacleShape,
-    StepError, step,
+    MovementConfig, SceneBounds, SimConfig, SimEvent, SimStepResult, StaticObstacle,
+    StaticObstacleShape, StepError, step,
 };
 
 pub const SIM_CORE_SCHEMA_VERSION: u16 = 1;
