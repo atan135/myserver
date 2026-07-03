@@ -25,7 +25,9 @@ pub use combat::{
 };
 pub use hash::{SimHash, hash_world};
 pub use ids::{EntityId, FrameId, TeamId};
-pub use input::{FaceCommand, MoveCommand, SimCommand, SimInput, SimInputSource};
+pub use input::{
+    CastSkillCommand, FaceCommand, MoveCommand, SimCommand, SimInput, SimInputSource, SkillTarget,
+};
 pub use math::{FP_SCALE, Fp, QuantizedDir, QuantizedDirError, Vec2Fp};
 pub use snapshot::{SimSnapshot, SnapshotError, restore, snapshot};
 pub use state::{

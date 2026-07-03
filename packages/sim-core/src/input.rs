@@ -1,7 +1,8 @@
 //! Frame input model and deterministic ordering helpers.
 
+use crate::combat::SkillId;
 use crate::ids::{EntityId, FrameId};
-use crate::math::{Fp, QuantizedDir};
+use crate::math::{Fp, QuantizedDir, Vec2Fp};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -29,16 +30,35 @@ pub struct FaceCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CastSkillCommand {
+    pub skill_id: SkillId,
+    pub target: SkillTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillTarget {
+    None,
+    Entity(EntityId),
+    Position(Vec2Fp),
+    Direction(QuantizedDir),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SimCommand {
     Move(MoveCommand),
     Stop,
     Face(FaceCommand),
+    CastSkill(CastSkillCommand),
     Noop,
 }
 
 impl SimCommand {
     pub fn is_movement_selection_command(&self) -> bool {
         matches!(self, Self::Move(_) | Self::Stop)
+    }
+
+    pub fn is_cast_skill_selection_command(&self) -> bool {
+        matches!(self, Self::CastSkill(_))
     }
 }
 
@@ -90,10 +110,21 @@ pub fn ordered_inputs(inputs: &[SimInput]) -> Vec<IndexedSimInput<'_>> {
 }
 
 pub fn select_latest_movement_inputs(inputs: &[SimInput]) -> Vec<IndexedSimInput<'_>> {
+    select_latest_inputs_by_command(inputs, SimCommand::is_movement_selection_command)
+}
+
+pub fn select_latest_cast_skill_inputs(inputs: &[SimInput]) -> Vec<IndexedSimInput<'_>> {
+    select_latest_inputs_by_command(inputs, SimCommand::is_cast_skill_selection_command)
+}
+
+fn select_latest_inputs_by_command<'a>(
+    inputs: &'a [SimInput],
+    is_selected_command: impl Fn(&SimCommand) -> bool,
+) -> Vec<IndexedSimInput<'a>> {
     let mut selected = BTreeMap::<(FrameId, &str), IndexedSimInput<'_>>::new();
 
     for (original_index, input) in inputs.iter().enumerate() {
-        if !input.command.is_movement_selection_command() {
+        if !is_selected_command(&input.command) {
             continue;
         }
 
@@ -103,7 +134,7 @@ pub fn select_latest_movement_inputs(inputs: &[SimInput]) -> Vec<IndexedSimInput
             input,
         };
         let should_replace = match selected.get(&key) {
-            Some(current) => movement_candidate_wins(candidate, *current),
+            Some(current) => latest_input_candidate_wins(candidate, *current),
             None => true,
         };
 
@@ -115,7 +146,10 @@ pub fn select_latest_movement_inputs(inputs: &[SimInput]) -> Vec<IndexedSimInput
     selected.into_values().collect()
 }
 
-fn movement_candidate_wins(candidate: IndexedSimInput<'_>, current: IndexedSimInput<'_>) -> bool {
+fn latest_input_candidate_wins(
+    candidate: IndexedSimInput<'_>,
+    current: IndexedSimInput<'_>,
+) -> bool {
     candidate.input.seq > current.input.seq
         || (candidate.input.seq == current.input.seq
             && candidate.original_index > current.original_index)
@@ -146,6 +180,13 @@ mod tests {
         SimCommand::Move(MoveCommand {
             dir: QuantizedDir::RIGHT,
             speed_per_second: Some(Fp::from_i32(6)),
+        })
+    }
+
+    fn cast_skill(skill_id: u32, target: SkillTarget) -> SimCommand {
+        SimCommand::CastSkill(CastSkillCommand {
+            skill_id: SkillId::new(skill_id),
+            target,
         })
     }
 
@@ -261,6 +302,68 @@ mod tests {
     }
 
     #[test]
+    fn cast_skill_selection_uses_highest_seq_then_highest_original_index() {
+        let inputs = vec![
+            input(10, "alice", 100, 1, cast_skill(10, SkillTarget::None)),
+            input(
+                10,
+                "alice",
+                100,
+                3,
+                cast_skill(20, SkillTarget::Entity(EntityId::new(200))),
+            ),
+            input(
+                9,
+                "alice",
+                100,
+                5,
+                cast_skill(
+                    30,
+                    SkillTarget::Position(Vec2Fp::new(Fp::from_i32(1), Fp::from_i32(2))),
+                ),
+            ),
+            input(
+                10,
+                "alice",
+                100,
+                3,
+                cast_skill(40, SkillTarget::Direction(QuantizedDir::RIGHT)),
+            ),
+            input(10, "bob", 200, 1, SimCommand::Stop),
+            input(
+                10,
+                "bob",
+                200,
+                2,
+                SimCommand::Face(FaceCommand {
+                    dir: QuantizedDir::DOWN,
+                }),
+            ),
+            input(
+                10,
+                "bob",
+                200,
+                1,
+                cast_skill(50, SkillTarget::Entity(EntityId::new(100))),
+            ),
+        ];
+
+        let selected = select_latest_cast_skill_inputs(&inputs);
+        let selected_indexes = selected
+            .iter()
+            .map(|indexed| indexed.original_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selected_indexes, vec![2, 3, 6]);
+        assert!(
+            matches!(selected[1].input.command, SimCommand::CastSkill(command) if command.skill_id == SkillId::new(40))
+        );
+        assert!(
+            matches!(selected[2].input.command, SimCommand::CastSkill(command) if command.skill_id == SkillId::new(50))
+        );
+    }
+
+    #[test]
     fn invalid_quantized_direction_is_rejected_during_deserialization() {
         let move_command = r#"{"dir":{"x":1000,"y":1000},"speed_per_second":null}"#;
         assert!(serde_json::from_str::<MoveCommand>(move_command).is_err());
@@ -282,5 +385,6 @@ mod tests {
 
         assert!(ordered_inputs(&inputs).is_empty());
         assert!(select_latest_movement_inputs(&inputs).is_empty());
+        assert!(select_latest_cast_skill_inputs(&inputs).is_empty());
     }
 }

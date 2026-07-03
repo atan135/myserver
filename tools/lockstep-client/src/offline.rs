@@ -1,7 +1,7 @@
 use crate::scenario::{Scenario, ScenarioError};
 use sim_core::{
-    EntityId, FrameId, MovementMode, SimCommand, SimEntity, SimHash, SimInput, SimWorld, StepError,
-    hash_world, step,
+    EntityId, FrameId, MovementMode, SimCommand, SimEntity, SimHash, SimInput, SimWorld,
+    SkillTarget, StepError, hash_world, step,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -557,7 +557,27 @@ fn format_command(command: &SimCommand) -> String {
             let (dir_x, dir_y) = command.dir.raw_tuple();
             format!("Face(dir=({}, {}))", dir_x, dir_y)
         }
+        SimCommand::CastSkill(command) => format!(
+            "CastSkill(skill_id={}, target={})",
+            command.skill_id.raw(),
+            format_skill_target(command.target)
+        ),
         SimCommand::Noop => "Noop".to_owned(),
+    }
+}
+
+fn format_skill_target(target: SkillTarget) -> String {
+    match target {
+        SkillTarget::None => "None".to_owned(),
+        SkillTarget::Entity(entity_id) => format!("Entity({})", entity_id.raw()),
+        SkillTarget::Position(pos) => {
+            let (x, y) = pos.raw_tuple();
+            format!("Position({}, {})", x, y)
+        }
+        SkillTarget::Direction(dir) => {
+            let (x, y) = dir.raw_tuple();
+            format!("Direction({}, {})", x, y)
+        }
     }
 }
 

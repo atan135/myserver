@@ -1,9 +1,12 @@
 //! Simulation tick advancement.
 
-use crate::combat::CombatConfig;
+use crate::combat::{CombatConfig, SkillId, SkillTargetType};
 use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
-use crate::input::{SimCommand, SimInput, ordered_inputs, select_latest_movement_inputs};
+use crate::input::{
+    CastSkillCommand, SimCommand, SimInput, SkillTarget, ordered_inputs,
+    select_latest_cast_skill_inputs, select_latest_movement_inputs,
+};
 use crate::math::{FP_SCALE, Fp, QuantizedDir, Vec2Fp};
 use crate::state::{MovementMode, SimEntity, SimWorld};
 use serde::{Deserialize, Serialize};
@@ -145,6 +148,25 @@ pub enum StepError {
     EntityNotFound {
         entity_id: EntityId,
     },
+    UnknownSkill {
+        entity_id: EntityId,
+        skill_id: SkillId,
+    },
+    SkillNotEquipped {
+        entity_id: EntityId,
+        skill_id: SkillId,
+    },
+    SkillOnCooldown {
+        entity_id: EntityId,
+        skill_id: SkillId,
+        cooldown_remaining: u32,
+    },
+    SkillTargetTypeMismatch {
+        entity_id: EntityId,
+        skill_id: SkillId,
+        expected: SkillTargetType,
+        actual: SkillTarget,
+    },
     MovementDeltaOverflow {
         entity_id: EntityId,
     },
@@ -194,6 +216,48 @@ impl fmt::Display for StepError {
             Self::EntityNotFound { entity_id } => {
                 write!(f, "simulation entity not found: {}", entity_id.raw())
             }
+            Self::UnknownSkill {
+                entity_id,
+                skill_id,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast unknown skill {}",
+                entity_id.raw(),
+                skill_id.raw()
+            ),
+            Self::SkillNotEquipped {
+                entity_id,
+                skill_id,
+            } => write!(
+                f,
+                "simulation entity {} has not equipped skill {}",
+                entity_id.raw(),
+                skill_id.raw()
+            ),
+            Self::SkillOnCooldown {
+                entity_id,
+                skill_id,
+                cooldown_remaining,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast skill {} while cooldown remains {} frames",
+                entity_id.raw(),
+                skill_id.raw(),
+                cooldown_remaining
+            ),
+            Self::SkillTargetTypeMismatch {
+                entity_id,
+                skill_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast skill {} with target {}, expected {}",
+                entity_id.raw(),
+                skill_id.raw(),
+                skill_target_name(*actual),
+                skill_target_type_name(*expected)
+            ),
             Self::MovementDeltaOverflow { entity_id } => write!(
                 f,
                 "movement delta overflow for simulation entity: {}",
@@ -328,6 +392,21 @@ fn validate_step(
         }
     }
 
+    for indexed in select_latest_cast_skill_inputs(inputs) {
+        let input = indexed.input;
+        let entity = world
+            .entity(input.entity_id)
+            .ok_or(StepError::EntityNotFound {
+                entity_id: input.entity_id,
+            })?;
+
+        let SimCommand::CastSkill(command) = input.command else {
+            unreachable!("select_latest_cast_skill_inputs only returns cast skill commands")
+        };
+
+        validate_cast_skill_input(input.entity_id, command, entity, config)?;
+    }
+
     Ok(movement_inputs)
 }
 
@@ -354,7 +433,7 @@ fn resolve_movement_input(
             })
         }
         SimCommand::Stop => MovementSelection::Stop,
-        SimCommand::Face(_) | SimCommand::Noop => {
+        SimCommand::Face(_) | SimCommand::CastSkill(_) | SimCommand::Noop => {
             unreachable!("resolve_movement_input is only called for movement selection commands")
         }
     };
@@ -391,6 +470,83 @@ fn validate_move_speed(
     }
 
     Ok(())
+}
+
+fn validate_cast_skill_input(
+    entity_id: EntityId,
+    command: CastSkillCommand,
+    entity: &SimEntity,
+    config: &SimConfig,
+) -> Result<(), StepError> {
+    let skill = config
+        .combat
+        .skills
+        .get(command.skill_id)
+        .ok_or(StepError::UnknownSkill {
+            entity_id,
+            skill_id: command.skill_id,
+        })?;
+
+    let slot = entity
+        .combat
+        .skill_slots
+        .iter()
+        .find(|slot| slot.skill_id == command.skill_id)
+        .ok_or(StepError::SkillNotEquipped {
+            entity_id,
+            skill_id: command.skill_id,
+        })?;
+
+    if slot.cooldown_remaining > 0 {
+        return Err(StepError::SkillOnCooldown {
+            entity_id,
+            skill_id: command.skill_id,
+            cooldown_remaining: slot.cooldown_remaining,
+        });
+    }
+
+    if !skill_target_matches(command.target, skill.target_type) {
+        return Err(StepError::SkillTargetTypeMismatch {
+            entity_id,
+            skill_id: command.skill_id,
+            expected: skill.target_type,
+            actual: command.target,
+        });
+    }
+
+    Ok(())
+}
+
+fn skill_target_matches(target: SkillTarget, target_type: SkillTargetType) -> bool {
+    match target_type {
+        SkillTargetType::None | SkillTargetType::SelfOnly => matches!(target, SkillTarget::None),
+        SkillTargetType::Ally | SkillTargetType::Enemy | SkillTargetType::AnyEntity => {
+            matches!(target, SkillTarget::Entity(_))
+        }
+        SkillTargetType::Position => matches!(target, SkillTarget::Position(_)),
+        SkillTargetType::Direction => matches!(target, SkillTarget::Direction(_)),
+    }
+}
+
+fn skill_target_type_name(target_type: SkillTargetType) -> &'static str {
+    match target_type {
+        SkillTargetType::None => "none",
+        SkillTargetType::SelfOnly => "self_only",
+        SkillTargetType::Ally => "ally",
+        SkillTargetType::Enemy => "enemy",
+        SkillTargetType::AnyEntity => "any_entity",
+        SkillTargetType::Position => "position",
+        SkillTargetType::Direction => "direction",
+    }
+}
+
+fn skill_target_name(target: SkillTarget) -> &'static str {
+    match target {
+        SkillTarget::None => "none",
+        SkillTarget::Entity(_) => "entity",
+        SkillTarget::Position(_) => "position",
+        SkillTarget::Direction(_) => "direction",
+    }
 }
 
 fn advance_controlled_entity(entity: &mut SimEntity, config: &SimConfig) -> Result<(), StepError> {
@@ -470,7 +626,7 @@ fn clamp_axis_with_radius(value: i128, min: i64, max: i64, radius: i64) -> Fp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::{BuffId, SkillId};
+    use crate::combat::{BuffId, SkillDefinition, SkillId, SkillTargetType};
     use crate::ids::TeamId;
     use crate::input::{FaceCommand, MoveCommand, SimInputSource};
     use crate::state::{BuffSlot, CombatState, EntityKind, MovementState, SimTransform, SkillSlot};
@@ -517,6 +673,30 @@ mod tests {
             source: SimInputSource::Real,
             command,
         }
+    }
+
+    fn skill(id: u32, target_type: SkillTargetType) -> SkillDefinition {
+        SkillDefinition {
+            id: SkillId::new(id),
+            cooldown_frames: 30,
+            cast_range: Fp::from_i32(5),
+            target_type,
+            effects: Vec::new(),
+        }
+    }
+
+    fn test_config_with_skills(skills: Vec<SkillDefinition>) -> SimConfig {
+        SimConfig {
+            combat: CombatConfig::from_definitions(skills, Vec::new()).unwrap(),
+            ..test_config()
+        }
+    }
+
+    fn cast_skill(skill_id: u32, target: SkillTarget) -> SimCommand {
+        SimCommand::CastSkill(CastSkillCommand {
+            skill_id: SkillId::new(skill_id),
+            target,
+        })
     }
 
     fn entity_pos(world: &SimWorld, entity_id: u32) -> (i64, i64) {
@@ -704,6 +884,180 @@ mod tests {
         step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
 
         assert!(entity_combat(&world, 100).buffs.is_empty());
+    }
+
+    #[test]
+    fn step_accepts_valid_cast_skill_input_without_resolving_effects() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::Enemy)]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster.clone(), target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        let result = step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert!(result.events.is_empty());
+        assert_eq!(world.frame, FrameId::new(1));
+        assert_eq!(
+            entity_combat(&world, 100).skill_slots,
+            caster.combat.skill_slots
+        );
+    }
+
+    #[test]
+    fn step_rejects_unknown_skill_without_updating_world() {
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(999),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(999, SkillTarget::None))];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::UnknownSkill {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(999),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+    }
+
+    #[test]
+    fn step_rejects_unequipped_skill_without_updating_world() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::None)]);
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(20),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::SkillNotEquipped {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+    }
+
+    #[test]
+    fn step_rejects_skill_on_cooldown_without_updating_world() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::None)]);
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 3,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(1, 100, 1, cast_skill(10, SkillTarget::None))];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::SkillOnCooldown {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+                cooldown_remaining: 3,
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(
+            entity_combat(&world, 100).skill_slots[0].cooldown_remaining,
+            3
+        );
+    }
+
+    #[test]
+    fn step_rejects_mismatched_skill_target_type_without_updating_world() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::Position)]);
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let actual = SkillTarget::Direction(QuantizedDir::RIGHT);
+        let inputs = vec![input(1, 100, 1, cast_skill(10, actual))];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::SkillTargetTypeMismatch {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+                expected: SkillTargetType::Position,
+                actual,
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+    }
+
+    #[test]
+    fn step_validates_latest_cast_skill_input_per_character() {
+        let config = test_config_with_skills(vec![
+            skill(10, SkillTargetType::None),
+            skill(20, SkillTargetType::Position),
+            skill(30, SkillTargetType::Direction),
+        ]);
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![
+            SkillSlot {
+                skill_id: SkillId::new(10),
+                cooldown_remaining: 0,
+            },
+            SkillSlot {
+                skill_id: SkillId::new(20),
+                cooldown_remaining: 0,
+            },
+            SkillSlot {
+                skill_id: SkillId::new(30),
+                cooldown_remaining: 0,
+            },
+        ];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![
+            input(
+                1,
+                100,
+                1,
+                cast_skill(20, SkillTarget::Direction(QuantizedDir::RIGHT)),
+            ),
+            input(1, 100, 2, cast_skill(10, SkillTarget::None)),
+            input(
+                1,
+                100,
+                2,
+                cast_skill(30, SkillTarget::Direction(QuantizedDir::LEFT)),
+            ),
+        ];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(1));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
     }
 
     #[test]
