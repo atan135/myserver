@@ -78,10 +78,10 @@ fn hash_entity(hasher: &mut StableHasher, entity: &SimEntity) {
     hasher.write_u64(entity.combat.buffs.len() as u64);
     for buff in &entity.combat.buffs {
         hasher.write_u32(buff.buff_id.raw());
+        hasher.write_u32(buff.source_entity.raw());
         hasher.write_u32(buff.duration_remaining);
         hasher.write_u32(buff.interval_remaining);
         hasher.write_u16(buff.stacks);
-        hasher.write_u32(buff.source_entity.raw());
     }
 }
 
@@ -174,9 +174,12 @@ impl StableHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::{BuffId, SkillId};
     use crate::ids::{EntityId, TeamId};
     use crate::math::{Fp, QuantizedDir, Vec2Fp};
-    use crate::state::{CombatState, MovementState, SimRngState, SimTransform};
+    use crate::state::{
+        BuffSlot, CombatState, MovementState, SimRngState, SimTransform, SkillSlot,
+    };
 
     fn test_entity(id: u32, pos: Vec2Fp) -> SimEntity {
         SimEntity {
@@ -224,6 +227,22 @@ mod tests {
         .unwrap()
     }
 
+    fn test_buff(
+        buff_id: u32,
+        source_entity: u32,
+        duration_remaining: u32,
+        interval_remaining: u32,
+        stacks: u16,
+    ) -> BuffSlot {
+        BuffSlot {
+            buff_id: BuffId::new(buff_id),
+            duration_remaining,
+            interval_remaining,
+            stacks,
+            source_entity: EntityId::new(source_entity),
+        }
+    }
+
     #[test]
     fn same_state_hashes_the_same() {
         let world = test_world();
@@ -249,5 +268,108 @@ mod tests {
         moved.entities[0].transform.pos.x = Fp::from_i32(9);
 
         assert_ne!(hash_world(&world), hash_world(&moved));
+    }
+
+    #[test]
+    fn combat_hp_max_hp_and_base_stats_change_hash() {
+        let world = test_world();
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.hp = 99;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.max_hp = 101;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.attack = 11;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.defense = 4;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.speed = 7;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.crit_rate_bps = 501;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.crit_damage_bps = 15_001;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+    }
+
+    #[test]
+    fn skill_slot_id_and_cooldown_change_hash() {
+        let mut world = test_world();
+        world.entities[0].combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 3,
+        }];
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.skill_slots[0].skill_id = SkillId::new(11);
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.skill_slots[0].cooldown_remaining = 4;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+    }
+
+    #[test]
+    fn buff_slot_fields_change_hash() {
+        let mut world = test_world();
+        world.entities[0].combat.buffs = vec![test_buff(10, 200, 30, 5, 1)];
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.buffs[0].buff_id = BuffId::new(11);
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.buffs[0].source_entity = EntityId::new(201);
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.buffs[0].duration_remaining = 31;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.buffs[0].interval_remaining = 6;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+
+        let mut changed = world.clone();
+        changed.entities[0].combat.buffs[0].stacks = 2;
+        assert_ne!(hash_world(&world), hash_world(&changed));
+    }
+
+    #[test]
+    fn buff_slot_order_changes_hash_because_tick_order_uses_slot_order() {
+        let mut world = test_world();
+        world.entities[0].combat.buffs =
+            vec![test_buff(20, 300, 60, 10, 2), test_buff(10, 200, 30, 5, 1)];
+        let mut reordered = world.clone();
+        reordered.entities[0].combat.buffs.reverse();
+
+        assert_ne!(hash_world(&world), hash_world(&reordered));
+        assert_eq!(world.entities[0].combat.buffs[0].buff_id, BuffId::new(20));
+        assert_eq!(world.entities[0].combat.buffs[1].buff_id, BuffId::new(10));
+    }
+
+    #[test]
+    fn entity_vec_order_with_combat_state_does_not_change_hash() {
+        let mut world = test_world();
+        world.entities[0].combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 3,
+        }];
+        world.entities[1].combat.buffs = vec![test_buff(20, 300, 60, 10, 2)];
+        let mut reordered = world.clone();
+        reordered.entities.reverse();
+
+        assert_eq!(hash_world(&world), hash_world(&reordered));
     }
 }

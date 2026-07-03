@@ -2365,6 +2365,50 @@ mod tests {
     }
 
     #[test]
+    fn pending_cast_skill_request_does_not_affect_next_frame_hash() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::None)]);
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+
+        let first = step(
+            &mut world,
+            FrameId::new(1),
+            &[input(1, 100, 1, cast_skill(10, SkillTarget::None))],
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(first.state_hash, hash_world(&world));
+        assert_eq!(
+            entity_combat(&world, 100).skill_slots[0].cooldown_remaining,
+            29
+        );
+
+        let second = step(&mut world, FrameId::new(2), &[], &config).unwrap();
+
+        assert!(second.events.is_empty());
+        assert_eq!(
+            entity_combat(&world, 100).skill_slots[0].cooldown_remaining,
+            28
+        );
+        assert_eq!(second.state_hash, hash_world(&world));
+
+        let mut expected =
+            SimWorld::new(FrameId::new(2), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let expected_entity = expected.entity_mut(EntityId::new(100)).unwrap();
+        expected_entity.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 28,
+        }];
+
+        assert_eq!(hash_world(&world), hash_world(&expected));
+    }
+
+    #[test]
     fn step_applies_fixed_damage_after_defense_reduction() {
         let config = test_config_with_skills(vec![skill_with_effects(
             10,
