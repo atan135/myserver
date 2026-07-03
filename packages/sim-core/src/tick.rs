@@ -268,6 +268,10 @@ pub fn step(
         advance_controlled_entity(entity, config)?;
     }
 
+    for entity in &mut world.entities {
+        advance_combat_timers(entity);
+    }
+
     world.frame = frame;
 
     Ok(SimStepResult {
@@ -416,6 +420,22 @@ fn advance_controlled_entity(entity: &mut SimEntity, config: &SimConfig) -> Resu
     Ok(())
 }
 
+fn advance_combat_timers(entity: &mut SimEntity) {
+    for slot in &mut entity.combat.skill_slots {
+        slot.cooldown_remaining = slot.cooldown_remaining.saturating_sub(1);
+    }
+
+    for buff in &mut entity.combat.buffs {
+        buff.duration_remaining = buff.duration_remaining.saturating_sub(1);
+        buff.interval_remaining = buff.interval_remaining.saturating_sub(1);
+    }
+
+    entity
+        .combat
+        .buffs
+        .retain(|buff| buff.duration_remaining > 0);
+}
+
 fn movement_delta_raw(
     dir_component: i16,
     speed_per_second: Fp,
@@ -450,9 +470,10 @@ fn clamp_axis_with_radius(value: i128, min: i64, max: i64, radius: i64) -> Fp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::{BuffId, SkillId};
     use crate::ids::TeamId;
     use crate::input::{FaceCommand, MoveCommand, SimInputSource};
-    use crate::state::{CombatState, EntityKind, MovementState, SimTransform};
+    use crate::state::{BuffSlot, CombatState, EntityKind, MovementState, SimTransform, SkillSlot};
 
     fn test_config() -> SimConfig {
         SimConfig {
@@ -505,6 +526,10 @@ mod tests {
             .transform
             .pos
             .raw_tuple()
+    }
+
+    fn entity_combat(world: &SimWorld, entity_id: u32) -> &CombatState {
+        &world.entity(EntityId::new(entity_id)).unwrap().combat
     }
 
     #[test]
@@ -612,6 +637,73 @@ mod tests {
             world.entity(EntityId::new(100)).unwrap().movement,
             MovementState::default()
         );
+    }
+
+    #[test]
+    fn step_keeps_initial_skill_slots_and_decrements_cooldowns() {
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.skill_slots = vec![
+            SkillSlot {
+                skill_id: SkillId::new(10),
+                cooldown_remaining: 2,
+            },
+            SkillSlot {
+                skill_id: SkillId::new(20),
+                cooldown_remaining: 0,
+            },
+        ];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+
+        step(&mut world, FrameId::new(1), &[], &test_config()).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.skill_slots.len(), 2);
+        assert_eq!(combat.skill_slots[0].skill_id, SkillId::new(10));
+        assert_eq!(combat.skill_slots[0].cooldown_remaining, 1);
+        assert_eq!(combat.skill_slots[1].skill_id, SkillId::new(20));
+        assert_eq!(combat.skill_slots[1].cooldown_remaining, 0);
+
+        step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.skill_slots[0].cooldown_remaining, 0);
+        assert_eq!(combat.skill_slots[1].cooldown_remaining, 0);
+    }
+
+    #[test]
+    fn step_decrements_buff_timers_and_removes_expired_slots() {
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.combat.buffs = vec![
+            BuffSlot {
+                buff_id: BuffId::new(10),
+                duration_remaining: 2,
+                interval_remaining: 3,
+                stacks: 1,
+                source_entity: EntityId::new(200),
+            },
+            BuffSlot {
+                buff_id: BuffId::new(20),
+                duration_remaining: 1,
+                interval_remaining: 0,
+                stacks: 2,
+                source_entity: EntityId::new(201),
+            },
+        ];
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+
+        step(&mut world, FrameId::new(1), &[], &test_config()).unwrap();
+
+        let combat = entity_combat(&world, 100);
+        assert_eq!(combat.buffs.len(), 1);
+        assert_eq!(combat.buffs[0].buff_id, BuffId::new(10));
+        assert_eq!(combat.buffs[0].duration_remaining, 1);
+        assert_eq!(combat.buffs[0].interval_remaining, 2);
+        assert_eq!(combat.buffs[0].stacks, 1);
+        assert_eq!(combat.buffs[0].source_entity, EntityId::new(200));
+
+        step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
+
+        assert!(entity_combat(&world, 100).buffs.is_empty());
     }
 
     #[test]

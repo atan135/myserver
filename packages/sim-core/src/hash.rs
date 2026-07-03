@@ -66,6 +66,23 @@ fn hash_entity(hasher: &mut StableHasher, entity: &SimEntity) {
     hasher.write_i32(entity.combat.attack);
     hasher.write_i32(entity.combat.defense);
     hasher.write_i32(entity.combat.speed);
+    hasher.write_u16(entity.combat.crit_rate_bps);
+    hasher.write_u16(entity.combat.crit_damage_bps);
+
+    hasher.write_u64(entity.combat.skill_slots.len() as u64);
+    for slot in &entity.combat.skill_slots {
+        hasher.write_u32(slot.skill_id.raw());
+        hasher.write_u32(slot.cooldown_remaining);
+    }
+
+    hasher.write_u64(entity.combat.buffs.len() as u64);
+    for buff in &entity.combat.buffs {
+        hasher.write_u32(buff.buff_id.raw());
+        hasher.write_u32(buff.duration_remaining);
+        hasher.write_u32(buff.interval_remaining);
+        hasher.write_u16(buff.stacks);
+        hasher.write_u32(buff.source_entity.raw());
+    }
 }
 
 fn entity_kind_code(kind: EntityKind) -> u8 {
@@ -183,6 +200,10 @@ mod tests {
                 attack: 10,
                 defense: 3,
                 speed: 6,
+                crit_rate_bps: 500,
+                crit_damage_bps: 15_000,
+                skill_slots: Vec::new(),
+                buffs: Vec::new(),
             },
             alive: true,
         }

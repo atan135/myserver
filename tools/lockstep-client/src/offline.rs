@@ -921,6 +921,10 @@ mod tests {
                 attack: 10,
                 defense: 3,
                 speed: 6,
+                crit_rate_bps: 500,
+                crit_damage_bps: 15_000,
+                skill_slots: Vec::new(),
+                buffs: Vec::new(),
             },
             alive,
         }

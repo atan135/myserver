@@ -29,8 +29,8 @@ pub use input::{FaceCommand, MoveCommand, SimCommand, SimInput, SimInputSource};
 pub use math::{FP_SCALE, Fp, QuantizedDir, QuantizedDirError, Vec2Fp};
 pub use snapshot::{SimSnapshot, SnapshotError, restore, snapshot};
 pub use state::{
-    CombatState, EntityKind, MovementMode, MovementState, SimEntity, SimRngState, SimTransform,
-    SimWorld,
+    BuffSlot, CombatState, EntityKind, MovementMode, MovementState, SimEntity, SimRngState,
+    SimTransform, SimWorld, SkillSlot,
 };
 pub use tick::{
     MovementConfig, SceneBounds, SimConfig, SimStepResult, StaticObstacle, StaticObstacleShape,

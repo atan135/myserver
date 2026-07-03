@@ -1,6 +1,7 @@
 //! Simulation world state.
 
 use crate::SIM_CORE_SCHEMA_VERSION;
+use crate::combat::{BuffId, SkillId};
 use crate::ids::{EntityId, FrameId, TeamId};
 use crate::math::{Fp, QuantizedDir, Vec2Fp};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,25 @@ pub struct CombatState {
     pub attack: i32,
     pub defense: i32,
     pub speed: i32,
+    pub crit_rate_bps: u16,
+    pub crit_damage_bps: u16,
+    pub skill_slots: Vec<SkillSlot>,
+    pub buffs: Vec<BuffSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SkillSlot {
+    pub skill_id: SkillId,
+    pub cooldown_remaining: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BuffSlot {
+    pub buff_id: BuffId,
+    pub duration_remaining: u32,
+    pub interval_remaining: u32,
+    pub stacks: u16,
+    pub source_entity: EntityId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +226,10 @@ mod tests {
                 attack: 10,
                 defense: 3,
                 speed: 6,
+                crit_rate_bps: 500,
+                crit_damage_bps: 15_000,
+                skill_slots: Vec::new(),
+                buffs: Vec::new(),
             },
             alive: true,
         }
@@ -288,5 +312,29 @@ mod tests {
         ];
 
         assert_eq!(kinds.len(), 5);
+    }
+
+    #[test]
+    fn combat_state_stores_skill_slots_and_buff_slots() {
+        let mut entity = test_entity(100, EntityKind::Player);
+        entity.combat.skill_slots.push(SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 30,
+        });
+        entity.combat.buffs.push(BuffSlot {
+            buff_id: BuffId::new(20),
+            duration_remaining: 120,
+            interval_remaining: 15,
+            stacks: 2,
+            source_entity: EntityId::new(200),
+        });
+
+        assert_eq!(entity.combat.skill_slots[0].skill_id, SkillId::new(10));
+        assert_eq!(entity.combat.skill_slots[0].cooldown_remaining, 30);
+        assert_eq!(entity.combat.buffs[0].buff_id, BuffId::new(20));
+        assert_eq!(entity.combat.buffs[0].duration_remaining, 120);
+        assert_eq!(entity.combat.buffs[0].interval_remaining, 15);
+        assert_eq!(entity.combat.buffs[0].stacks, 2);
+        assert_eq!(entity.combat.buffs[0].source_entity, EntityId::new(200));
     }
 }
