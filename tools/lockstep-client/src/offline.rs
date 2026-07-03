@@ -774,6 +774,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_input_fixture_is_rejected_with_readable_error() {
+        let error = run_offline_by_name_or_path("move_invalid_input").unwrap_err();
+        let message = error.to_string();
+
+        assert!(matches!(
+            &error,
+            OfflineError::Scenario(ScenarioError::InvalidInput { .. })
+        ));
+        assert!(message.contains("invalid scenario input"));
+        assert!(message.contains("speedPerSecondMilli exceeds"));
+    }
+
+    #[test]
     fn frame_hash_mismatch_display_includes_readable_diff() {
         let server_world = SimWorld::with_rng(
             FrameId::new(7),

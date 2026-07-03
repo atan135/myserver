@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "tickRate": 20,
+  "config": {
+    "movement": {
+      "bounds": { "minX": -250000, "minY": -250000, "maxX": 250000, "maxY": 250000 },
+      "defaultSpeedPerSecondMilli": 6000,
+      "maxSpeedPerSecondMilli": 10000
+    }
+  },
+  "initial": {
+    "frame": 0,
+    "seed": 12345,
+    "entities": [
+      {
+        "id": 1001,
+        "kind": "player",
+        "characterId": "chr_a",
+        "teamId": 1,
+        "x": 0,
+        "y": 0,
+        "radius": 500,
+        "hp": 100
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "frame": 1,
+      "characterId": "chr_a",
+      "entityId": 1001,
+      "seq": 1,
+      "command": { "type": "Move", "dirX": 707, "dirY": 707, "speedPerSecondMilli": 6000 }
+    }
+  ],
+  "assertions": {
+    "finalFrame": 5,
+    "finalHash": "c6a4919b89dd5a4b",
+    "entityPositions": [
+      { "entityId": 1001, "x": 1060, "y": 1060, "toleranceMilli": 0 }
+    ]
+  }
+}
