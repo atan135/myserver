@@ -1,6 +1,6 @@
 //! Simulation tick advancement.
 
-use crate::combat::{CombatConfig, SkillId, SkillTargetType};
+use crate::combat::{CombatConfig, SkillDefinition, SkillId, SkillTargetType};
 use crate::hash::{SimHash, hash_world};
 use crate::ids::{EntityId, FrameId};
 use crate::input::{
@@ -122,6 +122,32 @@ struct ResolvedMovementInput {
     selection: MovementSelection,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedSkillTargets {
+    targets: Vec<HitTarget>,
+}
+
+impl ResolvedSkillTargets {
+    fn empty() -> Self {
+        Self {
+            targets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HitTarget {
+    entity_id: EntityId,
+    distance_squared: i128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkillTargetFilter {
+    Ally,
+    Enemy,
+    AnyEntity,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepError {
     NonSequentialFrame {
@@ -166,6 +192,22 @@ pub enum StepError {
         skill_id: SkillId,
         expected: SkillTargetType,
         actual: SkillTarget,
+    },
+    InvalidSkillTarget {
+        entity_id: EntityId,
+        skill_id: SkillId,
+        target_entity_id: EntityId,
+    },
+    SkillTargetOutOfRange {
+        entity_id: EntityId,
+        skill_id: SkillId,
+        target_entity_id: EntityId,
+        distance_squared: i128,
+        range_squared: i128,
+    },
+    SkillTargetDistanceOverflow {
+        entity_id: EntityId,
+        skill_id: SkillId,
     },
     MovementDeltaOverflow {
         entity_id: EntityId,
@@ -257,6 +299,41 @@ impl fmt::Display for StepError {
                 skill_id.raw(),
                 skill_target_name(*actual),
                 skill_target_type_name(*expected)
+            ),
+            Self::InvalidSkillTarget {
+                entity_id,
+                skill_id,
+                target_entity_id,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast skill {} on invalid target entity {}",
+                entity_id.raw(),
+                skill_id.raw(),
+                target_entity_id.raw()
+            ),
+            Self::SkillTargetOutOfRange {
+                entity_id,
+                skill_id,
+                target_entity_id,
+                distance_squared,
+                range_squared,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast skill {} on target entity {} out of range: distance_squared {} > range_squared {}",
+                entity_id.raw(),
+                skill_id.raw(),
+                target_entity_id.raw(),
+                distance_squared,
+                range_squared
+            ),
+            Self::SkillTargetDistanceOverflow {
+                entity_id,
+                skill_id,
+            } => write!(
+                f,
+                "simulation entity {} tried to cast skill {} but target distance overflowed",
+                entity_id.raw(),
+                skill_id.raw()
             ),
             Self::MovementDeltaOverflow { entity_id } => write!(
                 f,
@@ -404,7 +481,7 @@ fn validate_step(
             unreachable!("select_latest_cast_skill_inputs only returns cast skill commands")
         };
 
-        validate_cast_skill_input(input.entity_id, command, entity, config)?;
+        validate_cast_skill_input(input.entity_id, command, entity, world, config)?;
     }
 
     Ok(movement_inputs)
@@ -476,6 +553,7 @@ fn validate_cast_skill_input(
     entity_id: EntityId,
     command: CastSkillCommand,
     entity: &SimEntity,
+    world: &SimWorld,
     config: &SimConfig,
 ) -> Result<(), StepError> {
     let skill = config
@@ -514,7 +592,165 @@ fn validate_cast_skill_input(
         });
     }
 
+    let _resolved_targets = resolve_skill_targets(entity_id, command.target, entity, skill, world)?;
+
     Ok(())
+}
+
+fn resolve_skill_targets(
+    caster_id: EntityId,
+    target: SkillTarget,
+    caster: &SimEntity,
+    skill: &SkillDefinition,
+    world: &SimWorld,
+) -> Result<ResolvedSkillTargets, StepError> {
+    match (skill.target_type, target) {
+        (
+            SkillTargetType::Ally | SkillTargetType::Enemy | SkillTargetType::AnyEntity,
+            SkillTarget::Entity(target_entity_id),
+        ) => {
+            let filter = entity_target_filter(skill.target_type)
+                .expect("entity target skill type should have a target filter");
+            resolve_entity_skill_target(caster_id, caster, target_entity_id, skill, world, filter)
+        }
+        (SkillTargetType::Position, SkillTarget::Position(center)) => {
+            resolve_position_skill_targets(
+                caster_id,
+                caster,
+                center,
+                skill,
+                world,
+                SkillTargetFilter::Enemy,
+            )
+        }
+        _ => Ok(ResolvedSkillTargets::empty()),
+    }
+}
+
+fn resolve_entity_skill_target(
+    caster_id: EntityId,
+    caster: &SimEntity,
+    target_entity_id: EntityId,
+    skill: &SkillDefinition,
+    world: &SimWorld,
+    filter: SkillTargetFilter,
+) -> Result<ResolvedSkillTargets, StepError> {
+    let target = world
+        .entity(target_entity_id)
+        .ok_or(StepError::EntityNotFound {
+            entity_id: target_entity_id,
+        })?;
+
+    if !is_valid_hit_candidate(caster, target, filter) {
+        return Err(StepError::InvalidSkillTarget {
+            entity_id: caster_id,
+            skill_id: skill.id,
+            target_entity_id,
+        });
+    }
+
+    let distance_squared = skill_target_distance_squared(
+        caster_id,
+        skill.id,
+        caster.transform.pos,
+        target.transform.pos,
+    )?;
+    let range_squared = range_squared_raw(skill.cast_range);
+
+    if distance_squared > range_squared {
+        return Err(StepError::SkillTargetOutOfRange {
+            entity_id: caster_id,
+            skill_id: skill.id,
+            target_entity_id,
+            distance_squared,
+            range_squared,
+        });
+    }
+
+    Ok(ResolvedSkillTargets {
+        targets: vec![HitTarget {
+            entity_id: target_entity_id,
+            distance_squared,
+        }],
+    })
+}
+
+fn resolve_position_skill_targets(
+    caster_id: EntityId,
+    caster: &SimEntity,
+    center: Vec2Fp,
+    skill: &SkillDefinition,
+    world: &SimWorld,
+    filter: SkillTargetFilter,
+) -> Result<ResolvedSkillTargets, StepError> {
+    let range_squared = range_squared_raw(skill.cast_range);
+    let mut targets = Vec::new();
+
+    for candidate in world.entities_sorted_by_id() {
+        if !is_valid_hit_candidate(caster, candidate, filter) {
+            continue;
+        }
+
+        let distance_squared =
+            skill_target_distance_squared(caster_id, skill.id, center, candidate.transform.pos)?;
+
+        if distance_squared <= range_squared {
+            targets.push(HitTarget {
+                entity_id: candidate.id,
+                distance_squared,
+            });
+        }
+    }
+
+    targets.sort_by_key(|target| (target.distance_squared, target.entity_id));
+
+    Ok(ResolvedSkillTargets { targets })
+}
+
+fn entity_target_filter(target_type: SkillTargetType) -> Option<SkillTargetFilter> {
+    match target_type {
+        SkillTargetType::Ally => Some(SkillTargetFilter::Ally),
+        SkillTargetType::Enemy => Some(SkillTargetFilter::Enemy),
+        SkillTargetType::AnyEntity => Some(SkillTargetFilter::AnyEntity),
+        SkillTargetType::None
+        | SkillTargetType::SelfOnly
+        | SkillTargetType::Position
+        | SkillTargetType::Direction => None,
+    }
+}
+
+fn is_valid_hit_candidate(
+    caster: &SimEntity,
+    candidate: &SimEntity,
+    filter: SkillTargetFilter,
+) -> bool {
+    if !candidate.alive || candidate.id == caster.id {
+        return false;
+    }
+
+    match filter {
+        SkillTargetFilter::Ally => candidate.team_id == caster.team_id,
+        SkillTargetFilter::Enemy => candidate.team_id != caster.team_id,
+        SkillTargetFilter::AnyEntity => true,
+    }
+}
+
+fn skill_target_distance_squared(
+    entity_id: EntityId,
+    skill_id: SkillId,
+    lhs: Vec2Fp,
+    rhs: Vec2Fp,
+) -> Result<i128, StepError> {
+    lhs.distance_squared_raw(rhs)
+        .ok_or(StepError::SkillTargetDistanceOverflow {
+            entity_id,
+            skill_id,
+        })
+}
+
+fn range_squared_raw(range: Fp) -> i128 {
+    let raw = range.raw() as i128;
+    raw * raw
 }
 
 fn skill_target_matches(target: SkillTarget, target_type: SkillTargetType) -> bool {
@@ -676,10 +912,14 @@ mod tests {
     }
 
     fn skill(id: u32, target_type: SkillTargetType) -> SkillDefinition {
+        skill_with_range(id, target_type, Fp::from_i32(5))
+    }
+
+    fn skill_with_range(id: u32, target_type: SkillTargetType, cast_range: Fp) -> SkillDefinition {
         SkillDefinition {
             id: SkillId::new(id),
             cooldown_frames: 30,
-            cast_range: Fp::from_i32(5),
+            cast_range,
             target_type,
             effects: Vec::new(),
         }
@@ -894,7 +1134,8 @@ mod tests {
             skill_id: SkillId::new(10),
             cooldown_remaining: 0,
         }];
-        let target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
         let mut world = SimWorld::new(FrameId::new(0), vec![caster.clone(), target]).unwrap();
         let inputs = vec![input(
             1,
@@ -910,6 +1151,252 @@ mod tests {
         assert_eq!(
             entity_combat(&world, 100).skill_slots,
             caster.combat.skill_slots
+        );
+    }
+
+    #[test]
+    fn step_accepts_entity_target_at_melee_range_boundary() {
+        let config = test_config_with_skills(vec![skill_with_range(
+            10,
+            SkillTargetType::Enemy,
+            Fp::from_i32(2),
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(2), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(1));
+    }
+
+    #[test]
+    fn step_rejects_entity_target_out_of_melee_range_without_updating_world() {
+        let config = test_config_with_skills(vec![skill_with_range(
+            10,
+            SkillTargetType::Enemy,
+            Fp::from_i32(2),
+        )]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_milli(2_001), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::SkillTargetOutOfRange {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+                target_entity_id: EntityId::new(200),
+                distance_squared: 4_004_001,
+                range_squared: 4_000_000,
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+    }
+
+    #[test]
+    fn step_rejects_dead_entity_target_without_updating_world() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::Enemy)]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let mut target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        target.team_id = TeamId::new(2);
+        target.alive = false;
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::InvalidSkillTarget {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+                target_entity_id: EntityId::new(200),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+    }
+
+    #[test]
+    fn step_rejects_enemy_skill_against_same_team_target_without_updating_world() {
+        let config = test_config_with_skills(vec![skill(10, SkillTargetType::Enemy)]);
+        let mut caster = test_entity(100, Vec2Fp::zero());
+        caster.combat.skill_slots = vec![SkillSlot {
+            skill_id: SkillId::new(10),
+            cooldown_remaining: 0,
+        }];
+        let target = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        let mut world = SimWorld::new(FrameId::new(0), vec![caster, target]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            cast_skill(10, SkillTarget::Entity(EntityId::new(200))),
+        )];
+
+        let error = step(&mut world, FrameId::new(1), &inputs, &config).unwrap_err();
+
+        assert_eq!(
+            error,
+            StepError::InvalidSkillTarget {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(10),
+                target_entity_id: EntityId::new(200),
+            }
+        );
+        assert_eq!(world.frame, FrameId::new(0));
+    }
+
+    #[test]
+    fn resolve_position_target_aoe_filters_and_sorts_candidates() {
+        let skill = skill_with_range(10, SkillTargetType::Position, Fp::from_i32(3));
+        let caster = test_entity(100, Vec2Fp::new(Fp::from_i32(9), Fp::ZERO));
+        let mut friendly = test_entity(120, Vec2Fp::new(Fp::from_milli(500), Fp::ZERO));
+        friendly.team_id = TeamId::new(1);
+        let mut dead_enemy = test_entity(130, Vec2Fp::zero());
+        dead_enemy.team_id = TeamId::new(2);
+        dead_enemy.alive = false;
+        let mut out_of_range_enemy = test_entity(140, Vec2Fp::new(Fp::from_i32(4), Fp::ZERO));
+        out_of_range_enemy.team_id = TeamId::new(2);
+        let mut enemy_a = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        enemy_a.team_id = TeamId::new(2);
+        let mut enemy_b = test_entity(150, Vec2Fp::new(Fp::from_i32(-1), Fp::ZERO));
+        enemy_b.team_id = TeamId::new(2);
+        let mut enemy_c = test_entity(300, Vec2Fp::new(Fp::from_i32(2), Fp::ZERO));
+        enemy_c.team_id = TeamId::new(2);
+        let mut enemy_d = test_entity(250, Vec2Fp::new(Fp::ZERO, Fp::from_i32(3)));
+        enemy_d.team_id = TeamId::new(2);
+        let world = SimWorld::new(
+            FrameId::new(0),
+            vec![
+                caster,
+                friendly,
+                dead_enemy,
+                out_of_range_enemy,
+                enemy_a,
+                enemy_b,
+                enemy_c,
+                enemy_d,
+            ],
+        )
+        .unwrap();
+        let caster = world.entity(EntityId::new(100)).unwrap();
+
+        let resolved = resolve_skill_targets(
+            EntityId::new(100),
+            SkillTarget::Position(Vec2Fp::zero()),
+            caster,
+            &skill,
+            &world,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved
+                .targets
+                .iter()
+                .map(|target| (target.entity_id.raw(), target.distance_squared))
+                .collect::<Vec<_>>(),
+            vec![
+                (150, 1_000_000),
+                (200, 1_000_000),
+                (300, 4_000_000),
+                (250, 9_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_entity_targets_apply_ally_any_and_self_filters() {
+        let ally_skill = skill(10, SkillTargetType::Ally);
+        let any_skill = skill(20, SkillTargetType::AnyEntity);
+        let caster = test_entity(100, Vec2Fp::zero());
+        let ally = test_entity(120, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        let mut enemy = test_entity(200, Vec2Fp::new(Fp::from_i32(1), Fp::ZERO));
+        enemy.team_id = TeamId::new(2);
+        let world = SimWorld::new(FrameId::new(0), vec![caster, ally, enemy]).unwrap();
+        let caster = world.entity(EntityId::new(100)).unwrap();
+
+        let ally_targets = resolve_skill_targets(
+            EntityId::new(100),
+            SkillTarget::Entity(EntityId::new(120)),
+            caster,
+            &ally_skill,
+            &world,
+        )
+        .unwrap();
+        let any_targets = resolve_skill_targets(
+            EntityId::new(100),
+            SkillTarget::Entity(EntityId::new(200)),
+            caster,
+            &any_skill,
+            &world,
+        )
+        .unwrap();
+        let self_error = resolve_skill_targets(
+            EntityId::new(100),
+            SkillTarget::Entity(EntityId::new(100)),
+            caster,
+            &any_skill,
+            &world,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            ally_targets.targets,
+            vec![HitTarget {
+                entity_id: EntityId::new(120),
+                distance_squared: 1_000_000,
+            }]
+        );
+        assert_eq!(
+            any_targets.targets,
+            vec![HitTarget {
+                entity_id: EntityId::new(200),
+                distance_squared: 1_000_000,
+            }]
+        );
+        assert_eq!(
+            self_error,
+            StepError::InvalidSkillTarget {
+                entity_id: EntityId::new(100),
+                skill_id: SkillId::new(20),
+                target_entity_id: EntityId::new(100),
+            }
         );
     }
 
