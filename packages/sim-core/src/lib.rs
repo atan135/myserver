@@ -27,6 +27,9 @@ pub use state::{
     CombatState, EntityKind, MovementMode, MovementState, SimEntity, SimRngState, SimTransform,
     SimWorld,
 };
-pub use tick::{MovementConfig, SceneBounds, SimConfig, SimStepResult, StepError, step};
+pub use tick::{
+    MovementConfig, SceneBounds, SimConfig, SimStepResult, StaticObstacle, StaticObstacleShape,
+    StepError, step,
+};
 
 pub const SIM_CORE_SCHEMA_VERSION: u16 = 1;

@@ -9,24 +9,94 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Axis-aligned rectangular scene bounds.
+///
+/// `min` and `max` are opposite corners. Each axis is normalized independently,
+/// so swapped min/max values still form the same rectangle.
 pub struct SceneBounds {
     pub min: Vec2Fp,
     pub max: Vec2Fp,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+impl SceneBounds {
+    /// Clamps an entity center so its radius stays inside this rectangle.
+    ///
+    /// The center is clamped to `[min + radius, max - radius]` per axis. If the
+    /// radius is larger than the available span on an axis, that axis
+    /// deterministically collapses to the bounds midpoint.
+    pub fn clamp_center_with_radius(self, center: Vec2Fp, radius: Fp) -> Vec2Fp {
+        self.clamp_raw_center_with_radius(center.x.raw() as i128, center.y.raw() as i128, radius)
+    }
+
+    fn clamp_raw_center_with_radius(
+        self,
+        center_x_raw: i128,
+        center_y_raw: i128,
+        radius: Fp,
+    ) -> Vec2Fp {
+        Vec2Fp::new(
+            clamp_axis_with_radius(
+                center_x_raw,
+                self.min.x.raw(),
+                self.max.x.raw(),
+                radius.raw(),
+            ),
+            clamp_axis_with_radius(
+                center_y_raw,
+                self.min.y.raw(),
+                self.max.y.raw(),
+                radius.raw(),
+            ),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SimConfig {
     pub movement: MovementConfig,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MovementConfig {
     pub tick_rate: u16,
     /// Simulation units per second represented as `Fp` raw milli-units.
     pub default_speed_per_second: Fp,
     /// Simulation units per second represented as `Fp` raw milli-units.
     pub max_speed_per_second: Fp,
+    /// Axis-aligned rectangular movement bounds.
     pub bounds: SceneBounds,
+    /// Reserved map collision data.
+    ///
+    /// P1 movement does not apply static obstacles. They are serializable
+    /// configuration only, kept out of `SimWorld` and therefore out of
+    /// `hash_world`. When obstacle collision is enabled in a later phase,
+    /// entities should still be advanced in sorted `EntityId` order and
+    /// obstacles should be resolved in this vector order after bounds clamping.
+    pub static_obstacles: Vec<StaticObstacle>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Reserved static obstacle for future map collision.
+///
+/// P1 movement accepts this structure in configuration but intentionally does
+/// not resolve collisions against it.
+pub struct StaticObstacle {
+    pub shape: StaticObstacleShape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Reserved static obstacle shape.
+pub enum StaticObstacleShape {
+    Circle {
+        center: Vec2Fp,
+        radius: Fp,
+    },
+    /// Axis-aligned rectangle using opposite corners with the same semantics as
+    /// `SceneBounds`.
+    AxisAlignedRect {
+        min: Vec2Fp,
+        max: Vec2Fp,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,17 +405,10 @@ fn advance_controlled_entity(entity: &mut SimEntity, config: &SimConfig) -> Resu
         entity.id,
     )?;
 
-    entity.transform.pos = Vec2Fp::new(
-        clamp_axis_i128(
-            entity.transform.pos.x.raw() as i128 + delta_x as i128,
-            config.movement.bounds.min.x.raw(),
-            config.movement.bounds.max.x.raw(),
-        ),
-        clamp_axis_i128(
-            entity.transform.pos.y.raw() as i128 + delta_y as i128,
-            config.movement.bounds.min.y.raw(),
-            config.movement.bounds.max.y.raw(),
-        ),
+    entity.transform.pos = config.movement.bounds.clamp_raw_center_with_radius(
+        entity.transform.pos.x.raw() as i128 + delta_x as i128,
+        entity.transform.pos.y.raw() as i128 + delta_y as i128,
+        entity.transform.radius,
     );
 
     Ok(())
@@ -368,10 +431,18 @@ fn movement_delta_raw(
     i64::try_from(delta).map_err(|_| StepError::MovementDeltaOverflow { entity_id })
 }
 
-fn clamp_axis_i128(value: i128, min: i64, max: i64) -> Fp {
+fn clamp_axis_with_radius(value: i128, min: i64, max: i64, radius: i64) -> Fp {
     let low = min.min(max) as i128;
     let high = min.max(max) as i128;
-    Fp::from_raw(value.clamp(low, high) as i64)
+    let radius = radius.max(0) as i128;
+    let center_low = low + radius;
+    let center_high = high - radius;
+
+    if center_low > center_high {
+        return Fp::from_raw((low + (high - low) / 2) as i64);
+    }
+
+    Fp::from_raw(value.clamp(center_low, center_high) as i64)
 }
 
 #[cfg(test)]
@@ -391,6 +462,7 @@ mod tests {
                     min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
                     max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
                 },
+                static_obstacles: Vec::new(),
             },
         }
     }
@@ -736,15 +808,21 @@ mod tests {
 
         step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
 
-        assert_eq!(entity_pos(&world, 100), (10_000, 0));
+        assert_eq!(entity_pos(&world, 100), (9_500, 0));
         assert_eq!(
             world.entity(EntityId::new(100)).unwrap().transform.pos.x,
-            config.movement.bounds.max.x
+            config
+                .movement
+                .bounds
+                .max
+                .x
+                .checked_sub(Fp::from_milli(500))
+                .unwrap()
         );
     }
 
     #[test]
-    fn step_clamps_position_to_scene_min_bounds() {
+    fn step_clamps_position_to_scene_min_bounds_with_entity_radius() {
         let config = test_config();
         let mut world = SimWorld::new(
             FrameId::new(0),
@@ -766,10 +844,141 @@ mod tests {
 
         step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
 
-        assert_eq!(entity_pos(&world, 100), (-10_000, -10_000));
+        assert_eq!(entity_pos(&world, 100), (-9_500, -9_500));
         assert_eq!(
             world.entity(EntityId::new(100)).unwrap().transform.pos,
-            config.movement.bounds.min
+            Vec2Fp::new(
+                config
+                    .movement
+                    .bounds
+                    .min
+                    .x
+                    .checked_add(Fp::from_milli(500))
+                    .unwrap(),
+                config
+                    .movement
+                    .bounds
+                    .min
+                    .y
+                    .checked_add(Fp::from_milli(500))
+                    .unwrap(),
+            )
+        );
+    }
+
+    #[test]
+    fn step_clamps_near_boundary_so_entity_radius_stays_inside() {
+        let config = test_config();
+        let mut entity = test_entity(
+            100,
+            Vec2Fp::new(Fp::from_milli(9_450), Fp::from_milli(9_450)),
+        );
+        entity.transform.radius = Fp::from_milli(750);
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::DOWN_RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        let entity = world.entity(EntityId::new(100)).unwrap();
+        assert_eq!(entity.transform.pos.raw_tuple(), (9_250, 9_250));
+        assert!(entity.transform.pos.x.raw() + entity.transform.radius.raw() <= 10_000);
+        assert!(entity.transform.pos.y.raw() + entity.transform.radius.raw() <= 10_000);
+    }
+
+    #[test]
+    fn step_collapses_oversized_radius_axis_to_bounds_midpoint() {
+        let config = SimConfig {
+            movement: MovementConfig {
+                tick_rate: 60,
+                default_speed_per_second: Fp::from_i32(6),
+                max_speed_per_second: Fp::from_i32(10),
+                bounds: SceneBounds {
+                    min: Vec2Fp::new(Fp::from_i32(0), Fp::from_i32(-10)),
+                    max: Vec2Fp::new(Fp::from_i32(1), Fp::from_i32(10)),
+                },
+                static_obstacles: Vec::new(),
+            },
+        };
+        let mut entity = test_entity(100, Vec2Fp::zero());
+        entity.transform.radius = Fp::from_i32(1);
+        let mut world = SimWorld::new(FrameId::new(0), vec![entity]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_pos(&world, 100), (500, 0));
+    }
+
+    #[test]
+    fn static_obstacles_are_reserved_and_do_not_affect_p1_movement_or_hash() {
+        let config_without_obstacles = test_config();
+        let mut config_with_obstacles = config_without_obstacles.clone();
+        config_with_obstacles.movement.static_obstacles.extend([
+            StaticObstacle {
+                shape: StaticObstacleShape::Circle {
+                    center: Vec2Fp::new(Fp::from_milli(100), Fp::ZERO),
+                    radius: Fp::from_i32(2),
+                },
+            },
+            StaticObstacle {
+                shape: StaticObstacleShape::AxisAlignedRect {
+                    min: Vec2Fp::new(Fp::from_milli(50), Fp::from_milli(-500)),
+                    max: Vec2Fp::new(Fp::from_milli(200), Fp::from_milli(500)),
+                },
+            },
+        ]);
+        let mut world_without_obstacles =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let mut world_with_obstacles = world_without_obstacles.clone();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        let result_without_obstacles = step(
+            &mut world_without_obstacles,
+            FrameId::new(1),
+            &inputs,
+            &config_without_obstacles,
+        )
+        .unwrap();
+        let result_with_obstacles = step(
+            &mut world_with_obstacles,
+            FrameId::new(1),
+            &inputs,
+            &config_with_obstacles,
+        )
+        .unwrap();
+
+        assert_eq!(world_without_obstacles, world_with_obstacles);
+        assert_eq!(
+            result_without_obstacles.state_hash,
+            result_with_obstacles.state_hash
+        );
+        assert_eq!(
+            result_with_obstacles.state_hash,
+            hash_world(&world_with_obstacles)
         );
     }
 

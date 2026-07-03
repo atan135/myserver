@@ -144,6 +144,7 @@ mod tests {
                     min: Vec2Fp::new(Fp::from_i32(-10), Fp::from_i32(-10)),
                     max: Vec2Fp::new(Fp::from_i32(10), Fp::from_i32(10)),
                 },
+                static_obstacles: Vec::new(),
             },
         }
     }
