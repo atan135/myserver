@@ -357,6 +357,11 @@ fn movement_delta_raw(
     tick_rate: u16,
     entity_id: EntityId,
 ) -> Result<i64, StepError> {
+    // Fixed movement formula:
+    // delta = dir * speed / (FP_SCALE * fps)
+    //
+    // Rust signed integer division truncates toward zero. That truncation is
+    // part of the deterministic movement contract and is covered by tests.
     let denominator = FP_SCALE as i128 * tick_rate as i128;
     let delta = dir_component as i128 * speed_per_second.raw() as i128 / denominator;
 
@@ -428,6 +433,56 @@ mod tests {
     }
 
     #[test]
+    fn movement_delta_raw_uses_fixed_formula_and_truncates_toward_zero() {
+        let entity_id = EntityId::new(100);
+
+        assert_eq!(
+            movement_delta_raw(QuantizedDir::RIGHT.x(), Fp::from_i32(6), 60, entity_id).unwrap(),
+            100
+        );
+        assert_eq!(
+            movement_delta_raw(QuantizedDir::LEFT.x(), Fp::from_i32(6), 60, entity_id).unwrap(),
+            -100
+        );
+        assert_eq!(
+            movement_delta_raw(QuantizedDir::DOWN_RIGHT.x(), Fp::from_i32(1), 60, entity_id)
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            movement_delta_raw(QuantizedDir::UP_LEFT.x(), Fp::from_i32(1), 60, entity_id).unwrap(),
+            -11
+        );
+    }
+
+    #[test]
+    fn step_moves_horizontal_vertical_and_707_diagonal_by_fixed_formula() {
+        let cases = [
+            (QuantizedDir::RIGHT, (100, 0)),
+            (QuantizedDir::DOWN, (0, 100)),
+            (QuantizedDir::UP_RIGHT, (70, -70)),
+        ];
+
+        for (dir, expected_pos) in cases {
+            let mut world =
+                SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+            let inputs = vec![input(
+                1,
+                100,
+                1,
+                SimCommand::Move(MoveCommand {
+                    dir,
+                    speed_per_second: Some(Fp::from_i32(6)),
+                }),
+            )];
+
+            step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap();
+
+            assert_eq!(entity_pos(&world, 100), expected_pos);
+        }
+    }
+
+    #[test]
     fn step_moves_in_a_straight_line_and_reuses_missing_movement_input() {
         let mut world =
             SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
@@ -467,6 +522,48 @@ mod tests {
 
         assert_eq!(world.frame, FrameId::new(2));
         assert_eq!(entity_pos(&world, 100), (200, 0));
+    }
+
+    #[test]
+    fn step_first_missing_movement_input_keeps_entity_stationary() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+
+        step(&mut world, FrameId::new(1), &[], &test_config()).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(1));
+        assert_eq!(entity_pos(&world, 100), (0, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().movement,
+            MovementState::default()
+        );
+    }
+
+    #[test]
+    fn step_reuses_previous_movement_state_across_consecutive_missing_inputs() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap();
+        step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
+        step(&mut world, FrameId::new(3), &[], &test_config()).unwrap();
+        step(&mut world, FrameId::new(4), &[], &test_config()).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(4));
+        assert_eq!(entity_pos(&world, 100), (400, 0));
+        let entity = world.entity(EntityId::new(100)).unwrap();
+        assert_eq!(entity.movement.mode, MovementMode::Controlled);
+        assert_eq!(entity.movement.move_dir, QuantizedDir::RIGHT);
+        assert_eq!(entity.movement.speed_per_second, Fp::from_i32(6));
     }
 
     #[test]
@@ -588,7 +685,37 @@ mod tests {
     }
 
     #[test]
+    fn step_stop_after_movement_makes_following_missing_inputs_stationary() {
+        let mut world =
+            SimWorld::new(FrameId::new(0), vec![test_entity(100, Vec2Fp::zero())]).unwrap();
+        let move_inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+        let stop_inputs = vec![input(3, 100, 2, SimCommand::Stop)];
+
+        step(&mut world, FrameId::new(1), &move_inputs, &test_config()).unwrap();
+        step(&mut world, FrameId::new(2), &[], &test_config()).unwrap();
+        step(&mut world, FrameId::new(3), &stop_inputs, &test_config()).unwrap();
+        step(&mut world, FrameId::new(4), &[], &test_config()).unwrap();
+        step(&mut world, FrameId::new(5), &[], &test_config()).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(5));
+        assert_eq!(entity_pos(&world, 100), (200, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().movement,
+            MovementState::default()
+        );
+    }
+
+    #[test]
     fn step_clamps_position_to_scene_bounds() {
+        let config = test_config();
         let mut world = SimWorld::new(
             FrameId::new(0),
             vec![test_entity(
@@ -607,9 +734,43 @@ mod tests {
             }),
         )];
 
-        step(&mut world, FrameId::new(1), &inputs, &test_config()).unwrap();
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
 
         assert_eq!(entity_pos(&world, 100), (10_000, 0));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().transform.pos.x,
+            config.movement.bounds.max.x
+        );
+    }
+
+    #[test]
+    fn step_clamps_position_to_scene_min_bounds() {
+        let config = test_config();
+        let mut world = SimWorld::new(
+            FrameId::new(0),
+            vec![test_entity(
+                100,
+                Vec2Fp::new(Fp::from_milli(-9_950), Fp::from_milli(-9_950)),
+            )],
+        )
+        .unwrap();
+        let inputs = vec![input(
+            1,
+            100,
+            1,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::UP_LEFT,
+                speed_per_second: Some(Fp::from_i32(6)),
+            }),
+        )];
+
+        step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(entity_pos(&world, 100), (-10_000, -10_000));
+        assert_eq!(
+            world.entity(EntityId::new(100)).unwrap().transform.pos,
+            config.movement.bounds.min
+        );
     }
 
     #[test]
