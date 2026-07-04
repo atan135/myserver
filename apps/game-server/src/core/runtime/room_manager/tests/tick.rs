@@ -324,6 +324,49 @@ async fn reconnect_and_observer_receive_waiting_inputs_with_frame_ids() {
 }
 
 #[tokio::test]
+async fn observer_cannot_submit_or_generate_tick_inputs() {
+    let (manager, factory, _receivers) =
+        setup_started_room(MOVEMENT_DEMO_POLICY, &[PLAYER_A]).await;
+
+    let (observer_tx, _observer_rx) = mpsc::channel(1024);
+    let observer = manager
+        .join_room_as_observer(TEST_ROOM_ID, OBSERVER_1, observer_tx)
+        .await
+        .unwrap();
+    assert_eq!(observer.snapshot.state, "in_game");
+
+    let rejected = manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            OBSERVER_1,
+            1,
+            "move_dir",
+            "{\"dirX\":1,\"dirY\":0}",
+        )
+        .await;
+    assert_eq!(rejected, Err("OBSERVER_CANNOT_SEND_INPUT"));
+
+    manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            1,
+            "move_dir",
+            "{\"dirX\":1,\"dirY\":0}",
+        )
+        .await
+        .unwrap();
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+    assert_eq!(progressed.0.inputs.len(), 1);
+    assert_eq!(progressed.0.inputs[0].character_id, PLAYER_A);
+
+    let recorded = factory.recorded_ticks();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].1.len(), 1);
+    assert_eq!(recorded[0].1[0].character_id, PLAYER_A);
+}
+
+#[tokio::test]
 async fn existing_room_runtime_paths_continue_for_drain_mode_contract() {
     let factory = RecordingRoomLogicFactory::default();
     let manager = RoomManager::with_match_client(

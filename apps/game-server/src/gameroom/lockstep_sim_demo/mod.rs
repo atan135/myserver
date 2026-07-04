@@ -50,10 +50,19 @@ struct LockstepSimDemoState<'a> {
     training_target: Option<LockstepSimEntityDebugState>,
     initial_snapshot: Option<SimInitialSnapshot>,
     last_frame: Option<SimFrameEnvelope>,
+    observer_frame: Option<LockstepSimObserverFrame>,
     last_hash: Option<u64>,
     last_hash_hex: Option<String>,
     last_event_count: usize,
     last_error: Option<&'a str>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LockstepSimObserverFrame {
+    world_frame: u32,
+    state_hash: crate::core::system::lockstep_sim::SimHashEnvelope,
+    last_frame: Option<SimFrameEnvelope>,
 }
 
 pub struct LockstepSimDemoLogic {
@@ -124,6 +133,11 @@ impl LockstepSimDemoLogic {
         let initial_snapshot = self.world.as_ref().map(|world| {
             create_initial_snapshot(&self.room_id, self.tick_rate, world, &self.bindings)
         });
+        let observer_frame = self.world.as_ref().map(|world| LockstepSimObserverFrame {
+            world_frame,
+            state_hash: sim_hash_envelope(world_hash(world)),
+            last_frame: self.last_frame.clone(),
+        });
 
         LockstepSimDemoState {
             logic_type: LOCKSTEP_SIM_DEMO_POLICY_ID,
@@ -139,6 +153,7 @@ impl LockstepSimDemoLogic {
             training_target,
             initial_snapshot,
             last_frame: self.last_frame.clone(),
+            observer_frame,
             last_hash: self.last_hash.map(|hash| hash.value),
             last_hash_hex: self.last_hash.map(|hash| sim_hash_envelope(hash).hex),
             last_event_count: self.last_event_count,
@@ -381,6 +396,12 @@ mod tests {
         assert_eq!(started["entityCount"], 2);
         assert_eq!(started["bindingCount"], 1);
         assert!(started["lastHash"].as_u64().is_some());
+        assert_eq!(started["observerFrame"]["worldFrame"], 0);
+        assert_eq!(
+            started["observerFrame"]["stateHash"],
+            started["initialSnapshot"]["stateHash"]
+        );
+        assert!(started["observerFrame"]["lastFrame"].is_null());
         assert_eq!(started["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
         assert_eq!(
             started["initialSnapshot"]["schema"],
@@ -422,6 +443,12 @@ mod tests {
         assert!(advanced["lastHash"].as_u64().is_some());
         assert_eq!(advanced["initialSnapshot"]["startFrame"], 1);
         assert_eq!(advanced["lastFrame"]["frame"], 1);
+        assert_eq!(advanced["observerFrame"]["worldFrame"], 1);
+        assert_eq!(
+            advanced["observerFrame"]["stateHash"],
+            advanced["lastFrame"]["stateHash"]
+        );
+        assert_eq!(advanced["observerFrame"]["lastFrame"]["frame"], 1);
         assert!(
             advanced["lastFrame"]["stateHash"]["hex"]
                 .as_str()
@@ -467,6 +494,13 @@ mod tests {
         assert_eq!(attacked["lastEventCount"], 2);
         assert_eq!(attacked["lastFrame"]["frame"], 2);
         assert_eq!(attacked["lastFrame"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            attacked["observerFrame"]["lastFrame"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(attacked["lastFrame"]["debugSummary"]["eventCount"], 2);
         assert!(attacked["lastError"].is_null());
     }
@@ -514,6 +548,94 @@ mod tests {
         assert_eq!(
             restored_state["lastFrame"]["stateHash"],
             continuous_state["lastFrame"]["stateHash"]
+        );
+        assert_eq!(
+            restored_state["observerFrame"]["stateHash"],
+            continuous_state["observerFrame"]["stateHash"]
+        );
+    }
+
+    #[test]
+    fn lockstep_sim_demo_empty_missing_input_continues_movement_without_recasting() {
+        let mut logic = LockstepSimDemoLogic::default();
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_game_started("room-lockstep");
+
+        logic.on_tick(1, 20, &[input(1, "player-a", move_right_payload(1))]);
+        logic.on_tick(
+            2,
+            20,
+            &[input(2, "player-a", cast_training_target_payload(2))],
+        );
+        logic.on_tick(
+            3,
+            20,
+            &[PlayerInputRecord {
+                frame_id: 3,
+                character_id: "player-a".to_string(),
+                action: String::new(),
+                payload_json: String::new(),
+                received_at: Instant::now(),
+                is_synthetic: true,
+            }],
+        );
+
+        let state = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        assert_eq!(state["worldFrame"], 3);
+        assert_eq!(state["trainingTarget"]["hp"], 136);
+        assert_eq!(state["lastEventCount"], 0);
+        assert_eq!(state["playerEntities"][0]["x"], 900);
+        assert_eq!(state["lastFrame"]["debugSummary"]["inputCount"], 1);
+        assert_eq!(state["lastFrame"]["debugSummary"]["realInputCount"], 0);
+        assert_eq!(state["lastFrame"]["debugSummary"]["syntheticInputCount"], 1);
+        assert_eq!(
+            state["lastFrame"]["debugSummary"]["synthesizedEmptyInputCount"],
+            1
+        );
+        assert_eq!(
+            state["lastFrame"]["debugSummary"]["synthesizedRepeatLastInputCount"],
+            0
+        );
+        assert_eq!(
+            state["lastFrame"]["inputSources"][0]["source"],
+            "synthesizedEmpty"
+        );
+        assert_eq!(
+            state["observerFrame"]["stateHash"],
+            state["lastFrame"]["stateHash"]
+        );
+    }
+
+    #[test]
+    fn lockstep_sim_demo_observer_read_only_state_does_not_change_hash() {
+        let mut logic = LockstepSimDemoLogic::default();
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_game_started("room-lockstep");
+        logic.on_tick(
+            1,
+            20,
+            &[input(1, "player-a", cast_training_target_payload(1))],
+        );
+
+        let before = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        let observer_hash = before["observerFrame"]["stateHash"].clone();
+        assert_eq!(
+            before["observerFrame"]["lastFrame"]["events"],
+            before["lastFrame"]["events"]
+        );
+
+        let after = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+
+        assert_eq!(after["lastHash"], before["lastHash"]);
+        assert_eq!(after["observerFrame"]["stateHash"], observer_hash);
+        assert_eq!(
+            after["initialSnapshot"]["stateHash"],
+            before["initialSnapshot"]["stateHash"]
         );
     }
 

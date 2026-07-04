@@ -63,10 +63,31 @@ pub struct SimFrameDebugSummary {
     pub input_count: usize,
     pub real_input_count: usize,
     pub synthetic_input_count: usize,
+    #[serde(default)]
+    pub synthesized_empty_input_count: usize,
+    #[serde(default)]
+    pub synthesized_repeat_last_input_count: usize,
     pub event_count: usize,
     pub entity_count: usize,
     pub alive_entity_count: usize,
     pub player_entity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameInputSourceSummary {
+    pub frame: u32,
+    pub character_id: String,
+    pub source: SimFrameInputSource,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SimFrameInputSource {
+    Real,
+    SynthesizedEmpty,
+    SynthesizedRepeatLast,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +101,8 @@ pub struct SimFrameEnvelope {
     pub config_hash: String,
     pub state_hash: SimHashEnvelope,
     pub events: Vec<sim_core::SimEvent>,
+    #[serde(default)]
+    pub input_sources: Vec<SimFrameInputSourceSummary>,
     pub debug_summary: SimFrameDebugSummary,
 }
 
@@ -195,6 +218,7 @@ pub fn create_frame_envelope(
         config_hash: sim_config_hash_hex(&config),
         state_hash: sim_hash_envelope(result.state_hash),
         events: result.events.clone(),
+        input_sources: frame_input_source_summary(inputs),
         debug_summary: frame_debug_summary(world, inputs, &result.events),
     }
 }
@@ -303,6 +327,19 @@ fn frame_debug_summary(
         input_count: inputs.len(),
         real_input_count: inputs.iter().filter(|input| !input.is_synthetic).count(),
         synthetic_input_count: inputs.iter().filter(|input| input.is_synthetic).count(),
+        synthesized_empty_input_count: inputs
+            .iter()
+            .filter(|input| matches!(sim_input_source(input), SimInputSource::SynthesizedEmpty))
+            .count(),
+        synthesized_repeat_last_input_count: inputs
+            .iter()
+            .filter(|input| {
+                matches!(
+                    sim_input_source(input),
+                    SimInputSource::SynthesizedRepeatLast
+                )
+            })
+            .count(),
         event_count: events.len(),
         entity_count: world.entities_sorted_by_id().len(),
         alive_entity_count: world
@@ -315,6 +352,26 @@ fn frame_debug_summary(
             .iter()
             .filter(|entity| entity.kind == EntityKind::Player)
             .count(),
+    }
+}
+
+fn frame_input_source_summary(inputs: &[PlayerInputRecord]) -> Vec<SimFrameInputSourceSummary> {
+    inputs
+        .iter()
+        .map(|input| SimFrameInputSourceSummary {
+            frame: input.frame_id,
+            character_id: input.character_id.clone(),
+            source: frame_input_source(input),
+            action: input.action.clone(),
+        })
+        .collect()
+}
+
+fn frame_input_source(input: &PlayerInputRecord) -> SimFrameInputSource {
+    match sim_input_source(input) {
+        SimInputSource::Real => SimFrameInputSource::Real,
+        SimInputSource::SynthesizedEmpty => SimFrameInputSource::SynthesizedEmpty,
+        SimInputSource::SynthesizedRepeatLast => SimFrameInputSource::SynthesizedRepeatLast,
     }
 }
 
@@ -715,6 +772,32 @@ mod tests {
         }
     }
 
+    fn synthetic_empty_input(frame_id: u32, character_id: &str) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            character_id: character_id.to_string(),
+            action: String::new(),
+            payload_json: String::new(),
+            received_at: Instant::now(),
+            is_synthetic: true,
+        }
+    }
+
+    fn synthetic_repeat_last_input(
+        frame_id: u32,
+        character_id: &str,
+        payload_json: String,
+    ) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            character_id: character_id.to_string(),
+            action: SIM_INPUT_ACTION.to_string(),
+            payload_json,
+            received_at: Instant::now(),
+            is_synthetic: true,
+        }
+    }
+
     fn move_right_payload(seq: u32) -> String {
         serde_json::json!({
             "version": SIM_INPUT_VERSION,
@@ -849,11 +932,185 @@ mod tests {
         assert_eq!(envelope.state_hash, sim_hash_envelope(result.state_hash));
         assert_eq!(envelope.state_hash.hex.len(), 16);
         assert_eq!(envelope.events.len(), 2);
+        assert_eq!(envelope.input_sources.len(), 1);
+        assert_eq!(envelope.input_sources[0].frame, 1);
+        assert_eq!(envelope.input_sources[0].character_id, "player-a");
+        assert_eq!(envelope.input_sources[0].source, SimFrameInputSource::Real);
+        assert_eq!(envelope.input_sources[0].action, SIM_INPUT_ACTION);
         assert_eq!(envelope.debug_summary.input_count, 1);
         assert_eq!(envelope.debug_summary.real_input_count, 1);
         assert_eq!(envelope.debug_summary.synthetic_input_count, 0);
+        assert_eq!(envelope.debug_summary.synthesized_empty_input_count, 0);
+        assert_eq!(
+            envelope.debug_summary.synthesized_repeat_last_input_count,
+            0
+        );
         assert_eq!(envelope.debug_summary.event_count, 2);
         assert_eq!(envelope.debug_summary.entity_count, 2);
         assert_eq!(envelope.debug_summary.player_entity_count, 1);
+    }
+
+    #[test]
+    fn frame_envelope_distinguishes_real_empty_and_repeat_last_inputs() {
+        let players = vec!["player-a".to_string(), "player-b".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+        let inputs = vec![
+            input(1, "player-a", move_right_payload(1)),
+            synthetic_empty_input(1, "player-b"),
+            synthetic_repeat_last_input(1, "player-c", move_right_payload(1)),
+        ];
+        let result = step_world(&mut world, 1, 20, &inputs, &bindings).unwrap();
+
+        let envelope = create_frame_envelope("room-lockstep", 20, &world, &inputs, &result);
+
+        assert_eq!(envelope.input_sources.len(), 3);
+        assert_eq!(envelope.input_sources[0].source, SimFrameInputSource::Real);
+        assert_eq!(
+            envelope.input_sources[1].source,
+            SimFrameInputSource::SynthesizedEmpty
+        );
+        assert_eq!(
+            envelope.input_sources[2].source,
+            SimFrameInputSource::SynthesizedRepeatLast
+        );
+        assert_eq!(envelope.debug_summary.input_count, 3);
+        assert_eq!(envelope.debug_summary.real_input_count, 1);
+        assert_eq!(envelope.debug_summary.synthetic_input_count, 2);
+        assert_eq!(envelope.debug_summary.synthesized_empty_input_count, 1);
+        assert_eq!(
+            envelope.debug_summary.synthesized_repeat_last_input_count,
+            1
+        );
+    }
+
+    #[test]
+    fn synthesized_empty_advances_movement_without_recasting_skill() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+
+        let move_result = step_world(
+            &mut world,
+            1,
+            20,
+            &[input(1, "player-a", move_right_payload(1))],
+            &bindings,
+        )
+        .unwrap();
+        assert!(move_result.events.is_empty());
+        assert_eq!(
+            world
+                .entity(EntityId::new(PLAYER_ENTITY_ID_BASE))
+                .unwrap()
+                .transform
+                .pos
+                .x
+                .raw(),
+            300
+        );
+
+        let cast_result = step_world(
+            &mut world,
+            2,
+            20,
+            &[input(2, "player-a", cast_training_target_payload(2))],
+            &bindings,
+        )
+        .unwrap();
+        assert_eq!(cast_result.events.len(), 2);
+        assert_eq!(
+            world
+                .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+                .unwrap()
+                .combat
+                .hp,
+            136
+        );
+
+        let empty_input = synthetic_empty_input(3, "player-a");
+        let empty_result = step_world(
+            &mut world,
+            3,
+            20,
+            std::slice::from_ref(&empty_input),
+            &bindings,
+        )
+        .unwrap();
+        let envelope =
+            create_frame_envelope("room-lockstep", 20, &world, &[empty_input], &empty_result);
+
+        assert!(empty_result.events.is_empty());
+        assert_eq!(
+            world
+                .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+                .unwrap()
+                .combat
+                .hp,
+            136
+        );
+        assert_eq!(
+            world
+                .entity(EntityId::new(PLAYER_ENTITY_ID_BASE))
+                .unwrap()
+                .transform
+                .pos
+                .x
+                .raw(),
+            900
+        );
+        assert_eq!(envelope.debug_summary.synthesized_empty_input_count, 1);
+        assert_eq!(
+            envelope.input_sources[0].source,
+            SimFrameInputSource::SynthesizedEmpty
+        );
+        assert_eq!(empty_result.state_hash, world_hash(&world));
+    }
+
+    #[test]
+    fn restore_then_continue_matches_continuous_world_and_snapshot_is_read_only() {
+        let players = vec!["player-a".to_string()];
+        let (mut continuous_world, continuous_bindings) = create_minimal_world(&players);
+        let (mut snapshot_world, snapshot_bindings) = create_minimal_world(&players);
+
+        for frame in 1..=2 {
+            let input = input(frame, "player-a", move_right_payload(frame));
+            step_world(
+                &mut continuous_world,
+                frame,
+                20,
+                std::slice::from_ref(&input),
+                &continuous_bindings,
+            )
+            .unwrap();
+            step_world(&mut snapshot_world, frame, 20, &[input], &snapshot_bindings).unwrap();
+        }
+
+        let snapshot =
+            create_initial_snapshot("room-lockstep", 20, &snapshot_world, &snapshot_bindings);
+        let snapshot_hash = world_hash(&snapshot_world);
+        let observer_snapshot = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(world_hash(&snapshot_world), snapshot_hash);
+        assert_eq!(
+            observer_snapshot["stateHash"]["hex"].as_str(),
+            Some(snapshot.state_hash.hex.as_str())
+        );
+
+        let (mut restored_world, restored_bindings) = restore_initial_snapshot(&snapshot).unwrap();
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+
+        let frame_3 = synthetic_empty_input(3, "player-a");
+        let continuous_result = step_world(
+            &mut continuous_world,
+            3,
+            20,
+            std::slice::from_ref(&frame_3),
+            &continuous_bindings,
+        )
+        .unwrap();
+        let restored_result =
+            step_world(&mut restored_world, 3, 20, &[frame_3], &restored_bindings).unwrap();
+
+        assert_eq!(restored_result.state_hash, continuous_result.state_hash);
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+        assert_eq!(restored_result.frame.raw(), snapshot.start_frame + 1);
     }
 }

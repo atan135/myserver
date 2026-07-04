@@ -76,7 +76,8 @@ impl RoomManager {
             return Err("ROOM_FULL");
         }
 
-        let is_new_member = !room.members.contains_key(character_id);
+        let previous_role = room.members.get(character_id).map(|member| member.role);
+        let is_new_member = previous_role.is_none();
         let sync_before_broadcast =
             is_new_member && room.phase == RoomPhase::InGame && policy.allow_join_in_game;
         room.members.insert(
@@ -96,6 +97,10 @@ impl RoomManager {
         if is_new_member {
             room.update_activity();
             room.clear_empty();
+        }
+        if role == MemberRole::Player
+            && (is_new_member || previous_role == Some(MemberRole::Observer))
+        {
             room.logic.on_character_join(character_id);
         }
 
@@ -135,7 +140,6 @@ impl RoomManager {
         if is_new_member {
             room.update_activity();
             room.clear_empty();
-            room.logic.on_character_join(character_id);
         }
 
         let snapshot = room.snapshot();
