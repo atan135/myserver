@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sim_core::{
     CastSkillCommand, CombatConfig, CombatEffect, CombatState, DamageFormula, EntityId, EntityKind,
     FaceCommand, Fp, FrameId, MoveCommand, MovementConfig, MovementMode, MovementState,
     QuantizedDir, SceneBounds, SimCommand, SimConfig, SimEntity, SimHash, SimInput, SimInputSource,
-    SimStepResult, SimTransform, SimWorld, SkillDefinition, SkillId, SkillSlot, SkillTarget,
-    SkillTargetType, StepError, TeamId, Vec2Fp,
+    SimSnapshot, SimStepResult, SimTransform, SimWorld, SkillDefinition, SkillId, SkillSlot,
+    SkillTarget, SkillTargetType, SnapshotError, StepError, TeamId, Vec2Fp,
+    restore as restore_sim_snapshot, snapshot as capture_sim_snapshot,
 };
 
 use crate::core::room::PlayerInputRecord;
@@ -16,9 +18,70 @@ pub const SIM_INPUT_VERSION: u32 = 1;
 pub const PLAYER_ENTITY_ID_BASE: u32 = 1000;
 pub const TRAINING_TARGET_ENTITY_ID: u32 = 9000;
 pub const DEFAULT_PLAYER_SKILL_ID: u32 = 1;
+pub const DEFAULT_LOCKSTEP_SIM_TICK_RATE: u16 = 20;
+pub const SIM_INITIAL_SNAPSHOT_SCHEMA: &str = "myserver.lockstep-sim.initial-snapshot.v1";
+pub const SIM_FRAME_ENVELOPE_SCHEMA: &str = "myserver.lockstep-sim.frame-envelope.v1";
+pub const SIM_DOWNLINK_SCHEMA_VERSION: u32 = 1;
 const SIM_INPUT_PAYLOAD_MAX_BYTES: usize = 2048;
 const SIM_INPUT_MAX_COMMANDS: usize = 8;
 const SIM_INPUT_MAX_SPEED_MILLI: i64 = 12_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimHashEnvelope {
+    pub frame: u32,
+    pub value: u64,
+    pub hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimControlBinding {
+    pub character_id: String,
+    pub entity_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimInitialSnapshot {
+    pub schema: String,
+    pub schema_version: u32,
+    pub room_id: String,
+    pub start_frame: u32,
+    pub tick_rate: u16,
+    pub config_hash: String,
+    pub rng_seed: u64,
+    pub state_hash: SimHashEnvelope,
+    pub snapshot: SimSnapshot,
+    pub entities: Vec<SimEntity>,
+    pub control_bindings: Vec<SimControlBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameDebugSummary {
+    pub input_count: usize,
+    pub real_input_count: usize,
+    pub synthetic_input_count: usize,
+    pub event_count: usize,
+    pub entity_count: usize,
+    pub alive_entity_count: usize,
+    pub player_entity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEnvelope {
+    pub schema: String,
+    pub schema_version: u32,
+    pub room_id: String,
+    pub frame: u32,
+    pub tick_rate: u16,
+    pub config_hash: String,
+    pub state_hash: SimHashEnvelope,
+    pub events: Vec<sim_core::SimEvent>,
+    pub debug_summary: SimFrameDebugSummary,
+}
 
 pub fn create_minimal_world(character_ids: &[String]) -> (SimWorld, HashMap<String, EntityId>) {
     let mut bindings = HashMap::new();
@@ -62,6 +125,196 @@ pub fn default_sim_config(tick_rate: u16) -> SimConfig {
             Vec::new(),
         )
         .expect("lockstep_sim_demo default combat config should be valid"),
+    }
+}
+
+pub fn sim_hash_envelope(hash: SimHash) -> SimHashEnvelope {
+    SimHashEnvelope {
+        frame: hash.frame.raw(),
+        value: hash.value,
+        hex: sim_hash_hex(hash),
+    }
+}
+
+pub fn sim_hash_hex(hash: SimHash) -> String {
+    format!("{:016x}", hash.value)
+}
+
+pub fn sim_config_hash_hex(config: &SimConfig) -> String {
+    let encoded = serde_json::to_vec(config).expect("sim config should serialize to JSON");
+    let digest = Sha256::digest(encoded);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").expect("writing sha256 hex to String should not fail");
+    }
+    hex
+}
+
+pub fn create_initial_snapshot(
+    room_id: &str,
+    tick_rate: u16,
+    world: &SimWorld,
+    bindings: &HashMap<String, EntityId>,
+) -> SimInitialSnapshot {
+    let tick_rate = tick_rate.max(1);
+    let config = default_sim_config(tick_rate);
+    let snapshot = capture_sim_snapshot(world, &config);
+
+    SimInitialSnapshot {
+        schema: SIM_INITIAL_SNAPSHOT_SCHEMA.to_string(),
+        schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
+        room_id: room_id.to_string(),
+        start_frame: world.frame.raw(),
+        tick_rate,
+        config_hash: sim_config_hash_hex(&config),
+        rng_seed: world.rng.seed,
+        state_hash: sim_hash_envelope(snapshot.hash),
+        snapshot,
+        entities: world.entities_sorted_by_id().to_vec(),
+        control_bindings: control_bindings_snapshot(bindings),
+    }
+}
+
+pub fn create_frame_envelope(
+    room_id: &str,
+    tick_rate: u16,
+    world: &SimWorld,
+    inputs: &[PlayerInputRecord],
+    result: &SimStepResult,
+) -> SimFrameEnvelope {
+    let tick_rate = tick_rate.max(1);
+    let config = default_sim_config(tick_rate);
+
+    SimFrameEnvelope {
+        schema: SIM_FRAME_ENVELOPE_SCHEMA.to_string(),
+        schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
+        room_id: room_id.to_string(),
+        frame: result.frame.raw(),
+        tick_rate,
+        config_hash: sim_config_hash_hex(&config),
+        state_hash: sim_hash_envelope(result.state_hash),
+        events: result.events.clone(),
+        debug_summary: frame_debug_summary(world, inputs, &result.events),
+    }
+}
+
+pub fn restore_initial_snapshot(
+    snapshot: &SimInitialSnapshot,
+) -> Result<(SimWorld, HashMap<String, EntityId>), LockstepSimSnapshotError> {
+    if snapshot.schema != SIM_INITIAL_SNAPSHOT_SCHEMA {
+        return Err(LockstepSimSnapshotError::UnsupportedSchema);
+    }
+    if snapshot.schema_version != SIM_DOWNLINK_SCHEMA_VERSION {
+        return Err(LockstepSimSnapshotError::UnsupportedSchema);
+    }
+    if snapshot.room_id.trim().is_empty() {
+        return Err(LockstepSimSnapshotError::InvalidRoomId);
+    }
+    if snapshot.tick_rate == 0 {
+        return Err(LockstepSimSnapshotError::InvalidTickRate);
+    }
+
+    let config = default_sim_config(snapshot.tick_rate);
+    let expected_config_hash = sim_config_hash_hex(&config);
+    if snapshot.config_hash != expected_config_hash {
+        return Err(LockstepSimSnapshotError::ConfigHashMismatch);
+    }
+
+    let world =
+        restore_sim_snapshot(&snapshot.snapshot).map_err(LockstepSimSnapshotError::Snapshot)?;
+    if snapshot.start_frame != world.frame.raw() {
+        return Err(LockstepSimSnapshotError::FrameMismatch);
+    }
+    if snapshot.rng_seed != world.rng.seed {
+        return Err(LockstepSimSnapshotError::RngSeedMismatch);
+    }
+    if snapshot.state_hash != sim_hash_envelope(snapshot.snapshot.hash) {
+        return Err(LockstepSimSnapshotError::HashEnvelopeMismatch);
+    }
+
+    let mut entities = snapshot.entities.clone();
+    entities.sort_by_key(|entity| entity.id);
+    if entities != world.entities_sorted_by_id() {
+        return Err(LockstepSimSnapshotError::EntitiesMismatch);
+    }
+
+    let bindings = restore_control_bindings(&snapshot.control_bindings, &world)?;
+    Ok((world, bindings))
+}
+
+fn control_bindings_snapshot(bindings: &HashMap<String, EntityId>) -> Vec<SimControlBinding> {
+    let mut snapshot = bindings
+        .iter()
+        .map(|(character_id, entity_id)| SimControlBinding {
+            character_id: character_id.clone(),
+            entity_id: entity_id.raw(),
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_by(|left, right| {
+        left.character_id
+            .cmp(&right.character_id)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    });
+    snapshot
+}
+
+fn restore_control_bindings(
+    bindings: &[SimControlBinding],
+    world: &SimWorld,
+) -> Result<HashMap<String, EntityId>, LockstepSimSnapshotError> {
+    let entities = world
+        .entities_sorted_by_id()
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect::<HashMap<_, _>>();
+    let mut restored = HashMap::new();
+    let mut character_ids = HashSet::new();
+    let mut bound_entity_ids = HashSet::new();
+
+    for binding in bindings {
+        if binding.character_id.trim().is_empty()
+            || !character_ids.insert(binding.character_id.clone())
+        {
+            return Err(LockstepSimSnapshotError::InvalidControlBinding);
+        }
+
+        let entity_id = EntityId::new(binding.entity_id);
+        let Some(entity) = entities.get(&entity_id) else {
+            return Err(LockstepSimSnapshotError::InvalidControlBinding);
+        };
+        if !bound_entity_ids.insert(entity_id)
+            || entity.owner_character_id.as_deref() != Some(binding.character_id.as_str())
+        {
+            return Err(LockstepSimSnapshotError::InvalidControlBinding);
+        }
+        restored.insert(binding.character_id.clone(), entity_id);
+    }
+
+    Ok(restored)
+}
+
+fn frame_debug_summary(
+    world: &SimWorld,
+    inputs: &[PlayerInputRecord],
+    events: &[sim_core::SimEvent],
+) -> SimFrameDebugSummary {
+    SimFrameDebugSummary {
+        input_count: inputs.len(),
+        real_input_count: inputs.iter().filter(|input| !input.is_synthetic).count(),
+        synthetic_input_count: inputs.iter().filter(|input| input.is_synthetic).count(),
+        event_count: events.len(),
+        entity_count: world.entities_sorted_by_id().len(),
+        alive_entity_count: world
+            .entities_sorted_by_id()
+            .iter()
+            .filter(|entity| entity.alive)
+            .count(),
+        player_entity_count: world
+            .entities_sorted_by_id()
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Player)
+            .count(),
     }
 }
 
@@ -219,6 +472,43 @@ impl From<StepError> for LockstepSimStepError {
         Self::Step(error)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockstepSimSnapshotError {
+    UnsupportedSchema,
+    InvalidRoomId,
+    InvalidTickRate,
+    ConfigHashMismatch,
+    Snapshot(SnapshotError),
+    FrameMismatch,
+    RngSeedMismatch,
+    HashEnvelopeMismatch,
+    EntitiesMismatch,
+    InvalidControlBinding,
+}
+
+impl std::fmt::Display for LockstepSimSnapshotError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchema => formatter.write_str("UNSUPPORTED_SIM_SNAPSHOT_SCHEMA"),
+            Self::InvalidRoomId => formatter.write_str("INVALID_SIM_SNAPSHOT_ROOM_ID"),
+            Self::InvalidTickRate => formatter.write_str("INVALID_SIM_SNAPSHOT_TICK_RATE"),
+            Self::ConfigHashMismatch => formatter.write_str("SIM_SNAPSHOT_CONFIG_HASH_MISMATCH"),
+            Self::Snapshot(error) => write!(formatter, "{error}"),
+            Self::FrameMismatch => formatter.write_str("SIM_SNAPSHOT_FRAME_MISMATCH"),
+            Self::RngSeedMismatch => formatter.write_str("SIM_SNAPSHOT_RNG_SEED_MISMATCH"),
+            Self::HashEnvelopeMismatch => {
+                formatter.write_str("SIM_SNAPSHOT_HASH_ENVELOPE_MISMATCH")
+            }
+            Self::EntitiesMismatch => formatter.write_str("SIM_SNAPSHOT_ENTITIES_MISMATCH"),
+            Self::InvalidControlBinding => {
+                formatter.write_str("INVALID_SIM_SNAPSHOT_CONTROL_BINDING")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LockstepSimSnapshotError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimInputPayload {
@@ -412,6 +702,44 @@ fn training_target_entity() -> SimEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    fn input(frame_id: u32, character_id: &str, payload_json: String) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            character_id: character_id.to_string(),
+            action: SIM_INPUT_ACTION.to_string(),
+            payload_json,
+            received_at: Instant::now(),
+            is_synthetic: false,
+        }
+    }
+
+    fn move_right_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                { "type": "move", "dirX": 1000, "dirY": 0 }
+            ]
+        })
+        .to_string()
+    }
+
+    fn cast_training_target_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                {
+                    "type": "castSkill",
+                    "skillId": DEFAULT_PLAYER_SKILL_ID,
+                    "targetEntityId": TRAINING_TARGET_ENTITY_ID
+                }
+            ]
+        })
+        .to_string()
+    }
 
     #[test]
     fn minimal_world_contains_players_target_and_bindings() {
@@ -424,12 +752,108 @@ mod tests {
             EntityId::new(PLAYER_ENTITY_ID_BASE + 1)
         );
         assert_eq!(world.entities.len(), 3);
-        assert!(world
-            .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
-            .is_some());
+        assert!(
+            world
+                .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+                .is_some()
+        );
 
         let result = step_world(&mut world, 1, 20, &[], &bindings).unwrap();
         assert_eq!(world.frame, FrameId::new(1));
         assert_eq!(result.frame, FrameId::new(1));
+    }
+
+    #[test]
+    fn initial_snapshot_restores_and_continues_with_same_hash() {
+        let players = vec!["player-a".to_string()];
+        let (mut continuous_world, continuous_bindings) = create_minimal_world(&players);
+        let (mut restored_source_world, restored_source_bindings) = create_minimal_world(&players);
+
+        let first_input = input(1, "player-a", move_right_payload(1));
+        step_world(
+            &mut continuous_world,
+            1,
+            20,
+            std::slice::from_ref(&first_input),
+            &continuous_bindings,
+        )
+        .unwrap();
+        step_world(
+            &mut restored_source_world,
+            1,
+            20,
+            &[first_input],
+            &restored_source_bindings,
+        )
+        .unwrap();
+
+        let snapshot = create_initial_snapshot(
+            "room-lockstep",
+            20,
+            &restored_source_world,
+            &restored_source_bindings,
+        );
+        assert_eq!(snapshot.schema, SIM_INITIAL_SNAPSHOT_SCHEMA);
+        assert_eq!(snapshot.schema_version, SIM_DOWNLINK_SCHEMA_VERSION);
+        assert_eq!(snapshot.room_id, "room-lockstep");
+        assert_eq!(snapshot.start_frame, 1);
+        assert_eq!(snapshot.tick_rate, 20);
+        assert_eq!(snapshot.rng_seed, restored_source_world.rng.seed);
+        assert_eq!(snapshot.entities.len(), 2);
+        assert_eq!(snapshot.control_bindings[0].character_id, "player-a");
+        assert_eq!(
+            snapshot.control_bindings[0].entity_id,
+            PLAYER_ENTITY_ID_BASE
+        );
+        assert_eq!(snapshot.state_hash.hex.len(), 16);
+
+        let (mut restored_world, restored_bindings) = restore_initial_snapshot(&snapshot).unwrap();
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+
+        let second_input = input(2, "player-a", cast_training_target_payload(2));
+        let continuous_result = step_world(
+            &mut continuous_world,
+            2,
+            20,
+            std::slice::from_ref(&second_input),
+            &continuous_bindings,
+        )
+        .unwrap();
+        let restored_result = step_world(
+            &mut restored_world,
+            2,
+            20,
+            &[second_input],
+            &restored_bindings,
+        )
+        .unwrap();
+
+        assert_eq!(restored_result.state_hash, continuous_result.state_hash);
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+    }
+
+    #[test]
+    fn frame_envelope_contains_hash_events_and_debug_summary() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+        let input = input(1, "player-a", cast_training_target_payload(1));
+        let result =
+            step_world(&mut world, 1, 20, std::slice::from_ref(&input), &bindings).unwrap();
+
+        let envelope = create_frame_envelope("room-lockstep", 20, &world, &[input], &result);
+
+        assert_eq!(envelope.schema, SIM_FRAME_ENVELOPE_SCHEMA);
+        assert_eq!(envelope.schema_version, SIM_DOWNLINK_SCHEMA_VERSION);
+        assert_eq!(envelope.room_id, "room-lockstep");
+        assert_eq!(envelope.frame, 1);
+        assert_eq!(envelope.state_hash, sim_hash_envelope(result.state_hash));
+        assert_eq!(envelope.state_hash.hex.len(), 16);
+        assert_eq!(envelope.events.len(), 2);
+        assert_eq!(envelope.debug_summary.input_count, 1);
+        assert_eq!(envelope.debug_summary.real_input_count, 1);
+        assert_eq!(envelope.debug_summary.synthetic_input_count, 0);
+        assert_eq!(envelope.debug_summary.event_count, 2);
+        assert_eq!(envelope.debug_summary.entity_count, 2);
+        assert_eq!(envelope.debug_summary.player_entity_count, 1);
     }
 }
