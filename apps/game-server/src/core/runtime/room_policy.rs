@@ -218,6 +218,35 @@ impl RoomRuntimePolicy {
         }
     }
 
+    pub fn lockstep_sim_demo() -> Self {
+        Self {
+            policy_id: "lockstep_sim_demo".to_string(),
+            max_members: 32,
+            min_start_players: 1,
+            allow_join_in_game: false,
+            silent_room_fps: 1,
+            idle_room_fps: 10,
+            active_room_fps: 20,
+            busy_room_fps: 30,
+            busy_room_player_threshold: 4,
+            destroy_enabled: true,
+            destroy_when_empty: false,
+            empty_ttl_secs: 300,
+            retain_state_when_empty: true,
+            offline_ttl_secs: 120,
+            snapshot_interval_frames: 10,
+            input_delay_frames: 2,
+            wait_timeout_ms: 100,
+            wait_strategy: InputWaitStrategy::Optimistic,
+            missing_input_strategy: MissingInputStrategy::Empty,
+            movement_correction_interval_frames: 0,
+            movement_correction_threshold: 0.0,
+            movement_aoi_enabled: false,
+            movement_aoi_radius: 0.0,
+            movement_control_stop_frames: 0,
+        }
+    }
+
     pub fn ui_touch_room() -> Self {
         Self {
             policy_id: "ui_touch_room".to_string(),
@@ -302,6 +331,10 @@ impl Default for RoomPolicyRegistry {
             RoomRuntimePolicy::movement_demo(),
         );
         policies.insert("combat_demo".to_string(), RoomRuntimePolicy::combat_demo());
+        policies.insert(
+            "lockstep_sim_demo".to_string(),
+            RoomRuntimePolicy::lockstep_sim_demo(),
+        );
         policies.insert(
             "ui_touch_room".to_string(),
             RoomRuntimePolicy::ui_touch_room(),

@@ -1,4 +1,5 @@
 pub mod combat;
+pub mod lockstep_sim;
 pub mod movement;
 pub mod scene;
 

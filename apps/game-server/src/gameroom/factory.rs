@@ -2,8 +2,8 @@ use crate::core::config_table::ConfigTableRuntime;
 use crate::core::logic::{RoomLogic, RoomLogicFactory};
 
 use super::{
-    CombatDemoLogic, DisposableMatchLogic, MovementDemoLogic, PersistentWorldLogic,
-    RobotSyncRoomLogic, SandboxLogic, TestRoomLogic, UITouchRoomLogic,
+    CombatDemoLogic, DisposableMatchLogic, LockstepSimDemoLogic, MovementDemoLogic,
+    PersistentWorldLogic, RobotSyncRoomLogic, SandboxLogic, TestRoomLogic, UITouchRoomLogic,
 };
 
 #[derive(Clone)]
@@ -23,6 +23,7 @@ impl RoomLogicFactory for GameRoomLogicFactory {
             "ui_touch_room" | "UITouchRoom" => Box::new(UITouchRoomLogic::default()),
             "robot_sync_room" => Box::new(RobotSyncRoomLogic::default()),
             "combat_demo" => Box::new(CombatDemoLogic::new(self.config_tables.clone())),
+            "lockstep_sim_demo" => Box::new(LockstepSimDemoLogic::default()),
             "movement_demo" => {
                 let config_tables = self.config_tables.clone();
                 let current = config_tables.current_snapshot();

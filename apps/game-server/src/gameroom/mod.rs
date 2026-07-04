@@ -1,6 +1,7 @@
 pub mod combat_demo;
 pub mod disposable_match;
 pub mod factory;
+pub mod lockstep_sim_demo;
 pub mod movement_demo;
 pub mod persistent_world;
 pub mod robot_sync_room;
@@ -11,6 +12,7 @@ pub mod ui_touch_room;
 pub use combat_demo::CombatDemoLogic;
 pub use disposable_match::DisposableMatchLogic;
 pub use factory::GameRoomLogicFactory;
+pub use lockstep_sim_demo::LockstepSimDemoLogic;
 pub use movement_demo::MovementDemoLogic;
 pub use persistent_world::PersistentWorldLogic;
 pub use robot_sync_room::RobotSyncRoomLogic;
