@@ -1,9 +1,11 @@
 # lockstep-client
 
-`lockstep-client` is a local verification tool for shared lockstep simulation
-scenarios. The current CLI supports offline replay only: it loads a scenario,
-steps both server-side and client-side simulation with the same inputs, and
-checks the final frame/hash assertions.
+`lockstep-client` is a verification tool for shared lockstep simulation
+scenarios. The CLI supports offline replay and an online MyServer mode. Offline
+mode loads a scenario, steps both server-side and client-side simulation with
+the same inputs, and checks the final frame/hash assertions. Online mode connects
+to a local game endpoint, joins a `lockstep_sim_demo` room, sends `sim_input`,
+and replays server frames locally through the same `sim-core`.
 
 ## Offline replay
 
@@ -45,6 +47,41 @@ foreach ($scenario in $scenarios) {
   }
 }
 ```
+
+## Online replay
+
+Dry-run online mode parses a scenario and builds the `PlayerInputReq`
+`action=sim_input` payloads without opening a socket. Run both movement and
+`lockstep_sim_demo` melee dry-runs before a real service integration run:
+
+```powershell
+cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online --scenario move_straight --dry-run
+
+cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online --scenario lockstep_demo_melee --dry-run
+```
+
+`lockstep_demo_melee` is aligned with the server demo defaults: player entity
+`1000`, skill id `1`, and training target entity `9000`.
+
+Real online mode requires the MyServer dependencies and game endpoint to be
+started by the operator first. It does not start Redis, PostgreSQL, NATS,
+`auth-http`, `game-server`, or `game-proxy` itself.
+
+```powershell
+cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
+  --scenario move_straight `
+  --server 127.0.0.1:7000 `
+  --ticket <ticket-or-local-test-ticket> `
+  --room lockstep-online-demo `
+  --policy lockstep_sim_demo
+```
+
+Online mode consumes `RoomSnapshot.game_state` JSON. It restores
+`initialSnapshot.snapshot` through `sim-core`, consumes each `SimFrameEnvelope`
+from `lastFrame` or `observerFrame.lastFrame`, reconstructs frame inputs from
+`FrameBundlePush.inputs`, and compares server `stateHash` and `events` against
+local replay. On mismatch it prints the first mismatching frame, server hash,
+client hash, tracked entity differences, event differences, and frame inputs.
 
 ## Tests
 

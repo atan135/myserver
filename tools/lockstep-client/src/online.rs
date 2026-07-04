@@ -1,0 +1,2029 @@
+use crate::offline::MismatchDiff;
+use crate::scenario::{Scenario, ScenarioError};
+use sim_core::{
+    CastSkillCommand, CombatConfig, CombatEffect, EntityId, FaceCommand, Fp, FrameId, MoveCommand,
+    MovementConfig, QuantizedDir, SceneBounds, SimCommand, SimConfig, SimEntity, SimEvent, SimHash,
+    SimInput, SimInputSource, SimSnapshot, SimWorld, SkillDefinition, SkillId, SkillTarget,
+    SkillTargetType, StaticObstacle, StepError, Vec2Fp, hash_world,
+    restore as restore_sim_snapshot, step,
+};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[allow(dead_code)]
+mod pb {
+    include!("../../../apps/game-server/src/proto/myserver.game.rs");
+}
+
+const USAGE: &str = "\
+usage: lockstep-client --mode online --scenario <path-or-name> [options]
+
+options:
+  --server <host:port>        TCP game-server or local game-proxy endpoint, default 127.0.0.1:7000
+  --ticket <ticket>          ticket issued by auth-http or a local test ticket
+  --test-ticket <ticket>     alias for --ticket
+  --room <room-id>           room id, default lockstep-online-demo
+  --policy <policy-id>       room policy id, default lockstep_sim_demo
+  --character-id <id>        expected ticket-bound character id for reporting
+  --timeout-ms <ms>          socket/read timeout, default 5000
+  --dry-run                  parse scenario and print the packets that would be sent";
+
+const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:7000";
+const DEFAULT_ROOM_ID: &str = "lockstep-online-demo";
+const LOCKSTEP_SIM_DEMO_POLICY_ID: &str = "lockstep_sim_demo";
+const SIM_INPUT_ACTION: &str = "sim_input";
+const SIM_INPUT_VERSION: u32 = 1;
+const SIM_INITIAL_SNAPSHOT_SCHEMA: &str = "myserver.lockstep-sim.initial-snapshot.v1";
+const SIM_FRAME_ENVELOPE_SCHEMA: &str = "myserver.lockstep-sim.frame-envelope.v1";
+const SIM_DOWNLINK_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_PLAYER_SKILL_ID: u32 = 1;
+const SIM_INPUT_MAX_SPEED_MILLI: i64 = 12_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnlineCliOptions {
+    pub scenario: String,
+    pub server_addr: String,
+    pub ticket: Option<String>,
+    pub room_id: String,
+    pub policy_id: String,
+    pub character_id: Option<String>,
+    pub timeout_ms: u64,
+    pub dry_run: bool,
+}
+
+impl OnlineCliOptions {
+    pub fn parse<I, S>(args: I) -> Result<Self, OnlineError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut mode = None;
+        let mut scenario = None;
+        let mut server_addr = None;
+        let mut ticket = None;
+        let mut room_id = None;
+        let mut policy_id = None;
+        let mut character_id = None;
+        let mut timeout_ms = None;
+        let mut dry_run = false;
+        let mut args = args.into_iter().map(Into::into);
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--mode" => {
+                    if mode.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --mode"));
+                    }
+                    let value = next_arg(&mut args, "--mode")?;
+                    if value != "online" {
+                        return Err(OnlineError::invalid_args(format!(
+                            "unsupported --mode `{value}` for online runner; expected `online`"
+                        )));
+                    }
+                    mode = Some(value);
+                }
+                "--scenario" => {
+                    if scenario.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --scenario"));
+                    }
+                    let value = next_non_empty_arg(&mut args, "--scenario")?;
+                    scenario = Some(value);
+                }
+                "--server" => {
+                    if server_addr.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --server"));
+                    }
+                    server_addr = Some(next_non_empty_arg(&mut args, "--server")?);
+                }
+                "--ticket" | "--test-ticket" => {
+                    if ticket.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --ticket"));
+                    }
+                    ticket = Some(next_non_empty_arg(&mut args, arg.as_str())?);
+                }
+                "--room" | "--room-id" => {
+                    if room_id.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --room"));
+                    }
+                    room_id = Some(next_non_empty_arg(&mut args, arg.as_str())?);
+                }
+                "--policy" | "--policy-id" => {
+                    if policy_id.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --policy"));
+                    }
+                    policy_id = Some(next_non_empty_arg(&mut args, arg.as_str())?);
+                }
+                "--character-id" => {
+                    if character_id.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --character-id"));
+                    }
+                    character_id = Some(next_non_empty_arg(&mut args, "--character-id")?);
+                }
+                "--timeout-ms" => {
+                    if timeout_ms.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --timeout-ms"));
+                    }
+                    let value = next_non_empty_arg(&mut args, "--timeout-ms")?;
+                    let parsed = value.parse::<u64>().map_err(|_| {
+                        OnlineError::invalid_args(format!(
+                            "--timeout-ms must be a positive integer, got `{value}`"
+                        ))
+                    })?;
+                    if parsed == 0 {
+                        return Err(OnlineError::invalid_args(
+                            "--timeout-ms must be greater than zero",
+                        ));
+                    }
+                    timeout_ms = Some(parsed);
+                }
+                "--dry-run" => {
+                    dry_run = true;
+                }
+                "--help" | "-h" => {
+                    return Err(OnlineError::invalid_args(USAGE));
+                }
+                _ => {
+                    return Err(OnlineError::invalid_args(format!(
+                        "unexpected argument `{arg}`"
+                    )));
+                }
+            }
+        }
+
+        if mode.as_deref() != Some("online") {
+            return Err(OnlineError::invalid_args("missing --mode online"));
+        }
+
+        Ok(Self {
+            scenario: scenario
+                .ok_or_else(|| OnlineError::invalid_args("missing --scenario <path-or-name>"))?,
+            server_addr: server_addr.unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_owned()),
+            ticket,
+            room_id: room_id.unwrap_or_else(|| DEFAULT_ROOM_ID.to_owned()),
+            policy_id: policy_id.unwrap_or_else(|| LOCKSTEP_SIM_DEMO_POLICY_ID.to_owned()),
+            character_id,
+            timeout_ms: timeout_ms.unwrap_or(5_000),
+            dry_run,
+        })
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
+    }
+}
+
+fn next_arg(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, OnlineError> {
+    args.next()
+        .ok_or_else(|| OnlineError::invalid_args(format!("missing value for {name}")))
+}
+
+fn next_non_empty_arg(
+    args: &mut impl Iterator<Item = String>,
+    name: &str,
+) -> Result<String, OnlineError> {
+    let value = next_arg(args, name)?;
+    if value.trim().is_empty() {
+        return Err(OnlineError::invalid_args(format!(
+            "{name} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnlineReport {
+    pub scenario_path: PathBuf,
+    pub server_addr: String,
+    pub room_id: String,
+    pub policy_id: String,
+    pub dry_run: bool,
+    pub input_plan_count: usize,
+    pub frames_checked: usize,
+    pub final_frame: Option<u32>,
+    pub final_hash: Option<SimHash>,
+}
+
+impl fmt::Display for OnlineReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "scenario: {}", self.scenario_path.display())?;
+        writeln!(
+            f,
+            "mode: online{}",
+            if self.dry_run { " (dry-run)" } else { "" }
+        )?;
+        writeln!(f, "server: {}", self.server_addr)?;
+        writeln!(f, "room: {}", self.room_id)?;
+        writeln!(f, "policy: {}", self.policy_id)?;
+        writeln!(f, "sim_input packets: {}", self.input_plan_count)?;
+        writeln!(f, "frames checked: {}", self.frames_checked)?;
+        if let Some(frame) = self.final_frame {
+            writeln!(f, "final frame: {frame}")?;
+        }
+        if let Some(hash) = self.final_hash {
+            write!(f, "final hash: {:016x}", hash.value)?;
+        } else if self.dry_run {
+            write!(f, "network: not started; dry-run only")?;
+        } else {
+            write!(f, "final hash: <none>")?;
+        }
+        Ok(())
+    }
+}
+
+pub fn run_cli<I, S>(args: I) -> Result<OnlineReport, OnlineError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let options = OnlineCliOptions::parse(args)?;
+    run_online(options)
+}
+
+pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError> {
+    let scenario_path =
+        crate::offline::resolve_scenario_path(&options.scenario, default_scenario_dir())?;
+    let json = fs::read_to_string(&scenario_path).map_err(|source| OnlineError::ReadScenario {
+        path: scenario_path.clone(),
+        source,
+    })?;
+    let scenario = Scenario::from_json_str(&json).map_err(OnlineError::Scenario)?;
+    let sim_inputs = scenario.to_sim_inputs().map_err(OnlineError::Scenario)?;
+    let input_plan = build_player_input_plan(&sim_inputs)?;
+
+    if options.dry_run {
+        return Ok(OnlineReport {
+            scenario_path,
+            server_addr: options.server_addr,
+            room_id: options.room_id,
+            policy_id: options.policy_id,
+            dry_run: true,
+            input_plan_count: input_plan.len(),
+            frames_checked: 0,
+            final_frame: None,
+            final_hash: None,
+        });
+    }
+
+    let ticket = options.ticket.clone().ok_or_else(|| {
+        OnlineError::invalid_args(
+            "online mode requires --ticket or --test-ticket unless --dry-run is used",
+        )
+    })?;
+
+    let mut transport = TcpGameTransport::connect(&options.server_addr, options.timeout())?;
+    let outcome = drive_online_session(&mut transport, &options, &ticket, &input_plan)?;
+
+    Ok(OnlineReport {
+        scenario_path,
+        server_addr: options.server_addr,
+        room_id: options.room_id,
+        policy_id: options.policy_id,
+        dry_run: false,
+        input_plan_count: input_plan.len(),
+        frames_checked: outcome.frames_checked,
+        final_frame: outcome.final_hash.map(|hash| hash.frame.raw()),
+        final_hash: outcome.final_hash,
+    })
+}
+
+fn default_scenario_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerInputPlan {
+    pub frame_id: u32,
+    pub action: String,
+    pub payload_json: String,
+}
+
+pub fn build_player_input_plan(inputs: &[SimInput]) -> Result<Vec<PlayerInputPlan>, OnlineError> {
+    inputs
+        .iter()
+        .map(|input| {
+            Ok(PlayerInputPlan {
+                frame_id: input.frame.raw(),
+                action: SIM_INPUT_ACTION.to_owned(),
+                payload_json: build_sim_input_payload(
+                    input.seq,
+                    std::slice::from_ref(&input.command),
+                )?,
+            })
+        })
+        .collect()
+}
+
+pub fn build_sim_input_payload(seq: u32, commands: &[SimCommand]) -> Result<String, OnlineError> {
+    let commands = commands
+        .iter()
+        .map(WireSimCommand::try_from_sim_command)
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&WireSimInputPayload {
+        version: SIM_INPUT_VERSION,
+        seq,
+        commands,
+    })
+    .map_err(OnlineError::Json)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct WireSimInputPayload {
+    version: u32,
+    seq: u32,
+    commands: Vec<WireSimCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum WireSimCommand {
+    Move {
+        #[serde(rename = "dirX")]
+        dir_x: i16,
+        #[serde(rename = "dirY")]
+        dir_y: i16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<i64>,
+    },
+    Stop {},
+    Face {
+        #[serde(rename = "dirX")]
+        dir_x: i16,
+        #[serde(rename = "dirY")]
+        dir_y: i16,
+    },
+    CastSkill {
+        #[serde(rename = "skillId")]
+        skill_id: u32,
+        #[serde(
+            rename = "targetEntityId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_entity_id: Option<u32>,
+    },
+}
+
+impl WireSimCommand {
+    fn try_from_sim_command(command: &SimCommand) -> Result<Self, OnlineError> {
+        match *command {
+            SimCommand::Move(MoveCommand {
+                dir,
+                speed_per_second,
+            }) => {
+                let (dir_x, dir_y) = dir.raw_tuple();
+                Ok(Self::Move {
+                    dir_x,
+                    dir_y,
+                    speed: speed_per_second.map(|speed| speed.raw()),
+                })
+            }
+            SimCommand::Stop => Ok(Self::Stop {}),
+            SimCommand::Face(FaceCommand { dir }) => {
+                let (dir_x, dir_y) = dir.raw_tuple();
+                Ok(Self::Face { dir_x, dir_y })
+            }
+            SimCommand::CastSkill(CastSkillCommand { skill_id, target }) => {
+                let target_entity_id = match target {
+                    SkillTarget::None => None,
+                    SkillTarget::Entity(entity_id) => Some(entity_id.raw()),
+                    SkillTarget::Position(_) | SkillTarget::Direction(_) => {
+                        return Err(OnlineError::UnsupportedOnlineCommand(
+                            "lockstep_sim_demo online payload only supports CastSkill target None or Entity",
+                        ));
+                    }
+                };
+                Ok(Self::CastSkill {
+                    skill_id: skill_id.raw(),
+                    target_entity_id,
+                })
+            }
+            SimCommand::Noop => Ok(Self::Stop {}),
+        }
+    }
+
+    fn validate(self) -> Result<ParsedWireSimCommand, OnlineError> {
+        match self {
+            Self::Move {
+                dir_x,
+                dir_y,
+                speed,
+            } => {
+                let dir = QuantizedDir::new(dir_x, dir_y)
+                    .map_err(|_| OnlineError::InvalidSimInput("SIM_INPUT_DIR_OUT_OF_RANGE"))?;
+                if dir == QuantizedDir::ZERO {
+                    return Err(OnlineError::InvalidSimInput("SIM_INPUT_MOVE_DIR_ZERO"));
+                }
+                let speed_per_second = speed
+                    .map(|speed| {
+                        if speed <= 0 || speed > SIM_INPUT_MAX_SPEED_MILLI {
+                            return Err(OnlineError::InvalidSimInput(
+                                "SIM_INPUT_SPEED_OUT_OF_RANGE",
+                            ));
+                        }
+                        Ok(Fp::from_milli(speed))
+                    })
+                    .transpose()?;
+                Ok(ParsedWireSimCommand::Move {
+                    dir,
+                    speed_per_second,
+                })
+            }
+            Self::Stop {} => Ok(ParsedWireSimCommand::Stop),
+            Self::Face { dir_x, dir_y } => {
+                let dir = QuantizedDir::new(dir_x, dir_y)
+                    .map_err(|_| OnlineError::InvalidSimInput("SIM_INPUT_DIR_OUT_OF_RANGE"))?;
+                Ok(ParsedWireSimCommand::Face { dir })
+            }
+            Self::CastSkill {
+                skill_id,
+                target_entity_id,
+            } => {
+                if skill_id == 0 {
+                    return Err(OnlineError::InvalidSimInput(
+                        "SIM_INPUT_SKILL_ID_OUT_OF_RANGE",
+                    ));
+                }
+                let target = match target_entity_id {
+                    Some(0) => {
+                        return Err(OnlineError::InvalidSimInput(
+                            "SIM_INPUT_TARGET_ENTITY_ID_OUT_OF_RANGE",
+                        ));
+                    }
+                    Some(target_entity_id) => SkillTarget::Entity(EntityId::new(target_entity_id)),
+                    None => SkillTarget::None,
+                };
+                Ok(ParsedWireSimCommand::CastSkill {
+                    skill_id: SkillId::new(skill_id),
+                    target,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParsedWireSimCommand {
+    Move {
+        dir: QuantizedDir,
+        speed_per_second: Option<Fp>,
+    },
+    Stop,
+    Face {
+        dir: QuantizedDir,
+    },
+    CastSkill {
+        skill_id: SkillId,
+        target: SkillTarget,
+    },
+}
+
+impl ParsedWireSimCommand {
+    fn to_sim_command(self) -> SimCommand {
+        match self {
+            Self::Move {
+                dir,
+                speed_per_second,
+            } => SimCommand::Move(MoveCommand {
+                dir,
+                speed_per_second,
+            }),
+            Self::Stop => SimCommand::Stop,
+            Self::Face { dir } => SimCommand::Face(FaceCommand { dir }),
+            Self::CastSkill { skill_id, target } => {
+                SimCommand::CastSkill(CastSkillCommand { skill_id, target })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimHashEnvelope {
+    pub frame: u32,
+    pub value: u64,
+    pub hex: String,
+}
+
+impl SimHashEnvelope {
+    fn to_sim_hash(&self) -> SimHash {
+        SimHash {
+            frame: FrameId::new(self.frame),
+            value: self.value,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimControlBinding {
+    pub character_id: String,
+    pub entity_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimInitialSnapshot {
+    pub schema: String,
+    pub schema_version: u32,
+    pub room_id: String,
+    pub start_frame: u32,
+    pub tick_rate: u16,
+    pub config_hash: String,
+    pub rng_seed: u64,
+    pub state_hash: SimHashEnvelope,
+    pub snapshot: SimSnapshot,
+    #[serde(default)]
+    pub entities: Vec<SimEntity>,
+    #[serde(default)]
+    pub control_bindings: Vec<SimControlBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameDebugSummary {
+    pub input_count: usize,
+    pub real_input_count: usize,
+    pub synthetic_input_count: usize,
+    #[serde(default)]
+    pub synthesized_empty_input_count: usize,
+    #[serde(default)]
+    pub synthesized_repeat_last_input_count: usize,
+    pub event_count: usize,
+    pub entity_count: usize,
+    pub alive_entity_count: usize,
+    pub player_entity_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameInputSourceSummary {
+    pub frame: u32,
+    pub character_id: String,
+    pub source: SimFrameInputSource,
+    pub action: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SimFrameInputSource {
+    Real,
+    SynthesizedEmpty,
+    SynthesizedRepeatLast,
+}
+
+impl From<SimFrameInputSource> for SimInputSource {
+    fn from(value: SimFrameInputSource) -> Self {
+        match value {
+            SimFrameInputSource::Real => Self::Real,
+            SimFrameInputSource::SynthesizedEmpty => Self::SynthesizedEmpty,
+            SimFrameInputSource::SynthesizedRepeatLast => Self::SynthesizedRepeatLast,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEnvelope {
+    pub schema: String,
+    pub schema_version: u32,
+    pub room_id: String,
+    pub frame: u32,
+    pub tick_rate: u16,
+    pub config_hash: String,
+    pub state_hash: SimHashEnvelope,
+    #[serde(default)]
+    pub events: Vec<SimEvent>,
+    #[serde(default)]
+    pub input_sources: Vec<SimFrameInputSourceSummary>,
+    pub debug_summary: SimFrameDebugSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockstepSimDemoState {
+    pub logic_type: Option<String>,
+    pub room_id: Option<String>,
+    #[serde(default)]
+    pub world_frame: u32,
+    #[serde(default)]
+    pub tick_rate: u16,
+    #[serde(default)]
+    pub training_target_entity_id: u32,
+    #[serde(default)]
+    pub player_entities: Vec<LockstepSimPlayerDebugState>,
+    #[serde(default)]
+    pub training_target: Option<LockstepSimEntityDebugState>,
+    #[serde(default)]
+    pub initial_snapshot: Option<SimInitialSnapshot>,
+    #[serde(default)]
+    pub last_frame: Option<SimFrameEnvelope>,
+    #[serde(default)]
+    pub observer_frame: Option<LockstepSimObserverFrame>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl LockstepSimDemoState {
+    fn observed_frame(&self) -> Option<&SimFrameEnvelope> {
+        self.observer_frame
+            .as_ref()
+            .and_then(|observer| observer.last_frame.as_ref())
+            .or(self.last_frame.as_ref())
+    }
+
+    fn project_server_world(&self, local_world: &SimWorld) -> SimWorld {
+        let mut server_world = local_world.clone();
+        for debug in self
+            .player_entities
+            .iter()
+            .map(|player| &player.entity)
+            .chain(self.training_target.iter())
+        {
+            if let Some(entity) = server_world.entity_mut(EntityId::new(debug.entity_id)) {
+                entity.transform.pos =
+                    Vec2Fp::new(Fp::from_milli(debug.x), Fp::from_milli(debug.y));
+                entity.combat.hp = debug.hp;
+                entity.combat.max_hp = debug.max_hp;
+                entity.alive = debug.alive;
+            }
+        }
+        server_world
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockstepSimObserverFrame {
+    pub world_frame: u32,
+    pub state_hash: SimHashEnvelope,
+    #[serde(default)]
+    pub last_frame: Option<SimFrameEnvelope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockstepSimPlayerDebugState {
+    pub character_id: String,
+    #[serde(flatten)]
+    pub entity: LockstepSimEntityDebugState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LockstepSimEntityDebugState {
+    pub entity_id: u32,
+    pub x: i64,
+    pub y: i64,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub alive: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInputRecord {
+    pub character_id: String,
+    pub action: String,
+    pub payload_json: String,
+    pub frame_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerFrameObservation {
+    pub envelope: SimFrameEnvelope,
+    pub inputs: Vec<FrameInputRecord>,
+    pub game_state: Option<LockstepSimDemoState>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OnlineReplay {
+    room_id: String,
+    config: SimConfig,
+    world: SimWorld,
+    bindings: HashMap<String, EntityId>,
+    frames_checked: usize,
+    final_hash: SimHash,
+}
+
+impl OnlineReplay {
+    pub fn from_initial_snapshot(snapshot: &SimInitialSnapshot) -> Result<Self, OnlineError> {
+        validate_initial_snapshot(snapshot)?;
+        let world = restore_sim_snapshot(&snapshot.snapshot)
+            .map_err(|error| OnlineError::InvalidInitialSnapshot(error.to_string()))?;
+        let final_hash = hash_world(&world);
+        let bindings = restore_control_bindings(&snapshot.control_bindings, &world)?;
+
+        Ok(Self {
+            room_id: snapshot.room_id.clone(),
+            config: lockstep_demo_config(snapshot.tick_rate),
+            world,
+            bindings,
+            frames_checked: 0,
+            final_hash,
+        })
+    }
+
+    pub fn current_frame(&self) -> u32 {
+        self.world.frame.raw()
+    }
+
+    pub fn final_hash(&self) -> SimHash {
+        self.final_hash
+    }
+
+    pub fn frames_checked(&self) -> usize {
+        self.frames_checked
+    }
+
+    pub fn apply_server_frame(
+        &mut self,
+        observation: &ServerFrameObservation,
+    ) -> Result<(), OnlineError> {
+        let envelope = &observation.envelope;
+        validate_frame_envelope(envelope, &self.room_id)?;
+
+        if envelope.frame <= self.world.frame.raw() {
+            return Ok(());
+        }
+
+        let inputs = sim_inputs_from_frame_records(
+            &observation.inputs,
+            &envelope.input_sources,
+            &self.bindings,
+        )?;
+        let result = step(
+            &mut self.world,
+            FrameId::new(envelope.frame),
+            &inputs,
+            &self.config,
+        )
+        .map_err(|source| OnlineError::Step {
+            frame: envelope.frame,
+            source,
+        })?;
+        self.final_hash = result.state_hash;
+        self.frames_checked += 1;
+
+        let server_hash = envelope.state_hash.to_sim_hash();
+        let hash_matches = result.state_hash == server_hash;
+        let events_match = result.events == envelope.events;
+        if !hash_matches || !events_match {
+            let server_world = observation
+                .game_state
+                .as_ref()
+                .map(|state| state.project_server_world(&self.world))
+                .unwrap_or_else(|| self.world.clone());
+            let diff = OnlineMismatchDiff::new(
+                envelope.frame,
+                server_hash,
+                result.state_hash,
+                &server_world,
+                &self.world,
+                &inputs,
+                &envelope.events,
+                &result.events,
+                observation.game_state.is_some(),
+            );
+            return Err(OnlineError::Mismatch { diff });
+        }
+
+        Ok(())
+    }
+}
+
+pub fn parse_game_state_json(input: &str) -> Result<LockstepSimDemoState, OnlineError> {
+    serde_json::from_str::<LockstepSimDemoState>(input).map_err(OnlineError::Json)
+}
+
+pub fn observation_from_game_state_and_inputs(
+    game_state_json: &str,
+    inputs: Vec<FrameInputRecord>,
+) -> Result<Option<ServerFrameObservation>, OnlineError> {
+    if game_state_json.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let game_state = parse_game_state_json(game_state_json)?;
+    let Some(envelope) = game_state.observed_frame().cloned() else {
+        return Ok(None);
+    };
+
+    Ok(Some(ServerFrameObservation {
+        envelope,
+        inputs,
+        game_state: Some(game_state),
+    }))
+}
+
+fn validate_initial_snapshot(snapshot: &SimInitialSnapshot) -> Result<(), OnlineError> {
+    if snapshot.schema != SIM_INITIAL_SNAPSHOT_SCHEMA
+        || snapshot.schema_version != SIM_DOWNLINK_SCHEMA_VERSION
+    {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "UNSUPPORTED_SIM_SNAPSHOT_SCHEMA".to_owned(),
+        ));
+    }
+    if snapshot.room_id.trim().is_empty() {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "INVALID_SIM_SNAPSHOT_ROOM_ID".to_owned(),
+        ));
+    }
+    if snapshot.tick_rate == 0 {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "INVALID_SIM_SNAPSHOT_TICK_RATE".to_owned(),
+        ));
+    }
+    if snapshot.start_frame != snapshot.snapshot.frame.raw() {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "SIM_SNAPSHOT_FRAME_MISMATCH".to_owned(),
+        ));
+    }
+    if snapshot.rng_seed != snapshot.snapshot.world.rng.seed {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "SIM_SNAPSHOT_RNG_SEED_MISMATCH".to_owned(),
+        ));
+    }
+    if snapshot.state_hash.to_sim_hash() != snapshot.snapshot.hash {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "SIM_SNAPSHOT_HASH_ENVELOPE_MISMATCH".to_owned(),
+        ));
+    }
+
+    let mut entities = snapshot.entities.clone();
+    entities.sort_by_key(|entity| entity.id);
+    if !entities.is_empty() && entities != snapshot.snapshot.world.entities_sorted_by_id() {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "SIM_SNAPSHOT_ENTITIES_MISMATCH".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn restore_control_bindings(
+    bindings: &[SimControlBinding],
+    world: &SimWorld,
+) -> Result<HashMap<String, EntityId>, OnlineError> {
+    let entities = world
+        .entities_sorted_by_id()
+        .iter()
+        .map(|entity| (entity.id, entity))
+        .collect::<HashMap<_, _>>();
+    let mut restored = HashMap::new();
+
+    for binding in bindings {
+        if binding.character_id.trim().is_empty() {
+            return Err(OnlineError::InvalidInitialSnapshot(
+                "INVALID_SIM_SNAPSHOT_CONTROL_BINDING".to_owned(),
+            ));
+        }
+        let entity_id = EntityId::new(binding.entity_id);
+        let Some(entity) = entities.get(&entity_id) else {
+            return Err(OnlineError::InvalidInitialSnapshot(
+                "INVALID_SIM_SNAPSHOT_CONTROL_BINDING".to_owned(),
+            ));
+        };
+        if entity.owner_character_id.as_deref() != Some(binding.character_id.as_str()) {
+            return Err(OnlineError::InvalidInitialSnapshot(
+                "INVALID_SIM_SNAPSHOT_CONTROL_BINDING".to_owned(),
+            ));
+        }
+        if restored
+            .insert(binding.character_id.clone(), entity_id)
+            .is_some()
+        {
+            return Err(OnlineError::InvalidInitialSnapshot(
+                "INVALID_SIM_SNAPSHOT_CONTROL_BINDING".to_owned(),
+            ));
+        }
+    }
+
+    Ok(restored)
+}
+
+fn validate_frame_envelope(envelope: &SimFrameEnvelope, room_id: &str) -> Result<(), OnlineError> {
+    if envelope.schema != SIM_FRAME_ENVELOPE_SCHEMA
+        || envelope.schema_version != SIM_DOWNLINK_SCHEMA_VERSION
+    {
+        return Err(OnlineError::InvalidFrameEnvelope(
+            "UNSUPPORTED_SIM_FRAME_ENVELOPE_SCHEMA".to_owned(),
+        ));
+    }
+    if envelope.room_id != room_id {
+        return Err(OnlineError::InvalidFrameEnvelope(format!(
+            "SIM_FRAME_ROOM_MISMATCH expected {room_id}, got {}",
+            envelope.room_id
+        )));
+    }
+    if envelope.tick_rate == 0 {
+        return Err(OnlineError::InvalidFrameEnvelope(
+            "INVALID_SIM_FRAME_TICK_RATE".to_owned(),
+        ));
+    }
+    if envelope.state_hash.frame != envelope.frame {
+        return Err(OnlineError::InvalidFrameEnvelope(
+            "SIM_FRAME_HASH_FRAME_MISMATCH".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn sim_inputs_from_frame_records(
+    records: &[FrameInputRecord],
+    input_sources: &[SimFrameInputSourceSummary],
+    bindings: &HashMap<String, EntityId>,
+) -> Result<Vec<SimInput>, OnlineError> {
+    let source_by_key = input_sources
+        .iter()
+        .map(|source| {
+            (
+                (
+                    source.frame,
+                    source.character_id.as_str(),
+                    source.action.as_str(),
+                ),
+                source.source,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut sim_inputs = Vec::new();
+
+    for record in records {
+        let Some(entity_id) = bindings.get(&record.character_id).copied() else {
+            continue;
+        };
+        let source = source_by_key
+            .get(&(
+                record.frame_id,
+                record.character_id.as_str(),
+                record.action.as_str(),
+            ))
+            .copied()
+            .unwrap_or(SimFrameInputSource::Real)
+            .into();
+
+        if record.action.is_empty() || record.action != SIM_INPUT_ACTION {
+            sim_inputs.push(SimInput {
+                frame: FrameId::new(record.frame_id),
+                character_id: record.character_id.clone(),
+                entity_id,
+                seq: 0,
+                source,
+                command: SimCommand::Noop,
+            });
+            continue;
+        }
+
+        let payload = parse_wire_sim_input_payload(&record.payload_json)?;
+        sim_inputs.extend(payload.commands.into_iter().map(|command| SimInput {
+            frame: FrameId::new(record.frame_id),
+            character_id: record.character_id.clone(),
+            entity_id,
+            seq: payload.seq,
+            source,
+            command: command.to_sim_command(),
+        }));
+    }
+
+    Ok(sim_inputs)
+}
+
+fn parse_wire_sim_input_payload(input: &str) -> Result<ParsedWireSimInputPayload, OnlineError> {
+    let payload = serde_json::from_str::<WireSimInputPayload>(input).map_err(OnlineError::Json)?;
+    if payload.version != SIM_INPUT_VERSION {
+        return Err(OnlineError::InvalidSimInput(
+            "UNSUPPORTED_SIM_INPUT_VERSION",
+        ));
+    }
+    let commands = payload
+        .commands
+        .into_iter()
+        .map(WireSimCommand::validate)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ParsedWireSimInputPayload {
+        seq: payload.seq,
+        commands,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedWireSimInputPayload {
+    seq: u32,
+    commands: Vec<ParsedWireSimCommand>,
+}
+
+pub fn lockstep_demo_config(tick_rate: u16) -> SimConfig {
+    SimConfig {
+        movement: MovementConfig {
+            tick_rate: tick_rate.max(1),
+            default_speed_per_second: Fp::from_i32(6),
+            max_speed_per_second: Fp::from_i32(12),
+            bounds: SceneBounds {
+                min: Vec2Fp::new(Fp::from_i32(-100), Fp::from_i32(-100)),
+                max: Vec2Fp::new(Fp::from_i32(100), Fp::from_i32(100)),
+            },
+            static_obstacles: Vec::<StaticObstacle>::new(),
+        },
+        combat: CombatConfig::from_definitions(
+            vec![SkillDefinition {
+                id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                cooldown_frames: tick_rate.max(1) as u32,
+                cast_range: Fp::from_i32(12),
+                target_type: SkillTargetType::Enemy,
+                effects: vec![CombatEffect::Damage {
+                    formula: sim_core::DamageFormula::Fixed { amount: 15 },
+                }],
+            }],
+            Vec::new(),
+        )
+        .expect("lockstep_sim_demo default combat config should be valid"),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnlineMismatchDiff {
+    pub frame: u32,
+    pub server_hash: SimHash,
+    pub client_hash: SimHash,
+    pub entity_diff: MismatchDiff,
+    pub event_diff: EventDiff,
+    pub server_debug_available: bool,
+}
+
+impl OnlineMismatchDiff {
+    fn new(
+        frame: u32,
+        server_hash: SimHash,
+        client_hash: SimHash,
+        server_world: &SimWorld,
+        client_world: &SimWorld,
+        frame_inputs: &[SimInput],
+        server_events: &[SimEvent],
+        client_events: &[SimEvent],
+        server_debug_available: bool,
+    ) -> Self {
+        Self {
+            frame,
+            server_hash,
+            client_hash,
+            entity_diff: MismatchDiff::new(
+                frame,
+                server_hash,
+                client_hash,
+                server_world,
+                client_world,
+                frame_inputs,
+            ),
+            event_diff: EventDiff {
+                server_events: server_events.to_vec(),
+                client_events: client_events.to_vec(),
+            },
+            server_debug_available,
+        }
+    }
+}
+
+impl fmt::Display for OnlineMismatchDiff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "online mismatch: first mismatch frame {}", self.frame)?;
+        writeln!(f, "server_hash: {:016x}", self.server_hash.value)?;
+        writeln!(f, "client_hash: {:016x}", self.client_hash.value)?;
+        writeln!(
+            f,
+            "entity count: server={} client={} diff={:+}",
+            self.entity_diff.server_entity_count,
+            self.entity_diff.client_entity_count,
+            self.entity_diff.entity_count_delta()
+        )?;
+
+        if !self.server_debug_available {
+            writeln!(
+                f,
+                "entity diffs: server debug state unavailable in frame snapshot"
+            )?;
+        } else if self.entity_diff.entity_diffs.is_empty() {
+            writeln!(f, "entity diffs: none in tracked fields")?;
+        } else {
+            writeln!(f, "entity diffs:")?;
+            for diff in &self.entity_diff.entity_diffs {
+                writeln!(f, "  - entity {}:", diff.entity_id)?;
+                if diff.server_pos != diff.client_pos {
+                    writeln!(
+                        f,
+                        "    pos: server_pos={} client_pos={}",
+                        format_optional(diff.server_pos),
+                        format_optional(diff.client_pos)
+                    )?;
+                }
+                if diff.server_hp != diff.client_hp {
+                    writeln!(
+                        f,
+                        "    hp: server_hp={} client_hp={}",
+                        format_optional(diff.server_hp),
+                        format_optional(diff.client_hp)
+                    )?;
+                }
+                if diff.server_alive != diff.client_alive {
+                    writeln!(
+                        f,
+                        "    alive: server_alive={} client_alive={}",
+                        format_optional(diff.server_alive),
+                        format_optional(diff.client_alive)
+                    )?;
+                }
+                if diff.server_movement != diff.client_movement {
+                    writeln!(
+                        f,
+                        "    movement: server_movement={} client_movement={}",
+                        format_optional(diff.server_movement),
+                        format_optional(diff.client_movement)
+                    )?;
+                }
+            }
+        }
+
+        if self.event_diff.server_events == self.event_diff.client_events {
+            writeln!(f, "event diffs: none")?;
+        } else {
+            writeln!(f, "event diffs:")?;
+            writeln!(f, "  server_events: {:?}", self.event_diff.server_events)?;
+            writeln!(f, "  client_events: {:?}", self.event_diff.client_events)?;
+        }
+
+        if self.entity_diff.inputs.is_empty() {
+            write!(f, "inputs: none")?;
+        } else {
+            writeln!(f, "inputs:")?;
+            for input in &self.entity_diff.inputs {
+                writeln!(f, "  - {input}")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventDiff {
+    pub server_events: Vec<SimEvent>,
+    pub client_events: Vec<SimEvent>,
+}
+
+fn format_optional<T: fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "<missing>".to_owned())
+}
+
+#[derive(Debug)]
+pub enum OnlineError {
+    InvalidArgs {
+        message: String,
+    },
+    ReadScenario {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Scenario(ScenarioError),
+    Json(serde_json::Error),
+    Io(io::Error),
+    Protocol(String),
+    ServerRejected {
+        stage: &'static str,
+        error_code: String,
+    },
+    InvalidInitialSnapshot(String),
+    InvalidFrameEnvelope(String),
+    InvalidSimInput(&'static str),
+    UnsupportedOnlineCommand(&'static str),
+    Step {
+        frame: u32,
+        source: StepError,
+    },
+    Mismatch {
+        diff: OnlineMismatchDiff,
+    },
+}
+
+impl OnlineError {
+    fn invalid_args(message: impl Into<String>) -> Self {
+        Self::InvalidArgs {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<crate::offline::OfflineError> for OnlineError {
+    fn from(error: crate::offline::OfflineError) -> Self {
+        Self::Protocol(error.to_string())
+    }
+}
+
+impl From<io::Error> for OnlineError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl fmt::Display for OnlineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidArgs { message } => write!(f, "{message}\n{USAGE}"),
+            Self::ReadScenario { path, source } => {
+                write!(f, "failed to read scenario `{}`: {source}", path.display())
+            }
+            Self::Scenario(error) => write!(f, "{error}"),
+            Self::Json(error) => write!(f, "JSON error: {error}"),
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Protocol(message) => write!(f, "protocol error: {message}"),
+            Self::ServerRejected { stage, error_code } => {
+                write!(f, "{stage} rejected by server: {error_code}")
+            }
+            Self::InvalidInitialSnapshot(message) => {
+                write!(f, "invalid lockstep initial snapshot: {message}")
+            }
+            Self::InvalidFrameEnvelope(message) => {
+                write!(f, "invalid lockstep frame envelope: {message}")
+            }
+            Self::InvalidSimInput(code) => write!(f, "invalid sim_input payload: {code}"),
+            Self::UnsupportedOnlineCommand(message) => write!(f, "{message}"),
+            Self::Step { frame, source } => {
+                write!(f, "client replay failed at frame {frame}: {source}")
+            }
+            Self::Mismatch { diff } => write!(f, "{diff}"),
+        }
+    }
+}
+
+impl std::error::Error for OnlineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ReadScenario { source, .. } => Some(source),
+            Self::Scenario(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::Step { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+enum MessageType {
+    AuthReq = 1001,
+    AuthRes = 1002,
+    RoomJoinReq = 1101,
+    RoomJoinRes = 1102,
+    RoomReadyReq = 1105,
+    RoomReadyRes = 1106,
+    RoomStartReq = 1107,
+    RoomStartRes = 1108,
+    PlayerInputReq = 1111,
+    PlayerInputRes = 1112,
+    RoomStatePush = 1201,
+    FrameBundlePush = 1203,
+    ErrorRes = 9000,
+}
+
+impl MessageType {
+    fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            1001 => Some(Self::AuthReq),
+            1002 => Some(Self::AuthRes),
+            1101 => Some(Self::RoomJoinReq),
+            1102 => Some(Self::RoomJoinRes),
+            1105 => Some(Self::RoomReadyReq),
+            1106 => Some(Self::RoomReadyRes),
+            1107 => Some(Self::RoomStartReq),
+            1108 => Some(Self::RoomStartRes),
+            1111 => Some(Self::PlayerInputReq),
+            1112 => Some(Self::PlayerInputRes),
+            1201 => Some(Self::RoomStatePush),
+            1203 => Some(Self::FrameBundlePush),
+            9000 => Some(Self::ErrorRes),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Packet {
+    msg_type: u16,
+    seq: u32,
+    body: Vec<u8>,
+}
+
+struct TcpGameTransport {
+    stream: TcpStream,
+    next_seq: u32,
+}
+
+impl TcpGameTransport {
+    fn connect(addr: &str, timeout: Duration) -> Result<Self, OnlineError> {
+        let socket_addr = addr
+            .to_socket_addrs()
+            .map_err(OnlineError::Io)?
+            .next()
+            .ok_or_else(|| {
+                OnlineError::Protocol(format!(
+                    "server address `{addr}` resolved to no socket address"
+                ))
+            })?;
+        let stream = TcpStream::connect_timeout(&socket_addr, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+
+        Ok(Self {
+            stream,
+            next_seq: 1,
+        })
+    }
+
+    fn send<M: prost::Message>(
+        &mut self,
+        msg_type: MessageType,
+        message: &M,
+    ) -> Result<u32, OnlineError> {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        let body = message.encode_to_vec();
+        let packet = encode_packet(msg_type, seq, &body);
+        self.stream.write_all(&packet)?;
+        Ok(seq)
+    }
+
+    fn read_packet(&mut self) -> Result<Packet, OnlineError> {
+        read_packet(&mut self.stream)
+    }
+
+    fn read_until(
+        &mut self,
+        expected: MessageType,
+        expected_seq: Option<u32>,
+        replay: Option<&mut Option<OnlineReplay>>,
+    ) -> Result<Packet, OnlineError> {
+        let mut replay = replay;
+        loop {
+            let packet = self.read_packet()?;
+            if MessageType::from_u16(packet.msg_type) == Some(expected)
+                && expected_seq.is_none_or(|seq| seq == packet.seq)
+            {
+                return Ok(packet);
+            }
+
+            if let Some(replay_slot) = replay.as_deref_mut() {
+                maybe_consume_push_packet(&packet, replay_slot)?;
+            }
+        }
+    }
+}
+
+fn drive_online_session(
+    transport: &mut TcpGameTransport,
+    options: &OnlineCliOptions,
+    ticket: &str,
+    input_plan: &[PlayerInputPlan],
+) -> Result<OnlineSessionOutcome, OnlineError> {
+    let auth_seq = transport.send(
+        MessageType::AuthReq,
+        &pb::AuthReq {
+            ticket: ticket.to_owned(),
+        },
+    )?;
+    let auth_packet = transport.read_until(MessageType::AuthRes, Some(auth_seq), None)?;
+    let auth = decode_body::<pb::AuthRes>(&auth_packet)?;
+    if !auth.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "auth",
+            error_code: auth.error_code,
+        });
+    }
+
+    let join_seq = transport.send(
+        MessageType::RoomJoinReq,
+        &pb::RoomJoinReq {
+            room_id: options.room_id.clone(),
+            policy_id: options.policy_id.clone(),
+        },
+    )?;
+    let join_packet = transport.read_until(MessageType::RoomJoinRes, Some(join_seq), None)?;
+    let join = decode_body::<pb::RoomJoinRes>(&join_packet)?;
+    if !join.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "room_join",
+            error_code: join.error_code,
+        });
+    }
+
+    let mut replay = None;
+    drain_until_initial_snapshot(transport, &mut replay)?;
+
+    let ready_seq = transport.send(MessageType::RoomReadyReq, &pb::RoomReadyReq { ready: true })?;
+    let ready_packet = transport.read_until(
+        MessageType::RoomReadyRes,
+        Some(ready_seq),
+        Some(&mut replay),
+    )?;
+    let ready = decode_body::<pb::RoomReadyRes>(&ready_packet)?;
+    if !ready.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "room_ready",
+            error_code: ready.error_code,
+        });
+    }
+
+    let start_seq = transport.send(MessageType::RoomStartReq, &pb::RoomStartReq {})?;
+    let start_packet = transport.read_until(
+        MessageType::RoomStartRes,
+        Some(start_seq),
+        Some(&mut replay),
+    )?;
+    let start = decode_body::<pb::RoomStartRes>(&start_packet)?;
+    if !start.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "room_start",
+            error_code: start.error_code,
+        });
+    }
+
+    drain_until_initial_snapshot(transport, &mut replay)?;
+
+    for input in input_plan {
+        let seq = transport.send(
+            MessageType::PlayerInputReq,
+            &pb::PlayerInputReq {
+                frame_id: input.frame_id,
+                action: input.action.clone(),
+                payload_json: input.payload_json.clone(),
+                client_timestamp_ms: now_ms(),
+            },
+        )?;
+        let packet =
+            transport.read_until(MessageType::PlayerInputRes, Some(seq), Some(&mut replay))?;
+        let response = decode_body::<pb::PlayerInputRes>(&packet)?;
+        if !response.ok {
+            return Err(OnlineError::ServerRejected {
+                stage: "player_input",
+                error_code: response.error_code,
+            });
+        }
+    }
+
+    let target_frame = input_plan
+        .iter()
+        .map(|input| input.frame_id)
+        .max()
+        .unwrap_or(0);
+    while replay
+        .as_ref()
+        .is_none_or(|replay| replay.current_frame() < target_frame)
+    {
+        let packet = transport.read_packet()?;
+        maybe_consume_push_packet(&packet, &mut replay)?;
+    }
+
+    let Some(replay) = replay else {
+        return Err(OnlineError::Protocol(
+            "room did not publish lockstep initialSnapshot in RoomSnapshot.game_state".to_owned(),
+        ));
+    };
+
+    Ok(OnlineSessionOutcome {
+        frames_checked: replay.frames_checked(),
+        final_hash: Some(replay.final_hash()),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OnlineSessionOutcome {
+    frames_checked: usize,
+    final_hash: Option<SimHash>,
+}
+
+fn drain_until_initial_snapshot(
+    transport: &mut TcpGameTransport,
+    replay: &mut Option<OnlineReplay>,
+) -> Result<(), OnlineError> {
+    if replay.is_some() {
+        return Ok(());
+    }
+
+    let packet = transport.read_packet()?;
+    maybe_consume_push_packet(&packet, replay)?;
+    Ok(())
+}
+
+fn maybe_consume_push_packet(
+    packet: &Packet,
+    replay: &mut Option<OnlineReplay>,
+) -> Result<(), OnlineError> {
+    match MessageType::from_u16(packet.msg_type) {
+        Some(MessageType::RoomStatePush) => {
+            let push = decode_body::<pb::RoomStatePush>(packet)?;
+            if let Some(snapshot) = push.snapshot {
+                consume_room_snapshot(snapshot, Vec::new(), replay)?;
+            }
+        }
+        Some(MessageType::FrameBundlePush) => {
+            let push = decode_body::<pb::FrameBundlePush>(packet)?;
+            if let Some(snapshot) = push.snapshot {
+                let inputs = push
+                    .inputs
+                    .into_iter()
+                    .map(|input| FrameInputRecord {
+                        character_id: input.character_id,
+                        action: input.action,
+                        payload_json: input.payload_json,
+                        frame_id: input.frame_id,
+                    })
+                    .collect();
+                consume_room_snapshot(snapshot, inputs, replay)?;
+            }
+        }
+        Some(MessageType::ErrorRes) => {
+            let error = decode_body::<pb::ErrorRes>(packet)?;
+            return Err(OnlineError::Protocol(format!(
+                "server error response: {} {}",
+                error.error_code, error.message
+            )));
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn consume_room_snapshot(
+    snapshot: pb::RoomSnapshot,
+    inputs: Vec<FrameInputRecord>,
+    replay: &mut Option<OnlineReplay>,
+) -> Result<(), OnlineError> {
+    if snapshot.game_state.trim().is_empty() {
+        return Ok(());
+    }
+
+    let game_state = parse_game_state_json(&snapshot.game_state)?;
+    if replay.is_none() {
+        if let Some(initial) = &game_state.initial_snapshot {
+            *replay = Some(OnlineReplay::from_initial_snapshot(initial)?);
+        }
+    }
+
+    let Some(replay) = replay else {
+        return Ok(());
+    };
+    let Some(envelope) = game_state.observed_frame().cloned() else {
+        return Ok(());
+    };
+
+    replay.apply_server_frame(&ServerFrameObservation {
+        envelope,
+        inputs,
+        game_state: Some(game_state),
+    })
+}
+
+fn decode_body<M: prost::Message + Default>(packet: &Packet) -> Result<M, OnlineError> {
+    M::decode(packet.body.as_slice()).map_err(|error| {
+        OnlineError::Protocol(format!(
+            "failed to decode message type {} body: {error}",
+            packet.msg_type
+        ))
+    })
+}
+
+const MAGIC: u16 = 0xCAFE;
+const PROTOCOL_VERSION: u8 = 1;
+const HEADER_LEN: usize = 14;
+const MAX_BODY_LEN: u32 = 1024 * 1024;
+
+fn encode_packet(msg_type: MessageType, seq: u32, body: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(HEADER_LEN + body.len());
+    packet.extend_from_slice(&MAGIC.to_be_bytes());
+    packet.push(PROTOCOL_VERSION);
+    packet.push(0);
+    packet.extend_from_slice(&(msg_type as u16).to_be_bytes());
+    packet.extend_from_slice(&seq.to_be_bytes());
+    packet.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    packet.extend_from_slice(body);
+    packet
+}
+
+fn read_packet(stream: &mut impl Read) -> Result<Packet, OnlineError> {
+    let mut header = [0_u8; HEADER_LEN];
+    stream.read_exact(&mut header)?;
+
+    let magic = u16::from_be_bytes([header[0], header[1]]);
+    if magic != MAGIC {
+        return Err(OnlineError::Protocol(format!(
+            "invalid packet magic: {magic:#06x}"
+        )));
+    }
+    if header[2] != PROTOCOL_VERSION {
+        return Err(OnlineError::Protocol(format!(
+            "invalid packet version: {}",
+            header[2]
+        )));
+    }
+    if header[3] != 0 {
+        return Err(OnlineError::Protocol(format!(
+            "unsupported packet flags: {}",
+            header[3]
+        )));
+    }
+
+    let msg_type = u16::from_be_bytes([header[4], header[5]]);
+    let seq = u32::from_be_bytes([header[6], header[7], header[8], header[9]]);
+    let body_len = u32::from_be_bytes([header[10], header[11], header[12], header[13]]);
+    if body_len > MAX_BODY_LEN {
+        return Err(OnlineError::Protocol(format!(
+            "packet body too large: {body_len}"
+        )));
+    }
+
+    let mut body = vec![0_u8; body_len as usize];
+    stream.read_exact(&mut body)?;
+    Ok(Packet {
+        msg_type,
+        seq,
+        body,
+    })
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sim_core::{
+        CombatState, EntityKind, MovementState, SimRngState, SimTransform, TeamId, snapshot,
+    };
+
+    const DEFAULT_LOCKSTEP_SIM_TICK_RATE: u16 = 20;
+    const TRAINING_TARGET_ENTITY_ID: u32 = 9000;
+
+    fn player_entity(character_id: &str) -> SimEntity {
+        SimEntity {
+            id: EntityId::new(1000),
+            kind: EntityKind::Player,
+            owner_character_id: Some(character_id.to_owned()),
+            team_id: TeamId::new(1),
+            transform: SimTransform {
+                pos: Vec2Fp::zero(),
+                facing: QuantizedDir::RIGHT,
+                radius: Fp::from_milli(500),
+            },
+            movement: MovementState::default(),
+            combat: CombatState {
+                hp: 100,
+                max_hp: 100,
+                attack: 10,
+                defense: 3,
+                speed: 6,
+                crit_rate_bps: 500,
+                crit_damage_bps: 15_000,
+                skill_slots: vec![sim_core::SkillSlot {
+                    skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                    cooldown_remaining: 0,
+                }],
+                buffs: Vec::new(),
+            },
+            alive: true,
+        }
+    }
+
+    fn target_entity() -> SimEntity {
+        SimEntity {
+            id: EntityId::new(TRAINING_TARGET_ENTITY_ID),
+            kind: EntityKind::Monster,
+            owner_character_id: None,
+            team_id: TeamId::new(90),
+            transform: SimTransform {
+                pos: Vec2Fp::new(Fp::from_i32(8), Fp::ZERO),
+                facing: QuantizedDir::LEFT,
+                radius: Fp::from_milli(500),
+            },
+            movement: MovementState::default(),
+            combat: CombatState {
+                hp: 150,
+                max_hp: 150,
+                attack: 0,
+                defense: 1,
+                speed: 0,
+                crit_rate_bps: 0,
+                crit_damage_bps: 10_000,
+                skill_slots: Vec::new(),
+                buffs: Vec::new(),
+            },
+            alive: true,
+        }
+    }
+
+    fn initial_snapshot() -> SimInitialSnapshot {
+        let config = lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE);
+        let world = SimWorld::with_rng(
+            FrameId::new(0),
+            SimRngState::default(),
+            vec![player_entity("player-a"), target_entity()],
+        )
+        .unwrap();
+        let snapshot = snapshot(&world, &config);
+
+        SimInitialSnapshot {
+            schema: SIM_INITIAL_SNAPSHOT_SCHEMA.to_owned(),
+            schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
+            room_id: "room-lockstep".to_owned(),
+            start_frame: 0,
+            tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            config_hash: "test".to_owned(),
+            rng_seed: 0,
+            state_hash: sim_hash_envelope(snapshot.hash),
+            snapshot,
+            entities: world.entities_sorted_by_id().to_vec(),
+            control_bindings: vec![SimControlBinding {
+                character_id: "player-a".to_owned(),
+                entity_id: 1000,
+            }],
+        }
+    }
+
+    fn sim_hash_envelope(hash: SimHash) -> SimHashEnvelope {
+        SimHashEnvelope {
+            frame: hash.frame.raw(),
+            value: hash.value,
+            hex: format!("{:016x}", hash.value),
+        }
+    }
+
+    fn debug_state(world: &SimWorld, last_frame: Option<SimFrameEnvelope>) -> LockstepSimDemoState {
+        let player = world.entity(EntityId::new(1000)).unwrap();
+        let target = world
+            .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+            .unwrap();
+
+        LockstepSimDemoState {
+            logic_type: Some(LOCKSTEP_SIM_DEMO_POLICY_ID.to_owned()),
+            room_id: Some("room-lockstep".to_owned()),
+            world_frame: world.frame.raw(),
+            tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            training_target_entity_id: TRAINING_TARGET_ENTITY_ID,
+            player_entities: vec![LockstepSimPlayerDebugState {
+                character_id: "player-a".to_owned(),
+                entity: LockstepSimEntityDebugState {
+                    entity_id: player.id.raw(),
+                    x: player.transform.pos.x.raw(),
+                    y: player.transform.pos.y.raw(),
+                    hp: player.combat.hp,
+                    max_hp: player.combat.max_hp,
+                    alive: player.alive,
+                },
+            }],
+            training_target: Some(LockstepSimEntityDebugState {
+                entity_id: target.id.raw(),
+                x: target.transform.pos.x.raw(),
+                y: target.transform.pos.y.raw(),
+                hp: target.combat.hp,
+                max_hp: target.combat.max_hp,
+                alive: target.alive,
+            }),
+            initial_snapshot: None,
+            last_frame,
+            observer_frame: None,
+            last_error: None,
+        }
+    }
+
+    fn frame_envelope(result: &sim_core::SimStepResult) -> SimFrameEnvelope {
+        SimFrameEnvelope {
+            schema: SIM_FRAME_ENVELOPE_SCHEMA.to_owned(),
+            schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
+            room_id: "room-lockstep".to_owned(),
+            frame: result.frame.raw(),
+            tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            config_hash: "test".to_owned(),
+            state_hash: sim_hash_envelope(result.state_hash),
+            events: result.events.clone(),
+            input_sources: vec![SimFrameInputSourceSummary {
+                frame: result.frame.raw(),
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            debug_summary: SimFrameDebugSummary {
+                input_count: 1,
+                real_input_count: 1,
+                synthetic_input_count: 0,
+                synthesized_empty_input_count: 0,
+                synthesized_repeat_last_input_count: 0,
+                event_count: result.events.len(),
+                entity_count: 2,
+                alive_entity_count: 2,
+                player_entity_count: 1,
+            },
+        }
+    }
+
+    fn move_right_payload(seq: u32) -> String {
+        build_sim_input_payload(
+            seq,
+            &[SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: None,
+            })],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn online_cli_parses_dry_run_options() {
+        let options = OnlineCliOptions::parse([
+            "--mode",
+            "online",
+            "--scenario",
+            "move_straight",
+            "--server",
+            "127.0.0.1:4000",
+            "--test-ticket",
+            "ticket-1",
+            "--room",
+            "room-1",
+            "--character-id",
+            "player-a",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        assert_eq!(options.server_addr, "127.0.0.1:4000");
+        assert_eq!(options.ticket.as_deref(), Some("ticket-1"));
+        assert_eq!(options.room_id, "room-1");
+        assert_eq!(options.character_id.as_deref(), Some("player-a"));
+        assert!(options.dry_run);
+    }
+
+    #[test]
+    fn builds_server_sim_input_payload_from_sim_core_command() {
+        let payload = move_right_payload(7);
+        let parsed = parse_wire_sim_input_payload(&payload).unwrap();
+
+        assert_eq!(parsed.seq, 7);
+        assert_eq!(parsed.commands.len(), 1);
+        assert!(matches!(
+            parsed.commands[0].to_sim_command(),
+            SimCommand::Move(command) if command.dir == QuantizedDir::RIGHT
+        ));
+    }
+
+    #[test]
+    fn lockstep_demo_melee_scenario_builds_target_9000_payload() {
+        let scenario =
+            Scenario::from_json_str(include_str!("../scenarios/lockstep_demo_melee.json")).unwrap();
+        let inputs = scenario.to_sim_inputs().unwrap();
+        let plan = build_player_input_plan(&inputs).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].frame_id, 1);
+        assert_eq!(plan[0].action, SIM_INPUT_ACTION);
+
+        let payload = serde_json::from_str::<WireSimInputPayload>(&plan[0].payload_json).unwrap();
+        assert_eq!(payload.version, SIM_INPUT_VERSION);
+        assert_eq!(payload.seq, 1);
+        assert_eq!(
+            payload.commands,
+            vec![WireSimCommand::CastSkill {
+                skill_id: DEFAULT_PLAYER_SKILL_ID,
+                target_entity_id: Some(TRAINING_TARGET_ENTITY_ID),
+            }]
+        );
+    }
+
+    #[test]
+    fn online_replay_matches_server_frame_hash_and_events() {
+        let initial = initial_snapshot();
+        let mut server_world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let input = FrameInputRecord {
+            character_id: "player-a".to_owned(),
+            action: SIM_INPUT_ACTION.to_owned(),
+            payload_json: move_right_payload(1),
+            frame_id: 1,
+        };
+        let sim_inputs = sim_inputs_from_frame_records(
+            std::slice::from_ref(&input),
+            &[SimFrameInputSourceSummary {
+                frame: 1,
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            &HashMap::from([("player-a".to_owned(), EntityId::new(1000))]),
+        )
+        .unwrap();
+        let result = step(
+            &mut server_world,
+            FrameId::new(1),
+            &sim_inputs,
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        let envelope = frame_envelope(&result);
+        let game_state = debug_state(&server_world, Some(envelope.clone()));
+
+        let mut replay = OnlineReplay::from_initial_snapshot(&initial).unwrap();
+        replay
+            .apply_server_frame(&ServerFrameObservation {
+                envelope,
+                inputs: vec![input],
+                game_state: Some(game_state),
+            })
+            .unwrap();
+
+        assert_eq!(replay.current_frame(), 1);
+        assert_eq!(replay.final_hash(), result.state_hash);
+        assert_eq!(replay.frames_checked(), 1);
+    }
+
+    #[test]
+    fn online_replay_mismatch_reports_hash_entities_events_and_inputs() {
+        let initial = initial_snapshot();
+        let mut server_world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let input = FrameInputRecord {
+            character_id: "player-a".to_owned(),
+            action: SIM_INPUT_ACTION.to_owned(),
+            payload_json: move_right_payload(1),
+            frame_id: 1,
+        };
+        let sim_inputs = sim_inputs_from_frame_records(
+            std::slice::from_ref(&input),
+            &[SimFrameInputSourceSummary {
+                frame: 1,
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            &HashMap::from([("player-a".to_owned(), EntityId::new(1000))]),
+        )
+        .unwrap();
+        let result = step(
+            &mut server_world,
+            FrameId::new(1),
+            &sim_inputs,
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        server_world
+            .entity_mut(EntityId::new(1000))
+            .unwrap()
+            .transform
+            .pos
+            .x = Fp::from_milli(301);
+
+        let mut envelope = frame_envelope(&result);
+        envelope.state_hash.value ^= 1;
+        envelope.events.push(SimEvent::SkillCast {
+            frame: FrameId::new(1),
+            source_entity: EntityId::new(1000),
+            target_entity: Some(EntityId::new(TRAINING_TARGET_ENTITY_ID)),
+            skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+            value: 1,
+            sequence: 99,
+        });
+        let game_state = debug_state(&server_world, Some(envelope.clone()));
+
+        let mut replay = OnlineReplay::from_initial_snapshot(&initial).unwrap();
+        let error = replay
+            .apply_server_frame(&ServerFrameObservation {
+                envelope,
+                inputs: vec![input],
+                game_state: Some(game_state),
+            })
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("first mismatch frame 1"));
+        assert!(message.contains("server_hash:"));
+        assert!(message.contains("client_hash:"));
+        assert!(message.contains("entity diffs:"));
+        assert!(message.contains("event diffs:"));
+        assert!(message.contains("inputs:"));
+    }
+
+    #[test]
+    fn packet_codec_round_trips_header_and_body() {
+        let body = vec![1, 2, 3];
+        let encoded = encode_packet(MessageType::PlayerInputReq, 42, &body);
+        let packet = read_packet(&mut encoded.as_slice()).unwrap();
+
+        assert_eq!(packet.msg_type, MessageType::PlayerInputReq as u16);
+        assert_eq!(packet.seq, 42);
+        assert_eq!(packet.body, body);
+    }
+}

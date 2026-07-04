@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "tickRate": 20,
+  "config": {
+    "movement": {
+      "bounds": { "minX": -100000, "minY": -100000, "maxX": 100000, "maxY": 100000 },
+      "defaultSpeedPerSecondMilli": 6000,
+      "maxSpeedPerSecondMilli": 12000
+    },
+    "combat": {
+      "skills": [
+        {
+          "id": 1,
+          "cooldownFrames": 20,
+          "castRangeMilli": 12000,
+          "targetType": "enemy",
+          "effects": [
+            { "type": "damage", "formula": { "type": "fixed", "amount": 15 } }
+          ]
+        }
+      ]
+    }
+  },
+  "initial": {
+    "frame": 0,
+    "seed": 0,
+    "entities": [
+      {
+        "id": 1000,
+        "kind": "player",
+        "characterId": "player-a",
+        "teamId": 1,
+        "x": 0,
+        "y": 0,
+        "radius": 500,
+        "hp": 100,
+        "combat": {
+          "maxHp": 100,
+          "attack": 10,
+          "defense": 3,
+          "speed": 6,
+          "crit": 500,
+          "critDamage": 15000,
+          "skills": [{ "skillId": 1 }]
+        }
+      },
+      {
+        "id": 9000,
+        "kind": "monster",
+        "characterId": "training-target",
+        "teamId": 90,
+        "x": 8000,
+        "y": 0,
+        "radius": 500,
+        "hp": 150,
+        "combat": {
+          "maxHp": 150,
+          "attack": 0,
+          "defense": 1,
+          "speed": 0,
+          "crit": 0,
+          "critDamage": 10000
+        }
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "frame": 1,
+      "characterId": "player-a",
+      "entityId": 1000,
+      "seq": 1,
+      "command": {
+        "type": "CastSkill",
+        "skillId": 1,
+        "target": { "type": "Entity", "entityId": 9000 }
+      }
+    }
+  ],
+  "assertions": {
+    "finalFrame": 1,
+    "finalHash": "959839fddfc8c0dc",
+    "events": [
+      {
+        "frame": 1,
+        "type": "skillCast",
+        "sourceEntity": 1000,
+        "targetEntity": 9000,
+        "skillId": 1,
+        "value": 1
+      },
+      {
+        "frame": 1,
+        "type": "damageApplied",
+        "sourceEntity": 1000,
+        "targetEntity": 9000,
+        "skillId": 1,
+        "value": 14
+      }
+    ]
+  }
+}
