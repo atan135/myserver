@@ -220,6 +220,7 @@ pub struct OnlineReport {
     pub room_id: String,
     pub policy_id: String,
     pub dry_run: bool,
+    pub dry_run_packets: Vec<OnlineDryRunPacket>,
     pub input_plan_count: usize,
     pub frames_checked: usize,
     pub final_frame: Option<u32>,
@@ -239,6 +240,12 @@ impl fmt::Display for OnlineReport {
         writeln!(f, "room: {}", self.room_id)?;
         writeln!(f, "policy: {}", self.policy_id)?;
         writeln!(f, "sim_input packets: {}", self.input_plan_count)?;
+        if self.dry_run && !self.dry_run_packets.is_empty() {
+            writeln!(f, "dry-run packet plan:")?;
+            for packet in &self.dry_run_packets {
+                writeln!(f, "  - {packet}")?;
+            }
+        }
         writeln!(f, "frames checked: {}", self.frames_checked)?;
         if let Some(frame) = self.final_frame {
             writeln!(f, "final frame: {frame}")?;
@@ -268,6 +275,27 @@ impl fmt::Display for OnlineReport {
             write!(f, "observer hash: {:016x}", recovery.observer_hash.value)?;
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnlineDryRunPacket {
+    pub direction: &'static str,
+    pub name: &'static str,
+    pub msg_type: Option<u16>,
+    pub summary: String,
+}
+
+impl fmt::Display for OnlineDryRunPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.msg_type {
+            Some(msg_type) => write!(
+                f,
+                "{} {}({msg_type}): {}",
+                self.direction, self.name, self.summary
+            ),
+            None => write!(f, "{} {}: {}", self.direction, self.name, self.summary),
+        }
     }
 }
 
@@ -303,12 +331,14 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
     let input_plan = build_player_input_plan(&sim_inputs)?;
 
     if options.dry_run {
+        let dry_run_packets = build_dry_run_packet_plan(&options, &input_plan);
         return Ok(OnlineReport {
             scenario_path,
             server_addr: options.server_addr,
             room_id: options.room_id,
             policy_id: options.policy_id,
             dry_run: true,
+            dry_run_packets,
             input_plan_count: input_plan.len(),
             frames_checked: 0,
             final_frame: None,
@@ -342,6 +372,7 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
         room_id: options.room_id,
         policy_id: options.policy_id,
         dry_run: false,
+        dry_run_packets: Vec::new(),
         input_plan_count: input_plan.len(),
         frames_checked: outcome.frames_checked,
         final_frame: outcome.final_hash.map(|hash| hash.frame.raw()),
@@ -375,6 +406,73 @@ pub fn build_player_input_plan(inputs: &[SimInput]) -> Result<Vec<PlayerInputPla
             })
         })
         .collect()
+}
+
+fn build_dry_run_packet_plan(
+    options: &OnlineCliOptions,
+    input_plan: &[PlayerInputPlan],
+) -> Vec<OnlineDryRunPacket> {
+    let mut packets = vec![
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "AuthReq",
+            msg_type: Some(MessageType::AuthReq as u16),
+            summary: format!(
+                "ticket={}",
+                options
+                    .ticket
+                    .as_deref()
+                    .map(|_| "<provided>")
+                    .unwrap_or("<not required for dry-run>")
+            ),
+        },
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "RoomJoinReq",
+            msg_type: Some(MessageType::RoomJoinReq as u16),
+            summary: format!(
+                "create-or-join room={} policy={}",
+                options.room_id, options.policy_id
+            ),
+        },
+        OnlineDryRunPacket {
+            direction: "expect",
+            name: "RoomStatePush",
+            msg_type: Some(MessageType::RoomStatePush as u16),
+            summary: "RoomSnapshot.game_state.initialSnapshot".to_owned(),
+        },
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "RoomReadyReq",
+            msg_type: Some(MessageType::RoomReadyReq as u16),
+            summary: "ready=true".to_owned(),
+        },
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "RoomStartReq",
+            msg_type: Some(MessageType::RoomStartReq as u16),
+            summary: "start lockstep room".to_owned(),
+        },
+        OnlineDryRunPacket {
+            direction: "expect",
+            name: "FrameBundlePush",
+            msg_type: Some(MessageType::FrameBundlePush as u16),
+            summary: "snapshot.game_state.lastFrame or observerFrame.lastFrame with hash/events/inputSources"
+                .to_owned(),
+        },
+    ];
+
+    packets.extend(input_plan.iter().map(|input| OnlineDryRunPacket {
+        direction: "send",
+        name: "PlayerInputReq",
+        msg_type: Some(MessageType::PlayerInputReq as u16),
+        summary: format!(
+            "frame={} action={} payload_json={}",
+            input.frame_id, input.action, input.payload_json
+        ),
+    }));
+
+    packets
 }
 
 pub fn build_sim_input_payload(seq: u32, commands: &[SimCommand]) -> Result<String, OnlineError> {
@@ -1877,6 +1975,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
     use sim_core::{
         CombatState, EntityKind, MovementState, SimRngState, SimTransform, TeamId, snapshot,
     };
@@ -2056,6 +2155,29 @@ mod tests {
         .unwrap()
     }
 
+    fn room_snapshot_from_game_state(
+        room_id: &str,
+        current_frame_id: u32,
+        game_state: &LockstepSimDemoState,
+    ) -> pb::RoomSnapshot {
+        pb::RoomSnapshot {
+            room_id: room_id.to_owned(),
+            owner_character_id: "player-a".to_owned(),
+            state: "in_game".to_owned(),
+            members: vec![],
+            current_frame_id,
+            game_state: serde_json::to_string(game_state).unwrap(),
+        }
+    }
+
+    fn assert_online_error_contains(error: OnlineError, expected: &str) {
+        let actual = error.to_string();
+        assert!(
+            actual.contains(expected),
+            "expected online error to contain `{expected}`, got `{actual}`"
+        );
+    }
+
     #[test]
     fn online_cli_parses_dry_run_options() {
         let options = OnlineCliOptions::parse([
@@ -2091,16 +2213,173 @@ mod tests {
     }
 
     #[test]
-    fn builds_server_sim_input_payload_from_sim_core_command() {
-        let payload = move_right_payload(7);
+    fn online_cli_rejects_invalid_args() {
+        assert_online_error_contains(
+            OnlineCliOptions::parse(["--mode", "online"]).unwrap_err(),
+            "missing --scenario",
+        );
+        assert_online_error_contains(
+            OnlineCliOptions::parse([
+                "--mode",
+                "online",
+                "--scenario",
+                "move_straight",
+                "--scenario",
+                "move_stop",
+            ])
+            .unwrap_err(),
+            "duplicate --scenario",
+        );
+        assert_online_error_contains(
+            OnlineCliOptions::parse([
+                "--mode",
+                "online",
+                "--scenario",
+                "move_straight",
+                "--timeout-ms",
+                "0",
+            ])
+            .unwrap_err(),
+            "--timeout-ms must be greater than zero",
+        );
+        assert_online_error_contains(
+            OnlineCliOptions::parse([
+                "--mode",
+                "offline",
+                "--scenario",
+                "move_straight",
+                "--dry-run",
+            ])
+            .unwrap_err(),
+            "unsupported --mode `offline`",
+        );
+        assert_online_error_contains(
+            OnlineCliOptions::parse(["--mode", "online", "--scenario", "move_straight", "--wat"])
+                .unwrap_err(),
+            "unexpected argument `--wat`",
+        );
+    }
+
+    #[test]
+    fn non_dry_run_requires_ticket_before_network_connect() {
+        let error = run_cli(["--mode", "online", "--scenario", "move_straight"]).unwrap_err();
+
+        assert_online_error_contains(error, "requires --ticket or --test-ticket");
+    }
+
+    #[test]
+    fn dry_run_report_lists_join_start_input_and_downlink_packets() {
+        let report = run_cli([
+            "--mode",
+            "online",
+            "--scenario",
+            "move_straight",
+            "--room",
+            "room-1",
+            "--policy",
+            LOCKSTEP_SIM_DEMO_POLICY_ID,
+            "--dry-run",
+        ])
+        .unwrap();
+        let rendered = report.to_string();
+
+        assert!(report.dry_run);
+        assert_eq!(report.room_id, "room-1");
+        assert_eq!(report.policy_id, LOCKSTEP_SIM_DEMO_POLICY_ID);
+        assert_eq!(report.input_plan_count, 5);
+        assert!(rendered.contains("dry-run packet plan:"));
+        assert!(rendered.contains(
+            "send RoomJoinReq(1101): create-or-join room=room-1 policy=lockstep_sim_demo"
+        ));
+        assert!(rendered.contains("send RoomStartReq(1107): start lockstep room"));
+        assert!(rendered.contains("expect FrameBundlePush(1203):"));
+        assert!(
+            rendered.contains("send PlayerInputReq(1111): frame=1 action=sim_input payload_json=")
+        );
+        assert!(rendered.contains(r#""type":"move""#));
+    }
+
+    #[test]
+    fn builds_server_sim_input_payload_from_supported_sim_core_commands() {
+        let payload = build_sim_input_payload(
+            7,
+            &[
+                SimCommand::Move(MoveCommand {
+                    dir: QuantizedDir::RIGHT,
+                    speed_per_second: Some(Fp::from_milli(6_000)),
+                }),
+                SimCommand::Stop,
+                SimCommand::Face(FaceCommand {
+                    dir: QuantizedDir::LEFT,
+                }),
+                SimCommand::CastSkill(CastSkillCommand {
+                    skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                    target: SkillTarget::Entity(EntityId::new(TRAINING_TARGET_ENTITY_ID)),
+                }),
+            ],
+        )
+        .unwrap();
         let parsed = parse_wire_sim_input_payload(&payload).unwrap();
 
         assert_eq!(parsed.seq, 7);
-        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands.len(), 4);
         assert!(matches!(
             parsed.commands[0].to_sim_command(),
-            SimCommand::Move(command) if command.dir == QuantizedDir::RIGHT
+            SimCommand::Move(command)
+                if command.dir == QuantizedDir::RIGHT
+                    && command.speed_per_second == Some(Fp::from_milli(6_000))
         ));
+        assert_eq!(parsed.commands[1].to_sim_command(), SimCommand::Stop);
+        assert!(matches!(
+            parsed.commands[2].to_sim_command(),
+            SimCommand::Face(command) if command.dir == QuantizedDir::LEFT
+        ));
+        assert!(matches!(
+            parsed.commands[3].to_sim_command(),
+            SimCommand::CastSkill(command)
+                if command.skill_id == SkillId::new(DEFAULT_PLAYER_SKILL_ID)
+                    && command.target == SkillTarget::Entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+        ));
+    }
+
+    #[test]
+    fn sim_input_payload_reports_validation_errors() {
+        assert_online_error_contains(
+            parse_wire_sim_input_payload(r#"{"version":2,"seq":1,"commands":[]}"#).unwrap_err(),
+            "UNSUPPORTED_SIM_INPUT_VERSION",
+        );
+        assert_online_error_contains(
+            parse_wire_sim_input_payload(
+                r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":0,"dirY":0}]}"#,
+            )
+            .unwrap_err(),
+            "SIM_INPUT_MOVE_DIR_ZERO",
+        );
+        assert_online_error_contains(
+            parse_wire_sim_input_payload(
+                r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":1000,"dirY":0,"speed":12001}]}"#,
+            )
+            .unwrap_err(),
+            "SIM_INPUT_SPEED_OUT_OF_RANGE",
+        );
+        assert_online_error_contains(
+            parse_wire_sim_input_payload(
+                r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":0}]}"#,
+            )
+            .unwrap_err(),
+            "SIM_INPUT_SKILL_ID_OUT_OF_RANGE",
+        );
+        assert_online_error_contains(
+            build_sim_input_payload(
+                1,
+                &[SimCommand::CastSkill(CastSkillCommand {
+                    skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                    target: SkillTarget::Direction(QuantizedDir::RIGHT),
+                })],
+            )
+            .unwrap_err(),
+            "only supports CastSkill target None or Entity",
+        );
     }
 
     #[test]
@@ -2169,6 +2448,90 @@ mod tests {
         assert_eq!(replay.current_frame(), 1);
         assert_eq!(replay.final_hash(), result.state_hash);
         assert_eq!(replay.frames_checked(), 1);
+    }
+
+    #[test]
+    fn room_state_and_frame_bundle_push_restore_and_replay_snapshot() {
+        let initial = initial_snapshot();
+        let mut replay = None;
+        let mut game_state = debug_state(&restore_sim_snapshot(&initial.snapshot).unwrap(), None);
+        game_state.initial_snapshot = Some(initial.clone());
+        let room_state_push = pb::RoomStatePush {
+            event: "state".to_owned(),
+            snapshot: Some(room_snapshot_from_game_state(
+                "room-lockstep",
+                0,
+                &game_state,
+            )),
+        };
+        let room_state_packet = Packet {
+            msg_type: MessageType::RoomStatePush as u16,
+            seq: 1,
+            body: room_state_push.encode_to_vec(),
+        };
+
+        maybe_consume_push_packet(&room_state_packet, &mut replay).unwrap();
+
+        let replay_ref = replay.as_ref().unwrap();
+        assert_eq!(replay_ref.current_frame(), 0);
+        assert_eq!(replay_ref.final_hash(), initial.snapshot.hash);
+
+        let input = FrameInputRecord {
+            character_id: "player-a".to_owned(),
+            action: SIM_INPUT_ACTION.to_owned(),
+            payload_json: move_right_payload(1),
+            frame_id: 1,
+        };
+        let sim_inputs = sim_inputs_from_frame_records(
+            std::slice::from_ref(&input),
+            &[SimFrameInputSourceSummary {
+                frame: 1,
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            &HashMap::from([("player-a".to_owned(), EntityId::new(1000))]),
+        )
+        .unwrap();
+        let mut server_world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let result = step(
+            &mut server_world,
+            FrameId::new(1),
+            &sim_inputs,
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        let envelope = frame_envelope(&result);
+        let bundle_game_state = debug_state(&server_world, Some(envelope));
+        let bundle_push = pb::FrameBundlePush {
+            room_id: "room-lockstep".to_owned(),
+            frame_id: 1,
+            fps: DEFAULT_LOCKSTEP_SIM_TICK_RATE as u32,
+            inputs: vec![pb::FrameInput {
+                character_id: input.character_id,
+                action: input.action,
+                payload_json: input.payload_json,
+                frame_id: input.frame_id,
+            }],
+            is_silent_frame: false,
+            snapshot: Some(room_snapshot_from_game_state(
+                "room-lockstep",
+                1,
+                &bundle_game_state,
+            )),
+        };
+        let bundle_packet = Packet {
+            msg_type: MessageType::FrameBundlePush as u16,
+            seq: 2,
+            body: bundle_push.encode_to_vec(),
+        };
+
+        maybe_consume_push_packet(&bundle_packet, &mut replay).unwrap();
+
+        let replay_ref = replay.as_ref().unwrap();
+        assert_eq!(replay_ref.current_frame(), 1);
+        assert_eq!(replay_ref.final_hash(), result.state_hash);
+        assert_eq!(replay_ref.frames_checked(), 1);
     }
 
     #[test]
@@ -2272,14 +2635,7 @@ mod tests {
             state_hash: sim_hash_envelope(result.state_hash),
             last_frame: Some(envelope),
         });
-        let snapshot = pb::RoomSnapshot {
-            room_id: "room-lockstep".to_owned(),
-            owner_character_id: "player-a".to_owned(),
-            state: "in_game".to_owned(),
-            members: vec![],
-            current_frame_id: 1,
-            game_state: serde_json::to_string(&game_state).unwrap(),
-        };
+        let snapshot = room_snapshot_from_game_state("room-lockstep", 1, &game_state);
 
         let report = validate_observer_recovery_snapshot(snapshot, 1).unwrap();
 
