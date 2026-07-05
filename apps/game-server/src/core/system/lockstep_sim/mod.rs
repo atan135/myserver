@@ -8,8 +8,7 @@ use sim_core::{
     MovementMode, MovementState, QuantizedDir, SceneBounds, SimCommand, SimConfig, SimEntity,
     SimHash, SimInput, SimInputSource, SimSnapshot, SimStepResult, SimTransform, SimWorld,
     SkillDefinition, SkillId, SkillSlot, SkillTarget, SkillTargetType, SnapshotError, StepError,
-    TeamId, Vec2Fp,
-    restore as restore_sim_snapshot, snapshot as capture_sim_snapshot,
+    TeamId, Vec2Fp, restore as restore_sim_snapshot, snapshot as capture_sim_snapshot,
 };
 
 use crate::core::room::PlayerInputRecord;
@@ -486,8 +485,17 @@ pub fn step_world_with_config(
     bindings: &HashMap<String, EntityId>,
 ) -> Result<SimStepResult, LockstepSimStepError> {
     let sim_inputs = sim_inputs_from_records(inputs, bindings)?;
+    let mut next_world = world.clone();
 
-    sim_core::step(world, FrameId::new(frame_id), &sim_inputs, &config.config).map_err(Into::into)
+    let result = sim_core::step(
+        &mut next_world,
+        FrameId::new(frame_id),
+        &sim_inputs,
+        &config.config,
+    )
+    .map_err(LockstepSimStepError::from)?;
+    *world = next_world;
+    Ok(result)
 }
 
 pub fn world_hash(world: &SimWorld) -> SimHash {
@@ -907,6 +915,28 @@ mod tests {
         .to_string()
     }
 
+    fn stop_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                { "type": "stop" }
+            ]
+        })
+        .to_string()
+    }
+
+    fn unknown_skill_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                { "type": "castSkill", "skillId": 999, "targetEntityId": TRAINING_TARGET_ENTITY_ID }
+            ]
+        })
+        .to_string()
+    }
+
     fn cast_training_target_payload(seq: u32) -> String {
         serde_json::json!({
             "version": SIM_INPUT_VERSION,
@@ -1082,6 +1112,35 @@ mod tests {
     }
 
     #[test]
+    fn sim_step_error_does_not_commit_partial_world_updates() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+        step_world(
+            &mut world,
+            1,
+            20,
+            &[input(1, "player-a", move_right_payload(1))],
+            &bindings,
+        )
+        .unwrap();
+        let before_world = world.clone();
+        let before_hash = world_hash(&world);
+
+        let result = step_world(
+            &mut world,
+            2,
+            20,
+            &[input(2, "player-a", unknown_skill_payload(2))],
+            &bindings,
+        );
+
+        assert!(matches!(result, Err(LockstepSimStepError::Step(_))));
+        assert_eq!(world, before_world);
+        assert_eq!(world.frame, FrameId::new(1));
+        assert_eq!(world_hash(&world), before_hash);
+    }
+
+    #[test]
     fn game_server_can_reference_sim_core_minimal_step_api() {
         use sim_core::{FrameId, SimConfig, SimInput, SimWorld, step};
 
@@ -1173,9 +1232,14 @@ mod tests {
         );
 
         let input = input(1, "player-a", cast_training_target_payload(1));
-        let result =
-            step_world_with_config(&mut world, 1, &config, std::slice::from_ref(&input), &bindings)
-                .unwrap();
+        let result = step_world_with_config(
+            &mut world,
+            1,
+            &config,
+            std::slice::from_ref(&input),
+            &bindings,
+        )
+        .unwrap();
         let envelope =
             create_frame_envelope_with_config("room-lockstep", &config, &world, &[input], &result);
 
@@ -1269,10 +1333,7 @@ mod tests {
         assert_eq!(world_a, world_b);
         assert_eq!(world_hash(&world_a), world_hash(&world_b));
         assert_eq!(bindings_a, bindings_b);
-        assert_eq!(
-            bindings_a["player-b"],
-            EntityId::new(PLAYER_ENTITY_ID_BASE)
-        );
+        assert_eq!(bindings_a["player-b"], EntityId::new(PLAYER_ENTITY_ID_BASE));
         assert_eq!(
             bindings_a["player-a"],
             EntityId::new(PLAYER_ENTITY_ID_BASE + 1)
@@ -1290,14 +1351,15 @@ mod tests {
             ]
         );
 
-        let snapshot_a =
-            create_initial_snapshot("room-lockstep", 20, &world_a, &bindings_a);
-        let snapshot_b =
-            create_initial_snapshot("room-lockstep", 20, &world_b, &bindings_b);
+        let snapshot_a = create_initial_snapshot("room-lockstep", 20, &world_a, &bindings_a);
+        let snapshot_b = create_initial_snapshot("room-lockstep", 20, &world_b, &bindings_b);
         assert_eq!(snapshot_a, snapshot_b);
         assert_eq!(snapshot_a.start_frame, 0);
         assert_eq!(snapshot_a.rng_seed, 0);
-        assert_eq!(snapshot_a.state_hash, sim_hash_envelope(world_hash(&world_a)));
+        assert_eq!(
+            snapshot_a.state_hash,
+            sim_hash_envelope(world_hash(&world_a))
+        );
     }
 
     #[test]
@@ -1517,6 +1579,102 @@ mod tests {
             SimFrameInputSource::SynthesizedEmpty
         );
         assert_eq!(empty_result.state_hash, world_hash(&world));
+    }
+
+    #[test]
+    fn stop_input_updates_authoritative_world_and_frame_envelope_hash() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+
+        step_world(
+            &mut world,
+            1,
+            20,
+            &[input(1, "player-a", move_right_payload(1))],
+            &bindings,
+        )
+        .unwrap();
+        step_world(&mut world, 2, 20, &[], &bindings).unwrap();
+        let moving_x = world
+            .entity(EntityId::new(PLAYER_ENTITY_ID_BASE))
+            .unwrap()
+            .transform
+            .pos
+            .x
+            .raw();
+        assert_eq!(moving_x, 600);
+
+        let stop_input = input(3, "player-a", stop_payload(3));
+        let result = step_world(
+            &mut world,
+            3,
+            20,
+            std::slice::from_ref(&stop_input),
+            &bindings,
+        )
+        .unwrap();
+        let envelope = create_frame_envelope("room-lockstep", 20, &world, &[stop_input], &result);
+
+        let player = world.entity(EntityId::new(PLAYER_ENTITY_ID_BASE)).unwrap();
+        assert_eq!(world.frame, FrameId::new(3));
+        assert_eq!(player.transform.pos.x.raw(), moving_x);
+        assert_eq!(player.movement.mode, MovementMode::Idle);
+        assert_eq!(player.movement.move_dir, QuantizedDir::ZERO);
+        assert_eq!(player.movement.speed_per_second, Fp::ZERO);
+        assert_eq!(result.frame, FrameId::new(3));
+        assert_eq!(result.state_hash, world_hash(&world));
+        assert_eq!(envelope.frame, 3);
+        assert_eq!(envelope.state_hash, sim_hash_envelope(result.state_hash));
+        assert_eq!(envelope.debug_summary.real_input_count, 1);
+        assert_eq!(envelope.events.len(), result.events.len());
+    }
+
+    #[test]
+    fn same_input_sequence_replays_to_identical_hashes() {
+        let players = vec!["player-a".to_string()];
+        let (mut first_world, first_bindings) = create_minimal_world(&players);
+        let (mut second_world, second_bindings) = create_minimal_world(&players);
+        let frames = vec![
+            vec![input(1, "player-a", move_right_payload(1))],
+            vec![synthetic_repeat_last_input(
+                2,
+                "player-a",
+                move_right_payload(1),
+            )],
+            vec![input(3, "player-a", stop_payload(3))],
+            vec![input(4, "player-a", cast_training_target_payload(4))],
+            vec![synthetic_empty_input(5, "player-a")],
+        ];
+
+        let mut first_hashes = Vec::new();
+        let mut second_hashes = Vec::new();
+        for (index, frame_inputs) in frames.iter().enumerate() {
+            let frame_id = index as u32 + 1;
+            let first_result = step_world(
+                &mut first_world,
+                frame_id,
+                20,
+                frame_inputs,
+                &first_bindings,
+            )
+            .unwrap();
+            let second_result = step_world(
+                &mut second_world,
+                frame_id,
+                20,
+                frame_inputs,
+                &second_bindings,
+            )
+            .unwrap();
+
+            first_hashes.push(first_result.state_hash);
+            second_hashes.push(second_result.state_hash);
+            assert_eq!(first_result.frame, FrameId::new(frame_id));
+            assert_eq!(first_result.events, second_result.events);
+        }
+
+        assert_eq!(first_hashes, second_hashes);
+        assert_eq!(world_hash(&first_world), world_hash(&second_world));
     }
 
     #[test]

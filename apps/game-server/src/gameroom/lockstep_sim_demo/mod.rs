@@ -389,6 +389,28 @@ mod tests {
         .to_string()
     }
 
+    fn stop_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                { "type": "stop" }
+            ]
+        })
+        .to_string()
+    }
+
+    fn unknown_skill_payload(seq: u32) -> String {
+        serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": seq,
+            "commands": [
+                { "type": "castSkill", "skillId": 999, "targetEntityId": TRAINING_TARGET_ENTITY_ID }
+            ]
+        })
+        .to_string()
+    }
+
     fn cast_training_target_payload(seq: u32) -> String {
         serde_json::json!({
             "version": SIM_INPUT_VERSION,
@@ -402,6 +424,32 @@ mod tests {
             ]
         })
         .to_string()
+    }
+
+    fn synthetic_empty_input(frame_id: u32, character_id: &str) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            character_id: character_id.to_string(),
+            action: String::new(),
+            payload_json: String::new(),
+            received_at: Instant::now(),
+            is_synthetic: true,
+        }
+    }
+
+    fn synthetic_repeat_last_input(
+        frame_id: u32,
+        character_id: &str,
+        payload_json: String,
+    ) -> PlayerInputRecord {
+        PlayerInputRecord {
+            frame_id,
+            character_id: character_id.to_string(),
+            action: SIM_INPUT_ACTION.to_string(),
+            payload_json,
+            received_at: Instant::now(),
+            is_synthetic: true,
+        }
     }
 
     #[test]
@@ -555,6 +603,41 @@ mod tests {
     }
 
     #[test]
+    fn lockstep_sim_demo_accepts_stop_and_saves_authoritative_frame_result() {
+        let mut logic = LockstepSimDemoLogic::default();
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_game_started("room-lockstep");
+
+        logic.on_tick(1, 20, &[input(1, "player-a", move_right_payload(1))]);
+        logic.on_tick(2, 20, &[]);
+        let moving = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        assert_eq!(moving["worldFrame"], 2);
+        assert_eq!(moving["playerEntities"][0]["x"], 600);
+
+        logic.on_tick(3, 20, &[input(3, "player-a", stop_payload(3))]);
+
+        let stopped = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        assert_eq!(stopped["worldFrame"], 3);
+        assert_eq!(stopped["playerEntities"][0]["x"], 600);
+        assert_eq!(stopped["lastFrame"]["frame"], 3);
+        assert_eq!(stopped["lastFrame"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(stopped["lastEventCount"], 0);
+        assert_eq!(
+            stopped["lastFrame"]["stateHash"],
+            stopped["observerFrame"]["stateHash"]
+        );
+        assert_eq!(
+            stopped["lastHashHex"],
+            stopped["lastFrame"]["stateHash"]["hex"]
+        );
+        assert_eq!(stopped["lastFrame"]["debugSummary"]["realInputCount"], 1);
+        assert!(stopped["lastError"].is_null());
+    }
+
+    #[test]
     fn lockstep_sim_demo_restores_snapshot_and_continues_with_same_hash() {
         let mut continuous = LockstepSimDemoLogic::default();
         continuous.on_room_created("room-lockstep");
@@ -574,7 +657,10 @@ mod tests {
         assert_eq!(restored_state["roomId"], "room-lockstep");
         assert_eq!(restored_state["worldFrame"], 1);
         assert_eq!(restored_state["tickRate"], 20);
-        assert_eq!(restored_state["configHash"], snapshot_json_value["configHash"]);
+        assert_eq!(
+            restored_state["configHash"],
+            snapshot_json_value["configHash"]
+        );
         assert!(restored_state["lastError"].is_null());
         assert_eq!(
             restored_state["initialSnapshot"]["stateHash"],
@@ -628,7 +714,10 @@ mod tests {
         assert_eq!(advanced["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
         assert_eq!(advanced["configVersion"], 2);
         assert_eq!(advanced["configHash"], config_hash);
-        assert_eq!(advanced["lastFrame"]["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
+        assert_eq!(
+            advanced["lastFrame"]["tickRate"],
+            DEFAULT_LOCKSTEP_SIM_TICK_RATE
+        );
         assert_eq!(advanced["lastFrame"]["configVersion"], 2);
         assert_eq!(advanced["lastFrame"]["configHash"], config_hash);
     }
@@ -683,6 +772,87 @@ mod tests {
         assert_eq!(
             state["observerFrame"]["stateHash"],
             state["lastFrame"]["stateHash"]
+        );
+    }
+
+    #[test]
+    fn lockstep_sim_demo_distinguishes_real_empty_and_repeat_last_sources() {
+        let mut logic = LockstepSimDemoLogic::default();
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_character_join("player-b");
+        logic.on_game_started("room-lockstep");
+
+        logic.on_tick(
+            1,
+            20,
+            &[
+                input(1, "player-a", move_right_payload(1)),
+                synthetic_empty_input(1, "player-b"),
+                synthetic_repeat_last_input(1, "player-c", move_right_payload(1)),
+            ],
+        );
+
+        let state = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        assert_eq!(state["worldFrame"], 1);
+        assert_eq!(
+            state["lastFrame"]["inputSources"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(state["lastFrame"]["inputSources"][0]["source"], "real");
+        assert_eq!(
+            state["lastFrame"]["inputSources"][1]["source"],
+            "synthesizedEmpty"
+        );
+        assert_eq!(
+            state["lastFrame"]["inputSources"][2]["source"],
+            "synthesizedRepeatLast"
+        );
+        assert_eq!(state["lastFrame"]["debugSummary"]["realInputCount"], 1);
+        assert_eq!(state["lastFrame"]["debugSummary"]["syntheticInputCount"], 2);
+        assert_eq!(
+            state["lastFrame"]["debugSummary"]["synthesizedEmptyInputCount"],
+            1
+        );
+        assert_eq!(
+            state["lastFrame"]["debugSummary"]["synthesizedRepeatLastInputCount"],
+            1
+        );
+        assert!(state["lastError"].is_null());
+    }
+
+    #[test]
+    fn lockstep_sim_demo_step_error_keeps_previous_world_hash_and_last_frame() {
+        let mut logic = LockstepSimDemoLogic::default();
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_game_started("room-lockstep");
+
+        logic.on_tick(1, 20, &[input(1, "player-a", move_right_payload(1))]);
+        let before = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+
+        logic.on_tick(2, 20, &[input(2, "player-a", unknown_skill_payload(2))]);
+
+        let after = serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state())
+            .expect("state should be valid json");
+        assert_eq!(after["tickCount"], 2);
+        assert_eq!(after["worldFrame"], before["worldFrame"]);
+        assert_eq!(after["playerEntities"], before["playerEntities"]);
+        assert_eq!(after["trainingTarget"], before["trainingTarget"]);
+        assert_eq!(after["lastHash"], before["lastHash"]);
+        assert_eq!(after["lastHashHex"], before["lastHashHex"]);
+        assert_eq!(after["lastEventCount"], before["lastEventCount"]);
+        assert_eq!(after["lastFrame"], before["lastFrame"]);
+        assert_eq!(
+            after["observerFrame"]["stateHash"],
+            before["observerFrame"]["stateHash"]
+        );
+        assert!(
+            after["lastError"]
+                .as_str()
+                .is_some_and(|error| error.contains("unknown skill 999"))
         );
     }
 
