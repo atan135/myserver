@@ -825,6 +825,22 @@ mod tests {
     }
 
     #[test]
+    fn game_server_can_reference_sim_core_minimal_step_api() {
+        use sim_core::{FrameId, SimConfig, SimInput, SimWorld, step};
+
+        let players = vec!["player-a".to_string()];
+        let (world, _) = create_minimal_world(&players);
+        let mut world: SimWorld = world;
+        let inputs: Vec<SimInput> = Vec::new();
+        let config: SimConfig = default_sim_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE);
+
+        let result = step(&mut world, FrameId::new(1), &inputs, &config).unwrap();
+
+        assert_eq!(world.frame, FrameId::new(1));
+        assert_eq!(result.frame, FrameId::new(1));
+    }
+
+    #[test]
     fn minimal_world_contains_players_target_and_bindings() {
         let players = vec!["player-a".to_string(), "player-b".to_string()];
         let (mut world, bindings) = create_minimal_world(&players);
