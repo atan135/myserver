@@ -825,6 +825,165 @@ mod tests {
     }
 
     #[test]
+    fn sim_input_payload_accepts_supported_commands_and_preserves_seq() {
+        let payload = serde_json::json!({
+            "version": SIM_INPUT_VERSION,
+            "seq": 42,
+            "commands": [
+                { "type": "move", "dirX": 1000, "dirY": 0, "speed": 6000 },
+                { "type": "stop" },
+                { "type": "face", "dirX": 0, "dirY": -1000 },
+                {
+                    "type": "castSkill",
+                    "skillId": DEFAULT_PLAYER_SKILL_ID,
+                    "targetEntityId": TRAINING_TARGET_ENTITY_ID
+                }
+            ]
+        })
+        .to_string();
+
+        let parsed = parse_sim_input_payload(&payload).unwrap();
+
+        assert_eq!(parsed.seq, 42);
+        assert_eq!(parsed.commands.len(), 4);
+        assert_eq!(
+            parsed.commands[0],
+            ParsedSimCommand::Move {
+                dir: QuantizedDir::RIGHT,
+                speed_per_second: Some(Fp::from_milli(6000))
+            }
+        );
+        assert_eq!(parsed.commands[1], ParsedSimCommand::Stop);
+        assert_eq!(
+            parsed.commands[2],
+            ParsedSimCommand::Face {
+                dir: QuantizedDir::UP
+            }
+        );
+        assert_eq!(
+            parsed.commands[3],
+            ParsedSimCommand::CastSkill {
+                skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                target: SkillTarget::Entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+            }
+        );
+    }
+
+    #[test]
+    fn sim_inputs_use_room_identity_and_server_control_binding() {
+        let players = vec!["player-a".to_string()];
+        let (_, bindings) = create_minimal_world(&players);
+        let record = input(7, "player-a", move_right_payload(99));
+
+        let sim_inputs = sim_inputs_from_records(&[record], &bindings).unwrap();
+
+        assert_eq!(sim_inputs.len(), 1);
+        assert_eq!(sim_inputs[0].frame, FrameId::new(7));
+        assert_eq!(sim_inputs[0].character_id, "player-a");
+        assert_eq!(
+            sim_inputs[0].entity_id,
+            EntityId::new(PLAYER_ENTITY_ID_BASE)
+        );
+        assert_eq!(sim_inputs[0].seq, 99);
+        assert!(matches!(
+            sim_inputs[0].command,
+            SimCommand::Move(MoveCommand {
+                dir: QuantizedDir::RIGHT,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn sim_input_payload_rejects_invalid_protocol_and_field_types() {
+        let cases = [
+            (
+                r#"{"version":2,"seq":1,"commands":[]}"#,
+                "UNSUPPORTED_SIM_INPUT_VERSION",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":1001,"dirY":0}]}"#,
+                "SIM_INPUT_DIR_OUT_OF_RANGE",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"warp","dirX":1000,"dirY":0}]}"#,
+                "INVALID_SIM_INPUT_JSON",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":{"entityId":9000}}]}"#,
+                "INVALID_SIM_INPUT_JSON",
+            ),
+            (
+                r#"{"version":1,"seq":"1","commands":[]}"#,
+                "INVALID_SIM_INPUT_JSON",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":{"type":"stop"}}"#,
+                "INVALID_SIM_INPUT_JSON",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"face","dirX":"0","dirY":-1000}]}"#,
+                "INVALID_SIM_INPUT_JSON",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":0}]}"#,
+                "SIM_INPUT_SKILL_ID_OUT_OF_RANGE",
+            ),
+            (
+                r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":0}]}"#,
+                "SIM_INPUT_TARGET_ENTITY_ID_OUT_OF_RANGE",
+            ),
+        ];
+
+        for (payload, expected) in cases {
+            assert_eq!(
+                validate_player_input(SIM_INPUT_ACTION, payload),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn sim_input_payload_rejects_client_authoritative_state_fields() {
+        let cases = [
+            r#"{"version":1,"seq":1,"entityId":1000,"commands":[{"type":"move","dirX":1000,"dirY":0}]}"#,
+            r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":9000,"hit":true}]}"#,
+            r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":9000,"damage":9999}]}"#,
+            r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":9000,"buffs":[{"id":1}]}]}"#,
+            r#"{"version":1,"seq":1,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":9000,"finalState":{"hp":0}}]}"#,
+            r#"{"version":1,"seq":1,"commands":[{"type":"stop","stateHash":"0000000000000000"}]}"#,
+        ];
+
+        for payload in cases {
+            assert_eq!(
+                validate_player_input(SIM_INPUT_ACTION, payload),
+                Err("INVALID_SIM_INPUT_JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_sim_input_rejects_step_without_advancing_frame() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+        let before_hash = world_hash(&world);
+        let record = input(
+            1,
+            "player-a",
+            r#"{"version":2,"seq":1,"commands":[]}"#.to_string(),
+        );
+
+        let result = step_world(&mut world, 1, 20, &[record], &bindings);
+
+        assert!(matches!(
+            result,
+            Err(LockstepSimStepError::Input("UNSUPPORTED_SIM_INPUT_VERSION"))
+        ));
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(world_hash(&world), before_hash);
+    }
+
+    #[test]
     fn game_server_can_reference_sim_core_minimal_step_api() {
         use sim_core::{FrameId, SimConfig, SimInput, SimWorld, step};
 
