@@ -472,6 +472,56 @@ mod tests {
     }
 
     #[test]
+    fn lockstep_sim_demo_policy_resolves_to_demo_runtime_settings() {
+        let registry = RoomPolicyRegistry::default();
+        let lockstep = registry.resolve("lockstep_sim_demo");
+
+        assert_eq!(lockstep.policy_id, "lockstep_sim_demo");
+        assert_eq!(lockstep.max_members, 32);
+        assert_eq!(lockstep.min_start_players, 1);
+        assert!(!lockstep.allow_join_in_game);
+        assert_eq!(lockstep.silent_room_fps, 1);
+        assert_eq!(lockstep.idle_room_fps, 10);
+        assert_eq!(lockstep.active_room_fps, 20);
+        assert_eq!(lockstep.busy_room_fps, 30);
+        assert_eq!(lockstep.busy_room_player_threshold, 4);
+        assert!(lockstep.destroy_enabled);
+        assert!(!lockstep.destroy_when_empty);
+        assert_eq!(lockstep.empty_ttl_secs, 300);
+        assert!(lockstep.retain_state_when_empty);
+        assert_eq!(lockstep.offline_ttl_secs, 120);
+        assert_eq!(lockstep.snapshot_interval_frames, 10);
+        assert_eq!(lockstep.input_delay_frames, 2);
+        assert_eq!(lockstep.wait_timeout_ms, 100);
+        assert_eq!(lockstep.wait_strategy, InputWaitStrategy::Optimistic);
+        assert_eq!(lockstep.missing_input_strategy, MissingInputStrategy::Empty);
+        assert_eq!(lockstep.movement_correction_interval_frames, 0);
+        assert_eq!(lockstep.movement_correction_threshold, 0.0);
+        assert!(!lockstep.movement_aoi_enabled);
+        assert_eq!(lockstep.movement_aoi_radius, 0.0);
+        assert_eq!(lockstep.movement_control_stop_frames, 0);
+
+        let robot_sync = registry.resolve("robot_sync_room");
+        assert_eq!(robot_sync.active_room_fps, 20);
+        assert_eq!(robot_sync.busy_room_fps, 20);
+        assert_eq!(robot_sync.snapshot_interval_frames, 20);
+        assert_eq!(robot_sync.wait_strategy, InputWaitStrategy::Optimistic);
+        assert_eq!(
+            robot_sync.missing_input_strategy,
+            MissingInputStrategy::Empty
+        );
+
+        let movement = registry.resolve("movement_demo");
+        assert_eq!(movement.active_room_fps, 20);
+        assert_eq!(movement.snapshot_interval_frames, 15);
+        assert_eq!(movement.movement_correction_interval_frames, 3);
+
+        let combat = registry.resolve("combat_demo");
+        assert_eq!(combat.busy_room_fps, 30);
+        assert_eq!(combat.snapshot_interval_frames, 10);
+    }
+
+    #[test]
     fn shared_room_policy_registry_can_replace_defaults_atomically() {
         let shared = SharedRoomPolicyRegistry::default();
         assert_eq!(shared.resolve("default_match").active_room_fps, 10);
