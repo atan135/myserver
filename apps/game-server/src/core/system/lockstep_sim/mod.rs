@@ -1694,6 +1694,117 @@ mod tests {
     }
 
     #[test]
+    fn initial_snapshot_json_contains_full_recovery_contract_and_round_trips() {
+        let players = vec!["player-a".to_string(), "player-b".to_string()];
+        let (mut continuous_world, continuous_bindings) = create_minimal_world(&players);
+        let (mut snapshot_world, snapshot_bindings) = create_minimal_world(&players);
+        let config = room_sim_config(42, 20);
+
+        let first_input = input(1, "player-a", move_right_payload(1));
+        step_world_with_config(
+            &mut continuous_world,
+            1,
+            &config,
+            std::slice::from_ref(&first_input),
+            &continuous_bindings,
+        )
+        .unwrap();
+        step_world_with_config(
+            &mut snapshot_world,
+            1,
+            &config,
+            &[first_input],
+            &snapshot_bindings,
+        )
+        .unwrap();
+
+        let snapshot = create_initial_snapshot_with_config(
+            "room-lockstep",
+            &config,
+            &snapshot_world,
+            &snapshot_bindings,
+        );
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        for field in [
+            "schema",
+            "schemaVersion",
+            "roomId",
+            "startFrame",
+            "tickRate",
+            "configHash",
+            "configVersion",
+            "simSchemaVersion",
+            "rngSeed",
+            "entities",
+            "controlBindings",
+            "stateHash",
+            "snapshot",
+        ] {
+            assert!(json.get(field).is_some(), "missing snapshot field {field}");
+        }
+        assert_eq!(json["schema"], SIM_INITIAL_SNAPSHOT_SCHEMA);
+        assert_eq!(json["schemaVersion"], SIM_DOWNLINK_SCHEMA_VERSION);
+        assert_eq!(json["roomId"], "room-lockstep");
+        assert_eq!(json["startFrame"], 1);
+        assert_eq!(json["tickRate"], 20);
+        assert_eq!(json["configVersion"], 42);
+        assert_eq!(json["configHash"], config.config_hash);
+        assert_eq!(json["simSchemaVersion"], sim_core::SIM_CORE_SCHEMA_VERSION);
+        assert_eq!(json["rngSeed"], snapshot_world.rng.seed);
+        assert_eq!(json["entities"].as_array().unwrap().len(), 3);
+        assert_eq!(json["controlBindings"].as_array().unwrap().len(), 2);
+        assert_eq!(json["controlBindings"][0]["characterId"], "player-a");
+        assert_eq!(
+            json["controlBindings"][0]["entityId"],
+            PLAYER_ENTITY_ID_BASE
+        );
+        assert_eq!(json["controlBindings"][1]["characterId"], "player-b");
+        assert_eq!(
+            json["controlBindings"][1]["entityId"],
+            PLAYER_ENTITY_ID_BASE + 1
+        );
+        assert_eq!(json["stateHash"]["frame"], snapshot.start_frame);
+        assert_eq!(json["stateHash"]["value"], snapshot.state_hash.value);
+        assert_eq!(json["stateHash"]["hex"].as_str().map(str::len), Some(16));
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded = serde_json::from_str::<SimInitialSnapshot>(&encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+
+        let (mut restored_world, restored_bindings) = restore_initial_snapshot(&decoded).unwrap();
+        assert_eq!(restored_world.frame.raw(), decoded.start_frame);
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+
+        let next_frame = decoded.start_frame + 1;
+        let next_input = input(
+            next_frame,
+            "player-b",
+            cast_training_target_payload(next_frame),
+        );
+        let continuous_result = step_world_with_config(
+            &mut continuous_world,
+            next_frame,
+            &config,
+            std::slice::from_ref(&next_input),
+            &continuous_bindings,
+        )
+        .unwrap();
+        let restored_result = step_world_with_config(
+            &mut restored_world,
+            next_frame,
+            &config,
+            &[next_input],
+            &restored_bindings,
+        )
+        .unwrap();
+
+        assert_eq!(restored_result.frame.raw(), decoded.start_frame + 1);
+        assert_eq!(restored_result.state_hash, continuous_result.state_hash);
+        assert_eq!(world_hash(&restored_world), world_hash(&continuous_world));
+    }
+
+    #[test]
     fn frame_envelope_contains_hash_events_and_debug_summary() {
         let players = vec!["player-a".to_string()];
         let (mut world, bindings) = create_minimal_world(&players);

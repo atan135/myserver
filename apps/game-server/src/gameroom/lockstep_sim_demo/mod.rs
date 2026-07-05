@@ -811,6 +811,105 @@ mod tests {
     }
 
     #[test]
+    fn lockstep_sim_demo_serialized_state_initial_snapshot_is_recoverable() {
+        let mut continuous = LockstepSimDemoLogic::default();
+        continuous.on_room_created("room-lockstep");
+        continuous.on_character_join("player-a");
+        continuous.on_game_started("room-lockstep");
+        continuous.on_tick(1, 20, &[input(1, "player-a", move_right_payload(1))]);
+
+        let serialized = continuous.get_serialized_state();
+        let state = serde_json::from_str::<serde_json::Value>(&serialized).unwrap();
+        let initial_snapshot = &state["initialSnapshot"];
+
+        for field in [
+            "schema",
+            "schemaVersion",
+            "roomId",
+            "startFrame",
+            "tickRate",
+            "configHash",
+            "configVersion",
+            "simSchemaVersion",
+            "rngSeed",
+            "entities",
+            "controlBindings",
+            "stateHash",
+            "snapshot",
+        ] {
+            assert!(
+                initial_snapshot.get(field).is_some(),
+                "missing initialSnapshot field {field}"
+            );
+        }
+        assert_eq!(state["worldFrame"], initial_snapshot["startFrame"]);
+        assert_eq!(state["roomId"], initial_snapshot["roomId"]);
+        assert_eq!(state["tickRate"], initial_snapshot["tickRate"]);
+        assert_eq!(state["configHash"], initial_snapshot["configHash"]);
+        assert_eq!(state["configVersion"], initial_snapshot["configVersion"]);
+        assert_eq!(
+            state["simSchemaVersion"],
+            initial_snapshot["simSchemaVersion"]
+        );
+        assert_eq!(state["lastStateHash"], initial_snapshot["stateHash"]);
+        assert_eq!(
+            state["observerFrame"]["stateHash"],
+            initial_snapshot["stateHash"]
+        );
+        assert_eq!(state["lastFrame"]["frame"], 1);
+
+        let snapshot =
+            serde_json::from_value::<SimInitialSnapshot>(initial_snapshot.clone()).unwrap();
+        let (restored_world, restored_bindings) = restore_initial_snapshot(&snapshot).unwrap();
+        assert_eq!(restored_world.frame.raw(), snapshot.start_frame);
+        assert_eq!(restored_bindings.len(), 1);
+        assert_eq!(
+            restored_bindings["player-a"],
+            EntityId::new(crate::core::system::lockstep_sim::PLAYER_ENTITY_ID_BASE)
+        );
+
+        let mut restored = LockstepSimDemoLogic::default();
+        restored.restore_from_serialized_state(&serialized);
+        let restored_state =
+            serde_json::from_str::<serde_json::Value>(&restored.get_serialized_state()).unwrap();
+        assert_eq!(
+            restored_state["initialSnapshot"]["stateHash"],
+            initial_snapshot["stateHash"]
+        );
+        assert!(restored_state["lastError"].is_null());
+
+        let next_frame = initial_snapshot["startFrame"].as_u64().unwrap() as u32 + 1;
+        let next_payload = cast_training_target_payload(next_frame);
+        continuous.on_tick(
+            next_frame,
+            20,
+            &[input(next_frame, "player-a", next_payload.clone())],
+        );
+        restored.on_tick(
+            next_frame,
+            20,
+            &[input(next_frame, "player-a", next_payload)],
+        );
+
+        let continuous_state =
+            serde_json::from_str::<serde_json::Value>(&continuous.get_serialized_state()).unwrap();
+        let restored_state =
+            serde_json::from_str::<serde_json::Value>(&restored.get_serialized_state()).unwrap();
+        assert_eq!(
+            restored_state["lastFrame"]["frame"],
+            initial_snapshot["startFrame"].as_u64().unwrap() + 1
+        );
+        assert_eq!(
+            restored_state["lastFrame"]["stateHash"],
+            continuous_state["lastFrame"]["stateHash"]
+        );
+        assert_eq!(
+            restored_state["observerFrame"]["stateHash"],
+            continuous_state["observerFrame"]["stateHash"]
+        );
+    }
+
+    #[test]
     fn lockstep_sim_demo_binds_config_metadata_for_room_lifetime() {
         let mut logic = LockstepSimDemoLogic::new(2);
         logic.on_room_created("room-lockstep");

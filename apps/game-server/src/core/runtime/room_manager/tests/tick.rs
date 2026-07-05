@@ -1,5 +1,66 @@
 use super::*;
 
+fn assert_lockstep_snapshot_recoverable(
+    snapshot: &crate::pb::RoomSnapshot,
+    expected_start_frame: u32,
+) -> serde_json::Value {
+    let game_state = serde_json::from_str::<serde_json::Value>(&snapshot.game_state)
+        .expect("lockstep room snapshot game_state should be valid json");
+    assert_eq!(game_state["logicType"], "lockstep_sim_demo");
+    assert_eq!(snapshot.current_frame_id, expected_start_frame);
+    assert_eq!(game_state["worldFrame"], expected_start_frame);
+
+    let initial_snapshot = &game_state["initialSnapshot"];
+    for field in [
+        "schema",
+        "schemaVersion",
+        "roomId",
+        "startFrame",
+        "tickRate",
+        "configHash",
+        "configVersion",
+        "simSchemaVersion",
+        "rngSeed",
+        "entities",
+        "controlBindings",
+        "stateHash",
+        "snapshot",
+    ] {
+        assert!(
+            initial_snapshot.get(field).is_some(),
+            "missing initialSnapshot field {field}"
+        );
+    }
+    assert_eq!(initial_snapshot["roomId"], snapshot.room_id);
+    assert_eq!(initial_snapshot["startFrame"], expected_start_frame);
+    assert_eq!(initial_snapshot["tickRate"], 20);
+    assert_eq!(initial_snapshot["configHash"], game_state["configHash"]);
+    assert_eq!(
+        initial_snapshot["configVersion"],
+        game_state["configVersion"]
+    );
+    assert_eq!(
+        initial_snapshot["simSchemaVersion"],
+        game_state["simSchemaVersion"]
+    );
+    assert_eq!(initial_snapshot["stateHash"], game_state["lastStateHash"]);
+    assert_eq!(
+        initial_snapshot["stateHash"],
+        game_state["observerFrame"]["stateHash"]
+    );
+
+    let decoded = serde_json::from_value::<crate::core::system::lockstep_sim::SimInitialSnapshot>(
+        initial_snapshot.clone(),
+    )
+    .expect("initialSnapshot should deserialize");
+    let (world, bindings) = crate::core::system::lockstep_sim::restore_initial_snapshot(&decoded)
+        .expect("initialSnapshot should restore");
+    assert_eq!(world.frame.raw(), expected_start_frame);
+    assert!(!bindings.is_empty());
+
+    game_state
+}
+
 #[tokio::test]
 async fn fps_change_pushes_room_frame_rate_update_to_online_members() {
     let (manager, _factory, mut receivers) =
@@ -180,7 +241,8 @@ async fn lockstep_sim_demo_frame_bundle_carries_snapshot_every_frame() {
         .set_ready_state(TEST_ROOM_ID, PLAYER_A, true)
         .await
         .unwrap();
-    manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    let started = manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    assert_lockstep_snapshot_recoverable(&started, 0);
     stop_runtime_for_test(&manager, TEST_ROOM_ID).await;
 
     manager
@@ -198,10 +260,119 @@ async fn lockstep_sim_demo_frame_bundle_carries_snapshot_every_frame() {
 
     assert_eq!(progressed.0.frame_id, 1);
     let snapshot = progressed.0.snapshot.expect("lockstep frame snapshot");
-    let game_state: serde_json::Value = serde_json::from_str(&snapshot.game_state).unwrap();
-    assert_eq!(game_state["logicType"], "lockstep_sim_demo");
+    let game_state = assert_lockstep_snapshot_recoverable(&snapshot, 1);
     assert_eq!(game_state["lastFrame"]["frame"], 1);
     assert_eq!(game_state["observerFrame"]["lastFrame"]["frame"], 1);
+
+    let frame_2_payload = r#"{"version":1,"seq":2,"commands":[{"type":"castSkill","skillId":1,"targetEntityId":9000}]}"#;
+    let mut restored_logic = crate::gameroom::LockstepSimDemoLogic::default();
+    restored_logic.restore_from_serialized_state(&snapshot.game_state);
+    restored_logic.on_tick(
+        2,
+        20,
+        &[PlayerInputRecord {
+            frame_id: 2,
+            character_id: PLAYER_A.to_string(),
+            action: "sim_input".to_string(),
+            payload_json: frame_2_payload.to_string(),
+            received_at: Instant::now(),
+            is_synthetic: false,
+        }],
+    );
+
+    manager
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 2, "sim_input", frame_2_payload)
+        .await
+        .unwrap();
+    let progressed_2 = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+    let frame_2_snapshot = progressed_2.0.snapshot.expect("lockstep frame 2 snapshot");
+    let manager_state = assert_lockstep_snapshot_recoverable(&frame_2_snapshot, 2);
+    let restored_state =
+        serde_json::from_str::<serde_json::Value>(&restored_logic.get_serialized_state()).unwrap();
+
+    assert_eq!(restored_state["lastFrame"]["frame"], 2);
+    assert_eq!(
+        restored_state["lastFrame"]["stateHash"],
+        manager_state["lastFrame"]["stateHash"]
+    );
+    assert_eq!(
+        restored_state["observerFrame"]["stateHash"],
+        manager_state["observerFrame"]["stateHash"]
+    );
+}
+
+#[tokio::test]
+async fn lockstep_sim_demo_rejoin_reconnect_and_observer_snapshots_are_recoverable() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(GameRoomLogicFactory::new(
+            ConfigTableRuntime::load_with_scene_dir(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+            )
+            .expect("game-server csv fixture should load"),
+        )),
+    );
+    let (tx, _rx) = mpsc::channel(1024);
+    manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            tx,
+            MemberRole::Player,
+            Some(LOCKSTEP_SIM_DEMO_POLICY),
+        )
+        .await
+        .unwrap();
+    manager
+        .set_ready_state(TEST_ROOM_ID, PLAYER_A, true)
+        .await
+        .unwrap();
+    let started = manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    stop_runtime_for_test(&manager, TEST_ROOM_ID).await;
+    assert_lockstep_snapshot_recoverable(&started, 0);
+
+    let (rejoin_tx, _rejoin_rx) = mpsc::channel(1024);
+    let rejoin_snapshot = manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            rejoin_tx,
+            MemberRole::Player,
+            Some(LOCKSTEP_SIM_DEMO_POLICY),
+        )
+        .await
+        .unwrap();
+    assert_lockstep_snapshot_recoverable(&rejoin_snapshot, 0);
+
+    manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            1,
+            "sim_input",
+            r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":1000,"dirY":0,"speed":6000}]}"#,
+        )
+        .await
+        .unwrap();
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+    let frame_snapshot = progressed.0.snapshot.expect("lockstep frame snapshot");
+    assert_lockstep_snapshot_recoverable(&frame_snapshot, 1);
+
+    manager.disconnect_room_member(TEST_ROOM_ID, PLAYER_A).await;
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel(1024);
+    let reconnect = manager
+        .reconnect_room(TEST_ROOM_ID, PLAYER_A, reconnect_tx)
+        .await
+        .unwrap();
+    assert_lockstep_snapshot_recoverable(&reconnect.snapshot, 1);
+
+    let (observer_tx, _observer_rx) = mpsc::channel(1024);
+    let observer = manager
+        .join_room_as_observer(TEST_ROOM_ID, OBSERVER_1, observer_tx)
+        .await
+        .unwrap();
+    assert_lockstep_snapshot_recoverable(&observer.snapshot, 1);
 }
 
 #[tokio::test]
