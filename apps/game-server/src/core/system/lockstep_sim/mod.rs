@@ -1022,6 +1022,100 @@ mod tests {
     }
 
     #[test]
+    fn minimal_world_builds_single_player_entity_with_initial_state() {
+        let players = vec!["player-a".to_string()];
+        let (world, bindings) = create_minimal_world(&players);
+
+        assert_eq!(world.schema_version, sim_core::SIM_CORE_SCHEMA_VERSION);
+        assert_eq!(world.frame, FrameId::new(0));
+        assert_eq!(world.rng.seed, 0);
+        assert_eq!(world.entities.len(), 2);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings["player-a"], EntityId::new(PLAYER_ENTITY_ID_BASE));
+
+        let player = world
+            .entity(EntityId::new(PLAYER_ENTITY_ID_BASE))
+            .expect("single player entity should exist");
+        assert_eq!(player.kind, EntityKind::Player);
+        assert_eq!(player.owner_character_id.as_deref(), Some("player-a"));
+        assert_eq!(player.team_id, TeamId::new(1));
+        assert_eq!(player.transform.pos, Vec2Fp::new(Fp::ZERO, Fp::ZERO));
+        assert_eq!(player.transform.facing, QuantizedDir::RIGHT);
+        assert_eq!(player.transform.radius, Fp::from_milli(500));
+        assert_eq!(player.movement.mode, MovementMode::Idle);
+        assert_eq!(player.movement.move_dir, QuantizedDir::ZERO);
+        assert_eq!(player.movement.speed_per_second, Fp::ZERO);
+        assert_eq!(player.combat.hp, 100);
+        assert_eq!(player.combat.max_hp, 100);
+        assert_eq!(player.combat.skill_slots.len(), 1);
+        assert_eq!(
+            player.combat.skill_slots[0].skill_id,
+            SkillId::new(DEFAULT_PLAYER_SKILL_ID)
+        );
+        assert!(player.alive);
+    }
+
+    #[test]
+    fn minimal_world_builds_training_target_for_movement_and_combat_scenarios() {
+        let players = vec!["player-a".to_string()];
+        let (world, _) = create_minimal_world(&players);
+
+        let target = world
+            .entity(EntityId::new(TRAINING_TARGET_ENTITY_ID))
+            .expect("training target should exist");
+        assert_eq!(target.kind, EntityKind::Monster);
+        assert_eq!(target.owner_character_id, None);
+        assert_eq!(target.team_id, TeamId::new(90));
+        assert_eq!(target.transform.pos, Vec2Fp::new(Fp::from_i32(8), Fp::ZERO));
+        assert_eq!(target.transform.facing, QuantizedDir::LEFT);
+        assert_eq!(target.movement, MovementState::default());
+        assert_eq!(target.combat.hp, 150);
+        assert_eq!(target.combat.max_hp, 150);
+        assert_eq!(target.combat.defense, 1);
+        assert!(target.alive);
+    }
+
+    #[test]
+    fn minimal_world_entity_ids_and_initial_hash_are_deterministic_for_same_players() {
+        let players = vec!["player-b".to_string(), "player-a".to_string()];
+        let (world_a, bindings_a) = create_minimal_world(&players);
+        let (world_b, bindings_b) = create_minimal_world(&players);
+
+        assert_eq!(world_a, world_b);
+        assert_eq!(world_hash(&world_a), world_hash(&world_b));
+        assert_eq!(bindings_a, bindings_b);
+        assert_eq!(
+            bindings_a["player-b"],
+            EntityId::new(PLAYER_ENTITY_ID_BASE)
+        );
+        assert_eq!(
+            bindings_a["player-a"],
+            EntityId::new(PLAYER_ENTITY_ID_BASE + 1)
+        );
+        assert_eq!(
+            world_a
+                .entities_sorted_by_id()
+                .iter()
+                .map(|entity| entity.id.raw())
+                .collect::<Vec<_>>(),
+            vec![
+                PLAYER_ENTITY_ID_BASE,
+                PLAYER_ENTITY_ID_BASE + 1,
+                TRAINING_TARGET_ENTITY_ID
+            ]
+        );
+
+        let snapshot_a =
+            create_initial_snapshot("room-lockstep", 20, &world_a, &bindings_a);
+        let snapshot_b =
+            create_initial_snapshot("room-lockstep", 20, &world_b, &bindings_b);
+        assert_eq!(snapshot_a, snapshot_b);
+        assert_eq!(snapshot_a.start_frame, 0);
+        assert_eq!(snapshot_a.rng_seed, 0);
+        assert_eq!(snapshot_a.state_hash, sim_hash_envelope(world_hash(&world_a)));
+    }
+
+    #[test]
     fn initial_snapshot_restores_and_continues_with_same_hash() {
         let players = vec!["player-a".to_string()];
         let (mut continuous_world, continuous_bindings) = create_minimal_world(&players);
