@@ -3,11 +3,12 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sim_core::{
-    CastSkillCommand, CombatConfig, CombatEffect, CombatState, DamageFormula, EntityId, EntityKind,
-    FaceCommand, Fp, FrameId, MoveCommand, MovementConfig, MovementMode, MovementState,
-    QuantizedDir, SceneBounds, SimCommand, SimConfig, SimEntity, SimHash, SimInput, SimInputSource,
-    SimSnapshot, SimStepResult, SimTransform, SimWorld, SkillDefinition, SkillId, SkillSlot,
-    SkillTarget, SkillTargetType, SnapshotError, StepError, TeamId, Vec2Fp,
+    BuffDefinition, BuffId, CastSkillCommand, CombatConfig, CombatEffect, CombatState,
+    DamageFormula, EntityId, EntityKind, FaceCommand, Fp, FrameId, MoveCommand, MovementConfig,
+    MovementMode, MovementState, QuantizedDir, SceneBounds, SimCommand, SimConfig, SimEntity,
+    SimHash, SimInput, SimInputSource, SimSnapshot, SimStepResult, SimTransform, SimWorld,
+    SkillDefinition, SkillId, SkillSlot, SkillTarget, SkillTargetType, SnapshotError, StepError,
+    TeamId, Vec2Fp,
     restore as restore_sim_snapshot, snapshot as capture_sim_snapshot,
 };
 
@@ -18,7 +19,12 @@ pub const SIM_INPUT_VERSION: u32 = 1;
 pub const PLAYER_ENTITY_ID_BASE: u32 = 1000;
 pub const TRAINING_TARGET_ENTITY_ID: u32 = 9000;
 pub const DEFAULT_PLAYER_SKILL_ID: u32 = 1;
+pub const DEFAULT_DEMO_BUFF_ID: u32 = 1;
 pub const DEFAULT_LOCKSTEP_SIM_TICK_RATE: u16 = 20;
+pub const LOCKSTEP_SIM_DEMO_FIXED_CONFIG_VERSION: u64 = 1;
+pub const LOCKSTEP_SIM_DEMO_CONFIG_SOURCE: &str = "lockstep_sim_demo.fixed_v1";
+pub const LOCKSTEP_SIM_DEMO_CONFIG_MIGRATION_BOUNDARY: &str =
+    "skills_and_buffs_use_fixed_demo_definitions_until_sim_core_csv_mapping_is_complete";
 pub const SIM_INITIAL_SNAPSHOT_SCHEMA: &str = "myserver.lockstep-sim.initial-snapshot.v1";
 pub const SIM_FRAME_ENVELOPE_SCHEMA: &str = "myserver.lockstep-sim.frame-envelope.v1";
 pub const SIM_DOWNLINK_SCHEMA_VERSION: u32 = 1;
@@ -41,6 +47,20 @@ pub struct SimControlBinding {
     pub entity_id: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundSimConfig {
+    pub config_version: u64,
+    pub config_hash: String,
+    pub sim_schema_version: u16,
+    pub config: SimConfig,
+}
+
+impl BoundSimConfig {
+    pub fn tick_rate(&self) -> u16 {
+        self.config.movement.tick_rate
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimInitialSnapshot {
@@ -49,7 +69,11 @@ pub struct SimInitialSnapshot {
     pub room_id: String,
     pub start_frame: u32,
     pub tick_rate: u16,
+    #[serde(default = "default_sim_config_version")]
+    pub config_version: u64,
     pub config_hash: String,
+    #[serde(default = "default_sim_schema_version")]
+    pub sim_schema_version: u16,
     pub rng_seed: u64,
     pub state_hash: SimHashEnvelope,
     pub snapshot: SimSnapshot,
@@ -98,7 +122,11 @@ pub struct SimFrameEnvelope {
     pub room_id: String,
     pub frame: u32,
     pub tick_rate: u16,
+    #[serde(default = "default_sim_config_version")]
+    pub config_version: u64,
     pub config_hash: String,
+    #[serde(default = "default_sim_schema_version")]
+    pub sim_schema_version: u16,
     pub state_hash: SimHashEnvelope,
     pub events: Vec<sim_core::SimEvent>,
     #[serde(default)]
@@ -124,9 +152,10 @@ pub fn create_minimal_world(character_ids: &[String]) -> (SimWorld, HashMap<Stri
 }
 
 pub fn default_sim_config(tick_rate: u16) -> SimConfig {
+    let tick_rate = tick_rate.max(1);
     SimConfig {
         movement: MovementConfig {
-            tick_rate: tick_rate.max(1),
+            tick_rate,
             default_speed_per_second: Fp::from_i32(6),
             max_speed_per_second: Fp::from_i32(12),
             bounds: SceneBounds {
@@ -138,16 +167,38 @@ pub fn default_sim_config(tick_rate: u16) -> SimConfig {
         combat: CombatConfig::from_definitions(
             vec![SkillDefinition {
                 id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
-                cooldown_frames: tick_rate.max(1) as u32,
+                cooldown_frames: tick_rate as u32,
                 cast_range: Fp::from_i32(12),
                 target_type: SkillTargetType::Enemy,
                 effects: vec![CombatEffect::Damage {
                     formula: DamageFormula::Fixed { amount: 15 },
                 }],
             }],
-            Vec::new(),
+            vec![BuffDefinition {
+                id: BuffId::new(DEFAULT_DEMO_BUFF_ID),
+                duration_frames: tick_rate as u32 * 3,
+                interval_frames: tick_rate as u32,
+                max_stacks: 1,
+                effects: vec![CombatEffect::Heal {
+                    formula: DamageFormula::Fixed { amount: 1 },
+                }],
+            }],
         )
         .expect("lockstep_sim_demo default combat config should be valid"),
+    }
+}
+
+pub fn default_bound_sim_config(tick_rate: u16) -> BoundSimConfig {
+    room_sim_config(LOCKSTEP_SIM_DEMO_FIXED_CONFIG_VERSION, tick_rate)
+}
+
+pub fn room_sim_config(config_version: u64, tick_rate: u16) -> BoundSimConfig {
+    let config = default_sim_config(tick_rate);
+    BoundSimConfig {
+        config_version,
+        config_hash: sim_config_hash_hex(&config),
+        sim_schema_version: sim_core::SIM_CORE_SCHEMA_VERSION,
+        config,
     }
 }
 
@@ -180,17 +231,27 @@ pub fn create_initial_snapshot(
     world: &SimWorld,
     bindings: &HashMap<String, EntityId>,
 ) -> SimInitialSnapshot {
-    let tick_rate = tick_rate.max(1);
-    let config = default_sim_config(tick_rate);
-    let snapshot = capture_sim_snapshot(world, &config);
+    let config = default_bound_sim_config(tick_rate);
+    create_initial_snapshot_with_config(room_id, &config, world, bindings)
+}
+
+pub fn create_initial_snapshot_with_config(
+    room_id: &str,
+    config: &BoundSimConfig,
+    world: &SimWorld,
+    bindings: &HashMap<String, EntityId>,
+) -> SimInitialSnapshot {
+    let snapshot = capture_sim_snapshot(world, &config.config);
 
     SimInitialSnapshot {
         schema: SIM_INITIAL_SNAPSHOT_SCHEMA.to_string(),
         schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
         room_id: room_id.to_string(),
         start_frame: world.frame.raw(),
-        tick_rate,
-        config_hash: sim_config_hash_hex(&config),
+        tick_rate: config.tick_rate(),
+        config_version: config.config_version,
+        config_hash: config.config_hash.clone(),
+        sim_schema_version: config.sim_schema_version,
         rng_seed: world.rng.seed,
         state_hash: sim_hash_envelope(snapshot.hash),
         snapshot,
@@ -206,21 +267,39 @@ pub fn create_frame_envelope(
     inputs: &[PlayerInputRecord],
     result: &SimStepResult,
 ) -> SimFrameEnvelope {
-    let tick_rate = tick_rate.max(1);
-    let config = default_sim_config(tick_rate);
+    let config = default_bound_sim_config(tick_rate);
+    create_frame_envelope_with_config(room_id, &config, world, inputs, result)
+}
 
+pub fn create_frame_envelope_with_config(
+    room_id: &str,
+    config: &BoundSimConfig,
+    world: &SimWorld,
+    inputs: &[PlayerInputRecord],
+    result: &SimStepResult,
+) -> SimFrameEnvelope {
     SimFrameEnvelope {
         schema: SIM_FRAME_ENVELOPE_SCHEMA.to_string(),
         schema_version: SIM_DOWNLINK_SCHEMA_VERSION,
         room_id: room_id.to_string(),
         frame: result.frame.raw(),
-        tick_rate,
-        config_hash: sim_config_hash_hex(&config),
+        tick_rate: config.tick_rate(),
+        config_version: config.config_version,
+        config_hash: config.config_hash.clone(),
+        sim_schema_version: config.sim_schema_version,
         state_hash: sim_hash_envelope(result.state_hash),
         events: result.events.clone(),
         input_sources: frame_input_source_summary(inputs),
         debug_summary: frame_debug_summary(world, inputs, &result.events),
     }
+}
+
+fn default_sim_config_version() -> u64 {
+    LOCKSTEP_SIM_DEMO_FIXED_CONFIG_VERSION
+}
+
+fn default_sim_schema_version() -> u16 {
+    sim_core::SIM_CORE_SCHEMA_VERSION
 }
 
 pub fn restore_initial_snapshot(
@@ -238,10 +317,15 @@ pub fn restore_initial_snapshot(
     if snapshot.tick_rate == 0 {
         return Err(LockstepSimSnapshotError::InvalidTickRate);
     }
+    if snapshot.config_version == 0 {
+        return Err(LockstepSimSnapshotError::InvalidConfigVersion);
+    }
+    if snapshot.sim_schema_version != sim_core::SIM_CORE_SCHEMA_VERSION {
+        return Err(LockstepSimSnapshotError::UnsupportedSchema);
+    }
 
-    let config = default_sim_config(snapshot.tick_rate);
-    let expected_config_hash = sim_config_hash_hex(&config);
-    if snapshot.config_hash != expected_config_hash {
+    let config = room_sim_config(snapshot.config_version, snapshot.tick_rate);
+    if snapshot.config_hash != config.config_hash {
         return Err(LockstepSimSnapshotError::ConfigHashMismatch);
     }
 
@@ -390,10 +474,20 @@ pub fn step_world(
     inputs: &[PlayerInputRecord],
     bindings: &HashMap<String, EntityId>,
 ) -> Result<SimStepResult, LockstepSimStepError> {
-    let sim_inputs = sim_inputs_from_records(inputs, bindings)?;
-    let config = default_sim_config(fps);
+    let config = default_bound_sim_config(fps);
+    step_world_with_config(world, frame_id, &config, inputs, bindings)
+}
 
-    sim_core::step(world, FrameId::new(frame_id), &sim_inputs, &config).map_err(Into::into)
+pub fn step_world_with_config(
+    world: &mut SimWorld,
+    frame_id: u32,
+    config: &BoundSimConfig,
+    inputs: &[PlayerInputRecord],
+    bindings: &HashMap<String, EntityId>,
+) -> Result<SimStepResult, LockstepSimStepError> {
+    let sim_inputs = sim_inputs_from_records(inputs, bindings)?;
+
+    sim_core::step(world, FrameId::new(frame_id), &sim_inputs, &config.config).map_err(Into::into)
 }
 
 pub fn world_hash(world: &SimWorld) -> SimHash {
@@ -535,6 +629,7 @@ pub enum LockstepSimSnapshotError {
     UnsupportedSchema,
     InvalidRoomId,
     InvalidTickRate,
+    InvalidConfigVersion,
     ConfigHashMismatch,
     Snapshot(SnapshotError),
     FrameMismatch,
@@ -550,6 +645,9 @@ impl std::fmt::Display for LockstepSimSnapshotError {
             Self::UnsupportedSchema => formatter.write_str("UNSUPPORTED_SIM_SNAPSHOT_SCHEMA"),
             Self::InvalidRoomId => formatter.write_str("INVALID_SIM_SNAPSHOT_ROOM_ID"),
             Self::InvalidTickRate => formatter.write_str("INVALID_SIM_SNAPSHOT_TICK_RATE"),
+            Self::InvalidConfigVersion => {
+                formatter.write_str("INVALID_SIM_SNAPSHOT_CONFIG_VERSION")
+            }
             Self::ConfigHashMismatch => formatter.write_str("SIM_SNAPSHOT_CONFIG_HASH_MISMATCH"),
             Self::Snapshot(error) => write!(formatter, "{error}"),
             Self::FrameMismatch => formatter.write_str("SIM_SNAPSHOT_FRAME_MISMATCH"),
@@ -997,6 +1095,93 @@ mod tests {
 
         assert_eq!(world.frame, FrameId::new(1));
         assert_eq!(result.frame, FrameId::new(1));
+    }
+
+    #[test]
+    fn default_sim_config_contains_movement_skill_and_buff_definitions() {
+        let config = default_sim_config(20);
+
+        assert_eq!(config.movement.tick_rate, 20);
+        assert_eq!(config.movement.default_speed_per_second, Fp::from_i32(6));
+        assert_eq!(config.movement.max_speed_per_second, Fp::from_i32(12));
+        assert_eq!(
+            config.movement.bounds.min,
+            Vec2Fp::new(Fp::from_i32(-100), Fp::from_i32(-100))
+        );
+        assert_eq!(
+            config.movement.bounds.max,
+            Vec2Fp::new(Fp::from_i32(100), Fp::from_i32(100))
+        );
+        assert_eq!(config.combat.skills.iter().count(), 1);
+        assert_eq!(
+            config
+                .combat
+                .skills
+                .get(SkillId::new(DEFAULT_PLAYER_SKILL_ID))
+                .expect("default player skill should exist")
+                .cooldown_frames,
+            20
+        );
+        assert_eq!(config.combat.buffs.iter().count(), 1);
+        assert_eq!(
+            config
+                .combat
+                .buffs
+                .get(BuffId::new(DEFAULT_DEMO_BUFF_ID))
+                .expect("default demo buff should exist")
+                .duration_frames,
+            60
+        );
+    }
+
+    #[test]
+    fn bound_sim_config_hash_is_stable_and_changes_when_config_changes() {
+        let first = room_sim_config(7, 20);
+        let second = room_sim_config(7, 20);
+        let different_tick_rate = room_sim_config(7, 30);
+        let mut different_skill = default_sim_config(20);
+        different_skill
+            .combat
+            .skills
+            .skills
+            .first_mut()
+            .expect("default skill should exist")
+            .cooldown_frames += 1;
+
+        assert_eq!(first, second);
+        assert_eq!(first.config_version, 7);
+        assert_eq!(first.sim_schema_version, sim_core::SIM_CORE_SCHEMA_VERSION);
+        assert_eq!(first.config_hash.len(), 64);
+        assert_eq!(first.config_hash, second.config_hash);
+        assert_ne!(first.config_hash, different_tick_rate.config_hash);
+        assert_ne!(first.config_hash, sim_config_hash_hex(&different_skill));
+    }
+
+    #[test]
+    fn snapshot_and_frame_envelope_bind_config_metadata() {
+        let players = vec!["player-a".to_string()];
+        let (mut world, bindings) = create_minimal_world(&players);
+        let config = room_sim_config(42, 20);
+
+        let snapshot =
+            create_initial_snapshot_with_config("room-lockstep", &config, &world, &bindings);
+        assert_eq!(snapshot.config_version, 42);
+        assert_eq!(snapshot.config_hash, config.config_hash);
+        assert_eq!(
+            snapshot.sim_schema_version,
+            sim_core::SIM_CORE_SCHEMA_VERSION
+        );
+
+        let input = input(1, "player-a", cast_training_target_payload(1));
+        let result =
+            step_world_with_config(&mut world, 1, &config, std::slice::from_ref(&input), &bindings)
+                .unwrap();
+        let envelope =
+            create_frame_envelope_with_config("room-lockstep", &config, &world, &[input], &result);
+
+        assert_eq!(envelope.config_version, snapshot.config_version);
+        assert_eq!(envelope.config_hash, snapshot.config_hash);
+        assert_eq!(envelope.sim_schema_version, snapshot.sim_schema_version);
     }
 
     #[test]

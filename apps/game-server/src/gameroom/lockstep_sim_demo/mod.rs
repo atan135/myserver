@@ -7,10 +7,11 @@ use tracing::{info, warn};
 use crate::core::logic::{RoomLogic, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::lockstep_sim::{
-    DEFAULT_LOCKSTEP_SIM_TICK_RATE, SimFrameEnvelope, SimInitialSnapshot,
-    TRAINING_TARGET_ENTITY_ID, create_frame_envelope, create_initial_snapshot,
-    create_minimal_world, restore_initial_snapshot, sim_hash_envelope, step_world,
-    validate_player_input, world_hash,
+    BoundSimConfig, DEFAULT_LOCKSTEP_SIM_TICK_RATE, LOCKSTEP_SIM_DEMO_CONFIG_MIGRATION_BOUNDARY,
+    LOCKSTEP_SIM_DEMO_CONFIG_SOURCE, SimFrameEnvelope, SimInitialSnapshot,
+    TRAINING_TARGET_ENTITY_ID, create_frame_envelope_with_config,
+    create_initial_snapshot_with_config, create_minimal_world, restore_initial_snapshot,
+    room_sim_config, sim_hash_envelope, step_world_with_config, validate_player_input, world_hash,
 };
 
 pub const LOCKSTEP_SIM_DEMO_POLICY_ID: &str = "lockstep_sim_demo";
@@ -43,6 +44,11 @@ struct LockstepSimDemoState<'a> {
     roster: &'a [String],
     world_frame: u32,
     tick_rate: u16,
+    config_version: u64,
+    config_hash: &'a str,
+    sim_schema_version: u16,
+    config_source: &'static str,
+    config_migration_boundary: &'static str,
     entity_count: usize,
     binding_count: usize,
     training_target_entity_id: u32,
@@ -72,6 +78,7 @@ pub struct LockstepSimDemoLogic {
     world: Option<SimWorld>,
     bindings: HashMap<String, EntityId>,
     tick_rate: u16,
+    config: BoundSimConfig,
     last_hash: Option<SimHash>,
     last_frame: Option<SimFrameEnvelope>,
     last_event_count: usize,
@@ -92,7 +99,7 @@ impl LockstepSimDemoLogic {
         self.last_event_count = 0;
         self.world = Some(world);
         self.bindings = bindings;
-        self.tick_rate = DEFAULT_LOCKSTEP_SIM_TICK_RATE;
+        self.tick_rate = self.config.tick_rate();
         self.last_error = None;
     }
 
@@ -131,7 +138,7 @@ impl LockstepSimDemoLogic {
                 .map(entity_debug_state)
         });
         let initial_snapshot = self.world.as_ref().map(|world| {
-            create_initial_snapshot(&self.room_id, self.tick_rate, world, &self.bindings)
+            create_initial_snapshot_with_config(&self.room_id, &self.config, world, &self.bindings)
         });
         let observer_frame = self.world.as_ref().map(|world| LockstepSimObserverFrame {
             world_frame,
@@ -146,6 +153,11 @@ impl LockstepSimDemoLogic {
             roster: &self.roster,
             world_frame,
             tick_rate: self.tick_rate,
+            config_version: self.config.config_version,
+            config_hash: &self.config.config_hash,
+            sim_schema_version: self.config.sim_schema_version,
+            config_source: LOCKSTEP_SIM_DEMO_CONFIG_SOURCE,
+            config_migration_boundary: LOCKSTEP_SIM_DEMO_CONFIG_MIGRATION_BOUNDARY,
             entity_count,
             binding_count: self.bindings.len(),
             training_target_entity_id: TRAINING_TARGET_ENTITY_ID,
@@ -164,13 +176,21 @@ impl LockstepSimDemoLogic {
 
 impl Default for LockstepSimDemoLogic {
     fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+impl LockstepSimDemoLogic {
+    pub fn new(config_version: u64) -> Self {
+        let config = room_sim_config(config_version.max(1), DEFAULT_LOCKSTEP_SIM_TICK_RATE);
         Self {
             room_id: String::new(),
             tick_count: 0,
             roster: Vec::new(),
             world: None,
             bindings: HashMap::new(),
-            tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            tick_rate: config.tick_rate(),
+            config,
             last_hash: None,
             last_frame: None,
             last_event_count: 0,
@@ -218,23 +238,24 @@ impl RoomLogic for LockstepSimDemoLogic {
 
     fn on_tick(&mut self, frame_id: u32, fps: u16, inputs: &[PlayerInputRecord]) {
         self.tick_count = self.tick_count.saturating_add(1);
-        self.tick_rate = fps.max(1);
         if self.world.is_none() {
             self.rebuild_world();
-            self.tick_rate = fps.max(1);
+        }
+        if self.tick_rate != fps.max(1) {
+            self.tick_rate = self.config.tick_rate();
         }
 
         let Some(world) = self.world.as_mut() else {
             return;
         };
 
-        match step_world(world, frame_id, fps, inputs, &self.bindings) {
+        match step_world_with_config(world, frame_id, &self.config, inputs, &self.bindings) {
             Ok(result) => {
                 self.last_hash = Some(result.state_hash);
                 self.last_event_count = result.events.len();
-                self.last_frame = Some(create_frame_envelope(
+                self.last_frame = Some(create_frame_envelope_with_config(
                     &self.room_id,
-                    self.tick_rate,
+                    &self.config,
                     world,
                     inputs,
                     &result,
@@ -288,6 +309,7 @@ impl RoomLogic for LockstepSimDemoLogic {
                 self.world = Some(world);
                 self.bindings = bindings;
                 self.tick_rate = snapshot.tick_rate;
+                self.config = room_sim_config(snapshot.config_version, snapshot.tick_rate);
                 self.last_hash = Some(SimHash {
                     frame: sim_core::FrameId::new(snapshot.state_hash.frame),
                     value: snapshot.state_hash.value,
@@ -397,6 +419,24 @@ mod tests {
         assert_eq!(started["bindingCount"], 1);
         assert!(started["lastHash"].as_u64().is_some());
         assert_eq!(started["observerFrame"]["worldFrame"], 0);
+        assert_eq!(started["configVersion"], 1);
+        assert_eq!(
+            started["simSchemaVersion"],
+            sim_core::SIM_CORE_SCHEMA_VERSION
+        );
+        assert_eq!(started["configSource"], "lockstep_sim_demo.fixed_v1");
+        assert_eq!(
+            started["configHash"],
+            started["initialSnapshot"]["configHash"]
+        );
+        assert_eq!(
+            started["configVersion"],
+            started["initialSnapshot"]["configVersion"]
+        );
+        assert_eq!(
+            started["simSchemaVersion"],
+            started["initialSnapshot"]["simSchemaVersion"]
+        );
         assert_eq!(
             started["observerFrame"]["stateHash"],
             started["initialSnapshot"]["stateHash"]
@@ -443,6 +483,15 @@ mod tests {
         assert!(advanced["lastHash"].as_u64().is_some());
         assert_eq!(advanced["initialSnapshot"]["startFrame"], 1);
         assert_eq!(advanced["lastFrame"]["frame"], 1);
+        assert_eq!(advanced["lastFrame"]["configHash"], advanced["configHash"]);
+        assert_eq!(
+            advanced["lastFrame"]["configVersion"],
+            advanced["configVersion"]
+        );
+        assert_eq!(
+            advanced["lastFrame"]["simSchemaVersion"],
+            advanced["simSchemaVersion"]
+        );
         assert_eq!(advanced["observerFrame"]["worldFrame"], 1);
         assert_eq!(
             advanced["observerFrame"]["stateHash"],
@@ -515,6 +564,8 @@ mod tests {
         let move_payload = move_right_payload(1);
         continuous.on_tick(1, 20, &[input(1, "player-a", move_payload)]);
         let snapshot_json = continuous.get_serialized_state();
+        let snapshot_json_value =
+            serde_json::from_str::<serde_json::Value>(&snapshot_json).unwrap();
 
         let mut restored = LockstepSimDemoLogic::default();
         restored.restore_from_serialized_state(&snapshot_json);
@@ -523,10 +574,11 @@ mod tests {
         assert_eq!(restored_state["roomId"], "room-lockstep");
         assert_eq!(restored_state["worldFrame"], 1);
         assert_eq!(restored_state["tickRate"], 20);
+        assert_eq!(restored_state["configHash"], snapshot_json_value["configHash"]);
         assert!(restored_state["lastError"].is_null());
         assert_eq!(
             restored_state["initialSnapshot"]["stateHash"],
-            serde_json::from_str::<serde_json::Value>(&snapshot_json).unwrap()["initialSnapshot"]["stateHash"]
+            snapshot_json_value["initialSnapshot"]["stateHash"]
         );
 
         let cast_payload = cast_training_target_payload(2);
@@ -553,6 +605,32 @@ mod tests {
             restored_state["observerFrame"]["stateHash"],
             continuous_state["observerFrame"]["stateHash"]
         );
+    }
+
+    #[test]
+    fn lockstep_sim_demo_binds_config_metadata_for_room_lifetime() {
+        let mut logic = LockstepSimDemoLogic::new(2);
+        logic.on_room_created("room-lockstep");
+        logic.on_character_join("player-a");
+        logic.on_game_started("room-lockstep");
+
+        let started =
+            serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state()).unwrap();
+        let config_hash = started["configHash"].clone();
+        assert_eq!(started["configVersion"], 2);
+        assert_eq!(started["initialSnapshot"]["configVersion"], 2);
+        assert_eq!(started["initialSnapshot"]["configHash"], config_hash);
+
+        logic.on_tick(1, 30, &[]);
+
+        let advanced =
+            serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state()).unwrap();
+        assert_eq!(advanced["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
+        assert_eq!(advanced["configVersion"], 2);
+        assert_eq!(advanced["configHash"], config_hash);
+        assert_eq!(advanced["lastFrame"]["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
+        assert_eq!(advanced["lastFrame"]["configVersion"], 2);
+        assert_eq!(advanced["lastFrame"]["configHash"], config_hash);
     }
 
     #[test]
@@ -694,6 +772,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&logic.get_serialized_state()).unwrap();
         assert_eq!(state["logicType"], LOCKSTEP_SIM_DEMO_POLICY_ID);
         assert_eq!(state["worldFrame"], 1);
+        assert_eq!(state["configVersion"], 1);
 
         let robot = factory.create("robot_sync_room");
         assert_eq!(

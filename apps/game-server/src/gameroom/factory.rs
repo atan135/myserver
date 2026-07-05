@@ -23,7 +23,9 @@ impl RoomLogicFactory for GameRoomLogicFactory {
             "ui_touch_room" | "UITouchRoom" => Box::new(UITouchRoomLogic::default()),
             "robot_sync_room" => Box::new(RobotSyncRoomLogic::default()),
             "combat_demo" => Box::new(CombatDemoLogic::new(self.config_tables.clone())),
-            "lockstep_sim_demo" => Box::new(LockstepSimDemoLogic::default()),
+            "lockstep_sim_demo" => Box::new(LockstepSimDemoLogic::new(
+                self.config_tables.current_snapshot().version,
+            )),
             "movement_demo" => {
                 let config_tables = self.config_tables.clone();
                 let current = config_tables.current_snapshot();
