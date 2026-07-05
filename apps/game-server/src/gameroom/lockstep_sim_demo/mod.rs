@@ -8,7 +8,7 @@ use crate::core::logic::{RoomLogic, RoomLogicTransfer};
 use crate::core::room::PlayerInputRecord;
 use crate::core::system::lockstep_sim::{
     BoundSimConfig, DEFAULT_LOCKSTEP_SIM_TICK_RATE, LOCKSTEP_SIM_DEMO_CONFIG_MIGRATION_BOUNDARY,
-    LOCKSTEP_SIM_DEMO_CONFIG_SOURCE, SimFrameEnvelope, SimInitialSnapshot,
+    LOCKSTEP_SIM_DEMO_CONFIG_SOURCE, SimFrameEnvelope, SimFrameEventSummary, SimInitialSnapshot,
     TRAINING_TARGET_ENTITY_ID, create_frame_envelope_with_config,
     create_initial_snapshot_with_config, create_minimal_world, restore_initial_snapshot,
     room_sim_config, sim_hash_envelope, step_world_with_config, validate_player_input, world_hash,
@@ -59,7 +59,9 @@ struct LockstepSimDemoState<'a> {
     observer_frame: Option<LockstepSimObserverFrame>,
     last_hash: Option<u64>,
     last_hash_hex: Option<String>,
+    last_state_hash: Option<crate::core::system::lockstep_sim::SimHashEnvelope>,
     last_event_count: usize,
+    last_event_summaries: Vec<SimFrameEventSummary>,
     last_error: Option<&'a str>,
 }
 
@@ -68,6 +70,8 @@ struct LockstepSimDemoState<'a> {
 struct LockstepSimObserverFrame {
     world_frame: u32,
     state_hash: crate::core::system::lockstep_sim::SimHashEnvelope,
+    last_event_count: usize,
+    last_event_summaries: Vec<SimFrameEventSummary>,
     last_frame: Option<SimFrameEnvelope>,
 }
 
@@ -143,8 +147,20 @@ impl LockstepSimDemoLogic {
         let observer_frame = self.world.as_ref().map(|world| LockstepSimObserverFrame {
             world_frame,
             state_hash: sim_hash_envelope(world_hash(world)),
+            last_event_count: self.last_event_count,
+            last_event_summaries: self
+                .last_frame
+                .as_ref()
+                .map(|frame| frame.event_summaries.clone())
+                .unwrap_or_default(),
             last_frame: self.last_frame.clone(),
         });
+        let last_state_hash = self.last_hash.map(sim_hash_envelope);
+        let last_event_summaries = self
+            .last_frame
+            .as_ref()
+            .map(|frame| frame.event_summaries.clone())
+            .unwrap_or_default();
 
         LockstepSimDemoState {
             logic_type: LOCKSTEP_SIM_DEMO_POLICY_ID,
@@ -168,7 +184,9 @@ impl LockstepSimDemoLogic {
             observer_frame,
             last_hash: self.last_hash.map(|hash| hash.value),
             last_hash_hex: self.last_hash.map(|hash| sim_hash_envelope(hash).hex),
+            last_state_hash,
             last_event_count: self.last_event_count,
+            last_event_summaries,
             last_error: self.last_error.as_deref(),
         }
     }
@@ -322,7 +340,7 @@ impl RoomLogic for LockstepSimDemoLogic {
                 self.last_event_count = self
                     .last_frame
                     .as_ref()
-                    .map(|frame| frame.events.len())
+                    .map(frame_event_count)
                     .unwrap_or(0);
                 self.last_error = None;
             }
@@ -344,6 +362,13 @@ fn entity_debug_state(entity: &SimEntity) -> LockstepSimEntityDebugState {
         max_hp: entity.combat.max_hp,
         alive: entity.alive,
     }
+}
+
+fn frame_event_count(frame: &SimFrameEnvelope) -> usize {
+    frame
+        .event_count
+        .max(frame.events.len())
+        .max(frame.event_summaries.len())
 }
 
 #[cfg(test)]
@@ -489,6 +514,11 @@ mod tests {
             started["observerFrame"]["stateHash"],
             started["initialSnapshot"]["stateHash"]
         );
+        assert_eq!(started["observerFrame"]["lastEventCount"], 0);
+        assert!(started["observerFrame"]["lastEventSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert!(started["observerFrame"]["lastFrame"].is_null());
         assert_eq!(started["tickRate"], DEFAULT_LOCKSTEP_SIM_TICK_RATE);
         assert_eq!(
@@ -551,8 +581,37 @@ mod tests {
                 .as_str()
                 .is_some_and(|hex| hex.len() == 16)
         );
+        assert_eq!(advanced["lastStateHash"], advanced["lastFrame"]["stateHash"]);
+        assert_eq!(advanced["lastFrame"]["eventCount"], 0);
+        assert!(advanced["lastFrame"]["eventSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(advanced["lastEventSummaries"].as_array().unwrap().is_empty());
+        assert_eq!(advanced["observerFrame"]["lastEventCount"], 0);
+        assert!(advanced["observerFrame"]["lastEventSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(advanced["lastFrame"]["debugSummary"]["inputCount"], 0);
         assert_eq!(advanced["lastFrame"]["debugSummary"]["eventCount"], 0);
+        assert_eq!(advanced["lastFrame"]["debugState"]["schemaVersion"], 1);
+        assert_eq!(
+            advanced["lastFrame"]["debugState"]["entities"][0]["entityId"],
+            1000
+        );
+        assert_eq!(
+            advanced["lastFrame"]["debugState"]["entities"][0]["xRaw"],
+            0
+        );
+        assert_eq!(
+            advanced["lastFrame"]["debugState"]["entities"][0]["hp"],
+            100
+        );
+        assert_eq!(
+            advanced["lastFrame"]["debugState"]["entities"][0]["alive"],
+            true
+        );
         assert!(advanced["lastError"].is_null());
     }
 
@@ -590,7 +649,46 @@ mod tests {
         assert_eq!(attacked["trainingTarget"]["hp"], 136);
         assert_eq!(attacked["lastEventCount"], 2);
         assert_eq!(attacked["lastFrame"]["frame"], 2);
+        assert_eq!(attacked["lastStateHash"], attacked["lastFrame"]["stateHash"]);
+        assert_eq!(attacked["lastFrame"]["eventCount"], 2);
         assert_eq!(attacked["lastFrame"]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(attacked["lastFrame"]["eventSummaries"][0]["kind"], "skillCast");
+        assert_eq!(attacked["lastFrame"]["eventSummaries"][0]["schemaVersion"], 1);
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][0]["sourceEntityId"],
+            1000
+        );
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][0]["targetEntityId"],
+            TRAINING_TARGET_ENTITY_ID
+        );
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][0]["skillId"],
+            DEFAULT_PLAYER_SKILL_ID
+        );
+        assert_eq!(attacked["lastFrame"]["eventSummaries"][0]["amount"], 1);
+        assert_eq!(attacked["lastFrame"]["eventSummaries"][1]["kind"], "damage");
+        assert_eq!(
+            attacked["lastFrame"]["eventSummaries"][1]["targetEntityId"],
+            TRAINING_TARGET_ENTITY_ID
+        );
+        assert_eq!(attacked["lastFrame"]["eventSummaries"][1]["amount"], 14);
+        assert_eq!(
+            attacked["lastEventSummaries"],
+            attacked["lastFrame"]["eventSummaries"]
+        );
+        assert_eq!(attacked["observerFrame"]["lastEventCount"], 2);
+        assert_eq!(
+            attacked["observerFrame"]["lastEventSummaries"],
+            attacked["lastFrame"]["eventSummaries"]
+        );
         assert_eq!(
             attacked["observerFrame"]["lastFrame"]["events"]
                 .as_array()
@@ -598,7 +696,21 @@ mod tests {
                 .len(),
             2
         );
+        assert_eq!(
+            attacked["observerFrame"]["lastFrame"]["eventSummaries"],
+            attacked["lastFrame"]["eventSummaries"]
+        );
         assert_eq!(attacked["lastFrame"]["debugSummary"]["eventCount"], 2);
+        assert_eq!(
+            attacked["lastFrame"]["debugState"]["entities"][1]["entityId"],
+            TRAINING_TARGET_ENTITY_ID
+        );
+        assert_eq!(attacked["lastFrame"]["debugState"]["entities"][1]["hp"], 136);
+        assert!(
+            attacked["lastFrame"]["debugState"]["entities"][1]["alive"]
+                .as_bool()
+                .unwrap()
+        );
         assert!(attacked["lastError"].is_null());
     }
 
@@ -624,6 +736,11 @@ mod tests {
         assert_eq!(stopped["playerEntities"][0]["x"], 600);
         assert_eq!(stopped["lastFrame"]["frame"], 3);
         assert_eq!(stopped["lastFrame"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(stopped["lastFrame"]["eventCount"], 0);
+        assert!(stopped["lastFrame"]["eventSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert_eq!(stopped["lastEventCount"], 0);
         assert_eq!(
             stopped["lastFrame"]["stateHash"],

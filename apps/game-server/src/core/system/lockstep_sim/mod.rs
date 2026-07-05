@@ -27,6 +27,9 @@ pub const LOCKSTEP_SIM_DEMO_CONFIG_MIGRATION_BOUNDARY: &str =
 pub const SIM_INITIAL_SNAPSHOT_SCHEMA: &str = "myserver.lockstep-sim.initial-snapshot.v1";
 pub const SIM_FRAME_ENVELOPE_SCHEMA: &str = "myserver.lockstep-sim.frame-envelope.v1";
 pub const SIM_DOWNLINK_SCHEMA_VERSION: u32 = 1;
+pub const SIM_EVENT_SUMMARY_SCHEMA_VERSION: u32 = 1;
+pub const SIM_DEBUG_STATE_SCHEMA_VERSION: u32 = 1;
+pub const SIM_FRAME_DEBUG_STATE_ENTITY_LIMIT: usize = 32;
 const SIM_INPUT_PAYLOAD_MAX_BYTES: usize = 2048;
 const SIM_INPUT_MAX_COMMANDS: usize = 8;
 const SIM_INPUT_MAX_SPEED_MILLI: i64 = 12_000;
@@ -113,6 +116,75 @@ pub enum SimFrameInputSource {
     SynthesizedRepeatLast,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SimFrameEventKind {
+    SkillCast,
+    Damage,
+    Heal,
+    BuffApplied,
+    BuffExpired,
+    BuffTick,
+    Death,
+}
+
+impl SimFrameEventKind {
+    fn sort_code(self) -> u8 {
+        match self {
+            Self::SkillCast => 10,
+            Self::BuffApplied => 20,
+            Self::BuffTick => 30,
+            Self::Damage => 40,
+            Self::Heal => 50,
+            Self::BuffExpired => 60,
+            Self::Death => 70,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEventSummary {
+    #[serde(default = "default_sim_event_summary_schema_version")]
+    pub schema_version: u32,
+    pub kind: SimFrameEventKind,
+    pub frame: u32,
+    pub source_entity_id: u32,
+    pub target_entity_id: Option<u32>,
+    pub skill_id: Option<u32>,
+    pub buff_id: Option<u32>,
+    pub amount: i32,
+    pub sequence: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameDebugState {
+    #[serde(default = "default_sim_debug_state_schema_version")]
+    pub schema_version: u32,
+    pub entities: Vec<SimFrameEntityDebugState>,
+}
+
+impl Default for SimFrameDebugState {
+    fn default() -> Self {
+        Self {
+            schema_version: SIM_DEBUG_STATE_SCHEMA_VERSION,
+            entities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEntityDebugState {
+    pub entity_id: u32,
+    pub x_raw: i64,
+    pub y_raw: i64,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub alive: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimFrameEnvelope {
@@ -127,10 +199,16 @@ pub struct SimFrameEnvelope {
     #[serde(default = "default_sim_schema_version")]
     pub sim_schema_version: u16,
     pub state_hash: SimHashEnvelope,
+    #[serde(default)]
+    pub event_count: usize,
     pub events: Vec<sim_core::SimEvent>,
+    #[serde(default)]
+    pub event_summaries: Vec<SimFrameEventSummary>,
     #[serde(default)]
     pub input_sources: Vec<SimFrameInputSourceSummary>,
     pub debug_summary: SimFrameDebugSummary,
+    #[serde(default)]
+    pub debug_state: SimFrameDebugState,
 }
 
 pub fn create_minimal_world(character_ids: &[String]) -> (SimWorld, HashMap<String, EntityId>) {
@@ -287,9 +365,12 @@ pub fn create_frame_envelope_with_config(
         config_hash: config.config_hash.clone(),
         sim_schema_version: config.sim_schema_version,
         state_hash: sim_hash_envelope(result.state_hash),
+        event_count: result.events.len(),
         events: result.events.clone(),
+        event_summaries: sim_event_summaries(&result.events),
         input_sources: frame_input_source_summary(inputs),
         debug_summary: frame_debug_summary(world, inputs, &result.events),
+        debug_state: frame_debug_state(world),
     }
 }
 
@@ -299,6 +380,14 @@ fn default_sim_config_version() -> u64 {
 
 fn default_sim_schema_version() -> u16 {
     sim_core::SIM_CORE_SCHEMA_VERSION
+}
+
+fn default_sim_event_summary_schema_version() -> u32 {
+    SIM_EVENT_SUMMARY_SCHEMA_VERSION
+}
+
+fn default_sim_debug_state_schema_version() -> u32 {
+    SIM_DEBUG_STATE_SCHEMA_VERSION
 }
 
 pub fn restore_initial_snapshot(
@@ -435,6 +524,179 @@ fn frame_debug_summary(
             .iter()
             .filter(|entity| entity.kind == EntityKind::Player)
             .count(),
+    }
+}
+
+pub fn sim_event_summaries(events: &[sim_core::SimEvent]) -> Vec<SimFrameEventSummary> {
+    let mut summaries = events.iter().map(sim_event_summary).collect::<Vec<_>>();
+    summaries.sort_by_key(sim_event_summary_sort_key);
+    summaries
+}
+
+fn sim_event_summary(event: &sim_core::SimEvent) -> SimFrameEventSummary {
+    match event {
+        sim_core::SimEvent::SkillCast {
+            frame,
+            source_entity,
+            target_entity,
+            skill_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::SkillCast,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: target_entity.map(EntityId::raw),
+            skill_id: Some(skill_id.raw()),
+            buff_id: None,
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::DamageApplied {
+            frame,
+            source_entity,
+            target_entity,
+            skill_id,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::Damage,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: skill_id.map(SkillId::raw),
+            buff_id: buff_id.map(BuffId::raw),
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::HealApplied {
+            frame,
+            source_entity,
+            target_entity,
+            skill_id,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::Heal,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: skill_id.map(SkillId::raw),
+            buff_id: buff_id.map(BuffId::raw),
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::BuffApplied {
+            frame,
+            source_entity,
+            target_entity,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::BuffApplied,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: None,
+            buff_id: Some(buff_id.raw()),
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::BuffExpired {
+            frame,
+            source_entity,
+            target_entity,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::BuffExpired,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: None,
+            buff_id: Some(buff_id.raw()),
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::EntityDied {
+            frame,
+            source_entity,
+            target_entity,
+            skill_id,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::Death,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: skill_id.map(SkillId::raw),
+            buff_id: buff_id.map(BuffId::raw),
+            amount: *value,
+            sequence: *sequence,
+        },
+        sim_core::SimEvent::BuffTick {
+            frame,
+            source_entity,
+            target_entity,
+            buff_id,
+            value,
+            sequence,
+        } => SimFrameEventSummary {
+            schema_version: SIM_EVENT_SUMMARY_SCHEMA_VERSION,
+            kind: SimFrameEventKind::BuffTick,
+            frame: frame.raw(),
+            source_entity_id: source_entity.raw(),
+            target_entity_id: Some(target_entity.raw()),
+            skill_id: None,
+            buff_id: Some(buff_id.raw()),
+            amount: *value,
+            sequence: *sequence,
+        },
+    }
+}
+
+fn sim_event_summary_sort_key(summary: &SimFrameEventSummary) -> (u32, u8, u32, Option<u32>, u32) {
+    (
+        summary.frame,
+        summary.kind.sort_code(),
+        summary.source_entity_id,
+        summary.target_entity_id,
+        summary.sequence,
+    )
+}
+
+fn frame_debug_state(world: &SimWorld) -> SimFrameDebugState {
+    SimFrameDebugState {
+        schema_version: SIM_DEBUG_STATE_SCHEMA_VERSION,
+        entities: world
+            .entities_sorted_by_id()
+            .iter()
+            .take(SIM_FRAME_DEBUG_STATE_ENTITY_LIMIT)
+            .map(entity_debug_state)
+            .collect(),
+    }
+}
+
+fn entity_debug_state(entity: &SimEntity) -> SimFrameEntityDebugState {
+    SimFrameEntityDebugState {
+        entity_id: entity.id.raw(),
+        x_raw: entity.transform.pos.x.raw(),
+        y_raw: entity.transform.pos.y.raw(),
+        hp: entity.combat.hp,
+        max_hp: entity.combat.max_hp,
+        alive: entity.alive,
     }
 }
 
@@ -1447,7 +1709,30 @@ mod tests {
         assert_eq!(envelope.frame, 1);
         assert_eq!(envelope.state_hash, sim_hash_envelope(result.state_hash));
         assert_eq!(envelope.state_hash.hex.len(), 16);
+        assert_eq!(envelope.event_count, 2);
         assert_eq!(envelope.events.len(), 2);
+        assert_eq!(envelope.event_summaries.len(), 2);
+        assert_eq!(envelope.event_summaries[0].schema_version, 1);
+        assert_eq!(
+            envelope.event_summaries[0].kind,
+            SimFrameEventKind::SkillCast
+        );
+        assert_eq!(
+            envelope.event_summaries[0].source_entity_id,
+            PLAYER_ENTITY_ID_BASE
+        );
+        assert_eq!(
+            envelope.event_summaries[0].target_entity_id,
+            Some(TRAINING_TARGET_ENTITY_ID)
+        );
+        assert_eq!(
+            envelope.event_summaries[0].skill_id,
+            Some(DEFAULT_PLAYER_SKILL_ID)
+        );
+        assert_eq!(envelope.event_summaries[0].buff_id, None);
+        assert_eq!(envelope.event_summaries[0].amount, 1);
+        assert_eq!(envelope.event_summaries[1].kind, SimFrameEventKind::Damage);
+        assert_eq!(envelope.event_summaries[1].amount, 14);
         assert_eq!(envelope.input_sources.len(), 1);
         assert_eq!(envelope.input_sources[0].frame, 1);
         assert_eq!(envelope.input_sources[0].character_id, "player-a");
@@ -1464,6 +1749,182 @@ mod tests {
         assert_eq!(envelope.debug_summary.event_count, 2);
         assert_eq!(envelope.debug_summary.entity_count, 2);
         assert_eq!(envelope.debug_summary.player_entity_count, 1);
+        assert_eq!(envelope.debug_state.schema_version, 1);
+        assert_eq!(envelope.debug_state.entities.len(), 2);
+        assert_eq!(
+            envelope.debug_state.entities[0].entity_id,
+            PLAYER_ENTITY_ID_BASE
+        );
+        assert_eq!(envelope.debug_state.entities[0].x_raw, 0);
+        assert_eq!(envelope.debug_state.entities[0].hp, 100);
+        assert!(envelope.debug_state.entities[0].alive);
+        assert_eq!(
+            envelope.debug_state.entities[1].entity_id,
+            TRAINING_TARGET_ENTITY_ID
+        );
+        assert_eq!(envelope.debug_state.entities[1].x_raw, 8000);
+        assert_eq!(envelope.debug_state.entities[1].hp, 136);
+
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["eventCount"], 2);
+        assert_eq!(json["eventSummaries"][0]["kind"], "skillCast");
+        assert_eq!(json["eventSummaries"][1]["kind"], "damage");
+        assert_eq!(json["debugState"]["entities"][0]["xRaw"], 0);
+        assert!(json.get("snapshot").is_none());
+        assert!(json["debugState"]["entities"][0].get("combat").is_none());
+    }
+
+    #[test]
+    fn event_summaries_preserve_stable_fields_and_sort_order() {
+        let frame = FrameId::new(7);
+        let source = EntityId::new(1001);
+        let target = EntityId::new(9001);
+        let skill = SkillId::new(11);
+        let buff = BuffId::new(22);
+        let events = vec![
+            sim_core::SimEvent::EntityDied {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                skill_id: Some(skill),
+                buff_id: None,
+                value: 0,
+                sequence: 7,
+            },
+            sim_core::SimEvent::HealApplied {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                skill_id: None,
+                buff_id: Some(buff),
+                value: 5,
+                sequence: 5,
+            },
+            sim_core::SimEvent::DamageApplied {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                skill_id: Some(skill),
+                buff_id: None,
+                value: 17,
+                sequence: 4,
+            },
+            sim_core::SimEvent::BuffTick {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                buff_id: buff,
+                value: 2,
+                sequence: 3,
+            },
+            sim_core::SimEvent::BuffExpired {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                buff_id: buff,
+                value: 2,
+                sequence: 6,
+            },
+            sim_core::SimEvent::BuffApplied {
+                frame,
+                source_entity: source,
+                target_entity: target,
+                buff_id: buff,
+                value: 2,
+                sequence: 2,
+            },
+            sim_core::SimEvent::SkillCast {
+                frame,
+                source_entity: source,
+                target_entity: Some(target),
+                skill_id: skill,
+                value: 1,
+                sequence: 1,
+            },
+        ];
+
+        let summaries = sim_event_summaries(&events);
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SimFrameEventKind::SkillCast,
+                SimFrameEventKind::BuffApplied,
+                SimFrameEventKind::BuffTick,
+                SimFrameEventKind::Damage,
+                SimFrameEventKind::Heal,
+                SimFrameEventKind::BuffExpired,
+                SimFrameEventKind::Death,
+            ]
+        );
+        assert!(summaries.iter().all(|summary| summary.schema_version == 1));
+        assert!(summaries.iter().all(|summary| summary.frame == 7));
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.source_entity_id == source.raw())
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.target_entity_id == Some(target.raw()))
+        );
+        assert_eq!(summaries[0].skill_id, Some(skill.raw()));
+        assert_eq!(summaries[0].buff_id, None);
+        assert_eq!(summaries[0].amount, 1);
+        assert_eq!(summaries[1].skill_id, None);
+        assert_eq!(summaries[1].buff_id, Some(buff.raw()));
+        assert_eq!(summaries[3].skill_id, Some(skill.raw()));
+        assert_eq!(summaries[3].amount, 17);
+        assert_eq!(summaries[4].skill_id, None);
+        assert_eq!(summaries[4].buff_id, Some(buff.raw()));
+        assert_eq!(summaries[4].amount, 5);
+        assert_eq!(summaries[6].kind, SimFrameEventKind::Death);
+        assert_eq!(summaries[6].skill_id, Some(skill.raw()));
+
+        let json = serde_json::to_value(&summaries).unwrap();
+        assert_eq!(json[0]["schemaVersion"], 1);
+        assert_eq!(json[0]["kind"], "skillCast");
+        assert_eq!(json[3]["kind"], "damage");
+        assert_eq!(json[4]["kind"], "heal");
+        assert_eq!(json[6]["kind"], "death");
+        assert_eq!(json[3]["sourceEntityId"], source.raw());
+        assert_eq!(json[3]["targetEntityId"], target.raw());
+        assert_eq!(json[3]["skillId"], skill.raw());
+        assert_eq!(json[3]["buffId"], serde_json::Value::Null);
+        assert_eq!(json[3]["amount"], 17);
+    }
+
+    #[test]
+    fn frame_envelope_debug_state_is_lightweight_and_bounded() {
+        let players = (0..40)
+            .map(|index| format!("player-{index}"))
+            .collect::<Vec<_>>();
+        let (mut world, bindings) = create_minimal_world(&players);
+        let result = step_world(&mut world, 1, 20, &[], &bindings).unwrap();
+
+        let envelope = create_frame_envelope("room-lockstep", 20, &world, &[], &result);
+
+        assert_eq!(envelope.debug_summary.entity_count, 41);
+        assert_eq!(
+            envelope.debug_state.entities.len(),
+            SIM_FRAME_DEBUG_STATE_ENTITY_LIMIT
+        );
+        assert_eq!(envelope.debug_state.entities[0].entity_id, 1000);
+        assert_eq!(envelope.debug_state.entities[31].entity_id, 1031);
+
+        let json = serde_json::to_value(&envelope).unwrap();
+        let first_entity = &json["debugState"]["entities"][0];
+        assert!(first_entity.get("id").is_none());
+        assert!(first_entity.get("kind").is_none());
+        assert!(first_entity.get("transform").is_none());
+        assert!(first_entity.get("movement").is_none());
+        assert!(first_entity.get("combat").is_none());
+        assert!(first_entity.get("buffs").is_none());
+        assert!(json.get("snapshot").is_none());
     }
 
     #[test]
