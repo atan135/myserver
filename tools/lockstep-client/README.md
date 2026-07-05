@@ -98,6 +98,15 @@ Supported online commands are `move`, `stop`, `face`, and `castSkill`.
 `castSkill` online payloads currently support `targetEntityId` or no target;
 position and direction skill targets are supported by `sim-core` / offline
 scenarios but are rejected by the current online wire adapter.
+The online JSON is an intent payload only. Do not add authoritative result
+fields such as `entityId`, `hit`, `damage`, `buffs`, `finalState`, or
+`stateHash`; the server adapter uses a strict schema and rejects unknown fields.
+
+`lockstep_sim_demo` is an independent MyServer room policy for shared
+`sim-core` verification. It does not replace `robot_sync_room`,
+`movement_demo`, or `combat_demo`: the robot room remains a lightweight input
+forwarding sample, movement remains the older server-authoritative correction
+sample, and combat remains the older ECS/snapshot comparison sample.
 
 Real online mode requires the MyServer dependencies and game endpoint to be
 started by the operator first. It does not start Redis, PostgreSQL, NATS,
@@ -270,12 +279,29 @@ Downlink semantics:
   `rngSeed`, `entities`, and `controlBindings`.
 - `lastFrame` / `observerFrame.lastFrame` schema is
   `myserver.lockstep-sim.frame-envelope.v1` with `schemaVersion = 1`; it
-  carries `frame`, `stateHash`, `events`, `inputSources`, and `debugSummary`.
+  carries `frame`, `stateHash`, `eventCount`, `events`, `eventSummaries`,
+  `inputSources`, `debugSummary`, and `debugState`.
 - `stateHash.hex` is the 16-character server hash for the world after that
   frame. Events are emitted for that frame only and are compared separately
   from the world hash.
-- `debugSummary` is diagnostic only. It helps explain real versus synthesized
-  input counts, event count, and entity count; it is not replay input.
+- `eventSummaries` is a stable summary stream with fields such as `kind`,
+  `sourceEntityId`, `targetEntityId`, `skillId`, `buffId`, `amount`, and
+  `sequence`.
+- `debugSummary` and `debugState` are diagnostic only. They help explain real
+  versus synthesized input counts, event count, entity count, and lightweight
+  entity state; they are not replay input.
+- `FrameBundlePush.snapshot.game_state` is the source for the server envelope,
+  while `FrameBundlePush.inputs` is replayed locally. After restoring from
+  `initialSnapshot.snapshot`, reconciliation treats the server `stateHash.hex`
+  as authoritative.
+
+Not covered by this tool or the current demo: production deployment, complex
+physics, NavMesh, production AOI, cross-server migration, complete CSV
+skill/Buff mapping, real external client integration, formal UI/animation, and
+productized prediction/rollback. Real online reconciliation still requires the
+operator to confirm startup of Redis, PostgreSQL, Core NATS, `auth-http`,
+`game-server`, `game-proxy`, ticket preparation, and the exact commands before
+running non-dry-run online mode.
 
 On mismatch the tool prints the first mismatching frame, server hash, client
 hash, tracked entity differences, event differences, and frame inputs.
