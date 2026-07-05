@@ -154,6 +154,57 @@ async fn future_inputs_are_buffered_until_their_frame_is_ready() {
 }
 
 #[tokio::test]
+async fn lockstep_sim_demo_frame_bundle_carries_snapshot_every_frame() {
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(GameRoomLogicFactory::new(
+            ConfigTableRuntime::load_with_scene_dir(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+            )
+            .expect("game-server csv fixture should load"),
+        )),
+    );
+    let (tx, _rx) = mpsc::channel(1024);
+    manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            tx,
+            MemberRole::Player,
+            Some(LOCKSTEP_SIM_DEMO_POLICY),
+        )
+        .await
+        .unwrap();
+    manager
+        .set_ready_state(TEST_ROOM_ID, PLAYER_A, true)
+        .await
+        .unwrap();
+    manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    stop_runtime_for_test(&manager, TEST_ROOM_ID).await;
+
+    manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            1,
+            "sim_input",
+            r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":1000,"dirY":0,"speed":6000}]}"#,
+        )
+        .await
+        .unwrap();
+
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+
+    assert_eq!(progressed.0.frame_id, 1);
+    let snapshot = progressed.0.snapshot.expect("lockstep frame snapshot");
+    let game_state: serde_json::Value = serde_json::from_str(&snapshot.game_state).unwrap();
+    assert_eq!(game_state["logicType"], "lockstep_sim_demo");
+    assert_eq!(game_state["lastFrame"]["frame"], 1);
+    assert_eq!(game_state["observerFrame"]["lastFrame"]["frame"], 1);
+}
+
+#[tokio::test]
 async fn expired_input_frame_is_rejected() {
     let (manager, _factory, _receivers) =
         setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;

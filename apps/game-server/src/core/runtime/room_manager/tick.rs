@@ -190,15 +190,18 @@ impl RoomManager {
             room.push_input_history(input.clone());
         }
 
-        let snapshot = if waiting_frame_id % snapshot_interval == 0 {
+        let force_snapshot_for_frame_replay = room.policy_id == "lockstep_sim_demo";
+        let snapshot = if force_snapshot_for_frame_replay || waiting_frame_id % snapshot_interval == 0 {
             room.last_snapshot_frame = waiting_frame_id;
-            info!(
-                room_id = %room_id,
-                frame_id = waiting_frame_id,
-                snapshot_interval = snapshot_interval,
-                ">>> SNAPSHOT GENERATED at frame {} <<<",
-                waiting_frame_id
-            );
+            if !force_snapshot_for_frame_replay {
+                info!(
+                    room_id = %room_id,
+                    frame_id = waiting_frame_id,
+                    snapshot_interval = snapshot_interval,
+                    ">>> SNAPSHOT GENERATED at frame {} <<<",
+                    waiting_frame_id
+                );
+            }
             Some(room.snapshot())
         } else {
             None

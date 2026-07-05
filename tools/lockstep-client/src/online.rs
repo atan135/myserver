@@ -27,6 +27,8 @@ options:
   --server <host:port>        TCP game-server or local game-proxy endpoint, default 127.0.0.1:7000
   --ticket <ticket>          ticket issued by auth-http or a local test ticket
   --test-ticket <ticket>     alias for --ticket
+  --probe-observer-recovery  verify RoomJoinAsObserverRes.snapshot.game_state after replay
+  --observer-ticket <ticket> ticket for the observer recovery probe
   --room <room-id>           room id, default lockstep-online-demo
   --policy <policy-id>       room policy id, default lockstep_sim_demo
   --character-id <id>        expected ticket-bound character id for reporting
@@ -43,12 +45,15 @@ const SIM_FRAME_ENVELOPE_SCHEMA: &str = "myserver.lockstep-sim.frame-envelope.v1
 const SIM_DOWNLINK_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_PLAYER_SKILL_ID: u32 = 1;
 const SIM_INPUT_MAX_SPEED_MILLI: i64 = 12_000;
+const DEFAULT_ONLINE_INPUT_DELAY_FRAMES: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OnlineCliOptions {
     pub scenario: String,
     pub server_addr: String,
     pub ticket: Option<String>,
+    pub observer_ticket: Option<String>,
+    pub probe_observer_recovery: bool,
     pub room_id: String,
     pub policy_id: String,
     pub character_id: Option<String>,
@@ -66,6 +71,8 @@ impl OnlineCliOptions {
         let mut scenario = None;
         let mut server_addr = None;
         let mut ticket = None;
+        let mut observer_ticket = None;
+        let mut probe_observer_recovery = false;
         let mut room_id = None;
         let mut policy_id = None;
         let mut character_id = None;
@@ -105,6 +112,15 @@ impl OnlineCliOptions {
                         return Err(OnlineError::invalid_args("duplicate --ticket"));
                     }
                     ticket = Some(next_non_empty_arg(&mut args, arg.as_str())?);
+                }
+                "--observer-ticket" => {
+                    if observer_ticket.is_some() {
+                        return Err(OnlineError::invalid_args("duplicate --observer-ticket"));
+                    }
+                    observer_ticket = Some(next_non_empty_arg(&mut args, "--observer-ticket")?);
+                }
+                "--probe-observer-recovery" => {
+                    probe_observer_recovery = true;
                 }
                 "--room" | "--room-id" => {
                     if room_id.is_some() {
@@ -164,6 +180,8 @@ impl OnlineCliOptions {
                 .ok_or_else(|| OnlineError::invalid_args("missing --scenario <path-or-name>"))?,
             server_addr: server_addr.unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_owned()),
             ticket,
+            observer_ticket,
+            probe_observer_recovery,
             room_id: room_id.unwrap_or_else(|| DEFAULT_ROOM_ID.to_owned()),
             policy_id: policy_id.unwrap_or_else(|| LOCKSTEP_SIM_DEMO_POLICY_ID.to_owned()),
             character_id,
@@ -206,6 +224,7 @@ pub struct OnlineReport {
     pub frames_checked: usize,
     pub final_frame: Option<u32>,
     pub final_hash: Option<SimHash>,
+    pub observer_recovery: Option<ObserverRecoveryProbeReport>,
 }
 
 impl fmt::Display for OnlineReport {
@@ -225,14 +244,42 @@ impl fmt::Display for OnlineReport {
             writeln!(f, "final frame: {frame}")?;
         }
         if let Some(hash) = self.final_hash {
-            write!(f, "final hash: {:016x}", hash.value)?;
+            writeln!(f, "final hash: {:016x}", hash.value)?;
         } else if self.dry_run {
-            write!(f, "network: not started; dry-run only")?;
+            writeln!(f, "network: not started; dry-run only")?;
         } else {
-            write!(f, "final hash: <none>")?;
+            writeln!(f, "final hash: <none>")?;
+        }
+        if let Some(recovery) = &self.observer_recovery {
+            writeln!(f, "observer recovery: ok")?;
+            writeln!(f, "observer current frame: {}", recovery.current_frame_id)?;
+            writeln!(f, "observer snapshot frame: {}", recovery.snapshot_frame_id)?;
+            writeln!(
+                f,
+                "observer initial snapshot frame: {}",
+                recovery.initial_snapshot_frame
+            )?;
+            writeln!(f, "observer last frame: {}", recovery.last_frame)?;
+            writeln!(
+                f,
+                "observer observerFrame.lastFrame: {}",
+                recovery.observer_last_frame
+            )?;
+            write!(f, "observer hash: {:016x}", recovery.observer_hash.value)?;
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObserverRecoveryProbeReport {
+    pub room_id: String,
+    pub current_frame_id: u32,
+    pub snapshot_frame_id: u32,
+    pub initial_snapshot_frame: u32,
+    pub last_frame: u32,
+    pub observer_last_frame: u32,
+    pub observer_hash: SimHash,
 }
 
 pub fn run_cli<I, S>(args: I) -> Result<OnlineReport, OnlineError>
@@ -266,6 +313,7 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
             frames_checked: 0,
             final_frame: None,
             final_hash: None,
+            observer_recovery: None,
         });
     }
 
@@ -277,6 +325,16 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
 
     let mut transport = TcpGameTransport::connect(&options.server_addr, options.timeout())?;
     let outcome = drive_online_session(&mut transport, &options, &ticket, &input_plan)?;
+    let observer_recovery = if options.probe_observer_recovery {
+        let observer_ticket = options.observer_ticket.as_deref().ok_or_else(|| {
+            OnlineError::invalid_args(
+                "--probe-observer-recovery requires --observer-ticket for a separate observer character",
+            )
+        })?;
+        Some(run_observer_recovery_probe(&options, observer_ticket)?)
+    } else {
+        None
+    };
 
     Ok(OnlineReport {
         scenario_path,
@@ -288,6 +346,7 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
         frames_checked: outcome.frames_checked,
         final_frame: outcome.final_hash.map(|hash| hash.frame.raw()),
         final_hash: outcome.final_hash,
+        observer_recovery,
     })
 }
 
@@ -1285,6 +1344,8 @@ enum MessageType {
     RoomStartRes = 1108,
     PlayerInputReq = 1111,
     PlayerInputRes = 1112,
+    RoomJoinAsObserverReq = 1117,
+    RoomJoinAsObserverRes = 1118,
     RoomStatePush = 1201,
     FrameBundlePush = 1203,
     ErrorRes = 9000,
@@ -1303,6 +1364,8 @@ impl MessageType {
             1108 => Some(Self::RoomStartRes),
             1111 => Some(Self::PlayerInputReq),
             1112 => Some(Self::PlayerInputRes),
+            1117 => Some(Self::RoomJoinAsObserverReq),
+            1118 => Some(Self::RoomJoinAsObserverRes),
             1201 => Some(Self::RoomStatePush),
             1203 => Some(Self::FrameBundlePush),
             9000 => Some(Self::ErrorRes),
@@ -1453,7 +1516,19 @@ fn drive_online_session(
 
     drain_until_initial_snapshot(transport, &mut replay)?;
 
+    if replay.is_none() {
+        return Err(OnlineError::Protocol(
+            "room did not publish lockstep initialSnapshot in RoomSnapshot.game_state".to_owned(),
+        ));
+    }
+
     for input in input_plan {
+        wait_until_input_frame_is_sendable(
+            transport,
+            &mut replay,
+            input.frame_id,
+            DEFAULT_ONLINE_INPUT_DELAY_FRAMES,
+        )?;
         let seq = transport.send(
             MessageType::PlayerInputReq,
             &pb::PlayerInputReq {
@@ -1499,10 +1574,74 @@ fn drive_online_session(
     })
 }
 
+fn run_observer_recovery_probe(
+    options: &OnlineCliOptions,
+    observer_ticket: &str,
+) -> Result<ObserverRecoveryProbeReport, OnlineError> {
+    let mut transport = TcpGameTransport::connect(&options.server_addr, options.timeout())?;
+    let auth_seq = transport.send(
+        MessageType::AuthReq,
+        &pb::AuthReq {
+            ticket: observer_ticket.to_owned(),
+        },
+    )?;
+    let auth_packet = transport.read_until(MessageType::AuthRes, Some(auth_seq), None)?;
+    let auth = decode_body::<pb::AuthRes>(&auth_packet)?;
+    if !auth.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "observer_auth",
+            error_code: auth.error_code,
+        });
+    }
+
+    let observer_seq = transport.send(
+        MessageType::RoomJoinAsObserverReq,
+        &pb::RoomJoinAsObserverReq {
+            room_id: options.room_id.clone(),
+        },
+    )?;
+    let observer_packet =
+        transport.read_until(MessageType::RoomJoinAsObserverRes, Some(observer_seq), None)?;
+    let response = decode_body::<pb::RoomJoinAsObserverRes>(&observer_packet)?;
+    if !response.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "observer_recovery",
+            error_code: response.error_code,
+        });
+    }
+
+    let Some(snapshot) = response.snapshot else {
+        return Err(OnlineError::Protocol(
+            "observer recovery response did not include RoomSnapshot".to_owned(),
+        ));
+    };
+
+    validate_observer_recovery_snapshot(snapshot, response.current_frame_id)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OnlineSessionOutcome {
     frames_checked: usize,
     final_hash: Option<SimHash>,
+}
+
+fn wait_until_input_frame_is_sendable(
+    transport: &mut TcpGameTransport,
+    replay: &mut Option<OnlineReplay>,
+    frame_id: u32,
+    input_delay_frames: u32,
+) -> Result<(), OnlineError> {
+    let input_delay_frames = input_delay_frames.max(1);
+    while replay
+        .as_ref()
+        .map(|replay| replay.current_frame().saturating_add(input_delay_frames) < frame_id)
+        .unwrap_or(false)
+    {
+        let packet = transport.read_packet()?;
+        maybe_consume_push_packet(&packet, replay)?;
+    }
+
+    Ok(())
 }
 
 fn drain_until_initial_snapshot(
@@ -1585,6 +1724,79 @@ fn consume_room_snapshot(
         envelope,
         inputs,
         game_state: Some(game_state),
+    })
+}
+
+fn validate_observer_recovery_snapshot(
+    snapshot: pb::RoomSnapshot,
+    current_frame_id: u32,
+) -> Result<ObserverRecoveryProbeReport, OnlineError> {
+    if snapshot.game_state.trim().is_empty() {
+        return Err(OnlineError::Protocol(
+            "observer recovery RoomSnapshot.game_state is empty".to_owned(),
+        ));
+    }
+
+    let game_state = parse_game_state_json(&snapshot.game_state)?;
+    let initial = game_state.initial_snapshot.as_ref().ok_or_else(|| {
+        OnlineError::Protocol(
+            "observer recovery RoomSnapshot.game_state missing initialSnapshot".to_owned(),
+        )
+    })?;
+    validate_initial_snapshot(initial)?;
+
+    let last_frame = game_state.last_frame.as_ref().ok_or_else(|| {
+        OnlineError::Protocol(
+            "observer recovery RoomSnapshot.game_state missing lastFrame".to_owned(),
+        )
+    })?;
+    validate_frame_envelope(last_frame, &snapshot.room_id)?;
+
+    let observer_frame = game_state.observer_frame.as_ref().ok_or_else(|| {
+        OnlineError::Protocol(
+            "observer recovery RoomSnapshot.game_state missing observerFrame".to_owned(),
+        )
+    })?;
+    let observer_last_frame = observer_frame.last_frame.as_ref().ok_or_else(|| {
+        OnlineError::Protocol(
+            "observer recovery RoomSnapshot.game_state missing observerFrame.lastFrame".to_owned(),
+        )
+    })?;
+    validate_frame_envelope(observer_last_frame, &snapshot.room_id)?;
+
+    if observer_frame.world_frame != snapshot.current_frame_id {
+        return Err(OnlineError::Protocol(format!(
+            "observer recovery worldFrame {} did not match RoomSnapshot.current_frame_id {}",
+            observer_frame.world_frame, snapshot.current_frame_id
+        )));
+    }
+    if current_frame_id != snapshot.current_frame_id {
+        return Err(OnlineError::Protocol(format!(
+            "observer recovery response current_frame_id {} did not match snapshot current_frame_id {}",
+            current_frame_id, snapshot.current_frame_id
+        )));
+    }
+    if observer_last_frame.frame != last_frame.frame {
+        return Err(OnlineError::Protocol(format!(
+            "observer recovery observerFrame.lastFrame {} did not match lastFrame {}",
+            observer_last_frame.frame, last_frame.frame
+        )));
+    }
+    if observer_frame.state_hash.to_sim_hash() != observer_last_frame.state_hash.to_sim_hash() {
+        return Err(OnlineError::Protocol(
+            "observer recovery observerFrame.stateHash did not match observerFrame.lastFrame.stateHash"
+                .to_owned(),
+        ));
+    }
+
+    Ok(ObserverRecoveryProbeReport {
+        room_id: snapshot.room_id,
+        current_frame_id,
+        snapshot_frame_id: snapshot.current_frame_id,
+        initial_snapshot_frame: initial.snapshot.frame.raw(),
+        last_frame: last_frame.frame,
+        observer_last_frame: observer_last_frame.frame,
+        observer_hash: observer_frame.state_hash.to_sim_hash(),
     })
 }
 
@@ -1855,6 +2067,9 @@ mod tests {
             "127.0.0.1:4000",
             "--test-ticket",
             "ticket-1",
+            "--observer-ticket",
+            "observer-ticket-1",
+            "--probe-observer-recovery",
             "--room",
             "room-1",
             "--character-id",
@@ -1865,6 +2080,11 @@ mod tests {
 
         assert_eq!(options.server_addr, "127.0.0.1:4000");
         assert_eq!(options.ticket.as_deref(), Some("ticket-1"));
+        assert_eq!(
+            options.observer_ticket.as_deref(),
+            Some("observer-ticket-1")
+        );
+        assert!(options.probe_observer_recovery);
         assert_eq!(options.room_id, "room-1");
         assert_eq!(options.character_id.as_deref(), Some("player-a"));
         assert!(options.dry_run);
@@ -2014,6 +2234,61 @@ mod tests {
         assert!(message.contains("entity diffs:"));
         assert!(message.contains("event diffs:"));
         assert!(message.contains("inputs:"));
+    }
+
+    #[test]
+    fn observer_recovery_snapshot_reports_restorable_frame_and_hash() {
+        let initial = initial_snapshot();
+        let mut server_world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let input = FrameInputRecord {
+            character_id: "player-a".to_owned(),
+            action: SIM_INPUT_ACTION.to_owned(),
+            payload_json: move_right_payload(1),
+            frame_id: 1,
+        };
+        let sim_inputs = sim_inputs_from_frame_records(
+            std::slice::from_ref(&input),
+            &[SimFrameInputSourceSummary {
+                frame: 1,
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            &HashMap::from([("player-a".to_owned(), EntityId::new(1000))]),
+        )
+        .unwrap();
+        let result = step(
+            &mut server_world,
+            FrameId::new(1),
+            &sim_inputs,
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        let envelope = frame_envelope(&result);
+        let mut game_state = debug_state(&server_world, Some(envelope.clone()));
+        game_state.initial_snapshot = Some(initial);
+        game_state.observer_frame = Some(LockstepSimObserverFrame {
+            world_frame: 1,
+            state_hash: sim_hash_envelope(result.state_hash),
+            last_frame: Some(envelope),
+        });
+        let snapshot = pb::RoomSnapshot {
+            room_id: "room-lockstep".to_owned(),
+            owner_character_id: "player-a".to_owned(),
+            state: "in_game".to_owned(),
+            members: vec![],
+            current_frame_id: 1,
+            game_state: serde_json::to_string(&game_state).unwrap(),
+        };
+
+        let report = validate_observer_recovery_snapshot(snapshot, 1).unwrap();
+
+        assert_eq!(report.current_frame_id, 1);
+        assert_eq!(report.snapshot_frame_id, 1);
+        assert_eq!(report.initial_snapshot_frame, 0);
+        assert_eq!(report.last_frame, 1);
+        assert_eq!(report.observer_last_frame, 1);
+        assert_eq!(report.observer_hash, result.state_hash);
     }
 
     #[test]

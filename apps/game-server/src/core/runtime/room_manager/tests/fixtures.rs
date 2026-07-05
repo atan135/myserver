@@ -9,6 +9,7 @@ pub(super) const ROLLOUT_EPOCH: &str = "epoch-1";
 pub(super) const DEFAULT_POLICY: &str = "default_match";
 pub(super) const MOVEMENT_DEMO_POLICY: &str = "movement_demo";
 pub(super) const COMBAT_DEMO_POLICY: &str = "combat_demo";
+pub(super) const LOCKSTEP_SIM_DEMO_POLICY: &str = "lockstep_sim_demo";
 pub(super) const DISPOSABLE_MATCH_POLICY: &str = "disposable_match";
 
 #[derive(Clone, Default)]
