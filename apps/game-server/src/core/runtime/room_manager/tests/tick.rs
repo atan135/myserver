@@ -302,6 +302,124 @@ async fn lockstep_sim_demo_frame_bundle_carries_snapshot_every_frame() {
 }
 
 #[tokio::test]
+async fn lockstep_sim_demo_optimistic_empty_missing_input_keeps_source_metadata() {
+    let policy = RoomRuntimePolicy::lockstep_sim_demo();
+    assert_eq!(
+        policy.wait_strategy,
+        crate::core::runtime::room_policy::InputWaitStrategy::Optimistic
+    );
+    assert_eq!(policy.missing_input_strategy, MissingInputStrategy::Empty);
+    assert!(!policy.allow_join_in_game);
+
+    let manager = RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(GameRoomLogicFactory::new(
+            ConfigTableRuntime::load_with_scene_dir(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("csv"),
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scene"),
+            )
+            .expect("game-server csv fixture should load"),
+        )),
+    );
+    for character_id in [PLAYER_A, PLAYER_B] {
+        let (tx, _rx) = mpsc::channel(1024);
+        manager
+            .join_room(
+                TEST_ROOM_ID,
+                character_id,
+                tx,
+                MemberRole::Player,
+                Some(LOCKSTEP_SIM_DEMO_POLICY),
+            )
+            .await
+            .unwrap();
+        manager
+            .set_ready_state(TEST_ROOM_ID, character_id, true)
+            .await
+            .unwrap();
+    }
+    let started = manager.start_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    stop_runtime_for_test(&manager, TEST_ROOM_ID).await;
+    let started_state = assert_lockstep_snapshot_recoverable(&started, 0);
+    let player_b_start_x = started_state["playerEntities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["characterId"] == PLAYER_B)
+        .and_then(|entity| entity["x"].as_i64())
+        .expect("player-b start x should be present");
+
+    manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            PLAYER_A,
+            1,
+            "sim_input",
+            r#"{"version":1,"seq":1,"commands":[{"type":"move","dirX":1000,"dirY":0,"speed":6000}]}"#,
+        )
+        .await
+        .unwrap();
+
+    let progressed = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+    assert_eq!(progressed.0.frame_id, 1);
+    assert!(!progressed.0.is_silent_frame);
+    assert_eq!(progressed.0.inputs.len(), 2);
+
+    let missing_input = progressed
+        .0
+        .inputs
+        .iter()
+        .find(|input| input.character_id == PLAYER_B)
+        .expect("missing player should receive synthesized empty input");
+    assert_eq!(missing_input.action, "");
+    assert_eq!(missing_input.payload_json, "");
+
+    let snapshot = progressed.0.snapshot.expect("lockstep frame snapshot");
+    let game_state = assert_lockstep_snapshot_recoverable(&snapshot, 1);
+    assert_eq!(game_state["lastFrame"]["debugSummary"]["realInputCount"], 1);
+    assert_eq!(
+        game_state["lastFrame"]["debugSummary"]["syntheticInputCount"],
+        1
+    );
+    assert_eq!(
+        game_state["lastFrame"]["debugSummary"]["synthesizedEmptyInputCount"],
+        1
+    );
+    assert_eq!(
+        game_state["lastFrame"]["debugSummary"]["synthesizedRepeatLastInputCount"],
+        0
+    );
+
+    let input_sources = game_state["lastFrame"]["inputSources"]
+        .as_array()
+        .expect("inputSources should be an array");
+    assert_eq!(input_sources.len(), 2);
+    assert!(input_sources.iter().any(|source| {
+        source["characterId"] == PLAYER_A
+            && source["source"] == "real"
+            && source["action"] == "sim_input"
+    }));
+    assert!(input_sources.iter().any(|source| {
+        source["characterId"] == PLAYER_B
+            && source["source"] == "synthesizedEmpty"
+            && source["action"] == ""
+    }));
+    assert_eq!(
+        game_state["observerFrame"]["stateHash"],
+        game_state["lastFrame"]["stateHash"]
+    );
+    assert_eq!(game_state["playerEntities"][0]["x"], 300);
+    let player_b_x = game_state["playerEntities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["characterId"] == PLAYER_B)
+        .and_then(|entity| entity["x"].as_i64())
+        .expect("player-b current x should be present");
+    assert_eq!(player_b_x, player_b_start_x);
+}
+
+#[tokio::test]
 async fn lockstep_sim_demo_rejoin_reconnect_and_observer_snapshots_are_recoverable() {
     let manager = RoomManager::with_match_client(
         crate::match_client::create_match_client_shared(),
@@ -372,7 +490,78 @@ async fn lockstep_sim_demo_rejoin_reconnect_and_observer_snapshots_are_recoverab
         .join_room_as_observer(TEST_ROOM_ID, OBSERVER_1, observer_tx)
         .await
         .unwrap();
-    assert_lockstep_snapshot_recoverable(&observer.snapshot, 1);
+    let observer_state = assert_lockstep_snapshot_recoverable(&observer.snapshot, 1);
+    assert!(
+        observer_state["initialSnapshot"]["controlBindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|binding| binding["characterId"] != OBSERVER_1)
+    );
+    assert!(observer
+        .snapshot
+        .members
+        .iter()
+        .any(|member| member.character_id == OBSERVER_1
+            && member.role == crate::pb::MemberRole::Observer as i32));
+
+    let observer_input = manager
+        .accept_player_input(
+            TEST_ROOM_ID,
+            OBSERVER_1,
+            2,
+            "sim_input",
+            r#"{"version":1,"seq":2,"commands":[{"type":"stop"}]}"#,
+        )
+        .await;
+    assert_eq!(observer_input, Err("OBSERVER_CANNOT_SEND_INPUT"));
+
+    let (late_join_tx, _late_join_rx) = mpsc::channel(1024);
+    let late_join = manager
+        .join_room(
+            TEST_ROOM_ID,
+            PLAYER_B,
+            late_join_tx,
+            MemberRole::Player,
+            Some(LOCKSTEP_SIM_DEMO_POLICY),
+        )
+        .await;
+    assert_eq!(late_join, Err("ROOM_ALREADY_IN_GAME"));
+
+    let mut restored_logic = crate::gameroom::LockstepSimDemoLogic::default();
+    restored_logic.restore_from_serialized_state(&reconnect.snapshot.game_state);
+    let frame_2_payload = r#"{"version":1,"seq":2,"commands":[{"type":"stop"}]}"#;
+    restored_logic.on_tick(
+        2,
+        20,
+        &[PlayerInputRecord {
+            frame_id: 2,
+            character_id: PLAYER_A.to_string(),
+            action: "sim_input".to_string(),
+            payload_json: frame_2_payload.to_string(),
+            received_at: Instant::now(),
+            is_synthetic: false,
+        }],
+    );
+
+    manager
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 2, "sim_input", frame_2_payload)
+        .await
+        .unwrap();
+    let progressed_2 = manager.process_room_tick(TEST_ROOM_ID, 20).await.unwrap();
+    let frame_2_snapshot = progressed_2.0.snapshot.expect("lockstep frame 2 snapshot");
+    let manager_state = assert_lockstep_snapshot_recoverable(&frame_2_snapshot, 2);
+    let restored_state =
+        serde_json::from_str::<serde_json::Value>(&restored_logic.get_serialized_state()).unwrap();
+
+    assert_eq!(
+        restored_state["lastFrame"]["stateHash"],
+        manager_state["lastFrame"]["stateHash"]
+    );
+    assert_eq!(
+        restored_state["observerFrame"]["stateHash"],
+        manager_state["observerFrame"]["stateHash"]
+    );
 }
 
 #[tokio::test]
@@ -762,6 +951,7 @@ async fn strict_wait_timeout_repeats_last_input() {
     assert_eq!(repeated.frame_id, 2);
     assert_eq!(repeated.action, "move");
     assert_eq!(repeated.payload_json, "{\"x\":2}");
+    assert!(repeated.is_synthetic);
 }
 
 #[tokio::test]

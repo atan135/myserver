@@ -519,6 +519,9 @@ async fn drop_after_misses_marks_player_offline_after_threshold() {
             resolve_tick_inputs(&mut room, &participants, frame_id, &policy);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].frame_id, frame_id);
+        assert_eq!(resolved[0].action, "");
+        assert_eq!(resolved[0].payload_json, "");
+        assert!(resolved[0].is_synthetic);
         if frame_id < MAX_MISSING_INPUT_STREAK_BEFORE_OFFLINE {
             assert!(newly_offline_characters.is_empty());
         } else {
