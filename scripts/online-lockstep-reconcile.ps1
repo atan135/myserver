@@ -443,6 +443,73 @@ function Invoke-TicketStore {
     }
 }
 
+function ConvertTo-NativeCommandLineArgument {
+    param([AllowEmptyString()][string]$Argument)
+
+    if ($null -eq $Argument) { $Argument = "" }
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') { return $Argument }
+
+    # Preserve Windows CommandLineToArgvW semantics for spaces, quotes, and trailing slashes.
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            for ($index = 0; $index -lt (($backslashCount * 2) + 1); $index++) {
+                [void]$builder.Append('\')
+            }
+            [void]$builder.Append('"')
+            $backslashCount = 0
+            continue
+        }
+        for ($index = 0; $index -lt $backslashCount; $index++) {
+            [void]$builder.Append('\')
+        }
+        $backslashCount = 0
+        [void]$builder.Append($character)
+    }
+    for ($index = 0; $index -lt ($backslashCount * 2); $index++) {
+        [void]$builder.Append('\')
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Get-NativeProcessExitCode {
+    param(
+        [IntPtr]$ProcessHandle,
+        [int]$ProcessId
+    )
+
+    if (-not ("MyServer.NativeProcessMethods" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace MyServer
+{
+    public static class NativeProcessMethods
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetExitCodeProcess(IntPtr processHandle, out uint exitCode);
+    }
+}
+'@
+    }
+
+    [uint32]$exitCode = 0
+    if (-not [MyServer.NativeProcessMethods]::GetExitCodeProcess($ProcessHandle, [ref]$exitCode)) {
+        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "failed to read native launcher PID $ProcessId exit code (Win32 error $nativeError)"
+    }
+    return [BitConverter]::ToInt32([BitConverter]::GetBytes($exitCode), 0)
+}
+
 function Invoke-NativeCaptured {
     param(
         [string]$FilePath,
@@ -450,8 +517,46 @@ function Invoke-NativeCaptured {
         [string]$StdoutPath,
         [string]$StderrPath
     )
-    & $FilePath @Arguments 1> $StdoutPath 2> $StderrPath
-    return $LASTEXITCODE
+
+    $argumentLine = (@($Arguments | ForEach-Object {
+        ConvertTo-NativeCommandLineArgument -Argument ([string]$_)
+    }) -join " ")
+    $startParameters = @{
+        FilePath = $FilePath
+        WorkingDirectory = $ProjectRoot
+        WindowStyle = "Hidden"
+        RedirectStandardOutput = $StdoutPath
+        RedirectStandardError = $StderrPath
+        PassThru = $true
+    }
+    if ($argumentLine) { $startParameters["ArgumentList"] = $argumentLine }
+
+    $launcher = Start-Process @startParameters
+    try {
+        $launcherHandle = $launcher.Handle
+        $launcherStartTimeUtcTicks = $launcher.StartTime.ToUniversalTime().Ticks
+        while ($true) {
+            $launcher.Refresh()
+            if ($launcher.HasExited) {
+                return Get-NativeProcessExitCode -ProcessHandle $launcherHandle -ProcessId $launcher.Id
+            }
+
+            $liveLauncher = Get-Process -Id $launcher.Id -ErrorAction SilentlyContinue
+            if (-not $liveLauncher) {
+                $launcher.Refresh()
+                if ($launcher.HasExited) {
+                    return Get-NativeProcessExitCode -ProcessHandle $launcherHandle -ProcessId $launcher.Id
+                }
+                throw "native launcher PID $($launcher.Id) disappeared before its exit code was available"
+            }
+            if ($liveLauncher.StartTime.ToUniversalTime().Ticks -ne $launcherStartTimeUtcTicks) {
+                throw "native launcher PID $($launcher.Id) identity changed while waiting"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    } finally {
+        $launcher.Dispose()
+    }
 }
 
 function Assert-DevStackPidFileCreated {
@@ -777,6 +882,113 @@ function Invoke-SelfTests {
         $missingPidFileRejected = $_.Exception.Message -match 'success without creating the required PID ownership file'
     }
     if (-not $missingPidFileRejected) { throw "self-test: successful dev-stack without a PID file was accepted" }
+    $captureTestDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver lockstep native capture $([Guid]::NewGuid().ToString('N'))"
+    $captureLauncherPath = Join-Path $captureTestDirectory "launcher.ps1"
+    $captureChildRecordPath = Join-Path $captureTestDirectory "child.json"
+    $captureStdoutPath = Join-Path $captureTestDirectory "launcher.stdout.log"
+    $captureStderrPath = Join-Path $captureTestDirectory "launcher.stderr.log"
+    $captureExitStdoutPath = Join-Path $captureTestDirectory "exit-code.stdout.log"
+    $captureExitStderrPath = Join-Path $captureTestDirectory "exit-code.stderr.log"
+    $captureSignedExitStdoutPath = Join-Path $captureTestDirectory "signed-exit-code.stdout.log"
+    $captureSignedExitStderrPath = Join-Path $captureTestDirectory "signed-exit-code.stderr.log"
+    $capture259ExitStdoutPath = Join-Path $captureTestDirectory "exit-code-259.stdout.log"
+    $capture259ExitStderrPath = Join-Path $captureTestDirectory "exit-code-259.stderr.log"
+    $captureChildRecord = $null
+    try {
+        New-Item -ItemType Directory -Path $captureTestDirectory | Out-Null
+        @'
+param([string]$ChildRecordPath)
+$ErrorActionPreference = "Stop"
+$powerShellHost = (Get-Process -Id $PID).Path
+$child = Start-Process `
+    -FilePath $powerShellHost `
+    -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 30") `
+    -NoNewWindow `
+    -PassThru
+[pscustomobject]@{
+    pid = $child.Id
+    processName = $child.ProcessName
+    startTimeUtcTicks = $child.StartTime.ToUniversalTime().Ticks
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath $ChildRecordPath -Encoding UTF8
+Write-Output "launcher-complete"
+[Environment]::Exit(23)
+'@ | Set-Content -LiteralPath $captureLauncherPath -Encoding UTF8
+        $capturePowerShellHost = (Get-Process -Id $PID).Path
+        $ordinaryExitCode = Invoke-NativeCaptured `
+            -FilePath $capturePowerShellHost `
+            -Arguments @("-NoProfile", "-Command", "[Environment]::Exit(17)") `
+            -StdoutPath $captureExitStdoutPath `
+            -StderrPath $captureExitStderrPath
+        if ($ordinaryExitCode -ne 17) { throw "self-test: native capture lost ordinary nonzero exit code" }
+        $signedExitCode = Invoke-NativeCaptured `
+            -FilePath $capturePowerShellHost `
+            -Arguments @("-NoProfile", "-Command", "[Environment]::Exit(-1)") `
+            -StdoutPath $captureSignedExitStdoutPath `
+            -StderrPath $captureSignedExitStderrPath
+        if ($signedExitCode -ne -1) { throw "self-test: native capture lost signed exit code" }
+        $exitCode259 = Invoke-NativeCaptured `
+            -FilePath $capturePowerShellHost `
+            -Arguments @("-NoProfile", "-Command", "[Environment]::Exit(259)") `
+            -StdoutPath $capture259ExitStdoutPath `
+            -StderrPath $capture259ExitStderrPath
+        if ($exitCode259 -ne 259) { throw "self-test: native capture treated an exited process as still active" }
+        $captureStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $captureExitCode = Invoke-NativeCaptured `
+            -FilePath $capturePowerShellHost `
+            -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $captureLauncherPath, $captureChildRecordPath) `
+            -StdoutPath $captureStdoutPath `
+            -StderrPath $captureStderrPath
+        $captureStopwatch.Stop()
+        if ($captureExitCode -ne 23) {
+            $captureStdout = if (Test-Path -LiteralPath $captureStdoutPath) { ((Get-Content -LiteralPath $captureStdoutPath -Raw) | Out-String).Trim() } else { "" }
+            $captureStderr = if (Test-Path -LiteralPath $captureStderrPath) { ((Get-Content -LiteralPath $captureStderrPath -Raw) | Out-String).Trim() } else { "" }
+            throw "self-test: native capture lost launcher exit code (actual=$captureExitCode, stdout=$captureStdout, stderr=$captureStderr, childRecordExists=$(Test-Path -LiteralPath $captureChildRecordPath))"
+        }
+        if ($captureStopwatch.Elapsed.TotalSeconds -ge 10) { throw "self-test: native capture waited for a long-lived child" }
+        if (-not (Test-Path -LiteralPath $captureChildRecordPath)) { throw "self-test: native capture launcher created no child identity" }
+        $captureChildRecord = Get-Content -LiteralPath $captureChildRecordPath -Raw | ConvertFrom-Json
+        $captureChild = Get-Process -Id ([int]$captureChildRecord.pid) -ErrorAction SilentlyContinue
+        if (-not $captureChild) { throw "self-test: native capture waited for the launcher child to exit" }
+        if ($captureChild.ProcessName -ne $captureChildRecord.processName -or $captureChild.StartTime.ToUniversalTime().Ticks -ne [long]$captureChildRecord.startTimeUtcTicks) {
+            throw "self-test: native capture child identity changed"
+        }
+        if ((Get-Content -LiteralPath $captureStdoutPath -Raw) -notmatch 'launcher-complete') {
+            throw "self-test: native capture stdout redirection failed"
+        }
+        if ((Get-Item -LiteralPath $captureStderrPath).Length -ne 0) {
+            throw "self-test: native capture wrote unexpected launcher stderr"
+        }
+    } finally {
+        $captureCleanupFailure = $null
+        if (-not $captureChildRecord -and (Test-Path -LiteralPath $captureChildRecordPath)) {
+            try { $captureChildRecord = Get-Content -LiteralPath $captureChildRecordPath -Raw | ConvertFrom-Json } catch {}
+        }
+        if ($captureChildRecord) {
+            $captureChild = Get-Process -Id ([int]$captureChildRecord.pid) -ErrorAction SilentlyContinue
+            if ($captureChild) {
+                if ($captureChild.ProcessName -ne $captureChildRecord.processName -or $captureChild.StartTime.ToUniversalTime().Ticks -ne [long]$captureChildRecord.startTimeUtcTicks) {
+                    $captureCleanupFailure = "self-test: refusing to stop native capture child after identity changed"
+                } else {
+                    Stop-Process -Id $captureChild.Id -Force
+                    if (-not $captureChild.WaitForExit(5000)) { $captureCleanupFailure = "self-test: native capture child cleanup did not finish" }
+                }
+            }
+        }
+        foreach ($capturePath in @($captureLauncherPath, $captureChildRecordPath, $captureStdoutPath, $captureStderrPath, $captureExitStdoutPath, $captureExitStderrPath, $captureSignedExitStdoutPath, $captureSignedExitStderrPath, $capture259ExitStdoutPath, $capture259ExitStderrPath)) {
+            Remove-Item -LiteralPath $capturePath -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $captureTestDirectory -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $captureTestDirectory) {
+            $captureCleanupFailure = "self-test: native capture temp directory remains after cleanup"
+        }
+        if ($captureChildRecord) {
+            $captureChild = Get-Process -Id ([int]$captureChildRecord.pid) -ErrorAction SilentlyContinue
+            if ($captureChild -and $captureChild.ProcessName -eq $captureChildRecord.processName -and $captureChild.StartTime.ToUniversalTime().Ticks -eq [long]$captureChildRecord.startTimeUtcTicks) {
+                $captureCleanupFailure = "self-test: native capture child remains after cleanup"
+            }
+        }
+        if ($captureCleanupFailure) { throw $captureCleanupFailure }
+    }
     $savedRunId = $script:RunId
     $savedRedisUrl = $script:RedisUrl
     $script:RunId = $testRunId
@@ -797,7 +1009,7 @@ function Invoke-SelfTests {
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "pid-ownership-identity", "registry-ownership-gate", "missing-pid-file-rejected", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "pid-ownership-identity", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
