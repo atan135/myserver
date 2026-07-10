@@ -112,13 +112,16 @@ Real online mode requires the MyServer dependencies and game endpoint to be
 started by the operator first. It does not start Redis, PostgreSQL, NATS,
 `auth-http`, `game-server`, or `game-proxy` itself.
 
+Keep bearer tickets out of shell arguments by using an environment variable:
+
 Real online movement replay:
 
 ```powershell
+$env:MYSERVER_LOCKSTEP_TICKET = "<character-bound-ticket>"
 cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
   --scenario move_straight `
   --server 127.0.0.1:7000 `
-  --ticket <ticket-or-local-test-ticket> `
+  --ticket-env MYSERVER_LOCKSTEP_TICKET `
   --room lockstep-online-demo `
   --policy lockstep_sim_demo
 ```
@@ -129,142 +132,231 @@ Real online melee replay:
 cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
   --scenario lockstep_demo_melee `
   --server 127.0.0.1:7000 `
-  --ticket <ticket-or-local-test-ticket> `
+  --ticket-env MYSERVER_LOCKSTEP_TICKET `
   --room lockstep-online-demo `
   --policy lockstep_sim_demo
 ```
 
-## Real online reconciliation runbook
+## Automated local online reconciliation
 
-This section is preparation for a real MyServer online reconciliation run. Do
-not start services or run real online commands until the operator has reviewed
-the dependency list, exact commands, and impact scope, then explicitly
-confirmed.
-
-Startup gate:
-
-- List the services and dependencies that will be started.
-- List the exact dry-run and real online commands, including endpoint, room id,
-  policy id, and ticket source.
-- State the impact scope: local Redis keys, PostgreSQL test account / character
-  rows if auth login is used, Core NATS subjects, service registry entries, and
-  logs under the configured `LOG_DIR`.
-- Wait for confirmation before starting Redis, PostgreSQL, Core NATS,
-  `auth-http`, `game-server`, `game-proxy`, or any real online replay.
-
-Prerequisites:
-
-- Redis is required for session / ticket owner checks, service registry, and
-  metrics snapshots. Local default: `redis://127.0.0.1:6379`.
-- PostgreSQL is required when using the real `auth-http` login / character /
-  ticket path. Local `.env.example` values use port `5432` and databases such
-  as `myserver_auth` and `myserver_game`.
-- Core NATS is required by the local stack for session kick / notification /
-  metrics channels. Local default: `nats://127.0.0.1:4222`.
-- `auth-http` is required for the real login path and game ticket issuance.
-- `game-server` is required for the `lockstep_sim_demo` room runtime.
-- `game-proxy` is required when validating the formal player entry path. A
-  direct `game-server:7000` connection with a supported local / dev test ticket
-  may bypass `game-proxy`, but that is only a local debugging boundary.
-
-Ports and config sources:
-
-| Component | Local default | Source |
-|-----------|---------------|--------|
-| `auth-http` | `127.0.0.1:3000` | `apps/port.txt`, `apps/auth-http/.env.example` |
-| `game-server` player TCP | `127.0.0.1:7000` | `apps/port.txt`, `apps/game-server/.env.example` |
-| `game-server` admin | `127.0.0.1:7500` | `apps/port.txt`, `apps/game-server/.env.example` |
-| `game-proxy` KCP/client entry | `127.0.0.1:4000` | `apps/port.txt`, `apps/game-proxy/.env.example` |
-| `game-proxy` admin | `127.0.0.1:7101` | `apps/game-proxy/.env.example` |
-| `game-proxy` TCP fallback | usually `127.0.0.1:14000`, or `PROXY_TCP_FALLBACK_PORT` | `apps/game-proxy/.env.example`, runtime `.env` |
-| Redis | `127.0.0.1:6379` | service `.env.example` / local runtime config |
-| PostgreSQL | `127.0.0.1:5432` | service `.env.example` / local runtime config |
-| Core NATS | `127.0.0.1:4222` | service `.env.example` / local runtime config |
-
-`lockstep-client` uses a TCP socket. For `game-proxy`, use its TCP fallback
-endpoint, not the KCP `4000` endpoint. For test / staging / production-like
-cross-service access, services should discover each other through Redis service
-registry endpoints instead of hard-coding the local port table.
-
-Ticket preparation:
-
-- Real path: use `auth-http` to register or login / guest-login, ensure a
-  character exists, then call character select or game-ticket issue to obtain a
-  character-bound game ticket.
-- Local / dev path: `--test-ticket <ticket>` is accepted by this CLI as an alias
-  for `--ticket <ticket>`. It does not mint a ticket or bypass server checks;
-  the supplied value must be accepted by the running `game-server` /
-  `game-proxy` configuration. If the current server build does not support a
-  local test ticket path, use the real `auth-http` ticket path.
-- Keep `TICKET_SECRET` aligned across `auth-http`, `game-server`, and
-  `game-proxy` when using signed tickets.
-
-Preflight dry-runs do not open a socket and are safe to run before services are
-started:
+`scripts/online-lockstep-reconcile.ps1` is the reusable local orchestration
+entry point. A call without `-Execute` or `-DryRun` only prints a JSON plan. It
+does not create an artifact directory, read ticket values, start a process, or
+open a network connection:
 
 ```powershell
-cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online --scenario move_straight --dry-run
-
-cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online --scenario lockstep_demo_melee --dry-run
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -StartDevStack -ProvisionDevTickets
 ```
 
-Real direct-to-`game-server` online commands, for local / dev reconciliation
-after services and ticket are ready:
+Run all three client packet plans without services or tickets:
 
 ```powershell
-cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
-  --scenario move_straight `
-  --server 127.0.0.1:7000 `
-  --ticket <ticket-or-supported-local-test-ticket> `
-  --room lockstep-online-demo `
-  --policy lockstep_sim_demo
-
-cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
-  --scenario lockstep_demo_melee `
-  --server 127.0.0.1:7000 `
-  --ticket <ticket-or-supported-local-test-ticket> `
-  --room lockstep-online-demo `
-  --policy lockstep_sim_demo
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 -DryRun
 ```
 
-Real `game-proxy` path commands should use the proxy TCP fallback endpoint:
+`-DryRun` does not open network connections, but it does invoke Cargo and write
+the run report/stdout/stderr artifacts. Its report therefore marks local
+`sideEffects=true`, `externalSideEffects=false`, and
+`networkConnectionsAllowed=false`.
+
+Use `-Check move`, `-Check melee`, or `-Check observer` to run one check. The
+default `-Check all` runs movement, melee, then observer recovery with a unique
+run id and a separate room id for each check.
+
+Real execution is intentionally gated by `-Execute`. Review the plan and obtain
+operator confirmation before using either example below. These commands are
+documented for a future confirmed run; this README does not assert that a real
+online run has passed.
+
+External `auth-http` ticket path:
 
 ```powershell
-cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
-  --scenario move_straight `
-  --server 127.0.0.1:<proxy-tcp-fallback-port> `
-  --ticket <auth-http-issued-character-ticket> `
-  --room lockstep-online-demo `
-  --policy lockstep_sim_demo
+$env:MYSERVER_LOCKSTEP_TICKET = "<primary-character-ticket>"
+$env:MYSERVER_LOCKSTEP_OBSERVER_TICKET = "<different-observer-character-ticket>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -Execute -StartDevStack -TicketSource auth-http-external
+
+Remove-Item Env:MYSERVER_LOCKSTEP_TICKET, Env:MYSERVER_LOCKSTEP_OBSERVER_TICKET
 ```
 
-Failure collection:
+The external tickets must already have valid owner and version bindings in the
+same Redis used by `game-server`. Before opening the game socket, the script
+decodes only non-secret ticket metadata and checks these exact keys:
 
-- `auth-http`, `game-server`, `game-proxy`, Redis, PostgreSQL, and Core NATS
-  logs for the same time window; include configured `LOG_DIR` and service
-  instance ids.
-- Connection endpoint, transport path, room id, policy id, ticket source,
-  ticket-bound character id when known, and service-side frame.
-- `RoomSnapshot.game_state.initialSnapshot`, top-level `lastFrame`, and
-  `observerFrame.lastFrame`.
-- `stateHash.hex`, `events`, `inputSources`, and `debugSummary` from each
-  relevant `SimFrameEnvelope`.
-- `FrameBundlePush.inputs` and any `PlayerInputRes.error_code`.
-- The `lockstep-client` mismatch report: first mismatching frame, server hash,
-  client hash, tracked entity diffs, event diffs, and frame inputs.
+- `<REDIS_KEY_PREFIX>ticket:<sha256(ticket)>` must equal the account player id.
+- `<REDIS_KEY_PREFIX>player-ticket-version:<account-player-id>` must equal the
+  ticket `ver` field.
 
-Stop and cleanup after a run:
+Pass `-RedisKeyPrefix` when `game-server` uses a non-empty
+`REDIS_KEY_PREFIX`; the wrapper and server values must match exactly.
 
-- Stop only the local processes that were started for this run. If the stack was
-  started with `scripts/dev-stack.ps1`, use its documented stop path.
-- Remove or expire only test room / session / ticket / service-registry Redis
-  keys that were created for this run and are identifiable by the chosen room,
-  account, character, or log marker.
-- Clear temporary test accounts / characters only when they were created for
-  this run and the operator approves the specific rows or scripts.
-- Preserve logs and mismatch artifacts until the reconciliation result is
-  recorded. Do not run destructive database resets or broad Redis flushes as
-  part of normal cleanup.
+Use `-SkipTicketRedisPreflight` only when the operator has separately verified
+those bindings and the script cannot access Redis. The game server still
+performs the authoritative signature, owner, expiry, and version checks.
+
+Ephemeral local dev ticket path:
+
+```powershell
+$env:MYSERVER_LOCKSTEP_TICKET_SECRET = "<same-local-secret-used-by-game-server>"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -Execute -StartDevStack -ProvisionDevTickets
+
+Remove-Item Env:MYSERVER_LOCKSTEP_TICKET_SECRET
+```
+
+Provisioning is restricted to loopback Redis. It creates two character-bound
+HMAC tickets and four unique keys with `SET NX` and a maximum one-hour TTL. It
+does not create accounts or PostgreSQL rows. Cleanup uses compare-and-delete on
+those four exact keys and refuses wildcard keys, unrelated key types, or values
+that no longer match this run. Neither ticket nor the signing secret is written
+to the command line, logs, or JSON report. The client reads them through
+`--ticket-env` and `--observer-ticket-env`.
+
+### Local dependency matrix
+
+| Component | Local default | Required by the wrapper |
+|-----------|---------------|-------------------------|
+| Redis | `redis://127.0.0.1:6379` | Yes: ticket bindings and registry |
+| Core NATS | `nats://127.0.0.1:4222` | Yes: local game runtime channels |
+| `game-server` player TCP | `127.0.0.1:7000` | Yes: direct local debug endpoint |
+| `game-server` admin | `127.0.0.1:7500` | Yes when the wrapper starts the stack, for readiness |
+| `auth-http` | `127.0.0.1:3000` | Only to issue external tickets before the run |
+| PostgreSQL | `127.0.0.1:5432` | Never touched by the wrapper-owned stack (`DB_ENABLED=false`); an external operator-owned endpoint may use it |
+| `game-proxy` TCP fallback | usually `127.0.0.1:14000` | Not started by this direct local reconciliation |
+
+The wrapper also requires PowerShell, Cargo, and Node.js. Redis ticket
+provisioning or binding validation loads the repository's existing `ioredis`
+workspace dependency, so run the normal root `npm install` before a real
+execution.
+
+With `-StartDevStack`, the wrapper selects only Redis, Core NATS, and
+`game-server` through `scripts/dev-stack.ps1`; it explicitly disables auth,
+proxy, admin UI/API, and metrics collector. Redis and Core NATS may already be
+listening; they are then reused and never stopped. The game player/admin ports
+must both be free: the wrapper refuses to reuse a game-server whose runtime
+configuration it does not own. Before startup it explicitly sets `REDIS_URL`,
+`REDIS_KEY_PREFIX`, `REGISTRY_URL`, `REGISTRY_KEY_PREFIX`, `NATS_URL`,
+`SERVICE_NAME=game-server`, and `DB_ENABLED=false` in the child environment.
+This direct reconciliation path therefore does not connect to or write
+PostgreSQL, even if `apps/game-server/.env` enables the database. Without
+`-StartDevStack`, the endpoint and its configuration remain entirely
+operator-owned and the wrapper does not override them.
+
+The wrapper records the PID, name, launcher timestamp, and process start time of
+each process actually started by this run. Registry ownership begins as
+`planned` and changes to `owned` only after the new PID file proves that this
+invocation started exactly one `game-server`; successful guarded deletion changes
+it to `cleaned`. The wrapper stops only those exact process trees, then checks
+only their owned ports. It never uses `-Restart`,
+`-StopExistingProjectProcesses`, or a broad project-process stop. An existing
+`logs/dev-stack/dev-stack.pids.json` blocks startup instead of being replaced.
+Returning success without a new PID ownership file is also a hard failure.
+Failures before ownership confirmation report
+`not-attempted-no-owned-game-server` and issue no registry delete command.
+
+The local fixed ports above are bind/probe defaults, not a discovery strategy.
+Test, staging, and production consumers must continue to use Redis service
+registry endpoints. This wrapper deliberately accepts only a loopback TCP
+endpoint and is not a production deployment tool.
+
+### Reports and cleanup
+
+Every `-DryRun` or `-Execute` invocation writes
+`logs/lockstep-online/<run-id>/report.json`, plus separate stdout/stderr files
+for movement, melee, observer recovery, and dev-stack startup when selected.
+The report schema is `myserver.lockstep-online-reconcile.report.v1`. Redis URLs
+in plans and reports omit userinfo, query, and fragment fields. The report records
+room ids, masked ticket fingerprints, ticket source, endpoint, stage, frame,
+server/client hashes, entity/event/input differences, owned Redis keys, owned
+PIDs, cleanup results, port checks, and all artifact paths. Ticket cleanup
+ownership includes each exact key and its non-secret expected player-id/version
+value. Registry cleanup ownership includes its `planned`/`owned`/`cleaned`
+status, the confirmed game-server PID identity, exact instance/heartbeat keys,
+expected `data.id`, expected `data.name`, and heartbeat value. Ticket values,
+signing secrets, and Redis credentials are never included.
+
+`-Execute` always attempts cleanup in `finally`, including failed runs. It first
+stops the run-owned game-server, then compare-deletes ticket keys and atomically
+validates and deletes the exact registry instance/heartbeat keys, and only then
+stops run-owned NATS/Redis. A mismatching registry hash, heartbeat value, or
+ticket value is not deleted and makes cleanup fail. Reused services and
+external ticket keys are never deleted or stopped. The wrapper never runs
+`FLUSH*`, wildcard deletion, database reset, or account/character deletion.
+The normal stop command is therefore the same one-shot `-Execute` command; no
+separate broad stop command is needed. After startup has returned and the report
+shows registry status `owned`, `report.json` is the normal recovery record. It
+is not sufficient by itself during the narrow startup window between
+`dev-stack.ps1` writing its PID file and the wrapper persisting confirmed
+ownership.
+
+For a hard interruption in that window, also inspect
+`logs/dev-stack/dev-stack.pids.json`, the run's `dev-stack.stdout.log` and
+`dev-stack.stderr.log`, and the game-server log. Correlate PID-file `startedAt`
+and the live process start time with `ownership.registry.startInvocationAt`, and
+verify the configured instance is exactly
+`ownership.registry.gameInstanceIdArgument` (`lockstep-<runId>`). Treat
+`planned` as unconfirmed: do not delete registry keys from it. Do not use broad
+`dev-stack -Stop`, a
+port-wide kill, or an unrelated PID solely because the run id matches.
+
+Read-only stack status is available with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-stack.ps1 -Status
+```
+
+The automatic stop action is process-specific `Stop-Process -Id <owned-pid>`
+after matching the report's name, PID, and process start time, followed by owned-port
+checks. Do not substitute `dev-stack -Restart`,
+`-StopExistingProjectProcesses`, or a port-wide kill. A manual interrupted-run
+stop must repeat the same PID/start-time check from `report.json` before using
+`Stop-Process`.
+
+After stopping the report-owned game-server, an interrupted run can replay the
+same guarded Redis cleanup without ticket plaintext. Set the original Redis URL
+in the runtime environment, then feed the ownership fields from the report to
+the helper:
+
+```powershell
+$report = Get-Content logs/lockstep-online/<run-id>/report.json -Raw | ConvertFrom-Json
+$env:MYSERVER_LOCKSTEP_REDIS_URL_RUNTIME = "<original-redis-url>"
+
+@{
+  action = "cleanup"
+  keyPrefix = $report.runtimeConfig.redisKeyPrefix
+  entries = @($report.ticket.ownedRedisKeys)
+} | ConvertTo-Json -Depth 10 -Compress |
+  node tools/lockstep-client/online-ticket-store.mjs
+
+if ($report.ownership.registry.status -eq "owned") {
+  @{
+    action = "cleanup-registry"
+    runId = $report.runId
+    keyPrefix = $report.runtimeConfig.registryKeyPrefix
+    serviceName = $report.ownership.registry.serviceName
+    instanceId = $report.ownership.registry.instanceId
+  } | ConvertTo-Json -Depth 10 -Compress |
+    node tools/lockstep-client/online-ticket-store.mjs
+}
+```
+
+Skip the ticket helper call when `ownedRedisKeys` is empty. Manual registry
+cleanup is allowed only for status `owned`; skip `cleaned`, and investigate
+`planned` using the startup-window evidence above instead of issuing a Redis
+delete. Stop remaining report-owned infrastructure only after both guarded
+cleanups finish, again requiring the recorded PID/start-time identity to match.
+Remove the runtime Redis environment variable when recovery is complete.
+
+After each successful scenario, the client strictly validates `RoomEndReq` and
+`RoomLeaveReq`. If replay or observer validation fails, it still attempts both
+primary cleanup calls while preserving the original error; cleanup failures are
+appended to that error. Once an observer has joined, its connection always
+attempts `RoomLeaveReq`, including snapshot validation failures. This releases
+character room bindings and leaves temporary rooms eligible for normal empty-room
+cleanup.
 
 Online mode consumes `RoomSnapshot.game_state` JSON. It restores
 `initialSnapshot.snapshot` through `sim-core`, consumes each
@@ -299,9 +391,10 @@ Not covered by this tool or the current demo: production deployment, complex
 physics, NavMesh, production AOI, cross-server migration, complete CSV
 skill/Buff mapping, real external client integration, formal UI/animation, and
 productized prediction/rollback. Real online reconciliation still requires the
-operator to confirm startup of Redis, PostgreSQL, Core NATS, `auth-http`,
-`game-server`, `game-proxy`, ticket preparation, and the exact commands before
-running non-dry-run online mode.
+operator to confirm the selected dependency set, ticket source, impact scope,
+and exact commands before running non-dry-run online mode. PostgreSQL and
+`auth-http` are needed only for the external account/ticket path; `game-proxy`
+is needed only for a separate formal-entry-path validation.
 
 On mismatch the tool prints the first mismatching frame, server hash, client
 hash, tracked entity differences, event differences, and frame inputs.
@@ -318,6 +411,14 @@ Run the lockstep client tests:
 
 ```powershell
 cargo test --manifest-path tools/lockstep-client/Cargo.toml
+```
+
+Run the online orchestration checks without services:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 -SelfTest
+node --test tools/lockstep-client/online-ticket-store.test.mjs
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 -DryRun
 ```
 
 ## Common failures

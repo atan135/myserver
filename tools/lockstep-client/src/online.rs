@@ -27,8 +27,11 @@ options:
   --server <host:port>        TCP game-server or local game-proxy endpoint, default 127.0.0.1:7000
   --ticket <ticket>          ticket issued by auth-http or a local test ticket
   --test-ticket <ticket>     alias for --ticket
+  --ticket-env <name>        read the player ticket from an environment variable
   --probe-observer-recovery  verify RoomJoinAsObserverRes.snapshot.game_state after replay
   --observer-ticket <ticket> ticket for the observer recovery probe
+  --observer-ticket-env <name>
+                             read the observer ticket from an environment variable
   --room <room-id>           room id, default lockstep-online-demo
   --policy <policy-id>       room policy id, default lockstep_sim_demo
   --character-id <id>        expected ticket-bound character id for reporting
@@ -52,7 +55,9 @@ pub struct OnlineCliOptions {
     pub scenario: String,
     pub server_addr: String,
     pub ticket: Option<String>,
+    pub ticket_env: Option<String>,
     pub observer_ticket: Option<String>,
+    pub observer_ticket_env: Option<String>,
     pub probe_observer_recovery: bool,
     pub room_id: String,
     pub policy_id: String,
@@ -71,7 +76,9 @@ impl OnlineCliOptions {
         let mut scenario = None;
         let mut server_addr = None;
         let mut ticket = None;
+        let mut ticket_env = None;
         let mut observer_ticket = None;
+        let mut observer_ticket_env = None;
         let mut probe_observer_recovery = false;
         let mut room_id = None;
         let mut policy_id = None;
@@ -108,16 +115,33 @@ impl OnlineCliOptions {
                     server_addr = Some(next_non_empty_arg(&mut args, "--server")?);
                 }
                 "--ticket" | "--test-ticket" => {
-                    if ticket.is_some() {
+                    if ticket.is_some() || ticket_env.is_some() {
                         return Err(OnlineError::invalid_args("duplicate --ticket"));
                     }
                     ticket = Some(next_non_empty_arg(&mut args, arg.as_str())?);
                 }
+                "--ticket-env" => {
+                    if ticket.is_some() || ticket_env.is_some() {
+                        return Err(OnlineError::invalid_args(
+                            "use exactly one of --ticket or --ticket-env",
+                        ));
+                    }
+                    ticket_env = Some(next_non_empty_arg(&mut args, "--ticket-env")?);
+                }
                 "--observer-ticket" => {
-                    if observer_ticket.is_some() {
+                    if observer_ticket.is_some() || observer_ticket_env.is_some() {
                         return Err(OnlineError::invalid_args("duplicate --observer-ticket"));
                     }
                     observer_ticket = Some(next_non_empty_arg(&mut args, "--observer-ticket")?);
+                }
+                "--observer-ticket-env" => {
+                    if observer_ticket.is_some() || observer_ticket_env.is_some() {
+                        return Err(OnlineError::invalid_args(
+                            "use exactly one of --observer-ticket or --observer-ticket-env",
+                        ));
+                    }
+                    observer_ticket_env =
+                        Some(next_non_empty_arg(&mut args, "--observer-ticket-env")?);
                 }
                 "--probe-observer-recovery" => {
                     probe_observer_recovery = true;
@@ -180,7 +204,9 @@ impl OnlineCliOptions {
                 .ok_or_else(|| OnlineError::invalid_args("missing --scenario <path-or-name>"))?,
             server_addr: server_addr.unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_owned()),
             ticket,
+            ticket_env,
             observer_ticket,
+            observer_ticket_env,
             probe_observer_recovery,
             room_id: room_id.unwrap_or_else(|| DEFAULT_ROOM_ID.to_owned()),
             policy_id: policy_id.unwrap_or_else(|| LOCKSTEP_SIM_DEMO_POLICY_ID.to_owned()),
@@ -347,24 +373,39 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
         });
     }
 
-    let ticket = options.ticket.clone().ok_or_else(|| {
-        OnlineError::invalid_args(
-            "online mode requires --ticket or --test-ticket unless --dry-run is used",
+    let ticket = resolve_ticket(
+        options.ticket.as_deref(),
+        options.ticket_env.as_deref(),
+        "player",
+    )?;
+    let observer_ticket = if options.probe_observer_recovery {
+        Some(resolve_ticket(
+            options.observer_ticket.as_deref(),
+            options.observer_ticket_env.as_deref(),
+            "observer",
         )
-    })?;
-
-    let mut transport = TcpGameTransport::connect(&options.server_addr, options.timeout())?;
-    let outcome = drive_online_session(&mut transport, &options, &ticket, &input_plan)?;
-    let observer_recovery = if options.probe_observer_recovery {
-        let observer_ticket = options.observer_ticket.as_deref().ok_or_else(|| {
-            OnlineError::invalid_args(
-                "--probe-observer-recovery requires --observer-ticket for a separate observer character",
-            )
-        })?;
-        Some(run_observer_recovery_probe(&options, observer_ticket)?)
+        .map_err(|error| match error {
+            OnlineError::InvalidArgs { .. } => OnlineError::invalid_args(
+                "--probe-observer-recovery requires --observer-ticket or --observer-ticket-env for a separate observer character",
+            ),
+            other => other,
+        })?)
     } else {
         None
     };
+
+    let mut transport = TcpGameTransport::connect(&options.server_addr, options.timeout())?;
+    let session_result = (|| {
+        let outcome = drive_online_session(&mut transport, &options, &ticket, &input_plan)?;
+        let observer_recovery = if let Some(observer_ticket) = observer_ticket {
+            Some(run_observer_recovery_probe(&options, &observer_ticket)?)
+        } else {
+            None
+        };
+        Ok((outcome, observer_recovery))
+    })();
+    let (outcome, observer_recovery) =
+        complete_operation_with_cleanup(session_result, || finish_online_session(&mut transport))?;
 
     Ok(OnlineReport {
         scenario_path,
@@ -379,6 +420,34 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
         final_hash: outcome.final_hash,
         observer_recovery,
     })
+}
+
+fn resolve_ticket(
+    direct: Option<&str>,
+    env_name: Option<&str>,
+    label: &str,
+) -> Result<String, OnlineError> {
+    if let Some(ticket) = direct {
+        return Ok(ticket.to_owned());
+    }
+
+    if let Some(env_name) = env_name {
+        let ticket = std::env::var(env_name).map_err(|_| {
+            OnlineError::invalid_args(format!(
+                "{label} ticket environment variable `{env_name}` is missing or not valid Unicode"
+            ))
+        })?;
+        if ticket.trim().is_empty() {
+            return Err(OnlineError::invalid_args(format!(
+                "{label} ticket environment variable `{env_name}` is empty"
+            )));
+        }
+        return Ok(ticket);
+    }
+
+    Err(OnlineError::invalid_args(format!(
+        "online mode requires a {label} ticket argument or environment variable unless --dry-run is used"
+    )))
 }
 
 fn default_scenario_dir() -> PathBuf {
@@ -471,6 +540,52 @@ fn build_dry_run_packet_plan(
             input.frame_id, input.action, input.payload_json
         ),
     }));
+
+    if options.probe_observer_recovery {
+        packets.extend([
+            OnlineDryRunPacket {
+                direction: "send",
+                name: "ObserverAuthReq",
+                msg_type: Some(MessageType::AuthReq as u16),
+                summary: "authenticate a separate observer character".to_owned(),
+            },
+            OnlineDryRunPacket {
+                direction: "send",
+                name: "RoomJoinAsObserverReq",
+                msg_type: Some(MessageType::RoomJoinAsObserverReq as u16),
+                summary: format!("join room={} as observer", options.room_id),
+            },
+            OnlineDryRunPacket {
+                direction: "expect",
+                name: "RoomJoinAsObserverRes",
+                msg_type: Some(MessageType::RoomJoinAsObserverRes as u16),
+                summary: "snapshot.game_state restores and observerFrame.lastFrame aligns with the top-level lastFrame"
+                    .to_owned(),
+            },
+            OnlineDryRunPacket {
+                direction: "send",
+                name: "ObserverRoomLeaveReq",
+                msg_type: Some(MessageType::RoomLeaveReq as u16),
+                summary: "release observer room binding after success or validation failure"
+                    .to_owned(),
+            },
+        ]);
+    }
+
+    packets.extend([
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "RoomEndReq",
+            msg_type: Some(MessageType::RoomEndReq as u16),
+            summary: "end the temporary reconciliation room".to_owned(),
+        },
+        OnlineDryRunPacket {
+            direction: "send",
+            name: "RoomLeaveReq",
+            msg_type: Some(MessageType::RoomLeaveReq as u16),
+            summary: "release the primary character room binding".to_owned(),
+        },
+    ]);
 
     packets
 }
@@ -1480,6 +1595,13 @@ pub enum OnlineError {
     Mismatch {
         diff: OnlineMismatchDiff,
     },
+    CleanupFailed {
+        errors: Vec<String>,
+    },
+    OperationAndCleanupFailed {
+        operation: Box<OnlineError>,
+        cleanup: Box<OnlineError>,
+    },
 }
 
 impl OnlineError {
@@ -1528,6 +1650,15 @@ impl fmt::Display for OnlineError {
                 write!(f, "client replay failed at frame {frame}: {source}")
             }
             Self::Mismatch { diff } => write!(f, "{diff}"),
+            Self::CleanupFailed { errors } => {
+                write!(f, "online cleanup failed: {}", errors.join("; "))
+            }
+            Self::OperationAndCleanupFailed { operation, cleanup } => {
+                write!(
+                    f,
+                    "{operation}\ncleanup after failure also failed: {cleanup}"
+                )
+            }
         }
     }
 }
@@ -1540,6 +1671,7 @@ impl std::error::Error for OnlineError {
             Self::Json(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::Step { source, .. } => Some(source),
+            Self::OperationAndCleanupFailed { operation, .. } => Some(operation.as_ref()),
             _ => None,
         }
     }
@@ -1552,12 +1684,16 @@ enum MessageType {
     AuthRes = 1002,
     RoomJoinReq = 1101,
     RoomJoinRes = 1102,
+    RoomLeaveReq = 1103,
+    RoomLeaveRes = 1104,
     RoomReadyReq = 1105,
     RoomReadyRes = 1106,
     RoomStartReq = 1107,
     RoomStartRes = 1108,
     PlayerInputReq = 1111,
     PlayerInputRes = 1112,
+    RoomEndReq = 1113,
+    RoomEndRes = 1114,
     RoomJoinAsObserverReq = 1117,
     RoomJoinAsObserverRes = 1118,
     RoomStatePush = 1201,
@@ -1572,12 +1708,16 @@ impl MessageType {
             1002 => Some(Self::AuthRes),
             1101 => Some(Self::RoomJoinReq),
             1102 => Some(Self::RoomJoinRes),
+            1103 => Some(Self::RoomLeaveReq),
+            1104 => Some(Self::RoomLeaveRes),
             1105 => Some(Self::RoomReadyReq),
             1106 => Some(Self::RoomReadyRes),
             1107 => Some(Self::RoomStartReq),
             1108 => Some(Self::RoomStartRes),
             1111 => Some(Self::PlayerInputReq),
             1112 => Some(Self::PlayerInputRes),
+            1113 => Some(Self::RoomEndReq),
+            1114 => Some(Self::RoomEndRes),
             1117 => Some(Self::RoomJoinAsObserverReq),
             1118 => Some(Self::RoomJoinAsObserverRes),
             1201 => Some(Self::RoomStatePush),
@@ -1825,12 +1965,88 @@ fn run_observer_recovery_probe(
     }
 
     let Some(snapshot) = response.snapshot else {
-        return Err(OnlineError::Protocol(
-            "observer recovery response did not include RoomSnapshot".to_owned(),
-        ));
+        return complete_operation_with_cleanup(
+            Err(OnlineError::Protocol(
+                "observer recovery response did not include RoomSnapshot".to_owned(),
+            )),
+            || leave_online_session(&mut transport, "observer_leave"),
+        );
     };
 
-    validate_observer_recovery_snapshot(snapshot, response.current_frame_id)
+    complete_operation_with_cleanup(
+        validate_observer_recovery_snapshot(snapshot, response.current_frame_id),
+        || leave_online_session(&mut transport, "observer_leave"),
+    )
+}
+
+fn finish_online_session(transport: &mut TcpGameTransport) -> Result<(), OnlineError> {
+    let end_result = end_online_room(transport);
+    let leave_result = leave_online_session(transport, "room_leave");
+    let errors = [end_result, leave_result]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(OnlineError::CleanupFailed { errors })
+    }
+}
+
+fn end_online_room(transport: &mut TcpGameTransport) -> Result<(), OnlineError> {
+    let end_seq = transport.send(
+        MessageType::RoomEndReq,
+        &pb::RoomEndReq {
+            reason: "lockstep-online-reconcile-complete".to_owned(),
+        },
+    )?;
+    let end_packet = transport.read_until(MessageType::RoomEndRes, Some(end_seq), None)?;
+    let end = decode_body::<pb::RoomEndRes>(&end_packet)?;
+    if !end.ok {
+        return Err(OnlineError::ServerRejected {
+            stage: "room_end",
+            error_code: end.error_code,
+        });
+    }
+
+    Ok(())
+}
+
+fn leave_online_session(
+    transport: &mut TcpGameTransport,
+    stage: &'static str,
+) -> Result<(), OnlineError> {
+    let leave_seq = transport.send(MessageType::RoomLeaveReq, &pb::RoomLeaveReq {})?;
+    let leave_packet = transport.read_until(MessageType::RoomLeaveRes, Some(leave_seq), None)?;
+    let leave = decode_body::<pb::RoomLeaveRes>(&leave_packet)?;
+    if !leave.ok {
+        return Err(OnlineError::ServerRejected {
+            stage,
+            error_code: leave.error_code,
+        });
+    }
+
+    Ok(())
+}
+
+fn complete_operation_with_cleanup<T, F>(
+    operation: Result<T, OnlineError>,
+    cleanup: F,
+) -> Result<T, OnlineError>
+where
+    F: FnOnce() -> Result<(), OnlineError>,
+{
+    let cleanup_result = cleanup();
+    match (operation, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(operation), Ok(())) => Err(operation),
+        (Err(operation), Err(cleanup)) => Err(OnlineError::OperationAndCleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2329,10 +2545,12 @@ mod tests {
 
         assert_eq!(options.server_addr, "127.0.0.1:4000");
         assert_eq!(options.ticket.as_deref(), Some("ticket-1"));
+        assert_eq!(options.ticket_env, None);
         assert_eq!(
             options.observer_ticket.as_deref(),
             Some("observer-ticket-1")
         );
+        assert_eq!(options.observer_ticket_env, None);
         assert!(options.probe_observer_recovery);
         assert_eq!(options.room_id, "room-1");
         assert_eq!(options.character_id.as_deref(), Some("player-a"));
@@ -2385,13 +2603,111 @@ mod tests {
                 .unwrap_err(),
             "unexpected argument `--wat`",
         );
+        assert_online_error_contains(
+            OnlineCliOptions::parse([
+                "--mode",
+                "online",
+                "--scenario",
+                "move_straight",
+                "--ticket",
+                "literal",
+                "--ticket-env",
+                "LOCKSTEP_TICKET",
+            ])
+            .unwrap_err(),
+            "use exactly one of --ticket or --ticket-env",
+        );
     }
 
     #[test]
     fn non_dry_run_requires_ticket_before_network_connect() {
         let error = run_cli(["--mode", "online", "--scenario", "move_straight"]).unwrap_err();
 
-        assert_online_error_contains(error, "requires --ticket or --test-ticket");
+        assert_online_error_contains(
+            error,
+            "requires a player ticket argument or environment variable",
+        );
+    }
+
+    #[test]
+    fn observer_probe_requires_observer_ticket_before_network_connect() {
+        let error = run_cli([
+            "--mode",
+            "online",
+            "--scenario",
+            "move_straight",
+            "--ticket",
+            "primary-ticket",
+            "--probe-observer-recovery",
+        ])
+        .unwrap_err();
+
+        assert_online_error_contains(error, "requires --observer-ticket or --observer-ticket-env");
+    }
+
+    #[test]
+    fn operation_failure_still_runs_cleanup_and_preserves_both_errors() {
+        let cleanup_called = std::cell::Cell::new(false);
+        let result = complete_operation_with_cleanup::<(), _>(
+            Err(OnlineError::ServerRejected {
+                stage: "player_input",
+                error_code: "SIM_MISMATCH".to_owned(),
+            }),
+            || {
+                cleanup_called.set(true);
+                Err(OnlineError::ServerRejected {
+                    stage: "room_leave",
+                    error_code: "LEAVE_FAILED".to_owned(),
+                })
+            },
+        );
+
+        assert!(cleanup_called.get());
+        let error = result.unwrap_err();
+        assert!(matches!(
+            &error,
+            OnlineError::OperationAndCleanupFailed { .. }
+        ));
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("player_input rejected by server: SIM_MISMATCH"));
+        assert!(rendered.contains("cleanup after failure also failed"));
+        assert!(rendered.contains("room_leave rejected by server: LEAVE_FAILED"));
+    }
+
+    #[test]
+    fn cleanup_failure_is_strict_after_successful_operation() {
+        let result = complete_operation_with_cleanup(Ok(7_u32), || {
+            Err(OnlineError::CleanupFailed {
+                errors: vec!["room end timed out".to_owned()],
+            })
+        });
+
+        assert_online_error_contains(result.unwrap_err(), "room end timed out");
+    }
+
+    #[test]
+    fn online_cli_parses_ticket_environment_names_without_reading_values() {
+        let options = OnlineCliOptions::parse([
+            "--mode",
+            "online",
+            "--scenario",
+            "move_straight",
+            "--ticket-env",
+            "LOCKSTEP_TICKET",
+            "--probe-observer-recovery",
+            "--observer-ticket-env",
+            "LOCKSTEP_OBSERVER_TICKET",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        assert_eq!(options.ticket, None);
+        assert_eq!(options.ticket_env.as_deref(), Some("LOCKSTEP_TICKET"));
+        assert_eq!(options.observer_ticket, None);
+        assert_eq!(
+            options.observer_ticket_env.as_deref(),
+            Some("LOCKSTEP_OBSERVER_TICKET")
+        );
     }
 
     #[test]
@@ -2425,6 +2741,39 @@ mod tests {
             rendered.contains("send PlayerInputReq(1111): frame=1 action=sim_input payload_json=")
         );
         assert!(rendered.contains(r#""type":"move""#));
+        assert!(rendered.contains("send RoomEndReq(1113): end the temporary reconciliation room"));
+        assert!(
+            rendered
+                .contains("send RoomLeaveReq(1103): release the primary character room binding")
+        );
+    }
+
+    #[test]
+    fn observer_dry_run_lists_recovery_probe_packets_without_reading_tickets() {
+        let report = run_cli([
+            "--mode",
+            "online",
+            "--scenario",
+            "move_straight",
+            "--room",
+            "room-observer",
+            "--probe-observer-recovery",
+            "--dry-run",
+        ])
+        .unwrap();
+        let rendered = report.to_string();
+
+        assert!(rendered.contains("send ObserverAuthReq(1001):"));
+        assert!(
+            rendered
+                .contains("send RoomJoinAsObserverReq(1117): join room=room-observer as observer")
+        );
+        assert!(rendered.contains("expect RoomJoinAsObserverRes(1118):"));
+        assert!(rendered.contains("observerFrame.lastFrame aligns"));
+        assert!(rendered.contains("send ObserverRoomLeaveReq(1103):"));
+        assert!(
+            rendered.find("RoomJoinAsObserverRes").unwrap() < rendered.find("RoomEndReq").unwrap()
+        );
     }
 
     #[test]
