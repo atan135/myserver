@@ -137,3 +137,87 @@ async fn marked_for_destruction_room_rejects_later_operations() {
     assert!(manager.process_room_tick(TEST_ROOM_ID, 10).await.is_none());
     assert_eq!(manager.find_room_by_offline_character(PLAYER_A).await, None);
 }
+
+#[tokio::test]
+async fn observer_leave_preserves_started_room_until_owner_ends_game() {
+    let (manager, _factory, _receivers) =
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{}")
+        .await
+        .unwrap();
+
+    let (observer_tx, _observer_rx) = mpsc::channel(1024);
+    let observer = manager
+        .join_room_as_observer(TEST_ROOM_ID, OBSERVER_1, observer_tx)
+        .await
+        .unwrap();
+    assert_eq!(observer.snapshot.state, "in_game");
+
+    let leave = manager.leave_room(TEST_ROOM_ID, OBSERVER_1).await;
+    let snapshot = leave
+        .snapshot
+        .expect("observer leave should return snapshot");
+    assert_eq!(snapshot.state, "in_game");
+
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert_eq!(room.phase, RoomPhase::InGame);
+        assert_eq!(room.pending_inputs_for_frame(1).len(), 1);
+
+        let owner = room.members.get(PLAYER_A).expect("owner should remain");
+        assert!(owner.ready);
+        assert!(!owner.offline);
+        let other_player = room
+            .members
+            .get(PLAYER_B)
+            .expect("other player should remain");
+        assert!(other_player.ready);
+        assert!(!other_player.offline);
+
+        let observer = room
+            .members
+            .get(OBSERVER_1)
+            .expect("observer membership should remain recoverable");
+        assert_eq!(observer.role, MemberRole::Observer);
+        assert!(observer.offline);
+    })
+    .await;
+
+    assert_eq!(
+        offline_character_index_for_test(&manager, OBSERVER_1).await,
+        Some(TEST_ROOM_ID.to_string())
+    );
+    let ended = manager.end_game(TEST_ROOM_ID, PLAYER_A).await.unwrap();
+    assert_eq!(ended.state, "waiting");
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert_eq!(room.phase, RoomPhase::Waiting);
+        assert!(room.pending_inputs.is_empty());
+        assert!(!room.members.get(PLAYER_A).unwrap().ready);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn player_leave_keeps_existing_started_room_reset_semantics() {
+    let (manager, _factory, _receivers) =
+        setup_started_room(DEFAULT_POLICY, &[PLAYER_A, PLAYER_B]).await;
+    manager
+        .accept_player_input(TEST_ROOM_ID, PLAYER_A, 1, "move", "{}")
+        .await
+        .unwrap();
+
+    let leave = manager.leave_room(TEST_ROOM_ID, PLAYER_B).await;
+    let snapshot = leave.snapshot.expect("player leave should return snapshot");
+    assert_eq!(snapshot.state, "waiting");
+
+    with_room_for_test(&manager, TEST_ROOM_ID, |room| {
+        assert_eq!(room.phase, RoomPhase::Waiting);
+        assert!(room.pending_inputs.is_empty());
+        assert_eq!(room.owner_character_id, PLAYER_A);
+        assert!(!room.members.get(PLAYER_A).unwrap().ready);
+        let leaving_player = room.members.get(PLAYER_B).unwrap();
+        assert!(leaving_player.offline);
+        assert!(!leaving_player.ready);
+    })
+    .await;
+}

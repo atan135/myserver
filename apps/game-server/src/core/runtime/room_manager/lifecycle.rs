@@ -303,7 +303,8 @@ impl RoomManager {
             .filter(|member| !member.offline)
             .count();
 
-        if let Some(member) = room.members.get_mut(character_id) {
+        let leaving_role = if let Some(member) = room.members.get_mut(character_id) {
+            let role = member.role;
             member.offline = true;
             member.offline_since = Some(Instant::now());
             detach_member_outbound(member);
@@ -314,6 +315,7 @@ impl RoomManager {
                 "player marked offline, members count: {}",
                 room.members.len()
             );
+            role
         } else {
             info!(
                 room_id = room_id,
@@ -325,11 +327,9 @@ impl RoomManager {
                 snapshot: None,
                 room_removed: false,
             };
-        }
+        };
 
-        let policy = self.policies.resolve(&room.policy_id);
-
-        if room.owner_character_id == character_id {
+        if leaving_role == MemberRole::Player && room.owner_character_id == character_id {
             if let Some(next_owner) = room
                 .members
                 .values()
@@ -347,12 +347,17 @@ impl RoomManager {
             }
         }
 
-        let _ = policy;
-        room.reset_to_waiting();
+        if leaving_role == MemberRole::Player {
+            room.reset_to_waiting();
+        }
 
         let pending_broadcasts = room.logic.take_pending_broadcasts();
         let snapshot = room.snapshot();
-        let match_id = room.match_id.clone();
+        let match_id = if leaving_role == MemberRole::Player {
+            room.match_id.clone()
+        } else {
+            None
+        };
         drop(room);
 
         self.set_character_index(character_id, room_id, true).await;
