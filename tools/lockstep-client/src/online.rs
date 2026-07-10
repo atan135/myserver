@@ -457,7 +457,7 @@ fn build_dry_run_packet_plan(
             direction: "expect",
             name: "FrameBundlePush",
             msg_type: Some(MessageType::FrameBundlePush as u16),
-            summary: "snapshot.game_state.lastFrame or observerFrame.lastFrame with hash/events/inputSources"
+            summary: "snapshot.game_state.lastFrame or observerFrame.lastFrame with hash/events/eventSummaries/inputSources"
                 .to_owned(),
         },
     ];
@@ -690,7 +690,9 @@ pub struct SimInitialSnapshot {
     pub room_id: String,
     pub start_frame: u32,
     pub tick_rate: u16,
+    pub config_version: u64,
     pub config_hash: String,
+    pub sim_schema_version: u16,
     pub rng_seed: u64,
     pub state_hash: SimHashEnvelope,
     pub snapshot: SimSnapshot,
@@ -743,6 +745,50 @@ impl From<SimFrameInputSource> for SimInputSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SimFrameEventKind {
+    SkillCast,
+    Damage,
+    Heal,
+    BuffApplied,
+    BuffExpired,
+    BuffTick,
+    Death,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEventSummary {
+    pub schema_version: u32,
+    pub kind: SimFrameEventKind,
+    pub frame: u32,
+    pub source_entity_id: u32,
+    pub target_entity_id: Option<u32>,
+    pub skill_id: Option<u32>,
+    pub buff_id: Option<u32>,
+    pub amount: i32,
+    pub sequence: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameDebugState {
+    pub schema_version: u32,
+    pub entities: Vec<SimFrameEntityDebugState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimFrameEntityDebugState {
+    pub entity_id: u32,
+    pub x_raw: i64,
+    pub y_raw: i64,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub alive: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimFrameEnvelope {
@@ -751,13 +797,16 @@ pub struct SimFrameEnvelope {
     pub room_id: String,
     pub frame: u32,
     pub tick_rate: u16,
+    pub config_version: u64,
     pub config_hash: String,
+    pub sim_schema_version: u16,
     pub state_hash: SimHashEnvelope,
-    #[serde(default)]
+    pub event_count: usize,
     pub events: Vec<SimEvent>,
-    #[serde(default)]
+    pub event_summaries: Vec<SimFrameEventSummary>,
     pub input_sources: Vec<SimFrameInputSourceSummary>,
     pub debug_summary: SimFrameDebugSummary,
+    pub debug_state: SimFrameDebugState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -818,6 +867,8 @@ impl LockstepSimDemoState {
 pub struct LockstepSimObserverFrame {
     pub world_frame: u32,
     pub state_hash: SimHashEnvelope,
+    pub last_event_count: usize,
+    pub last_event_summaries: Vec<SimFrameEventSummary>,
     #[serde(default)]
     pub last_frame: Option<SimFrameEnvelope>,
 }
@@ -856,9 +907,27 @@ pub struct ServerFrameObservation {
     pub game_state: Option<LockstepSimDemoState>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SimContractMetadata {
+    config_version: u64,
+    config_hash: String,
+    sim_schema_version: u16,
+}
+
+impl From<&SimInitialSnapshot> for SimContractMetadata {
+    fn from(snapshot: &SimInitialSnapshot) -> Self {
+        Self {
+            config_version: snapshot.config_version,
+            config_hash: snapshot.config_hash.clone(),
+            sim_schema_version: snapshot.sim_schema_version,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OnlineReplay {
     room_id: String,
+    contract: SimContractMetadata,
     config: SimConfig,
     world: SimWorld,
     bindings: HashMap<String, EntityId>,
@@ -876,6 +945,7 @@ impl OnlineReplay {
 
         Ok(Self {
             room_id: snapshot.room_id.clone(),
+            contract: SimContractMetadata::from(snapshot),
             config: lockstep_demo_config(snapshot.tick_rate),
             world,
             bindings,
@@ -901,7 +971,7 @@ impl OnlineReplay {
         observation: &ServerFrameObservation,
     ) -> Result<(), OnlineError> {
         let envelope = &observation.envelope;
-        validate_frame_envelope(envelope, &self.room_id)?;
+        validate_frame_envelope(envelope, &self.room_id, &self.contract)?;
 
         if envelope.frame <= self.world.frame.raw() {
             return Ok(());
@@ -994,6 +1064,23 @@ fn validate_initial_snapshot(snapshot: &SimInitialSnapshot) -> Result<(), Online
             "INVALID_SIM_SNAPSHOT_TICK_RATE".to_owned(),
         ));
     }
+    if snapshot.config_version == 0 {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "UNSUPPORTED_SIM_CONFIG_VERSION expected >= 1, got 0".to_owned(),
+        ));
+    }
+    if snapshot.config_hash.trim().is_empty() {
+        return Err(OnlineError::InvalidInitialSnapshot(
+            "INVALID_SIM_CONFIG_HASH".to_owned(),
+        ));
+    }
+    if snapshot.sim_schema_version != sim_core::SIM_CORE_SCHEMA_VERSION {
+        return Err(OnlineError::InvalidInitialSnapshot(format!(
+            "UNSUPPORTED_SIM_SCHEMA_VERSION expected {}, got {}",
+            sim_core::SIM_CORE_SCHEMA_VERSION,
+            snapshot.sim_schema_version
+        )));
+    }
     if snapshot.start_frame != snapshot.snapshot.frame.raw() {
         return Err(OnlineError::InvalidInitialSnapshot(
             "SIM_SNAPSHOT_FRAME_MISMATCH".to_owned(),
@@ -1062,7 +1149,11 @@ fn restore_control_bindings(
     Ok(restored)
 }
 
-fn validate_frame_envelope(envelope: &SimFrameEnvelope, room_id: &str) -> Result<(), OnlineError> {
+fn validate_frame_envelope(
+    envelope: &SimFrameEnvelope,
+    room_id: &str,
+    expected: &SimContractMetadata,
+) -> Result<(), OnlineError> {
     if envelope.schema != SIM_FRAME_ENVELOPE_SCHEMA
         || envelope.schema_version != SIM_DOWNLINK_SCHEMA_VERSION
     {
@@ -1081,10 +1172,35 @@ fn validate_frame_envelope(envelope: &SimFrameEnvelope, room_id: &str) -> Result
             "INVALID_SIM_FRAME_TICK_RATE".to_owned(),
         ));
     }
+    if envelope.config_version != expected.config_version {
+        return Err(OnlineError::InvalidFrameEnvelope(format!(
+            "SIM_FRAME_CONFIG_VERSION_MISMATCH expected {}, got {}",
+            expected.config_version, envelope.config_version
+        )));
+    }
+    if envelope.config_hash != expected.config_hash {
+        return Err(OnlineError::InvalidFrameEnvelope(format!(
+            "SIM_FRAME_CONFIG_HASH_MISMATCH expected {}, got {}",
+            expected.config_hash, envelope.config_hash
+        )));
+    }
+    if envelope.sim_schema_version != expected.sim_schema_version {
+        return Err(OnlineError::InvalidFrameEnvelope(format!(
+            "SIM_FRAME_SIM_SCHEMA_VERSION_MISMATCH expected {}, got {}",
+            expected.sim_schema_version, envelope.sim_schema_version
+        )));
+    }
     if envelope.state_hash.frame != envelope.frame {
         return Err(OnlineError::InvalidFrameEnvelope(
             "SIM_FRAME_HASH_FRAME_MISMATCH".to_owned(),
         ));
+    }
+    if envelope.event_count != envelope.events.len() {
+        return Err(OnlineError::InvalidFrameEnvelope(format!(
+            "SIM_FRAME_EVENT_COUNT_MISMATCH declared {}, actual {}",
+            envelope.event_count,
+            envelope.events.len()
+        )));
     }
     Ok(())
 }
@@ -1842,13 +1958,14 @@ fn validate_observer_recovery_snapshot(
         )
     })?;
     validate_initial_snapshot(initial)?;
+    let contract = SimContractMetadata::from(initial);
 
     let last_frame = game_state.last_frame.as_ref().ok_or_else(|| {
         OnlineError::Protocol(
             "observer recovery RoomSnapshot.game_state missing lastFrame".to_owned(),
         )
     })?;
-    validate_frame_envelope(last_frame, &snapshot.room_id)?;
+    validate_frame_envelope(last_frame, &snapshot.room_id, &contract)?;
 
     let observer_frame = game_state.observer_frame.as_ref().ok_or_else(|| {
         OnlineError::Protocol(
@@ -1860,7 +1977,7 @@ fn validate_observer_recovery_snapshot(
             "observer recovery RoomSnapshot.game_state missing observerFrame.lastFrame".to_owned(),
         )
     })?;
-    validate_frame_envelope(observer_last_frame, &snapshot.room_id)?;
+    validate_frame_envelope(observer_last_frame, &snapshot.room_id, &contract)?;
 
     if observer_frame.world_frame != snapshot.current_frame_id {
         return Err(OnlineError::Protocol(format!(
@@ -2056,7 +2173,9 @@ mod tests {
             room_id: "room-lockstep".to_owned(),
             start_frame: 0,
             tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            config_version: 1,
             config_hash: "test".to_owned(),
+            sim_schema_version: sim_core::SIM_CORE_SCHEMA_VERSION,
             rng_seed: 0,
             state_hash: sim_hash_envelope(snapshot.hash),
             snapshot,
@@ -2121,9 +2240,13 @@ mod tests {
             room_id: "room-lockstep".to_owned(),
             frame: result.frame.raw(),
             tick_rate: DEFAULT_LOCKSTEP_SIM_TICK_RATE,
+            config_version: 1,
             config_hash: "test".to_owned(),
+            sim_schema_version: sim_core::SIM_CORE_SCHEMA_VERSION,
             state_hash: sim_hash_envelope(result.state_hash),
+            event_count: result.events.len(),
             events: result.events.clone(),
+            event_summaries: Vec::new(),
             input_sources: vec![SimFrameInputSourceSummary {
                 frame: result.frame.raw(),
                 character_id: "player-a".to_owned(),
@@ -2140,6 +2263,10 @@ mod tests {
                 entity_count: 2,
                 alive_entity_count: 2,
                 player_entity_count: 1,
+            },
+            debug_state: SimFrameDebugState {
+                schema_version: 1,
+                entities: Vec::new(),
             },
         }
     }
@@ -2293,6 +2420,7 @@ mod tests {
         ));
         assert!(rendered.contains("send RoomStartReq(1107): start lockstep room"));
         assert!(rendered.contains("expect FrameBundlePush(1203):"));
+        assert!(rendered.contains("hash/events/eventSummaries/inputSources"));
         assert!(
             rendered.contains("send PlayerInputReq(1111): frame=1 action=sim_input payload_json=")
         );
@@ -2402,6 +2530,172 @@ mod tests {
                 skill_id: DEFAULT_PLAYER_SKILL_ID,
                 target_entity_id: Some(TRAINING_TARGET_ENTITY_ID),
             }]
+        );
+    }
+
+    #[test]
+    fn server_contract_metadata_and_diagnostics_are_deserialized_without_loss() {
+        let initial = initial_snapshot();
+        let mut world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let mut result = step(
+            &mut world,
+            FrameId::new(1),
+            &[],
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        result.events.push(SimEvent::SkillCast {
+            frame: FrameId::new(1),
+            source_entity: EntityId::new(1000),
+            target_entity: Some(EntityId::new(TRAINING_TARGET_ENTITY_ID)),
+            skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+            value: 1,
+            sequence: 7,
+        });
+        let mut envelope = frame_envelope(&result);
+        envelope.event_count = envelope.events.len();
+        envelope.event_summaries = vec![SimFrameEventSummary {
+            schema_version: 1,
+            kind: SimFrameEventKind::SkillCast,
+            frame: 1,
+            source_entity_id: 1000,
+            target_entity_id: Some(TRAINING_TARGET_ENTITY_ID),
+            skill_id: Some(DEFAULT_PLAYER_SKILL_ID),
+            buff_id: None,
+            amount: 1,
+            sequence: 7,
+        }];
+        envelope.debug_state = SimFrameDebugState {
+            schema_version: 1,
+            entities: vec![SimFrameEntityDebugState {
+                entity_id: 1000,
+                x_raw: 0,
+                y_raw: 0,
+                hp: 100,
+                max_hp: 100,
+                alive: true,
+            }],
+        };
+
+        let mut game_state = debug_state(&world, Some(envelope.clone()));
+        game_state.initial_snapshot = Some(initial);
+        game_state.observer_frame = Some(LockstepSimObserverFrame {
+            world_frame: 1,
+            state_hash: envelope.state_hash.clone(),
+            last_event_count: envelope.event_count,
+            last_event_summaries: envelope.event_summaries.clone(),
+            last_frame: Some(envelope),
+        });
+
+        let wire = serde_json::to_value(&game_state).unwrap();
+        assert_eq!(wire["initialSnapshot"]["configVersion"], 1);
+        assert_eq!(
+            wire["initialSnapshot"]["simSchemaVersion"],
+            sim_core::SIM_CORE_SCHEMA_VERSION
+        );
+        assert_eq!(wire["lastFrame"]["eventCount"], 1);
+        assert_eq!(wire["lastFrame"]["eventSummaries"][0]["schemaVersion"], 1);
+        assert_eq!(wire["lastFrame"]["debugState"]["entities"][0]["xRaw"], 0);
+
+        let parsed = parse_game_state_json(&wire.to_string()).unwrap();
+        let parsed_initial = parsed.initial_snapshot.as_ref().unwrap();
+        assert_eq!(parsed_initial.config_version, 1);
+        assert_eq!(
+            parsed_initial.sim_schema_version,
+            sim_core::SIM_CORE_SCHEMA_VERSION
+        );
+        let parsed_frame = parsed.last_frame.as_ref().unwrap();
+        assert_eq!(parsed_frame.event_count, 1);
+        assert_eq!(
+            parsed_frame.event_summaries[0].kind,
+            SimFrameEventKind::SkillCast
+        );
+        assert_eq!(parsed_frame.debug_state.entities[0].entity_id, 1000);
+        let parsed_observer = parsed.observer_frame.as_ref().unwrap();
+        assert_eq!(parsed_observer.last_event_count, 1);
+        assert_eq!(parsed_observer.last_event_summaries.len(), 1);
+    }
+
+    #[test]
+    fn initial_and_frame_contract_metadata_mismatches_are_rejected() {
+        let initial = initial_snapshot();
+
+        let mut invalid_initial = initial.clone();
+        invalid_initial.config_version = 0;
+        assert_online_error_contains(
+            OnlineReplay::from_initial_snapshot(&invalid_initial).unwrap_err(),
+            "UNSUPPORTED_SIM_CONFIG_VERSION expected >= 1, got 0",
+        );
+
+        let mut invalid_initial = initial.clone();
+        invalid_initial.sim_schema_version = sim_core::SIM_CORE_SCHEMA_VERSION + 1;
+        assert_online_error_contains(
+            OnlineReplay::from_initial_snapshot(&invalid_initial).unwrap_err(),
+            &format!(
+                "UNSUPPORTED_SIM_SCHEMA_VERSION expected {}, got {}",
+                sim_core::SIM_CORE_SCHEMA_VERSION,
+                sim_core::SIM_CORE_SCHEMA_VERSION + 1
+            ),
+        );
+
+        let mut invalid_initial = initial.clone();
+        invalid_initial.config_hash.clear();
+        assert_online_error_contains(
+            OnlineReplay::from_initial_snapshot(&invalid_initial).unwrap_err(),
+            "INVALID_SIM_CONFIG_HASH",
+        );
+
+        let mut world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let result = step(
+            &mut world,
+            FrameId::new(1),
+            &[],
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        let mut valid_envelope = frame_envelope(&result);
+        valid_envelope.input_sources.clear();
+        let apply = |envelope: SimFrameEnvelope| {
+            let mut replay = OnlineReplay::from_initial_snapshot(&initial).unwrap();
+            replay.apply_server_frame(&ServerFrameObservation {
+                envelope,
+                inputs: Vec::new(),
+                game_state: None,
+            })
+        };
+
+        apply(valid_envelope.clone()).unwrap();
+
+        let mut mismatch = valid_envelope.clone();
+        mismatch.config_version += 1;
+        assert_online_error_contains(
+            apply(mismatch).unwrap_err(),
+            "SIM_FRAME_CONFIG_VERSION_MISMATCH expected 1, got 2",
+        );
+
+        let mut mismatch = valid_envelope.clone();
+        mismatch.config_hash = "other-config".to_owned();
+        assert_online_error_contains(
+            apply(mismatch).unwrap_err(),
+            "SIM_FRAME_CONFIG_HASH_MISMATCH expected test, got other-config",
+        );
+
+        let mut mismatch = valid_envelope.clone();
+        mismatch.sim_schema_version += 1;
+        assert_online_error_contains(
+            apply(mismatch).unwrap_err(),
+            &format!(
+                "SIM_FRAME_SIM_SCHEMA_VERSION_MISMATCH expected {}, got {}",
+                sim_core::SIM_CORE_SCHEMA_VERSION,
+                sim_core::SIM_CORE_SCHEMA_VERSION + 1
+            ),
+        );
+
+        let mut mismatch = valid_envelope;
+        mismatch.event_count += 1;
+        assert_online_error_contains(
+            apply(mismatch).unwrap_err(),
+            "SIM_FRAME_EVENT_COUNT_MISMATCH declared 1, actual 0",
         );
     }
 
@@ -2579,6 +2873,7 @@ mod tests {
             value: 1,
             sequence: 99,
         });
+        envelope.event_count = envelope.events.len();
         let game_state = debug_state(&server_world, Some(envelope.clone()));
 
         let mut replay = OnlineReplay::from_initial_snapshot(&initial).unwrap();
@@ -2633,6 +2928,8 @@ mod tests {
         game_state.observer_frame = Some(LockstepSimObserverFrame {
             world_frame: 1,
             state_hash: sim_hash_envelope(result.state_hash),
+            last_event_count: envelope.event_count,
+            last_event_summaries: envelope.event_summaries.clone(),
             last_frame: Some(envelope),
         });
         let snapshot = room_snapshot_from_game_state("room-lockstep", 1, &game_state);
