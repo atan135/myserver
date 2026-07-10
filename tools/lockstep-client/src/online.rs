@@ -251,6 +251,9 @@ pub struct OnlineReport {
     pub frames_checked: usize,
     pub final_frame: Option<u32>,
     pub final_hash: Option<SimHash>,
+    pub final_event_count: Option<usize>,
+    pub final_events: Vec<SimEvent>,
+    pub final_event_summaries: Vec<SimFrameEventSummary>,
     pub observer_recovery: Option<ObserverRecoveryProbeReport>,
 }
 
@@ -282,6 +285,14 @@ impl fmt::Display for OnlineReport {
             writeln!(f, "network: not started; dry-run only")?;
         } else {
             writeln!(f, "final hash: <none>")?;
+        }
+        if let Some(event_count) = self.final_event_count {
+            let events_json = serde_json::to_string(&self.final_events).map_err(|_| fmt::Error)?;
+            let event_summaries_json =
+                serde_json::to_string(&self.final_event_summaries).map_err(|_| fmt::Error)?;
+            writeln!(f, "final event count: {event_count}")?;
+            writeln!(f, "final events json: {events_json}")?;
+            writeln!(f, "final event summaries json: {event_summaries_json}")?;
         }
         if let Some(recovery) = &self.observer_recovery {
             writeln!(f, "observer recovery: ok")?;
@@ -369,6 +380,9 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
             frames_checked: 0,
             final_frame: None,
             final_hash: None,
+            final_event_count: None,
+            final_events: Vec::new(),
+            final_event_summaries: Vec::new(),
             observer_recovery: None,
         });
     }
@@ -418,6 +432,9 @@ pub fn run_online(options: OnlineCliOptions) -> Result<OnlineReport, OnlineError
         frames_checked: outcome.frames_checked,
         final_frame: outcome.final_hash.map(|hash| hash.frame.raw()),
         final_hash: outcome.final_hash,
+        final_event_count: outcome.final_event_count,
+        final_events: outcome.final_events,
+        final_event_summaries: outcome.final_event_summaries,
         observer_recovery,
     })
 }
@@ -1048,6 +1065,9 @@ pub struct OnlineReplay {
     bindings: HashMap<String, EntityId>,
     frames_checked: usize,
     final_hash: SimHash,
+    final_event_count: Option<usize>,
+    final_events: Vec<SimEvent>,
+    final_event_summaries: Vec<SimFrameEventSummary>,
 }
 
 impl OnlineReplay {
@@ -1066,6 +1086,9 @@ impl OnlineReplay {
             bindings,
             frames_checked: 0,
             final_hash,
+            final_event_count: None,
+            final_events: Vec::new(),
+            final_event_summaries: Vec::new(),
         })
     }
 
@@ -1079,6 +1102,18 @@ impl OnlineReplay {
 
     pub fn frames_checked(&self) -> usize {
         self.frames_checked
+    }
+
+    pub fn final_event_count(&self) -> Option<usize> {
+        self.final_event_count
+    }
+
+    pub fn final_events(&self) -> &[SimEvent] {
+        &self.final_events
+    }
+
+    pub fn final_event_summaries(&self) -> &[SimFrameEventSummary] {
+        &self.final_event_summaries
     }
 
     pub fn apply_server_frame(
@@ -1107,9 +1142,6 @@ impl OnlineReplay {
             frame: envelope.frame,
             source,
         })?;
-        self.final_hash = result.state_hash;
-        self.frames_checked += 1;
-
         let server_hash = envelope.state_hash.to_sim_hash();
         let hash_matches = result.state_hash == server_hash;
         let events_match = result.events == envelope.events;
@@ -1132,6 +1164,12 @@ impl OnlineReplay {
             );
             return Err(OnlineError::Mismatch { diff });
         }
+
+        self.final_hash = result.state_hash;
+        self.final_event_count = Some(envelope.event_count);
+        self.final_events = envelope.events.clone();
+        self.final_event_summaries = envelope.event_summaries.clone();
+        self.frames_checked += 1;
 
         Ok(())
     }
@@ -1925,6 +1963,9 @@ fn drive_online_session(
     Ok(OnlineSessionOutcome {
         frames_checked: replay.frames_checked(),
         final_hash: Some(replay.final_hash()),
+        final_event_count: replay.final_event_count(),
+        final_events: replay.final_events().to_vec(),
+        final_event_summaries: replay.final_event_summaries().to_vec(),
     })
 }
 
@@ -2053,6 +2094,9 @@ where
 struct OnlineSessionOutcome {
     frames_checked: usize,
     final_hash: Option<SimHash>,
+    final_event_count: Option<usize>,
+    final_events: Vec<SimEvent>,
+    final_event_summaries: Vec<SimFrameEventSummary>,
 }
 
 fn wait_until_input_frame_is_sendable(
@@ -2498,6 +2542,17 @@ mod tests {
         .unwrap()
     }
 
+    fn cast_skill_payload(seq: u32) -> String {
+        build_sim_input_payload(
+            seq,
+            &[SimCommand::CastSkill(CastSkillCommand {
+                skill_id: SkillId::new(DEFAULT_PLAYER_SKILL_ID),
+                target: SkillTarget::Entity(EntityId::new(TRAINING_TARGET_ENTITY_ID)),
+            })],
+        )
+        .unwrap()
+    }
+
     fn room_snapshot_from_game_state(
         room_id: &str,
         current_frame_id: u32,
@@ -2730,6 +2785,11 @@ mod tests {
         assert_eq!(report.room_id, "room-1");
         assert_eq!(report.policy_id, LOCKSTEP_SIM_DEMO_POLICY_ID);
         assert_eq!(report.input_plan_count, 5);
+        assert_eq!(report.final_event_count, None);
+        assert!(report.final_events.is_empty());
+        assert!(report.final_event_summaries.is_empty());
+        assert!(!rendered.contains("final event count:"));
+        assert!(!rendered.contains("final events json:"));
         assert!(rendered.contains("dry-run packet plan:"));
         assert!(rendered.contains(
             "send RoomJoinReq(1101): create-or-join room=room-1 policy=lockstep_sim_demo"
@@ -3091,6 +3151,123 @@ mod tests {
         assert_eq!(replay.current_frame(), 1);
         assert_eq!(replay.final_hash(), result.state_hash);
         assert_eq!(replay.frames_checked(), 1);
+        assert_eq!(replay.final_event_count(), Some(0));
+        assert!(replay.final_events().is_empty());
+        assert!(replay.final_event_summaries().is_empty());
+    }
+
+    #[test]
+    fn verified_final_frame_events_and_summaries_enter_report_display() {
+        let initial = initial_snapshot();
+        let input = FrameInputRecord {
+            character_id: "player-a".to_owned(),
+            action: SIM_INPUT_ACTION.to_owned(),
+            payload_json: cast_skill_payload(1),
+            frame_id: 1,
+        };
+        let sim_inputs = sim_inputs_from_frame_records(
+            std::slice::from_ref(&input),
+            &[SimFrameInputSourceSummary {
+                frame: 1,
+                character_id: "player-a".to_owned(),
+                source: SimFrameInputSource::Real,
+                action: SIM_INPUT_ACTION.to_owned(),
+            }],
+            &HashMap::from([("player-a".to_owned(), EntityId::new(1000))]),
+        )
+        .unwrap();
+        let mut server_world = restore_sim_snapshot(&initial.snapshot).unwrap();
+        let result = step(
+            &mut server_world,
+            FrameId::new(1),
+            &sim_inputs,
+            &lockstep_demo_config(DEFAULT_LOCKSTEP_SIM_TICK_RATE),
+        )
+        .unwrap();
+        assert_eq!(result.events.len(), 2);
+        let (skill_value, skill_sequence) = match &result.events[0] {
+            SimEvent::SkillCast {
+                value, sequence, ..
+            } => (*value, *sequence),
+            event => panic!("expected skill cast event, got {event:?}"),
+        };
+        let (damage_value, damage_sequence) = match &result.events[1] {
+            SimEvent::DamageApplied {
+                value, sequence, ..
+            } => (*value, *sequence),
+            event => panic!("expected damage event, got {event:?}"),
+        };
+
+        let mut envelope = frame_envelope(&result);
+        envelope.event_summaries = vec![
+            SimFrameEventSummary {
+                schema_version: 1,
+                kind: SimFrameEventKind::SkillCast,
+                frame: 1,
+                source_entity_id: 1000,
+                target_entity_id: Some(TRAINING_TARGET_ENTITY_ID),
+                skill_id: Some(DEFAULT_PLAYER_SKILL_ID),
+                buff_id: None,
+                amount: skill_value,
+                sequence: skill_sequence,
+            },
+            SimFrameEventSummary {
+                schema_version: 1,
+                kind: SimFrameEventKind::Damage,
+                frame: 1,
+                source_entity_id: 1000,
+                target_entity_id: Some(TRAINING_TARGET_ENTITY_ID),
+                skill_id: Some(DEFAULT_PLAYER_SKILL_ID),
+                buff_id: None,
+                amount: damage_value,
+                sequence: damage_sequence,
+            },
+        ];
+        let game_state = debug_state(&server_world, Some(envelope.clone()));
+        let mut replay = OnlineReplay::from_initial_snapshot(&initial).unwrap();
+        replay
+            .apply_server_frame(&ServerFrameObservation {
+                envelope,
+                inputs: vec![input],
+                game_state: Some(game_state),
+            })
+            .unwrap();
+
+        assert_eq!(replay.final_event_count(), Some(2));
+        assert_eq!(replay.final_events(), result.events.as_slice());
+        assert_eq!(replay.final_event_summaries().len(), 2);
+
+        let report = OnlineReport {
+            scenario_path: PathBuf::from("lockstep_demo_melee.json"),
+            server_addr: "127.0.0.1:7000".to_owned(),
+            room_id: "room-lockstep".to_owned(),
+            policy_id: LOCKSTEP_SIM_DEMO_POLICY_ID.to_owned(),
+            dry_run: false,
+            dry_run_packets: Vec::new(),
+            input_plan_count: 1,
+            frames_checked: replay.frames_checked(),
+            final_frame: Some(replay.current_frame()),
+            final_hash: Some(replay.final_hash()),
+            final_event_count: replay.final_event_count(),
+            final_events: replay.final_events().to_vec(),
+            final_event_summaries: replay.final_event_summaries().to_vec(),
+            observer_recovery: None,
+        };
+        let expected_events = serde_json::to_string(&report.final_events).unwrap();
+        let expected_summaries = serde_json::to_string(&report.final_event_summaries).unwrap();
+        let rendered = report.to_string();
+
+        assert!(rendered.lines().any(|line| line == "final event count: 2"));
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == format!("final events json: {expected_events}"))
+        );
+        assert!(
+            rendered.lines().any(|line| {
+                line == format!("final event summaries json: {expected_summaries}")
+            })
+        );
     }
 
     #[test]
@@ -3241,6 +3418,9 @@ mod tests {
         assert!(message.contains("entity diffs:"));
         assert!(message.contains("event diffs:"));
         assert!(message.contains("inputs:"));
+        assert_eq!(replay.final_event_count(), None);
+        assert!(replay.final_events().is_empty());
+        assert!(replay.final_event_summaries().is_empty());
     }
 
     #[test]

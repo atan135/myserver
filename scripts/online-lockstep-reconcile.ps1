@@ -800,6 +800,73 @@ function Get-ClientDiagnostics {
         entityDiff = Get-TextSection -Text $text -Start "entity diffs:" -End "event diffs:"
         eventDiff = Get-TextSection -Text $text -Start "event diffs:" -End "inputs:"
         inputDiff = Get-TextSection -Text $text -Start "inputs:" -End "__never_matches__"
+        successEvidenceError = $null
+    }
+}
+
+function Get-RequiredClientOutputValue {
+    param([string]$Text, [string]$Label, [string]$ValuePattern)
+    $pattern = "(?m)^" + [regex]::Escape($Label) + "\s*(" + $ValuePattern + ")\s*$"
+    $match = [regex]::Match($Text, $pattern)
+    if (-not $match.Success) {
+        throw "client success output is missing '$Label'"
+    }
+    return $match.Groups[1].Value
+}
+
+function Get-ClientSuccessEvidence {
+    param([string]$Stdout, [bool]$ObserverProbe)
+
+    $eventCount = [int](Get-RequiredClientOutputValue `
+        -Text $Stdout `
+        -Label "final event count:" `
+        -ValuePattern "[0-9]+")
+    $eventsJson = Get-RequiredClientOutputValue `
+        -Text $Stdout `
+        -Label "final events json:" `
+        -ValuePattern "\[[^\r\n]*\]"
+    $eventSummariesJson = Get-RequiredClientOutputValue `
+        -Text $Stdout `
+        -Label "final event summaries json:" `
+        -ValuePattern "\[[^\r\n]*\]"
+
+    try {
+        $parsedEvents = $eventsJson | ConvertFrom-Json -ErrorAction Stop
+        $finalEvents = @($parsedEvents)
+        $parsedEventSummaries = $eventSummariesJson | ConvertFrom-Json -ErrorAction Stop
+        $finalEventSummaries = @($parsedEventSummaries)
+    } catch {
+        throw "client success event JSON could not be parsed: $($_.Exception.Message)"
+    }
+
+    if ($eventCount -ne $finalEvents.Count) {
+        throw "client success event count mismatch: declared $eventCount, events $($finalEvents.Count)"
+    }
+    if ($eventCount -ne $finalEventSummaries.Count) {
+        throw "client success event summary count mismatch: declared $eventCount, summaries $($finalEventSummaries.Count)"
+    }
+
+    $observerRecovery = $null
+    if ($ObserverProbe) {
+        if (-not [regex]::IsMatch($Stdout, '(?m)^observer recovery:\s*ok\s*$')) {
+            throw "client success output is missing 'observer recovery: ok'"
+        }
+        $observerRecovery = [ordered]@{
+            ok = $true
+            currentFrame = [int](Get-RequiredClientOutputValue -Text $Stdout -Label "observer current frame:" -ValuePattern "[0-9]+")
+            snapshotFrame = [int](Get-RequiredClientOutputValue -Text $Stdout -Label "observer snapshot frame:" -ValuePattern "[0-9]+")
+            initialSnapshotFrame = [int](Get-RequiredClientOutputValue -Text $Stdout -Label "observer initial snapshot frame:" -ValuePattern "[0-9]+")
+            lastFrame = [int](Get-RequiredClientOutputValue -Text $Stdout -Label "observer last frame:" -ValuePattern "[0-9]+")
+            observerLastFrame = [int](Get-RequiredClientOutputValue -Text $Stdout -Label "observer observerFrame.lastFrame:" -ValuePattern "[0-9]+")
+            hash = (Get-RequiredClientOutputValue -Text $Stdout -Label "observer hash:" -ValuePattern "[0-9a-fA-F]+").ToLowerInvariant()
+        }
+    }
+
+    return [ordered]@{
+        finalEventCount = $eventCount
+        finalEvents = $finalEvents
+        finalEventSummaries = $finalEventSummaries
+        observerRecovery = $observerRecovery
     }
 }
 
@@ -824,23 +891,46 @@ function Invoke-ClientStage {
     $finalHash = $null
     if ($stdout -match '(?m)^final frame:\s*([0-9]+)') { $finalFrame = [int]$Matches[1] }
     if ($stdout -match '(?m)^final hash:\s*([0-9a-fA-F]+)') { $finalHash = $Matches[1].ToLowerInvariant() }
+    $successEvidence = [ordered]@{
+        finalEventCount = $null
+        finalEvents = @()
+        finalEventSummaries = @()
+        observerRecovery = $null
+    }
+    $stageExitCode = $exitCode
+    if ($Mode -eq "execute" -and $exitCode -eq 0) {
+        try {
+            $successEvidence = Get-ClientSuccessEvidence `
+                -Stdout $stdout `
+                -ObserverProbe ([bool]$Definition.observerProbe)
+        } catch {
+            $stageExitCode = 1
+            $diagnostics.failureStage = "success_evidence"
+            $diagnostics.successEvidenceError = $_.Exception.Message
+        }
+    }
     $result = [ordered]@{
         name = $Definition.name
         scenario = $Definition.scenario
         roomId = $Definition.roomId
         observerProbe = [bool]$Definition.observerProbe
-        status = if ($exitCode -eq 0) { "passed" } else { "failed" }
-        exitCode = $exitCode
+        status = if ($stageExitCode -eq 0) { "passed" } else { "failed" }
+        exitCode = $stageExitCode
+        processExitCode = $exitCode
         startedAt = $startedAt
         endedAt = $endedAt
         finalFrame = $finalFrame
         finalHash = $finalHash
+        finalEventCount = $successEvidence.finalEventCount
+        finalEvents = @($successEvidence.finalEvents)
+        finalEventSummaries = @($successEvidence.finalEventSummaries)
+        observerRecovery = $successEvidence.observerRecovery
         diagnostics = $diagnostics
         stdout = $stdoutPath
         stderr = $stderrPath
     }
-    if ($Definition.observerProbe -and $stdout -match '(?m)^observer hash:\s*([0-9a-fA-F]+)') {
-        $result["observerHash"] = $Matches[1].ToLowerInvariant()
+    if ($successEvidence.observerRecovery) {
+        $result["observerHash"] = $successEvidence.observerRecovery.hash
     }
     return $result
 }
@@ -878,6 +968,64 @@ function Invoke-SelfTests {
     if ($diagnostics.frame -ne 7 -or $diagnostics.serverHash -ne "aabb" -or $diagnostics.clientHash -ne "ccdd") { throw "self-test: diagnostic parser failed" }
     $cleanupDiagnostics = Get-ClientDiagnostics -Stdout "" -Stderr "online cleanup failed: room_end rejected by server: END_FAILED"
     if ($cleanupDiagnostics.failureStage -ne "room_end") { throw "self-test: cleanup failure stage parser failed" }
+    $successStdout = @(
+        "final event count: 2",
+        'final events json: [{"type":"skill_cast","frame":1,"value":1},{"type":"damage_applied","frame":1,"value":14}]',
+        'final event summaries json: [{"kind":"skillCast","frame":1,"amount":1},{"kind":"damage","frame":1,"amount":14}]',
+        "observer recovery: ok",
+        "observer current frame: 5",
+        "observer snapshot frame: 5",
+        "observer initial snapshot frame: 0",
+        "observer last frame: 5",
+        "observer observerFrame.lastFrame: 5",
+        "observer hash: AABBCCDDEEFF0011"
+    ) -join "`n"
+    $successEvidence = Get-ClientSuccessEvidence -Stdout $successStdout -ObserverProbe $true
+    if ($successEvidence.finalEventCount -ne 2 -or
+        @($successEvidence.finalEvents).Count -ne 2 -or
+        @($successEvidence.finalEventSummaries).Count -ne 2) {
+        throw "self-test: success evidence parser did not preserve two event records"
+    }
+    if (-not $successEvidence.observerRecovery.ok -or
+        $successEvidence.observerRecovery.currentFrame -ne 5 -or
+        $successEvidence.observerRecovery.snapshotFrame -ne 5 -or
+        $successEvidence.observerRecovery.initialSnapshotFrame -ne 0 -or
+        $successEvidence.observerRecovery.lastFrame -ne 5 -or
+        $successEvidence.observerRecovery.observerLastFrame -ne 5 -or
+        $successEvidence.observerRecovery.hash -ne "aabbccddeeff0011") {
+        throw "self-test: observer recovery evidence parser failed"
+    }
+    $successEvidenceJson = $successEvidence | ConvertTo-Json -Depth 20
+    $parsedSuccessEvidence = $successEvidenceJson | ConvertFrom-Json
+    $roundTripEvents = @($parsedSuccessEvidence.finalEvents)
+    $roundTripSummaries = @($parsedSuccessEvidence.finalEventSummaries)
+    if ($roundTripEvents.Count -ne 2 -or $roundTripSummaries.Count -ne 2) {
+        throw "self-test: success evidence JSON collapsed nested arrays"
+    }
+    $emptyEventEvidence = Get-ClientSuccessEvidence `
+        -Stdout (@(
+            "final event count: 0",
+            "final events json: []",
+            "final event summaries json: []"
+        ) -join "`n") `
+        -ObserverProbe $false
+    if ($emptyEventEvidence.finalEventCount -ne 0 -or
+        @($emptyEventEvidence.finalEvents).Count -ne 0 -or
+        @($emptyEventEvidence.finalEventSummaries).Count -ne 0 -or
+        $null -ne $emptyEventEvidence.observerRecovery) {
+        throw "self-test: success evidence parser did not preserve empty event arrays"
+    }
+    $eventCountMismatchRejected = $false
+    try {
+        Get-ClientSuccessEvidence `
+            -Stdout ($successStdout.Replace("final event count: 2", "final event count: 1")) `
+            -ObserverProbe $true | Out-Null
+    } catch {
+        $eventCountMismatchRejected = $_.Exception.Message -match 'event count mismatch'
+    }
+    if (-not $eventCountMismatchRejected) {
+        throw "self-test: success evidence parser accepted mismatched event count"
+    }
     $pidIdentity = @(Get-PidOwnershipIdentities -Items @([pscustomobject]@{
         name = "game-server"; pid = 42; startedAt = "2026-07-10T12:00:00+08:00"
     }))
@@ -1100,7 +1248,7 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
