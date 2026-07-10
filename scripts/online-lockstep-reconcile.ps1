@@ -573,6 +573,49 @@ function Assert-DevStackPidFileCreated {
     throw "minimal dev-stack returned success without creating the required PID ownership file: $Path"
 }
 
+function Read-DevStackPidRecords {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "dev-stack PID ownership file does not exist: $Path"
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "dev-stack PID ownership file is empty: $Path"
+    }
+    $trimmed = $raw.Trim()
+    if (-not $trimmed.StartsWith("[")) {
+        throw "dev-stack PID ownership file root must be a JSON array: $Path"
+    }
+    try {
+        $decoded = $raw | ConvertFrom-Json
+    } catch {
+        throw "dev-stack PID ownership file is not valid JSON: $Path ($($_.Exception.Message))"
+    }
+
+    $records = @()
+    if ($decoded -is [System.Array]) {
+        foreach ($record in $decoded) { $records += $record }
+    } elseif ($null -ne $decoded) {
+        $records += $decoded
+    }
+    if ($records.Count -eq 0) {
+        throw "dev-stack PID ownership file must contain at least one record: $Path"
+    }
+    for ($index = 0; $index -lt $records.Count; $index++) {
+        $record = $records[$index]
+        $pidValue = 0
+        if (-not $record -or
+            [string]::IsNullOrWhiteSpace([string]$record.name) -or
+            -not [int]::TryParse([string]$record.pid, [ref]$pidValue) -or
+            $pidValue -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$record.startedAt)) {
+            throw "dev-stack PID ownership record $index must contain name, positive pid, and startedAt: $Path"
+        }
+    }
+    return $records
+}
+
 function Start-OwnedDevStack {
     param(
         [string]$ArtifactDirectory,
@@ -599,7 +642,7 @@ function Start-OwnedDevStack {
     $ownershipTimeFloor = $InvocationStartedAt.ToUniversalTime().AddSeconds(-2)
     $exitCode = Invoke-NativeCaptured -FilePath $powerShellHost -Arguments $arguments -StdoutPath $stdoutPath -StderrPath $stderrPath
     Assert-DevStackPidFileCreated -Path $DevStackPidFile -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath
-    $items = @(Get-Content -LiteralPath $DevStackPidFile -Raw | ConvertFrom-Json)
+    $items = @(Read-DevStackPidRecords -Path $DevStackPidFile)
     $owned = @()
     foreach ($item in $items) {
         $recordedAt = [DateTime]::Parse([string]$item.startedAt).ToUniversalTime()
@@ -717,7 +760,7 @@ function Remove-OwnedPidFile {
     if (-not (Test-Path -LiteralPath $DevStackPidFile)) {
         return [pscustomobject]@{ removed = $false; reason = "not-present" }
     }
-    $current = @(Get-Content -LiteralPath $DevStackPidFile -Raw | ConvertFrom-Json)
+    $current = @(Read-DevStackPidRecords -Path $DevStackPidFile)
     $expectedIdentities = @(Get-PidOwnershipIdentities -Items $OwnedServices)
     $currentIdentities = @(Get-PidOwnershipIdentities -Items $current)
     if (($expectedIdentities -join ",") -ne ($currentIdentities -join ",")) {
@@ -842,6 +885,54 @@ function Invoke-SelfTests {
         name = "redis"; pid = 42; startedAt = "2026-07-10T12:00:00+08:00"
     }))
     if (($pidIdentity -join ",") -eq ($changedPidIdentity -join ",")) { throw "self-test: PID ownership ignored process name" }
+    $pidReaderFixtureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver-lockstep-pid-reader-$([Guid]::NewGuid().ToString('N'))"
+    $pidReaderFixturePath = Join-Path $pidReaderFixtureDirectory "dev-stack.pids.json"
+    $savedDevStackPidFile = $script:DevStackPidFile
+    try {
+        New-Item -ItemType Directory -Path $pidReaderFixtureDirectory | Out-Null
+        @'
+[
+  {
+    "name": "nats",
+    "pid": 41001,
+    "filePath": "C:\\project\\MyServer\\bin\\nats-server.exe",
+    "startedAt": "2026-07-10T17:47:37.7931194+08:00"
+  },
+  {
+    "name": "game-server",
+    "pid": 41002,
+    "filePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "startedAt": "2026-07-10T17:47:42.5346168+08:00"
+  }
+]
+'@ | Set-Content -LiteralPath $pidReaderFixturePath -Encoding UTF8
+        $pidReaderRecords = @(Read-DevStackPidRecords -Path $pidReaderFixturePath)
+        if ($pidReaderRecords.Count -ne 2) { throw "self-test: PID JSON array reader did not return two records" }
+        if ($pidReaderRecords[0].name -ne "nats" -or $pidReaderRecords[1].name -ne "game-server") {
+            throw "self-test: PID JSON array reader combined record names"
+        }
+        if ([string]$pidReaderRecords[0].startedAt -eq [string]$pidReaderRecords[1].startedAt) {
+            throw "self-test: PID JSON array reader combined record start times"
+        }
+        $pidReaderIdentities = @(Get-PidOwnershipIdentities -Items $pidReaderRecords)
+        if ($pidReaderIdentities.Count -ne 2 -or
+            @($pidReaderIdentities | Where-Object { $_ -match '^nats\|41001\|' }).Count -ne 1 -or
+            @($pidReaderIdentities | Where-Object { $_ -match '^game-server\|41002\|' }).Count -ne 1) {
+            throw "self-test: PID JSON array reader returned an invalid ownership identity shape"
+        }
+        $script:DevStackPidFile = $pidReaderFixturePath
+        $pidReaderRemoval = Remove-OwnedPidFile -OwnedServices $pidReaderRecords
+        if (-not $pidReaderRemoval.removed -or $pidReaderRemoval.reason -ne "matched-owned-pids" -or (Test-Path -LiteralPath $pidReaderFixturePath)) {
+            throw "self-test: PID JSON array reader did not preserve removal ownership identities"
+        }
+    } finally {
+        $script:DevStackPidFile = $savedDevStackPidFile
+        Remove-Item -LiteralPath $pidReaderFixturePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pidReaderFixtureDirectory -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $pidReaderFixtureDirectory) {
+            throw "self-test: PID JSON array reader fixture remains after cleanup"
+        }
+    }
     $plannedRegistry = [ordered]@{
         status = "planned"
         serviceName = "game-server"
@@ -1009,7 +1100,7 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "pid-ownership-identity", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
