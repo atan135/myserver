@@ -84,6 +84,17 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
   assert.equal(roleHasPermission("operator", "id.read"), true);
   assert.equal(roleHasPermission("operator", "id.manage"), false);
   assert.equal(roleHasPermission("operator", "maintenance.write"), false);
+  for (const permission of [
+    "myforge.agent.read",
+    "myforge.task.read",
+    "myforge.task.create",
+    "myforge.task.cancel"
+  ]) {
+    assert.equal(roleHasPermission("viewer", permission), false);
+    assert.equal(roleHasPermission("operator", permission), false);
+    assert.equal(roleHasPermission("admin", permission), true);
+    assert.equal(roleHasPermission("super_admin", permission), true);
+  }
   assert.equal(roleHasPermission("admin", "id.manage"), true);
   assert.equal(roleHasPermission("admin", "admins.reset_password"), true);
   assert.equal(roleHasPermission("super_admin", "monitoring.archive"), true);
@@ -111,6 +122,18 @@ test("RolesGuard rejects unauthorized write operations with 403", async () => {
   const fixture = makeContext({ role: "viewer", permissions: ["gm.broadcast"] });
 
   await assert.rejects(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+});
+
+test("RolesGuard rejects viewer and operator access to myforge control-plane routes", async () => {
+  for (const role of ["viewer", "operator"]) {
+    const fixture = makeContext({
+      role,
+      permissions: ["myforge.task.read"],
+      method: "GET",
+      url: "/api/v1/myforge/tasks"
+    });
+    await assert.rejects(() => new RolesGuard(fixture.reflector).canActivate(fixture.context), assertForbidden);
+  }
 });
 
 test("RolesGuard requires every declared permission", async () => {

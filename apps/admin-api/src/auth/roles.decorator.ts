@@ -22,6 +22,10 @@ export type AdminPermission =
   | "monitoring.archive"
   | "id.read"
   | "id.manage"
+  | "myforge.agent.read"
+  | "myforge.task.read"
+  | "myforge.task.create"
+  | "myforge.task.cancel"
   | "admins.revoke_tokens"
   | "admins.reset_password";
 

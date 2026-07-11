@@ -759,6 +759,36 @@ test("signed command.error fails only the matching dispatched task", async (t) =
   assert.equal(harness.store.tasks.get(REQUEST_ID).errorCode, "MYFORGE_TARGET_PATH_INVALID");
 });
 
+test("gateway notifies orchestration after registration, task terminal state, and disconnect", async () => {
+  const harness = createHarness();
+  const calls = [];
+  harness.gateway.setTaskOrchestrator({
+    async onAgentRegistered(value) { calls.push({ type: "registered", value }); },
+    async onTaskTerminal(value) { calls.push({ type: "terminal", value }); },
+    async onAgentDisconnected(value) { calls.push({ type: "disconnected", value }); },
+    stop() {}
+  });
+  const { socket, connection } = await handshake(harness);
+  await waitFor(() => calls.some((entry) => entry.type === "registered"), "registration orchestration callback");
+  installDispatchedTask(harness.store, connection);
+  socket.receive(agentEnvelope("command.error", {
+    connectionId: connection.connectionId,
+    requestId: REQUEST_ID,
+    agentId: AGENT_ID,
+    projectId: PROJECT_ID,
+    errorCode: "MYFORGE_TARGET_PATH_INVALID",
+    errorMessage: "artifactFile is outside the allowed path",
+    retryable: false
+  }, harness.agentKeys.privateKey, 3));
+  await waitFor(() => calls.some((entry) => entry.type === "terminal"), "terminal orchestration callback");
+  await connection.close(1000, "test_complete");
+  await waitFor(() => calls.some((entry) => entry.type === "disconnected"), "disconnect orchestration callback");
+
+  assert.equal(calls.find((entry) => entry.type === "registered").value.connectionId, connection.connectionId);
+  assert.equal(calls.find((entry) => entry.type === "terminal").value.status, "failed");
+  assert.equal(calls.find((entry) => entry.type === "disconnected").value.agentId, AGENT_ID);
+});
+
 test("prepared execute and cancel expire while queued without reaching the wire", async (t) => {
   async function runCase(kind) {
     let nowMs = NOW;
@@ -896,6 +926,23 @@ test("connection operation mutex enforces execute then cancel wire order", async
   await cancel;
 });
 
+test("delivery reservation survives a close between database claim and socket enqueue", async () => {
+  const harness = createHarness();
+  const { connection } = await handshake(harness);
+  await harness.gateway.withConnectionOperation({ agentId: AGENT_ID, projectId: PROJECT_ID }, async (operation) => {
+    const reservation = operation.reserveDelivery({
+      requestId: REQUEST_ID,
+      kind: "command.execute"
+    });
+    await connection.close(1011, "closed_before_enqueue");
+    operation.releaseDelivery(reservation);
+  });
+  assert.deepEqual(harness.store.offlineCalls[0].deliveryFailure, {
+    requestId: REQUEST_ID,
+    kind: "command.execute"
+  });
+});
+
 test("writer failure closes connection and shutdown cleans every registered socket", async () => {
   const harness = createHarness();
   const first = await handshake(harness, new FakeSocket());
@@ -911,6 +958,10 @@ test("writer failure closes connection and shutdown cleans every registered sock
   });
   await assert.rejects(send, /fake writer failed/);
   await waitFor(() => first.connection.closed, "writer failure close");
+  assert.deepEqual(harness.store.offlineCalls[0].deliveryFailure, {
+    requestId: REQUEST_ID,
+    kind: "command.cancel"
+  });
 
   const second = await handshake(harness, new FakeSocket());
   second.socket.blockWrites = true;
@@ -928,8 +979,96 @@ test("writer failure closes connection and shutdown cleans every registered sock
   await shutdown;
   assert.equal(second.connection.closed, true);
   assert.equal(harness.gateway.connections.size, 0);
+  assert.equal(harness.gateway.connectionSettlements.size, 0);
   assert.equal(harness.store.agentConnectionId, null);
   assert.equal(harness.store.offlineCalls.at(-1).failureReason, "server_shutdown");
+});
+
+test("gateway shutdown idempotently waits for orchestrator stop before closing sockets", async () => {
+  const harness = createHarness();
+  const { connection } = await handshake(harness);
+  let releaseStop;
+  const stopGate = new Promise((resolve) => { releaseStop = resolve; });
+  let stopCalls = 0;
+  harness.gateway.setTaskOrchestrator({
+    stop() {
+      stopCalls += 1;
+      return stopGate;
+    }
+  });
+
+  let shutdownFinished = false;
+  const first = harness.gateway.shutdown();
+  const second = harness.gateway.shutdown();
+  first.then(() => { shutdownFinished = true; });
+  assert.equal(first, second);
+  assert.equal(stopCalls, 1);
+  await Promise.resolve();
+  assert.equal(shutdownFinished, false);
+  assert.equal(connection.closed, false);
+
+  releaseStop();
+  await Promise.all([first, second]);
+  assert.equal(shutdownFinished, true);
+  assert.equal(connection.closed, true);
+  assert.equal(stopCalls, 1);
+});
+
+test("gateway shutdown drains an entered inbound orchestration operation before resolving", async () => {
+  const harness = createHarness();
+  let releaseOperation;
+  let markOperationStarted;
+  const operationStarted = new Promise((resolve) => { markOperationStarted = resolve; });
+  const operationGate = new Promise((resolve) => { releaseOperation = resolve; });
+  let terminalCalls = 0;
+  let operationCompletions = 0;
+  harness.gateway.setTaskOrchestrator({
+    stop() { return Promise.resolve(); },
+    async onTaskTerminal() {
+      terminalCalls += 1;
+      await harness.gateway.withConnectionOperation({ agentId: AGENT_ID, projectId: PROJECT_ID }, async () => {
+        markOperationStarted();
+        await operationGate;
+        operationCompletions += 1;
+      });
+    },
+    async onAgentDisconnected() {}
+  });
+  const { socket, connection } = await handshake(harness);
+  installDispatchedTask(harness.store, connection);
+  const errorMessage = (sequence) => agentEnvelope("command.error", {
+    connectionId: connection.connectionId,
+    requestId: REQUEST_ID,
+    agentId: AGENT_ID,
+    projectId: PROJECT_ID,
+    errorCode: "MYFORGE_TARGET_PATH_INVALID",
+    errorMessage: "artifactFile is outside the allowed path",
+    retryable: false
+  }, harness.agentKeys.privateKey, sequence);
+  socket.receive(errorMessage(3));
+  await operationStarted;
+
+  let shutdownFinished = false;
+  const first = harness.gateway.shutdown();
+  const second = harness.gateway.shutdown();
+  first.then(() => { shutdownFinished = true; });
+  assert.equal(first, second);
+  await Promise.resolve();
+  assert.equal(shutdownFinished, false);
+
+  socket.receive(errorMessage(4));
+  releaseOperation();
+  await first;
+  assert.equal(shutdownFinished, true);
+  assert.equal(terminalCalls, 1);
+  assert.equal(operationCompletions, 1);
+  assert.equal(harness.store.errorCalls, 1);
+  assert.equal(connection.backgroundTasks.size, 0);
+
+  socket.receive(errorMessage(5));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(terminalCalls, 1);
+  assert.equal(harness.store.errorCalls, 1);
 });
 
 test("disabled upgrade is rejected without loading or using signing keys", async () => {

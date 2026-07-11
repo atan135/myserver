@@ -910,6 +910,29 @@ test("myforge queued cancellation records request and terminal audit without a c
   client.assertDone();
 });
 
+test("myforge queued-only cancel probe never mutates a task that dispatch already claimed", async () => {
+  const dispatched = taskRow({
+    status: "dispatched",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_digest: DIGEST_A,
+    command_expires_at: new Date(NOW.getTime() + 60000),
+    dispatched_at: NOW
+  });
+  const tx = transactionClient([
+    { pattern: /^SELECT \* FROM myforge_task_runs/, result: { rows: [dispatched] } }
+  ]);
+  const result = await new MyforgeStore(tx.pool).requestTaskCancellation({
+    requestId: REQUEST_ID,
+    requestedAt: NOW,
+    queuedOnly: true
+  });
+  assert.equal(result.outcome, "requires_connection");
+  assert.equal(result.task.cancelRequestedAt, null);
+  tx.client.assertDone();
+});
+
 test("myforge task get, filtered list and count return mapped persisted records", async () => {
   const failed = taskRow({
     status: "failed",
@@ -954,6 +977,186 @@ test("myforge task get, filtered list and count return mapped persisted records"
   assert.equal(tasks[0].status, "failed");
   assert.equal(count, 3);
   client.assertDone({ released: false });
+});
+
+test("myforge FIFO lookup and bulk queue reason updates use stable agent-local ordering", async () => {
+  const oldest = taskRow({ queue_reason: null });
+  const client = new ScriptedClient([
+    {
+      pattern: /^SELECT \* FROM myforge_task_runs WHERE agent_id = \$1 AND project_id = \$2 AND status = 'queued'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /queue_expires_at > \$3/);
+        assert.match(sql, /ORDER BY created_at ASC, request_id ASC LIMIT 1$/);
+        assert.deepEqual(params, ["dev-pc-001", "myforge-local", NOW]);
+        return { rows: [oldest] };
+      }
+    },
+    {
+      pattern: /^UPDATE myforge_task_runs SET queue_reason = \$3/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /status = 'queued'/);
+        assert.deepEqual(params, ["dev-pc-001", "myforge-local", "agent_busy"]);
+        return { rows: [{ ...oldest, queue_reason: "agent_busy" }] };
+      }
+    },
+    {
+      pattern: /^SELECT DISTINCT task\.agent_id, task\.project_id FROM myforge_task_runs task/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /agent\.configured = true/);
+        assert.match(sql, /agent\.status = 'online'/);
+        assert.match(sql, /task\.status = 'queued' AND task\.queue_expires_at > \$1/);
+        assert.match(sql, /NOT EXISTS/);
+        assert.deepEqual(params, [NOW]);
+        return { rows: [{ agent_id: "dev-pc-001", project_id: "myforge-local" }] };
+      }
+    }
+  ]);
+  const store = new MyforgeStore({ async query(sql, params) { return client.query(sql, params); } });
+  const next = await store.findNextQueuedTask({ agentId: "dev-pc-001", projectId: "myforge-local", now: NOW });
+  const updated = await store.setQueuedTasksReasonForAgent({
+    agentId: "dev-pc-001",
+    projectId: "myforge-local",
+    queueReason: "agent_busy"
+  });
+  const identities = await store.listQueuedAgentIdentities(NOW);
+  assert.equal(next.requestId, REQUEST_ID);
+  assert.equal(updated[0].queueReason, "agent_busy");
+  assert.deepEqual(identities, [{ agentId: "dev-pc-001", projectId: "myforge-local" }]);
+  client.assertDone({ released: false });
+});
+
+test("myforge command and cancellation watchdog SQL keeps cancel priority deterministic", async () => {
+  const dispatchedFailed = taskRow({
+    status: "failed",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_expires_at: new Date(NOW.getTime() - 6000),
+    dispatched_at: new Date(NOW.getTime() - 66000),
+    error_code: "MYFORGE_COMMAND_EXPIRED",
+    completed_at: NOW
+  });
+  const dispatchedTx = transactionClient([
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'failed'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /status = 'dispatched'/);
+        assert.match(sql, /cancel_requested_at IS NULL/);
+        assert.match(sql, /command_expires_at \+ \(\$2::bigint \* interval '1 millisecond'\) <= \$1/);
+        assert.deepEqual(params, [NOW, 5000]);
+        return { rows: [dispatchedFailed] };
+      }
+    },
+    { pattern: /^INSERT INTO admin_audit_logs/ }
+  ]);
+  const commandExpired = await new MyforgeStore(dispatchedTx.pool).failExpiredDispatchedTasks({ now: NOW, clockSkewMs: 5000 });
+  assert.equal(commandExpired[0].errorCode, "MYFORGE_COMMAND_EXPIRED");
+  dispatchedTx.client.assertDone();
+
+  const runningFailed = taskRow({
+    status: "failed",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_expires_at: new Date(NOW.getTime() - 120000),
+    dispatched_at: new Date(NOW.getTime() - 130000),
+    started_at: new Date(NOW.getTime() - 126000),
+    error_code: "MYFORGE_COMMAND_TIMEOUT",
+    completed_at: NOW
+  });
+  const runningTx = transactionClient([
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'failed'/,
+      result: ({ sql }) => {
+        assert.match(sql, /status = 'running'/);
+        assert.match(sql, /cancel_requested_at IS NULL/);
+        assert.match(sql, /started_at \+ \(\(timeout_ms \+ \$2::bigint\) \* interval '1 millisecond'\) <= \$1/);
+        return { rows: [runningFailed] };
+      }
+    },
+    { pattern: /^INSERT INTO admin_audit_logs/ }
+  ]);
+  const commandTimedOut = await new MyforgeStore(runningTx.pool).failTimedOutRunningTasks({ now: NOW, clockSkewMs: 5000 });
+  assert.equal(commandTimedOut[0].errorCode, "MYFORGE_COMMAND_TIMEOUT");
+  runningTx.client.assertDone();
+
+  const cancelFailed = taskRow({
+    status: "failed",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_expires_at: new Date(NOW.getTime() - 120000),
+    dispatched_at: new Date(NOW.getTime() - 130000),
+    cancel_requested_at: new Date(NOW.getTime() - 16000),
+    cancel_deadline_at: new Date(NOW.getTime() - 6000),
+    error_code: "MYFORGE_CANCEL_TIMEOUT",
+    completed_at: NOW
+  });
+  const cancelTx = transactionClient([
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'failed'/,
+      result: ({ sql }) => {
+        assert.match(sql, /status IN \('dispatched', 'running'\)/);
+        assert.match(sql, /cancel_requested_at IS NOT NULL/);
+        assert.match(sql, /cancel_deadline_at \+ \(\$2::bigint \* interval '1 millisecond'\) <= \$1/);
+        return { rows: [cancelFailed] };
+      }
+    },
+    { pattern: /^INSERT INTO admin_audit_logs/ }
+  ]);
+  const cancelTimedOut = await new MyforgeStore(cancelTx.pool).failExpiredCancellationTasks({ now: NOW, clockSkewMs: 5000 });
+  assert.equal(cancelTimedOut[0].errorCode, "MYFORGE_CANCEL_TIMEOUT");
+  cancelTx.client.assertDone();
+});
+
+test("myforge connection close preserves execute and cancel writer failure classifications", async () => {
+  for (const [kind, errorCode, pendingCancel, expectedAuditReason] of [
+    ["command.execute", "MYFORGE_DISPATCH_FAILED", false, "dispatch_delivery_failed"],
+    ["command.cancel", "MYFORGE_CANCEL_DELIVERY_FAILED", true, "cancel_delivery_failed"],
+    ["command.cancel", "MYFORGE_AGENT_DISCONNECTED", false, "agent_disconnected"]
+  ]) {
+    const failed = taskRow({
+      status: "failed",
+      queue_reason: null,
+      execution_mode: "codex_exec",
+      connection_id: CONNECTION_ID,
+      command_digest: DIGEST_A,
+      command_expires_at: new Date(NOW.getTime() + 60000),
+      dispatched_at: NOW,
+      cancel_requested_at: pendingCancel ? NOW : null,
+      cancel_deadline_at: pendingCancel ? new Date(NOW.getTime() + 10000) : null,
+      error_code: errorCode,
+      completed_at: NOW
+    });
+    const tx = transactionClient([
+      { pattern: /^UPDATE myforge_agents SET status = 'offline'/, result: { rows: [agentRow()] } },
+      {
+        pattern: /^UPDATE myforge_task_runs SET status = 'failed'/,
+        result: ({ sql, params }) => {
+          assert.match(sql, /request_id = \$5::uuid AND \$6 = 'command.execute'/);
+          assert.match(sql, /request_id = \$5::uuid AND \$6 = 'command.cancel'/);
+          assert.equal(params[4], REQUEST_ID);
+          assert.equal(params[5], kind);
+          return { rows: [failed] };
+        }
+      },
+      {
+        pattern: /^INSERT INTO admin_audit_logs/,
+        result: ({ params }) => {
+          assert.equal(JSON.parse(params[4]).reason, expectedAuditReason);
+          return { rows: [] };
+        }
+      }
+    ]);
+    const result = await new MyforgeStore(tx.pool).markAgentOffline({
+      agentId: "dev-pc-001",
+      connectionId: CONNECTION_ID,
+      disconnectedAt: NOW,
+      deliveryFailure: { requestId: REQUEST_ID, kind }
+    });
+    assert.equal(result.failedTasks[0].errorCode, errorCode);
+    tx.client.assertDone();
+  }
 });
 
 test("myforge schema is present in both bootstrap paths with state and active-task constraints", () => {

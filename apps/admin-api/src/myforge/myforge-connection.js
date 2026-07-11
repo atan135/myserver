@@ -47,6 +47,7 @@ export class MyforgeConnection {
     this.capabilities = null;
     this.effectiveLimits = null;
     this.inbound = [];
+    this.acceptingInbound = true;
     this.outbound = [];
     this.outboundCapacityWaiters = [];
     this.dispatching = false;
@@ -56,27 +57,58 @@ export class MyforgeConnection {
     this.closed = false;
     this.closeReason = null;
     this.operationMutex = new AsyncMutex();
+    this.acceptingOperations = true;
+    this.deliveryInProgress = null;
     this.timers = new Set();
+    this.backgroundTasks = new Set();
     this.finalizePromise = null;
 
     socket.on("message", (data, isBinary) => this.enqueueInbound(data, isBinary));
     socket.on("close", (code, reason) => {
-      void this.finalize(code, reason?.toString?.() || "socket_closed");
+      this.trackBackground(this.finalize(code, reason?.toString?.() || "socket_closed"));
     });
     socket.on("error", (error) => {
+      if (!this.acceptingInbound) return;
       if (error?.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") {
-        void this.gateway.handleConnectionError(
+        this.trackBackground(this.gateway.handleConnectionError(
           this,
           new MyforgeProtocolError(
             "MYFORGE_OUTPUT_TOO_LARGE",
             "WebSocket frame exceeds the configured limit",
             { safeToRespond: false }
           )
-        );
+        ));
       } else {
-        void this.transportFailure(error);
+        this.trackBackground(this.transportFailure(error));
       }
     });
+  }
+
+  trackBackground(promise) {
+    const task = Promise.resolve(promise);
+    this.backgroundTasks.add(task);
+    void task.then(
+      () => this.backgroundTasks.delete(task),
+      () => this.backgroundTasks.delete(task)
+    );
+    return task;
+  }
+
+  stopAcceptingWork() {
+    this.acceptingInbound = false;
+    this.acceptingOperations = false;
+    this.clearTimers();
+    this.inbound.length = 0;
+  }
+
+  async waitForQuiescence() {
+    this.stopAcceptingWork();
+    for (;;) {
+      const background = [...this.backgroundTasks];
+      if (background.length > 0) await Promise.allSettled(background);
+      await this.operationMutex.runExclusive(() => undefined);
+      if (this.backgroundTasks.size === 0) return;
+    }
   }
 
   serverLimits() {
@@ -117,7 +149,8 @@ export class MyforgeConnection {
     this.clearTimers();
     const timer = setTimeout(() => {
       this.timers.delete(timer);
-      void this.gateway.handleConnectionDeadline(this, reason);
+      if (!this.acceptingInbound) return;
+      this.trackBackground(this.gateway.handleConnectionDeadline(this, reason));
     }, delayMs);
     timer.unref?.();
     this.timers.add(timer);
@@ -137,50 +170,50 @@ export class MyforgeConnection {
   }
 
   enqueueInbound(data, isBinary = false) {
-    if (this.closed || this.closing) return;
+    if (this.closed || this.closing || !this.acceptingInbound) return;
     if (isBinary) {
-      void this.gateway.handleConnectionError(
+      this.trackBackground(this.gateway.handleConnectionError(
         this,
         new MyforgeProtocolError(
           "MYFORGE_MESSAGE_IJSON_INVALID",
           "binary WebSocket frames are not accepted",
           { safeToRespond: false }
         )
-      );
+      ));
       return;
     }
     const frameLimit = this.effectiveLimits?.wsMaxMessageBytes ?? this.config.wsMaxMessageBytes;
     if (byteLength(data) > frameLimit) {
-      void this.gateway.handleConnectionError(
+      this.trackBackground(this.gateway.handleConnectionError(
         this,
         new MyforgeProtocolError(
           this.effectiveLimits ? "MYFORGE_LIMIT_MISMATCH" : "MYFORGE_OUTPUT_TOO_LARGE",
           "WebSocket frame exceeds the accepted limit",
           { safeToRespond: false }
         )
-      );
+      ));
       return;
     }
     if (this.inbound.length >= QUEUE_CAPACITY) {
-      void this.gateway.handleConnectionError(
+      this.trackBackground(this.gateway.handleConnectionError(
         this,
         new MyforgeProtocolError(
           "MYFORGE_PROTOCOL_STATE_INVALID",
           "inbound WebSocket queue is full",
           { safeToRespond: false }
         )
-      );
+      ));
       return;
     }
     this.inbound.push(data);
-    if (!this.dispatching) void this.drainInbound();
+    if (!this.dispatching) this.trackBackground(this.drainInbound());
   }
 
   async drainInbound() {
     if (this.dispatching) return;
     this.dispatching = true;
     try {
-      while (!this.closed && !this.closing && this.inbound.length > 0) {
+      while (!this.closed && !this.closing && this.acceptingInbound && this.inbound.length > 0) {
         const frame = this.inbound.shift();
         try {
           await this.gateway.handleFrame(this, frame);
@@ -280,11 +313,11 @@ export class MyforgeConnection {
         this.outbound.splice(index, 1);
         const error = this.outboundDeadlineError(item);
         item.reject(error);
-        void this.transportFailure(error);
+        this.trackBackground(this.transportFailure(error));
       }, deadline - this.clock());
       item.queueTimer.unref?.();
       this.outbound.push(item);
-      if (!this.writing) void this.drainOutbound();
+      if (!this.writing) this.trackBackground(this.drainOutbound());
     });
   }
 
@@ -365,6 +398,7 @@ export class MyforgeConnection {
 
   async close(code = 1008, reason = "policy_violation") {
     if (this.closed) return this.finalizePromise;
+    this.stopAcceptingWork();
     if (!this.closing) {
       this.closing = true;
       this.closeReason = reason;
@@ -384,12 +418,11 @@ export class MyforgeConnection {
   async finalize(code = 1006, reason = "socket_closed") {
     if (this.finalizePromise) return this.finalizePromise;
     this.finalizePromise = (async () => {
+      this.stopAcceptingWork();
       this.closed = true;
       this.closing = true;
       this.state = "closed";
       this.closeReason = this.closeReason ?? reason;
-      this.clearTimers();
-      this.inbound.length = 0;
       const closeError = timeoutError("connection closed before send completed");
       this.activeWriteAbort?.(closeError);
       this.rejectPending(closeError);

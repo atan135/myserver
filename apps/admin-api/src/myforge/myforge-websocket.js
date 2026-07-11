@@ -148,11 +148,31 @@ export class MyforgeWebsocketGateway {
     this.replayCache = new ReplayCache(replayCacheMaxEntries);
     this.connections = new Set();
     this.connectionsByAgent = new Map();
+    this.connectionSettlements = new Map();
     this.shuttingDown = false;
+    this.shutdownPromise = null;
+    this.taskOrchestrator = null;
   }
 
   get enabled() {
     return this.config.enabled === true;
+  }
+
+  setTaskOrchestrator(orchestrator) {
+    this.taskOrchestrator = orchestrator;
+  }
+
+  async notifyTaskOrchestrator(method, payload) {
+    const callback = this.taskOrchestrator?.[method];
+    if (typeof callback !== "function") return;
+    try {
+      await callback.call(this.taskOrchestrator, payload);
+    } catch (error) {
+      log("error", "myforge.orchestrator_callback_failed", {
+        callback: method,
+        errorCode: error?.code ?? error?.name ?? "UNKNOWN_ERROR"
+      });
+    }
   }
 
   async audit(code, connection, details = {}, severity = "warning") {
@@ -233,7 +253,9 @@ export class MyforgeWebsocketGateway {
       clock: this.clock
     });
     this.connections.add(connection);
-    void connection.start().catch((error) => this.handleConnectionError(connection, error));
+    connection.trackBackground(
+      connection.start().catch((error) => this.handleConnectionError(connection, error))
+    );
     return connection;
   }
 
@@ -359,6 +381,11 @@ export class MyforgeWebsocketGateway {
       const stale = [...this.connections].find((candidate) => candidate.connectionId === result.replacedConnectionId);
       await stale?.close(1008, "replaced_by_new_connection");
     }
+    await this.notifyTaskOrchestrator("onAgentRegistered", {
+      agentId: connection.agentId,
+      projectId: connection.projectId,
+      connectionId: connection.connectionId
+    });
   }
 
   async handleHeartbeat(connection, message) {
@@ -457,7 +484,7 @@ export class MyforgeWebsocketGateway {
         }
       }
     }
-    await this.store.recordTaskResult({
+    const result = await this.store.recordTaskResult({
       requestId: message.requestId,
       agentId: connection.agentId,
       projectId: connection.projectId,
@@ -480,6 +507,7 @@ export class MyforgeWebsocketGateway {
       errorMessage: message.errorMessage,
       completedAt: new Date(message.completedAtMs)
     });
+    await this.notifyTaskOrchestrator("onTaskTerminal", result.task);
   }
 
   async handleCommandError(connection, message) {
@@ -494,7 +522,7 @@ export class MyforgeWebsocketGateway {
         requestId: message.requestId
       });
     }
-    await this.store.recordTaskError({
+    const result = await this.store.recordTaskError({
       requestId: message.requestId,
       agentId: connection.agentId,
       projectId: connection.projectId,
@@ -504,6 +532,7 @@ export class MyforgeWebsocketGateway {
       errorMessage: message.errorMessage,
       completedAt: new Date(this.clock())
     });
+    await this.notifyTaskOrchestrator("onTaskTerminal", result.task);
   }
 
   async handlePeerProtocolError(connection, message) {
@@ -555,27 +584,51 @@ export class MyforgeWebsocketGateway {
   }
 
   async onConnectionClosed(connection, { reason = "socket_closed" } = {}) {
+    let resolveSettlement;
+    const settlement = new Promise((resolve) => { resolveSettlement = resolve; });
+    this.connectionSettlements.set(connection.connectionId, settlement);
     this.connections.delete(connection);
     if (this.connectionsByAgent.get(connection.agentId) === connection) {
       this.connectionsByAgent.delete(connection.agentId);
     }
-    if (connection.registered) {
-      try {
-        await this.store.markAgentOffline({
-          agentId: connection.agentId,
-          connectionId: connection.connectionId,
-          disconnectedAt: new Date(this.clock()),
-          failureReason: reason === "server_shutdown" ? "server_shutdown" : "agent_disconnected"
-        });
-      } catch (error) {
-        await this.audit("MYFORGE_PROTOCOL_STATE_INVALID", connection, { messageType: "connection.close" });
+    try {
+      if (connection.registered) {
+        try {
+          const deliveryFailure = reason === "server_shutdown" ? null : connection.deliveryInProgress;
+          const result = await this.store.markAgentOffline({
+            agentId: connection.agentId,
+            connectionId: connection.connectionId,
+            disconnectedAt: new Date(this.clock()),
+            failureReason: reason === "server_shutdown" ? "server_shutdown" : "agent_disconnected",
+            ...(deliveryFailure ? { deliveryFailure } : {})
+          });
+          await this.notifyTaskOrchestrator("onAgentDisconnected", {
+            agentId: connection.agentId,
+            projectId: connection.projectId,
+            connectionId: connection.connectionId,
+            staleConnection: result.staleConnection
+          });
+        } catch (error) {
+          await this.audit("MYFORGE_PROTOCOL_STATE_INVALID", connection, { messageType: "connection.close" });
+        }
+      }
+    } finally {
+      resolveSettlement();
+      if (this.connectionSettlements.get(connection.connectionId) === settlement) {
+        this.connectionSettlements.delete(connection.connectionId);
       }
     }
   }
 
+  async waitForConnectionSettlement(connectionId) {
+    const settlement = this.connectionSettlements.get(connectionId);
+    if (settlement) await settlement;
+  }
+
   getRegisteredConnection(agentId, projectId) {
     const connection = this.connectionsByAgent.get(agentId);
-    if (!connection || connection.closed || connection.state !== "registered" || connection.projectId !== projectId) {
+    if (!connection || connection.closed || !connection.acceptingOperations ||
+        connection.state !== "registered" || connection.projectId !== projectId) {
       return null;
     }
     return connection;
@@ -593,8 +646,27 @@ export class MyforgeWebsocketGateway {
 
   assertCurrentConnection(connection) {
     if (!connection || this.connectionsByAgent.get(connection.agentId) !== connection ||
-        connection.closed || connection.state !== "registered") {
+        connection.closed || !connection.acceptingOperations || connection.state !== "registered") {
       throw protocolError("MYFORGE_AGENT_DISCONNECTED", "agent connection is not available");
+    }
+  }
+
+  reserveCommandDelivery(connection, { requestId, kind }) {
+    this.assertCurrentConnection(connection);
+    if (typeof requestId !== "string" || !new Set(["command.execute", "command.cancel"]).has(kind)) {
+      throw protocolError("MYFORGE_PROTOCOL_STATE_INVALID", "delivery intent is invalid");
+    }
+    if (connection.deliveryInProgress) {
+      throw protocolError("MYFORGE_PROTOCOL_STATE_INVALID", "another command delivery is already in progress");
+    }
+    const reservation = Object.freeze({ requestId, kind });
+    connection.deliveryInProgress = reservation;
+    return reservation;
+  }
+
+  releaseCommandDelivery(connection, reservation) {
+    if (connection.deliveryInProgress === reservation) {
+      connection.deliveryInProgress = null;
     }
   }
 
@@ -607,6 +679,10 @@ export class MyforgeWebsocketGateway {
         connection: this.snapshotConnection(connection),
         prepareExecute: (payload) => this.prepareCommandExecute(connection, payload),
         prepareCancel: (payload) => this.prepareCommandCancel(connection, payload),
+        reserveDelivery: (intent) => this.reserveCommandDelivery(connection, intent),
+        releaseDelivery: (reservation) => this.releaseCommandDelivery(connection, reservation),
+        assertCurrent: () => this.assertCurrentConnection(connection),
+        close: (code, reason) => connection.close(code, reason),
         send: (prepared) => this.sendPreparedCommand(connection, prepared)
       });
     });
@@ -685,34 +761,66 @@ export class MyforgeWebsocketGateway {
   }
 
   async sendPreparedCommand(connection, prepared) {
-    this.assertCurrentConnection(connection);
     if (!prepared || prepared.connectionId !== connection.connectionId ||
         !new Set(["command.execute", "command.cancel"]).has(prepared.kind)) {
       throw protocolError("MYFORGE_IDENTITY_MISMATCH", "prepared command belongs to another connection");
     }
-    const parsed = parseStrictJson(prepared.frame, connection.effectiveLimits.wsMaxMessageBytes);
-    validateMessageSchema(parsed, prepared.kind);
-    verifyMessageSignature(parsed, this.config.serverPublicKey);
-    if (jcsCanonicalize(parsed) !== prepared.frame) {
-      throw protocolError("MYFORGE_MESSAGE_IJSON_INVALID", "prepared command is not canonical JSON");
+    let reservation = connection.deliveryInProgress;
+    if (reservation && (reservation.requestId !== prepared.message?.requestId || reservation.kind !== prepared.kind)) {
+      this.releaseCommandDelivery(connection, reservation);
+      throw protocolError("MYFORGE_PROTOCOL_STATE_INVALID", "prepared command does not match the delivery intent");
     }
-    const nowMs = this.clock();
-    const cancelDeadlineAtMs = parsed.type === "command.cancel" ? parsed.cancelDeadlineAtMs : null;
-    if (nowMs >= parsed.expiresAtMs || (cancelDeadlineAtMs !== null && nowMs >= cancelDeadlineAtMs)) {
-      throw protocolError("MYFORGE_MESSAGE_EXPIRED", "prepared command expired before send");
+    if (!reservation) {
+      reservation = this.reserveCommandDelivery(connection, {
+        requestId: prepared.message?.requestId,
+        kind: prepared.kind
+      });
     }
-    await connection.enqueueOutbound(prepared.frame, {
-      expiresAtMs: parsed.expiresAtMs,
-      cancelDeadlineAtMs
-    });
-    return prepared.message;
+    try {
+      this.assertCurrentConnection(connection);
+      const parsed = parseStrictJson(prepared.frame, connection.effectiveLimits.wsMaxMessageBytes);
+      validateMessageSchema(parsed, prepared.kind);
+      verifyMessageSignature(parsed, this.config.serverPublicKey);
+      if (jcsCanonicalize(parsed) !== prepared.frame) {
+        throw protocolError("MYFORGE_MESSAGE_IJSON_INVALID", "prepared command is not canonical JSON");
+      }
+      if (parsed.requestId !== reservation.requestId || parsed.type !== reservation.kind) {
+        throw protocolError("MYFORGE_PROTOCOL_STATE_INVALID", "prepared command does not match the delivery intent");
+      }
+      const nowMs = this.clock();
+      const cancelDeadlineAtMs = parsed.type === "command.cancel" ? parsed.cancelDeadlineAtMs : null;
+      if (nowMs >= parsed.expiresAtMs || (cancelDeadlineAtMs !== null && nowMs >= cancelDeadlineAtMs)) {
+        throw protocolError("MYFORGE_MESSAGE_EXPIRED", "prepared command expired before send");
+      }
+      await connection.enqueueOutbound(prepared.frame, {
+        expiresAtMs: parsed.expiresAtMs,
+        cancelDeadlineAtMs
+      });
+      return prepared.message;
+    } finally {
+      this.releaseCommandDelivery(connection, reservation);
+    }
   }
 
-  async shutdown() {
-    if (this.shuttingDown) return;
+  async closeTaskConnection({ agentId, projectId, connectionId, reason }) {
+    const connection = this.getRegisteredConnection(agentId, projectId);
+    if (!connection || connection.connectionId !== connectionId) return false;
+    connection.acceptingOperations = false;
+    await connection.operationMutex.runExclusive(() => connection.close(1008, reason));
+    return true;
+  }
+
+  shutdown() {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
     const connections = [...this.connections];
-    await Promise.allSettled(connections.map((connection) => connection.close(1001, "server_shutdown")));
+    for (const connection of connections) connection.stopAcceptingWork();
+    this.shutdownPromise = (async () => {
+      await this.taskOrchestrator?.stop?.();
+      await Promise.allSettled(connections.map((connection) => connection.close(1001, "server_shutdown")));
+      await Promise.allSettled(connections.map((connection) => connection.waitForQuiescence()));
+    })();
+    return this.shutdownPromise;
   }
 }
 

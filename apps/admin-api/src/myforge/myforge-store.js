@@ -378,13 +378,21 @@ export class MyforgeStore {
     agentId,
     connectionId,
     disconnectedAt = new Date(),
-    failureReason = "agent_disconnected"
+    failureReason = "agent_disconnected",
+    deliveryFailure = null
   }) {
     if (!connectionId) {
       throw createMyforgeStoreError("INVALID_REQUEST", "connectionId is required");
     }
     if (!new Set(["agent_disconnected", "server_shutdown"]).has(failureReason)) {
       throw createMyforgeStoreError("INVALID_REQUEST", "failureReason is invalid");
+    }
+    if (deliveryFailure !== null && (
+      !deliveryFailure ||
+      typeof deliveryFailure.requestId !== "string" ||
+      !new Set(["command.execute", "command.cancel"]).has(deliveryFailure.kind)
+    )) {
+      throw createMyforgeStoreError("INVALID_REQUEST", "deliveryFailure is invalid");
     }
     return this.withTransaction(async (client) => {
       const { rows: agentRows } = await client.query(
@@ -398,17 +406,30 @@ export class MyforgeStore {
         [agentId, disconnectedAt, connectionId]
       );
 
-      const params = [agentId, disconnectedAt, connectionId];
+      const params = [
+        agentId,
+        disconnectedAt,
+        connectionId,
+        failureReason,
+        deliveryFailure?.requestId ?? null,
+        deliveryFailure?.kind ?? null
+      ];
       const { rows: taskRows } = await client.query(
         `UPDATE myforge_task_runs
          SET status = 'failed',
              queue_reason = NULL,
              error_code = CASE
+               WHEN request_id = $5::uuid AND $6 = 'command.execute' THEN 'MYFORGE_DISPATCH_FAILED'
+               WHEN request_id = $5::uuid AND $6 = 'command.cancel' AND cancel_requested_at IS NOT NULL
+                 THEN 'MYFORGE_CANCEL_DELIVERY_FAILED'
                WHEN cancel_requested_at IS NULL AND $4 = 'server_shutdown' THEN 'MYFORGE_SERVER_RESTARTED'
                WHEN cancel_requested_at IS NULL THEN 'MYFORGE_AGENT_DISCONNECTED'
                ELSE 'MYFORGE_CANCEL_UNCONFIRMED'
              END,
              error_message = CASE
+               WHEN request_id = $5::uuid AND $6 = 'command.execute' THEN 'Task command could not be delivered to the agent'
+               WHEN request_id = $5::uuid AND $6 = 'command.cancel' AND cancel_requested_at IS NOT NULL
+                 THEN 'Cancellation command could not be delivered to the agent'
                WHEN cancel_requested_at IS NULL AND $4 = 'server_shutdown' THEN 'Admin API stopped before the task completed'
                WHEN cancel_requested_at IS NULL THEN 'Agent disconnected before the task completed'
                WHEN $4 = 'server_shutdown' THEN 'Cancellation was not confirmed before the Admin API stopped'
@@ -416,15 +437,23 @@ export class MyforgeStore {
              END,
              completed_at = $2,
              updated_at = current_timestamp
-         WHERE agent_id = $1
-           AND status IN ('dispatched', 'running')
-           AND connection_id = $3
-         RETURNING *`,
-        [...params, failureReason]
+          WHERE agent_id = $1
+            AND status IN ('dispatched', 'running')
+            AND connection_id = $3
+          RETURNING *`,
+        params
       );
       for (const row of taskRows) {
-        await this.appendLifecycleAudit(client, "myforge_task_fail", toTask(row), {
-          details: { reason: failureReason }
+        const task = toTask(row);
+        const auditReason = task.errorCode === "MYFORGE_DISPATCH_FAILED"
+          ? "dispatch_delivery_failed"
+          : task.errorCode === "MYFORGE_CANCEL_DELIVERY_FAILED"
+            ? "cancel_delivery_failed"
+            : failureReason;
+        await this.appendLifecycleAudit(client, "myforge_task_fail", task, {
+          details: {
+            reason: auditReason
+          }
         });
       }
       const agent = toAgent(agentRows[0]);
@@ -555,6 +584,54 @@ export class MyforgeStore {
       [requestId, queueReason]
     );
     return toTask(rows[0]);
+  }
+
+  async setQueuedTasksReasonForAgent({ agentId, projectId, queueReason }) {
+    requireAllowed(queueReason, QUEUE_REASONS, "INVALID_REQUEST", "queueReason");
+    const { rows } = await this.pool.query(
+      `UPDATE myforge_task_runs
+       SET queue_reason = $3, updated_at = current_timestamp
+       WHERE agent_id = $1 AND project_id = $2 AND status = 'queued'
+       RETURNING *`,
+      [agentId, projectId, queueReason]
+    );
+    return rows.map(toTask);
+  }
+
+  async findNextQueuedTask({ agentId, projectId, now = new Date() }) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM myforge_task_runs
+       WHERE agent_id = $1
+         AND project_id = $2
+         AND status = 'queued'
+         AND queue_expires_at > $3
+       ORDER BY created_at ASC, request_id ASC
+       LIMIT 1`,
+      [agentId, projectId, now]
+    );
+    return toTask(rows[0]);
+  }
+
+  async listQueuedAgentIdentities(now = new Date()) {
+    const { rows } = await this.pool.query(
+      `SELECT DISTINCT task.agent_id, task.project_id
+       FROM myforge_task_runs task
+       INNER JOIN myforge_agents agent
+         ON agent.agent_id = task.agent_id
+        AND agent.project_id = task.project_id
+        AND agent.configured = true
+        AND agent.status = 'online'
+       WHERE task.status = 'queued' AND task.queue_expires_at > $1
+         AND NOT EXISTS (
+           SELECT 1 FROM myforge_task_runs active
+           WHERE active.agent_id = task.agent_id
+             AND active.project_id = task.project_id
+             AND active.status IN ('dispatched', 'running')
+         )
+       ORDER BY task.agent_id, task.project_id`,
+      [now]
+    );
+    return rows.map((row) => ({ agentId: row.agent_id, projectId: row.project_id }));
   }
 
   async claimTaskDispatched({
@@ -814,7 +891,10 @@ export class MyforgeStore {
     expectedStatuses = ["queued", "dispatched", "running"],
     errorCode,
     errorMessage,
-    completedAt = new Date()
+    completedAt = new Date(),
+    adminId = null,
+    adminUsername = null,
+    ip = null
   }) {
     for (const status of expectedStatuses) {
       requireAllowed(status, ACTIVE_TASK_STATUSES, "INVALID_REQUEST", "expectedStatus");
@@ -852,7 +932,10 @@ export class MyforgeStore {
         [requestId, errorCode, errorMessage, completedAt]
       );
       const task = toTask(rows[0]);
-      await this.appendLifecycleAudit(client, "myforge_task_fail", task);
+      await this.appendLifecycleAudit(client, "myforge_task_fail", task, {
+        actor: { adminId, adminUsername },
+        ip
+      });
       return { outcome: "updated", task };
     });
   }
@@ -879,13 +962,95 @@ export class MyforgeStore {
     });
   }
 
+  async failExpiredDispatchedTasks({ now = new Date(), clockSkewMs = this.config.clockSkewMs ?? 0 } = {}) {
+    return this.withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE myforge_task_runs
+         SET status = 'failed',
+             queue_reason = NULL,
+             error_code = 'MYFORGE_COMMAND_EXPIRED',
+             error_message = 'Agent did not acknowledge the command before it expired',
+             completed_at = $1,
+             updated_at = current_timestamp
+         WHERE status = 'dispatched'
+           AND cancel_requested_at IS NULL
+           AND command_expires_at + ($2::bigint * interval '1 millisecond') <= $1
+         RETURNING *`,
+        [now, clockSkewMs]
+      );
+      const tasks = rows.map(toTask);
+      for (const task of tasks) {
+        await this.appendLifecycleAudit(client, "myforge_task_fail", task, {
+          details: { reason: "command_expired" }
+        });
+      }
+      return tasks;
+    });
+  }
+
+  async failTimedOutRunningTasks({ now = new Date(), clockSkewMs = this.config.clockSkewMs ?? 0 } = {}) {
+    return this.withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE myforge_task_runs
+         SET status = 'failed',
+             queue_reason = NULL,
+             error_code = 'MYFORGE_COMMAND_TIMEOUT',
+             error_message = 'Task exceeded the negotiated command timeout',
+             completed_at = $1,
+             updated_at = current_timestamp
+         WHERE status = 'running'
+           AND cancel_requested_at IS NULL
+           AND started_at + ((timeout_ms + $2::bigint) * interval '1 millisecond') <= $1
+         RETURNING *`,
+        [now, clockSkewMs]
+      );
+      const tasks = rows.map(toTask);
+      for (const task of tasks) {
+        await this.appendLifecycleAudit(client, "myforge_task_fail", task, {
+          details: { reason: "command_timeout" }
+        });
+      }
+      return tasks;
+    });
+  }
+
+  async failExpiredCancellationTasks({ now = new Date(), clockSkewMs = this.config.clockSkewMs ?? 0 } = {}) {
+    return this.withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE myforge_task_runs
+         SET status = 'failed',
+             queue_reason = NULL,
+             error_code = 'MYFORGE_CANCEL_TIMEOUT',
+             error_message = 'Agent did not confirm cancellation before the deadline',
+             completed_at = $1,
+             updated_at = current_timestamp
+         WHERE status IN ('dispatched', 'running')
+           AND cancel_requested_at IS NOT NULL
+           AND cancel_deadline_at + ($2::bigint * interval '1 millisecond') <= $1
+         RETURNING *`,
+        [now, clockSkewMs]
+      );
+      const tasks = rows.map(toTask);
+      for (const task of tasks) {
+        await this.appendLifecycleAudit(client, "myforge_task_fail", task, {
+          details: { reason: "cancel_timeout" }
+        });
+      }
+      return tasks;
+    });
+  }
+
   async requestTaskCancellation({
     requestId,
+    agentId = null,
+    projectId = null,
+    connectionId = null,
     adminId = null,
     adminUsername = null,
     ip = null,
     requestedAt = new Date(),
-    cancelTimeoutMs = this.config.cancelTimeoutMs
+    cancelTimeoutMs = this.config.cancelTimeoutMs,
+    queuedOnly = false
   }) {
     return this.withTransaction(async (client) => {
       const existing = await this.lockTask(client, requestId);
@@ -896,10 +1061,6 @@ export class MyforgeStore {
       if (["completed", "completed_with_errors", "failed"].includes(existing.status)) {
         throw createMyforgeStoreError("MYFORGE_TASK_NOT_CANCELLABLE", "Task is already complete");
       }
-      if (existing.cancelRequestedAt) {
-        return { outcome: "duplicate", task: existing, sendCancel: true };
-      }
-
       if (existing.status === "queued") {
         const { rows } = await client.query(
           `UPDATE myforge_task_runs
@@ -919,6 +1080,15 @@ export class MyforgeStore {
         return { outcome: "cancelled", task, sendCancel: false };
       }
 
+      if (queuedOnly) {
+        return { outcome: "requires_connection", task: existing, sendCancel: true };
+      }
+      if (existing.cancelRequestedAt) {
+        this.assertTaskIdentity(existing, { agentId, projectId, connectionId });
+        return { outcome: "duplicate", task: existing, sendCancel: true };
+      }
+
+      this.assertTaskIdentity(existing, { agentId, projectId, connectionId });
       const deadlineAt = new Date(requestedAt.getTime() + cancelTimeoutMs);
       const { rows } = await client.query(
         `UPDATE myforge_task_runs

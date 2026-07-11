@@ -24,6 +24,8 @@ import { MonitoringController } from "./monitoring/monitoring.controller.js";
 import { MonitoringService } from "./monitoring/monitoring.service.js";
 import { MyforgeStore } from "./myforge/myforge-store.js";
 import { MyforgeWebsocketGateway } from "./myforge/myforge-websocket.js";
+import { MyforgeOrchestrator } from "./myforge/myforge-orchestrator.js";
+import { MyforgeController } from "./myforge/myforge.controller.js";
 import { HealthController } from "./health.controller.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
@@ -38,6 +40,7 @@ import {
   ADMIN_SESSION_STORE,
   ADMIN_STORE,
   MYFORGE_GATEWAY,
+  MYFORGE_ORCHESTRATOR,
   MYFORGE_STORE
 } from "./tokens.js";
 
@@ -62,6 +65,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GmController,
     GlobalIdController,
     MonitoringController,
+    MyforgeController,
     HealthController
   ],
   providers: [
@@ -120,6 +124,20 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         store,
         adminStore
       })
+    },
+    {
+      provide: MYFORGE_ORCHESTRATOR,
+      inject: [ADMIN_CONFIG, MYFORGE_STORE, MYFORGE_GATEWAY],
+      useFactory: (config: any, store: any, gateway: any) => {
+        const orchestrator = new MyforgeOrchestrator({
+          config: config.myforge,
+          store,
+          gateway
+        });
+        gateway.setTaskOrchestrator(orchestrator);
+        orchestrator.start();
+        return orchestrator;
+      }
     },
     {
       provide: ADMIN_SESSION_STORE,
