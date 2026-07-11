@@ -21,6 +21,9 @@ param(
     [switch]$SelfTest,
 
     [Parameter(Mandatory=$false)]
+    [switch]$DiagnosticFixture,
+
+    [Parameter(Mandatory=$false)]
     [switch]$StartDevStack,
 
     [Parameter(Mandatory=$false)]
@@ -87,6 +90,11 @@ $DevStackPath = Join-Path $ProjectRoot "scripts\dev-stack.ps1"
 $DevStackPidFile = Join-Path $ProjectRoot "logs\dev-stack\dev-stack.pids.json"
 $RedisRuntimeEnvVar = "MYSERVER_LOCKSTEP_REDIS_URL_RUNTIME"
 $ReportSchema = "myserver.lockstep-online-reconcile.report.v1"
+$ArtifactIndexSchema = "myserver.lockstep-online-reconcile.artifacts.v1"
+$TriageSchema = "myserver.lockstep-online-reconcile.triage.v1"
+$DiagnosticIndexSchema = "myserver.lockstep-online-reconcile.diagnostic-index.v1"
+$ServiceLogArchiveSchema = "myserver.lockstep-online-reconcile.service-log-archive.v1"
+$SensitiveValues = @()
 $LocalNatsUrl = "nats://127.0.0.1:4222"
 $RegistryServiceName = "game-server"
 $MybevyVisualSmokeEnvironmentNames = @(
@@ -185,6 +193,12 @@ function Assert-RunOptions {
 
     if ($Mode -eq "dry-run" -and ($StartDevStack -or $ProvisionDevTickets)) {
         throw "-DryRun cannot be combined with -StartDevStack or -ProvisionDevTickets."
+    }
+    if ($Mode -eq "diagnostic-fixture" -and ($StartDevStack -or $ProvisionDevTickets -or $SkipTicketRedisPreflight)) {
+        throw "-DiagnosticFixture is offline and cannot be combined with dev-stack or ticket options."
+    }
+    if ($Mode -eq "diagnostic-fixture" -and $Client -ne "mybevy") {
+        throw "-DiagnosticFixture requires -Client mybevy."
     }
     if ($ProvisionDevTickets -and $SkipTicketRedisPreflight) {
         throw "-ProvisionDevTickets cannot be combined with -SkipTicketRedisPreflight."
@@ -364,9 +378,35 @@ function New-StageDefinitions {
     return @($definitions)
 }
 
+function New-DiagnosticFixtureDefinition {
+    return [pscustomobject]@{
+        name = "mybevy-diagnostic-fixture"
+        scenario = "offline-fixture"
+        roomId = "lockstep-$RunId-diagnostic"
+        observerProbe = $false
+        visualSmoke = $false
+        dualClient = $false
+        reconnectObserver = $false
+        diagnosticFixture = $true
+    }
+}
+
 function New-ClientArguments {
     param([pscustomobject]$Stage, [string]$Mode)
     if ($Client -eq "mybevy") {
+        if ($Mode -eq "diagnostic-fixture") {
+            return [string[]]@(
+                "run", "--offline", "--quiet",
+                "--manifest-path", $MybevyManifestPath,
+                "--bin", "lockstep-sim-headless",
+                "--",
+                "--scenario", "offline-fixture",
+                "--run-id", $RunId,
+                "--room", $Stage.roomId,
+                "--policy", "lockstep_sim_demo",
+                "--inject-mismatch-frame", "3"
+            )
+        }
         if ($Mode -eq "dry-run") {
             return [string[]]@(
                 "run", "--quiet",
@@ -490,6 +530,16 @@ function New-RunReport {
         externalSideEffects = ($Mode -eq "execute")
         writesArtifacts = ($Mode -ne "plan")
         networkConnectionsAllowed = ($Mode -eq "execute")
+        provenance = [ordered]@{
+            kind = if ($Mode -eq "diagnostic-fixture") { "synthetic" } elseif ($Mode -eq "execute") { "runtime" } else { "offline" }
+            synthetic = ($Mode -eq "diagnostic-fixture")
+            representsLiveService = ($Mode -eq "execute")
+            expectedFailure = ($Mode -eq "diagnostic-fixture")
+            networkUsed = $false
+            verified = if ($Mode -eq "diagnostic-fixture") { $false } else { $null }
+            cleanupRequired = ($Mode -eq "execute")
+            description = if ($Mode -eq "diagnostic-fixture") { "Offline mybevy mismatch injection; no MyServer, Redis, NATS, ticket, or network access." } else { $null }
+        }
         endpoint = [ordered]@{
             value = $Server
             transport = "local TCP direct debug endpoint"
@@ -545,15 +595,342 @@ function New-RunReport {
             report = if ($ArtifactDirectory) { Join-Path $ArtifactDirectory "report.json" } else { $null }
             devStackDirectory = Join-Path $ProjectRoot "logs\dev-stack"
             gameServerDirectory = Join-Path $ProjectRoot "logs\game-server"
+            serviceArchive = [ordered]@{
+                schema = $ServiceLogArchiveSchema
+                schemaVersion = 1
+                attempted = $false
+                ok = $true
+                directory = if ($ArtifactDirectory) { Join-Path $ArtifactDirectory "owned-services" } else { $null }
+                items = @()
+                errors = @()
+            }
         }
+        artifacts = $null
+        triage = $null
+        diagnosticIndex = $null
         failure = $null
     }
+}
+
+function Protect-SensitiveText {
+    param([AllowNull()][string]$Text)
+    if ($null -eq $Text) { return $null }
+
+    $protected = $Text
+    foreach ($name in @($TicketEnvVar, $ObserverTicketEnvVar, $TicketSecretEnvVar, "TICKET_SECRET") | Select-Object -Unique) {
+        $value = Get-EnvironmentValue -Name $name
+        if (-not [string]::IsNullOrWhiteSpace($value) -and $value.Length -ge 8) {
+            $protected = $protected.Replace($value, "[REDACTED]")
+        }
+    }
+    foreach ($value in @($script:SensitiveValues)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$value) -and ([string]$value).Length -ge 8) {
+            $protected = $protected.Replace([string]$value, "[REDACTED]")
+        }
+    }
+    $protected = [regex]::Replace(
+        $protected,
+        '(?i)(rediss?://)(?:[^/@\s]+@)',
+        '${1}[REDACTED]@'
+    )
+    $protected = [regex]::Replace(
+        $protected,
+        '(?i)([?&](?:token|ticket|secret|password)=)[^&#\s"'']+',
+        '${1}[REDACTED]'
+    )
+    $protected = [regex]::Replace(
+        $protected,
+        '(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])',
+        '[REDACTED_JWT]'
+    )
+    return $protected
+}
+
+function New-ArtifactItem {
+    param(
+        [string]$Id,
+        [string]$Kind,
+        [AllowNull()][string]$Path,
+        [bool]$Applicable,
+        [bool]$AssumePresent = $false,
+        [bool]$EmbeddedPresent = $false,
+        [AllowNull()][string]$ReportPointer = $null,
+        [AllowNull()][string]$SourcePath = $null,
+        [AllowNull()][string]$Note = $null
+    )
+    $status = if (-not $Applicable) {
+        "not-applicable"
+    } elseif ($AssumePresent -or ($ReportPointer -and $EmbeddedPresent)) {
+        "present"
+    } elseif ($ReportPointer) {
+        "missing"
+    } elseif ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        "present"
+    } else {
+        "missing"
+    }
+    return [ordered]@{
+        id = $Id
+        kind = $Kind
+        status = $status
+        path = $Path
+        sourcePath = $SourcePath
+        reportPointer = $ReportPointer
+        note = $Note
+    }
+}
+
+function New-ArtifactIndex {
+    param([System.Collections.IDictionary]$Report)
+
+    $items = @()
+    $artifactDirectory = [string]$Report.logs.artifactDirectory
+    $reportPath = [string]$Report.logs.report
+    $writesArtifacts = [bool]$Report.writesArtifacts
+    $items += New-ArtifactItem -Id "run-report" -Kind "report" -Path $reportPath -Applicable $writesArtifacts -AssumePresent $writesArtifacts
+    $items += New-ArtifactItem `
+        -Id "actual-commands" `
+        -Kind "command-list" `
+        -Path $reportPath `
+        -Applicable $writesArtifacts `
+        -EmbeddedPresent (@($Report.commands).Count -gt 0) `
+        -ReportPointer '$.commands' `
+        -Note "Commands contain environment variable names, never ticket values."
+
+    $devStackApplicable = [bool]$Report.ownership.startRequested
+    $devStackStdout = if ($artifactDirectory) { Join-Path $artifactDirectory "dev-stack.stdout.log" } else { $null }
+    $devStackStderr = if ($artifactDirectory) { Join-Path $artifactDirectory "dev-stack.stderr.log" } else { $null }
+    $items += New-ArtifactItem -Id "dev-stack-stdout" -Kind "dev-stack-log" -Path $devStackStdout -Applicable $devStackApplicable
+    $items += New-ArtifactItem -Id "dev-stack-stderr" -Kind "dev-stack-log" -Path $devStackStderr -Applicable $devStackApplicable
+
+    $serviceArchiveItems = if ($Report.logs.serviceArchive) { @($Report.logs.serviceArchive.items) } else { @() }
+    $serviceNames = @("game-server", "nats", "redis") + @($Report.ownership.services | ForEach-Object { [string]$_.name }) + @($serviceArchiveItems | ForEach-Object { [string]$_.serviceName })
+    foreach ($serviceName in @($serviceNames | Select-Object -Unique)) {
+        $ownedService = @($Report.ownership.services | Where-Object { $_.name -eq $serviceName } | Select-Object -First 1)
+        $serviceApplicable = $ownedService.Count -eq 1 -or ($serviceName -eq "game-server" -and $devStackApplicable)
+        $safeServiceName = [regex]::Replace($serviceName, '[^A-Za-z0-9._-]', '_')
+        if ([string]::IsNullOrWhiteSpace($safeServiceName)) { $safeServiceName = "service" }
+        foreach ($stream in @("stdout", "stderr")) {
+            $archiveItem = @($serviceArchiveItems | Where-Object { $_.serviceName -eq $serviceName -and $_.stream -eq $stream } | Select-Object -First 1)
+            $archivePath = if ($archiveItem.Count -eq 1) {
+                [string]$archiveItem[0].archivePath
+            } elseif ($artifactDirectory) {
+                Join-Path (Join-Path $artifactDirectory "owned-services") "$safeServiceName.$stream.log"
+            } else {
+                $null
+            }
+            $sourcePath = if ($archiveItem.Count -eq 1) {
+                [string]$archiveItem[0].sourcePath
+            } elseif ($ownedService.Count -eq 1 -and $ownedService[0].$stream) {
+                [string]$ownedService[0].$stream
+            } else {
+                $null
+            }
+            $idPrefix = if ($serviceName -eq "game-server") { "myserver-game-server" } else { "owned-service-$safeServiceName" }
+            $kind = if ($serviceName -eq "game-server") { "myserver-log" } else { "owned-service-log" }
+            $items += New-ArtifactItem `
+                -Id "$idPrefix-$stream" `
+                -Kind $kind `
+                -Path $archivePath `
+                -SourcePath $sourcePath `
+                -Applicable $serviceApplicable `
+                -Note "Archived after the exact owned PID stopped; sourcePath records the original dev-stack log."
+        }
+    }
+
+    foreach ($command in @($Report.commands)) {
+        $stageName = [string]$command.stage
+        $stage = @($Report.stages | Where-Object { $_.name -eq $stageName } | Select-Object -First 1)
+        $stdoutPath = if ($stage.Count -eq 1 -and $stage[0].stdout) { [string]$stage[0].stdout } elseif ($artifactDirectory) { Join-Path $artifactDirectory "$stageName.stdout.log" } else { $null }
+        $stderrPath = if ($stage.Count -eq 1 -and $stage[0].stderr) { [string]$stage[0].stderr } elseif ($artifactDirectory) { Join-Path $artifactDirectory "$stageName.stderr.log" } else { $null }
+        $stageApplicable = $writesArtifacts
+        $items += New-ArtifactItem -Id "$stageName-stdout" -Kind "client-stdout" -Path $stdoutPath -Applicable $stageApplicable
+        $items += New-ArtifactItem -Id "$stageName-stderr" -Kind "client-stderr" -Path $stderrPath -Applicable $stageApplicable
+        $items += New-ArtifactItem -Id "$stageName-report" -Kind "client-report" -Path $reportPath -Applicable $stageApplicable -EmbeddedPresent ($stage.Count -eq 1) -ReportPointer "$.stages[?(@.name=='$stageName')]"
+
+        $isVisual = $stageName -eq "mybevy-visual-smoke"
+        if ($Report.client.kind -eq "mybevy") {
+            $items += New-ArtifactItem -Id "$stageName-jsonl" -Kind "mybevy-jsonl" -Path $stdoutPath -Applicable ($stageApplicable -and -not $isVisual) -Note "The mybevy headless stdout file is JSONL telemetry."
+        } else {
+            $items += New-ArtifactItem -Id "$stageName-lockstep-output" -Kind "lockstep-client-output" -Path $stdoutPath -Applicable $stageApplicable
+        }
+    }
+
+    $visualRequested = @($Report.commands | Where-Object { $_.stage -eq "mybevy-visual-smoke" }).Count -gt 0
+    $visualPaths = if ($artifactDirectory) { Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $artifactDirectory } else { $null }
+    $visualOnlineReport = if ($visualPaths) { [string]$visualPaths.onlineReport } else { $null }
+    $visualOnlineScreenshot = if ($visualPaths) { [string]$visualPaths.onlineScreenshot } else { $null }
+    $visualOfflineReport = if ($visualPaths) { [string]$visualPaths.offlineReport } else { $null }
+    $visualOfflineScreenshot = if ($visualPaths) { [string]$visualPaths.offlineScreenshot } else { $null }
+    $items += New-ArtifactItem -Id "visual-online-report" -Kind "visual-report" -Path $visualOnlineReport -Applicable $visualRequested
+    $items += New-ArtifactItem -Id "visual-online-screenshot" -Kind "screenshot" -Path $visualOnlineScreenshot -Applicable $visualRequested
+    $items += New-ArtifactItem -Id "visual-offline-report" -Kind "visual-report" -Path $visualOfflineReport -Applicable $visualRequested
+    $items += New-ArtifactItem -Id "visual-offline-screenshot" -Kind "screenshot" -Path $visualOfflineScreenshot -Applicable $visualRequested
+
+    return [ordered]@{
+        schema = $ArtifactIndexSchema
+        schemaVersion = 1
+        root = $artifactDirectory
+        statuses = @("present", "not-applicable", "missing")
+        items = @($items)
+    }
+}
+
+function New-DiagnosticIndex {
+    return [ordered]@{
+        schema = $DiagnosticIndexSchema
+        schemaVersion = 1
+        entries = @(
+            [ordered]@{ id = "connect"; failureStages = @("connect"); errorCodePatterns = @("CONNECT", "TRANSPORT", "DISCONNECT"); checks = @("Confirm the loopback endpoint and owned process identity.", "Inspect client stderr and game-server startup logs.") },
+            [ordered]@{ id = "ticket-auth"; failureStages = @("authentication"); errorCodePatterns = @("TICKET", "AUTH", "LOGIN", "CHARACTER_MISMATCH"); checks = @("Check ticket expiry, signature, character binding, and Redis version key.", "Confirm only ticket fingerprints, never ticket values, were recorded.") },
+            [ordered]@{ id = "room-join"; failureStages = @("room_join"); errorCodePatterns = @("ROOM_JOIN", "JOIN_REJECTED"); checks = @("Check room id, policy id, character ownership, and join response error code.") },
+            [ordered]@{ id = "room-ready"; failureStages = @("room_ready"); errorCodePatterns = @("ROOM_READY", "READY_REJECTED"); checks = @("Check that join completed and all expected players sent ready exactly once.") },
+            [ordered]@{ id = "room-start"; failureStages = @("room_start"); errorCodePatterns = @("ROOM_START", "START_REJECTED"); checks = @("Check ready state, room policy, and initial snapshot creation logs.") },
+            [ordered]@{ id = "room-reconnect"; failureStages = @("room_reconnect"); errorCodePatterns = @("RECONNECT", "RECOVERY_FRAME"); checks = @("Check reconnect generation, snapshot frame, waiting frame, and input continuity.") },
+            [ordered]@{ id = "observer-recovery"; failureStages = @("observer_recovery"); errorCodePatterns = @("OBSERVER"); checks = @("Check observer ticket role, snapshot recovery, no local input acknowledgement, and common frames.") },
+            [ordered]@{ id = "policy-mismatch"; failureStages = @("room_join", "room_start"); errorCodePatterns = @("POLICY"); checks = @("Compare requested policy with server policy id, tick rate, input delay, and capacity.") },
+            [ordered]@{ id = "payload-schema"; failureStages = @("payload_validation"); errorCodePatterns = @("PAYLOAD", "FIELD", "INPUT_SCHEMA"); checks = @("Compare payload action, schemaVersion, required fields, numeric bounds, and byte limit.") },
+            [ordered]@{ id = "config-hash"; failureStages = @("snapshot_validation"); errorCodePatterns = @("CONFIG_HASH"); checks = @("Compare the canonical sim config and config hash on server and client.") },
+            [ordered]@{ id = "snapshot-schema"; failureStages = @("snapshot_validation", "snapshot_restore"); errorCodePatterns = @("SNAPSHOT.*SCHEMA", "SNAPSHOT.*PARSE", "SNAPSHOT.*RESTORE"); checks = @("Check snapshot schemaVersion, configVersion, frame, control bindings, and restore error.") },
+            [ordered]@{ id = "sim-schema"; failureStages = @("payload_validation", "snapshot_validation"); errorCodePatterns = @("SIM.*SCHEMA", "SCHEMA_VERSION"); checks = @("Compare sim input/downlink schema constants and generated protocol artifacts.") },
+            [ordered]@{ id = "hash-mismatch"; failureStages = @("hash_compare"); errorCodePatterns = @("HASH_MISMATCH", "ENTITY_MISMATCH", "EVENT_MISMATCH", "INPUT_MISMATCH"); checks = @("Start at firstMismatchFrame; compare server/client inputs, entities, and events in triage.", "Use the referenced JSONL and game-server logs without rerunning the full flow.") },
+            [ordered]@{ id = "cleanup"; failureStages = @("cleanup"); errorCodePatterns = @("CLEANUP", "OWNERSHIP"); checks = @("Inspect compare-delete results, PID identity checks, environment restoration, and owned ports.") },
+            [ordered]@{ id = "orchestration"; failureStages = @("orchestration"); errorCodePatterns = @("WRAPPER_ORCHESTRATION"); checks = @("Inspect the wrapper failure message, command list, and first missing artifact.") }
+        )
+    }
+}
+
+function Get-NormalizedFailureStage {
+    param([AllowNull()][string]$SourceStage, [AllowNull()][string]$ErrorCode, [AllowNull()][string]$Message)
+    $value = "$SourceStage $ErrorCode $Message".ToLowerInvariant()
+    if ($value -match 'cleanup|compare-delete|restore-environment|owned.port') { return "cleanup" }
+    if ($value -match 'observer') { return "observer_recovery" }
+    if ($value -match 'reconnect|post_reconnect|recovery_frame') { return "room_reconnect" }
+    if ($value -match 'snapshot.*(restore|replay|recovery)|snapshot_restore|snapshot_replay') { return "snapshot_restore" }
+    if ($value -match 'snapshot|config_hash') { return "snapshot_validation" }
+    if ($value -match 'payload|input_schema|payload_validation|field_incompatible') { return "payload_validation" }
+    if ($value -match 'ticket|authentication|authenticate|\bauth\b|login|character_mismatch') { return "authentication" }
+    if ($value -match 'room[_ -]?join|join_rejected') { return "room_join" }
+    if ($value -match 'room[_ -]?ready|ready_rejected') { return "room_ready" }
+    if ($value -match 'room[_ -]?start|start_rejected') { return "room_start" }
+    if ($value -match 'hash_mismatch|frame_compare|dual_frame_compare|entity_mismatch|event_mismatch|input_mismatch') { return "hash_compare" }
+    if ($value -match 'connect|transport|disconnect') { return "connect" }
+    return "orchestration"
+}
+
+function Get-WrapperErrorCode {
+    param([string]$FailureStage)
+    return "WRAPPER_$($FailureStage.ToUpperInvariant())_FAILED"
+}
+
+function Get-DiagnosticMatches {
+    param([System.Collections.IDictionary]$Index, [string]$FailureStage, [string]$ErrorCode)
+    $matched = @()
+    foreach ($entry in @($Index.entries)) {
+        $matches = @($entry.failureStages) -contains $FailureStage
+        if (-not $matches) {
+            foreach ($pattern in @($entry.errorCodePatterns)) {
+                if ($ErrorCode -match $pattern) { $matches = $true; break }
+            }
+        }
+        if ($matches) { $matched += $entry }
+    }
+    if ($matched.Count -eq 0) {
+        $matched = @($Index.entries | Where-Object { $_.id -eq "orchestration" })
+    }
+    return [ordered]@{
+        entryIds = @($matched | ForEach-Object { $_.id } | Select-Object -Unique)
+        suggestedChecks = @($matched | ForEach-Object { @($_.checks) } | Select-Object -Unique)
+    }
+}
+
+function New-UnavailableDiff {
+    param([string]$Reason)
+    return [ordered]@{
+        status = "not_available"
+        equal = $null
+        server = $null
+        client = $null
+        reason = $Reason
+    }
+}
+
+function Get-ReportTriage {
+    param([System.Collections.IDictionary]$Report)
+
+    $relatedArtifacts = @($Report.artifacts.items | Where-Object { $_.status -ne "not-applicable" } | ForEach-Object {
+        [ordered]@{ id = $_.id; status = $_.status; path = $_.path; reportPointer = $_.reportPointer }
+    })
+    $triage = [ordered]@{
+        schema = $TriageSchema
+        schemaVersion = 1
+        errorCode = $null
+        failureStage = $null
+        sourceFailureStage = $null
+        roomId = $null
+        frame = $null
+        firstMismatchFrame = $null
+        serverHash = $null
+        clientHash = $null
+        inputDiff = $null
+        entityDiff = $null
+        eventDiff = $null
+        relatedArtifacts = $relatedArtifacts
+        diagnosticEntryIds = @()
+        suggestedChecks = @()
+        message = $null
+        synthetic = [bool]$Report.provenance.synthetic
+    }
+    if ($Report.status -ne "failed") { return $triage }
+
+    $failedStage = @($Report.stages | Where-Object { $_.status -eq "failed" } | Select-Object -First 1)
+    $diagnostics = if ($failedStage.Count -eq 1) { $failedStage[0].diagnostics } else { $null }
+    $failureMessage = if ($Report.failure) { Protect-SensitiveText -Text ([string]$Report.failure.message) } else { "run failed without a failure message" }
+    $sourceStage = if ($diagnostics -and $diagnostics.failureStage) {
+        [string]$diagnostics.failureStage
+    } elseif ($Report.failure -and $Report.failure.stage) {
+        [string]$Report.failure.stage
+    } else {
+        "orchestration"
+    }
+    $errorCode = if ($diagnostics -and $diagnostics.errorCode) { [string]$diagnostics.errorCode } else { $null }
+    $normalizedStage = Get-NormalizedFailureStage -SourceStage $sourceStage -ErrorCode $errorCode -Message $failureMessage
+    if (-not $errorCode) { $errorCode = Get-WrapperErrorCode -FailureStage $normalizedStage }
+    $isMismatch = $errorCode -match 'HASH_MISMATCH|ENTITY_MISMATCH|EVENT_MISMATCH|INPUT_MISMATCH' -or ($diagnostics -and $null -ne $diagnostics.firstMismatchFrame)
+
+    $triage.errorCode = $errorCode
+    $triage.failureStage = $normalizedStage
+    $triage.sourceFailureStage = $sourceStage
+    $triage.roomId = if ($failedStage.Count -eq 1) { [string]$failedStage[0].roomId } elseif ($Report.failure) { $Report.failure.roomId } else { $null }
+    $triage.frame = if ($diagnostics -and $null -ne $diagnostics.frame) { [int]$diagnostics.frame } else { $null }
+    $triage.firstMismatchFrame = if ($diagnostics -and $null -ne $diagnostics.firstMismatchFrame) { [int]$diagnostics.firstMismatchFrame } elseif ($isMismatch) { $triage.frame } else { $null }
+    $triage.serverHash = if ($diagnostics) { $diagnostics.serverHash } else { $null }
+    $triage.clientHash = if ($diagnostics) { $diagnostics.clientHash } else { $null }
+    if ($isMismatch) {
+        $triage.inputDiff = if ($diagnostics -and $diagnostics.inputDiffDetail) { $diagnostics.inputDiffDetail } else { New-UnavailableDiff -Reason "client telemetry did not include both sides for this frame" }
+        $triage.entityDiff = if ($diagnostics -and $diagnostics.entityDiffDetail) { $diagnostics.entityDiffDetail } else { New-UnavailableDiff -Reason "server entity snapshot is not available for this frame" }
+        $triage.eventDiff = if ($diagnostics -and $diagnostics.eventDiffDetail) { $diagnostics.eventDiffDetail } else { New-UnavailableDiff -Reason "client telemetry did not include both sides for this frame" }
+    }
+    $matches = Get-DiagnosticMatches -Index $Report.diagnosticIndex -FailureStage $normalizedStage -ErrorCode $errorCode
+    $triage.diagnosticEntryIds = @($matches.entryIds)
+    $triage.suggestedChecks = @($matches.suggestedChecks)
+    $triage.message = $failureMessage
+    return $triage
+}
+
+function Update-ReportDerivedFields {
+    param([System.Collections.IDictionary]$Report)
+    $Report.artifacts = New-ArtifactIndex -Report $Report
+    $Report.diagnosticIndex = New-DiagnosticIndex
+    $Report.triage = Get-ReportTriage -Report $Report
 }
 
 function Save-RunReport {
     param([System.Collections.IDictionary]$Report)
     if (-not $Report.logs.report) { return }
-    $Report | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $Report.logs.report -Encoding UTF8
+    Update-ReportDerivedFields -Report $Report
+    $json = $Report | ConvertTo-Json -Depth 60
+    Protect-SensitiveText -Text $json | Set-Content -LiteralPath $Report.logs.report -Encoding UTF8
 }
 
 function Add-CleanupError {
@@ -930,6 +1307,104 @@ function Stop-OwnedProcesses {
     return @($results)
 }
 
+function Copy-OwnedServiceLogs {
+    param(
+        [pscustomobject[]]$OwnedServices,
+        [object[]]$ProcessResults,
+        [string]$ArtifactDirectory
+    )
+
+    $artifactRoot = [System.IO.Path]::GetFullPath($ArtifactDirectory)
+    $artifactPrefix = $artifactRoot
+    if (-not $artifactPrefix.EndsWith([string][System.IO.Path]::DirectorySeparatorChar)) {
+        $artifactPrefix += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $archiveDirectory = [System.IO.Path]::GetFullPath((Join-Path $artifactRoot "owned-services"))
+    if (-not $archiveDirectory.StartsWith($artifactPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "owned service log archive must stay inside the run artifact directory"
+    }
+
+    $archive = [ordered]@{
+        schema = $ServiceLogArchiveSchema
+        schemaVersion = 1
+        attempted = @($OwnedServices).Count -gt 0
+        ok = $true
+        directory = $archiveDirectory
+        items = @()
+        errors = @()
+    }
+    if (@($OwnedServices).Count -eq 0) { return $archive }
+    New-Item -ItemType Directory -Path $archiveDirectory -Force | Out-Null
+
+    foreach ($service in @($OwnedServices)) {
+        $serviceName = [string]$service.name
+        $safeServiceName = [regex]::Replace($serviceName, '[^A-Za-z0-9._-]', '_')
+        if ([string]::IsNullOrWhiteSpace($safeServiceName)) { $safeServiceName = "service" }
+        $stopped = @($ProcessResults | Where-Object {
+            $_.name -eq $serviceName -and [int]$_.pid -eq [int]$service.pid -and
+            $_.result -in @("stopped", "already-stopped")
+        }).Count -gt 0
+
+        foreach ($stream in @("stdout", "stderr")) {
+            $sourceValue = $service.$stream
+            $sourcePath = if ($sourceValue) { [System.IO.Path]::GetFullPath([string]$sourceValue) } else { $null }
+            $archivePath = Join-Path $archiveDirectory "$safeServiceName.$stream.log"
+            $item = [ordered]@{
+                serviceName = $serviceName
+                pid = [int]$service.pid
+                stream = $stream
+                sourcePath = $sourcePath
+                archivePath = $archivePath
+                status = "missing"
+                reason = $null
+                sourceBytes = $null
+                archiveBytes = $null
+                archivedAt = $null
+            }
+
+            if (-not $stopped) {
+                $item.reason = "process-not-confirmed-stopped"
+            } elseif (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                $item.reason = "source-log-missing"
+            } else {
+                $lastError = $null
+                for ($attempt = 1; $attempt -le 20; $attempt++) {
+                    try {
+                        Copy-Item -LiteralPath $sourcePath -Destination $archivePath -Force -ErrorAction Stop
+                        $sourceLength = (Get-Item -LiteralPath $sourcePath -ErrorAction Stop).Length
+                        $archiveLength = (Get-Item -LiteralPath $archivePath -ErrorAction Stop).Length
+                        if ($sourceLength -ne $archiveLength) {
+                            throw "archived byte count $archiveLength differs from source byte count $sourceLength"
+                        }
+                        $item.status = "present"
+                        $item.sourceBytes = [long]$sourceLength
+                        $item.archiveBytes = [long]$archiveLength
+                        $item.archivedAt = Get-NowIso
+                        $lastError = $null
+                        break
+                    } catch {
+                        $lastError = $_.Exception.Message
+                        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+                        if ($attempt -lt 20) { Start-Sleep -Milliseconds 100 }
+                    }
+                }
+                if ($lastError) {
+                    $item.reason = "copy-failed"
+                    $archive.errors += [pscustomobject]@{
+                        serviceName = $serviceName
+                        stream = $stream
+                        message = $lastError
+                    }
+                }
+            }
+
+            if ($item.status -ne "present") { $archive.ok = $false }
+            $archive.items += [pscustomobject]$item
+        }
+    }
+    return $archive
+}
+
 function Test-LocalPortListening {
     param([int]$Port)
     return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -1002,13 +1477,18 @@ function Get-ClientDiagnostics {
     if ($text -match '(?m)^client_hash:\s*([0-9a-fA-F]+)') { $clientHash = $Matches[1].ToLowerInvariant() }
     if ($text -match '(?m)([a-z_]+) rejected by server:') { $failureStage = $Matches[1] }
     return [ordered]@{
+        errorCode = $null
         failureStage = $failureStage
         frame = $frame
+        firstMismatchFrame = if ($text -match '(?m)first mismatch frame ([0-9]+)') { [int]$Matches[1] } else { $null }
         serverHash = $serverHash
         clientHash = $clientHash
         entityDiff = Get-TextSection -Text $text -Start "entity diffs:" -End "event diffs:"
         eventDiff = Get-TextSection -Text $text -Start "event diffs:" -End "inputs:"
         inputDiff = Get-TextSection -Text $text -Start "inputs:" -End "__never_matches__"
+        entityDiffDetail = $null
+        eventDiffDetail = $null
+        inputDiffDetail = $null
         successEvidenceError = $null
     }
 }
@@ -1102,6 +1582,117 @@ function Get-MybevyTelemetryRecords {
     }
     if ($records.Count -eq 0) { throw "mybevy telemetry output is empty" }
     return @($records)
+}
+
+function New-ComparisonDiff {
+    param(
+        [AllowNull()][object]$Server,
+        [AllowNull()][object]$Client,
+        [bool]$ServerAvailable,
+        [bool]$ClientAvailable,
+        [string]$ServerLabel,
+        [string]$ClientLabel,
+        [string]$UnavailableReason
+    )
+    [object[]]$serverValues = @()
+    [object[]]$clientValues = @()
+    if ($ServerAvailable) { $serverValues = @($Server) } else { $serverValues = $null }
+    if ($ClientAvailable) { $clientValues = @($Client) } else { $clientValues = $null }
+    $equal = $null
+    if ($ServerAvailable -and $ClientAvailable) {
+        $serverJson = ConvertTo-Json -InputObject @($serverValues) -Depth 30 -Compress
+        $clientJson = ConvertTo-Json -InputObject @($clientValues) -Depth 30 -Compress
+        $equal = $serverJson -eq $clientJson
+    }
+    return [ordered]@{
+        status = if ($ServerAvailable -and $ClientAvailable) { "complete" } else { "not_available" }
+        equal = $equal
+        serverLabel = $ServerLabel
+        clientLabel = $ClientLabel
+        server = $serverValues
+        client = $clientValues
+        reason = if ($ServerAvailable -and $ClientAvailable) { $null } else { $UnavailableReason }
+    }
+}
+
+function Get-MybevyMismatchDetails {
+    param([object[]]$Records)
+    $mismatchRecords = @($Records | Where-Object {
+        $_.mismatch -eq $true -or
+        ($_.event -eq "run_failed" -and [string]$_.errorCode -match 'HASH_MISMATCH|ENTITY_MISMATCH|EVENT_MISMATCH|INPUT_MISMATCH')
+    })
+    if ($mismatchRecords.Count -eq 0) { return $null }
+
+    $firstFrame = @($mismatchRecords | Where-Object { $null -ne $_.frame } | ForEach-Object { [int]$_.frame } | Sort-Object | Select-Object -First 1)
+    if ($firstFrame.Count -ne 1) { return $null }
+    $frame = [int]$firstFrame[0]
+    $comparisonRecords = @($Records | Where-Object {
+        $_.event -eq "run_failed" -and $null -ne $_.comparison -and [int]$_.frame -eq $frame
+    } | Select-Object -First 1)
+
+    if ($comparisonRecords.Count -eq 0) {
+        $frameRecord = @($mismatchRecords | Where-Object { [int]$_.frame -eq $frame } | Select-Object -First 1)
+        return [ordered]@{
+            firstMismatchFrame = $frame
+            serverHash = if ($frameRecord.Count -eq 1 -and $frameRecord[0].serverHash) { [string]$frameRecord[0].serverHash.hex } else { $null }
+            clientHash = if ($frameRecord.Count -eq 1 -and $frameRecord[0].localHash) { [string]$frameRecord[0].localHash.hex } else { $null }
+            inputDiff = New-UnavailableDiff -Reason "comparison telemetry was not emitted for the first mismatch frame"
+            entityDiff = New-UnavailableDiff -Reason "server entity snapshot is not available for the first mismatch frame"
+            eventDiff = New-UnavailableDiff -Reason "comparison telemetry was not emitted for the first mismatch frame"
+            comparisonSchema = $null
+            comparisonStatus = "not_available"
+        }
+    }
+
+    $record = $comparisonRecords[0]
+    $comparison = $record.comparison
+    if ($comparison.schema -ne "mybevy.lockstep.mismatch-comparison" -or [int]$comparison.schemaVersion -ne 1) {
+        throw "mybevy mismatch comparison schema mismatch"
+    }
+    if ([int]$comparison.frame -ne $frame) {
+        throw "mybevy mismatch comparison does not describe the first mismatch frame"
+    }
+    $unavailable = @($comparison.unavailable)
+    $serverInputsAvailable = $unavailable -notcontains "server_inputs"
+    $serverEntitiesAvailable = $unavailable -notcontains "server_entities"
+    $serverEventsAvailable = $unavailable -notcontains "server_events"
+    $clientInputsAvailable = $unavailable -notcontains "client_inputs"
+    $clientEntitiesAvailable = $unavailable -notcontains "client_entities"
+    $clientEventsAvailable = $unavailable -notcontains "client_events"
+    $inputDiff = New-ComparisonDiff `
+        -Server $comparison.server.inputs `
+        -Client $comparison.client.inputs `
+        -ServerAvailable $serverInputsAvailable `
+        -ClientAvailable $clientInputsAvailable `
+        -ServerLabel "server_authority" `
+        -ClientLabel "client_replay" `
+        -UnavailableReason "server/client input comparison is not available"
+    $entityDiff = New-ComparisonDiff `
+        -Server $comparison.server.entities `
+        -Client $comparison.client.entities `
+        -ServerAvailable $serverEntitiesAvailable `
+        -ClientAvailable $clientEntitiesAvailable `
+        -ServerLabel "server_authority" `
+        -ClientLabel "client_replay" `
+        -UnavailableReason "server entity snapshot is not available for this online frame"
+    $eventDiff = New-ComparisonDiff `
+        -Server $comparison.server.events.items `
+        -Client $comparison.client.events.items `
+        -ServerAvailable $serverEventsAvailable `
+        -ClientAvailable $clientEventsAvailable `
+        -ServerLabel "server_authority" `
+        -ClientLabel "client_replay" `
+        -UnavailableReason "server/client event comparison is not available"
+    return [ordered]@{
+        firstMismatchFrame = $frame
+        serverHash = if ($comparison.server.hash) { [string]$comparison.server.hash.hex } else { $null }
+        clientHash = if ($comparison.client.hash) { [string]$comparison.client.hash.hex } else { $null }
+        inputDiff = $inputDiff
+        entityDiff = $entityDiff
+        eventDiff = $eventDiff
+        comparisonSchema = [string]$comparison.schema
+        comparisonStatus = if ($unavailable.Count -eq 0) { "complete" } else { "partial" }
+    }
 }
 
 function Get-MybevySuccessEvidence {
@@ -1710,30 +2301,57 @@ function Get-MybevyClientDiagnostics {
     $diagnostics = [ordered]@{
         errorCode = $null
         failureStage = $null
+        sourceFailureStage = $null
         frame = $null
+        firstMismatchFrame = $null
         serverHash = $null
         clientHash = $null
         entityDiff = $null
         eventDiff = $null
         inputDiff = $null
+        entityDiffDetail = $null
+        eventDiffDetail = $null
+        inputDiffDetail = $null
+        comparisonSchema = $null
+        comparisonStatus = $null
         successEvidenceError = $null
     }
     try {
         $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
-        $failure = @($records | Where-Object { $_.event -eq "run_failed" } | Select-Object -Last 1)
+        $failure = @($records | Where-Object { $_.event -eq "run_failed" } | Select-Object -First 1)
         if ($failure.Count -gt 0) {
             $diagnostics.errorCode = [string]$failure[0].errorCode
             $diagnostics.failureStage = [string]$failure[0].failureStage
+            $diagnostics.sourceFailureStage = [string]$failure[0].failureStage
             if ($null -ne $failure[0].frame) { $diagnostics.frame = [int]$failure[0].frame }
             $diagnostics.entityDiff = @($failure[0].entities) | ConvertTo-Json -Depth 12 -Compress
         }
-        $frameRecord = @($records | Where-Object { $_.event -eq "frame" } | Select-Object -Last 1)
+        $frameRecord = if ($failure.Count -gt 0 -and $null -ne $failure[0].frame) {
+            @($records | Where-Object { $_.event -eq "frame" -and [int]$_.frame -eq [int]$failure[0].frame } | Select-Object -First 1)
+        } else {
+            @($records | Where-Object { $_.event -eq "frame" } | Select-Object -Last 1)
+        }
         if ($frameRecord.Count -gt 0) {
             if ($null -eq $diagnostics.frame) { $diagnostics.frame = [int]$frameRecord[0].frame }
             if ($frameRecord[0].serverHash) { $diagnostics.serverHash = [string]$frameRecord[0].serverHash.hex }
             if ($frameRecord[0].localHash) { $diagnostics.clientHash = [string]$frameRecord[0].localHash.hex }
             $diagnostics.eventDiff = @($frameRecord[0].events.items) | ConvertTo-Json -Depth 12 -Compress
             $diagnostics.inputDiff = @($frameRecord[0].inputs) | ConvertTo-Json -Depth 12 -Compress
+        }
+        $mismatch = Get-MybevyMismatchDetails -Records $records
+        if ($mismatch) {
+            $diagnostics.firstMismatchFrame = [int]$mismatch.firstMismatchFrame
+            $diagnostics.frame = [int]$mismatch.firstMismatchFrame
+            $diagnostics.serverHash = $mismatch.serverHash
+            $diagnostics.clientHash = $mismatch.clientHash
+            $diagnostics.inputDiffDetail = $mismatch.inputDiff
+            $diagnostics.entityDiffDetail = $mismatch.entityDiff
+            $diagnostics.eventDiffDetail = $mismatch.eventDiff
+            $diagnostics.inputDiff = $mismatch.inputDiff | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.entityDiff = $mismatch.entityDiff | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.eventDiff = $mismatch.eventDiff | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.comparisonSchema = $mismatch.comparisonSchema
+            $diagnostics.comparisonStatus = $mismatch.comparisonStatus
         }
     } catch {
         $diagnostics.failureStage = "telemetry_parse"
@@ -1757,6 +2375,7 @@ function Get-MybevyDualClientDiagnostics {
             $_.event -eq "frame" -and $_.clientRole -eq "passive_replay" -and [int]$_.frame -eq $frame
         } | Select-Object -Last 1)
         $diagnostics.frame = $frame
+        $diagnostics.firstMismatchFrame = $frame
         if ($activeFrame.Count -eq 1 -and $passiveFrame.Count -eq 1) {
             $diagnostics.serverHash = [string]$activeFrame[0].serverHash.hex
             $diagnostics.clientHash = "active=$($activeFrame[0].localHash.hex);passive=$($passiveFrame[0].localHash.hex)"
@@ -1772,6 +2391,22 @@ function Get-MybevyDualClientDiagnostics {
                 active = @($activeFrame[0].inputs)
                 passive = @($passiveFrame[0].inputs)
             } | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.entityDiffDetail = New-ComparisonDiff `
+                -Server $activeFrame[0].entities -Client $passiveFrame[0].entities `
+                -ServerAvailable $true -ClientAvailable $true `
+                -ServerLabel "active_client" -ClientLabel "passive_client" `
+                -UnavailableReason ""
+            $diagnostics.eventDiffDetail = New-ComparisonDiff `
+                -Server $activeFrame[0].events.items -Client $passiveFrame[0].events.items `
+                -ServerAvailable $true -ClientAvailable $true `
+                -ServerLabel "active_client" -ClientLabel "passive_client" `
+                -UnavailableReason ""
+            $diagnostics.inputDiffDetail = New-ComparisonDiff `
+                -Server $activeFrame[0].inputs -Client $passiveFrame[0].inputs `
+                -ServerAvailable $true -ClientAvailable $true `
+                -ServerLabel "active_client" -ClientLabel "passive_client" `
+                -UnavailableReason ""
+            $diagnostics.comparisonStatus = "complete"
         }
     } catch {
         $diagnostics.failureStage = "telemetry_parse"
@@ -1940,9 +2575,20 @@ function Invoke-SelfTests {
             throw "self-test: mybevy command assembly is incomplete"
         }
         if ($mybevyCommand -match 'secret-ticket-value') { throw "self-test: mybevy command leaked ticket value" }
+        if ($mybevyArgs -contains "--offline") { throw "self-test: mybevy execute command unexpectedly forced Cargo offline" }
         $mybevyDryArgs = New-ClientArguments -Stage $mybevyDefinition -Mode "dry-run"
         if ($mybevyDryArgs -contains "--ticket-env" -or $mybevyDryArgs -contains "--endpoint" -or $mybevyDryArgs -notcontains "offline-fixture") {
             throw "self-test: mybevy dry-run command is not network-free"
+        }
+        if ($mybevyDryArgs -contains "--offline") { throw "self-test: mybevy dry-run command assembly changed unexpectedly" }
+        $diagnosticDefinition = New-DiagnosticFixtureDefinition
+        $diagnosticArgs = New-ClientArguments -Stage $diagnosticDefinition -Mode "diagnostic-fixture"
+        $diagnosticCommand = Format-Command -Executable "cargo" -Arguments $diagnosticArgs
+        if ($diagnosticArgs -notcontains "--offline" -or
+            $diagnosticArgs -contains "--ticket-env" -or
+            $diagnosticArgs -contains "--endpoint" -or
+            $diagnosticCommand -notmatch '--inject-mismatch-frame 3') {
+            throw "self-test: diagnostic fixture command is not Cargo-offline and network-free"
         }
         $dualDefinition = (New-StageDefinitions -Checks @("dual-client") -CurrentRunId $testRunId)[0]
         $dualArgs = New-ClientArguments -Stage $dualDefinition -Mode "execute"
@@ -2137,6 +2783,231 @@ function Invoke-SelfTests {
     if ($mismatchDiagnostics.errorCode -ne "HEADLESS_SNAPSHOT_CONFIG_HASH_MISMATCH" -or
         $mismatchDiagnostics.failureStage -ne "snapshot_config_validation") {
         throw "self-test: mybevy recovery mismatch diagnostics lost stable code or stage"
+    }
+
+    $comparisonServer = [ordered]@{
+        hash = [ordered]@{ hex = "1111" }
+        inputs = @([ordered]@{ characterId = "chr-a"; entityId = 1000; sequence = 3; command = "stop" })
+        entities = @([ordered]@{ entityId = 1000; fixedPositionMilli = [ordered]@{ x = 300; y = 0 }; hp = 100; alive = $true })
+        events = [ordered]@{ items = @([ordered]@{ kind = "skill_cast"; sequence = 3 }) }
+    }
+    $comparisonClient = [ordered]@{
+        hash = [ordered]@{ hex = "2222" }
+        inputs = @([ordered]@{ characterId = "chr-a"; entityId = 1000; sequence = 3; command = "move" })
+        entities = @([ordered]@{ entityId = 1000; fixedPositionMilli = [ordered]@{ x = 301; y = 0 }; hp = 99; alive = $true })
+        events = [ordered]@{ items = @([ordered]@{ kind = "damage_applied"; sequence = 3 }) }
+    }
+    $newMismatchRecord = {
+        param([int]$Frame, [bool]$WithComparison)
+        $record = [ordered]@{
+            schema = "mybevy.lockstep.telemetry"
+            schemaVersion = 1
+            event = if ($WithComparison) { "run_failed" } else { "frame" }
+            frame = $Frame
+            mismatch = $true
+            serverHash = [ordered]@{ hex = "1111" }
+            localHash = [ordered]@{ hex = "2222" }
+            errorCode = "HEADLESS_HASH_MISMATCH"
+            failureStage = "frame_compare"
+            inputs = @()
+            entities = @()
+            events = [ordered]@{ items = @() }
+        }
+        if ($WithComparison) {
+            $record.comparison = [ordered]@{
+                schema = "mybevy.lockstep.mismatch-comparison"
+                schemaVersion = 1
+                frame = $Frame
+                server = $comparisonServer
+                client = $comparisonClient
+                unavailable = @()
+            }
+        }
+        return $record
+    }
+    $detailedMismatchRecords = @(
+        (& $newMismatchRecord 4 $true),
+        (& $newMismatchRecord 3 $false),
+        (& $newMismatchRecord 3 $true)
+    )
+    $detailedMismatchStdout = @($detailedMismatchRecords | ForEach-Object { $_ | ConvertTo-Json -Depth 30 -Compress }) -join "`n"
+    $detailedMismatch = Get-MybevyClientDiagnostics -Stdout $detailedMismatchStdout -Stderr ""
+    if ($detailedMismatch.firstMismatchFrame -ne 3 -or
+        $detailedMismatch.frame -ne 3 -or
+        $detailedMismatch.serverHash -ne "1111" -or
+        $detailedMismatch.clientHash -ne "2222" -or
+        $detailedMismatch.comparisonStatus -ne "complete" -or
+        $detailedMismatch.inputDiffDetail.status -ne "complete" -or
+        $detailedMismatch.inputDiffDetail.equal -ne $false -or
+        $detailedMismatch.entityDiffDetail.equal -ne $false -or
+        $detailedMismatch.eventDiffDetail.equal -ne $false -or
+        $detailedMismatch.inputDiffDetail.server -isnot [System.Array] -or
+        $detailedMismatch.eventDiffDetail.server -isnot [System.Array] -or
+        @($detailedMismatch.entityDiffDetail.server).Count -ne 1 -or
+        @($detailedMismatch.entityDiffDetail.client).Count -ne 1) {
+        throw "self-test: detailed mismatch parser did not preserve the first frame and both comparison sides"
+    }
+
+    $failureStageCases = @(
+        [pscustomobject]@{ source = "connect"; code = "HEADLESS_CONNECT_FAILED"; expected = "connect" },
+        [pscustomobject]@{ source = "login"; code = "HEADLESS_LOGIN_FAILED"; expected = "authentication" },
+        [pscustomobject]@{ source = "room_join"; code = "HEADLESS_ROOM_JOIN_REJECTED"; expected = "room_join" },
+        [pscustomobject]@{ source = "room_ready"; code = "HEADLESS_ROOM_READY_REJECTED"; expected = "room_ready" },
+        [pscustomobject]@{ source = "room_start"; code = "HEADLESS_ROOM_START_REJECTED"; expected = "room_start" },
+        [pscustomobject]@{ source = "room_reconnect"; code = "HEADLESS_ROOM_RECONNECT_REJECTED"; expected = "room_reconnect" },
+        [pscustomobject]@{ source = "observer_recovery"; code = "HEADLESS_OBSERVER_RECOVERY_TIMEOUT"; expected = "observer_recovery" },
+        [pscustomobject]@{ source = "snapshot_schema_validation"; code = "HEADLESS_SNAPSHOT_SCHEMA_VERSION_MISMATCH"; expected = "snapshot_validation" },
+        [pscustomobject]@{ source = "snapshot_restore"; code = "HEADLESS_SNAPSHOT_RESTORE_FAILED"; expected = "snapshot_restore" },
+        [pscustomobject]@{ source = "payload_validation"; code = "HEADLESS_PAYLOAD_FIELD_INCOMPATIBLE"; expected = "payload_validation" },
+        [pscustomobject]@{ source = "cleanup"; code = "WRAPPER_CLEANUP_FAILED"; expected = "cleanup" },
+        [pscustomobject]@{ source = "unknown"; code = "UNCLASSIFIED"; expected = "orchestration" }
+    )
+    foreach ($case in $failureStageCases) {
+        $actualStage = Get-NormalizedFailureStage -SourceStage $case.source -ErrorCode $case.code -Message ""
+        if ($actualStage -ne $case.expected) {
+            throw "self-test: failure stage $($case.source)/$($case.code) classified as $actualStage instead of $($case.expected)"
+        }
+    }
+
+    $diagnosticIndex = New-DiagnosticIndex
+    $configMatches = Get-DiagnosticMatches -Index $diagnosticIndex -FailureStage "snapshot_validation" -ErrorCode "HEADLESS_SNAPSHOT_CONFIG_HASH_MISMATCH"
+    $policyMatches = Get-DiagnosticMatches -Index $diagnosticIndex -FailureStage "room_join" -ErrorCode "ROOM_POLICY_MISMATCH"
+    if (@($configMatches.entryIds) -notcontains "config-hash" -or @($policyMatches.entryIds) -notcontains "policy-mismatch") {
+        throw "self-test: diagnostic index lookup did not return config or policy guidance"
+    }
+
+    $artifactFixtureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver-lockstep-artifacts-$([Guid]::NewGuid().ToString('N'))"
+    $serviceSourceDirectory = Join-Path $artifactFixtureDirectory "service-source"
+    $serviceArchiveDirectory = Join-Path $artifactFixtureDirectory "owned-services"
+    $savedArtifactClient = $script:Client
+    $savedArtifactRunId = $script:RunId
+    try {
+        New-Item -ItemType Directory -Path $artifactFixtureDirectory | Out-Null
+        $script:RunId = $testRunId
+        $script:Client = "lockstep-client"
+        $lockstepDefinition = (New-StageDefinitions -Checks @("move") -CurrentRunId $testRunId)[0]
+        $lockstepReport = New-RunReport -Mode "dry-run" -Definitions @($lockstepDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $lockstepArtifacts = New-ArtifactIndex -Report $lockstepReport
+        if (@($lockstepArtifacts.items | Where-Object { $_.id -eq "move-lockstep-output" -and $_.status -eq "missing" }).Count -ne 1 -or
+            @($lockstepArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "not-applicable" }).Count -ne 0) {
+            throw "self-test: lockstep-client artifact applicability is incorrect"
+        }
+        if (@($lockstepArtifacts.items | Where-Object { $_.kind -in @("myserver-log", "owned-service-log") -and $_.status -ne "not-applicable" }).Count -ne 0) {
+            throw "self-test: unowned service logs were not marked not-applicable"
+        }
+
+        New-Item -ItemType Directory -Path $serviceSourceDirectory | Out-Null
+        $gameServerSourceStdout = Join-Path $serviceSourceDirectory "game-server.out.log"
+        $gameServerSourceStderr = Join-Path $serviceSourceDirectory "game-server.err.log"
+        Set-Content -LiteralPath $gameServerSourceStdout -Value "game-server-stdout-fixture" -Encoding ASCII
+        Set-Content -LiteralPath $gameServerSourceStderr -Value "game-server-stderr-fixture" -Encoding ASCII
+        $ownedGameServerFixture = [pscustomobject]@{
+            name = "game-server"
+            pid = 41002
+            stdout = $gameServerSourceStdout
+            stderr = $gameServerSourceStderr
+        }
+        $serviceArchive = Copy-OwnedServiceLogs `
+            -OwnedServices @($ownedGameServerFixture) `
+            -ProcessResults @([pscustomobject]@{ name = "game-server"; pid = 41002; result = "stopped" }) `
+            -ArtifactDirectory $artifactFixtureDirectory
+        $archivedGameStdout = @($serviceArchive.items | Where-Object { $_.serviceName -eq "game-server" -and $_.stream -eq "stdout" })
+        if (-not $serviceArchive.attempted -or -not $serviceArchive.ok -or
+            @($serviceArchive.items | Where-Object { $_.status -ne "present" }).Count -ne 0 -or
+            $archivedGameStdout.Count -ne 1 -or
+            (Get-Content -LiteralPath $archivedGameStdout[0].archivePath -Raw) -ne (Get-Content -LiteralPath $gameServerSourceStdout -Raw) -or
+            $archivedGameStdout[0].sourceBytes -ne $archivedGameStdout[0].archiveBytes) {
+            throw "self-test: owned game-server logs were not archived with preserved content"
+        }
+        $archiveReport = New-RunReport -Mode "dry-run" -Definitions @($lockstepDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $archiveReport.ownership.startRequested = $true
+        $archiveReport.ownership.services = @($ownedGameServerFixture)
+        $archiveReport.logs.serviceArchive = $serviceArchive
+        $archiveArtifacts = New-ArtifactIndex -Report $archiveReport
+        $gameLogArtifacts = @($archiveArtifacts.items | Where-Object { $_.id -like "myserver-game-server-*" })
+        if ($gameLogArtifacts.Count -ne 2 -or
+            @($gameLogArtifacts | Where-Object { $_.status -ne "present" }).Count -ne 0 -or
+            @($gameLogArtifacts | Where-Object { -not $_.path.StartsWith($serviceArchiveDirectory, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0 -or
+            @($gameLogArtifacts | Where-Object { -not $_.sourcePath.StartsWith($serviceSourceDirectory, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
+            throw "self-test: artifact index did not point at archived owned game-server logs"
+        }
+
+        $missingNatsFixture = [pscustomobject]@{
+            name = "nats"
+            pid = 41001
+            stdout = Join-Path $serviceSourceDirectory "missing-nats.out.log"
+            stderr = Join-Path $serviceSourceDirectory "missing-nats.err.log"
+        }
+        $missingServiceArchive = Copy-OwnedServiceLogs `
+            -OwnedServices @($missingNatsFixture) `
+            -ProcessResults @([pscustomobject]@{ name = "nats"; pid = 41001; result = "already-stopped" }) `
+            -ArtifactDirectory $artifactFixtureDirectory
+        $missingArchiveReport = New-RunReport -Mode "dry-run" -Definitions @($lockstepDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $missingArchiveReport.ownership.services = @($missingNatsFixture)
+        $missingArchiveReport.logs.serviceArchive = $missingServiceArchive
+        $missingArtifacts = New-ArtifactIndex -Report $missingArchiveReport
+        if ($missingServiceArchive.ok -or
+            @($missingServiceArchive.items | Where-Object { $_.status -ne "missing" -or $_.reason -ne "source-log-missing" }).Count -ne 0 -or
+            @($missingArtifacts.items | Where-Object { $_.id -like "owned-service-nats-*" -and $_.status -eq "missing" }).Count -ne 2) {
+            throw "self-test: missing owned service log semantics are incorrect"
+        }
+
+        $script:Client = "mybevy"
+        $visualDefinition = (New-StageDefinitions -Checks @("visual-smoke") -CurrentRunId $testRunId)[0]
+        $visualReport = New-RunReport -Mode "dry-run" -Definitions @($visualDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $visualArtifacts = New-ArtifactIndex -Report $visualReport
+        if (@($visualArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -eq "missing" }).Count -ne 4 -or
+            @($visualArtifacts.items | Where-Object { $_.id -eq "mybevy-visual-smoke-jsonl" -and $_.status -ne "not-applicable" }).Count -ne 0) {
+            throw "self-test: visual artifact applicability is incorrect"
+        }
+        $visualFixturePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $artifactFixtureDirectory
+        foreach ($path in @($visualFixturePaths.onlineReport, $visualFixturePaths.onlineScreenshot, $visualFixturePaths.offlineReport, $visualFixturePaths.offlineScreenshot)) {
+            Set-Content -LiteralPath $path -Value "fixture" -Encoding ASCII
+        }
+        $visualArtifacts = New-ArtifactIndex -Report $visualReport
+        if (@($visualArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "present" }).Count -ne 0) {
+            throw "self-test: present visual artifacts were not indexed"
+        }
+
+        $singleDefinition = (New-StageDefinitions -Checks @("single-client") -CurrentRunId $testRunId)[0]
+        $singleReport = New-RunReport -Mode "dry-run" -Definitions @($singleDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        Set-Content -LiteralPath (Join-Path $artifactFixtureDirectory "mybevy-single-client.stdout.log") -Value '{}' -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $artifactFixtureDirectory "mybevy-single-client.stderr.log") -Value '' -Encoding ASCII
+        $singleArtifacts = New-ArtifactIndex -Report $singleReport
+        if (@($singleArtifacts.items | Where-Object { $_.id -eq "mybevy-single-client-jsonl" -and $_.status -eq "present" }).Count -ne 1) {
+            throw "self-test: mybevy JSONL artifact was not indexed"
+        }
+    } finally {
+        $script:Client = $savedArtifactClient
+        $script:RunId = $savedArtifactRunId
+        foreach ($directory in @($serviceSourceDirectory, $serviceArchiveDirectory)) {
+            Get-ChildItem -LiteralPath $directory -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        }
+        Get-ChildItem -LiteralPath $artifactFixtureDirectory -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $artifactFixtureDirectory -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $artifactFixtureDirectory) {
+            throw "self-test: artifact applicability fixture remains after cleanup"
+        }
+    }
+
+    $savedRedactionTicket = Get-EnvironmentValue -Name $TicketEnvVar
+    try {
+        Set-ProcessEnvironmentValue -Name $TicketEnvVar -Value "secret-ticket-value"
+        $redactedDiagnostic = Protect-SensitiveText -Text "ticket=secret-ticket-value redis://user:password@127.0.0.1:6379/0?token=query-secret eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signaturevalue"
+        if ($redactedDiagnostic -match 'secret-ticket-value|user:password|query-secret|eyJhbGci') {
+            throw "self-test: diagnostic redaction leaked a ticket, Redis credential, query token, or JWT"
+        }
+        if ($redactedDiagnostic -notmatch '\[REDACTED_JWT\]') {
+            throw "self-test: diagnostic redaction did not replace a JWT-shaped value"
+        }
+        $schemaText = @($ReportSchema, $ArtifactIndexSchema, $TriageSchema, $DiagnosticIndexSchema) -join "`n"
+        $protectedSchemaText = Protect-SensitiveText -Text $schemaText
+        if ($protectedSchemaText -ne $schemaText -or $protectedSchemaText -match '\[REDACTED_JWT\]') {
+            throw "self-test: diagnostic redaction changed a machine-readable schema"
+        }
+    } finally {
+        Set-ProcessEnvironmentValue -Name $TicketEnvVar -Value $savedRedactionTicket
     }
     $visualEvidenceDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver visual evidence $([Guid]::NewGuid().ToString('N'))"
     $visualEvidencePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $visualEvidenceDirectory
@@ -2472,19 +3343,19 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-dual-command-assembly", "mybevy-reconnect-observer-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-dual-telemetry-parser", "mybevy-reconnect-observer-telemetry-parser", "mybevy-reconnect-observer-input-rejection", "mybevy-recovery-mismatch-diagnostics", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-dual-command-assembly", "mybevy-reconnect-observer-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "diagnostic-cargo-offline", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-dual-telemetry-parser", "mybevy-reconnect-observer-telemetry-parser", "mybevy-reconnect-observer-input-rejection", "mybevy-recovery-mismatch-diagnostics", "mybevy-first-mismatch-comparison", "failure-stage-classification", "diagnostic-index-lookup", "artifact-applicability", "owned-service-log-archive", "diagnostic-redaction", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
-$modeCount = @(@($DryRun, $Execute, $SelfTest) | Where-Object { $_.IsPresent }).Count
+$modeCount = @(@($DryRun, $Execute, $SelfTest, $DiagnosticFixture) | Where-Object { $_.IsPresent }).Count
 if ($modeCount -gt 1) {
-    throw "Use only one of -DryRun, -Execute, or -SelfTest."
+    throw "Use only one of -DryRun, -Execute, -SelfTest, or -DiagnosticFixture."
 }
 
 if (-not $RunId) { $RunId = New-RunId }
 if (-not $ArtifactRoot) { $ArtifactRoot = Join-Path $ProjectRoot "logs\lockstep-online" }
 $checks = @(Get-NormalizedChecks)
-$mode = if ($SelfTest) { "self-test" } elseif ($Execute) { "execute" } elseif ($DryRun) { "dry-run" } else { "plan" }
+$mode = if ($SelfTest) { "self-test" } elseif ($DiagnosticFixture) { "diagnostic-fixture" } elseif ($Execute) { "execute" } elseif ($DryRun) { "dry-run" } else { "plan" }
 Assert-RunOptions -Mode $mode -Checks $checks
 
 if ($SelfTest) {
@@ -2492,7 +3363,7 @@ if ($SelfTest) {
     exit 0
 }
 
-$definitions = @(New-StageDefinitions -Checks $checks -CurrentRunId $RunId)
+$definitions = if ($mode -eq "diagnostic-fixture") { @(New-DiagnosticFixtureDefinition) } else { @(New-StageDefinitions -Checks $checks -CurrentRunId $RunId) }
 if ($mode -eq "plan") {
     $plan = New-RunReport -Mode "plan" -Definitions $definitions -ArtifactDirectory ""
     $plan["plan"] = [ordered]@{
@@ -2504,6 +3375,7 @@ if ($mode -eq "plan") {
         cleanup = "Only exact keys and PIDs owned by this run; no wildcard delete, FLUSH, database reset, or broad stop."
     }
     $plan.endedAt = Get-NowIso
+    Update-ReportDerivedFields -Report $plan
     $plan | ConvertTo-Json -Depth 40
     exit 0
 }
@@ -2529,9 +3401,14 @@ $environmentNamesToRestore = @(
 foreach ($name in $environmentNamesToRestore) {
     $savedEnvironment[$name] = Get-EnvironmentValue -Name $name
 }
+foreach ($name in @($TicketEnvVar, $ObserverTicketEnvVar, $TicketSecretEnvVar, "TICKET_SECRET") | Select-Object -Unique) {
+    $value = Get-EnvironmentValue -Name $name
+    if (-not [string]::IsNullOrWhiteSpace($value)) { $SensitiveValues += $value }
+}
 
 try {
     if ($mode -eq "execute") {
+        $report.provenance.networkUsed = $true
         Set-ProcessEnvironmentValue -Name $RedisRuntimeEnvVar -Value $RedisUrl
         $observerRequired = @($definitions | Where-Object { $_.observerProbe -or $_.dualClient -or $_.reconnectObserver }).Count -gt 0
 
@@ -2542,6 +3419,7 @@ try {
                 Set-ProcessEnvironmentValue -Name $TicketSecretEnvVar -Value $secret
                 $report.ticket.ephemeralSecretGenerated = $true
             }
+            $SensitiveValues += $secret
         } else {
             if ([string]::IsNullOrWhiteSpace((Get-EnvironmentValue -Name $TicketEnvVar))) {
                 throw "External ticket environment variable $TicketEnvVar is missing or empty."
@@ -2603,6 +3481,7 @@ try {
             }
             Set-ProcessEnvironmentValue -Name $TicketEnvVar -Value ([string]$provision.primary.ticket)
             Set-ProcessEnvironmentValue -Name $ObserverTicketEnvVar -Value ([string]$provision.observer.ticket)
+            $SensitiveValues += @([string]$provision.primary.ticket, [string]$provision.observer.ticket)
             $ownedRedisEntries = @($provision.entries | ForEach-Object {
                 [pscustomobject]@{ key = [string]$_.key; expectedValue = [string]$_.expectedValue; kind = [string]$_.kind }
             })
@@ -2656,7 +3535,7 @@ try {
     $lastDiagnostics = if ($lastStage.Count -gt 0) { $lastStage[0].diagnostics } else { $null }
     $report.status = "failed"
     $report.failure = [ordered]@{
-        message = $_.Exception.Message
+        message = Protect-SensitiveText -Text $_.Exception.Message
         stage = if ($lastDiagnostics -and $lastDiagnostics.failureStage) { $lastDiagnostics.failureStage } elseif ($lastStage.Count -gt 0) { $lastStage[0].name } elseif ($activeStage) { $activeStage.name } else { "orchestration" }
         roomId = if ($lastStage.Count -gt 0) { $lastStage[0].roomId } elseif ($activeStage) { $activeStage.roomId } else { $null }
         ticketSource = $report.ticket.source
@@ -2805,6 +3684,23 @@ try {
 
             if ($ownedServices.Count -gt 0) {
                 try {
+                    $report.logs.serviceArchive = Copy-OwnedServiceLogs `
+                        -OwnedServices $ownedServices `
+                        -ProcessResults @($report.cleanup.processes.results) `
+                        -ArtifactDirectory $artifactDirectory
+                    if (-not $report.logs.serviceArchive.ok) {
+                        Add-CleanupError -Report $report -Stage "archive-owned-service-logs" -Message "one or more run-owned service logs were not archived"
+                    }
+                } catch {
+                    $report.logs.serviceArchive.attempted = $true
+                    $report.logs.serviceArchive.ok = $false
+                    $report.logs.serviceArchive.errors += [pscustomobject]@{ message = $_.Exception.Message }
+                    Add-CleanupError -Report $report -Stage "archive-owned-service-logs" -Message $_.Exception.Message
+                }
+            }
+
+            if ($ownedServices.Count -gt 0) {
+                try {
                     $report.cleanup.ports = @(Get-OwnedPortChecks -OwnedServices $ownedServices)
                     if (@($report.cleanup.ports | Where-Object { $_.listeningAfterCleanup }).Count -gt 0) {
                         Add-CleanupError -Report $report -Stage "check-owned-ports" -Message "one or more run-owned service ports are still listening"
@@ -2852,7 +3748,8 @@ try {
         $pidFileSafe = $ownedServices.Count -eq 0 -or $report.cleanup.pidFile.removed -or $report.cleanup.pidFile.reason -eq "not-present"
         $report.cleanup.ok = [bool](
             $report.cleanup.ok -and $report.cleanup.redis.ok -and $report.cleanup.registry.ok -and
-            $report.cleanup.processes.ok -and $report.cleanup.environment.ok -and $portsClear -and $pidFileSafe
+            $report.cleanup.processes.ok -and $report.cleanup.environment.ok -and
+            $report.logs.serviceArchive.ok -and $portsClear -and $pidFileSafe
         )
         if (-not $report.cleanup.ok -and $report.status -eq "passed") {
             $report.status = "failed"
@@ -2884,5 +3781,28 @@ try {
 
 Write-Host "Lockstep online reconciliation status: $($report.status)"
 Write-Host "Report: $($report.logs.report)"
+if ($mode -eq "diagnostic-fixture") {
+    Update-ReportDerivedFields -Report $report
+    $fixtureStage = @($report.stages | Where-Object { $_.name -eq "mybevy-diagnostic-fixture" } | Select-Object -First 1)
+    if ($fixtureStage.Count -ne 1 -or
+        $fixtureStage[0].processExitCode -ne 2 -or
+        $report.triage.errorCode -ne "HEADLESS_HASH_MISMATCH" -or
+        $report.triage.failureStage -ne "hash_compare" -or
+        $report.triage.firstMismatchFrame -ne 3 -or
+        $report.triage.inputDiff.status -ne "complete" -or
+        $report.triage.entityDiff.status -ne "complete" -or
+        $report.triage.eventDiff.status -ne "complete" -or
+        $report.triage.serverHash -eq $report.triage.clientHash) {
+        throw "diagnostic fixture did not produce the expected detailed first-mismatch triage"
+    }
+    $missingApplicableArtifacts = @($report.artifacts.items | Where-Object { $_.status -eq "missing" })
+    if ($missingApplicableArtifacts.Count -gt 0) {
+        throw "diagnostic fixture artifact index contains missing applicable artifacts: $(@($missingApplicableArtifacts.id) -join ', ')"
+    }
+    $report.provenance.verified = $true
+    Save-RunReport -Report $report
+    Write-Host "Diagnostic fixture verified as synthetic and network-free."
+    exit 0
+}
 if ($runError -or $report.status -eq "failed") { exit 1 }
 exit 0
