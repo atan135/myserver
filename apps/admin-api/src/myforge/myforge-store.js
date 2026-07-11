@@ -374,9 +374,17 @@ export class MyforgeStore {
     return { agent, staleConnection: !agent };
   }
 
-  async markAgentOffline({ agentId, connectionId, disconnectedAt = new Date() }) {
+  async markAgentOffline({
+    agentId,
+    connectionId,
+    disconnectedAt = new Date(),
+    failureReason = "agent_disconnected"
+  }) {
     if (!connectionId) {
       throw createMyforgeStoreError("INVALID_REQUEST", "connectionId is required");
+    }
+    if (!new Set(["agent_disconnected", "server_shutdown"]).has(failureReason)) {
+      throw createMyforgeStoreError("INVALID_REQUEST", "failureReason is invalid");
     }
     return this.withTransaction(async (client) => {
       const { rows: agentRows } = await client.query(
@@ -396,11 +404,14 @@ export class MyforgeStore {
          SET status = 'failed',
              queue_reason = NULL,
              error_code = CASE
+               WHEN cancel_requested_at IS NULL AND $4 = 'server_shutdown' THEN 'MYFORGE_SERVER_RESTARTED'
                WHEN cancel_requested_at IS NULL THEN 'MYFORGE_AGENT_DISCONNECTED'
                ELSE 'MYFORGE_CANCEL_UNCONFIRMED'
              END,
              error_message = CASE
+               WHEN cancel_requested_at IS NULL AND $4 = 'server_shutdown' THEN 'Admin API stopped before the task completed'
                WHEN cancel_requested_at IS NULL THEN 'Agent disconnected before the task completed'
+               WHEN $4 = 'server_shutdown' THEN 'Cancellation was not confirmed before the Admin API stopped'
                ELSE 'Cancellation was not confirmed before the agent disconnected'
              END,
              completed_at = $2,
@@ -409,11 +420,11 @@ export class MyforgeStore {
            AND status IN ('dispatched', 'running')
            AND connection_id = $3
          RETURNING *`,
-        params
+        [...params, failureReason]
       );
       for (const row of taskRows) {
         await this.appendLifecycleAudit(client, "myforge_task_fail", toTask(row), {
-          details: { reason: "agent_disconnected" }
+          details: { reason: failureReason }
         });
       }
       const agent = toAgent(agentRows[0]);

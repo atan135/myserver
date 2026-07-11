@@ -9,3 +9,4 @@ export const ADMIN_GAME_ADMIN_CLIENT = Symbol("ADMIN_GAME_ADMIN_CLIENT");
 export const ADMIN_METRICS = Symbol("ADMIN_METRICS");
 export const ADMIN_REGISTRY = Symbol("ADMIN_REGISTRY");
 export const MYFORGE_STORE = Symbol("MYFORGE_STORE");
+export const MYFORGE_GATEWAY = Symbol("MYFORGE_GATEWAY");

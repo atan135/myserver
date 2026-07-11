@@ -9,13 +9,15 @@ import { AppModule } from "./app.module.js";
 import { registerControlPlaneSecurityHook } from "./common/control-plane-security.js";
 import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { configureLogger, log } from "./logger.js";
+import { registerMyforgeWebsocket } from "./myforge/myforge-websocket.js";
 import {
   ADMIN_CONFIG,
   ADMIN_DB_POOL,
   ADMIN_METRICS,
   ADMIN_NATS,
   ADMIN_REDIS,
-  ADMIN_REGISTRY
+  ADMIN_REGISTRY,
+  MYFORGE_GATEWAY
 } from "./tokens.js";
 
 export async function createNestApp() {
@@ -36,6 +38,8 @@ export async function createNestApp() {
 
   const fastify = app.getHttpAdapter().getInstance();
   registerControlPlaneSecurityHook(fastify, config);
+  const myforgeGateway = app.get<any>(MYFORGE_GATEWAY, { strict: false });
+  await registerMyforgeWebsocket(fastify, myforgeGateway, config);
   fastify.addHook("onRequest", async (request: any) => {
     request.metricsStartedAt = Date.now();
   });
@@ -57,12 +61,24 @@ export async function createNestApp() {
   return app;
 }
 
-export async function closeNestApp(app: INestApplication) {
+export async function closeNestApp(
+  app: INestApplication,
+  { skipMyforgeShutdown = false }: { skipMyforgeShutdown?: boolean } = {}
+) {
   const metrics = app.get<any>(ADMIN_METRICS, { strict: false });
   const registryClient = app.get<any>(ADMIN_REGISTRY, { strict: false });
   const redis = app.get<any>(ADMIN_REDIS, { strict: false });
   const nats = app.get<any>(ADMIN_NATS, { strict: false });
   const pool = app.get<any>(ADMIN_DB_POOL, { strict: false });
+  const myforgeGateway = app.get<any>(MYFORGE_GATEWAY, { strict: false });
+
+  if (!skipMyforgeShutdown) {
+    try {
+      await myforgeGateway?.shutdown?.();
+    } catch (error: any) {
+      log("error", "shutdown.myforge_gateway_failed", { error: error.message });
+    }
+  }
 
   try {
     await metrics?.stop?.();

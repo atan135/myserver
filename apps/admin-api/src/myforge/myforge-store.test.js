@@ -809,6 +809,7 @@ test("myforge agent offline transition fails only the selected connection and au
       result: ({ sql, params }) => {
         assert.match(sql, /connection_id = \$3/);
         assert.equal(params[2], CONNECTION_ID);
+        assert.equal(params[3], "agent_disconnected");
         return { rows: [failed], rowCount: 1 };
       }
     },
@@ -822,6 +823,53 @@ test("myforge agent offline transition fails only the selected connection and au
   assert.equal(result.failedTasks.length, 1);
   assert.equal(result.failedTasks[0].errorCode, "MYFORGE_AGENT_DISCONNECTED");
   assert.equal(result.staleConnection, false);
+  client.assertDone();
+});
+
+test("myforge server shutdown preserves CAS and marks active work as server-restarted", async () => {
+  const failed = taskRow({
+    status: "failed",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_digest: DIGEST_A,
+    command_expires_at: new Date(NOW.getTime() + 60000),
+    dispatched_at: NOW,
+    error_code: "MYFORGE_SERVER_RESTARTED",
+    error_message: "Admin API stopped before the task completed",
+    completed_at: NOW
+  });
+  let auditDetails;
+  const { client, pool } = transactionClient([
+    {
+      pattern: /^UPDATE myforge_agents SET status = 'offline'/,
+      result: { rows: [agentRow()], rowCount: 1 }
+    },
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'failed'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /MYFORGE_SERVER_RESTARTED/);
+        assert.equal(params[2], CONNECTION_ID);
+        assert.equal(params[3], "server_shutdown");
+        return { rows: [failed], rowCount: 1 };
+      }
+    },
+    {
+      pattern: /^INSERT INTO admin_audit_logs/,
+      result: ({ params }) => {
+        auditDetails = JSON.parse(params[4]);
+        return { rows: [], rowCount: 1 };
+      }
+    }
+  ]);
+  const result = await new MyforgeStore(pool).markAgentOffline({
+    agentId: "dev-pc-001",
+    connectionId: CONNECTION_ID,
+    disconnectedAt: NOW,
+    failureReason: "server_shutdown"
+  });
+  assert.equal(result.failedTasks[0].errorCode, "MYFORGE_SERVER_RESTARTED");
+  assert.equal(auditDetails.reason, "server_shutdown");
   client.assertDone();
 });
 

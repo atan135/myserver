@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 src/auth/jwt-auth.guard.test.js src/auth/roles.guard.test.js src/ban-utils.test.js src/common/control-plane-security.test.js src/config.test.js src/game-admin-client.test.js src/global-id/global-id.controller.test.js src/gm/gm.controller.test.js src/monitoring/monitoring.service.test.js src/myforge/myforge-store.test.js src/players/players.controller.test.js src/registry-client.test.js"
+    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 src/auth/jwt-auth.guard.test.js src/auth/roles.guard.test.js src/ban-utils.test.js src/common/control-plane-security.test.js src/config.test.js src/game-admin-client.test.js src/global-id/global-id.controller.test.js src/gm/gm.controller.test.js src/main-shutdown.test.js src/monitoring/monitoring.service.test.js src/myforge/myforge-store.test.js src/myforge/protocol.test.js src/myforge/schemas.test.js src/myforge/myforge-websocket.test.js src/players/players.controller.test.js src/registry-client.test.js"
   },
   "dependencies": {
     "@fastify/static": "^9.1.3",
+    "@fastify/websocket": "^11.3.0",
     "@nestjs/common": "^11.1.24",
     "@nestjs/core": "^11.1.24",
     "@nestjs/jwt": "^11.0.2",
@@ -28,5 +29,8 @@
     "rxjs": "^7.8.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
   }
 }

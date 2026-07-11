@@ -23,6 +23,7 @@ import { GlobalIdController } from "./global-id/global-id.controller.js";
 import { MonitoringController } from "./monitoring/monitoring.controller.js";
 import { MonitoringService } from "./monitoring/monitoring.service.js";
 import { MyforgeStore } from "./myforge/myforge-store.js";
+import { MyforgeWebsocketGateway } from "./myforge/myforge-websocket.js";
 import { HealthController } from "./health.controller.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
@@ -36,6 +37,7 @@ import {
   ADMIN_REGISTRY,
   ADMIN_SESSION_STORE,
   ADMIN_STORE,
+  MYFORGE_GATEWAY,
   MYFORGE_STORE
 } from "./tokens.js";
 
@@ -109,6 +111,15 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         await store.initializeKnownAgents(config.myforge.agents);
         return store;
       }
+    },
+    {
+      provide: MYFORGE_GATEWAY,
+      inject: [ADMIN_CONFIG, MYFORGE_STORE, ADMIN_STORE],
+      useFactory: (config: any, store: any, adminStore: any) => new MyforgeWebsocketGateway({
+        config: config.myforge,
+        store,
+        adminStore
+      })
     },
     {
       provide: ADMIN_SESSION_STORE,
