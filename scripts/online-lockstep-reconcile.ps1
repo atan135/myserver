@@ -757,15 +757,16 @@ function New-ArtifactIndex {
     }
 
     $visualRequested = @($Report.commands | Where-Object { $_.stage -eq "mybevy-visual-smoke" }).Count -gt 0
+    $visualApplicable = $Report.mode -eq "execute" -and $visualRequested
     $visualPaths = if ($artifactDirectory) { Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $artifactDirectory } else { $null }
     $visualOnlineReport = if ($visualPaths) { [string]$visualPaths.onlineReport } else { $null }
     $visualOnlineScreenshot = if ($visualPaths) { [string]$visualPaths.onlineScreenshot } else { $null }
     $visualOfflineReport = if ($visualPaths) { [string]$visualPaths.offlineReport } else { $null }
     $visualOfflineScreenshot = if ($visualPaths) { [string]$visualPaths.offlineScreenshot } else { $null }
-    $items += New-ArtifactItem -Id "visual-online-report" -Kind "visual-report" -Path $visualOnlineReport -Applicable $visualRequested
-    $items += New-ArtifactItem -Id "visual-online-screenshot" -Kind "screenshot" -Path $visualOnlineScreenshot -Applicable $visualRequested
-    $items += New-ArtifactItem -Id "visual-offline-report" -Kind "visual-report" -Path $visualOfflineReport -Applicable $visualRequested
-    $items += New-ArtifactItem -Id "visual-offline-screenshot" -Kind "screenshot" -Path $visualOfflineScreenshot -Applicable $visualRequested
+    $items += New-ArtifactItem -Id "visual-online-report" -Kind "visual-report" -Path $visualOnlineReport -Applicable $visualApplicable
+    $items += New-ArtifactItem -Id "visual-online-screenshot" -Kind "screenshot" -Path $visualOnlineScreenshot -Applicable $visualApplicable
+    $items += New-ArtifactItem -Id "visual-offline-report" -Kind "visual-report" -Path $visualOfflineReport -Applicable $visualApplicable
+    $items += New-ArtifactItem -Id "visual-offline-screenshot" -Kind "screenshot" -Path $visualOfflineScreenshot -Applicable $visualApplicable
 
     return [ordered]@{
         schema = $ArtifactIndexSchema
@@ -2954,19 +2955,27 @@ function Invoke-SelfTests {
 
         $script:Client = "mybevy"
         $visualDefinition = (New-StageDefinitions -Checks @("visual-smoke") -CurrentRunId $testRunId)[0]
-        $visualReport = New-RunReport -Mode "dry-run" -Definitions @($visualDefinition) -ArtifactDirectory $artifactFixtureDirectory
-        $visualArtifacts = New-ArtifactIndex -Report $visualReport
-        if (@($visualArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -eq "missing" }).Count -ne 4 -or
-            @($visualArtifacts.items | Where-Object { $_.id -eq "mybevy-visual-smoke-jsonl" -and $_.status -ne "not-applicable" }).Count -ne 0) {
-            throw "self-test: visual artifact applicability is incorrect"
+        $visualDryRunReport = New-RunReport -Mode "dry-run" -Definitions @($visualDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $visualDryRunArtifacts = New-ArtifactIndex -Report $visualDryRunReport
+        if (@($visualDryRunArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -eq "not-applicable" }).Count -ne 4 -or
+            @($visualDryRunArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "not-applicable" }).Count -ne 0 -or
+            @($visualDryRunArtifacts.items | Where-Object { $_.id -eq "mybevy-visual-smoke-jsonl" -and $_.status -ne "not-applicable" }).Count -ne 0) {
+            throw "self-test: dry-run visual artifacts were not marked not-applicable"
+        }
+        $visualExecuteReport = New-RunReport -Mode "execute" -Definitions @($visualDefinition) -ArtifactDirectory $artifactFixtureDirectory
+        $visualExecuteArtifacts = New-ArtifactIndex -Report $visualExecuteReport
+        if (@($visualExecuteArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -eq "missing" }).Count -ne 4 -or
+            @($visualExecuteArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "missing" }).Count -ne 0) {
+            throw "self-test: missing execute visual artifacts were not indexed"
         }
         $visualFixturePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $artifactFixtureDirectory
         foreach ($path in @($visualFixturePaths.onlineReport, $visualFixturePaths.onlineScreenshot, $visualFixturePaths.offlineReport, $visualFixturePaths.offlineScreenshot)) {
             Set-Content -LiteralPath $path -Value "fixture" -Encoding ASCII
         }
-        $visualArtifacts = New-ArtifactIndex -Report $visualReport
-        if (@($visualArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "present" }).Count -ne 0) {
-            throw "self-test: present visual artifacts were not indexed"
+        $visualExecuteArtifacts = New-ArtifactIndex -Report $visualExecuteReport
+        if (@($visualExecuteArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -eq "present" }).Count -ne 4 -or
+            @($visualExecuteArtifacts.items | Where-Object { $_.id -like "visual-*" -and $_.status -ne "present" }).Count -ne 0) {
+            throw "self-test: present execute visual artifacts were not indexed"
         }
 
         $singleDefinition = (New-StageDefinitions -Checks @("single-client") -CurrentRunId $testRunId)[0]
