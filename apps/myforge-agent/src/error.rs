@@ -7,7 +7,6 @@ pub enum ErrorCode {
     RootInvalid,
     CodexUnavailable,
     AuditorInvalid,
-    ConnectNotImplemented,
 }
 
 impl ErrorCode {
@@ -18,7 +17,6 @@ impl ErrorCode {
             Self::RootInvalid => "MYFORGE_ROOT_INVALID",
             Self::CodexUnavailable => "MYFORGE_CODEX_UNAVAILABLE",
             Self::AuditorInvalid => "MYFORGE_AUDITOR_INVALID",
-            Self::ConnectNotImplemented => "MYFORGE_CONNECT_NOT_IMPLEMENTED",
         }
     }
 }

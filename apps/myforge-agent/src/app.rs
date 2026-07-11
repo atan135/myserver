@@ -1,9 +1,14 @@
+use async_trait::async_trait;
 use clap::Parser;
 use serde::Serialize;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
+use crate::command::PendingCommandHandler;
 use crate::config::{AgentConfig, AgentLimits};
-use crate::error::{AgentError, ErrorCode};
+use crate::error::AgentError;
 use crate::preflight::{Capabilities, ForgeRootSummary, PreflightReport};
+use crate::runtime::ClientRuntime;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunIntent {
@@ -35,23 +40,86 @@ impl Cli {
     }
 }
 
+#[async_trait]
 pub trait Connector {
-    fn connect(&self, config: &AgentConfig, preflight: &PreflightReport) -> Result<(), AgentError>;
+    async fn connect(
+        &self,
+        config: &AgentConfig,
+        preflight: &PreflightReport,
+    ) -> Result<(), AgentError>;
 }
 
-pub struct PendingWebSocketConnector;
+pub struct WebSocketConnector {
+    runtime: ClientRuntime,
+}
 
-impl Connector for PendingWebSocketConnector {
-    fn connect(
-        &self,
-        _config: &AgentConfig,
-        _preflight: &PreflightReport,
-    ) -> Result<(), AgentError> {
-        Err(AgentError::new(
-            ErrorCode::ConnectNotImplemented,
-            "WebSocket transport is scheduled for the next implementation stage",
-        ))
+impl Default for WebSocketConnector {
+    fn default() -> Self {
+        Self {
+            runtime: ClientRuntime::new(Arc::new(PendingCommandHandler)),
+        }
     }
+}
+
+#[async_trait]
+impl Connector for WebSocketConnector {
+    async fn connect(
+        &self,
+        config: &AgentConfig,
+        preflight: &PreflightReport,
+    ) -> Result<(), AgentError> {
+        let shutdown = CancellationToken::new();
+        let signal_task = tokio::spawn(wait_for_shutdown(shutdown.clone()));
+        let result = self.runtime.run(config, preflight, shutdown.clone()).await;
+        shutdown.cancel();
+        signal_task.abort();
+        let _ = signal_task.await;
+        result
+    }
+}
+
+async fn wait_for_shutdown(shutdown: CancellationToken) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(signal) = terminate.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+            () = shutdown.cancelled() => (),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close};
+        let mut break_signal = ctrl_break().ok();
+        let mut close_signal = ctrl_close().ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(signal) = break_signal.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+            _ = async {
+                if let Some(signal) = close_signal.as_mut() {
+                    signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+            () = shutdown.cancelled() => (),
+        }
+    }
+    shutdown.cancel();
 }
 
 #[derive(Debug, Serialize)]
@@ -95,7 +163,7 @@ pub fn startup_summary<'a>(
     }
 }
 
-pub fn dispatch(
+pub async fn dispatch(
     intent: RunIntent,
     config: &AgentConfig,
     preflight: &PreflightReport,
@@ -118,7 +186,7 @@ pub fn dispatch(
             tracing::info!(connect = false, "local preflight check passed");
             Ok(())
         }
-        RunIntent::Connect => connector.connect(config, preflight),
+        RunIntent::Connect => connector.connect(config, preflight).await,
     }
 }
 
@@ -165,8 +233,9 @@ mod tests {
 
     struct CountingConnector(AtomicUsize);
 
+    #[async_trait]
     impl Connector for CountingConnector {
-        fn connect(
+        async fn connect(
             &self,
             _config: &AgentConfig,
             _preflight: &PreflightReport,
@@ -250,16 +319,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn check_mode_never_calls_connector() {
+    #[tokio::test]
+    async fn check_mode_never_calls_connector() {
         let (_directory, config) = config_fixture();
         let report = run_preflight(&config, &FakeProbe).unwrap();
         let connector = CountingConnector(AtomicUsize::new(0));
 
-        dispatch(RunIntent::Check, &config, &report, &connector).unwrap();
+        dispatch(RunIntent::Check, &config, &report, &connector)
+            .await
+            .unwrap();
         assert_eq!(connector.0.load(Ordering::SeqCst), 0);
 
-        dispatch(RunIntent::Connect, &config, &report, &connector).unwrap();
+        dispatch(RunIntent::Connect, &config, &report, &connector)
+            .await
+            .unwrap();
         assert_eq!(connector.0.load(Ordering::SeqCst), 1);
     }
 

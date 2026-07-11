@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::error::AgentError;
@@ -16,6 +17,7 @@ pub struct KeyMaterial {
     agent_signing_key: SigningKey,
     agent_verifying_key: VerifyingKey,
     server_verifying_key: VerifyingKey,
+    server_public_key_fingerprint: String,
 }
 
 impl std::fmt::Debug for KeyMaterial {
@@ -82,6 +84,13 @@ impl KeyMaterial {
                     "expected SPKI Ed25519 public key PEM",
                 )
             })?;
+        let server_der = server_verifying_key.to_public_key_der().map_err(|_| {
+            AgentError::config(
+                "MYFORGE_SERVER_PUBLIC_KEY_PATH",
+                "expected SPKI Ed25519 public key PEM",
+            )
+        })?;
+        let server_public_key_fingerprint = format!("{:x}", Sha256::digest(server_der.as_bytes()));
 
         if agent_signing_key.verifying_key() != agent_verifying_key {
             return Err(AgentError::config(
@@ -94,6 +103,7 @@ impl KeyMaterial {
             agent_signing_key,
             agent_verifying_key,
             server_verifying_key,
+            server_public_key_fingerprint,
         })
     }
 
@@ -107,6 +117,10 @@ impl KeyMaterial {
 
     pub fn server_verifying_key(&self) -> &VerifyingKey {
         &self.server_verifying_key
+    }
+
+    pub fn server_public_key_fingerprint(&self) -> &str {
+        &self.server_public_key_fingerprint
     }
 }
 

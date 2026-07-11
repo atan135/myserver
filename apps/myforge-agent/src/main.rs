@@ -1,12 +1,13 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use myforge_agent::app::{Cli, PendingWebSocketConnector, dispatch};
+use myforge_agent::app::{Cli, WebSocketConnector, dispatch};
 use myforge_agent::config::AgentConfig;
 use myforge_agent::logging::init_logging;
 use myforge_agent::preflight::{SystemCapabilityProbe, run_preflight};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => error.exit(),
@@ -36,8 +37,10 @@ fn main() -> ExitCode {
         cli.intent(),
         &config,
         &preflight,
-        &PendingWebSocketConnector,
-    ) {
+        &WebSocketConnector::default(),
+    )
+    .await
+    {
         tracing::error!(error_code = error.code().as_str(), error = %error, "agent stopped");
         return ExitCode::FAILURE;
     }
