@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -37,6 +38,238 @@ const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_PROXY_ADMIN_HOST",
   "GAME_PROXY_ADMIN_PORT"
 ];
+
+const MYFORGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MYFORGE_NUMERIC_LIMITS = Object.freeze({
+  MYFORGE_AUTH_TTL_MS: { key: "authTtlMs", fallback: 60000, min: 5000, max: 300000 },
+  MYFORGE_COMMAND_TTL_MS: { key: "commandTtlMs", fallback: 60000, min: 5000, max: 300000 },
+  MYFORGE_CLOCK_SKEW_MS: { key: "clockSkewMs", fallback: 5000, min: 0, max: 30000 },
+  MYFORGE_HEARTBEAT_INTERVAL_MS: { key: "heartbeatIntervalMs", fallback: 15000, min: 1000, max: 60000 },
+  MYFORGE_HEARTBEAT_TIMEOUT_MS: { key: "heartbeatTimeoutMs", fallback: 45000, min: 3000, max: 180000 },
+  MYFORGE_QUEUE_TTL_MS: { key: "queueTtlMs", fallback: 900000, min: 10000, max: 86400000 },
+  MYFORGE_COMMAND_TIMEOUT_MS: { key: "commandTimeoutMs", fallback: 120000, min: 1000, max: 1800000 },
+  MYFORGE_CANCEL_TIMEOUT_MS: { key: "cancelTimeoutMs", fallback: 10000, min: 1000, max: 30000 },
+  MYFORGE_MAX_OUTPUT_BYTES: { key: "maxOutputBytes", fallback: 1048576, min: 4096, max: 4194304 },
+  MYFORGE_WS_MAX_MESSAGE_BYTES: { key: "wsMaxMessageBytes", fallback: 16777216, min: 524288, max: 33554432 },
+  MYFORGE_WS_WRITE_TIMEOUT_MS: { key: "wsWriteTimeoutMs", fallback: 5000, min: 1000, max: 30000 }
+});
+
+function createMyforgeConfigError(name, reason) {
+  const error = new Error(`MYFORGE_CONFIG_INVALID: ${name} ${reason}`);
+  error.code = "MYFORGE_CONFIG_INVALID";
+  error.configName = name;
+  return error;
+}
+
+function trimAsciiWhitespace(value) {
+  return value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
+}
+
+export function strictBoolean(name, env, fallback = false) {
+  if (!Object.prototype.hasOwnProperty.call(env, name) || env[name] === undefined) {
+    return fallback;
+  }
+
+  const value = trimAsciiWhitespace(String(env[name]));
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw createMyforgeConfigError(name, "invalid boolean");
+}
+
+function strictInteger(name, env, { fallback, min, max }) {
+  if (!Object.prototype.hasOwnProperty.call(env, name) || env[name] === undefined) {
+    return fallback;
+  }
+
+  const raw = String(env[name]);
+  if (!/^[0-9]+$/.test(raw)) {
+    throw createMyforgeConfigError(name, "must be an unsigned decimal integer");
+  }
+
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw createMyforgeConfigError(name, `must be between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function requiredConfigText(name, env) {
+  const value = trimAsciiWhitespace(String(env[name] ?? ""));
+  if (!value) {
+    throw createMyforgeConfigError(name, "is required when MYFORGE_ENABLED=true");
+  }
+  return value;
+}
+
+function readPemFile(name, configuredPath, cwd, kind) {
+  const resolvedPath = path.resolve(cwd, configuredPath);
+  let pem;
+  try {
+    pem = fs.readFileSync(resolvedPath, "utf8");
+  } catch {
+    throw createMyforgeConfigError(name, "is not readable");
+  }
+
+  const normalized = pem.trim();
+  const header = kind === "private" ? "PRIVATE KEY" : "PUBLIC KEY";
+  if (!normalized.startsWith(`-----BEGIN ${header}-----`) ||
+      !normalized.endsWith(`-----END ${header}-----`)) {
+    const format = kind === "private" ? "PKCS#8" : "SPKI";
+    throw createMyforgeConfigError(name, `must contain an Ed25519 ${format} PEM key`);
+  }
+
+  try {
+    const key = kind === "private" ? crypto.createPrivateKey(pem) : crypto.createPublicKey(pem);
+    if (key.asymmetricKeyType !== "ed25519") {
+      throw new Error("wrong key type");
+    }
+    return { key, resolvedPath };
+  } catch {
+    const format = kind === "private" ? "PKCS#8" : "SPKI";
+    throw createMyforgeConfigError(name, `must contain an Ed25519 ${format} PEM key`);
+  }
+}
+
+function publicKeyFingerprint(publicKey) {
+  const der = publicKey.export({ format: "der", type: "spki" });
+  return crypto.createHash("sha256").update(der).digest("hex");
+}
+
+function parseKnownMyforgeAgents(env, cwd) {
+  const name = "MYFORGE_AGENT_PUBLIC_KEYS_JSON";
+  const raw = requiredConfigText(name, env);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw createMyforgeConfigError(name, "must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw createMyforgeConfigError(name, "must be a JSON object");
+  }
+
+  return Object.entries(parsed).map(([agentId, entry]) => {
+    if (!MYFORGE_ID_PATTERN.test(agentId)) {
+      throw createMyforgeConfigError(name, "contains an invalid agentId");
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw createMyforgeConfigError(name, `agent ${agentId} must be an object`);
+    }
+
+    const allowedFields = new Set(["projectId", "publicKeyPath", "label"]);
+    const unknownField = Object.keys(entry).find((field) => !allowedFields.has(field));
+    if (unknownField) {
+      throw createMyforgeConfigError(name, `agent ${agentId} contains unknown field ${unknownField}`);
+    }
+
+    const projectId = typeof entry.projectId === "string" ? entry.projectId : "";
+    if (!MYFORGE_ID_PATTERN.test(projectId)) {
+      throw createMyforgeConfigError(name, `agent ${agentId} contains an invalid projectId`);
+    }
+    const publicKeyPath = typeof entry.publicKeyPath === "string"
+      ? trimAsciiWhitespace(entry.publicKeyPath)
+      : "";
+    if (!publicKeyPath) {
+      throw createMyforgeConfigError(name, `agent ${agentId} publicKeyPath is required`);
+    }
+    const rawLabel = entry.label === undefined || entry.label === null
+      ? null
+      : typeof entry.label === "string" ? entry.label : null;
+    const label = rawLabel === null ? null : trimAsciiWhitespace(rawLabel);
+    if (entry.label !== undefined && entry.label !== null && (
+      !label ||
+      rawLabel === null ||
+      /[\u0000-\u001f\u007f]/.test(rawLabel) ||
+      Buffer.byteLength(label, "utf8") > 128
+    )) {
+      throw createMyforgeConfigError(
+        name,
+        `agent ${agentId} label must be 1 to 128 UTF-8 bytes without control characters`
+      );
+    }
+
+    const loaded = readPemFile(name, publicKeyPath, cwd, "public");
+    return {
+      agentId,
+      projectId,
+      label,
+      publicKeyPath: loaded.resolvedPath,
+      publicKey: loaded.key,
+      publicKeyFingerprint: publicKeyFingerprint(loaded.key)
+    };
+  });
+}
+
+function validateMyforgeLimitInvariants(limits) {
+  if (2 * limits.clockSkewMs >= limits.authTtlMs) {
+    throw createMyforgeConfigError("MYFORGE_CLOCK_SKEW_MS", "must satisfy 2 * clock skew < auth TTL");
+  }
+  if (2 * limits.clockSkewMs >= limits.commandTtlMs) {
+    throw createMyforgeConfigError("MYFORGE_CLOCK_SKEW_MS", "must satisfy 2 * clock skew < command TTL");
+  }
+  if (limits.heartbeatTimeoutMs < 2 * limits.heartbeatIntervalMs + limits.clockSkewMs) {
+    throw createMyforgeConfigError(
+      "MYFORGE_HEARTBEAT_TIMEOUT_MS",
+      "must be at least 2 * heartbeat interval + clock skew"
+    );
+  }
+  if (limits.cancelTimeoutMs > limits.commandTimeoutMs) {
+    throw createMyforgeConfigError("MYFORGE_CANCEL_TIMEOUT_MS", "must not exceed command timeout");
+  }
+  if (limits.wsWriteTimeoutMs >= limits.authTtlMs || limits.wsWriteTimeoutMs >= limits.commandTtlMs) {
+    throw createMyforgeConfigError("MYFORGE_WS_WRITE_TIMEOUT_MS", "must be less than auth TTL and command TTL");
+  }
+}
+
+export function createMyforgeServerConfig(env = process.env, cwd = process.cwd()) {
+  const enabled = strictBoolean("MYFORGE_ENABLED", env, false);
+  const limits = {};
+  for (const [name, definition] of Object.entries(MYFORGE_NUMERIC_LIMITS)) {
+    limits[definition.key] = strictInteger(name, env, definition);
+  }
+  validateMyforgeLimitInvariants(limits);
+
+  if (!enabled) {
+    return {
+      enabled,
+      ...limits,
+      serverPrivateKeyPath: null,
+      serverPublicKeyPath: null,
+      serverPrivateKey: null,
+      serverPublicKey: null,
+      serverPublicKeyFingerprint: null,
+      agents: [],
+      agentsById: new Map()
+    };
+  }
+
+  const privatePath = requiredConfigText("MYFORGE_SERVER_PRIVATE_KEY_PATH", env);
+  const publicPath = requiredConfigText("MYFORGE_SERVER_PUBLIC_KEY_PATH", env);
+  const privateKey = readPemFile("MYFORGE_SERVER_PRIVATE_KEY_PATH", privatePath, cwd, "private");
+  const publicKey = readPemFile("MYFORGE_SERVER_PUBLIC_KEY_PATH", publicPath, cwd, "public");
+  const derivedPublic = crypto.createPublicKey(privateKey.key).export({ format: "der", type: "spki" });
+  const configuredPublic = publicKey.key.export({ format: "der", type: "spki" });
+  if (!crypto.timingSafeEqual(derivedPublic, configuredPublic)) {
+    throw createMyforgeConfigError(
+      "MYFORGE_SERVER_PUBLIC_KEY_PATH",
+      "does not match MYFORGE_SERVER_PRIVATE_KEY_PATH"
+    );
+  }
+
+  const agents = parseKnownMyforgeAgents(env, cwd);
+  return {
+    enabled,
+    ...limits,
+    serverPrivateKeyPath: privateKey.resolvedPath,
+    serverPublicKeyPath: publicKey.resolvedPath,
+    serverPrivateKey: privateKey.key,
+    serverPublicKey: publicKey.key,
+    serverPublicKeyFingerprint: publicKeyFingerprint(publicKey.key),
+    agents,
+    agentsById: new Map(agents.map((agent) => [agent.agentId, agent]))
+  };
+}
 
 function parseCsv(value) {
   if (typeof value !== "string") return [];
@@ -248,6 +481,7 @@ export function getConfig() {
   const disallowLegacyDirectConfig = parseBoolean(process.env[DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME], false);
   const databaseUrl = process.env.DATABASE_URL || "postgresql://postgres:password@127.0.0.1:5432/myserver_auth";
   const dbPoolSize = parsePositiveInteger("DB_POOL_SIZE", process.env.DB_POOL_SIZE, 10);
+  const myforge = createMyforgeServerConfig(process.env, process.cwd());
   validateLegacyDirectConfig(
     "admin-api",
     LEGACY_DIRECT_CONFIG_ENV_NAMES,
@@ -345,7 +579,8 @@ export function getConfig() {
     ),
     initialAdminUsername: process.env.ADMIN_USERNAME || "admin",
     initialAdminPassword: process.env.ADMIN_PASSWORD || "AdminPass123!",
-    initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator"
+    initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator",
+    myforge
   };
 
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);

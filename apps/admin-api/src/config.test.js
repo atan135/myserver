@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -45,7 +46,22 @@ const CONFIG_ENV_KEYS = [
   "SERVICE_BIND_HOST",
   "SERVICE_PUBLIC_HOST",
   "SERVICE_ADVERTISED_HOST",
-  "HOST"
+  "HOST",
+  "MYFORGE_ENABLED",
+  "MYFORGE_SERVER_PRIVATE_KEY_PATH",
+  "MYFORGE_SERVER_PUBLIC_KEY_PATH",
+  "MYFORGE_AGENT_PUBLIC_KEYS_JSON",
+  "MYFORGE_AUTH_TTL_MS",
+  "MYFORGE_COMMAND_TTL_MS",
+  "MYFORGE_CLOCK_SKEW_MS",
+  "MYFORGE_HEARTBEAT_INTERVAL_MS",
+  "MYFORGE_HEARTBEAT_TIMEOUT_MS",
+  "MYFORGE_QUEUE_TTL_MS",
+  "MYFORGE_COMMAND_TIMEOUT_MS",
+  "MYFORGE_CANCEL_TIMEOUT_MS",
+  "MYFORGE_MAX_OUTPUT_BYTES",
+  "MYFORGE_WS_MAX_MESSAGE_BYTES",
+  "MYFORGE_WS_WRITE_TIMEOUT_MS"
 ];
 
 async function withEnv(env, fn) {
@@ -88,6 +104,229 @@ async function withCapturedWarnings(env, fn) {
     console.warn = originalWarn;
   }
 }
+
+async function withMyforgeKeyFixtures(fn) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "admin-api-myforge-keys-"));
+  const server = crypto.generateKeyPairSync("ed25519");
+  const otherServer = crypto.generateKeyPairSync("ed25519");
+  const agent = crypto.generateKeyPairSync("ed25519");
+  const wrongType = crypto.generateKeyPairSync("rsa", { modulusLength: 1024 });
+  const paths = {
+    serverPrivate: path.join(directory, "server-private.pem"),
+    serverPublic: path.join(directory, "server-public.pem"),
+    otherServerPublic: path.join(directory, "other-server-public.pem"),
+    agentPublic: path.join(directory, "agent-public.pem"),
+    wrongTypePublic: path.join(directory, "rsa-public.pem")
+  };
+  fs.writeFileSync(paths.serverPrivate, server.privateKey.export({ format: "pem", type: "pkcs8" }));
+  fs.writeFileSync(paths.serverPublic, server.publicKey.export({ format: "pem", type: "spki" }));
+  fs.writeFileSync(paths.otherServerPublic, otherServer.publicKey.export({ format: "pem", type: "spki" }));
+  fs.writeFileSync(paths.agentPublic, agent.publicKey.export({ format: "pem", type: "spki" }));
+  fs.writeFileSync(paths.wrongTypePublic, wrongType.publicKey.export({ format: "pem", type: "spki" }));
+
+  const enabledEnv = {
+    MYFORGE_ENABLED: "true",
+    MYFORGE_SERVER_PRIVATE_KEY_PATH: paths.serverPrivate,
+    MYFORGE_SERVER_PUBLIC_KEY_PATH: paths.serverPublic,
+    MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+      "dev-pc-001": {
+        projectId: "myforge-local",
+        publicKeyPath: paths.agentPublic,
+        label: "Development PC"
+      }
+    })
+  };
+
+  try {
+    await fn({ directory, paths, enabledEnv });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("admin-api myforge config is disabled by default without requiring key files", async () => {
+  await withEnv({}, (config) => {
+    assert.equal(config.myforge.enabled, false);
+    assert.equal(config.myforge.serverPrivateKey, null);
+    assert.deepEqual(config.myforge.agents, []);
+    assert.equal(config.myforge.authTtlMs, 60000);
+    assert.equal(config.myforge.commandTtlMs, 60000);
+    assert.equal(config.myforge.clockSkewMs, 5000);
+    assert.equal(config.myforge.heartbeatIntervalMs, 15000);
+    assert.equal(config.myforge.heartbeatTimeoutMs, 45000);
+    assert.equal(config.myforge.queueTtlMs, 900000);
+    assert.equal(config.myforge.commandTimeoutMs, 120000);
+    assert.equal(config.myforge.cancelTimeoutMs, 10000);
+    assert.equal(config.myforge.maxOutputBytes, 1048576);
+    assert.equal(config.myforge.wsMaxMessageBytes, 16777216);
+    assert.equal(config.myforge.wsWriteTimeoutMs, 5000);
+  });
+
+  await withEnv({
+    MYFORGE_ENABLED: "false",
+    MYFORGE_SERVER_PRIVATE_KEY_PATH: "missing.pem",
+    MYFORGE_AGENT_PUBLIC_KEYS_JSON: "not-json"
+  }, (config) => {
+    assert.equal(config.myforge.enabled, false);
+  });
+});
+
+test("admin-api myforge strict boolean accepts only the four documented values", async () => {
+  for (const [value, expected] of [["true", true], ["1", true], ["false", false], ["0", false]]) {
+    if (expected) {
+      await withMyforgeKeyFixtures(async ({ enabledEnv }) => {
+        await withEnv({ ...enabledEnv, MYFORGE_ENABLED: value }, (config) => {
+          assert.equal(config.myforge.enabled, true);
+        });
+      });
+    } else {
+      await withEnv({ MYFORGE_ENABLED: value }, (config) => {
+        assert.equal(config.myforge.enabled, false);
+      });
+    }
+  }
+
+  for (const value of ["", "TRUE", "False", "yes", "on", "tru"]) {
+    await assert.rejects(
+      withEnv({ MYFORGE_ENABLED: value }, () => {}),
+      (error) => error.code === "MYFORGE_CONFIG_INVALID" && /MYFORGE_ENABLED invalid boolean/.test(error.message)
+    );
+  }
+});
+
+test("admin-api myforge loads matching Ed25519 keys and computes agent fingerprints", async () => {
+  await withMyforgeKeyFixtures(async ({ enabledEnv, paths }) => {
+    await withEnv(enabledEnv, (config) => {
+      assert.equal(config.myforge.enabled, true);
+      assert.equal(config.myforge.serverPrivateKey.asymmetricKeyType, "ed25519");
+      assert.equal(config.myforge.serverPublicKey.asymmetricKeyType, "ed25519");
+      assert.equal(config.myforge.serverPrivateKeyPath, paths.serverPrivate);
+      assert.match(config.myforge.serverPublicKeyFingerprint, /^[0-9a-f]{64}$/);
+      assert.equal(config.myforge.agents.length, 1);
+      assert.equal(config.myforge.agents[0].agentId, "dev-pc-001");
+      assert.equal(config.myforge.agents[0].projectId, "myforge-local");
+      assert.match(config.myforge.agents[0].publicKeyFingerprint, /^[0-9a-f]{64}$/);
+      assert.equal(config.myforge.agentsById.get("dev-pc-001"), config.myforge.agents[0]);
+    });
+  });
+});
+
+test("admin-api myforge rejects missing, unreadable, malformed and mismatched key configuration", async () => {
+  await assert.rejects(
+    withEnv({ MYFORGE_ENABLED: "true" }, () => {}),
+    /MYFORGE_SERVER_PRIVATE_KEY_PATH is required/
+  );
+
+  await withMyforgeKeyFixtures(async ({ enabledEnv, paths }) => {
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_SERVER_PUBLIC_KEY_PATH: path.join(paths.serverPublic, "missing") }, () => {}),
+      /MYFORGE_SERVER_PUBLIC_KEY_PATH is not readable/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_SERVER_PUBLIC_KEY_PATH: paths.otherServerPublic }, () => {}),
+      /MYFORGE_SERVER_PUBLIC_KEY_PATH does not match MYFORGE_SERVER_PRIVATE_KEY_PATH/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: "{" }, () => {}),
+      /MYFORGE_AGENT_PUBLIC_KEYS_JSON must be valid JSON/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "bad agent": { projectId: "myforge-local", publicKeyPath: paths.agentPublic }
+      }) }, () => {}),
+      /contains an invalid agentId/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "dev-pc-001": {
+          projectId: "myforge-local",
+          publicKeyPath: paths.agentPublic,
+          unexpected: true
+        }
+      }) }, () => {}),
+      /contains unknown field unexpected/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "dev-pc-001": { projectId: "myforge-local", publicKeyPath: paths.wrongTypePublic }
+      }) }, () => {}),
+      /must contain an Ed25519 SPKI PEM key/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "dev-pc-001": {
+          projectId: "myforge-local",
+          publicKeyPath: paths.agentPublic,
+          label: "line one\nline two"
+        }
+      }) }, () => {}),
+      /label must be 1 to 128 UTF-8 bytes without control characters/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "dev-pc-001": {
+          projectId: "myforge-local",
+          publicKeyPath: paths.agentPublic,
+          label: "\nleading control"
+        }
+      }) }, () => {}),
+      /label must be 1 to 128 UTF-8 bytes without control characters/
+    );
+    await assert.rejects(
+      withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+        "dev-pc-001": {
+          projectId: "myforge-local",
+          publicKeyPath: paths.agentPublic,
+          label: "界".repeat(43)
+        }
+      }) }, () => {}),
+      /label must be 1 to 128 UTF-8 bytes without control characters/
+    );
+    await withEnv({ ...enabledEnv, MYFORGE_AGENT_PUBLIC_KEYS_JSON: JSON.stringify({
+      "dev-pc-001": {
+        projectId: "myforge-local",
+        publicKeyPath: paths.agentPublic,
+        label: "界".repeat(42)
+      }
+    }) }, (config) => {
+      assert.equal(Buffer.byteLength(config.myforge.agents[0].label, "utf8"), 126);
+    });
+  });
+});
+
+test("admin-api myforge numeric settings are strict, bounded, and satisfy cross-field invariants", async () => {
+  for (const [name, value] of [
+    ["MYFORGE_AUTH_TTL_MS", " 60000"],
+    ["MYFORGE_COMMAND_TTL_MS", "1e5"],
+    ["MYFORGE_CLOCK_SKEW_MS", "-1"],
+    ["MYFORGE_HEARTBEAT_INTERVAL_MS", "999"],
+    ["MYFORGE_HEARTBEAT_TIMEOUT_MS", "180001"],
+    ["MYFORGE_QUEUE_TTL_MS", "9999"],
+    ["MYFORGE_COMMAND_TIMEOUT_MS", "0"],
+    ["MYFORGE_CANCEL_TIMEOUT_MS", "30001"],
+    ["MYFORGE_MAX_OUTPUT_BYTES", "4095"],
+    ["MYFORGE_WS_MAX_MESSAGE_BYTES", "524287"],
+    ["MYFORGE_WS_WRITE_TIMEOUT_MS", "999"]
+  ]) {
+    await assert.rejects(
+      withEnv({ [name]: value }, () => {}),
+      (error) => error.code === "MYFORGE_CONFIG_INVALID" && error.configName === name
+    );
+  }
+
+  for (const env of [
+    { MYFORGE_AUTH_TTL_MS: "10000", MYFORGE_CLOCK_SKEW_MS: "5000" },
+    { MYFORGE_COMMAND_TTL_MS: "10000", MYFORGE_CLOCK_SKEW_MS: "5000" },
+    { MYFORGE_HEARTBEAT_INTERVAL_MS: "20000", MYFORGE_HEARTBEAT_TIMEOUT_MS: "44999" },
+    { MYFORGE_COMMAND_TIMEOUT_MS: "9999", MYFORGE_CANCEL_TIMEOUT_MS: "10000" },
+    { MYFORGE_AUTH_TTL_MS: "5000", MYFORGE_CLOCK_SKEW_MS: "0", MYFORGE_WS_WRITE_TIMEOUT_MS: "5000" }
+  ]) {
+    await assert.rejects(
+      withEnv(env, () => {}),
+      (error) => error.code === "MYFORGE_CONFIG_INVALID"
+    );
+  }
+});
 
 test("admin-api control plane security defaults stay local-development friendly", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {

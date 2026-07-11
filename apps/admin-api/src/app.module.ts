@@ -22,6 +22,7 @@ import { GmController } from "./gm/gm.controller.js";
 import { GlobalIdController } from "./global-id/global-id.controller.js";
 import { MonitoringController } from "./monitoring/monitoring.controller.js";
 import { MonitoringService } from "./monitoring/monitoring.service.js";
+import { MyforgeStore } from "./myforge/myforge-store.js";
 import { HealthController } from "./health.controller.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
@@ -34,7 +35,8 @@ import {
   ADMIN_REDIS,
   ADMIN_REGISTRY,
   ADMIN_SESSION_STORE,
-  ADMIN_STORE
+  ADMIN_STORE,
+  MYFORGE_STORE
 } from "./tokens.js";
 
 class GameDbPoolShutdown implements OnModuleDestroy {
@@ -97,6 +99,15 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         const adminStore = new AdminStore(pool, redis, config, gamePool);
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
+      }
+    },
+    {
+      provide: MYFORGE_STORE,
+      inject: [ADMIN_DB_POOL, ADMIN_CONFIG],
+      useFactory: async (pool: any, config: any) => {
+        const store = new MyforgeStore(pool, config.myforge);
+        await store.initializeKnownAgents(config.myforge.agents);
+        return store;
       }
     },
     {

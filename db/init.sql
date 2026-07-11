@@ -128,6 +128,126 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_target
 CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at
   ON admin_audit_logs (created_at);
 
+CREATE TABLE IF NOT EXISTS myforge_agents (
+  agent_id varchar(128) PRIMARY KEY,
+  project_id varchar(128) NOT NULL,
+  label varchar(128) NULL,
+  public_key_fingerprint varchar(64) NOT NULL,
+  configured boolean NOT NULL DEFAULT true,
+  status varchar(32) NOT NULL DEFAULT 'offline',
+  hostname varchar(255) NULL,
+  platform varchar(32) NULL,
+  agent_version varchar(64) NULL,
+  forge_root_summary_json jsonb NULL,
+  capabilities_json jsonb NULL,
+  limits_json jsonb NULL,
+  effective_limits_json jsonb NULL,
+  connection_id uuid NULL,
+  last_registered_at timestamptz NULL,
+  connected_at timestamptz NULL,
+  last_seen_at timestamptz NULL,
+  disconnected_at timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT current_timestamp,
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  CONSTRAINT ck_myforge_agents_agent_id CHECK (agent_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'),
+  CONSTRAINT ck_myforge_agents_project_id CHECK (project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'),
+  CONSTRAINT ck_myforge_agents_fingerprint CHECK (public_key_fingerprint ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT ck_myforge_agents_status CHECK (status IN ('online', 'offline')),
+  CONSTRAINT ck_myforge_agents_connection_status CHECK ((status = 'online') = (connection_id IS NOT NULL)),
+  CONSTRAINT ck_myforge_agents_root_summary CHECK (forge_root_summary_json IS NULL OR jsonb_typeof(forge_root_summary_json) = 'object'),
+  CONSTRAINT ck_myforge_agents_capabilities CHECK (capabilities_json IS NULL OR jsonb_typeof(capabilities_json) = 'object'),
+  CONSTRAINT ck_myforge_agents_limits CHECK (limits_json IS NULL OR jsonb_typeof(limits_json) = 'object'),
+  CONSTRAINT ck_myforge_agents_effective_limits CHECK (effective_limits_json IS NULL OR jsonb_typeof(effective_limits_json) = 'object')
+);
+
+ALTER TABLE myforge_agents
+  ADD COLUMN IF NOT EXISTS connection_id uuid NULL;
+
+CREATE INDEX IF NOT EXISTS idx_myforge_agents_configured_status
+  ON myforge_agents (configured, status, agent_id);
+CREATE INDEX IF NOT EXISTS idx_myforge_agents_project_id
+  ON myforge_agents (project_id, agent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_myforge_agents_connection_id
+  ON myforge_agents (connection_id)
+  WHERE connection_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS myforge_task_runs (
+  request_id uuid PRIMARY KEY,
+  task_type varchar(64) NOT NULL,
+  project_id varchar(128) NOT NULL,
+  agent_id varchar(128) NOT NULL,
+  status varchar(32) NOT NULL,
+  queue_reason varchar(32) NULL,
+  execution_mode varchar(32) NULL,
+  connection_id uuid NULL,
+  artifact_file varchar(512) NOT NULL,
+  consumer_target_file varchar(512) NULL,
+  rules_file varchar(512) NOT NULL,
+  prompt_json jsonb NOT NULL,
+  rendered_prompt text NOT NULL,
+  command_preview text NOT NULL,
+  command_digest varchar(64) NULL,
+  command_expires_at timestamptz NULL,
+  timeout_ms integer NOT NULL,
+  max_output_bytes integer NOT NULL,
+  stdout_preview text NULL,
+  stderr_preview text NULL,
+  stdout_bytes bigint NULL,
+  stderr_bytes bigint NULL,
+  stdout_truncated boolean NOT NULL DEFAULT false,
+  stderr_truncated boolean NOT NULL DEFAULT false,
+  exit_code integer NULL,
+  artifact_json jsonb NULL,
+  audit_json jsonb NULL,
+  result_digest varchar(64) NULL,
+  error_code varchar(64) NULL,
+  error_message text NULL,
+  created_by_admin_id bigint NULL,
+  created_by_admin_username varchar(64) NULL,
+  created_at timestamptz NOT NULL DEFAULT current_timestamp,
+  queue_expires_at timestamptz NOT NULL,
+  dispatched_at timestamptz NULL,
+  started_at timestamptz NULL,
+  cancel_requested_at timestamptz NULL,
+  cancel_deadline_at timestamptz NULL,
+  completed_at timestamptz NULL,
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  CONSTRAINT ck_myforge_tasks_type CHECK (task_type = 'fangyuan.blueprint.generate'),
+  CONSTRAINT ck_myforge_tasks_status CHECK (status IN ('queued', 'dispatched', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
+  CONSTRAINT ck_myforge_tasks_queue_reason CHECK (queue_reason IS NULL OR queue_reason IN ('agent_offline', 'agent_busy')),
+  CONSTRAINT ck_myforge_tasks_queue_reason_status CHECK (queue_reason IS NULL OR status = 'queued'),
+  CONSTRAINT ck_myforge_tasks_execution_mode CHECK (execution_mode IS NULL OR execution_mode IN ('codex_exec', 'dry_run')),
+  CONSTRAINT ck_myforge_tasks_prompt_json CHECK (jsonb_typeof(prompt_json) = 'object'),
+  CONSTRAINT ck_myforge_tasks_artifact_json CHECK (artifact_json IS NULL OR jsonb_typeof(artifact_json) = 'object'),
+  CONSTRAINT ck_myforge_tasks_audit_json CHECK (audit_json IS NULL OR jsonb_typeof(audit_json) = 'object'),
+  CONSTRAINT ck_myforge_tasks_error_code CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+  CONSTRAINT ck_myforge_tasks_timeout CHECK (timeout_ms BETWEEN 1000 AND 1800000),
+  CONSTRAINT ck_myforge_tasks_max_output CHECK (max_output_bytes BETWEEN 4096 AND 4194304),
+  CONSTRAINT ck_myforge_tasks_stdout_bytes CHECK (stdout_bytes IS NULL OR stdout_bytes >= 0),
+  CONSTRAINT ck_myforge_tasks_stderr_bytes CHECK (stderr_bytes IS NULL OR stderr_bytes >= 0),
+  CONSTRAINT ck_myforge_tasks_command_digest CHECK (command_digest IS NULL OR command_digest ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT ck_myforge_tasks_result_digest CHECK (result_digest IS NULL OR result_digest ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT ck_myforge_tasks_cancel_pair CHECK ((cancel_requested_at IS NULL) = (cancel_deadline_at IS NULL)),
+  CONSTRAINT ck_myforge_tasks_cancel_order CHECK (cancel_deadline_at IS NULL OR cancel_deadline_at >= cancel_requested_at),
+  CONSTRAINT ck_myforge_tasks_queue_expiry CHECK (queue_expires_at >= created_at),
+  CONSTRAINT ck_myforge_tasks_completion CHECK ((status IN ('completed', 'completed_with_errors', 'failed', 'cancelled')) = (completed_at IS NOT NULL)),
+  CONSTRAINT ck_myforge_tasks_dispatch_fields CHECK (
+    (connection_id IS NULL AND execution_mode IS NULL AND command_digest IS NULL AND command_expires_at IS NULL AND dispatched_at IS NULL)
+    OR
+    (connection_id IS NOT NULL AND execution_mode IS NOT NULL AND command_digest IS NOT NULL AND command_expires_at IS NOT NULL AND dispatched_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_myforge_tasks_agent_status_created
+  ON myforge_task_runs (agent_id, status, created_at, request_id);
+CREATE INDEX IF NOT EXISTS idx_myforge_tasks_project_created
+  ON myforge_task_runs (project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_myforge_tasks_created_at
+  ON myforge_task_runs (created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_myforge_tasks_agent_active
+  ON myforge_task_runs (agent_id)
+  WHERE status IN ('dispatched', 'running');
+
 CREATE TABLE IF NOT EXISTS id_origins (
   origin_id smallint PRIMARY KEY CHECK (origin_id >= 0 AND origin_id <= 1023),
   origin_key varchar(64) NOT NULL UNIQUE,
