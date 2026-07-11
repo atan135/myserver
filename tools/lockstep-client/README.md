@@ -117,7 +117,7 @@ Keep bearer tickets out of shell arguments by using an environment variable:
 Real online movement replay:
 
 ```powershell
-$env:MYSERVER_LOCKSTEP_TICKET = "<character-bound-ticket>"
+# MYSERVER_LOCKSTEP_TICKET must already be set in the current process.
 cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
   --scenario move_straight `
   --server 127.0.0.1:7000 `
@@ -140,14 +140,26 @@ cargo run --manifest-path tools/lockstep-client/Cargo.toml -- --mode online `
 ## Automated local online reconciliation
 
 `scripts/online-lockstep-reconcile.ps1` is the reusable local orchestration
-entry point. A call without `-Execute` or `-DryRun` only prints a JSON plan. It
-does not create an artifact directory, read ticket values, start a process, or
-open a network connection:
+entry point. When none of `-Execute`, `-DryRun`, `-SelfTest`, or
+`-DiagnosticFixture` is supplied, it only prints a JSON plan. Plan mode does
+not create an artifact directory, read ticket values, start a process, or open
+a network connection:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
   -StartDevStack -ProvisionDevTickets
 ```
+
+The default client is `lockstep-client`; its accepted checks are `move`,
+`melee`, `observer`, and `all`. For `-Client mybevy`, the accepted checks are
+`single-client`, `dual-client`, `reconnect-observer`, `visual-smoke`, and
+`all`. The wrapper resolves the external repository from explicit
+`-ClientRoot`, then Process-level `MYSERVER_CLIENT_ROOT`, then User-level
+`MYSERVER_CLIENT_ROOT`. It does not read `local_help.txt`. The current mybevy
+Cargo manifest still uses `../../MyServer/packages/authority-core` and
+`../../MyServer/packages/sim-core`, so the environment variable is sufficient
+for the current sibling-repository layout only; a different layout also needs
+updated Cargo path dependencies.
 
 Run all three client packet plans without services or tickets:
 
@@ -165,15 +177,16 @@ default `-Check all` runs movement, melee, then observer recovery with a unique
 run id and a separate room id for each check.
 
 Real execution is intentionally gated by `-Execute`. Review the plan and obtain
-operator confirmation before using either example below. These commands are
-documented for a future confirmed run; this README does not assert that a real
-online run has passed.
+operator confirmation before using either example below. Verified run evidence
+and the current acceptance status are kept in
+`docs/游戏服与接入层/checklists/共享帧同步调试验证_checklist.md`; do not infer a
+fresh environment is ready solely from a historical passing run.
 
 External `auth-http` ticket path:
 
 ```powershell
-$env:MYSERVER_LOCKSTEP_TICKET = "<primary-character-ticket>"
-$env:MYSERVER_LOCKSTEP_OBSERVER_TICKET = "<different-observer-character-ticket>"
+# The current process must already expose MYSERVER_LOCKSTEP_TICKET and
+# MYSERVER_LOCKSTEP_OBSERVER_TICKET. Do not place either value in this command.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
   -Execute -StartDevStack -TicketSource auth-http-external
@@ -199,12 +212,8 @@ performs the authoritative signature, owner, expiry, and version checks.
 Ephemeral local dev ticket path:
 
 ```powershell
-$env:MYSERVER_LOCKSTEP_TICKET_SECRET = "<same-local-secret-used-by-game-server>"
-
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
   -Execute -StartDevStack -ProvisionDevTickets
-
-Remove-Item Env:MYSERVER_LOCKSTEP_TICKET_SECRET
 ```
 
 Provisioning is restricted to loopback Redis. It creates two character-bound
@@ -214,6 +223,80 @@ those four exact keys and refuses wildcard keys, unrelated key types, or values
 that no longer match this run. Neither ticket nor the signing secret is written
 to the command line, logs, or JSON report. The client reads them through
 `--ticket-env` and `--observer-ticket-env`.
+When the secret environment variable is absent, the wrapper generates an
+ephemeral signing secret inside its process and restores the prior environment
+after cleanup.
+
+### mybevy headless and visual checks
+
+First inspect the exact commands without files, ticket reads, processes, or
+network connections:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -Client mybevy -Check all `
+  -StartDevStack -ProvisionDevTickets `
+  -RunId <run-id>
+```
+
+Run the mybevy command plans through offline fixtures. This invokes Cargo and
+writes artifacts, but it does not open a network connection and cannot be
+combined with stack or ticket provisioning switches:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -DryRun -Client mybevy -Check all `
+  -RunId <run-id>
+```
+
+Dry-run does not launch the GUI or create the four visual reports/screenshots,
+so those artifacts are `not-applicable`. Require them to be `present` only for
+a real `-Execute -Check visual-smoke` acceptance run.
+
+After operator confirmation, run single-client, dual-client,
+reconnect/observer, and GUI visual smoke in one invocation:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -Execute -Client mybevy -Check all `
+  -StartDevStack -ProvisionDevTickets `
+  -RunId <run-id> `
+  -RedisKeyPrefix "lockstep-online:<run-id>:"
+```
+
+Use `-Check single-client,dual-client,reconnect-observer` to omit the GUI.
+External tickets are also supported: omit `-ProvisionDevTickets` and expose
+only the environment variable names `MYSERVER_LOCKSTEP_TICKET` and, when a
+second identity is needed, `MYSERVER_LOCKSTEP_OBSERVER_TICKET`. Never place a
+ticket value in the command. `-ClientRoot <path>` can override the configured
+root for one invocation.
+
+The headless binary emits `mybevy.lockstep.telemetry` version 1 as JSONL. Each
+record identifies `scene=arena.lockstep_sim`, room, policy, player, frame,
+server/local hashes, mismatch state, inputs, fixed-point entities, events, and
+replay recovery. Offline fixture hashes have source
+`offline_fixture_authority`; live results have source
+`my_server_authority`. A `mybevy.lockstep.mismatch-comparison` version 1 block
+is attached when both sides can be compared. Unavailable live server details
+are explicitly `not_available`, not reconstructed from client state.
+
+Exercise the failure archive without Redis, NATS, MyServer, tickets, or network
+access:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reconcile.ps1 `
+  -DiagnosticFixture -Client mybevy `
+  -RunId <run-id>
+```
+
+This mode deliberately injects a frame 3 mismatch. The report therefore has
+`status=failed`, `provenance.synthetic=true`,
+`representsLiveService=false`, and `networkUsed=false`; the wrapper exits zero
+only after the expected mismatch and all applicable artifacts are verified,
+then writes `provenance.verified=true`. `-DiagnosticFixture` is mutually
+exclusive with `-DryRun`, `-Execute`, `-SelfTest`, `-StartDevStack`,
+`-ProvisionDevTickets`, and `-SkipTicketRedisPreflight`. It is a diagnostic
+contract test, never evidence of a live server reconciliation.
 
 ### Local dependency matrix
 
@@ -262,11 +345,25 @@ Test, staging, and production consumers must continue to use Redis service
 registry endpoints. This wrapper deliberately accepts only a loopback TCP
 endpoint and is not a production deployment tool.
 
+### Automated coverage and manual smoke
+
+Automated reconciliation covers offline movement/stop/facing, melee and basic
+skill events, Buff/DoT fixtures, MyServer movement/melee/observer checks,
+mybevy single and dual clients, reconnect and read-only observer recovery,
+snapshot restore, server/local hashes, fixed entity state, inputs, events,
+build/protocol checks, and legacy `arena.robot_sync` regressions.
+
+The GUI stage automates report and screenshot capture, but a person must still
+inspect movement and facing, HUD readability, skill/hit feedback, damage
+numbers, Buff/DoT markers, death pose, and overall visual quality. Buff/DoT and
+death shown by the offline visual fixture do not prove that the live server
+emitted those events.
+
 ### Reports and cleanup
 
-Every `-DryRun` or `-Execute` invocation writes
+Every `-DryRun`, `-Execute`, or `-DiagnosticFixture` invocation writes
 `logs/lockstep-online/<run-id>/report.json`, plus separate stdout/stderr files
-for movement, melee, observer recovery, and dev-stack startup when selected.
+for each selected stage and dev-stack startup when selected.
 The report schema is `myserver.lockstep-online-reconcile.report.v1`. Redis URLs
 in plans and reports omit userinfo, query, and fragment fields. The report records
 room ids, masked ticket fingerprints, ticket source, endpoint, stage, frame,
@@ -277,6 +374,35 @@ value. Registry cleanup ownership includes its `planned`/`owned`/`cleaned`
 status, the confirmed game-server PID identity, exact instance/heartbeat keys,
 expected `data.id`, expected `data.name`, and heartbeat value. Ticket values,
 signing secrets, and Redis credentials are never included.
+
+The same `report.json` embeds three additional versioned indexes:
+
+- `artifacts` (`myserver.lockstep-online-reconcile.artifacts.v1`) lists every
+  expected report, command list, client JSONL/stdout/stderr, visual artifact,
+  and run-owned service log as `present`, `not-applicable`, or `missing`.
+- `triage` (`myserver.lockstep-online-reconcile.triage.v1`) normalizes the first
+  failure into connect, authentication, room join/ready/start,
+  reconnect/observer, snapshot, payload, hash comparison, cleanup, or
+  orchestration. Hash failures include the first mismatch frame, both hashes,
+  and input/entity/event diffs when available.
+- `diagnosticIndex`
+  (`myserver.lockstep-online-reconcile.diagnostic-index.v1`) maps common ticket,
+  policy, payload, config hash, snapshot/schema, hash, cleanup, and wrapper
+  errors to focused checks.
+
+Visual smoke additionally writes `mybevy-online-report.json`,
+`mybevy-online.png`, `offline-fixture-report.json`, and
+`mybevy-offline-fixture.png`. Logs from services actually started by the run
+are copied after their exact PID is stopped into
+`logs/lockstep-online/<run-id>/owned-services/`. Reused services remain
+operator-owned and do not receive fabricated owned-service artifacts.
+
+For a failure, start with `triage.errorCode`, `failureStage`, room and
+`firstMismatchFrame`; compare `serverHash`/`clientHash`, then follow
+`triage.relatedArtifacts` to the exact JSONL and service log. An applicable
+artifact marked `missing` is a collection failure in execute or diagnostic
+fixture mode; `not-applicable` is normal. Use `diagnosticEntryIds` and
+`suggestedChecks` before rerunning the full flow.
 
 `-Execute` always attempts cleanup in `finally`, including failed runs. It first
 stops the run-owned game-server, then compare-deletes ticket keys and atomically
@@ -449,6 +575,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/online-lockstep-reco
   `SIM_INPUT_DIR_OUT_OF_RANGE`, `SIM_INPUT_MOVE_DIR_ZERO`,
   `SIM_INPUT_SPEED_OUT_OF_RANGE`, and
   `SIM_INPUT_TARGET_ENTITY_ID_OUT_OF_RANGE`.
+- Wrapper or mybevy failure: open the run's `report.json` and follow `triage`
+  and `diagnosticIndex`. Do not treat a synthetic diagnostic fixture as live
+  evidence, and do not replace an online `not_available` server-side diff with
+  client-derived data.
 
 ## Updating finalHash
 
