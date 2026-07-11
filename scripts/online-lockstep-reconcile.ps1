@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("all", "move", "melee", "observer", "single-client", "visual-smoke")]
+    [ValidateSet("all", "move", "melee", "observer", "single-client", "dual-client", "visual-smoke")]
     [string[]]$Check = @("all"),
 
     [Parameter(Mandatory=$false)]
@@ -260,8 +260,8 @@ function Assert-RunOptions {
         throw "At least one check is required."
     }
     if ($Client -eq "mybevy") {
-        if (@($Checks | Where-Object { $_ -notin @("single-client", "visual-smoke") }).Count -gt 0) {
-            throw "-Client mybevy only supports -Check single-client, visual-smoke (or -Check all)."
+        if (@($Checks | Where-Object { $_ -notin @("single-client", "dual-client", "visual-smoke") }).Count -gt 0) {
+            throw "-Client mybevy only supports -Check single-client, dual-client, visual-smoke (or -Check all)."
         }
         if (-not $ConfiguredClientRoot) {
             throw "-Client mybevy requires -ClientRoot or MYSERVER_CLIENT_ROOT."
@@ -269,8 +269,8 @@ function Assert-RunOptions {
         if (-not (Test-Path -LiteralPath $MybevyManifestPath -PathType Leaf)) {
             throw "mybevy Cargo manifest not found under the configured client root."
         }
-    } elseif (@($Checks | Where-Object { $_ -in @("single-client", "visual-smoke") }).Count -gt 0) {
-        throw "-Check single-client and -Check visual-smoke require -Client mybevy."
+    } elseif (@($Checks | Where-Object { $_ -in @("single-client", "dual-client", "visual-smoke") }).Count -gt 0) {
+        throw "-Check single-client, dual-client, and visual-smoke require -Client mybevy."
     }
 }
 
@@ -278,7 +278,7 @@ function Get-NormalizedChecks {
     $requested = @($Check | ForEach-Object { $_.ToLowerInvariant() })
     if ($requested -contains "all") {
         if ($Client -eq "mybevy") {
-            return @("single-client", "visual-smoke")
+            return @("single-client", "dual-client", "visual-smoke")
         }
         return @("move", "melee", "observer")
     }
@@ -321,6 +321,17 @@ function New-StageDefinitions {
                     roomId = "lockstep-$CurrentRunId-mybevy"
                     observerProbe = $false
                     visualSmoke = $false
+                    dualClient = $false
+                }
+            }
+            "dual-client" {
+                $definitions += [pscustomobject]@{
+                    name = "mybevy-dual-client"
+                    scenario = "online-dual-client"
+                    roomId = "lockstep-$CurrentRunId-mybevy-dual"
+                    observerProbe = $false
+                    visualSmoke = $false
+                    dualClient = $true
                 }
             }
             "visual-smoke" {
@@ -330,6 +341,7 @@ function New-StageDefinitions {
                     roomId = "lockstep-$CurrentRunId-mybevy-gui"
                     observerProbe = $false
                     visualSmoke = $true
+                    dualClient = $false
                 }
             }
             default { throw "Unsupported check: $name" }
@@ -362,12 +374,13 @@ function New-ClientArguments {
                 "--window-profile", "desktop"
             )
         }
+        $scenario = if ($Stage.dualClient) { "online-dual-client" } else { "online-single-client" }
         $arguments = @(
             "run", "--quiet",
             "--manifest-path", $MybevyManifestPath,
             "--bin", "lockstep-sim-headless",
             "--",
-            "--scenario", "online-single-client",
+            "--scenario", $scenario,
             "--run-id", $RunId,
             "--room", $Stage.roomId,
             "--policy", "lockstep_sim_demo",
@@ -375,6 +388,9 @@ function New-ClientArguments {
             "--connect-timeout-ms", [string]$TimeoutMs,
             "--ticket-env", $TicketEnvVar
         )
+        if ($Stage.dualClient) {
+            $arguments += @("--observer-ticket-env", $ObserverTicketEnvVar)
+        }
         return [string[]]$arguments
     }
     $arguments = @(
@@ -1141,6 +1157,222 @@ function Get-MybevySuccessEvidence {
     }
 }
 
+function ConvertTo-MybevyTelemetryJson {
+    param([AllowNull()][object]$Value)
+    return ConvertTo-Json -InputObject @($Value) -Depth 30 -Compress
+}
+
+function Get-MybevyDualSuccessEvidence {
+    param([string]$Stdout)
+    $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
+    $failures = @($records | Where-Object { $_.event -eq "run_failed" })
+    if ($failures.Count -gt 0) {
+        $failure = $failures[-1]
+        throw "mybevy dual telemetry failed at $($failure.failureStage): $($failure.errorCode)"
+    }
+
+    $activeRecords = @($records | Where-Object { $_.clientRole -eq "active_input" })
+    $passiveRecords = @($records | Where-Object { $_.clientRole -eq "passive_replay" })
+    if ($activeRecords.Count -eq 0 -or $passiveRecords.Count -eq 0) {
+        throw "mybevy dual telemetry must identify active_input and passive_replay clients"
+    }
+    $activePlayer = [string]$activeRecords[0].player
+    $passivePlayer = [string]$passiveRecords[0].player
+    if ([string]::IsNullOrWhiteSpace($activePlayer) -or [string]::IsNullOrWhiteSpace($passivePlayer) -or $activePlayer -eq $passivePlayer) {
+        throw "mybevy dual telemetry players must be present and distinct"
+    }
+    if (@($activeRecords | Where-Object { $_.player -ne $activePlayer }).Count -gt 0 -or
+        @($passiveRecords | Where-Object { $_.player -ne $passivePlayer }).Count -gt 0) {
+        throw "mybevy dual telemetry changed player identity within a client stream"
+    }
+
+    $activeStarted = @($activeRecords | Where-Object { $_.event -eq "run_started" })
+    $passiveStarted = @($passiveRecords | Where-Object { $_.event -eq "run_started" })
+    $activeCompleted = @($activeRecords | Where-Object { $_.event -eq "run_completed" })
+    $passiveCompleted = @($passiveRecords | Where-Object { $_.event -eq "run_completed" })
+    $activeRecovery = @($activeRecords | Where-Object { $_.event -eq "replay_recovery" })
+    $passiveRecovery = @($passiveRecords | Where-Object { $_.event -eq "replay_recovery" })
+    if ($activeStarted.Count -ne 1 -or $passiveStarted.Count -ne 1 -or
+        $activeCompleted.Count -ne 1 -or $passiveCompleted.Count -ne 1 -or
+        $activeRecovery.Count -ne 1 -or $passiveRecovery.Count -ne 1) {
+        throw "mybevy dual telemetry requires one start, recovery, and completion record per client"
+    }
+    if ($activeRecovery[0].replayRecovery.status -ne "verified" -or
+        $passiveRecovery[0].replayRecovery.status -ne "verified") {
+        throw "mybevy dual telemetry replay recovery was not verified for both clients"
+    }
+
+    $activeFrames = @($activeRecords | Where-Object { $_.event -eq "frame" } | Sort-Object { [int]$_.frame })
+    $passiveFrames = @($passiveRecords | Where-Object { $_.event -eq "frame" } | Sort-Object { [int]$_.frame })
+    if ($activeFrames.Count -eq 0 -or $passiveFrames.Count -eq 0) {
+        throw "mybevy dual telemetry has no authority frame records for one or both clients"
+    }
+    $passiveByFrame = @{}
+    foreach ($frameRecord in $passiveFrames) {
+        $key = [string][int]$frameRecord.frame
+        if ($passiveByFrame.ContainsKey($key)) { throw "mybevy passive telemetry contains duplicate frame $key" }
+        $passiveByFrame[$key] = $frameRecord
+    }
+
+    $comparedFrames = @()
+    $allEvents = @()
+    $inputSources = @()
+    $inputSequences = @()
+    foreach ($activeFrame in $activeFrames) {
+        $frame = [int]$activeFrame.frame
+        $key = [string]$frame
+        if (-not $passiveByFrame.ContainsKey($key)) { continue }
+        $passiveFrame = $passiveByFrame[$key]
+        if (-not $activeFrame.serverConnected -or -not $passiveFrame.serverConnected) {
+            throw "dual telemetry first mismatch frame ${frame}: one client was not serverConnected"
+        }
+        if (-not $activeFrame.serverHash -or -not $passiveFrame.serverHash -or
+            -not $activeFrame.localHash -or -not $passiveFrame.localHash) {
+            throw "dual telemetry first mismatch frame ${frame}: one client is missing hash telemetry"
+        }
+        $serverHash = ([string]$activeFrame.serverHash.hex).ToLowerInvariant()
+        $activeHash = ([string]$activeFrame.localHash.hex).ToLowerInvariant()
+        $passiveServerHash = ([string]$passiveFrame.serverHash.hex).ToLowerInvariant()
+        $passiveHash = ([string]$passiveFrame.localHash.hex).ToLowerInvariant()
+        if ($activeFrame.serverHash.source -ne "my_server_authority" -or
+            $passiveFrame.serverHash.source -ne "my_server_authority" -or
+            $serverHash -ne $activeHash -or $serverHash -ne $passiveServerHash -or
+            $serverHash -ne $passiveHash -or $activeFrame.mismatch -ne $false -or
+            $passiveFrame.mismatch -ne $false) {
+            throw "dual telemetry first mismatch frame ${frame}: server/active/passive hash mismatch"
+        }
+
+        $activeEntitiesJson = ConvertTo-MybevyTelemetryJson -Value $activeFrame.entities
+        $passiveEntitiesJson = ConvertTo-MybevyTelemetryJson -Value $passiveFrame.entities
+        if ($activeEntitiesJson -cne $passiveEntitiesJson) {
+            throw "dual telemetry first mismatch frame ${frame}: entity fixed state differs"
+        }
+        $activeEventsJson = ConvertTo-MybevyTelemetryJson -Value $activeFrame.events.items
+        $passiveEventsJson = ConvertTo-MybevyTelemetryJson -Value $passiveFrame.events.items
+        if ($activeEventsJson -cne $passiveEventsJson) {
+            throw "dual telemetry first mismatch frame ${frame}: event sequence differs"
+        }
+        $activeInputsJson = ConvertTo-MybevyTelemetryJson -Value $activeFrame.inputs
+        $passiveInputsJson = ConvertTo-MybevyTelemetryJson -Value $passiveFrame.inputs
+        if ($activeInputsJson -cne $passiveInputsJson) {
+            throw "dual telemetry first mismatch frame ${frame}: authority input sequence differs"
+        }
+
+        $frameInputs = @($activeFrame.inputs)
+        foreach ($input in $frameInputs) {
+            if ([string]$input.characterId -ne $activePlayer) {
+                throw "dual telemetry first mismatch frame ${frame}: input source is not the active player"
+            }
+            $inputSources += [string]$input.characterId
+            $inputSequences += [int]$input.sequence
+        }
+        $frameEvents = @($activeFrame.events.items)
+        $allEvents += $frameEvents
+        $comparedFrames += [pscustomobject]@{
+            frame = $frame
+            serverHash = $serverHash
+            activeLocalHash = $activeHash
+            passiveLocalHash = $passiveHash
+            entityCount = @($activeFrame.entities).Count
+            eventKinds = @($frameEvents | ForEach-Object { $_.kind })
+            eventSequences = @($frameEvents | ForEach-Object { [int]$_.sequence })
+            inputSources = @($frameInputs | ForEach-Object { [string]$_.characterId })
+            inputSequences = @($frameInputs | ForEach-Object { [int]$_.sequence })
+            inputs = @($frameInputs)
+            entities = @($activeFrame.entities | ForEach-Object {
+                [pscustomobject]@{
+                    entityId = [int]$_.entityId
+                    ownerCharacterId = [string]$_.ownerCharacterId
+                    fixedPositionMilli = $_.fixedPositionMilli
+                    hp = [int]$_.hp
+                    alive = [bool]$_.alive
+                }
+            })
+            events = @($frameEvents)
+            matched = $true
+        }
+    }
+    if ($comparedFrames.Count -eq 0) { throw "mybevy dual telemetry has no common authority frames" }
+
+    $commands = @($activeFrames | ForEach-Object { @($_.inputs) } | ForEach-Object { $_.command })
+    foreach ($requiredCommand in @("move", "cast_skill", "stop")) {
+        if ($commands -notcontains $requiredCommand) { throw "mybevy dual telemetry is missing $requiredCommand input" }
+    }
+    $eventKinds = @($allEvents | ForEach-Object { $_.kind })
+    if ($eventKinds -notcontains "skill_cast" -or $eventKinds -notcontains "damage_applied") {
+        throw "mybevy dual telemetry is missing SkillCast or DamageApplied evidence"
+    }
+    if ($inputSequences -notcontains 1 -or $inputSequences -notcontains 2) {
+        throw "mybevy dual telemetry is missing active input sequence 1 or 2"
+    }
+    if (@($inputSources | Select-Object -Unique).Count -ne 1 -or $inputSources[0] -ne $activePlayer) {
+        throw "mybevy dual telemetry contains a passive or unknown input source"
+    }
+
+    $activeStartEntity = @($activeStarted[0].entities | Where-Object { $_.ownerCharacterId -eq $activePlayer })
+    $activeFinalEntity = @($activeCompleted[0].entities | Where-Object { $_.ownerCharacterId -eq $activePlayer })
+    $passiveStartEntity = @($passiveStarted[0].entities | Where-Object { $_.ownerCharacterId -eq $passivePlayer })
+    $passiveFinalEntity = @($passiveCompleted[0].entities | Where-Object { $_.ownerCharacterId -eq $passivePlayer })
+    if ($activeStartEntity.Count -ne 1 -or $activeFinalEntity.Count -ne 1 -or
+        $passiveStartEntity.Count -ne 1 -or $passiveFinalEntity.Count -ne 1) {
+        throw "mybevy dual telemetry does not identify one controlled entity per client"
+    }
+    if ([long]$activeStartEntity[0].fixedPositionMilli.x -eq [long]$activeFinalEntity[0].fixedPositionMilli.x) {
+        throw "mybevy dual active entity did not move"
+    }
+    if ((ConvertTo-MybevyTelemetryJson -Value $passiveStartEntity[0]) -cne
+        (ConvertTo-MybevyTelemetryJson -Value $passiveFinalEntity[0])) {
+        throw "mybevy dual passive controlled entity changed without local input"
+    }
+
+    $lastCompared = $comparedFrames[-1]
+    return [ordered]@{
+        finalFrame = [int]$lastCompared.frame
+        finalHash = [string]$lastCompared.serverHash
+        finalEventCount = $allEvents.Count
+        finalEvents = @($allEvents)
+        finalEventSummaries = @($allEvents)
+        observerRecovery = $null
+        visualSmoke = $null
+        telemetry = [ordered]@{
+            schema = [string]$activeCompleted[0].schema
+            schemaVersion = [int]$activeCompleted[0].schemaVersion
+            serverConnected = $true
+            hashMatched = $true
+            recoveryStatus = "verified"
+            dualReconciliation = [ordered]@{
+                matched = $true
+                firstMismatchFrame = $null
+                comparedFrameCount = $comparedFrames.Count
+                commonFrameStart = [int]$comparedFrames[0].frame
+                commonFrameEnd = [int]$lastCompared.frame
+                inputSources = @($inputSources | Select-Object -Unique)
+                inputSequences = @($inputSequences | Select-Object -Unique | Sort-Object)
+                active = [ordered]@{
+                    player = $activePlayer
+                    role = "active_input"
+                    entityId = [int]$activeFinalEntity[0].entityId
+                    initialFixedPosition = $activeStartEntity[0].fixedPositionMilli
+                    finalFixedPosition = $activeFinalEntity[0].fixedPositionMilli
+                    finalHp = [int]$activeFinalEntity[0].hp
+                    finalAlive = [bool]$activeFinalEntity[0].alive
+                }
+                passive = [ordered]@{
+                    player = $passivePlayer
+                    role = "passive_replay"
+                    entityId = [int]$passiveFinalEntity[0].entityId
+                    initialFixedPosition = $passiveStartEntity[0].fixedPositionMilli
+                    finalFixedPosition = $passiveFinalEntity[0].fixedPositionMilli
+                    finalHp = [int]$passiveFinalEntity[0].hp
+                    finalAlive = [bool]$passiveFinalEntity[0].alive
+                    localInputAcknowledgements = 0
+                }
+                frames = @($comparedFrames)
+            }
+        }
+    }
+}
+
 function Get-MybevyVisualSmokeSuccessEvidence {
     param([string]$ArtifactDirectory)
 
@@ -1309,6 +1541,44 @@ function Get-MybevyClientDiagnostics {
     return $diagnostics
 }
 
+function Get-MybevyDualClientDiagnostics {
+    param([string]$Stdout, [string]$Stderr)
+    $diagnostics = Get-MybevyClientDiagnostics -Stdout $Stdout -Stderr $Stderr
+    try {
+        $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
+        $failure = @($records | Where-Object { $_.event -eq "run_failed" } | Select-Object -Last 1)
+        if ($failure.Count -eq 0 -or $null -eq $failure[0].frame) { return $diagnostics }
+        $frame = [int]$failure[0].frame
+        $activeFrame = @($records | Where-Object {
+            $_.event -eq "frame" -and $_.clientRole -eq "active_input" -and [int]$_.frame -eq $frame
+        } | Select-Object -Last 1)
+        $passiveFrame = @($records | Where-Object {
+            $_.event -eq "frame" -and $_.clientRole -eq "passive_replay" -and [int]$_.frame -eq $frame
+        } | Select-Object -Last 1)
+        $diagnostics.frame = $frame
+        if ($activeFrame.Count -eq 1 -and $passiveFrame.Count -eq 1) {
+            $diagnostics.serverHash = [string]$activeFrame[0].serverHash.hex
+            $diagnostics.clientHash = "active=$($activeFrame[0].localHash.hex);passive=$($passiveFrame[0].localHash.hex)"
+            $diagnostics.entityDiff = [ordered]@{
+                active = @($activeFrame[0].entities)
+                passive = @($passiveFrame[0].entities)
+            } | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.eventDiff = [ordered]@{
+                active = @($activeFrame[0].events.items)
+                passive = @($passiveFrame[0].events.items)
+            } | ConvertTo-Json -Depth 30 -Compress
+            $diagnostics.inputDiff = [ordered]@{
+                active = @($activeFrame[0].inputs)
+                passive = @($passiveFrame[0].inputs)
+            } | ConvertTo-Json -Depth 30 -Compress
+        }
+    } catch {
+        $diagnostics.failureStage = "telemetry_parse"
+        $diagnostics.successEvidenceError = $_.Exception.Message
+    }
+    return $diagnostics
+}
+
 function Invoke-ClientStage {
     param([pscustomobject]$Definition, [string]$Mode, [string]$ArtifactDirectory)
     $stdoutPath = Join-Path $ArtifactDirectory "$($Definition.name).stdout.log"
@@ -1334,6 +1604,8 @@ function Invoke-ClientStage {
     $stderr = Read-TextFile -Path $stderrPath
     $diagnostics = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
         Get-MybevyVisualSmokeDiagnostics -ArtifactDirectory $ArtifactDirectory
+    } elseif ($Client -eq "mybevy" -and $Definition.dualClient) {
+        Get-MybevyDualClientDiagnostics -Stdout $stdout -Stderr $stderr
     } elseif ($Client -eq "mybevy") {
         Get-MybevyClientDiagnostics -Stdout $stdout -Stderr $stderr
     } else {
@@ -1358,6 +1630,8 @@ function Invoke-ClientStage {
         try {
             $successEvidence = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
                 Get-MybevyVisualSmokeSuccessEvidence -ArtifactDirectory $ArtifactDirectory
+            } elseif ($Client -eq "mybevy" -and $Definition.dualClient) {
+                Get-MybevyDualSuccessEvidence -Stdout $stdout
             } elseif ($Client -eq "mybevy") {
                 Get-MybevySuccessEvidence -Stdout $stdout
             } else {
@@ -1384,6 +1658,7 @@ function Invoke-ClientStage {
         scenario = $Definition.scenario
         roomId = $Definition.roomId
         observerProbe = [bool]$Definition.observerProbe
+        dualClient = [bool]$Definition.dualClient
         status = if ($stageExitCode -eq 0) { "passed" } else { "failed" }
         exitCode = $stageExitCode
         processExitCode = $exitCode
@@ -1463,6 +1738,20 @@ function Invoke-SelfTests {
         if ($mybevyDryArgs -contains "--ticket-env" -or $mybevyDryArgs -contains "--endpoint" -or $mybevyDryArgs -notcontains "offline-fixture") {
             throw "self-test: mybevy dry-run command is not network-free"
         }
+        $dualDefinition = (New-StageDefinitions -Checks @("dual-client") -CurrentRunId $testRunId)[0]
+        $dualArgs = New-ClientArguments -Stage $dualDefinition -Mode "execute"
+        $dualCommand = Format-Command -Executable "cargo" -Arguments $dualArgs
+        if ($dualCommand -notmatch '--scenario online-dual-client' -or
+            $dualCommand -notmatch '--ticket-env MYSERVER_LOCKSTEP_TICKET' -or
+            $dualCommand -notmatch '--observer-ticket-env MYSERVER_LOCKSTEP_OBSERVER_TICKET') {
+            throw "self-test: mybevy dual-client command assembly is incomplete"
+        }
+        if ($dualCommand -match 'secret-ticket-value') { throw "self-test: mybevy dual-client command leaked ticket value" }
+        $dualDryArgs = New-ClientArguments -Stage $dualDefinition -Mode "dry-run"
+        if ($dualDryArgs -contains "--ticket-env" -or $dualDryArgs -contains "--observer-ticket-env" -or
+            $dualDryArgs -contains "--endpoint" -or $dualDryArgs -notcontains "offline-fixture") {
+            throw "self-test: mybevy dual-client dry-run command is not network-free"
+        }
         $visualDefinition = (New-StageDefinitions -Checks @("visual-smoke") -CurrentRunId $testRunId)[0]
         $visualArgs = New-ClientArguments -Stage $visualDefinition -Mode "execute"
         $visualCommand = Format-Command -Executable "cargo" -Arguments $visualArgs
@@ -1520,6 +1809,29 @@ function Invoke-SelfTests {
         -not $mybevyEvidence.telemetry.serverConnected -or
         -not $mybevyEvidence.telemetry.hashMatched) {
         throw "self-test: mybevy telemetry evidence parser failed"
+    }
+    $dualEntitiesInitial = '[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":0,"y":0},"hp":100,"alive":true},{"entityId":1001,"ownerCharacterId":"chr-b","fixedPositionMilli":{"x":1000,"y":0},"hp":100,"alive":true}]'
+    $dualEntitiesFinal = '[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":300,"y":0},"hp":100,"alive":true},{"entityId":1001,"ownerCharacterId":"chr-b","fixedPositionMilli":{"x":1000,"y":0},"hp":100,"alive":true}]'
+    $dualInputs = '[{"characterId":"chr-a","entityId":1000,"sequence":1,"command":"move"},{"characterId":"chr-a","entityId":1000,"sequence":1,"command":"cast_skill"},{"characterId":"chr-a","entityId":1000,"sequence":2,"command":"stop"}]'
+    $dualEvents = '[{"kind":"skill_cast","sequence":1},{"kind":"damage_applied","sequence":2}]'
+    $dualStdout = @(
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"run_started`",`"clientRole`":`"active_input`",`"player`":`"chr-a`",`"serverConnected`":true,`"frame`":0,`"serverHash`":{`"hex`":`"aaaa`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"aaaa`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesInitial,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"checkpoint_captured`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"frame`",`"clientRole`":`"active_input`",`"player`":`"chr-a`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":$dualInputs,`"entities`":$dualEntitiesFinal,`"events`":{`"items`":$dualEvents},`"replayRecovery`":{`"status`":`"pending`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"replay_recovery`",`"clientRole`":`"active_input`",`"player`":`"chr-a`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesFinal,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"verified`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"run_completed`",`"clientRole`":`"active_input`",`"player`":`"chr-a`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesFinal,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"verified`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"run_started`",`"clientRole`":`"passive_replay`",`"player`":`"chr-b`",`"serverConnected`":true,`"frame`":0,`"serverHash`":{`"hex`":`"aaaa`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"aaaa`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesInitial,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"checkpoint_captured`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"frame`",`"clientRole`":`"passive_replay`",`"player`":`"chr-b`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":$dualInputs,`"entities`":$dualEntitiesFinal,`"events`":{`"items`":$dualEvents},`"replayRecovery`":{`"status`":`"pending`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"replay_recovery`",`"clientRole`":`"passive_replay`",`"player`":`"chr-b`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesFinal,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"verified`"}}",
+        "{`"schema`":`"mybevy.lockstep.telemetry`",`"schemaVersion`":1,`"event`":`"run_completed`",`"clientRole`":`"passive_replay`",`"player`":`"chr-b`",`"serverConnected`":true,`"frame`":2,`"serverHash`":{`"hex`":`"bbbb`",`"source`":`"my_server_authority`"},`"localHash`":{`"hex`":`"bbbb`"},`"mismatch`":false,`"inputs`":[],`"entities`":$dualEntitiesFinal,`"events`":{`"items`":[]},`"replayRecovery`":{`"status`":`"verified`"}}"
+    ) -join "`n"
+    $dualEvidence = Get-MybevyDualSuccessEvidence -Stdout $dualStdout
+    if ($dualEvidence.finalFrame -ne 2 -or $dualEvidence.finalHash -ne "bbbb" -or
+        -not $dualEvidence.telemetry.dualReconciliation.matched -or
+        $dualEvidence.telemetry.dualReconciliation.comparedFrameCount -ne 1 -or
+        $dualEvidence.telemetry.dualReconciliation.active.player -ne "chr-a" -or
+        $dualEvidence.telemetry.dualReconciliation.passive.player -ne "chr-b" -or
+        @($dualEvidence.telemetry.dualReconciliation.inputSequences).Count -ne 2) {
+        throw "self-test: mybevy dual telemetry reconciliation parser failed"
     }
     $visualEvidenceDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver visual evidence $([Guid]::NewGuid().ToString('N'))"
     $visualEvidencePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $visualEvidenceDirectory
@@ -1855,7 +2167,7 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-dual-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-dual-telemetry-parser", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
@@ -1916,7 +2228,7 @@ foreach ($name in $environmentNamesToRestore) {
 try {
     if ($mode -eq "execute") {
         Set-ProcessEnvironmentValue -Name $RedisRuntimeEnvVar -Value $RedisUrl
-        $observerRequired = @($definitions | Where-Object { $_.observerProbe }).Count -gt 0
+        $observerRequired = @($definitions | Where-Object { $_.observerProbe -or $_.dualClient }).Count -gt 0
 
         if ($ProvisionDevTickets) {
             $secret = Get-EnvironmentValue -Name $TicketSecretEnvVar
