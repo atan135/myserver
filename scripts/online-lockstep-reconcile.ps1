@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("all", "move", "melee", "observer", "single-client", "dual-client", "visual-smoke")]
+    [ValidateSet("all", "move", "melee", "observer", "single-client", "dual-client", "reconnect-observer", "visual-smoke")]
     [string[]]$Check = @("all"),
 
     [Parameter(Mandatory=$false)]
@@ -260,8 +260,8 @@ function Assert-RunOptions {
         throw "At least one check is required."
     }
     if ($Client -eq "mybevy") {
-        if (@($Checks | Where-Object { $_ -notin @("single-client", "dual-client", "visual-smoke") }).Count -gt 0) {
-            throw "-Client mybevy only supports -Check single-client, dual-client, visual-smoke (or -Check all)."
+        if (@($Checks | Where-Object { $_ -notin @("single-client", "dual-client", "reconnect-observer", "visual-smoke") }).Count -gt 0) {
+            throw "-Client mybevy only supports -Check single-client, dual-client, reconnect-observer, visual-smoke (or -Check all)."
         }
         if (-not $ConfiguredClientRoot) {
             throw "-Client mybevy requires -ClientRoot or MYSERVER_CLIENT_ROOT."
@@ -269,8 +269,8 @@ function Assert-RunOptions {
         if (-not (Test-Path -LiteralPath $MybevyManifestPath -PathType Leaf)) {
             throw "mybevy Cargo manifest not found under the configured client root."
         }
-    } elseif (@($Checks | Where-Object { $_ -in @("single-client", "dual-client", "visual-smoke") }).Count -gt 0) {
-        throw "-Check single-client, dual-client, and visual-smoke require -Client mybevy."
+    } elseif (@($Checks | Where-Object { $_ -in @("single-client", "dual-client", "reconnect-observer", "visual-smoke") }).Count -gt 0) {
+        throw "-Check single-client, dual-client, reconnect-observer, and visual-smoke require -Client mybevy."
     }
 }
 
@@ -278,7 +278,7 @@ function Get-NormalizedChecks {
     $requested = @($Check | ForEach-Object { $_.ToLowerInvariant() })
     if ($requested -contains "all") {
         if ($Client -eq "mybevy") {
-            return @("single-client", "dual-client", "visual-smoke")
+            return @("single-client", "dual-client", "reconnect-observer", "visual-smoke")
         }
         return @("move", "melee", "observer")
     }
@@ -322,6 +322,7 @@ function New-StageDefinitions {
                     observerProbe = $false
                     visualSmoke = $false
                     dualClient = $false
+                    reconnectObserver = $false
                 }
             }
             "dual-client" {
@@ -332,6 +333,18 @@ function New-StageDefinitions {
                     observerProbe = $false
                     visualSmoke = $false
                     dualClient = $true
+                    reconnectObserver = $false
+                }
+            }
+            "reconnect-observer" {
+                $definitions += [pscustomobject]@{
+                    name = "mybevy-reconnect-observer"
+                    scenario = "online-reconnect-observer"
+                    roomId = "lockstep-$CurrentRunId-mybevy-recovery"
+                    observerProbe = $false
+                    visualSmoke = $false
+                    dualClient = $false
+                    reconnectObserver = $true
                 }
             }
             "visual-smoke" {
@@ -342,6 +355,7 @@ function New-StageDefinitions {
                     observerProbe = $false
                     visualSmoke = $true
                     dualClient = $false
+                    reconnectObserver = $false
                 }
             }
             default { throw "Unsupported check: $name" }
@@ -374,7 +388,13 @@ function New-ClientArguments {
                 "--window-profile", "desktop"
             )
         }
-        $scenario = if ($Stage.dualClient) { "online-dual-client" } else { "online-single-client" }
+        $scenario = if ($Stage.reconnectObserver) {
+            "online-reconnect-observer"
+        } elseif ($Stage.dualClient) {
+            "online-dual-client"
+        } else {
+            "online-single-client"
+        }
         $arguments = @(
             "run", "--quiet",
             "--manifest-path", $MybevyManifestPath,
@@ -388,7 +408,7 @@ function New-ClientArguments {
             "--connect-timeout-ms", [string]$TimeoutMs,
             "--ticket-env", $TicketEnvVar
         )
-        if ($Stage.dualClient) {
+        if ($Stage.dualClient -or $Stage.reconnectObserver) {
             $arguments += @("--observer-ticket-env", $ObserverTicketEnvVar)
         }
         return [string[]]$arguments
@@ -1373,6 +1393,184 @@ function Get-MybevyDualSuccessEvidence {
     }
 }
 
+function Get-MybevyRecoverySuccessEvidence {
+    param([string]$Stdout)
+    $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
+    $failures = @($records | Where-Object { $_.event -eq "run_failed" })
+    if ($failures.Count -gt 0) {
+        $failure = $failures[-1]
+        throw "mybevy recovery telemetry failed at $($failure.failureStage): $($failure.errorCode)"
+    }
+
+    $primaryRecords = @($records | Where-Object { $_.clientRole -eq "reconnect_primary" })
+    $observerRecords = @($records | Where-Object { $_.clientRole -eq "observer" })
+    if ($primaryRecords.Count -eq 0 -or $observerRecords.Count -eq 0) {
+        throw "mybevy recovery telemetry must identify reconnect_primary and observer clients"
+    }
+    $primaryPlayer = [string]$primaryRecords[0].player
+    $observerPlayer = [string]$observerRecords[0].player
+    if ([string]::IsNullOrWhiteSpace($primaryPlayer) -or [string]::IsNullOrWhiteSpace($observerPlayer) -or $primaryPlayer -eq $observerPlayer) {
+        throw "mybevy recovery telemetry players must be present and distinct"
+    }
+
+    $disconnected = @($primaryRecords | Where-Object { $_.event -eq "transport_disconnected" })
+    $primarySnapshot = @($primaryRecords | Where-Object { $_.event -eq "snapshot_recovered" })
+    $observerSnapshot = @($observerRecords | Where-Object { $_.event -eq "snapshot_recovered" })
+    $primaryRecovery = @($primaryRecords | Where-Object { $_.event -eq "replay_recovery" })
+    $observerRecovery = @($observerRecords | Where-Object { $_.event -eq "replay_recovery" })
+    $primaryCompleted = @($primaryRecords | Where-Object { $_.event -eq "run_completed" })
+    $observerCompleted = @($observerRecords | Where-Object { $_.event -eq "run_completed" })
+    if ($disconnected.Count -ne 1 -or $primarySnapshot.Count -ne 1 -or $observerSnapshot.Count -ne 1 -or
+        $primaryRecovery.Count -ne 1 -or $observerRecovery.Count -ne 1 -or
+        $primaryCompleted.Count -ne 1 -or $observerCompleted.Count -ne 1) {
+        throw "mybevy recovery telemetry requires one disconnect, snapshot recovery, replay recovery, and completion record per applicable client"
+    }
+    if ($disconnected[0].serverConnected -ne $false) {
+        throw "mybevy recovery disconnect record still reports serverConnected"
+    }
+    foreach ($record in @($primarySnapshot[0], $observerSnapshot[0], $primaryRecovery[0], $observerRecovery[0], $primaryCompleted[0], $observerCompleted[0])) {
+        if (-not $record.serverConnected -or -not $record.serverHash -or -not $record.localHash -or
+            ([string]$record.serverHash.hex).ToLowerInvariant() -ne ([string]$record.localHash.hex).ToLowerInvariant() -or
+            $record.mismatch -ne $false) {
+            throw "mybevy recovery snapshot/completion hash evidence is incomplete or mismatched"
+        }
+    }
+    if ($primaryRecovery[0].replayRecovery.status -ne "verified" -or
+        $observerRecovery[0].replayRecovery.status -ne "verified") {
+        throw "mybevy recovery replay status was not verified for both clients"
+    }
+
+    $primaryAcceptance = $primaryRecovery[0].recoveryAcceptance
+    $observerAcceptance = $observerRecovery[0].recoveryAcceptance
+    if (-not $primaryAcceptance -or -not $observerAcceptance) {
+        throw "mybevy recovery acceptance metadata is missing"
+    }
+    if ([int]$primaryAcceptance.preDisconnectFrame -ne [int]$disconnected[0].frame -or
+        [string]$primaryAcceptance.preDisconnectHash -ne ([string]$disconnected[0].localHash.hex).ToLowerInvariant() -or
+        [long]$primaryAcceptance.disconnectGeneration -lt 1 -or
+        [long]$primaryAcceptance.recoveryGeneration -le [long]$primaryAcceptance.disconnectGeneration) {
+        throw "mybevy primary reconnect generation or pre-disconnect evidence is invalid"
+    }
+    $preDisconnectCommands = @($primaryAcceptance.preDisconnectInputCommands)
+    $preDisconnectEvents = @($primaryAcceptance.preDisconnectEventKinds)
+    if ([int]$primaryAcceptance.preDisconnectInputFrame -gt [int]$primaryAcceptance.preDisconnectFrame -or
+        $preDisconnectCommands -notcontains "move" -or $preDisconnectCommands -notcontains "cast_skill" -or
+        $preDisconnectEvents -notcontains "skill_cast" -or $preDisconnectEvents -notcontains "damage_applied") {
+        throw "mybevy primary pre-disconnect deterministic input/event evidence is incomplete"
+    }
+    if ([int]$primaryAcceptance.snapshotFrame -ne [int]$primarySnapshot[0].frame -or
+        [int]$observerAcceptance.snapshotFrame -ne [int]$observerSnapshot[0].frame -or
+        [string]$primaryAcceptance.snapshotHash -ne ([string]$primarySnapshot[0].localHash.hex).ToLowerInvariant() -or
+        [string]$observerAcceptance.snapshotHash -ne ([string]$observerSnapshot[0].localHash.hex).ToLowerInvariant()) {
+        throw "mybevy recovery snapshot frame/hash metadata does not match snapshot records"
+    }
+    foreach ($acceptance in @($primaryAcceptance, $observerAcceptance)) {
+        $start = [int]$acceptance.continuityStartFrame
+        $end = [int]$acceptance.continuityEndFrame
+        $count = [int]$acceptance.continuityFrameCount
+        if (-not [bool]$acceptance.contiguousWithoutDuplicateApply -or $start -ne ([int]$acceptance.snapshotFrame + 1) -or
+            $end -lt $start -or $count -ne ($end - $start + 1)) {
+            throw "mybevy recovery continuity metadata contains a gap or duplicate application"
+        }
+        if ([int]$acceptance.postReconnectInputApplicationCount -ne 1) {
+            throw "mybevy post-reconnect input was not applied exactly once"
+        }
+    }
+    if ([int]$primaryAcceptance.localInputAcknowledgements -lt 2 -or
+        [int]$observerAcceptance.localInputAcknowledgements -ne 0 -or
+        [bool]$observerAcceptance.hasControlBinding) {
+        throw "mybevy observer sent local input or acquired a simulation control binding"
+    }
+    if ([int]$primaryAcceptance.commonFrameStart -ne [int]$observerAcceptance.commonFrameStart -or
+        [int]$primaryAcceptance.commonFrameEnd -ne [int]$observerAcceptance.commonFrameEnd -or
+        [int]$primaryAcceptance.commonFrameCount -ne [int]$observerAcceptance.commonFrameCount) {
+        throw "mybevy primary and observer common-frame metadata differs"
+    }
+
+    $primaryFrames = @($primaryRecords | Where-Object { $_.event -eq "frame" } | Sort-Object { [int]$_.frame })
+    $observerFrames = @($observerRecords | Where-Object { $_.event -eq "frame" } | Sort-Object { [int]$_.frame })
+    $observerByFrame = @{}
+    foreach ($frameRecord in $observerFrames) {
+        $key = [string][int]$frameRecord.frame
+        if ($observerByFrame.ContainsKey($key)) { throw "mybevy observer telemetry contains duplicate applied frame $key" }
+        $observerByFrame[$key] = $frameRecord
+    }
+    $commonFrames = @()
+    $allEvents = @()
+    $observerInputSources = @()
+    foreach ($primaryFrame in $primaryFrames) {
+        $frame = [int]$primaryFrame.frame
+        $key = [string]$frame
+        if (-not $observerByFrame.ContainsKey($key)) { continue }
+        $observerFrame = $observerByFrame[$key]
+        if (([string]$primaryFrame.serverHash.hex).ToLowerInvariant() -ne ([string]$primaryFrame.localHash.hex).ToLowerInvariant() -or
+            ([string]$primaryFrame.serverHash.hex).ToLowerInvariant() -ne ([string]$observerFrame.serverHash.hex).ToLowerInvariant() -or
+            ([string]$primaryFrame.serverHash.hex).ToLowerInvariant() -ne ([string]$observerFrame.localHash.hex).ToLowerInvariant() -or
+            (ConvertTo-MybevyTelemetryJson -Value $primaryFrame.entities) -cne (ConvertTo-MybevyTelemetryJson -Value $observerFrame.entities) -or
+            (ConvertTo-MybevyTelemetryJson -Value $primaryFrame.inputs) -cne (ConvertTo-MybevyTelemetryJson -Value $observerFrame.inputs) -or
+            (ConvertTo-MybevyTelemetryJson -Value $primaryFrame.events.items) -cne (ConvertTo-MybevyTelemetryJson -Value $observerFrame.events.items)) {
+            throw "mybevy recovery primary/observer mismatch at frame $frame"
+        }
+        $frameInputs = @($observerFrame.inputs)
+        foreach ($input in $frameInputs) {
+            $observerInputSources += [string]$input.characterId
+            if ([string]$input.characterId -ne $primaryPlayer) {
+                throw "mybevy observer authority input did not originate from the primary player at frame $frame"
+            }
+        }
+        $frameEvents = @($primaryFrame.events.items)
+        $allEvents += $frameEvents
+        $commonFrames += [pscustomobject]@{
+            frame = $frame
+            hash = ([string]$primaryFrame.serverHash.hex).ToLowerInvariant()
+            inputs = @($primaryFrame.inputs)
+            events = @($frameEvents)
+            entities = @($primaryFrame.entities)
+            matched = $true
+        }
+    }
+    if ($commonFrames.Count -ne [int]$primaryAcceptance.commonFrameCount -or
+        [int]$commonFrames[0].frame -ne [int]$primaryAcceptance.commonFrameStart -or
+        [int]$commonFrames[-1].frame -ne [int]$primaryAcceptance.commonFrameEnd) {
+        throw "mybevy recovery common-frame telemetry does not match acceptance metadata"
+    }
+
+    return [ordered]@{
+        finalFrame = [int]$primaryCompleted[0].frame
+        finalHash = ([string]$primaryCompleted[0].localHash.hex).ToLowerInvariant()
+        finalEventCount = $allEvents.Count
+        finalEvents = @($allEvents)
+        finalEventSummaries = @($allEvents)
+        observerRecovery = [ordered]@{
+            ok = $true
+            player = $observerPlayer
+            snapshotFrame = [int]$observerAcceptance.snapshotFrame
+            finalFrame = [int]$observerCompleted[0].frame
+            hash = ([string]$observerCompleted[0].localHash.hex).ToLowerInvariant()
+            recoveryGeneration = [long]$observerAcceptance.recoveryGeneration
+            localInputAcknowledgements = [int]$observerAcceptance.localInputAcknowledgements
+            hasControlBinding = [bool]$observerAcceptance.hasControlBinding
+        }
+        visualSmoke = $null
+        telemetry = [ordered]@{
+            schema = [string]$primaryCompleted[0].schema
+            schemaVersion = [int]$primaryCompleted[0].schemaVersion
+            serverConnected = $true
+            hashMatched = $true
+            recoveryStatus = "verified"
+            reconnectObserver = [ordered]@{
+                matched = $true
+                primaryPlayer = $primaryPlayer
+                observerPlayer = $observerPlayer
+                primary = $primaryAcceptance
+                observer = $observerAcceptance
+                observerInputSources = @($observerInputSources | Select-Object -Unique)
+                frames = @($commonFrames)
+            }
+        }
+    }
+}
+
 function Get-MybevyVisualSmokeSuccessEvidence {
     param([string]$ArtifactDirectory)
 
@@ -1476,6 +1674,7 @@ function Get-MybevyVisualSmokeSuccessEvidence {
 function Get-MybevyVisualSmokeDiagnostics {
     param([string]$ArtifactDirectory)
     $diagnostics = [ordered]@{
+        errorCode = $null
         failureStage = $null
         frame = $null
         serverHash = $null
@@ -1509,6 +1708,7 @@ function Get-MybevyVisualSmokeDiagnostics {
 function Get-MybevyClientDiagnostics {
     param([string]$Stdout, [string]$Stderr)
     $diagnostics = [ordered]@{
+        errorCode = $null
         failureStage = $null
         frame = $null
         serverHash = $null
@@ -1522,6 +1722,7 @@ function Get-MybevyClientDiagnostics {
         $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
         $failure = @($records | Where-Object { $_.event -eq "run_failed" } | Select-Object -Last 1)
         if ($failure.Count -gt 0) {
+            $diagnostics.errorCode = [string]$failure[0].errorCode
             $diagnostics.failureStage = [string]$failure[0].failureStage
             if ($null -ne $failure[0].frame) { $diagnostics.frame = [int]$failure[0].frame }
             $diagnostics.entityDiff = @($failure[0].entities) | ConvertTo-Json -Depth 12 -Compress
@@ -1604,6 +1805,8 @@ function Invoke-ClientStage {
     $stderr = Read-TextFile -Path $stderrPath
     $diagnostics = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
         Get-MybevyVisualSmokeDiagnostics -ArtifactDirectory $ArtifactDirectory
+    } elseif ($Client -eq "mybevy" -and $Definition.reconnectObserver) {
+        Get-MybevyClientDiagnostics -Stdout $stdout -Stderr $stderr
     } elseif ($Client -eq "mybevy" -and $Definition.dualClient) {
         Get-MybevyDualClientDiagnostics -Stdout $stdout -Stderr $stderr
     } elseif ($Client -eq "mybevy") {
@@ -1630,6 +1833,8 @@ function Invoke-ClientStage {
         try {
             $successEvidence = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
                 Get-MybevyVisualSmokeSuccessEvidence -ArtifactDirectory $ArtifactDirectory
+            } elseif ($Client -eq "mybevy" -and $Definition.reconnectObserver) {
+                Get-MybevyRecoverySuccessEvidence -Stdout $stdout
             } elseif ($Client -eq "mybevy" -and $Definition.dualClient) {
                 Get-MybevyDualSuccessEvidence -Stdout $stdout
             } elseif ($Client -eq "mybevy") {
@@ -1659,6 +1864,7 @@ function Invoke-ClientStage {
         roomId = $Definition.roomId
         observerProbe = [bool]$Definition.observerProbe
         dualClient = [bool]$Definition.dualClient
+        reconnectObserver = [bool]$Definition.reconnectObserver
         status = if ($stageExitCode -eq 0) { "passed" } else { "failed" }
         exitCode = $stageExitCode
         processExitCode = $exitCode
@@ -1752,6 +1958,20 @@ function Invoke-SelfTests {
             $dualDryArgs -contains "--endpoint" -or $dualDryArgs -notcontains "offline-fixture") {
             throw "self-test: mybevy dual-client dry-run command is not network-free"
         }
+        $recoveryDefinition = (New-StageDefinitions -Checks @("reconnect-observer") -CurrentRunId $testRunId)[0]
+        $recoveryArgs = New-ClientArguments -Stage $recoveryDefinition -Mode "execute"
+        $recoveryCommand = Format-Command -Executable "cargo" -Arguments $recoveryArgs
+        if ($recoveryCommand -notmatch '--scenario online-reconnect-observer' -or
+            $recoveryCommand -notmatch '--ticket-env MYSERVER_LOCKSTEP_TICKET' -or
+            $recoveryCommand -notmatch '--observer-ticket-env MYSERVER_LOCKSTEP_OBSERVER_TICKET') {
+            throw "self-test: mybevy reconnect-observer command assembly is incomplete"
+        }
+        if ($recoveryCommand -match 'secret-ticket-value') { throw "self-test: mybevy reconnect-observer command leaked ticket value" }
+        $recoveryDryArgs = New-ClientArguments -Stage $recoveryDefinition -Mode "dry-run"
+        if ($recoveryDryArgs -contains "--ticket-env" -or $recoveryDryArgs -contains "--observer-ticket-env" -or
+            $recoveryDryArgs -contains "--endpoint" -or $recoveryDryArgs -notcontains "offline-fixture") {
+            throw "self-test: mybevy reconnect-observer dry-run command is not network-free"
+        }
         $visualDefinition = (New-StageDefinitions -Checks @("visual-smoke") -CurrentRunId $testRunId)[0]
         $visualArgs = New-ClientArguments -Stage $visualDefinition -Mode "execute"
         $visualCommand = Format-Command -Executable "cargo" -Arguments $visualArgs
@@ -1832,6 +2052,91 @@ function Invoke-SelfTests {
         $dualEvidence.telemetry.dualReconciliation.passive.player -ne "chr-b" -or
         @($dualEvidence.telemetry.dualReconciliation.inputSequences).Count -ne 2) {
         throw "self-test: mybevy dual telemetry reconciliation parser failed"
+    }
+    $primaryAcceptance = [ordered]@{
+        preDisconnectFrame = 5; preDisconnectHash = "aaaa"; disconnectGeneration = 2
+        preDisconnectInputFrame = 2; preDisconnectInputCommands = @("move", "cast_skill")
+        preDisconnectEventKinds = @("skill_cast", "damage_applied")
+        snapshotFrame = 5; snapshotHash = "aaaa"; responseCurrentFrame = 5; responseWaitingFrame = 6
+        responseRecentInputFrames = @(5); responseWaitingInputFrames = @(6); recoveryGeneration = 3
+        continuityStartFrame = 6; continuityEndFrame = 7; continuityFrameCount = 2
+        contiguousWithoutDuplicateApply = $true; ignoredDuplicateOrOldFrames = 0
+        postReconnectInputFrame = 6; postReconnectInputApplicationCount = 1
+        localInputAcknowledgements = 2; hasControlBinding = $true
+        commonFrameStart = 6; commonFrameEnd = 7; commonFrameCount = 2
+    }
+    $observerAcceptance = [ordered]@{
+        preDisconnectFrame = $null; preDisconnectHash = $null; disconnectGeneration = $null
+        preDisconnectInputFrame = $null; preDisconnectInputCommands = @(); preDisconnectEventKinds = @()
+        snapshotFrame = 5; snapshotHash = "aaaa"; responseCurrentFrame = 5; responseWaitingFrame = 6
+        responseRecentInputFrames = @(5); responseWaitingInputFrames = @(6); recoveryGeneration = 1
+        continuityStartFrame = 6; continuityEndFrame = 7; continuityFrameCount = 2
+        contiguousWithoutDuplicateApply = $true; ignoredDuplicateOrOldFrames = 0
+        postReconnectInputFrame = 6; postReconnectInputApplicationCount = 1
+        localInputAcknowledgements = 0; hasControlBinding = $false
+        commonFrameStart = 6; commonFrameEnd = 7; commonFrameCount = 2
+    }
+    $recoveryEntities = @([ordered]@{
+        entityId = 1000; ownerCharacterId = "chr-primary"; fixedPositionMilli = [ordered]@{ x = 300; y = 0 }
+        hp = 100; alive = $true
+    })
+    $recoveryInput = @([ordered]@{
+        characterId = "chr-primary"; entityId = 1000; sequence = 2; command = "stop"
+    })
+    $newRecoveryRecord = {
+        param($Role, $Player, $Event, $Frame, $Hash, $Connected, $Inputs, $Acceptance, $RecoveryStatus)
+        return [ordered]@{
+            schema = "mybevy.lockstep.telemetry"; schemaVersion = 1; event = $Event
+            clientRole = $Role; player = $Player; serverConnected = $Connected; frame = $Frame
+            serverHash = [ordered]@{ hex = $Hash; source = "my_server_authority" }
+            localHash = [ordered]@{ hex = $Hash; source = "local_replay" }
+            mismatch = $false; inputs = @($Inputs); entities = @($recoveryEntities)
+            events = [ordered]@{ items = @() }; replayRecovery = [ordered]@{ status = $RecoveryStatus }
+            recoveryAcceptance = $Acceptance
+        }
+    }
+    $recoveryRecords = @(
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "transport_disconnected" 5 "aaaa" $false @() $null "pending"),
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "snapshot_recovered" 5 "aaaa" $true @() $primaryAcceptance "checkpoint_captured"),
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "frame" 6 "bbbb" $true $recoveryInput $null "pending"),
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "frame" 7 "cccc" $true @() $null "pending"),
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "replay_recovery" 7 "cccc" $true @() $primaryAcceptance "verified"),
+        (& $newRecoveryRecord "reconnect_primary" "chr-primary" "run_completed" 7 "cccc" $true @() $primaryAcceptance "verified"),
+        (& $newRecoveryRecord "observer" "chr-observer" "snapshot_recovered" 5 "aaaa" $true @() $observerAcceptance "checkpoint_captured"),
+        (& $newRecoveryRecord "observer" "chr-observer" "frame" 6 "bbbb" $true $recoveryInput $observerAcceptance "pending"),
+        (& $newRecoveryRecord "observer" "chr-observer" "frame" 7 "cccc" $true @() $observerAcceptance "pending"),
+        (& $newRecoveryRecord "observer" "chr-observer" "replay_recovery" 7 "cccc" $true @() $observerAcceptance "verified"),
+        (& $newRecoveryRecord "observer" "chr-observer" "run_completed" 7 "cccc" $true @() $observerAcceptance "verified")
+    )
+    $recoveryStdout = @($recoveryRecords | ForEach-Object { $_ | ConvertTo-Json -Depth 30 -Compress }) -join "`n"
+    $recoveryEvidence = Get-MybevyRecoverySuccessEvidence -Stdout $recoveryStdout
+    if ($recoveryEvidence.finalFrame -ne 7 -or $recoveryEvidence.finalHash -ne "cccc" -or
+        -not $recoveryEvidence.telemetry.reconnectObserver.matched -or
+        $recoveryEvidence.telemetry.reconnectObserver.primary.recoveryGeneration -ne 3 -or
+        $recoveryEvidence.observerRecovery.localInputAcknowledgements -ne 0 -or
+        $recoveryEvidence.observerRecovery.hasControlBinding) {
+        throw "self-test: mybevy reconnect-observer telemetry parser failed"
+    }
+    $observerInputRejected = $false
+    $observerInputError = $null
+    try {
+        $decodedBadRecords = ConvertTo-Json -InputObject @($recoveryRecords) -Depth 30 | ConvertFrom-Json
+        $badRecords = @($decodedBadRecords | ForEach-Object { $_ })
+        foreach ($record in $badRecords) {
+            if ($record.clientRole -eq "observer" -and $record.recoveryAcceptance) {
+                $record.recoveryAcceptance.localInputAcknowledgements = 1
+            }
+        }
+        Get-MybevyRecoverySuccessEvidence -Stdout (@($badRecords | ForEach-Object { $_ | ConvertTo-Json -Depth 30 -Compress }) -join "`n") | Out-Null
+    } catch {
+        $observerInputError = $_.Exception.Message
+        $observerInputRejected = $_.Exception.Message -match 'observer sent local input'
+    }
+    if (-not $observerInputRejected) { throw "self-test: mybevy recovery parser accepted observer local input (parserResult=$observerInputError)" }
+    $mismatchDiagnostics = Get-MybevyClientDiagnostics -Stdout ('{"schema":"mybevy.lockstep.telemetry","schemaVersion":1,"event":"run_failed","errorCode":"HEADLESS_SNAPSHOT_CONFIG_HASH_MISMATCH","failureStage":"snapshot_config_validation","frame":5,"entities":[]}') -Stderr ""
+    if ($mismatchDiagnostics.errorCode -ne "HEADLESS_SNAPSHOT_CONFIG_HASH_MISMATCH" -or
+        $mismatchDiagnostics.failureStage -ne "snapshot_config_validation") {
+        throw "self-test: mybevy recovery mismatch diagnostics lost stable code or stage"
     }
     $visualEvidenceDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver visual evidence $([Guid]::NewGuid().ToString('N'))"
     $visualEvidencePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $visualEvidenceDirectory
@@ -2167,7 +2472,7 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-dual-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-dual-telemetry-parser", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-dual-command-assembly", "mybevy-reconnect-observer-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-dual-telemetry-parser", "mybevy-reconnect-observer-telemetry-parser", "mybevy-reconnect-observer-input-rejection", "mybevy-recovery-mismatch-diagnostics", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
@@ -2228,7 +2533,7 @@ foreach ($name in $environmentNamesToRestore) {
 try {
     if ($mode -eq "execute") {
         Set-ProcessEnvironmentValue -Name $RedisRuntimeEnvVar -Value $RedisUrl
-        $observerRequired = @($definitions | Where-Object { $_.observerProbe -or $_.dualClient }).Count -gt 0
+        $observerRequired = @($definitions | Where-Object { $_.observerProbe -or $_.dualClient -or $_.reconnectObserver }).Count -gt 0
 
         if ($ProvisionDevTickets) {
             $secret = Get-EnvironmentValue -Name $TicketSecretEnvVar
