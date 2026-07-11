@@ -1,8 +1,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("all", "move", "melee", "observer")]
+    [ValidateSet("all", "move", "melee", "observer", "single-client", "visual-smoke")]
     [string[]]$Check = @("all"),
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("lockstep-client", "mybevy")]
+    [string]$Client = "lockstep-client",
+
+    [Parameter(Mandatory=$false)]
+    [string]$ClientRoot = "",
 
     [Parameter(Mandatory=$false)]
     [switch]$DryRun,
@@ -68,6 +75,13 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ManifestPath = Join-Path $ProjectRoot "tools\lockstep-client\Cargo.toml"
+$ConfiguredClientRoot = if ($ClientRoot) {
+    $ClientRoot
+} else {
+    $processClientRoot = [Environment]::GetEnvironmentVariable("MYSERVER_CLIENT_ROOT", "Process")
+    if ($processClientRoot) { $processClientRoot } else { [Environment]::GetEnvironmentVariable("MYSERVER_CLIENT_ROOT", "User") }
+}
+$MybevyManifestPath = if ($ConfiguredClientRoot) { Join-Path ([System.IO.Path]::GetFullPath($ConfiguredClientRoot)) "project\Cargo.toml" } else { $null }
 $TicketStorePath = Join-Path $ProjectRoot "tools\lockstep-client\online-ticket-store.mjs"
 $DevStackPath = Join-Path $ProjectRoot "scripts\dev-stack.ps1"
 $DevStackPidFile = Join-Path $ProjectRoot "logs\dev-stack\dev-stack.pids.json"
@@ -75,6 +89,17 @@ $RedisRuntimeEnvVar = "MYSERVER_LOCKSTEP_REDIS_URL_RUNTIME"
 $ReportSchema = "myserver.lockstep-online-reconcile.report.v1"
 $LocalNatsUrl = "nats://127.0.0.1:4222"
 $RegistryServiceName = "game-server"
+$MybevyVisualSmokeEnvironmentNames = @(
+    "TOUCH_START_SCREEN", "MYBEVY_START_SCENE", "LOCKSTEP_SIM_AUTHORITY_MODE",
+    "LOCKSTEP_SIM_TRANSPORT", "LOCKSTEP_SIM_MYSERVER_TICKET_ENV",
+    "LOCKSTEP_SIM_MYSERVER_ROOM", "LOCKSTEP_SIM_MYSERVER_POLICY",
+    "LOCKSTEP_SIM_DEBUG_DIAGNOSTICS", "LOCKSTEP_SIM_VISUAL_SMOKE",
+    "LOCKSTEP_SIM_VISUAL_SMOKE_RUN_ID", "LOCKSTEP_SIM_VISUAL_SMOKE_SCREENSHOT",
+    "LOCKSTEP_SIM_VISUAL_SMOKE_REPORT", "LOCKSTEP_SIM_VISUAL_SMOKE_OFFLINE_SCREENSHOT",
+    "LOCKSTEP_SIM_VISUAL_SMOKE_OFFLINE_REPORT", "LOCKSTEP_SIM_VISUAL_SMOKE_TIMEOUT_MS",
+    "MYSERVER_TRANSPORT", "MYSERVER_GAME_HOST", "MYSERVER_TCP_FALLBACK_PORT",
+    "MYSERVER_REQUEST_TIMEOUT_MS"
+)
 
 function Get-NowIso {
     return (Get-Date).ToUniversalTime().ToString("o")
@@ -84,6 +109,17 @@ function New-RunId {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $suffix = [Guid]::NewGuid().ToString("N").Substring(0, 8)
     return "$stamp-$suffix".ToLowerInvariant()
+}
+
+function New-EphemeralTicketSecret {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
 function Assert-EnvironmentVariableName {
@@ -214,7 +250,7 @@ function Assert-RunOptions {
     $reservedEnvironmentNames = @(
         "TICKET_SECRET", $RedisRuntimeEnvVar, "REDIS_URL", "REDIS_KEY_PREFIX",
         "REGISTRY_URL", "REGISTRY_KEY_PREFIX", "NATS_URL", "DB_ENABLED", "SERVICE_NAME"
-    )
+    ) + $MybevyVisualSmokeEnvironmentNames
     foreach ($name in $ticketEnvironmentNames) {
         if ($reservedEnvironmentNames -contains $name) {
             throw "Ticket environment variable $name aliases a reserved runtime variable."
@@ -223,11 +259,27 @@ function Assert-RunOptions {
     if ($Checks.Count -eq 0) {
         throw "At least one check is required."
     }
+    if ($Client -eq "mybevy") {
+        if (@($Checks | Where-Object { $_ -notin @("single-client", "visual-smoke") }).Count -gt 0) {
+            throw "-Client mybevy only supports -Check single-client, visual-smoke (or -Check all)."
+        }
+        if (-not $ConfiguredClientRoot) {
+            throw "-Client mybevy requires -ClientRoot or MYSERVER_CLIENT_ROOT."
+        }
+        if (-not (Test-Path -LiteralPath $MybevyManifestPath -PathType Leaf)) {
+            throw "mybevy Cargo manifest not found under the configured client root."
+        }
+    } elseif (@($Checks | Where-Object { $_ -in @("single-client", "visual-smoke") }).Count -gt 0) {
+        throw "-Check single-client and -Check visual-smoke require -Client mybevy."
+    }
 }
 
 function Get-NormalizedChecks {
     $requested = @($Check | ForEach-Object { $_.ToLowerInvariant() })
     if ($requested -contains "all") {
+        if ($Client -eq "mybevy") {
+            return @("single-client", "visual-smoke")
+        }
         return @("move", "melee", "observer")
     }
     return @($requested | Select-Object -Unique)
@@ -262,6 +314,24 @@ function New-StageDefinitions {
                     observerProbe = $true
                 }
             }
+            "single-client" {
+                $definitions += [pscustomobject]@{
+                    name = "mybevy-single-client"
+                    scenario = "online-single-client"
+                    roomId = "lockstep-$CurrentRunId-mybevy"
+                    observerProbe = $false
+                    visualSmoke = $false
+                }
+            }
+            "visual-smoke" {
+                $definitions += [pscustomobject]@{
+                    name = "mybevy-visual-smoke"
+                    scenario = "gui-visual-smoke"
+                    roomId = "lockstep-$CurrentRunId-mybevy-gui"
+                    observerProbe = $false
+                    visualSmoke = $true
+                }
+            }
             default { throw "Unsupported check: $name" }
         }
     }
@@ -270,6 +340,43 @@ function New-StageDefinitions {
 
 function New-ClientArguments {
     param([pscustomobject]$Stage, [string]$Mode)
+    if ($Client -eq "mybevy") {
+        if ($Mode -eq "dry-run") {
+            return [string[]]@(
+                "run", "--quiet",
+                "--manifest-path", $MybevyManifestPath,
+                "--bin", "lockstep-sim-headless",
+                "--",
+                "--scenario", "offline-fixture",
+                "--run-id", $RunId,
+                "--room", $Stage.roomId,
+                "--policy", "lockstep_sim_demo"
+            )
+        }
+        if ($Stage.visualSmoke) {
+            return [string[]]@(
+                "run", "--quiet",
+                "--manifest-path", $MybevyManifestPath,
+                "--bin", "project",
+                "--",
+                "--window-profile", "desktop"
+            )
+        }
+        $arguments = @(
+            "run", "--quiet",
+            "--manifest-path", $MybevyManifestPath,
+            "--bin", "lockstep-sim-headless",
+            "--",
+            "--scenario", "online-single-client",
+            "--run-id", $RunId,
+            "--room", $Stage.roomId,
+            "--policy", "lockstep_sim_demo",
+            "--endpoint", $Server,
+            "--connect-timeout-ms", [string]$TimeoutMs,
+            "--ticket-env", $TicketEnvVar
+        )
+        return [string[]]$arguments
+    }
     $arguments = @(
         "run", "--quiet",
         "--manifest-path", $ManifestPath,
@@ -334,6 +441,11 @@ function New-RunReport {
         schema = $ReportSchema
         schemaVersion = 1
         runId = $RunId
+        client = [ordered]@{
+            kind = $Client
+            root = if ($Client -eq "mybevy") { [System.IO.Path]::GetFullPath($ConfiguredClientRoot) } else { $null }
+            manifest = if ($Client -eq "mybevy") { $MybevyManifestPath } else { $ManifestPath }
+        }
         mode = $Mode
         status = if ($Mode -eq "plan") { "planned" } else { "running" }
         startedAt = Get-NowIso
@@ -353,6 +465,7 @@ function New-RunReport {
             primaryEnvVar = $TicketEnvVar
             observerEnvVar = $ObserverTicketEnvVar
             secretEnvVar = if ($ProvisionDevTickets) { $TicketSecretEnvVar } else { $null }
+            ephemeralSecretGenerated = $false
             primaryFingerprint = $null
             observerFingerprint = $null
             signatureVerifiedByScript = $false
@@ -425,6 +538,65 @@ function Get-EnvironmentValue {
 function Set-ProcessEnvironmentValue {
     param([string]$Name, [AllowNull()][string]$Value)
     [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+}
+
+function Get-MybevyVisualSmokeArtifactPaths {
+    param([string]$ArtifactDirectory)
+    return [ordered]@{
+        onlineScreenshot = Join-Path $ArtifactDirectory "mybevy-online.png"
+        onlineReport = Join-Path $ArtifactDirectory "mybevy-online-report.json"
+        offlineScreenshot = Join-Path $ArtifactDirectory "mybevy-offline-fixture.png"
+        offlineReport = Join-Path $ArtifactDirectory "offline-fixture-report.json"
+    }
+}
+
+function Set-MybevyVisualSmokeEnvironment {
+    param([pscustomobject]$Definition, [string]$ArtifactDirectory)
+
+    $paths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $ArtifactDirectory
+    if ($Server -notmatch '^(localhost|127\.0\.0\.1):([1-9][0-9]{0,4})$') {
+        throw "visual smoke requires an explicit loopback TCP endpoint"
+    }
+    $gameHost = $Matches[1]
+    $gamePort = $Matches[2]
+    $visualTimeoutMs = [Math]::Max(30000, $TimeoutMs)
+    $values = [ordered]@{
+        TOUCH_START_SCREEN = "robot_sync_scene"
+        MYBEVY_START_SCENE = "arena.lockstep_sim"
+        LOCKSTEP_SIM_AUTHORITY_MODE = "myserver"
+        LOCKSTEP_SIM_TRANSPORT = "tcp"
+        LOCKSTEP_SIM_MYSERVER_TICKET_ENV = $TicketEnvVar
+        LOCKSTEP_SIM_MYSERVER_ROOM = [string]$Definition.roomId
+        LOCKSTEP_SIM_MYSERVER_POLICY = "lockstep_sim_demo"
+        LOCKSTEP_SIM_DEBUG_DIAGNOSTICS = "1"
+        LOCKSTEP_SIM_VISUAL_SMOKE = "1"
+        LOCKSTEP_SIM_VISUAL_SMOKE_RUN_ID = $RunId
+        LOCKSTEP_SIM_VISUAL_SMOKE_SCREENSHOT = [string]$paths.onlineScreenshot
+        LOCKSTEP_SIM_VISUAL_SMOKE_REPORT = [string]$paths.onlineReport
+        LOCKSTEP_SIM_VISUAL_SMOKE_OFFLINE_SCREENSHOT = [string]$paths.offlineScreenshot
+        LOCKSTEP_SIM_VISUAL_SMOKE_OFFLINE_REPORT = [string]$paths.offlineReport
+        LOCKSTEP_SIM_VISUAL_SMOKE_TIMEOUT_MS = [string]$visualTimeoutMs
+        MYSERVER_TRANSPORT = "tcp"
+        MYSERVER_GAME_HOST = [string]$gameHost
+        MYSERVER_TCP_FALLBACK_PORT = [string]$gamePort
+        MYSERVER_REQUEST_TIMEOUT_MS = [string]$TimeoutMs
+    }
+    foreach ($entry in $values.GetEnumerator()) {
+        Set-ProcessEnvironmentValue -Name $entry.Key -Value ([string]$entry.Value)
+    }
+    return $paths
+}
+
+function Read-JsonArtifact {
+    param([string]$Path, [string]$Label)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label is missing: $Path"
+    }
+    try {
+        return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    } catch {
+        throw "$Label is not valid JSON: $Path"
+    }
 }
 
 function Invoke-TicketStore {
@@ -515,7 +687,8 @@ function Invoke-NativeCaptured {
         [string]$FilePath,
         [string[]]$Arguments,
         [string]$StdoutPath,
-        [string]$StderrPath
+        [string]$StderrPath,
+        [string]$WorkingDirectory = $ProjectRoot
     )
 
     $argumentLine = (@($Arguments | ForEach-Object {
@@ -523,7 +696,7 @@ function Invoke-NativeCaptured {
     }) -join " ")
     $startParameters = @{
         FilePath = $FilePath
-        WorkingDirectory = $ProjectRoot
+        WorkingDirectory = $WorkingDirectory
         WindowStyle = "Hidden"
         RedirectStandardOutput = $StdoutPath
         RedirectStandardError = $StderrPath
@@ -876,38 +1049,335 @@ function Read-TextFile {
     return Get-Content -LiteralPath $Path -Raw
 }
 
+function Get-MybevyTelemetryRecords {
+    param([string]$Stdout)
+    $records = @()
+    foreach ($line in @($Stdout -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "mybevy telemetry contains invalid JSONL"
+        }
+        if ($record.schema -ne "mybevy.lockstep.telemetry" -or [int]$record.schemaVersion -ne 1) {
+            throw "mybevy telemetry schema mismatch"
+        }
+        $records += $record
+    }
+    if ($records.Count -eq 0) { throw "mybevy telemetry output is empty" }
+    return @($records)
+}
+
+function Get-MybevySuccessEvidence {
+    param([string]$Stdout)
+    $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
+    $failures = @($records | Where-Object { $_.event -eq "run_failed" })
+    if ($failures.Count -gt 0) {
+        $failure = $failures[-1]
+        throw "mybevy telemetry failed at $($failure.failureStage): $($failure.errorCode)"
+    }
+    $frames = @($records | Where-Object { $_.event -eq "frame" })
+    if ($frames.Count -eq 0) { throw "mybevy telemetry has no online frame records" }
+    $completed = @($records | Where-Object { $_.event -eq "run_completed" })
+    if ($completed.Count -ne 1) { throw "mybevy telemetry must contain exactly one run_completed record" }
+    $recovery = @($records | Where-Object { $_.event -eq "replay_recovery" })
+    if ($recovery.Count -ne 1 -or $recovery[0].replayRecovery.status -ne "verified") {
+        throw "mybevy telemetry replay recovery was not verified"
+    }
+    foreach ($frame in $frames) {
+        if (-not $frame.serverConnected) { throw "mybevy online frame is not serverConnected" }
+        if (-not $frame.serverHash -or $frame.serverHash.source -ne "my_server_authority") {
+            throw "mybevy online frame is missing a MyServer authority hash"
+        }
+        if (-not $frame.localHash -or $frame.serverHash.hex -ne $frame.localHash.hex -or $frame.mismatch -ne $false) {
+            throw "mybevy online frame hash mismatch"
+        }
+    }
+
+    $commands = @($frames | ForEach-Object { @($_.inputs) } | ForEach-Object { $_.command })
+    foreach ($requiredCommand in @("move", "cast_skill", "stop")) {
+        if ($commands -notcontains $requiredCommand) { throw "mybevy telemetry is missing $requiredCommand input" }
+    }
+    $events = @($frames | ForEach-Object { @($_.events.items) })
+    $eventKinds = @($events | ForEach-Object { $_.kind })
+    if ($eventKinds -notcontains "skill_cast") { throw "mybevy telemetry is missing SkillCast" }
+    if ($eventKinds -notcontains "damage_applied" -and $eventKinds -notcontains "buff_applied" -and $eventKinds -notcontains "buff_tick") {
+        throw "mybevy telemetry is missing damage or Buff evidence"
+    }
+
+    $started = @($records | Where-Object { $_.event -eq "run_started" })
+    if ($started.Count -ne 1) { throw "mybevy telemetry must contain exactly one run_started record" }
+    $playerId = [string]$completed[0].player
+    $startPlayer = @($started[0].entities | Where-Object { $_.ownerCharacterId -eq $playerId })
+    $finalPlayer = @($completed[0].entities | Where-Object { $_.ownerCharacterId -eq $playerId })
+    if ($startPlayer.Count -ne 1 -or $finalPlayer.Count -ne 1) {
+        throw "mybevy telemetry does not identify exactly one controlled player entity"
+    }
+    if ([long]$startPlayer[0].fixedPositionMilli.x -eq [long]$finalPlayer[0].fixedPositionMilli.x) {
+        throw "mybevy telemetry fixed position did not move"
+    }
+
+    $finalFrame = [int]$completed[0].frame
+    $finalHash = [string]$completed[0].localHash.hex
+    return [ordered]@{
+        finalFrame = $finalFrame
+        finalHash = $finalHash.ToLowerInvariant()
+        finalEventCount = $events.Count
+        finalEvents = @($events)
+        finalEventSummaries = @($events)
+        observerRecovery = $null
+        telemetry = [ordered]@{
+            schema = [string]$completed[0].schema
+            schemaVersion = [int]$completed[0].schemaVersion
+            serverConnected = $true
+            hashMatched = $true
+            inputCommands = @($commands)
+            eventKinds = @($eventKinds)
+            playerEntityId = [int]$finalPlayer[0].entityId
+            initialFixedPosition = $startPlayer[0].fixedPositionMilli
+            finalFixedPosition = $finalPlayer[0].fixedPositionMilli
+            recoveryStatus = [string]$recovery[0].replayRecovery.status
+        }
+    }
+}
+
+function Get-MybevyVisualSmokeSuccessEvidence {
+    param([string]$ArtifactDirectory)
+
+    $paths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $ArtifactDirectory
+    $online = Read-JsonArtifact -Path $paths.onlineReport -Label "mybevy online visual report"
+    $offline = Read-JsonArtifact -Path $paths.offlineReport -Label "mybevy offline fixture report"
+    if ($online.schema -ne "mybevy.lockstep.visual-smoke" -or [int]$online.schemaVersion -ne 1) {
+        throw "mybevy online visual report schema mismatch"
+    }
+    if ($offline.schema -ne "mybevy.lockstep.visual-smoke" -or [int]$offline.schemaVersion -ne 1) {
+        throw "mybevy offline fixture report schema mismatch"
+    }
+    if ($online.source -ne "myserver_authority") {
+        throw "mybevy online visual report does not identify MyServer authority"
+    }
+    if ($online.uiMode -ne "robot_sync_scene") {
+        throw "mybevy online screenshot was not captured from the gameplay UI"
+    }
+    if (-not [bool]$online.coreSmokePassed) {
+        throw "mybevy online visual smoke did not pass"
+    }
+    foreach ($field in @("movement", "skillCast", "hitAndDamageNumber", "hudReadable", "hashMatched")) {
+        if (-not [bool]$online.coverage.$field) {
+            throw "mybevy online visual smoke is missing $field evidence"
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$online.localHash) -or
+        [string]$online.localHash -ne [string]$online.serverHash -or
+        [bool]$online.mismatch) {
+        throw "mybevy online visual smoke hash evidence does not match"
+    }
+    if ($offline.source -ne "offline_visual_fixture") {
+        throw "mybevy offline visual report source is not isolated from online evidence"
+    }
+    if ($offline.uiMode -ne "robot_sync_scene") {
+        throw "mybevy offline fixture screenshot was not captured from the gameplay UI"
+    }
+    if (-not [bool]$offline.passed -or $offline.status -ne "passed") {
+        throw "mybevy offline Buff/DoT/death fixture did not pass"
+    }
+    foreach ($field in @("buffApplied", "buffTick", "dotDamageNumber", "deathState")) {
+        if (-not [bool]$offline.coverage.$field) {
+            throw "mybevy offline visual fixture is missing $field evidence"
+        }
+    }
+
+    $captureHashes = @{}
+    foreach ($capture in @(
+        [pscustomobject]@{ label = "online"; expectedPath = $paths.onlineScreenshot; report = $online.screenshot },
+        [pscustomobject]@{ label = "offline fixture"; expectedPath = $paths.offlineScreenshot; report = $offline.screenshot }
+    )) {
+        if (-not $capture.report -or [int]$capture.report.width -lt 1 -or [int]$capture.report.height -lt 1) {
+            throw "mybevy $($capture.label) screenshot metadata is missing"
+        }
+        $expectedPath = [System.IO.Path]::GetFullPath([string]$capture.expectedPath)
+        $reportedPath = [System.IO.Path]::GetFullPath([string]$capture.report.path)
+        if (-not [string]::Equals($expectedPath, $reportedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "mybevy $($capture.label) screenshot path does not match the run-owned artifact path"
+        }
+        if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+            (Get-Item -LiteralPath $expectedPath).Length -lt 1) {
+            throw "mybevy $($capture.label) screenshot is missing or empty"
+        }
+        $captureHashes[$capture.label] = (Get-FileHash -LiteralPath $expectedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    if ($captureHashes["online"] -eq $captureHashes["offline fixture"]) {
+        throw "mybevy online and offline fixture screenshots are byte-identical"
+    }
+
+    $eventKinds = @($online.eventKinds)
+    return [ordered]@{
+        finalFrame = [int]$online.frame
+        finalHash = ([string]$online.localHash).ToLowerInvariant()
+        finalEventCount = $eventKinds.Count
+        finalEvents = @($eventKinds)
+        finalEventSummaries = @($eventKinds)
+        observerRecovery = $null
+        telemetry = $null
+        visualSmoke = [ordered]@{
+            combinedAcceptanceComplete = $true
+            online = [ordered]@{
+                source = [string]$online.source
+                status = [string]$online.status
+                report = [string]$paths.onlineReport
+                screenshot = [string]$paths.onlineScreenshot
+                screenshotSha256 = [string]$captureHashes["online"]
+                coverage = $online.coverage
+            }
+            offlineFixture = [ordered]@{
+                source = [string]$offline.source
+                status = [string]$offline.status
+                report = [string]$paths.offlineReport
+                screenshot = [string]$paths.offlineScreenshot
+                screenshotSha256 = [string]$captureHashes["offline fixture"]
+                coverage = $offline.coverage
+            }
+        }
+    }
+}
+
+function Get-MybevyVisualSmokeDiagnostics {
+    param([string]$ArtifactDirectory)
+    $diagnostics = [ordered]@{
+        failureStage = $null
+        frame = $null
+        serverHash = $null
+        clientHash = $null
+        entityDiff = $null
+        eventDiff = $null
+        inputDiff = $null
+        successEvidenceError = $null
+    }
+    $paths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $ArtifactDirectory
+    if (-not (Test-Path -LiteralPath $paths.onlineReport -PathType Leaf)) {
+        return $diagnostics
+    }
+    try {
+        $online = Read-JsonArtifact -Path $paths.onlineReport -Label "mybevy online visual report"
+        if ($null -ne $online.frame) { $diagnostics.frame = [int]$online.frame }
+        $diagnostics.serverHash = [string]$online.serverHash
+        $diagnostics.clientHash = [string]$online.localHash
+        $diagnostics.eventDiff = @($online.eventKinds) | ConvertTo-Json -Compress
+        if ($online.failure) {
+            $diagnostics.failureStage = "visual_smoke"
+            $diagnostics.successEvidenceError = [string]$online.failure
+        }
+    } catch {
+        $diagnostics.failureStage = "visual_report_parse"
+        $diagnostics.successEvidenceError = $_.Exception.Message
+    }
+    return $diagnostics
+}
+
+function Get-MybevyClientDiagnostics {
+    param([string]$Stdout, [string]$Stderr)
+    $diagnostics = [ordered]@{
+        failureStage = $null
+        frame = $null
+        serverHash = $null
+        clientHash = $null
+        entityDiff = $null
+        eventDiff = $null
+        inputDiff = $null
+        successEvidenceError = $null
+    }
+    try {
+        $records = @(Get-MybevyTelemetryRecords -Stdout $Stdout)
+        $failure = @($records | Where-Object { $_.event -eq "run_failed" } | Select-Object -Last 1)
+        if ($failure.Count -gt 0) {
+            $diagnostics.failureStage = [string]$failure[0].failureStage
+            if ($null -ne $failure[0].frame) { $diagnostics.frame = [int]$failure[0].frame }
+            $diagnostics.entityDiff = @($failure[0].entities) | ConvertTo-Json -Depth 12 -Compress
+        }
+        $frameRecord = @($records | Where-Object { $_.event -eq "frame" } | Select-Object -Last 1)
+        if ($frameRecord.Count -gt 0) {
+            if ($null -eq $diagnostics.frame) { $diagnostics.frame = [int]$frameRecord[0].frame }
+            if ($frameRecord[0].serverHash) { $diagnostics.serverHash = [string]$frameRecord[0].serverHash.hex }
+            if ($frameRecord[0].localHash) { $diagnostics.clientHash = [string]$frameRecord[0].localHash.hex }
+            $diagnostics.eventDiff = @($frameRecord[0].events.items) | ConvertTo-Json -Depth 12 -Compress
+            $diagnostics.inputDiff = @($frameRecord[0].inputs) | ConvertTo-Json -Depth 12 -Compress
+        }
+    } catch {
+        $diagnostics.failureStage = "telemetry_parse"
+        $diagnostics.successEvidenceError = $_.Exception.Message
+    }
+    return $diagnostics
+}
+
 function Invoke-ClientStage {
     param([pscustomobject]$Definition, [string]$Mode, [string]$ArtifactDirectory)
     $stdoutPath = Join-Path $ArtifactDirectory "$($Definition.name).stdout.log"
     $stderrPath = Join-Path $ArtifactDirectory "$($Definition.name).stderr.log"
     $arguments = New-ClientArguments -Stage $Definition -Mode $Mode
+    if ($Mode -eq "execute" -and $Client -eq "mybevy" -and $Definition.visualSmoke) {
+        $null = Set-MybevyVisualSmokeEnvironment -Definition $Definition -ArtifactDirectory $ArtifactDirectory
+    }
+    $workingDirectory = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
+        Split-Path -Parent $MybevyManifestPath
+    } else {
+        $ProjectRoot
+    }
     $startedAt = Get-NowIso
-    $exitCode = Invoke-NativeCaptured -FilePath "cargo" -Arguments $arguments -StdoutPath $stdoutPath -StderrPath $stderrPath
+    $exitCode = Invoke-NativeCaptured `
+        -FilePath "cargo" `
+        -Arguments $arguments `
+        -StdoutPath $stdoutPath `
+        -StderrPath $stderrPath `
+        -WorkingDirectory $workingDirectory
     $endedAt = Get-NowIso
     $stdout = Read-TextFile -Path $stdoutPath
     $stderr = Read-TextFile -Path $stderrPath
-    $diagnostics = Get-ClientDiagnostics -Stdout $stdout -Stderr $stderr
+    $diagnostics = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
+        Get-MybevyVisualSmokeDiagnostics -ArtifactDirectory $ArtifactDirectory
+    } elseif ($Client -eq "mybevy") {
+        Get-MybevyClientDiagnostics -Stdout $stdout -Stderr $stderr
+    } else {
+        Get-ClientDiagnostics -Stdout $stdout -Stderr $stderr
+    }
     $finalFrame = $null
     $finalHash = $null
-    if ($stdout -match '(?m)^final frame:\s*([0-9]+)') { $finalFrame = [int]$Matches[1] }
-    if ($stdout -match '(?m)^final hash:\s*([0-9a-fA-F]+)') { $finalHash = $Matches[1].ToLowerInvariant() }
+    if ($Client -ne "mybevy") {
+        if ($stdout -match '(?m)^final frame:\s*([0-9]+)') { $finalFrame = [int]$Matches[1] }
+        if ($stdout -match '(?m)^final hash:\s*([0-9a-fA-F]+)') { $finalHash = $Matches[1].ToLowerInvariant() }
+    }
     $successEvidence = [ordered]@{
         finalEventCount = $null
         finalEvents = @()
         finalEventSummaries = @()
         observerRecovery = $null
+        telemetry = $null
+        visualSmoke = $null
     }
     $stageExitCode = $exitCode
     if ($Mode -eq "execute" -and $exitCode -eq 0) {
         try {
-            $successEvidence = Get-ClientSuccessEvidence `
-                -Stdout $stdout `
-                -ObserverProbe ([bool]$Definition.observerProbe)
+            $successEvidence = if ($Client -eq "mybevy" -and $Definition.visualSmoke) {
+                Get-MybevyVisualSmokeSuccessEvidence -ArtifactDirectory $ArtifactDirectory
+            } elseif ($Client -eq "mybevy") {
+                Get-MybevySuccessEvidence -Stdout $stdout
+            } else {
+                Get-ClientSuccessEvidence `
+                    -Stdout $stdout `
+                    -ObserverProbe ([bool]$Definition.observerProbe)
+            }
+            if ($Client -eq "mybevy") {
+                $finalFrame = $successEvidence.finalFrame
+                $finalHash = $successEvidence.finalHash
+            }
         } catch {
             $stageExitCode = 1
             $diagnostics.failureStage = "success_evidence"
             $diagnostics.successEvidenceError = $_.Exception.Message
         }
+    }
+    if ($Definition.visualSmoke -and $exitCode -ne 0 -and -not $diagnostics.failureStage) {
+        $diagnostics.failureStage = "visual_smoke_process"
+        $diagnostics.successEvidenceError = "mybevy GUI process exited with code $exitCode; see captured logs"
     }
     $result = [ordered]@{
         name = $Definition.name
@@ -925,6 +1395,8 @@ function Invoke-ClientStage {
         finalEvents = @($successEvidence.finalEvents)
         finalEventSummaries = @($successEvidence.finalEventSummaries)
         observerRecovery = $successEvidence.observerRecovery
+        telemetry = $successEvidence.telemetry
+        visualSmoke = $successEvidence.visualSmoke
         diagnostics = $diagnostics
         stdout = $stdoutPath
         stderr = $stderrPath
@@ -937,6 +1409,13 @@ function Invoke-ClientStage {
 
 function Invoke-SelfTests {
     $testRunId = "20260710-120000-a1b2c3d4"
+    $ephemeralSecretA = New-EphemeralTicketSecret
+    $ephemeralSecretB = New-EphemeralTicketSecret
+    if ($ephemeralSecretA.Length -lt 40 -or
+        $ephemeralSecretA -notmatch '^[A-Za-z0-9_-]+$' -or
+        $ephemeralSecretA -eq $ephemeralSecretB) {
+        throw "self-test: ephemeral ticket secret generation failed"
+    }
     $invalidEnvRejected = $false
     try {
         Assert-EnvironmentVariableName -Name "INVALID-NAME" -ParameterName "self-test"
@@ -964,6 +1443,134 @@ function Invoke-SelfTests {
     if ($command -match 'secret-ticket-value') { throw "self-test: command leaked ticket value" }
     $dryArgs = New-ClientArguments -Stage $definitions[0] -Mode "dry-run"
     if ($dryArgs -notcontains "--dry-run" -or $dryArgs -contains "--ticket-env") { throw "self-test: dry-run command is not network-free" }
+    $savedClient = $script:Client
+    $savedMybevyManifestPath = $script:MybevyManifestPath
+    $savedRunIdForClient = $script:RunId
+    try {
+        $script:Client = "mybevy"
+        $script:MybevyManifestPath = "C:\client\project\Cargo.toml"
+        $script:RunId = $testRunId
+        $mybevyDefinition = (New-StageDefinitions -Checks @("single-client") -CurrentRunId $testRunId)[0]
+        $mybevyArgs = New-ClientArguments -Stage $mybevyDefinition -Mode "execute"
+        $mybevyCommand = Format-Command -Executable "cargo" -Arguments $mybevyArgs
+        if ($mybevyCommand -notmatch '--bin lockstep-sim-headless' -or
+            $mybevyCommand -notmatch '--scenario online-single-client' -or
+            $mybevyCommand -notmatch '--ticket-env MYSERVER_LOCKSTEP_TICKET') {
+            throw "self-test: mybevy command assembly is incomplete"
+        }
+        if ($mybevyCommand -match 'secret-ticket-value') { throw "self-test: mybevy command leaked ticket value" }
+        $mybevyDryArgs = New-ClientArguments -Stage $mybevyDefinition -Mode "dry-run"
+        if ($mybevyDryArgs -contains "--ticket-env" -or $mybevyDryArgs -contains "--endpoint" -or $mybevyDryArgs -notcontains "offline-fixture") {
+            throw "self-test: mybevy dry-run command is not network-free"
+        }
+        $visualDefinition = (New-StageDefinitions -Checks @("visual-smoke") -CurrentRunId $testRunId)[0]
+        $visualArgs = New-ClientArguments -Stage $visualDefinition -Mode "execute"
+        $visualCommand = Format-Command -Executable "cargo" -Arguments $visualArgs
+        if ($visualCommand -notmatch '--bin project' -or
+            $visualCommand -notmatch '--window-profile desktop' -or
+            $visualCommand -match '--ticket-env|secret-ticket-value') {
+            throw "self-test: mybevy visual smoke command assembly is unsafe or incomplete"
+        }
+        $visualDryArgs = New-ClientArguments -Stage $visualDefinition -Mode "dry-run"
+        if ($visualDryArgs -contains "--ticket-env" -or $visualDryArgs -contains "--endpoint" -or $visualDryArgs -notcontains "offline-fixture") {
+            throw "self-test: mybevy visual smoke dry-run command is not network-free"
+        }
+        $savedVisualEnvironment = @{}
+        foreach ($name in $MybevyVisualSmokeEnvironmentNames) {
+            $savedVisualEnvironment[$name] = Get-EnvironmentValue -Name $name
+        }
+        try {
+            $visualPaths = Set-MybevyVisualSmokeEnvironment `
+                -Definition $visualDefinition `
+                -ArtifactDirectory "C:\temp\mybevy visual smoke"
+            if ((Get-EnvironmentValue -Name "LOCKSTEP_SIM_MYSERVER_TICKET_ENV") -ne $TicketEnvVar -or
+                (Get-EnvironmentValue -Name "LOCKSTEP_SIM_MYSERVER_ROOM") -ne $visualDefinition.roomId -or
+                (Get-EnvironmentValue -Name "MYSERVER_GAME_HOST") -ne "127.0.0.1" -or
+                (Get-EnvironmentValue -Name "MYSERVER_TCP_FALLBACK_PORT") -ne "7000" -or
+                $visualPaths.onlineScreenshot -notmatch 'mybevy-online\.png$' -or
+                $visualPaths.offlineReport -notmatch 'offline-fixture-report\.json$') {
+                throw "self-test: mybevy visual smoke environment assembly is incomplete"
+            }
+            $renderedVisualEnvironment = @($MybevyVisualSmokeEnvironmentNames | ForEach-Object {
+                "$_=$(Get-EnvironmentValue -Name $_)"
+            }) -join "`n"
+            if ($renderedVisualEnvironment -match 'secret-ticket-value') {
+                throw "self-test: mybevy visual smoke environment leaked a ticket value"
+            }
+        } finally {
+            foreach ($name in $MybevyVisualSmokeEnvironmentNames) {
+                Set-ProcessEnvironmentValue -Name $name -Value $savedVisualEnvironment[$name]
+            }
+        }
+    } finally {
+        $script:Client = $savedClient
+        $script:MybevyManifestPath = $savedMybevyManifestPath
+        $script:RunId = $savedRunIdForClient
+    }
+    $mybevyStdout = @(
+        '{"schema":"mybevy.lockstep.telemetry","schemaVersion":1,"event":"run_started","player":"chr-a","serverConnected":true,"frame":0,"serverHash":{"hex":"aaaa","source":"my_server_authority"},"localHash":{"hex":"aaaa"},"mismatch":false,"inputs":[],"entities":[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":0,"y":0}}],"events":{"items":[]},"replayRecovery":{"status":"checkpoint_captured"}}',
+        '{"schema":"mybevy.lockstep.telemetry","schemaVersion":1,"event":"frame","player":"chr-a","serverConnected":true,"frame":2,"serverHash":{"hex":"bbbb","source":"my_server_authority"},"localHash":{"hex":"bbbb"},"mismatch":false,"inputs":[{"command":"move"},{"command":"cast_skill"},{"command":"stop"}],"entities":[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":300,"y":0}}],"events":{"items":[{"kind":"skill_cast"},{"kind":"damage_applied"}]},"replayRecovery":{"status":"pending"}}',
+        '{"schema":"mybevy.lockstep.telemetry","schemaVersion":1,"event":"replay_recovery","player":"chr-a","serverConnected":true,"frame":2,"serverHash":{"hex":"bbbb","source":"my_server_authority"},"localHash":{"hex":"bbbb"},"mismatch":false,"inputs":[],"entities":[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":300,"y":0}}],"events":{"items":[]},"replayRecovery":{"status":"verified"}}',
+        '{"schema":"mybevy.lockstep.telemetry","schemaVersion":1,"event":"run_completed","player":"chr-a","serverConnected":true,"frame":2,"serverHash":{"hex":"bbbb","source":"my_server_authority"},"localHash":{"hex":"bbbb"},"mismatch":false,"inputs":[],"entities":[{"entityId":1000,"ownerCharacterId":"chr-a","fixedPositionMilli":{"x":300,"y":0}}],"events":{"items":[]},"replayRecovery":{"status":"verified"}}'
+    ) -join "`n"
+    $mybevyEvidence = Get-MybevySuccessEvidence -Stdout $mybevyStdout
+    if ($mybevyEvidence.finalFrame -ne 2 -or
+        $mybevyEvidence.finalHash -ne "bbbb" -or
+        $mybevyEvidence.finalEventCount -ne 2 -or
+        -not $mybevyEvidence.telemetry.serverConnected -or
+        -not $mybevyEvidence.telemetry.hashMatched) {
+        throw "self-test: mybevy telemetry evidence parser failed"
+    }
+    $visualEvidenceDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "myserver visual evidence $([Guid]::NewGuid().ToString('N'))"
+    $visualEvidencePaths = Get-MybevyVisualSmokeArtifactPaths -ArtifactDirectory $visualEvidenceDirectory
+    try {
+        New-Item -ItemType Directory -Path $visualEvidenceDirectory | Out-Null
+        Set-Content -LiteralPath $visualEvidencePaths.onlineScreenshot -Value "online-image" -Encoding ASCII
+        Set-Content -LiteralPath $visualEvidencePaths.offlineScreenshot -Value "offline-image" -Encoding ASCII
+        [ordered]@{
+            schema = "mybevy.lockstep.visual-smoke"
+            schemaVersion = 1
+            source = "myserver_authority"
+            uiMode = "robot_sync_scene"
+            status = "captured_with_fixture_gaps"
+            coreSmokePassed = $true
+            frame = 4
+            localHash = "aabb"
+            serverHash = "aabb"
+            mismatch = $false
+            eventKinds = @("skill_cast", "damage_applied")
+            coverage = [ordered]@{ movement = $true; skillCast = $true; hitAndDamageNumber = $true; hudReadable = $true; hashMatched = $true }
+            screenshot = [ordered]@{ path = $visualEvidencePaths.onlineScreenshot; width = 1280; height = 720 }
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $visualEvidencePaths.onlineReport -Encoding UTF8
+        [ordered]@{
+            schema = "mybevy.lockstep.visual-smoke"
+            schemaVersion = 1
+            source = "offline_visual_fixture"
+            uiMode = "robot_sync_scene"
+            status = "passed"
+            passed = $true
+            coverage = [ordered]@{ buffApplied = $true; buffTick = $true; dotDamageNumber = $true; deathState = $true }
+            screenshot = [ordered]@{ path = $visualEvidencePaths.offlineScreenshot; width = 1280; height = 720 }
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $visualEvidencePaths.offlineReport -Encoding UTF8
+        $visualEvidence = Get-MybevyVisualSmokeSuccessEvidence -ArtifactDirectory $visualEvidenceDirectory
+        if (-not $visualEvidence.visualSmoke.combinedAcceptanceComplete -or
+            $visualEvidence.finalFrame -ne 4 -or
+            $visualEvidence.finalHash -ne "aabb" -or
+            $visualEvidence.visualSmoke.online.source -ne "myserver_authority" -or
+            $visualEvidence.visualSmoke.offlineFixture.source -ne "offline_visual_fixture") {
+            throw "self-test: mybevy visual smoke evidence parser failed"
+        }
+    } finally {
+        foreach ($path in @(
+            $visualEvidencePaths.onlineScreenshot,
+            $visualEvidencePaths.onlineReport,
+            $visualEvidencePaths.offlineScreenshot,
+            $visualEvidencePaths.offlineReport
+        )) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $visualEvidenceDirectory -Force -ErrorAction SilentlyContinue
+    }
     $diagnostics = Get-ClientDiagnostics -Stdout "" -Stderr "online mismatch: first mismatch frame 7`nserver_hash: aabb`nclient_hash: ccdd`nentity diffs:`n  entity 1`nevent diffs:`n  events differ`ninputs:`n  move"
     if ($diagnostics.frame -ne 7 -or $diagnostics.serverHash -ne "aabb" -or $diagnostics.clientHash -ne "ccdd") { throw "self-test: diagnostic parser failed" }
     $cleanupDiagnostics = Get-ClientDiagnostics -Stdout "" -Stderr "online cleanup failed: room_end rejected by server: END_FAILED"
@@ -1248,7 +1855,7 @@ Write-Output "launcher-complete"
     return [ordered]@{
         schema = "myserver.lockstep-online-reconcile.self-test.v1"
         ok = $true
-        tests = @("parameter-validation", "reserved-env-alias", "command-assembly", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
+        tests = @("parameter-validation", "ephemeral-ticket-secret", "reserved-env-alias", "command-assembly", "mybevy-command-assembly", "mybevy-visual-command-assembly", "mybevy-visual-environment", "dry-run-no-ticket", "diagnostic-parser", "success-evidence-parser", "mybevy-telemetry-parser", "mybevy-visual-evidence-parser", "pid-ownership-identity", "pid-json-array-reader", "registry-ownership-gate", "missing-pid-file-rejected", "native-signed-exit-code", "native-exit-code-259", "native-launcher-only-wait", "report-schema", "redis-url-redaction")
     }
 }
 
@@ -1298,10 +1905,10 @@ $runError = $null
 $activeStage = $null
 $savedEnvironment = @{}
 $environmentNamesToRestore = @(
-    $RedisRuntimeEnvVar, $TicketEnvVar, $ObserverTicketEnvVar, "TICKET_SECRET",
+    $RedisRuntimeEnvVar, $TicketEnvVar, $ObserverTicketEnvVar, $TicketSecretEnvVar, "TICKET_SECRET",
     "REDIS_URL", "REDIS_KEY_PREFIX", "REGISTRY_URL", "REGISTRY_KEY_PREFIX",
     "NATS_URL", "DB_ENABLED", "SERVICE_NAME"
-) | Select-Object -Unique
+) + $MybevyVisualSmokeEnvironmentNames | Select-Object -Unique
 foreach ($name in $environmentNamesToRestore) {
     $savedEnvironment[$name] = Get-EnvironmentValue -Name $name
 }
@@ -1314,7 +1921,9 @@ try {
         if ($ProvisionDevTickets) {
             $secret = Get-EnvironmentValue -Name $TicketSecretEnvVar
             if ([string]::IsNullOrWhiteSpace($secret)) {
-                throw "-$TicketSecretEnvVar must contain the dev ticket signing secret when -ProvisionDevTickets is used."
+                $secret = New-EphemeralTicketSecret
+                Set-ProcessEnvironmentValue -Name $TicketSecretEnvVar -Value $secret
+                $report.ticket.ephemeralSecretGenerated = $true
             }
         } else {
             if ([string]::IsNullOrWhiteSpace((Get-EnvironmentValue -Name $TicketEnvVar))) {
