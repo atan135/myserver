@@ -3,6 +3,9 @@ const TIMEOUT_CODES = new Set(["ECONNABORTED", "ETIMEDOUT"]);
 export function normalizeMyforgeError(error, options = {}) {
   const status = error?.response?.status;
   const errorCode = error?.response?.data?.error;
+  const serverMessage = typeof error?.response?.data?.message === "string"
+    ? error.response.data.message.trim()
+    : "";
 
   if (TIMEOUT_CODES.has(error?.code)) {
     return {
@@ -41,6 +44,6 @@ export function normalizeMyforgeError(error, options = {}) {
 
   return {
     title: options.title || "MyForge 数据加载失败",
-    description: options.fallbackMessage || "请求处理失败，请稍后重试。"
+    description: serverMessage || options.fallbackMessage || "请求处理失败，请稍后重试。"
   };
 }

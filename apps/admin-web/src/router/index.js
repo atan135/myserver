@@ -74,6 +74,12 @@ const routes = [
     name: "MyForge",
     component: () => import("../views/MyForge.vue"),
     meta: { requiresAuth: true, anyPermission: MYFORGE_ENTRY_PERMISSIONS }
+  },
+  {
+    path: "/myforge/tasks/:requestId",
+    name: "MyForgeTaskDetail",
+    component: () => import("../views/MyForgeTaskDetail.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.MYFORGE_TASK_READ }
   }
 ];
 

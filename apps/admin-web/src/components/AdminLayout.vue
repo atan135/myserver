@@ -11,7 +11,7 @@
         </div>
       </el-header>
 
-      <el-container>
+      <el-container class="body-container">
         <el-aside width="200px" class="sidebar">
           <el-menu :default-active="activeMenu" router>
             <el-menu-item index="/">
@@ -121,5 +121,61 @@ async function handleLogout() {
 
 .main-content {
   background: #f5f7fa;
+  min-width: 0;
+}
+
+@media (max-width: 700px) {
+  .header {
+    min-height: 60px;
+    height: auto;
+    gap: 12px;
+    padding: 10px 12px;
+  }
+
+  .header h2 {
+    font-size: 16px;
+  }
+
+  .user-info {
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .user-info > span {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .body-container {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    min-height: auto;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid #e4e7ed;
+  }
+
+  .sidebar :deep(.el-menu) {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+    border-right: 0;
+  }
+
+  .sidebar :deep(.el-menu-item) {
+    flex: 0 0 auto;
+    height: 44px;
+    padding: 0 12px;
+    line-height: 44px;
+  }
+
+  .main-content {
+    padding: 8px;
+  }
 }
 </style>
