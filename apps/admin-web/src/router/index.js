@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
+import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
-import { ADMIN_PERMISSIONS } from "../auth/permissions";
+import { ADMIN_PERMISSIONS, MYFORGE_ENTRY_PERMISSIONS } from "../auth/permissions";
 
 const routes = [
   {
@@ -67,6 +68,12 @@ const routes = [
     name: "GlobalId",
     component: () => import("../views/GlobalId.vue"),
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.ID_READ }
+  },
+  {
+    path: "/myforge",
+    name: "MyForge",
+    component: () => import("../views/MyForge.vue"),
+    meta: { requiresAuth: true, anyPermission: MYFORGE_ENTRY_PERMISSIONS }
   }
 ];
 
@@ -84,11 +91,13 @@ router.beforeEach((to, from, next) => {
   }
 
   if (to.meta.permission && !authStore.hasPermission(to.meta.permission)) {
+    ElMessage.warning("当前账号无权限访问该页面");
     next({ name: "Dashboard" });
     return;
   }
 
   if (to.meta.anyPermission && !authStore.hasAnyPermission(to.meta.anyPermission)) {
+    ElMessage.warning("当前账号无权限访问该页面");
     next({ name: "Dashboard" });
     return;
   }

@@ -17,11 +17,20 @@ export const ADMIN_PERMISSIONS = Object.freeze({
   MONITORING_ARCHIVE: "monitoring.archive",
   ID_READ: "id.read",
   ID_MANAGE: "id.manage",
+  MYFORGE_AGENT_READ: "myforge.agent.read",
+  MYFORGE_TASK_READ: "myforge.task.read",
+  MYFORGE_TASK_CREATE: "myforge.task.create",
+  MYFORGE_TASK_CANCEL: "myforge.task.cancel",
   ADMINS_REVOKE_TOKENS: "admins.revoke_tokens",
   ADMINS_RESET_PASSWORD: "admins.reset_password"
 });
 
 export const ALL_ADMIN_PERMISSIONS = Object.freeze(Object.values(ADMIN_PERMISSIONS));
+
+export const MYFORGE_ENTRY_PERMISSIONS = Object.freeze([
+  ADMIN_PERMISSIONS.MYFORGE_AGENT_READ,
+  ADMIN_PERMISSIONS.MYFORGE_TASK_READ
+]);
 
 export const ROLE_PERMISSIONS = Object.freeze({
   viewer: Object.freeze([

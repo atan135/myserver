@@ -113,4 +113,17 @@ export const globalIdApi = {
     api.get("/global-id/merge-events", { params })
 };
 
+export const myforgeApi = {
+  getAgents: (params) =>
+    api.get("/myforge/agents", { params }),
+  getTasks: (params) =>
+    api.get("/myforge/tasks", { params }),
+  getTask: (requestId) =>
+    api.get(`/myforge/tasks/${encodeURIComponent(requestId)}`),
+  createFangyuanTask: (data) =>
+    api.post("/myforge/tasks/fangyuan-blueprint", data),
+  cancelTask: (requestId, data = {}) =>
+    api.post(`/myforge/tasks/${encodeURIComponent(requestId)}/cancel`, data)
+};
+
 export default api;

@@ -35,6 +35,9 @@
             <el-menu-item v-if="authStore.hasPermission(P.MONITORING_READ)" index="/monitoring">
               <span>服务监控</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasAnyPermission(MYFORGE_ENTRY_PERMISSIONS)" index="/myforge">
+              <span>MyForge 蓝图</span>
+            </el-menu-item>
           </el-menu>
         </el-aside>
 
@@ -51,7 +54,7 @@ import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
-import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
+import { ADMIN_PERMISSIONS as P, MYFORGE_ENTRY_PERMISSIONS } from "../auth/permissions";
 
 const route = useRoute();
 const router = useRouter();
@@ -72,6 +75,9 @@ const activeMenu = computed(() => {
   }
   if (route.path.startsWith("/global-id")) {
     return "/global-id";
+  }
+  if (route.path.startsWith("/myforge")) {
+    return "/myforge";
   }
   return route.path;
 });
