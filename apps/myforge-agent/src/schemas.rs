@@ -314,6 +314,151 @@ pub struct CommandErrorMessage<'a> {
     pub nonce: String,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactSummary {
+    pub exists: bool,
+    pub sha256: Option<String>,
+    pub bytes: Option<u64>,
+    pub modified_at_ms: Option<u64>,
+}
+
+impl ArtifactSummary {
+    pub const fn missing() -> Self {
+        Self {
+            exists: false,
+            sha256: None,
+            bytes: None,
+            modified_at_ms: None,
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditFinding {
+    pub severity: String,
+    pub code: String,
+    pub field_path: String,
+    pub message: String,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditSummary {
+    pub status: String,
+    pub errors: Option<u64>,
+    pub warnings: Option<u64>,
+    pub primitive_count: Option<u64>,
+    pub main_code: Option<String>,
+    pub reason_code: Option<String>,
+    pub findings_preview: Vec<AuditFinding>,
+}
+
+impl AuditSummary {
+    pub fn skipped(reason_code: &str) -> Self {
+        Self {
+            status: "skipped".to_string(),
+            errors: None,
+            warnings: None,
+            primitive_count: None,
+            main_code: None,
+            reason_code: Some(reason_code.to_string()),
+            findings_preview: Vec::new(),
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self {
+            status: "unavailable".to_string(),
+            errors: None,
+            warnings: None,
+            primitive_count: None,
+            main_code: None,
+            reason_code: Some("auditor_not_configured".to_string()),
+            findings_preview: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultSemantic {
+    pub execution_mode: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub stdout_preview: String,
+    pub stderr_preview: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub artifact_file: String,
+    pub consumer_target_file: Option<String>,
+    pub artifact: ArtifactSummary,
+    pub audit: AuditSummary,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub completed_at_ms: u64,
+}
+
+impl std::fmt::Debug for CommandResultSemantic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CommandResultSemantic")
+            .field("execution_mode", &self.execution_mode)
+            .field("status", &self.status)
+            .field("exit_code", &self.exit_code)
+            .field("stdout_bytes", &self.stdout_bytes)
+            .field("stderr_bytes", &self.stderr_bytes)
+            .field("stdout_truncated", &self.stdout_truncated)
+            .field("stderr_truncated", &self.stderr_truncated)
+            .field("artifact_exists", &self.artifact.exists)
+            .field("audit_status", &self.audit.status)
+            .field("error_code", &self.error_code)
+            .field("started_at_ms", &self.started_at_ms)
+            .field("completed_at_ms", &self.completed_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandResultSemantic {
+    pub fn output_too_large_fallback(&self) -> Self {
+        let mut fallback = self.clone();
+        fallback.status = "failed".to_string();
+        fallback.stdout_preview.clear();
+        fallback.stderr_preview.clear();
+        fallback.stdout_truncated = fallback.stdout_bytes > 0;
+        fallback.stderr_truncated = fallback.stderr_bytes > 0;
+        fallback.audit = AuditSummary::skipped("execution_failed");
+        fallback.error_code = Some("MYFORGE_OUTPUT_TOO_LARGE".to_string());
+        fallback.error_message = Some("result exceeds the negotiated size limit".to_string());
+        fallback
+    }
+
+    pub fn validate(&self, max_output_bytes: u64) -> Result<(), ProtocolError> {
+        validate_command_result(self, max_output_bytes)
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultMessage<'a> {
+    pub protocol_version: u8,
+    #[serde(rename = "type")]
+    pub message_type: &'static str,
+    pub connection_id: &'a str,
+    pub request_id: &'a str,
+    pub agent_id: &'a str,
+    pub project_id: &'a str,
+    #[serde(flatten)]
+    pub result: &'a CommandResultSemantic,
+    pub timestamp_ms: u64,
+    pub expires_at_ms: u64,
+    pub nonce: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolErrorMessage<'a> {
@@ -807,6 +952,254 @@ pub fn validate_message_time(
         ));
     }
     Ok(())
+}
+
+fn validate_command_result(
+    result: &CommandResultSemantic,
+    max_output_bytes: u64,
+) -> Result<(), ProtocolError> {
+    let safe_max = MAX_SAFE_INTEGER as u64;
+    if !matches!(result.execution_mode.as_str(), "codex_exec" | "dry_run") {
+        return schema_error("command.result executionMode is invalid");
+    }
+    if !matches!(
+        result.status.as_str(),
+        "completed" | "completed_with_errors" | "failed" | "cancelled"
+    ) {
+        return schema_error("command.result status is invalid");
+    }
+    if result.stdout_preview.len() as u64 > max_output_bytes
+        || result.stderr_preview.len() as u64 > max_output_bytes
+        || result.stdout_bytes > safe_max
+        || result.stderr_bytes > safe_max
+        || result.stdout_bytes < result.stdout_preview.len() as u64
+        || result.stderr_bytes < result.stderr_preview.len() as u64
+    {
+        return schema_error("command.result output fields are invalid");
+    }
+    validate_path(
+        &result.artifact_file,
+        "artifactFile",
+        "artifacts/fangyuan/",
+        ".ron",
+    )?;
+    if let Some(path) = &result.consumer_target_file {
+        validate_path(
+            path,
+            "consumerTargetFile",
+            "project/assets/fangyuan/",
+            ".ron",
+        )?;
+    }
+    validate_artifact_summary(&result.artifact)?;
+    validate_audit_summary(&result.audit)?;
+    if let Some(code) = &result.error_code
+        && !valid_error_code(code)
+    {
+        return schema_error("command.result errorCode is invalid");
+    }
+    if let Some(message) = &result.error_message {
+        validate_text(message, "errorMessage", 1, 512, false)?;
+    }
+    if result.completed_at_ms > safe_max
+        || result
+            .started_at_ms
+            .is_some_and(|started| started > safe_max || started > result.completed_at_ms)
+    {
+        return schema_error("command.result timing fields are invalid");
+    }
+    if result.status == "completed" {
+        if result.error_code.is_some() || result.error_message.is_some() {
+            return schema_error("completed result must not contain an error");
+        }
+    } else if result.error_code.is_none() || result.error_message.is_none() {
+        return schema_error("non-completed result requires an error");
+    }
+
+    if result.execution_mode == "dry_run" {
+        if result.status == "completed"
+            && (result.exit_code.is_some()
+                || result.started_at_ms.is_none()
+                || result.audit.status != "skipped"
+                || result.audit.reason_code.as_deref() != Some("dry_run"))
+        {
+            return schema_error("dry_run completed result fields are inconsistent");
+        }
+        if !matches!(result.status.as_str(), "completed" | "cancelled") {
+            return schema_error("dry_run result status is invalid");
+        }
+    }
+    if result.execution_mode == "codex_exec"
+        && result.status == "completed"
+        && (result.exit_code != Some(0)
+            || result.started_at_ms.is_none()
+            || !result.artifact.exists
+            || !matches!(result.audit.status.as_str(), "passed" | "unavailable"))
+    {
+        return schema_error("completed codex_exec result fields are inconsistent");
+    }
+    if result.status == "completed_with_errors" {
+        let expected = match result.audit.status.as_str() {
+            "warning" => Some("FANGYUAN_BLUEPRINT_AUDIT_WARNING"),
+            "failed" => Some("FANGYUAN_BLUEPRINT_AUDIT_FAILED"),
+            _ => None,
+        };
+        if result.execution_mode != "codex_exec"
+            || result.exit_code != Some(0)
+            || result.started_at_ms.is_none()
+            || !result.artifact.exists
+            || expected != result.error_code.as_deref()
+        {
+            return schema_error("completed_with_errors result fields are inconsistent");
+        }
+    }
+    if result.status == "failed" {
+        if result.started_at_ms.is_none()
+            || result.audit.status != "skipped"
+            || !matches!(
+                result.audit.reason_code.as_deref(),
+                Some("execution_failed" | "artifact_missing")
+            )
+        {
+            return schema_error("failed result fields are inconsistent");
+        }
+        if result.audit.reason_code.as_deref() == Some("artifact_missing") {
+            if result.error_code.as_deref() != Some("MYFORGE_TARGET_FILE_MISSING")
+                || result.exit_code != Some(0)
+                || result.artifact.exists
+            {
+                return schema_error("artifact-missing result fields are inconsistent");
+            }
+        } else if !matches!(
+            result.error_code.as_deref(),
+            Some("MYFORGE_COMMAND_TIMEOUT" | "MYFORGE_COMMAND_FAILED" | "MYFORGE_OUTPUT_TOO_LARGE")
+        ) || (result.error_code.as_deref() == Some("MYFORGE_COMMAND_TIMEOUT")
+            && result.exit_code.is_some())
+            || (result.error_code.as_deref() == Some("MYFORGE_COMMAND_FAILED")
+                && result.exit_code == Some(0))
+        {
+            return schema_error("execution-failed result fields are inconsistent");
+        }
+    }
+    if result.status == "cancelled"
+        && (result.audit.status != "skipped"
+            || result.audit.reason_code.as_deref() != Some("cancelled")
+            || result.error_code.as_deref() != Some("MYFORGE_COMMAND_CANCELLED")
+            || (result.started_at_ms.is_none() && result.exit_code.is_some()))
+    {
+        return schema_error("cancelled result fields are inconsistent");
+    }
+    Ok(())
+}
+
+fn validate_artifact_summary(artifact: &ArtifactSummary) -> Result<(), ProtocolError> {
+    if artifact.exists {
+        let Some(sha256) = artifact.sha256.as_deref() else {
+            return schema_error("artifact sha256 is required");
+        };
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || artifact
+                .bytes
+                .is_none_or(|value| value > MAX_SAFE_INTEGER as u64)
+            || artifact
+                .modified_at_ms
+                .is_none_or(|value| value > MAX_SAFE_INTEGER as u64)
+        {
+            return schema_error("artifact summary is invalid");
+        }
+    } else if artifact.sha256.is_some()
+        || artifact.bytes.is_some()
+        || artifact.modified_at_ms.is_some()
+    {
+        return schema_error("missing artifact fields must be null");
+    }
+    Ok(())
+}
+
+fn validate_audit_summary(audit: &AuditSummary) -> Result<(), ProtocolError> {
+    if audit.findings_preview.len() > 20 {
+        return schema_error("audit findings exceed the allowed count");
+    }
+    for finding in &audit.findings_preview {
+        if !matches!(finding.severity.as_str(), "info" | "warning" | "error")
+            || !valid_lower_code(&finding.code)
+        {
+            return schema_error("audit finding is invalid");
+        }
+        validate_text(&finding.field_path, "finding.fieldPath", 1, 256, false)?;
+        validate_text(&finding.message, "finding.message", 1, 512, false)?;
+    }
+    match audit.status.as_str() {
+        "passed" | "warning" | "failed" => {
+            if audit
+                .errors
+                .is_none_or(|value| value > MAX_SAFE_INTEGER as u64)
+                || audit
+                    .warnings
+                    .is_none_or(|value| value > MAX_SAFE_INTEGER as u64)
+                || audit
+                    .primitive_count
+                    .is_some_and(|value| value > MAX_SAFE_INTEGER as u64)
+                || audit.reason_code.is_some()
+            {
+                return schema_error("audit counters are invalid");
+            }
+            if audit.status == "passed" {
+                if audit.main_code.is_some() {
+                    return schema_error("passed audit has invalid codes");
+                }
+            } else if audit
+                .main_code
+                .as_deref()
+                .is_none_or(|code| !valid_lower_code(code))
+                || audit.findings_preview.is_empty()
+            {
+                return schema_error("warning or failed audit is incomplete");
+            }
+        }
+        "skipped" | "unavailable" => {
+            if audit.errors.is_some()
+                || audit.warnings.is_some()
+                || audit.primitive_count.is_some()
+                || audit.main_code.is_some()
+                || !audit.findings_preview.is_empty()
+            {
+                return schema_error("skipped or unavailable audit fields are invalid");
+            }
+            let valid_reason = if audit.status == "unavailable" {
+                audit.reason_code.as_deref() == Some("auditor_not_configured")
+            } else {
+                matches!(
+                    audit.reason_code.as_deref(),
+                    Some("dry_run" | "execution_failed" | "artifact_missing" | "cancelled")
+                )
+            };
+            if !valid_reason {
+                return schema_error("audit reasonCode is invalid");
+            }
+        }
+        _ => return schema_error("audit status is invalid"),
+    }
+    Ok(())
+}
+
+fn valid_error_code(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_uppercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_lower_code(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && (value.as_bytes()[0].is_ascii_lowercase() || value.as_bytes()[0].is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
 }
 
 fn validate_server_limits(limits: ServerLimits) -> Result<(), ProtocolError> {

@@ -4,9 +4,9 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::command::PendingCommandHandler;
 use crate::config::{AgentConfig, AgentLimits};
 use crate::error::AgentError;
+use crate::execution::ControlledCommandHandler;
 use crate::preflight::{Capabilities, ForgeRootSummary, PreflightReport};
 use crate::runtime::ClientRuntime;
 
@@ -49,15 +49,11 @@ pub trait Connector {
     ) -> Result<(), AgentError>;
 }
 
-pub struct WebSocketConnector {
-    runtime: ClientRuntime,
-}
+pub struct WebSocketConnector;
 
 impl Default for WebSocketConnector {
     fn default() -> Self {
-        Self {
-            runtime: ClientRuntime::new(Arc::new(PendingCommandHandler)),
-        }
+        Self
     }
 }
 
@@ -70,7 +66,9 @@ impl Connector for WebSocketConnector {
     ) -> Result<(), AgentError> {
         let shutdown = CancellationToken::new();
         let signal_task = tokio::spawn(wait_for_shutdown(shutdown.clone()));
-        let result = self.runtime.run(config, preflight, shutdown.clone()).await;
+        let runtime =
+            ClientRuntime::new(Arc::new(ControlledCommandHandler::new(config, preflight)));
+        let result = runtime.run(config, preflight, shutdown.clone()).await;
         shutdown.cancel();
         signal_task.abort();
         let _ = signal_task.await;

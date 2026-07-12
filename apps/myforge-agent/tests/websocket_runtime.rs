@@ -10,16 +10,20 @@ use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use myforge_agent::AgentError;
-use myforge_agent::command::{CommandControl, CommandHandler, CommandHandlerOutcome};
+use myforge_agent::command::{
+    CommandControl, CommandHandler, CommandHandlerOutcome, StartedExecution,
+    StartedExecutionOutcome,
+};
 use myforge_agent::config::{AgentConfig, Environment};
 use myforge_agent::preflight::{CapabilityProbe, PreflightReport, run_preflight};
 use myforge_agent::protocol::{
-    JsonValue, SUBPROTOCOL, parse_canonical_frame, random_base64url, sign_message,
+    JsonValue, SUBPROTOCOL, parse_canonical_frame, random_base64url, semantic_digest, sign_message,
     verify_message_signature,
 };
 use myforge_agent::runtime::{BackoffJitter, ClientRuntime, RuntimeHooks, Sleeper, SystemClock};
 use myforge_agent::schemas::{
-    CommandExecute, CommandRejection, ServerMessage, parse_server_message, validate_message_time,
+    ArtifactSummary, AuditSummary, CommandExecute, CommandRejection, CommandResultSemantic,
+    ServerMessage, parse_server_message, validate_message_time,
 };
 use pkcs8::LineEnding;
 use serde_json::json;
@@ -75,6 +79,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(endpoint: &str) -> Self {
+        Self::with_dry_run(endpoint, false)
+    }
+
+    fn with_dry_run(endpoint: &str, dry_run: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("external-myforge");
         fs::create_dir(&root).unwrap();
@@ -160,6 +168,7 @@ impl Fixture {
                 "MYFORGE_WS_WRITE_TIMEOUT_MS".to_string(),
                 "1000".to_string(),
             ),
+            ("MYFORGE_DRY_RUN".to_string(), dry_run.to_string()),
             ("LOG_ENABLE_FILE".to_string(), "false".to_string()),
         ]));
         let config = AgentConfig::from_environment(&environment).unwrap();
@@ -220,6 +229,137 @@ impl CommandHandler for CancelAwareHandler {
         control.cancellation().cancelled().await;
         self.cancelled.notify_one();
         CommandHandlerOutcome::CancelledBeforeStart
+    }
+}
+
+#[derive(Default)]
+struct ResultHandler {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl CommandHandler for ResultHandler {
+    async fn execute(
+        &self,
+        command: CommandExecute,
+        _control: CommandControl,
+    ) -> CommandHandlerOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let started_at_ms = now_ms();
+        CommandHandlerOutcome::Started(StartedExecution::new(started_at_ms, async move {
+            CommandResultSemantic {
+                execution_mode: "codex_exec".to_string(),
+                status: "completed".to_string(),
+                exit_code: Some(0),
+                stdout_preview: "\0".repeat(MAX_OUTPUT_BYTES as usize),
+                stderr_preview: String::new(),
+                stdout_bytes: MAX_OUTPUT_BYTES,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                artifact_file: command.input.artifact_file,
+                consumer_target_file: command.input.consumer_target_file,
+                artifact: ArtifactSummary {
+                    exists: true,
+                    sha256: Some("a".repeat(64)),
+                    bytes: Some(12),
+                    modified_at_ms: Some(started_at_ms),
+                },
+                audit: AuditSummary {
+                    status: "passed".to_string(),
+                    errors: Some(0),
+                    warnings: Some(0),
+                    primitive_count: Some(3),
+                    main_code: None,
+                    reason_code: None,
+                    findings_preview: Vec::new(),
+                },
+                error_code: None,
+                error_message: None,
+                started_at_ms: Some(started_at_ms),
+                completed_at_ms: started_at_ms,
+            }
+        }))
+    }
+}
+
+#[derive(Default)]
+struct StartedCancelHandler {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl CommandHandler for StartedCancelHandler {
+    async fn execute(
+        &self,
+        command: CommandExecute,
+        control: CommandControl,
+    ) -> CommandHandlerOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let started_at_ms = now_ms();
+        CommandHandlerOutcome::Started(StartedExecution::new(started_at_ms, async move {
+            control.cancellation().cancelled().await;
+            CommandResultSemantic {
+                execution_mode: "codex_exec".to_string(),
+                status: "cancelled".to_string(),
+                exit_code: None,
+                stdout_preview: String::new(),
+                stderr_preview: String::new(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                artifact_file: command.input.artifact_file,
+                consumer_target_file: command.input.consumer_target_file,
+                artifact: ArtifactSummary::missing(),
+                audit: AuditSummary::skipped("cancelled"),
+                error_code: Some("MYFORGE_COMMAND_CANCELLED".to_string()),
+                error_message: Some("command was cancelled".to_string()),
+                started_at_ms: Some(started_at_ms),
+                completed_at_ms: now_ms().max(started_at_ms),
+            }
+        }))
+    }
+}
+
+struct DryRunDeadlineHandler {
+    calls: AtomicUsize,
+    active_completions: Arc<AtomicUsize>,
+}
+
+impl DryRunDeadlineHandler {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            active_completions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+struct CompletionGuard(Arc<AtomicUsize>);
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl CommandHandler for DryRunDeadlineHandler {
+    async fn execute(
+        &self,
+        _command: CommandExecute,
+        _control: CommandControl,
+    ) -> CommandHandlerOutcome {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active_completions.clone();
+        CommandHandlerOutcome::Started(StartedExecution::new_outcome(now_ms(), async move {
+            active.fetch_add(1, Ordering::SeqCst);
+            let _guard = CompletionGuard(active);
+            StartedExecutionOutcome::FailClosed {
+                reason: "dry_run_command_timeout",
+            }
+        }))
     }
 }
 
@@ -505,6 +645,135 @@ async fn completes_handshake_register_heartbeat_and_execute_idempotency() {
 }
 
 #[tokio::test]
+async fn signs_started_and_result_then_replays_completed_semantics_with_a_fresh_envelope() {
+    let (listener, endpoint) = listener().await;
+    let fixture = Fixture::new(&endpoint);
+    let handler = Arc::new(ResultHandler::default());
+    let runtime = ClientRuntime::new(handler.clone());
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let server = async {
+        let mut socket = accept_agent(&listener).await;
+        let connection_id = handshake(
+            &mut socket,
+            &fixture.server_key,
+            &fixture.agent_key.verifying_key(),
+        )
+        .await;
+        let request_id = Uuid::new_v4().to_string();
+        send_signed(
+            &mut socket,
+            execute_message(&connection_id, &request_id, "codex_exec", now_ms()),
+            &fixture.server_key,
+        )
+        .await;
+        let started = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(started.string_field("type"), Some("command.started"));
+        assert_eq!(started.string_field("executionMode"), Some("codex_exec"));
+        assert_eq!(started.string_field("requestId"), Some(request_id.as_str()));
+
+        let result = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(result.string_field("type"), Some("command.result"));
+        assert_eq!(result.string_field("status"), Some("completed"));
+        assert_eq!(
+            result.string_field("artifactFile"),
+            Some("artifacts/fangyuan/test.ron")
+        );
+        assert_eq!(
+            result.object_field("consumerTargetFile"),
+            Some(&JsonValue::Null)
+        );
+        assert_eq!(
+            result.object_field("stdoutBytes"),
+            Some(&JsonValue::Integer(MAX_OUTPUT_BYTES as i64))
+        );
+        let first_digest = semantic_digest(&result).unwrap();
+        let first_nonce = result.string_field("nonce").unwrap().to_string();
+
+        send_signed(
+            &mut socket,
+            execute_message(&connection_id, &request_id, "codex_exec", now_ms()),
+            &fixture.server_key,
+        )
+        .await;
+        let replay = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(replay.string_field("type"), Some("command.result"));
+        assert_eq!(semantic_digest(&replay).unwrap(), first_digest);
+        assert_ne!(replay.string_field("nonce"), Some(first_nonce.as_str()));
+        server_shutdown.cancel();
+    };
+    let client = runtime.run(&fixture.config, &fixture.preflight, shutdown.clone());
+    let (client_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .unwrap();
+    client_result.unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn repeated_cancel_with_the_original_deadline_replays_the_cancelled_result() {
+    let (listener, endpoint) = listener().await;
+    let fixture = Fixture::new(&endpoint);
+    let handler = Arc::new(StartedCancelHandler::default());
+    let runtime = ClientRuntime::new(handler.clone());
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let server = async {
+        let mut socket = accept_agent(&listener).await;
+        let connection_id = handshake(
+            &mut socket,
+            &fixture.server_key,
+            &fixture.agent_key.verifying_key(),
+        )
+        .await;
+        let request_id = Uuid::new_v4().to_string();
+        send_signed(
+            &mut socket,
+            execute_message(&connection_id, &request_id, "codex_exec", now_ms()),
+            &fixture.server_key,
+        )
+        .await;
+        let started = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(started.string_field("type"), Some("command.started"));
+
+        let cancel_timestamp = now_ms();
+        send_signed(
+            &mut socket,
+            cancel_message(&connection_id, &request_id, cancel_timestamp),
+            &fixture.server_key,
+        )
+        .await;
+        let cancelled = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(cancelled.string_field("type"), Some("command.result"));
+        assert_eq!(cancelled.string_field("status"), Some("cancelled"));
+        let cancelled_digest = semantic_digest(&cancelled).unwrap();
+        let first_nonce = cancelled.string_field("nonce").unwrap().to_string();
+
+        send_signed(
+            &mut socket,
+            cancel_message(&connection_id, &request_id, cancel_timestamp),
+            &fixture.server_key,
+        )
+        .await;
+        let replay = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(replay.string_field("type"), Some("command.result"));
+        assert_eq!(semantic_digest(&replay).unwrap(), cancelled_digest);
+        assert_ne!(replay.string_field("nonce"), Some(first_nonce.as_str()));
+        server_shutdown.cancel();
+    };
+    let client = runtime.run(&fixture.config, &fixture.preflight, shutdown.clone());
+    let (client_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .unwrap();
+    client_result.unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn delivers_cancel_to_active_worker_without_blocking_dispatcher() {
     let (listener, endpoint) = listener().await;
     let fixture = Fixture::new(&endpoint);
@@ -549,6 +818,70 @@ async fn delivers_cancel_to_active_worker_without_blocking_dispatcher() {
     .unwrap();
     client_result.unwrap();
     assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dry_run_deadline_closes_connection_without_result_or_error_frame() {
+    let (listener, endpoint) = listener().await;
+    let fixture = Fixture::with_dry_run(&endpoint, true);
+    let handler = Arc::new(DryRunDeadlineHandler::new());
+    let runtime = ClientRuntime::new(handler.clone());
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let server = async {
+        let mut socket = accept_agent(&listener).await;
+        let connection_id = handshake(
+            &mut socket,
+            &fixture.server_key,
+            &fixture.agent_key.verifying_key(),
+        )
+        .await;
+        let request_id = Uuid::new_v4().to_string();
+        send_signed(
+            &mut socket,
+            execute_message(&connection_id, &request_id, "codex_exec", now_ms()),
+            &fixture.server_key,
+        )
+        .await;
+        let started = read_agent(&mut socket, &fixture.agent_key.verifying_key()).await;
+        assert_eq!(started.string_field("type"), Some("command.started"));
+        assert_eq!(started.string_field("executionMode"), Some("dry_run"));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Ping(payload))) => {
+                        socket.send(Message::Pong(payload)).await.unwrap();
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Text(text))) => {
+                        let value =
+                            parse_canonical_frame(text.as_bytes(), WS_MAX_MESSAGE_BYTES as usize)
+                                .unwrap();
+                        panic!(
+                            "fail-closed dry-run emitted terminal frame {:?}",
+                            value.string_field("type")
+                        );
+                    }
+                    Some(Ok(other)) => panic!("unexpected frame before close: {other:?}"),
+                    Some(Err(error)) => panic!("websocket failed before close: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("agent did not fail closed after dry-run deadline");
+        server_shutdown.cancel();
+    };
+    let client = runtime.run(&fixture.config, &fixture.preflight, shutdown.clone());
+    let (client_result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(client, server)
+    })
+    .await
+    .unwrap();
+    client_result.unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(handler.active_completions.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

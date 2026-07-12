@@ -33,14 +33,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(error) = dispatch(
-        cli.intent(),
-        &config,
-        &preflight,
-        &WebSocketConnector::default(),
-    )
-    .await
-    {
+    if let Err(error) = dispatch(cli.intent(), &config, &preflight, &WebSocketConnector).await {
         tracing::error!(error_code = error.code().as_str(), error = %error, "agent stopped");
         return ExitCode::FAILURE;
     }

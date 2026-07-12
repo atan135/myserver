@@ -564,6 +564,88 @@ test("myforge duplicate started message is idempotent and does not duplicate aud
   client.assertDone();
 });
 
+test("myforge started linearizes after cancellation request and preserves cancellation fields", async () => {
+  const cancelRequestedAt = new Date(NOW.getTime() + 50);
+  const cancelDeadlineAt = new Date(NOW.getTime() + 10050);
+  const dispatched = taskRow({
+    status: "dispatched",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_digest: DIGEST_A,
+    command_expires_at: new Date(NOW.getTime() + 60000),
+    dispatched_at: NOW,
+    started_at: null,
+    cancel_requested_at: cancelRequestedAt,
+    cancel_deadline_at: cancelDeadlineAt
+  });
+  const running = {
+    ...dispatched,
+    status: "running",
+    started_at: new Date(NOW.getTime() + 100)
+  };
+  const { client, pool } = transactionClient([
+    { pattern: /^SELECT \* FROM myforge_task_runs/, result: { rows: [dispatched] } },
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'running'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /WHERE request_id = \$1 AND status = 'dispatched'/);
+        assert.doesNotMatch(sql, /cancel_requested_at\s*=/);
+        assert.doesNotMatch(sql, /cancel_deadline_at\s*=/);
+        assert.deepEqual(params, [REQUEST_ID, new Date(NOW.getTime() + 100)]);
+        return { rows: [running], rowCount: 1 };
+      }
+    },
+    { pattern: /^INSERT INTO admin_audit_logs/ }
+  ]);
+  const store = new MyforgeStore(pool);
+  const result = await store.markTaskStarted({
+    requestId: REQUEST_ID,
+    agentId: "dev-pc-001",
+    projectId: "myforge-local",
+    connectionId: CONNECTION_ID,
+    executionMode: "codex_exec",
+    startedAt: new Date(NOW.getTime() + 100)
+  });
+  assert.equal(result.outcome, "updated");
+  assert.equal(result.task.status, "running");
+  assert.equal(result.task.cancelRequestedAt, cancelRequestedAt.toISOString());
+  assert.equal(result.task.cancelDeadlineAt, cancelDeadlineAt.toISOString());
+  client.assertDone();
+});
+
+test("myforge started remains invalid after terminal transition", async () => {
+  const terminal = taskRow({
+    status: "cancelled",
+    queue_reason: null,
+    execution_mode: "codex_exec",
+    connection_id: CONNECTION_ID,
+    command_digest: DIGEST_A,
+    command_expires_at: new Date(NOW.getTime() + 60000),
+    dispatched_at: NOW,
+    started_at: null,
+    cancel_requested_at: new Date(NOW.getTime() + 50),
+    cancel_deadline_at: new Date(NOW.getTime() + 10050),
+    completed_at: new Date(NOW.getTime() + 200)
+  });
+  const { client, pool } = transactionClient([
+    { pattern: /^SELECT \* FROM myforge_task_runs/, result: { rows: [terminal] } }
+  ]);
+  const store = new MyforgeStore(pool);
+  await assert.rejects(
+    store.markTaskStarted({
+      requestId: REQUEST_ID,
+      agentId: "dev-pc-001",
+      projectId: "myforge-local",
+      connectionId: CONNECTION_ID,
+      executionMode: "codex_exec",
+      startedAt: new Date(NOW.getTime() + 100)
+    }),
+    (error) => error.code === "MYFORGE_PROTOCOL_STATE_INVALID"
+  );
+  client.assertDone();
+});
+
 test("myforge first terminal result wins and lifecycle audit excludes output content", async () => {
   const running = taskRow({
     status: "running",

@@ -1,11 +1,13 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::config::{AgentConfig, AgentLimits};
 use crate::error::{AgentError, ErrorCode};
@@ -60,7 +62,7 @@ pub struct Capabilities {
 
 pub struct PreflightReport {
     root_real: PathBuf,
-    auditor_real: Option<PathBuf>,
+    auditor: Option<AuditorIdentity>,
     platform: String,
     hostname: String,
     agent_version: String,
@@ -75,7 +77,11 @@ impl PreflightReport {
     }
 
     pub fn auditor_real(&self) -> Option<&Path> {
-        self.auditor_real.as_deref()
+        self.auditor.as_ref().map(AuditorIdentity::path)
+    }
+
+    pub(crate) fn auditor_identity(&self) -> Option<&AuditorIdentity> {
+        self.auditor.as_ref()
     }
 
     pub fn platform(&self) -> &str {
@@ -100,6 +106,32 @@ impl PreflightReport {
 
     pub const fn limits(&self) -> AgentLimits {
         self.limits
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct AuditorIdentity {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) bytes: u64,
+    pub(crate) modified: SystemTime,
+}
+
+impl AuditorIdentity {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::fmt::Debug for AuditorIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuditorIdentity")
+            .field("path", &"[REDACTED]")
+            .field("sha256", &"[REDACTED]")
+            .field("bytes", &self.bytes)
+            .field("modified", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -133,7 +165,7 @@ pub fn run_preflight(
         ));
     }
 
-    let auditor_real = if config.audit().enabled() {
+    let auditor = if config.audit().enabled() {
         Some(validate_auditor(
             &root_real,
             config.audit().program().ok_or_else(|| {
@@ -146,7 +178,7 @@ pub fn run_preflight(
     } else {
         None
     };
-    let audit = if auditor_real.is_some() {
+    let audit = if auditor.is_some() {
         AuditAvailability::Available
     } else {
         AuditAvailability::Unavailable
@@ -154,7 +186,7 @@ pub fn run_preflight(
 
     Ok(PreflightReport {
         root_real,
-        auditor_real,
+        auditor,
         platform,
         hostname,
         agent_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -279,7 +311,7 @@ fn validate_hostname(hostname: String) -> Result<String, AgentError> {
     Ok(hostname)
 }
 
-fn validate_auditor(root_real: &Path, program: &str) -> Result<PathBuf, AgentError> {
+fn validate_auditor(root_real: &Path, program: &str) -> Result<AuditorIdentity, AgentError> {
     if !valid_auditor_path(program) {
         return Err(AgentError::new(
             ErrorCode::AuditorInvalid,
@@ -288,7 +320,7 @@ fn validate_auditor(root_real: &Path, program: &str) -> Result<PathBuf, AgentErr
     }
 
     let candidate = root_real.join(program);
-    let real = fs::canonicalize(candidate).map_err(|_| {
+    let real = fs::canonicalize(&candidate).map_err(|_| {
         AgentError::new(
             ErrorCode::AuditorInvalid,
             "configured auditor program is unavailable",
@@ -306,7 +338,79 @@ fn validate_auditor(root_real: &Path, program: &str) -> Result<PathBuf, AgentErr
             "configured auditor program is not an executable file inside forge root",
         ));
     }
-    Ok(real)
+    let modified = metadata.modified().map_err(|_| {
+        AgentError::new(
+            ErrorCode::AuditorInvalid,
+            "configured auditor program is unreadable",
+        )
+    })?;
+    let (sha256, opened_metadata, final_opened_metadata) = hash_file(&real).map_err(|_| {
+        AgentError::new(
+            ErrorCode::AuditorInvalid,
+            "configured auditor program is unreadable",
+        )
+    })?;
+    let final_real = fs::canonicalize(&candidate).map_err(|_| {
+        AgentError::new(
+            ErrorCode::AuditorInvalid,
+            "configured auditor program changed during validation",
+        )
+    })?;
+    let final_metadata = fs::metadata(&final_real).map_err(|_| {
+        AgentError::new(
+            ErrorCode::AuditorInvalid,
+            "configured auditor program changed during validation",
+        )
+    })?;
+    if final_real != real
+        || !same_file_snapshot(&metadata, &opened_metadata)
+        || !same_file_snapshot(&metadata, &final_opened_metadata)
+        || !same_file_snapshot(&metadata, &final_metadata)
+        || !final_metadata.is_file()
+        || !is_executable(&final_metadata)
+    {
+        return Err(AgentError::new(
+            ErrorCode::AuditorInvalid,
+            "configured auditor program changed during validation",
+        ));
+    }
+    Ok(AuditorIdentity {
+        path: real,
+        sha256,
+        bytes: metadata.len(),
+        modified,
+    })
+}
+
+fn hash_file(path: &Path) -> std::io::Result<([u8; 32], fs::Metadata, fs::Metadata)> {
+    let mut file = fs::File::open(path)?;
+    let opened_metadata = file.metadata()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let final_opened_metadata = file.metadata()?;
+    Ok((
+        digest.finalize().into(),
+        opened_metadata,
+        final_opened_metadata,
+    ))
+}
+
+fn same_file_snapshot(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+    first.is_file()
+        && second.is_file()
+        && first.len() == second.len()
+        && first.permissions().readonly() == second.permissions().readonly()
+        && matches!(
+            (first.modified(), second.modified()),
+            (Ok(first_modified), Ok(second_modified)) if first_modified == second_modified
+        )
 }
 
 fn valid_auditor_path(program: &str) -> bool {
@@ -630,6 +734,18 @@ mod tests {
         assert_eq!(report.capabilities().audit, AuditAvailability::Available);
         let auditor_real = fs::canonicalize(&auditor).unwrap();
         assert_eq!(report.auditor_real(), Some(auditor_real.as_path()));
+        let auditor_identity = report.auditor_identity().unwrap();
+        assert_eq!(
+            auditor_identity.modified,
+            fs::metadata(&auditor).unwrap().modified().unwrap()
+        );
+        let identity_debug = format!("{auditor_identity:?}");
+        let full_digest = format!("{:x}", Sha256::digest(b"test executable"));
+        assert!(!identity_debug.contains(auditor_real.to_string_lossy().as_ref()));
+        assert!(!identity_debug.contains("fangyuan-audit"));
+        assert!(!identity_debug.contains("test executable"));
+        assert!(!identity_debug.contains(&full_digest));
+        assert!(identity_debug.contains("[REDACTED]"));
 
         fixture.set("MYFORGE_AUDIT_PROGRAM", "../outside");
         let error = run_preflight(&fixture.config(), &FakeProbe::new(true)).unwrap_err();

@@ -2,6 +2,7 @@ pub mod app;
 pub mod command;
 pub mod config;
 pub mod error;
+pub mod execution;
 pub mod keys;
 pub mod logging;
 pub mod preflight;

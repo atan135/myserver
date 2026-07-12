@@ -1,9 +1,10 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -11,21 +12,26 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message, WebSocketConfig};
 use tokio_util::sync::CancellationToken;
 
-use crate::command::{CommandControl, CommandHandler, CommandHandlerOutcome};
+use crate::command::{
+    CommandControl, CommandHandler, CommandHandlerOutcome, StartedExecutionOutcome,
+};
 use crate::config::AgentConfig;
 use crate::error::{AgentError, ErrorCode};
 use crate::preflight::PreflightReport;
 use crate::protocol::{
-    JsonValue, ProtocolError, QUEUE_CAPACITY, SUBPROTOCOL, parse_canonical_frame, random_base64url,
-    semantic_digest, sign_message, verify_message_signature,
+    JsonValue, MAX_SAFE_INTEGER, ProtocolError, QUEUE_CAPACITY, SUBPROTOCOL, parse_canonical_frame,
+    random_base64url, semantic_digest, sign_message, verify_message_signature,
 };
 use crate::schemas::{
-    AgentHeartbeat, AgentHello, AgentRegister, CommandErrorMessage, CommandExecute,
-    CommandRejection, CommandStarted, EffectiveLimits, ProtocolErrorMessage, ServerMessage,
-    parse_server_message, validate_challenge_compatibility, validate_execute_business,
-    validate_message_time,
+    AgentHeartbeat, AgentHello, AgentRegister, ArtifactSummary, AuditSummary, CommandErrorMessage,
+    CommandExecute, CommandRejection, CommandResultMessage, CommandResultSemantic, CommandStarted,
+    EffectiveLimits, ProtocolErrorMessage, ServerMessage, parse_server_message,
+    validate_challenge_compatibility, validate_execute_business, validate_message_time,
 };
-use crate::state::{CachedResponse, ExecuteDecision, ReplayCache, RequestRegistry};
+use crate::state::{
+    CachedResponse, CancelDecision, CompletionDecision, DeliveryGeneration, DeliveryLease,
+    ExecuteDecision, ReplayCache, RequestRegistry, StartedDeliveryCandidate,
+};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
@@ -497,9 +503,17 @@ impl ClientRuntime {
                                 "command.execute requires a registered connection",
                             )
                         })?;
+                        let execution_mode = if config.dry_run() {
+                            "dry_run"
+                        } else {
+                            "codex_exec"
+                        };
                         self.handle_execute(
-                            config,
-                            state.connection_id().unwrap_or_default(),
+                            ConnectionIdentity::new(
+                                config,
+                                state.connection_id().unwrap_or_default().to_string(),
+                            ),
+                            execution_mode,
                             effective,
                             value,
                             command,
@@ -537,9 +551,20 @@ impl ClientRuntime {
                             )
                             .with_request_id(Some(cancel.request_id)));
                         }
-                        self.request_registry
-                            .cancel(&cancel.request_id, cancel.cancel_deadline_at_ms)
-                            .await?;
+                        let identity = ConnectionIdentity::new(
+                            config,
+                            state.connection_id().unwrap_or_default().to_string(),
+                        );
+                        cancel_request_owned(
+                            &identity,
+                            effective,
+                            &cancel.request_id,
+                            cancel.cancel_deadline_at_ms,
+                            outbound,
+                            self.hooks.clock.as_ref(),
+                            &self.request_registry,
+                        )
+                        .await?;
                         Ok(HandleOutcome::Continue)
                     }
                     ServerMessage::ProtocolError(_) => Ok(HandleOutcome::PeerFatal),
@@ -671,8 +696,8 @@ impl ClientRuntime {
     #[allow(clippy::too_many_arguments)]
     async fn handle_execute(
         &self,
-        config: &AgentConfig,
-        connection_id: &str,
+        identity: ConnectionIdentity,
+        execution_mode: &'static str,
         effective: EffectiveLimits,
         wire_value: JsonValue,
         command: CommandExecute,
@@ -690,189 +715,252 @@ impl ClientRuntime {
             .with_request_id(Some(command.request_id)));
         }
         let digest = semantic_digest(&wire_value)?;
+        let cancellation_result =
+            cancelled_semantic_result(&command, execution_mode, None, self.hooks.clock.now_ms());
         let decision = self
             .request_registry
             .begin(
-                connection_id,
+                &identity.connection_id,
                 &command.request_id,
                 &digest,
+                cancellation_result,
                 self.hooks.clock.now_ms(),
             )
             .await?;
         match decision {
-            ExecuteDecision::DuplicateActive { started_at_ms, .. } => {
-                if let Some(started_at_ms) = started_at_ms {
-                    self.send_started(
-                        config,
-                        connection_id,
-                        effective,
-                        &command.request_id,
-                        started_at_ms,
-                        outbound,
-                    )
-                    .await?;
+            ExecuteDecision::DuplicateActive { started, .. } => {
+                if let Some(started) = started {
+                    let identity = identity.clone();
+                    let request_id = command.request_id.clone();
+                    let outbound = outbound.clone();
+                    let clock = self.hooks.clock.clone();
+                    let terminal_tx = terminal_tx.clone();
+                    workers.spawn(async move {
+                        if let Err(error) = send_started_owned(
+                            &identity,
+                            effective,
+                            StartedDelivery {
+                                request_id: &request_id,
+                                execution_mode,
+                            },
+                            started,
+                            &outbound,
+                            clock.as_ref(),
+                        )
+                        .await
+                        {
+                            let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                        }
+                    });
                 }
                 Ok(())
             }
-            ExecuteDecision::DuplicateCompleted { response } => match response {
-                CachedResponse::CommandError(rejection) => {
-                    self.send_command_error(
-                        config,
-                        connection_id,
+            ExecuteDecision::DuplicateCompleted { .. } => {
+                let request_id = command.request_id.clone();
+                let outbound = outbound.clone();
+                let clock = self.hooks.clock.clone();
+                let registry = self.request_registry.clone();
+                let terminal_tx = terminal_tx.clone();
+                workers.spawn(async move {
+                    if let Err(error) = replay_completed_response(
+                        &identity,
                         effective,
-                        &command.request_id,
-                        &rejection,
-                        outbound,
+                        &request_id,
+                        &outbound,
+                        clock.as_ref(),
+                        &registry,
                     )
                     .await
-                }
-                CachedResponse::NoReplay => Err(ProtocolError::new(
-                    "MYFORGE_DUPLICATE_REQUEST_CONFLICT",
-                    "request belongs to a closed connection",
-                )
-                .with_request_id(Some(command.request_id))),
-            },
-            ExecuteDecision::New { cancellation } => {
-                if let Err(rejection) = validate_execute_business(&command, effective) {
-                    if rejection.protocol_fatal {
-                        return Err(ProtocolError::new(
-                            rejection.error_code,
-                            rejection.error_message,
-                        )
-                        .with_request_id(Some(command.request_id)));
+                    {
+                        let _ = terminal_tx.send(TerminalFailure::protocol(error));
                     }
-                    self.send_command_error(
-                        config,
-                        connection_id,
-                        effective,
-                        &command.request_id,
-                        &rejection,
-                        outbound,
-                    )
-                    .await?;
-                    self.request_registry
-                        .complete_error(
-                            &command.request_id,
-                            rejection,
-                            self.hooks.clock.now_ms(),
-                            effective
-                                .command_timeout_ms
-                                .saturating_add(effective.command_ttl_ms),
-                        )
-                        .await?;
-                    return Ok(());
-                }
-
+                });
+                Ok(())
+            }
+            ExecuteDecision::New { cancellation } => {
                 let handler = self.handler.clone();
                 let registry = self.request_registry.clone();
                 let outbound = outbound.clone();
                 let clock = self.hooks.clock.clone();
-                let identity = ConnectionIdentity::new(config, connection_id.to_string());
                 let request_id = command.request_id.clone();
+                let command_for_result = command.clone();
                 let terminal_tx = terminal_tx.clone();
                 workers.spawn(async move {
+                    if let Err(rejection) = validate_execute_business(&command, effective) {
+                        if rejection.protocol_fatal {
+                            let error =
+                                ProtocolError::new(rejection.error_code, rejection.error_message)
+                                    .with_request_id(Some(request_id.clone()));
+                            let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                        } else if let Err(error) = send_and_cache_error(
+                            &identity,
+                            effective,
+                            &request_id,
+                            &command_for_result,
+                            execution_mode,
+                            rejection,
+                            &outbound,
+                            clock.as_ref(),
+                            &registry,
+                        )
+                        .await
+                        {
+                            let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                        }
+                        return;
+                    }
                     let received_at_ms = clock.now_ms();
                     let outcome = handler
                         .execute(
                             command,
-                            CommandControl::new(cancellation.clone(), received_at_ms),
+                            CommandControl::from_cancellation(cancellation.clone(), received_at_ms),
                         )
                         .await;
                     match outcome {
-                        CommandHandlerOutcome::PreStartError(rejection)
-                            if !cancellation.is_cancelled() =>
-                        {
-                            let send = send_command_error_owned(
+                        CommandHandlerOutcome::PreStartError(rejection) => {
+                            if let Err(error) = send_and_cache_error(
                                 &identity,
                                 effective,
                                 &request_id,
-                                &rejection,
+                                &command_for_result,
+                                execution_mode,
+                                rejection,
                                 &outbound,
                                 clock.as_ref(),
+                                &registry,
                             )
-                            .await;
-                            if let Err(error) = send {
-                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
-                                return;
-                            }
-                            if let Err(error) = registry
-                                .complete_error(
-                                    &request_id,
-                                    rejection,
-                                    clock.now_ms(),
-                                    effective
-                                        .command_timeout_ms
-                                        .saturating_add(effective.command_ttl_ms),
-                                )
-                                .await
+                            .await
                             {
                                 let _ = terminal_tx.send(TerminalFailure::protocol(error));
                             }
                         }
-                        CommandHandlerOutcome::PreStartError(_)
-                        | CommandHandlerOutcome::CancelledBeforeStart => {
-                            // Stage 7 owns construction of the signed cancelled result. Keeping the
-                            // request active prevents a false command.error after cancellation.
+                        CommandHandlerOutcome::CancelledBeforeStart => {
+                            let result = cancelled_semantic_result(
+                                &command_for_result,
+                                execution_mode,
+                                None,
+                                clock.now_ms(),
+                            );
+                            if let Err(error) = send_and_cache_result(
+                                &identity,
+                                effective,
+                                &request_id,
+                                &command_for_result,
+                                execution_mode,
+                                result,
+                                &outbound,
+                                clock.as_ref(),
+                                &registry,
+                            )
+                            .await
+                            {
+                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                            }
+                        }
+                        CommandHandlerOutcome::CompletedBeforeStart(result) => {
+                            let mut result = *result;
+                            if cancellation.is_cancelled() && result.status != "cancelled" {
+                                force_cancelled(&mut result, None, clock.now_ms());
+                            }
+                            if let Err(error) = send_and_cache_result(
+                                &identity,
+                                effective,
+                                &request_id,
+                                &command_for_result,
+                                execution_mode,
+                                result,
+                                &outbound,
+                                clock.as_ref(),
+                                &registry,
+                            )
+                            .await
+                            {
+                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                            }
+                        }
+                        CommandHandlerOutcome::Started(execution) => {
+                            let started_at_ms = execution.started_at_ms();
+                            let started =
+                                match registry.mark_started(&request_id, started_at_ms).await {
+                                    Ok(started) => started,
+                                    Err(error) => {
+                                        cancellation.cancel();
+                                        let _ = execution.finish().await;
+                                        let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                                        return;
+                                    }
+                                };
+                            if let Some(started) = started
+                                && let Err(error) = send_started_owned(
+                                    &identity,
+                                    effective,
+                                    StartedDelivery {
+                                        request_id: &request_id,
+                                        execution_mode,
+                                    },
+                                    started,
+                                    &outbound,
+                                    clock.as_ref(),
+                                )
+                                .await
+                            {
+                                cancellation.cancel();
+                                let _ = execution.finish().await;
+                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                                return;
+                            }
+                            let mut result = match execution.finish().await {
+                                StartedExecutionOutcome::Result(result) => *result,
+                                StartedExecutionOutcome::FailClosed { reason } => {
+                                    let _ = terminal_tx.send(TerminalFailure::transport(reason));
+                                    return;
+                                }
+                            };
+                            let committed_started_at_ms =
+                                match registry.committed_started_at_ms(&request_id).await {
+                                    Ok(started_at_ms) => started_at_ms,
+                                    Err(error) => {
+                                        let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                                        return;
+                                    }
+                                };
+                            if cancellation.is_cancelled() {
+                                force_cancelled(
+                                    &mut result,
+                                    committed_started_at_ms,
+                                    clock.now_ms(),
+                                );
+                            }
+                            if result.started_at_ms != committed_started_at_ms {
+                                let error = ProtocolError::new(
+                                    "MYFORGE_PROTOCOL_STATE_INVALID",
+                                    "command result start time is inconsistent",
+                                )
+                                .with_request_id(Some(request_id.clone()));
+                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                                return;
+                            }
+                            if let Err(error) = send_and_cache_result(
+                                &identity,
+                                effective,
+                                &request_id,
+                                &command_for_result,
+                                execution_mode,
+                                result,
+                                &outbound,
+                                clock.as_ref(),
+                                &registry,
+                            )
+                            .await
+                            {
+                                let _ = terminal_tx.send(TerminalFailure::protocol(error));
+                            }
                         }
                     }
                 });
                 Ok(())
             }
         }
-    }
-
-    async fn send_started(
-        &self,
-        config: &AgentConfig,
-        connection_id: &str,
-        effective: EffectiveLimits,
-        request_id: &str,
-        started_at_ms: u64,
-        outbound: &OutboundHandle,
-    ) -> Result<(), ProtocolError> {
-        let timestamp_ms = self.hooks.clock.now_ms();
-        outbound
-            .send_signed(
-                &CommandStarted {
-                    protocol_version: 1,
-                    message_type: "command.started",
-                    connection_id,
-                    request_id,
-                    agent_id: config.agent_id(),
-                    project_id: config.project_id(),
-                    execution_mode: if config.dry_run() {
-                        "dry_run"
-                    } else {
-                        "codex_exec"
-                    },
-                    started_at_ms,
-                    timestamp_ms,
-                    expires_at_ms: timestamp_ms.saturating_add(effective.auth_ttl_ms),
-                    nonce: random_base64url::<16>(),
-                },
-                timestamp_ms.saturating_add(effective.auth_ttl_ms),
-            )
-            .await
-    }
-
-    async fn send_command_error(
-        &self,
-        config: &AgentConfig,
-        connection_id: &str,
-        effective: EffectiveLimits,
-        request_id: &str,
-        rejection: &CommandRejection,
-        outbound: &OutboundHandle,
-    ) -> Result<(), ProtocolError> {
-        send_command_error_owned(
-            &ConnectionIdentity::new(config, connection_id.to_string()),
-            effective,
-            request_id,
-            rejection,
-            outbound,
-            self.hooks.clock.as_ref(),
-        )
-        .await
     }
 
     async fn handle_protocol_failure(
@@ -913,35 +1001,680 @@ impl ClientRuntime {
     }
 }
 
-async fn send_command_error_owned(
+struct StartedDelivery<'a> {
+    request_id: &'a str,
+    execution_mode: &'static str,
+}
+
+async fn send_started_owned(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    started: StartedDelivery<'_>,
+    candidate: StartedDeliveryCandidate,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+) -> Result<DeliveryResult, ProtocolError> {
+    let delivery = candidate.delivery;
+    let lease = candidate.lease;
+    let timestamp_ms = clock.now_ms();
+    let expires_at_ms = timestamp_ms.saturating_add(effective.auth_ttl_ms);
+    let Some(reservation) = outbound.reserve_delivery(expires_at_ms, &lease).await? else {
+        return Ok(DeliveryResult::Superseded);
+    };
+    let delivery_guard = delivery.lock().await;
+    if !lease.is_current() {
+        drop(delivery_guard);
+        drop(reservation);
+        return Ok(DeliveryResult::Superseded);
+    }
+    let frame = sign_message(
+        &CommandStarted {
+            protocol_version: 1,
+            message_type: "command.started",
+            connection_id: &identity.connection_id,
+            request_id: started.request_id,
+            agent_id: &identity.agent_id,
+            project_id: &identity.project_id,
+            execution_mode: started.execution_mode,
+            started_at_ms: candidate.started_at_ms,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: random_base64url::<16>(),
+        },
+        &outbound.signing_key,
+    )?;
+    let pending =
+        outbound.commit_reserved_frame(reservation, frame, DeliveryBoundary::Started(lease))?;
+    drop(delivery_guard);
+    pending.wait().await
+}
+
+async fn reserve_current_delivery(
+    outbound: &OutboundHandle,
+    registry: &RequestRegistry,
+    request_id: &str,
+    base_expires_at_ms: u64,
+) -> Result<(ReservedOutbound, Arc<DeliveryGeneration>, DeliveryLease), ProtocolError> {
+    loop {
+        let delivery = registry.delivery(request_id).await?;
+        let lease = delivery.lease();
+        let expires_at_ms = registry
+            .cancel_deadline_at_ms(request_id)
+            .await?
+            .map_or(base_expires_at_ms, |deadline| {
+                deadline.min(base_expires_at_ms)
+            });
+        if let Some(reservation) = outbound.reserve_delivery(expires_at_ms, &lease).await? {
+            return Ok((reservation, delivery, lease));
+        }
+    }
+}
+
+async fn cancel_request_owned(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    cancel_deadline_at_ms: u64,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+    registry: &RequestRegistry,
+) -> Result<(), ProtocolError> {
+    let delivery = registry.delivery(request_id).await?;
+    let delivery_guard = delivery.lock().await;
+    let decision = registry.cancel(request_id, cancel_deadline_at_ms).await?;
+    match decision {
+        CancelDecision::CompletedNeedsCancellation {
+            response: CachedResponse::CommandResult(result),
+            started_at_ms,
+        } => {
+            let mut result = *result;
+            force_cancelled(&mut result, started_at_ms, clock.now_ms());
+            let result =
+                fit_command_result(identity, effective, request_id, result, outbound, clock)?;
+            registry
+                .replace_completed_with_cancelled(request_id, result.clone())
+                .await?;
+        }
+        CancelDecision::DuplicateCompleted {
+            response: CachedResponse::CommandResult(_),
+        } => {}
+        CancelDecision::CompletedNeedsCancellation { .. }
+        | CancelDecision::DuplicateCompleted { .. } => {
+            return Err(ProtocolError::new(
+                "MYFORGE_PROTOCOL_STATE_INVALID",
+                "completed request has no replayable cancellation result",
+            )
+            .with_request_id(Some(request_id.to_string())));
+        }
+        CancelDecision::First | CancelDecision::DuplicateActive => {
+            drop(delivery_guard);
+            return Ok(());
+        }
+    }
+    drop(delivery_guard);
+
+    let base_expires_at_ms =
+        cancel_deadline_at_ms.min(clock.now_ms().saturating_add(effective.auth_ttl_ms));
+    loop {
+        let reserved =
+            reserve_current_delivery(outbound, registry, request_id, base_expires_at_ms).await;
+        let (reservation, delivery, lease) = match reserved {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                registry.mark_no_replay(request_id).await?;
+                return Err(error);
+            }
+        };
+        let delivery_guard = delivery.lock().await;
+        if !lease.is_current() {
+            drop(delivery_guard);
+            drop(reservation);
+            continue;
+        }
+        let (response, stored_deadline) = registry.completed_response(request_id).await?;
+        let CachedResponse::CommandResult(result) = response else {
+            return Err(ProtocolError::new(
+                "MYFORGE_PROTOCOL_STATE_INVALID",
+                "completed request has no replayable cancellation result",
+            )
+            .with_request_id(Some(request_id.to_string())));
+        };
+        if stored_deadline != Some(cancel_deadline_at_ms) || result.status != "cancelled" {
+            return Err(ProtocolError::new(
+                "MYFORGE_DUPLICATE_REQUEST_CONFLICT",
+                "cancel deadline conflicts with the completed request",
+            )
+            .with_request_id(Some(request_id.to_string())));
+        }
+        let prepared = prepare_fitted_command_result(
+            identity,
+            effective,
+            request_id,
+            *result,
+            Some(cancel_deadline_at_ms),
+            outbound,
+            clock,
+        )?;
+        let pending = match outbound.commit_reserved_frame(
+            reservation,
+            prepared.frame,
+            DeliveryBoundary::Terminal(lease),
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                registry.mark_no_replay(request_id).await?;
+                return Err(error);
+            }
+        };
+        drop(delivery_guard);
+        match pending.wait().await? {
+            DeliveryResult::Written | DeliveryResult::Superseded => return Ok(()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_and_cache_result(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    expected: &CommandExecute,
+    expected_execution_mode: &str,
+    result: CommandResultSemantic,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+    registry: &RequestRegistry,
+) -> Result<(), ProtocolError> {
+    if result.artifact_file != expected.input.artifact_file
+        || result.consumer_target_file != expected.input.consumer_target_file
+        || result.execution_mode != expected_execution_mode
+    {
+        return Err(ProtocolError::new(
+            "MYFORGE_PROTOCOL_STATE_INVALID",
+            "command result does not match the request",
+        )
+        .with_request_id(Some(request_id.to_string())));
+    }
+    let proposed_result =
+        fit_command_result(identity, effective, request_id, result, outbound, clock)?;
+    let retention_ms = effective
+        .command_timeout_ms
+        .saturating_add(effective.command_ttl_ms);
+    let base_expires_at_ms = clock.now_ms().saturating_add(effective.auth_ttl_ms);
+    loop {
+        let (reservation, delivery, lease) =
+            reserve_current_delivery(outbound, registry, request_id, base_expires_at_ms).await?;
+        let delivery_guard = delivery.lock().await;
+        if !lease.is_current() {
+            drop(delivery_guard);
+            drop(reservation);
+            continue;
+        }
+        let mut final_result = proposed_result.clone();
+        match registry
+            .complete_response(
+                request_id,
+                CachedResponse::CommandResult(Box::new(final_result.clone())),
+                clock.now_ms(),
+                retention_ms,
+            )
+            .await?
+        {
+            CompletionDecision::Stored => {}
+            CompletionDecision::CancellationRequired {
+                response,
+                started_at_ms,
+            } => {
+                final_result = match response {
+                    CachedResponse::CommandResult(result) => *result,
+                    _ => cancelled_semantic_result(
+                        expected,
+                        expected_execution_mode,
+                        started_at_ms,
+                        clock.now_ms(),
+                    ),
+                };
+                force_cancelled(&mut final_result, started_at_ms, clock.now_ms());
+                final_result = fit_command_result(
+                    identity,
+                    effective,
+                    request_id,
+                    final_result,
+                    outbound,
+                    clock,
+                )?;
+                if registry
+                    .complete_response(
+                        request_id,
+                        CachedResponse::CommandResult(Box::new(final_result.clone())),
+                        clock.now_ms(),
+                        retention_ms,
+                    )
+                    .await?
+                    != CompletionDecision::Stored
+                {
+                    return Err(ProtocolError::new(
+                        "MYFORGE_PROTOCOL_STATE_INVALID",
+                        "cancelled result could not be finalized",
+                    )
+                    .with_request_id(Some(request_id.to_string())));
+                }
+            }
+        }
+        let delivery_deadline_at_ms = if final_result.status == "cancelled" {
+            registry.cancel_deadline_at_ms(request_id).await?
+        } else {
+            None
+        };
+        let prepared = prepare_fitted_command_result(
+            identity,
+            effective,
+            request_id,
+            final_result.clone(),
+            delivery_deadline_at_ms,
+            outbound,
+            clock,
+        )?;
+        if prepared.result != final_result {
+            return Err(ProtocolError::new(
+                "MYFORGE_PROTOCOL_STATE_INVALID",
+                "cached result differs from the transmitted result",
+            )
+            .with_request_id(Some(request_id.to_string())));
+        }
+        let pending = match outbound.commit_reserved_frame(
+            reservation,
+            prepared.frame,
+            DeliveryBoundary::Terminal(lease),
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                registry.mark_no_replay(request_id).await?;
+                return Err(error);
+            }
+        };
+        drop(delivery_guard);
+        return match pending.wait().await? {
+            DeliveryResult::Written | DeliveryResult::Superseded => Ok(()),
+        };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_and_cache_error(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    expected: &CommandExecute,
+    expected_execution_mode: &str,
+    rejection: CommandRejection,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+    registry: &RequestRegistry,
+) -> Result<(), ProtocolError> {
+    rejection.validate()?;
+    let retention_ms = effective
+        .command_timeout_ms
+        .saturating_add(effective.command_ttl_ms);
+    let base_expires_at_ms = clock.now_ms().saturating_add(effective.auth_ttl_ms);
+    loop {
+        let (reservation, delivery, lease) =
+            reserve_current_delivery(outbound, registry, request_id, base_expires_at_ms).await?;
+        let delivery_guard = delivery.lock().await;
+        if !lease.is_current() {
+            drop(delivery_guard);
+            drop(reservation);
+            continue;
+        }
+        let frame = match registry
+            .complete_response(
+                request_id,
+                CachedResponse::CommandError(rejection.clone()),
+                clock.now_ms(),
+                retention_ms,
+            )
+            .await?
+        {
+            CompletionDecision::Stored => {
+                prepare_command_error_frame(
+                    identity, effective, request_id, &rejection, outbound, clock,
+                )?
+                .0
+            }
+            CompletionDecision::CancellationRequired { started_at_ms, .. } => {
+                let result = fit_command_result(
+                    identity,
+                    effective,
+                    request_id,
+                    cancelled_semantic_result(
+                        expected,
+                        expected_execution_mode,
+                        started_at_ms,
+                        clock.now_ms(),
+                    ),
+                    outbound,
+                    clock,
+                )?;
+                if registry
+                    .complete_response(
+                        request_id,
+                        CachedResponse::CommandResult(Box::new(result.clone())),
+                        clock.now_ms(),
+                        retention_ms,
+                    )
+                    .await?
+                    != CompletionDecision::Stored
+                {
+                    return Err(ProtocolError::new(
+                        "MYFORGE_PROTOCOL_STATE_INVALID",
+                        "cancelled result could not be finalized",
+                    )
+                    .with_request_id(Some(request_id.to_string())));
+                }
+                prepare_fitted_command_result(
+                    identity,
+                    effective,
+                    request_id,
+                    result,
+                    registry.cancel_deadline_at_ms(request_id).await?,
+                    outbound,
+                    clock,
+                )?
+                .frame
+            }
+        };
+        let pending = match outbound.commit_reserved_frame(
+            reservation,
+            frame,
+            DeliveryBoundary::Terminal(lease),
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                registry.mark_no_replay(request_id).await?;
+                return Err(error);
+            }
+        };
+        drop(delivery_guard);
+        return match pending.wait().await? {
+            DeliveryResult::Written | DeliveryResult::Superseded => Ok(()),
+        };
+    }
+}
+
+async fn replay_completed_response(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+    registry: &RequestRegistry,
+) -> Result<(), ProtocolError> {
+    let base_expires_at_ms = clock.now_ms().saturating_add(effective.auth_ttl_ms);
+    loop {
+        let (reservation, delivery, lease) =
+            reserve_current_delivery(outbound, registry, request_id, base_expires_at_ms).await?;
+        let delivery_guard = delivery.lock().await;
+        if !lease.is_current() {
+            drop(delivery_guard);
+            drop(reservation);
+            continue;
+        }
+        let (response, cancel_deadline_at_ms) = registry.completed_response(request_id).await?;
+        let frame = match response {
+            CachedResponse::CommandError(rejection) => {
+                prepare_command_error_frame(
+                    identity, effective, request_id, &rejection, outbound, clock,
+                )?
+                .0
+            }
+            CachedResponse::CommandResult(result) => {
+                prepare_fitted_command_result(
+                    identity,
+                    effective,
+                    request_id,
+                    *result,
+                    cancel_deadline_at_ms,
+                    outbound,
+                    clock,
+                )?
+                .frame
+            }
+            CachedResponse::NoReplay => {
+                return Err(ProtocolError::new(
+                    "MYFORGE_DUPLICATE_REQUEST_CONFLICT",
+                    "request belongs to a closed connection",
+                )
+                .with_request_id(Some(request_id.to_string())));
+            }
+        };
+        let pending = match outbound.commit_reserved_frame(
+            reservation,
+            frame,
+            DeliveryBoundary::Terminal(lease),
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                registry.mark_no_replay(request_id).await?;
+                return Err(error);
+            }
+        };
+        drop(delivery_guard);
+        return match pending.wait().await? {
+            DeliveryResult::Written | DeliveryResult::Superseded => Ok(()),
+        };
+    }
+}
+
+struct PreparedCommandResult {
+    result: CommandResultSemantic,
+    frame: String,
+    #[cfg(test)]
+    send_deadline_at_ms: u64,
+}
+
+fn prepare_fitted_command_result(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    result: CommandResultSemantic,
+    _delivery_deadline_at_ms: Option<u64>,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+) -> Result<PreparedCommandResult, ProtocolError> {
+    let timestamp_ms = clock.now_ms().min(MAX_SAFE_INTEGER as u64);
+    let expires_at_ms = timestamp_ms
+        .saturating_add(effective.auth_ttl_ms)
+        .min(MAX_SAFE_INTEGER as u64);
+    let frame = sign_result(
+        identity,
+        request_id,
+        &result,
+        timestamp_ms,
+        expires_at_ms,
+        outbound,
+    )?;
+    Ok(PreparedCommandResult {
+        result,
+        frame,
+        #[cfg(test)]
+        send_deadline_at_ms: _delivery_deadline_at_ms
+            .map_or(expires_at_ms, |deadline| deadline.min(expires_at_ms)),
+    })
+}
+
+#[cfg(test)]
+async fn send_command_result_owned(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    result: CommandResultSemantic,
+    delivery_deadline_at_ms: Option<u64>,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+) -> Result<CommandResultSemantic, ProtocolError> {
+    let result = fit_command_result(identity, effective, request_id, result, outbound, clock)?;
+    let prepared = prepare_fitted_command_result(
+        identity,
+        effective,
+        request_id,
+        result,
+        delivery_deadline_at_ms,
+        outbound,
+        clock,
+    )?;
+    outbound
+        .send_signed_frame(prepared.frame, prepared.send_deadline_at_ms)
+        .await?;
+    Ok(prepared.result)
+}
+
+fn fit_command_result(
+    identity: &ConnectionIdentity,
+    effective: EffectiveLimits,
+    request_id: &str,
+    mut result: CommandResultSemantic,
+    outbound: &OutboundHandle,
+    clock: &dyn Clock,
+) -> Result<CommandResultSemantic, ProtocolError> {
+    result.validate(effective.max_output_bytes)?;
+    let timestamp_ms = clock.now_ms().min(MAX_SAFE_INTEGER as u64);
+    let expires_at_ms = timestamp_ms
+        .saturating_add(effective.auth_ttl_ms)
+        .min(MAX_SAFE_INTEGER as u64);
+    let frame = sign_result(
+        identity,
+        request_id,
+        &result,
+        timestamp_ms,
+        expires_at_ms,
+        outbound,
+    )?;
+    if frame.len() as u64 <= effective.ws_max_message_bytes {
+        return Ok(result);
+    }
+    tracing::warn!(
+        serialized_result_bytes = frame.len(),
+        negotiated_frame_bytes = effective.ws_max_message_bytes,
+        "command result exceeded the negotiated frame budget"
+    );
+    result = result.output_too_large_fallback();
+    result.validate(effective.max_output_bytes)?;
+    let fallback = sign_result(
+        identity,
+        request_id,
+        &result,
+        timestamp_ms,
+        expires_at_ms,
+        outbound,
+    )?;
+    if fallback.len() as u64 > effective.ws_max_message_bytes {
+        return Err(ProtocolError::new(
+            "MYFORGE_OUTPUT_TOO_LARGE",
+            "minimal command result exceeds the negotiated limit",
+        ));
+    }
+    Ok(result)
+}
+
+fn sign_result(
+    identity: &ConnectionIdentity,
+    request_id: &str,
+    result: &CommandResultSemantic,
+    timestamp_ms: u64,
+    expires_at_ms: u64,
+    outbound: &OutboundHandle,
+) -> Result<String, ProtocolError> {
+    sign_message(
+        &CommandResultMessage {
+            protocol_version: 1,
+            message_type: "command.result",
+            connection_id: &identity.connection_id,
+            request_id,
+            agent_id: &identity.agent_id,
+            project_id: &identity.project_id,
+            result,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: random_base64url::<16>(),
+        },
+        &outbound.signing_key,
+    )
+}
+
+fn cancelled_semantic_result(
+    command: &CommandExecute,
+    execution_mode: &str,
+    started_at_ms: Option<u64>,
+    completed_at_ms: u64,
+) -> CommandResultSemantic {
+    CommandResultSemantic {
+        execution_mode: execution_mode.to_string(),
+        status: "cancelled".to_string(),
+        exit_code: None,
+        stdout_preview: String::new(),
+        stderr_preview: String::new(),
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        artifact_file: command.input.artifact_file.clone(),
+        consumer_target_file: command.input.consumer_target_file.clone(),
+        artifact: ArtifactSummary::missing(),
+        audit: AuditSummary::skipped("cancelled"),
+        error_code: Some("MYFORGE_COMMAND_CANCELLED".to_string()),
+        error_message: Some("command was cancelled".to_string()),
+        started_at_ms,
+        completed_at_ms: started_at_ms
+            .map_or(completed_at_ms, |started| completed_at_ms.max(started)),
+    }
+}
+
+fn force_cancelled(
+    result: &mut CommandResultSemantic,
+    started_at_ms: Option<u64>,
+    completed_at_ms: u64,
+) {
+    result.status = "cancelled".to_string();
+    if started_at_ms.is_none() {
+        result.exit_code = None;
+    }
+    result.audit = AuditSummary::skipped("cancelled");
+    result.error_code = Some("MYFORGE_COMMAND_CANCELLED".to_string());
+    result.error_message = Some("command was cancelled".to_string());
+    result.started_at_ms = started_at_ms;
+    result.completed_at_ms =
+        started_at_ms.map_or(completed_at_ms, |started| completed_at_ms.max(started));
+}
+
+fn prepare_command_error_frame(
     identity: &ConnectionIdentity,
     effective: EffectiveLimits,
     request_id: &str,
     rejection: &CommandRejection,
     outbound: &OutboundHandle,
     clock: &dyn Clock,
-) -> Result<(), ProtocolError> {
+) -> Result<(String, u64), ProtocolError> {
     rejection.validate()?;
     let timestamp_ms = clock.now_ms();
-    outbound
-        .send_signed(
-            &CommandErrorMessage {
-                protocol_version: 1,
-                message_type: "command.error",
-                connection_id: &identity.connection_id,
-                request_id,
-                agent_id: &identity.agent_id,
-                project_id: &identity.project_id,
-                error_code: rejection.error_code,
-                error_message: rejection.error_message,
-                retryable: rejection.retryable,
-                timestamp_ms,
-                expires_at_ms: timestamp_ms.saturating_add(effective.auth_ttl_ms),
-                nonce: random_base64url::<16>(),
-            },
-            timestamp_ms.saturating_add(effective.auth_ttl_ms),
-        )
-        .await
+    let expires_at_ms = timestamp_ms.saturating_add(effective.auth_ttl_ms);
+    let frame = sign_message(
+        &CommandErrorMessage {
+            protocol_version: 1,
+            message_type: "command.error",
+            connection_id: &identity.connection_id,
+            request_id,
+            agent_id: &identity.agent_id,
+            project_id: &identity.project_id,
+            error_code: rejection.error_code,
+            error_message: rejection.error_message,
+            retryable: rejection.retryable,
+            timestamp_ms,
+            expires_at_ms,
+            nonce: random_base64url::<16>(),
+        },
+        &outbound.signing_key,
+    )?;
+    Ok((frame, expires_at_ms))
 }
 
 fn build_request(
@@ -1172,6 +1905,12 @@ enum InboundFrame {
 #[derive(Clone, Debug)]
 struct TransportError;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeliveryResult {
+    Written,
+    Superseded,
+}
+
 enum OutboundPayload {
     Message(Message),
     Close(u16, &'static str),
@@ -1180,7 +1919,74 @@ enum OutboundPayload {
 struct OutboundItem {
     payload: OutboundPayload,
     deadline: tokio::time::Instant,
-    completion: oneshot::Sender<Result<(), TransportError>>,
+    delivery_boundary: Option<DeliveryBoundary>,
+    completion: oneshot::Sender<Result<DeliveryResult, TransportError>>,
+}
+
+enum DeliveryBoundary {
+    Terminal(DeliveryLease),
+    Started(DeliveryLease),
+}
+
+impl DeliveryBoundary {
+    fn lease(&self) -> &DeliveryLease {
+        match self {
+            Self::Terminal(lease) | Self::Started(lease) => lease,
+        }
+    }
+
+    fn try_commit(&self) -> bool {
+        match self {
+            Self::Terminal(lease) => lease.try_commit_current(),
+            Self::Started(lease) => lease.try_commit_started(),
+        }
+    }
+}
+
+struct ReservedOutbound {
+    permit: mpsc::OwnedPermit<OutboundItem>,
+    deadline: tokio::time::Instant,
+}
+
+impl ReservedOutbound {
+    fn commit(
+        self,
+        payload: OutboundPayload,
+        delivery_boundary: DeliveryBoundary,
+    ) -> PendingOutbound {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.permit.send(OutboundItem {
+            payload,
+            deadline: self.deadline,
+            delivery_boundary: Some(delivery_boundary),
+            completion: completion_tx,
+        });
+        PendingOutbound {
+            completion: completion_rx,
+            deadline: self.deadline,
+        }
+    }
+}
+
+struct PendingOutbound {
+    completion: oneshot::Receiver<Result<DeliveryResult, TransportError>>,
+    deadline: tokio::time::Instant,
+}
+
+impl PendingOutbound {
+    async fn wait(self) -> Result<DeliveryResult, ProtocolError> {
+        let remaining = self
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(writer_error());
+        }
+        tokio::time::timeout(remaining, self.completion)
+            .await
+            .map_err(|_| writer_error())?
+            .map_err(|_| writer_error())?
+            .map_err(|_| writer_error())
+    }
 }
 
 #[derive(Clone)]
@@ -1199,6 +2005,25 @@ impl OutboundHandle {
         expires_at_ms: u64,
     ) -> Result<(), ProtocolError> {
         let frame = sign_message(message, &self.signing_key)?;
+        if frame.len() as u64 > self.max_frame_bytes.load(Ordering::Acquire) {
+            return Err(ProtocolError::new(
+                "MYFORGE_OUTPUT_TOO_LARGE",
+                "outbound frame exceeds the negotiated limit",
+            ));
+        }
+        self.send_payload(
+            OutboundPayload::Message(Message::Text(frame.into())),
+            Some(expires_at_ms),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn send_signed_frame(
+        &self,
+        frame: String,
+        expires_at_ms: u64,
+    ) -> Result<(), ProtocolError> {
         if frame.len() as u64 > self.max_frame_bytes.load(Ordering::Acquire) {
             return Err(ProtocolError::new(
                 "MYFORGE_OUTPUT_TOO_LARGE",
@@ -1243,21 +2068,68 @@ impl OutboundHandle {
         let item = OutboundItem {
             payload,
             deadline,
+            delivery_boundary: None,
             completion: completion_tx,
         };
         tokio::time::timeout_at(deadline, self.sender.send(item))
             .await
             .map_err(|_| writer_error())?
             .map_err(|_| writer_error())?;
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(writer_error());
+        PendingOutbound {
+            completion: completion_rx,
+            deadline,
         }
-        tokio::time::timeout(remaining, completion_rx)
-            .await
-            .map_err(|_| writer_error())?
-            .map_err(|_| writer_error())?
-            .map_err(|_| writer_error())
+        .wait()
+        .await
+        .map(|_| ())
+    }
+
+    async fn reserve_delivery(
+        &self,
+        expires_at_ms: u64,
+        lease: &DeliveryLease,
+    ) -> Result<Option<ReservedOutbound>, ProtocolError> {
+        let now_ms = self.clock.now_ms();
+        let expiry_budget = Duration::from_millis(expires_at_ms.saturating_sub(now_ms));
+        let timeout = self.write_timeout.min(expiry_budget);
+        if timeout.is_zero() {
+            return Err(ProtocolError::new(
+                "MYFORGE_MESSAGE_EXPIRED",
+                "outbound message expired before send",
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let reserve = self.sender.clone().reserve_owned();
+        let permit = tokio::select! {
+            biased;
+            () = lease.superseded() => return Ok(None),
+            result = tokio::time::timeout_at(deadline, reserve) => {
+                result.map_err(|_| writer_error())?.map_err(|_| writer_error())?
+            }
+        };
+        if !lease.is_current() {
+            drop(permit);
+            return Ok(None);
+        }
+        Ok(Some(ReservedOutbound { permit, deadline }))
+    }
+
+    fn commit_reserved_frame(
+        &self,
+        reservation: ReservedOutbound,
+        frame: String,
+        boundary: DeliveryBoundary,
+    ) -> Result<PendingOutbound, ProtocolError> {
+        if frame.len() as u64 > self.max_frame_bytes.load(Ordering::Acquire) {
+            return Err(ProtocolError::new(
+                "MYFORGE_OUTPUT_TOO_LARGE",
+                "outbound frame exceeds the negotiated limit",
+            ));
+        }
+        Ok(reservation.commit(
+            OutboundPayload::Message(Message::Text(frame.into())),
+            boundary,
+        ))
     }
 }
 
@@ -1288,36 +2160,89 @@ async fn writer_task<S>(
         let OutboundItem {
             payload,
             deadline,
+            delivery_boundary,
             completion,
         } = item;
+        if delivery_boundary
+            .as_ref()
+            .is_some_and(|boundary| !boundary.lease().is_current())
+        {
+            let _ = completion.send(Ok(DeliveryResult::Superseded));
+            continue;
+        }
         if tokio::time::Instant::now() >= deadline {
             let _ = completion.send(Err(TransportError));
             let _ = terminal.send(TerminalFailure::transport("writer_deadline"));
             break;
         }
         let close = matches!(payload, OutboundPayload::Close(_, _));
-        let send = async {
-            match payload {
-                OutboundPayload::Message(message) => sink.send(message).await,
-                OutboundPayload::Close(code, reason) => {
-                    sink.send(Message::Close(Some(CloseFrame {
-                        code: code.into(),
-                        reason: reason.into(),
-                    })))
-                    .await
-                }
+        let message = match payload {
+            OutboundPayload::Message(message) => message,
+            OutboundPayload::Close(code, reason) => Message::Close(Some(CloseFrame {
+                code: code.into(),
+                reason: reason.into(),
+            })),
+        };
+        let superseded = async {
+            match delivery_boundary.as_ref() {
+                Some(boundary) => boundary.lease().superseded().await,
+                None => std::future::pending::<()>().await,
             }
         };
-        let result = tokio::select! {
+        let ready = tokio::select! {
+            biased;
             () = shutdown.cancelled() => {
                 let _ = completion.send(Err(TransportError));
                 break;
             }
-            result = tokio::time::timeout_at(deadline, send) => result,
+            () = superseded => {
+                let _ = completion.send(Ok(DeliveryResult::Superseded));
+                continue;
+            }
+            result = tokio::time::timeout_at(
+                deadline,
+                std::future::poll_fn(|context| Pin::new(&mut sink).poll_ready(context)),
+            ) => result,
         };
-        match result {
+        match ready {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let _ = completion.send(Err(TransportError));
+                let _ = terminal.send(TerminalFailure::transport("writer_failure"));
+                break;
+            }
+            Err(_) => {
+                let _ = completion.send(Err(TransportError));
+                let _ = terminal.send(TerminalFailure::transport("writer_deadline"));
+                break;
+            }
+        }
+        if delivery_boundary
+            .as_ref()
+            .is_some_and(|boundary| !boundary.try_commit())
+        {
+            let _ = completion.send(Ok(DeliveryResult::Superseded));
+            continue;
+        }
+        if Pin::new(&mut sink).start_send(message).is_err() {
+            let _ = completion.send(Err(TransportError));
+            let _ = terminal.send(TerminalFailure::transport("writer_failure"));
+            break;
+        }
+        let flushed = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                let _ = completion.send(Err(TransportError));
+                break;
+            }
+            result = tokio::time::timeout_at(
+                deadline,
+                std::future::poll_fn(|context| Pin::new(&mut sink).poll_flush(context)),
+            ) => result,
+        };
+        match flushed {
             Ok(Ok(())) => {
-                let _ = completion.send(Ok(()));
+                let _ = completion.send(Ok(DeliveryResult::Written));
                 if close {
                     break;
                 }
@@ -1523,6 +2448,8 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use futures_util::{Sink, StreamExt};
 
+    use crate::schemas::{BlueprintBounds, BlueprintPrompt, CommandInput};
+
     use super::*;
 
     struct NoJitter;
@@ -1612,6 +2539,101 @@ mod tests {
         await_task(writer).await;
     }
 
+    #[tokio::test]
+    async fn oversized_result_falls_back_to_a_signed_minimal_failure_frame() {
+        let (sender, mut receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let outbound = OutboundHandle {
+            sender,
+            signing_key: Arc::new(signing_key),
+            clock: Arc::new(SystemClock),
+            max_frame_bytes: Arc::new(AtomicU64::new(524_288)),
+            write_timeout: Duration::from_secs(1),
+        };
+        let receiver_task = tokio::spawn(async move {
+            let item = receiver.recv().await.unwrap();
+            let OutboundPayload::Message(Message::Text(frame)) = item.payload else {
+                panic!("expected text result frame");
+            };
+            assert!(frame.len() <= 524_288);
+            let _ = item.completion.send(Ok(DeliveryResult::Written));
+            frame.to_string()
+        });
+        let now = SystemClock.now_ms();
+        let result = CommandResultSemantic {
+            execution_mode: "codex_exec".to_string(),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            stdout_preview: "\0".repeat(100_000),
+            stderr_preview: "\0".repeat(100_000),
+            stdout_bytes: 100_000,
+            stderr_bytes: 100_000,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            artifact_file: "artifacts/fangyuan/result.ron".to_string(),
+            consumer_target_file: None,
+            artifact: ArtifactSummary {
+                exists: true,
+                sha256: Some("a".repeat(64)),
+                bytes: Some(1),
+                modified_at_ms: Some(now),
+            },
+            audit: AuditSummary {
+                status: "passed".to_string(),
+                errors: Some(0),
+                warnings: Some(0),
+                primitive_count: Some(1),
+                main_code: None,
+                reason_code: None,
+                findings_preview: Vec::new(),
+            },
+            error_code: None,
+            error_message: None,
+            started_at_ms: Some(now),
+            completed_at_ms: now,
+        };
+        let effective = EffectiveLimits {
+            auth_ttl_ms: 5_000,
+            command_ttl_ms: 5_000,
+            server_clock_skew_ms: 1_000,
+            agent_clock_skew_ms: 1_000,
+            heartbeat_interval_ms: 1_000,
+            heartbeat_timeout_ms: 5_000,
+            command_timeout_ms: 5_000,
+            cancel_timeout_ms: 1_000,
+            max_output_bytes: 100_000,
+            ws_max_message_bytes: 524_288,
+        };
+        let sent = send_command_result_owned(
+            &ConnectionIdentity {
+                connection_id: "67da7da9-a653-4d6e-9e81-f5f8baf874bb".to_string(),
+                agent_id: "dev-pc-001".to_string(),
+                project_id: "myforge-local".to_string(),
+            },
+            effective,
+            "2d0465b1-dc92-46d2-bc45-c90ed9724f5a",
+            result,
+            None,
+            &outbound,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent.status, "failed");
+        assert_eq!(sent.error_code.as_deref(), Some("MYFORGE_OUTPUT_TOO_LARGE"));
+        assert!(sent.stdout_preview.is_empty());
+        assert!(sent.stderr_preview.is_empty());
+        let frame = receiver_task.await.unwrap();
+        let value = parse_canonical_frame(frame.as_bytes(), 524_288).unwrap();
+        verify_message_signature(&value, &verifying_key).unwrap();
+        assert_eq!(value.string_field("type"), Some("command.result"));
+        assert_eq!(
+            value.string_field("errorCode"),
+            Some("MYFORGE_OUTPUT_TOO_LARGE")
+        );
+    }
+
     #[derive(Default)]
     struct GateState {
         permits: AtomicUsize,
@@ -1679,6 +2701,78 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FlushGateState {
+        flush_permits: AtomicUsize,
+        started: Mutex<Vec<String>>,
+        pending: Mutex<Vec<String>>,
+        flushed: Mutex<Vec<String>>,
+        waker: Mutex<Option<Waker>>,
+    }
+
+    impl FlushGateState {
+        fn grant_flush(&self) {
+            self.flush_permits.fetch_add(1, Ordering::SeqCst);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    struct FlushGateSink(Arc<FlushGateState>);
+
+    impl Sink<Message> for FlushGateSink {
+        type Error = ();
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            let label = match item {
+                Message::Text(text) => text.to_string(),
+                _ => "control".to_string(),
+            };
+            self.0.started.lock().unwrap().push(label.clone());
+            self.0.pending.lock().unwrap().push(label);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            let mut permits = self.0.flush_permits.load(Ordering::SeqCst);
+            while permits > 0 {
+                match self.0.flush_permits.compare_exchange(
+                    permits,
+                    permits - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        let pending = std::mem::take(&mut *self.0.pending.lock().unwrap());
+                        self.0.flushed.lock().unwrap().extend(pending);
+                        return Poll::Ready(Ok(()));
+                    }
+                    Err(actual) => permits = actual,
+                }
+            }
+            *self.0.waker.lock().unwrap() = Some(context.waker().clone());
+            Poll::Pending
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.poll_flush(context)
+        }
+    }
+
     fn test_outbound(
         sender: mpsc::Sender<OutboundItem>,
         write_timeout: Duration,
@@ -1687,9 +2781,1110 @@ mod tests {
             sender,
             signing_key: Arc::new(SigningKey::from_bytes(&[7; 32])),
             clock: Arc::new(SystemClock),
-            max_frame_bytes: Arc::new(AtomicU64::new(1_024)),
+            max_frame_bytes: Arc::new(AtomicU64::new(524_288)),
             write_timeout,
         }
+    }
+
+    const TEST_CONNECTION_ID: &str = "67da7da9-a653-4d6e-9e81-f5f8baf874bb";
+    const TEST_REQUEST_ID: &str = "2d0465b1-dc92-46d2-bc45-c90ed9724f5a";
+
+    fn test_identity() -> ConnectionIdentity {
+        ConnectionIdentity {
+            connection_id: TEST_CONNECTION_ID.to_string(),
+            agent_id: "dev-pc-001".to_string(),
+            project_id: "myforge-local".to_string(),
+        }
+    }
+
+    fn test_command(profile: &str) -> CommandExecute {
+        let now_ms = SystemClock.now_ms();
+        CommandExecute {
+            protocol_version: 1,
+            message_type: "command.execute".to_string(),
+            connection_id: TEST_CONNECTION_ID.to_string(),
+            request_id: TEST_REQUEST_ID.to_string(),
+            task_type: "fangyuan.blueprint.generate".to_string(),
+            agent_id: "dev-pc-001".to_string(),
+            project_id: "myforge-local".to_string(),
+            profile: profile.to_string(),
+            input: CommandInput {
+                artifact_file: "artifacts/fangyuan/result.ron".to_string(),
+                consumer_target_file: None,
+                rules_file: "rules/fangyuan/rules.md".to_string(),
+                prompt: BlueprintPrompt {
+                    theme: "test".to_string(),
+                    primitive_limit: 10,
+                    bounds: BlueprintBounds {
+                        width: 10,
+                        depth: 10,
+                        height: 10,
+                    },
+                    requirements: vec!["safe".to_string()],
+                },
+                rendered_prompt: "fixed test prompt".to_string(),
+            },
+            timeout_ms: 5_000,
+            max_output_bytes: 4_096,
+            timestamp_ms: now_ms,
+            expires_at_ms: now_ms + 5_000,
+            nonce: "nonce".to_string(),
+            signature: "signature".to_string(),
+        }
+    }
+
+    fn completed_test_result() -> CommandResultSemantic {
+        CommandResultSemantic {
+            execution_mode: "codex_exec".to_string(),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            stdout_preview: "done".to_string(),
+            stderr_preview: String::new(),
+            stdout_bytes: 4,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            artifact_file: "artifacts/fangyuan/result.ron".to_string(),
+            consumer_target_file: None,
+            artifact: ArtifactSummary {
+                exists: true,
+                sha256: Some("a".repeat(64)),
+                bytes: Some(1),
+                modified_at_ms: Some(100),
+            },
+            audit: AuditSummary::unavailable(),
+            error_code: None,
+            error_message: None,
+            started_at_ms: Some(100),
+            completed_at_ms: 100,
+        }
+    }
+
+    async fn wait_for_gate_polls(gate: &GateState, minimum: usize) {
+        for _ in 0..1_000 {
+            if gate.polls.load(Ordering::SeqCst) >= minimum {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("writer did not reach gate poll {minimum}");
+    }
+
+    async fn wait_for_started_frames(gate: &FlushGateState, minimum: usize) {
+        for _ in 0..1_000 {
+            if gate.started.lock().unwrap().len() >= minimum {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("writer did not start frame {minimum}");
+    }
+
+    fn parse_written_frame(gate: &GateState, index: usize) -> JsonValue {
+        let frame = gate.writes.lock().unwrap()[index].clone();
+        parse_canonical_frame(frame.as_bytes(), 524_288).unwrap()
+    }
+
+    fn parse_flushed_frame(gate: &FlushGateState, index: usize) -> JsonValue {
+        let frame = gate.flushed.lock().unwrap()[index].clone();
+        parse_canonical_frame(frame.as_bytes(), 524_288).unwrap()
+    }
+
+    fn filler_item(label: &str, deadline: tokio::time::Instant) -> OutboundItem {
+        let (completion, _receiver) = oneshot::channel();
+        OutboundItem {
+            payload: OutboundPayload::Message(Message::Text(label.to_string().into())),
+            deadline,
+            delivery_boundary: None,
+            completion,
+        }
+    }
+
+    fn complete_queued_text(item: OutboundItem) -> JsonValue {
+        let OutboundItem {
+            payload: OutboundPayload::Message(Message::Text(frame)),
+            completion,
+            ..
+        } = item
+        else {
+            panic!("expected queued text frame");
+        };
+        let value = parse_canonical_frame(frame.as_bytes(), 524_288).unwrap();
+        let _ = completion.send(Ok(DeliveryResult::Written));
+        value
+    }
+
+    async fn register_start_candidate(
+        registry: &RequestRegistry,
+        command: &CommandExecute,
+    ) -> StartedDeliveryCandidate {
+        registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(command, "codex_exec", None, 100),
+                100,
+            )
+            .await
+            .unwrap();
+        registry
+            .mark_started(TEST_REQUEST_ID, 100)
+            .await
+            .unwrap()
+            .expect("uncancelled start must capture a delivery candidate")
+    }
+
+    async fn register_started_request(registry: &RequestRegistry, command: &CommandExecute) {
+        let candidate = register_start_candidate(registry, command).await;
+        assert!(candidate.lease.try_commit_started());
+    }
+
+    fn spawn_started_delivery(
+        outbound: OutboundHandle,
+        candidate: StartedDeliveryCandidate,
+    ) -> JoinHandle<Result<DeliveryResult, ProtocolError>> {
+        tokio::spawn(async move {
+            send_started_owned(
+                &test_identity(),
+                test_effective_limits(),
+                StartedDelivery {
+                    request_id: TEST_REQUEST_ID,
+                    execution_mode: "codex_exec",
+                },
+                candidate,
+                &outbound,
+                &SystemClock,
+            )
+            .await
+        })
+    }
+
+    fn spawn_completed_result(
+        outbound: OutboundHandle,
+        registry: Arc<RequestRegistry>,
+        command: CommandExecute,
+    ) -> JoinHandle<Result<(), ProtocolError>> {
+        tokio::spawn(async move {
+            send_and_cache_result(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                &command,
+                "codex_exec",
+                completed_test_result(),
+                &outbound,
+                &SystemClock,
+                &registry,
+            )
+            .await
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn generation_cannot_supersede_a_frame_after_start_send() {
+        let gate = Arc::new(FlushGateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            FlushGateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                100,
+            )
+            .await
+            .unwrap();
+        let delivery = registry.delivery(TEST_REQUEST_ID).await.unwrap();
+        let first_lease = delivery.lease();
+        let first_reservation = outbound
+            .reserve_delivery(SystemClock.now_ms() + 5_000, &first_lease)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = first_reservation.commit(
+            OutboundPayload::Message(Message::Text("first".into())),
+            DeliveryBoundary::Terminal(first_lease),
+        );
+        wait_for_started_frames(&gate, 1).await;
+
+        let delivery_guard = delivery.lock().await;
+        assert!(matches!(
+            registry
+                .cancel(TEST_REQUEST_ID, SystemClock.now_ms() + 1_000)
+                .await
+                .unwrap(),
+            CancelDecision::First
+        ));
+        drop(delivery_guard);
+        let second_lease = delivery.lease();
+        let second_reservation = outbound
+            .reserve_delivery(SystemClock.now_ms() + 5_000, &second_lease)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = second_reservation.commit(
+            OutboundPayload::Message(Message::Text("second".into())),
+            DeliveryBoundary::Terminal(second_lease),
+        );
+        let first_wait = tokio::spawn(first.wait());
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!first_wait.is_finished());
+        assert_eq!(gate.started.lock().unwrap().as_slice(), ["first"]);
+        assert!(gate.flushed.lock().unwrap().is_empty());
+
+        gate.grant_flush();
+        assert_eq!(first_wait.await.unwrap().unwrap(), DeliveryResult::Written);
+        assert_eq!(gate.flushed.lock().unwrap().as_slice(), ["first"]);
+        assert_eq!(
+            gate.started
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|frame| frame.as_str() == "first")
+                .count(),
+            1
+        );
+
+        wait_for_started_frames(&gate, 2).await;
+        gate.grant_flush();
+        assert_eq!(second.wait().await.unwrap(), DeliveryResult::Written);
+        assert_eq!(gate.flushed.lock().unwrap().as_slice(), ["first", "second"]);
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_waits_for_queue_capacity_within_the_shared_deadline() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(filler_item(
+                "occupied",
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ))
+            .unwrap();
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        register_started_request(&registry, &command).await;
+        let send_outbound = outbound.clone();
+        let send_registry = registry.clone();
+        let send_command = command.clone();
+        let send = tokio::spawn(async move {
+            send_and_cache_result(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                &send_command,
+                "codex_exec",
+                completed_test_result(),
+                &send_outbound,
+                &SystemClock,
+                &send_registry,
+            )
+            .await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!send.is_finished());
+
+        let occupied = receiver.recv().await.unwrap();
+        drop(occupied);
+        let terminal = receiver.recv().await.unwrap();
+        let value = complete_queued_text(terminal);
+        assert_eq!(value.string_field("type"), Some("command.result"));
+        assert_eq!(value.string_field("status"), Some("completed"));
+        send.await.unwrap().unwrap();
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_queue_wait_timeout_never_late_enqueues() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(filler_item(
+                "occupied",
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ))
+            .unwrap();
+        let outbound = test_outbound(sender, Duration::from_millis(100));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        register_started_request(&registry, &command).await;
+        let send_outbound = outbound.clone();
+        let send_registry = registry.clone();
+        let send_command = command.clone();
+        let send = tokio::spawn(async move {
+            send_and_cache_result(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                &send_command,
+                "codex_exec",
+                completed_test_result(),
+                &send_outbound,
+                &SystemClock,
+                &send_registry,
+            )
+            .await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert_eq!(
+            send.await.unwrap().unwrap_err().code(),
+            "MYFORGE_AGENT_DISCONNECTED"
+        );
+
+        drop(receiver.recv().await.unwrap());
+        tokio::task::yield_now().await;
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_wins_while_terminal_waits_for_queue_capacity() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(filler_item(
+                "occupied",
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ))
+            .unwrap();
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                100,
+            )
+            .await
+            .unwrap();
+        let send_outbound = outbound.clone();
+        let send_registry = registry.clone();
+        let send_command = command.clone();
+        let send = tokio::spawn(async move {
+            send_and_cache_result(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                &send_command,
+                "codex_exec",
+                completed_test_result(),
+                &send_outbound,
+                &SystemClock,
+                &send_registry,
+            )
+            .await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!send.is_finished());
+        cancel_request_owned(
+            &test_identity(),
+            test_effective_limits(),
+            TEST_REQUEST_ID,
+            SystemClock.now_ms() + 1_000,
+            &outbound,
+            &SystemClock,
+            &registry,
+        )
+        .await
+        .unwrap();
+
+        drop(receiver.recv().await.unwrap());
+        let terminal = receiver.recv().await.unwrap();
+        let value = complete_queued_text(terminal);
+        assert_eq!(value.string_field("type"), Some("command.result"));
+        assert_eq!(value.string_field("status"), Some("cancelled"));
+        assert_eq!(value.object_field("startedAtMs"), Some(&JsonValue::Null));
+        send.await.unwrap().unwrap();
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn initial_cancel_before_candidate_capture_suppresses_started_and_uses_null_start() {
+        let (sender, mut receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                100,
+            )
+            .await
+            .unwrap();
+        let cancel_deadline_at_ms = SystemClock.now_ms() + 1_000;
+        assert_eq!(
+            registry
+                .cancel(TEST_REQUEST_ID, cancel_deadline_at_ms)
+                .await
+                .unwrap(),
+            CancelDecision::First
+        );
+
+        assert!(
+            registry
+                .mark_started(TEST_REQUEST_ID, 100)
+                .await
+                .unwrap()
+                .is_none(),
+            "cancelled request must not mint a started delivery candidate"
+        );
+        assert_eq!(
+            registry
+                .committed_started_at_ms(TEST_REQUEST_ID)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            registry
+                .begin(
+                    TEST_CONNECTION_ID,
+                    TEST_REQUEST_ID,
+                    "digest",
+                    cancelled_semantic_result(&command, "codex_exec", None, 100),
+                    101,
+                )
+                .await
+                .unwrap(),
+            ExecuteDecision::DuplicateActive { started: None, .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let result = spawn_completed_result(outbound, registry, command);
+        let terminal = receiver.recv().await.unwrap();
+        let value = complete_queued_text(terminal);
+        result.await.unwrap().unwrap();
+        assert_eq!(value.string_field("type"), Some("command.result"));
+        assert_eq!(value.string_field("status"), Some("cancelled"));
+        assert_eq!(value.object_field("startedAtMs"), Some(&JsonValue::Null));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicate_cancel_before_worker_invalidates_the_captured_started_candidate() {
+        let (sender, mut receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        register_started_request(&registry, &command).await;
+        let replay_candidate = match registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                101,
+            )
+            .await
+            .unwrap()
+        {
+            ExecuteDecision::DuplicateActive {
+                started: Some(candidate),
+                ..
+            } if candidate.started_at_ms == 100 => candidate,
+            other => panic!("expected replayable started candidate, got {other:?}"),
+        };
+
+        let cancel_deadline_at_ms = SystemClock.now_ms() + 1_000;
+        assert_eq!(
+            registry
+                .cancel(TEST_REQUEST_ID, cancel_deadline_at_ms)
+                .await
+                .unwrap(),
+            CancelDecision::First
+        );
+        let replay = spawn_started_delivery(outbound.clone(), replay_candidate);
+        assert_eq!(replay.await.unwrap().unwrap(), DeliveryResult::Superseded);
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            registry
+                .begin(
+                    TEST_CONNECTION_ID,
+                    TEST_REQUEST_ID,
+                    "digest",
+                    cancelled_semantic_result(&command, "codex_exec", None, 100),
+                    102,
+                )
+                .await
+                .unwrap(),
+            ExecuteDecision::DuplicateActive { started: None, .. }
+        ));
+
+        let result = spawn_completed_result(outbound, registry, command);
+        let terminal = receiver.recv().await.unwrap();
+        let value = complete_queued_text(terminal);
+        result.await.unwrap().unwrap();
+        assert_eq!(value.string_field("type"), Some("command.result"));
+        assert_eq!(value.string_field("status"), Some("cancelled"));
+        assert_eq!(
+            value.object_field("startedAtMs"),
+            Some(&JsonValue::Integer(100))
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_started_is_suppressed_when_cancel_wins_before_start_send() {
+        let gate = Arc::new(GateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            GateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        let candidate = register_start_candidate(&registry, &command).await;
+
+        let started = spawn_started_delivery(outbound.clone(), candidate);
+        wait_for_gate_polls(&gate, 1).await;
+        cancel_request_owned(
+            &test_identity(),
+            test_effective_limits(),
+            TEST_REQUEST_ID,
+            SystemClock.now_ms() + 1_000,
+            &outbound,
+            &SystemClock,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(started.await.unwrap().unwrap(), DeliveryResult::Superseded);
+        assert_eq!(
+            registry
+                .committed_started_at_ms(TEST_REQUEST_ID)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            registry
+                .begin(
+                    TEST_CONNECTION_ID,
+                    TEST_REQUEST_ID,
+                    "digest",
+                    cancelled_semantic_result(&command, "codex_exec", None, 100),
+                    101,
+                )
+                .await
+                .unwrap(),
+            ExecuteDecision::DuplicateActive { started: None, .. }
+        ));
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        let next_poll = gate.polls.load(Ordering::SeqCst) + 1;
+        let result = spawn_completed_result(outbound.clone(), registry.clone(), command);
+        wait_for_gate_polls(&gate, next_poll).await;
+        gate.grant();
+        result.await.unwrap().unwrap();
+        let written = parse_written_frame(&gate, 0);
+        assert_eq!(written.string_field("type"), Some("command.result"));
+        assert_eq!(written.string_field("status"), Some("cancelled"));
+        assert_eq!(written.object_field("startedAtMs"), Some(&JsonValue::Null));
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_started_finishes_before_cancelled_result_after_start_send() {
+        let gate = Arc::new(FlushGateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            FlushGateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        let candidate = register_start_candidate(&registry, &command).await;
+
+        let started = spawn_started_delivery(outbound.clone(), candidate);
+        wait_for_started_frames(&gate, 1).await;
+        assert_eq!(
+            registry
+                .committed_started_at_ms(TEST_REQUEST_ID)
+                .await
+                .unwrap(),
+            Some(100)
+        );
+        cancel_request_owned(
+            &test_identity(),
+            test_effective_limits(),
+            TEST_REQUEST_ID,
+            SystemClock.now_ms() + 1_000,
+            &outbound,
+            &SystemClock,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(!started.is_finished());
+        gate.grant_flush();
+        assert_eq!(started.await.unwrap().unwrap(), DeliveryResult::Written);
+
+        let result = spawn_completed_result(outbound.clone(), registry.clone(), command);
+        wait_for_started_frames(&gate, 2).await;
+        gate.grant_flush();
+        result.await.unwrap().unwrap();
+        let first = parse_flushed_frame(&gate, 0);
+        let second = parse_flushed_frame(&gate, 1);
+        assert_eq!(first.string_field("type"), Some("command.started"));
+        assert_eq!(second.string_field("type"), Some("command.result"));
+        assert_eq!(second.string_field("status"), Some("cancelled"));
+        assert_eq!(
+            second.object_field("startedAtMs"),
+            Some(&JsonValue::Integer(100))
+        );
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_started_is_suppressed_when_cancel_wins_before_start_send() {
+        let gate = Arc::new(GateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            GateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        register_started_request(&registry, &command).await;
+        let replay_candidate = match registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                101,
+            )
+            .await
+            .unwrap()
+        {
+            ExecuteDecision::DuplicateActive {
+                started: Some(candidate),
+                ..
+            } if candidate.started_at_ms == 100 => candidate,
+            other => panic!("expected replayable started candidate, got {other:?}"),
+        };
+
+        let replay = spawn_started_delivery(outbound.clone(), replay_candidate);
+        wait_for_gate_polls(&gate, 1).await;
+        cancel_request_owned(
+            &test_identity(),
+            test_effective_limits(),
+            TEST_REQUEST_ID,
+            SystemClock.now_ms() + 1_000,
+            &outbound,
+            &SystemClock,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.await.unwrap().unwrap(), DeliveryResult::Superseded);
+
+        let next_poll = gate.polls.load(Ordering::SeqCst) + 1;
+        let result = spawn_completed_result(outbound.clone(), registry.clone(), command);
+        wait_for_gate_polls(&gate, next_poll).await;
+        gate.grant();
+        result.await.unwrap().unwrap();
+        let written = parse_written_frame(&gate, 0);
+        assert_eq!(written.string_field("type"), Some("command.result"));
+        assert_eq!(written.string_field("status"), Some("cancelled"));
+        assert_eq!(
+            written.object_field("startedAtMs"),
+            Some(&JsonValue::Integer(100))
+        );
+        gate.grant();
+        tokio::task::yield_now().await;
+        assert_eq!(gate.writes.lock().unwrap().len(), 1);
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_started_finishes_before_cancelled_result_after_start_send() {
+        let gate = Arc::new(FlushGateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            FlushGateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        register_started_request(&registry, &command).await;
+        let replay_candidate = match registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                101,
+            )
+            .await
+            .unwrap()
+        {
+            ExecuteDecision::DuplicateActive {
+                started: Some(candidate),
+                ..
+            } if candidate.started_at_ms == 100 => candidate,
+            other => panic!("expected replayable started candidate, got {other:?}"),
+        };
+
+        let replay = spawn_started_delivery(outbound.clone(), replay_candidate);
+        wait_for_started_frames(&gate, 1).await;
+        cancel_request_owned(
+            &test_identity(),
+            test_effective_limits(),
+            TEST_REQUEST_ID,
+            SystemClock.now_ms() + 1_000,
+            &outbound,
+            &SystemClock,
+            &registry,
+        )
+        .await
+        .unwrap();
+        assert!(!replay.is_finished());
+        gate.grant_flush();
+        assert_eq!(replay.await.unwrap().unwrap(), DeliveryResult::Written);
+
+        let result = spawn_completed_result(outbound.clone(), registry.clone(), command);
+        wait_for_started_frames(&gate, 2).await;
+        gate.grant_flush();
+        result.await.unwrap().unwrap();
+        let first = parse_flushed_frame(&gate, 0);
+        let second = parse_flushed_frame(&gate, 1);
+        assert_eq!(first.string_field("type"), Some("command.started"));
+        assert_eq!(second.string_field("type"), Some("command.result"));
+        assert_eq!(second.string_field("status"), Some("cancelled"));
+        assert_eq!(
+            second.object_field("startedAtMs"),
+            Some(&JsonValue::Integer(100))
+        );
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_supersedes_an_inflight_natural_result_before_any_write() {
+        let gate = Arc::new(GateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            GateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let registry = Arc::new(RequestRegistry::new(8));
+        let command = test_command("codex_exec");
+        let decision = registry
+            .begin(
+                TEST_CONNECTION_ID,
+                TEST_REQUEST_ID,
+                "digest",
+                cancelled_semantic_result(&command, "codex_exec", None, 100),
+                100,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(decision, ExecuteDecision::New { .. }));
+        assert!(
+            registry
+                .mark_started(TEST_REQUEST_ID, 100)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let result_outbound = outbound.clone();
+        let result_registry = registry.clone();
+        let result_command = command.clone();
+        let result_send = tokio::spawn(async move {
+            send_and_cache_result(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                &result_command,
+                "codex_exec",
+                completed_test_result(),
+                &result_outbound,
+                &SystemClock,
+                &result_registry,
+            )
+            .await
+        });
+        wait_for_gate_polls(&gate, 1).await;
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        let cancel_deadline_at_ms = SystemClock.now_ms() + 1_000;
+        let cancel_outbound = outbound.clone();
+        let cancel_registry = registry.clone();
+        let cancel = tokio::spawn(async move {
+            cancel_request_owned(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                cancel_deadline_at_ms,
+                &cancel_outbound,
+                &SystemClock,
+                &cancel_registry,
+            )
+            .await
+        });
+        result_send.await.unwrap().unwrap();
+        wait_for_gate_polls(&gate, 2).await;
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        gate.grant();
+        cancel.await.unwrap().unwrap();
+        assert_eq!(gate.writes.lock().unwrap().len(), 1);
+        let first = parse_written_frame(&gate, 0);
+        assert_eq!(first.string_field("type"), Some("command.result"));
+        assert_eq!(first.string_field("status"), Some("cancelled"));
+
+        let replay_polls = gate.polls.load(Ordering::SeqCst) + 1;
+        let replay_outbound = outbound.clone();
+        let replay_registry = registry.clone();
+        let replay = tokio::spawn(async move {
+            cancel_request_owned(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                cancel_deadline_at_ms,
+                &replay_outbound,
+                &SystemClock,
+                &replay_registry,
+            )
+            .await
+        });
+        wait_for_gate_polls(&gate, replay_polls).await;
+        gate.grant();
+        replay.await.unwrap().unwrap();
+        let replayed = parse_written_frame(&gate, 1);
+        assert_eq!(
+            semantic_digest(&replayed).unwrap(),
+            semantic_digest(&first).unwrap()
+        );
+
+        assert_eq!(
+            cancel_request_owned(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                cancel_deadline_at_ms + 1,
+                &outbound,
+                &SystemClock,
+                &registry,
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            "MYFORGE_DUPLICATE_REQUEST_CONFLICT"
+        );
+        assert!(terminal_rx.try_recv().is_err());
+        shutdown.cancel();
+        await_task(writer).await;
+    }
+
+    #[derive(Default)]
+    struct BusinessValidationHandler {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CommandHandler for BusinessValidationHandler {
+        async fn execute(
+            &self,
+            _command: CommandExecute,
+            _control: CommandControl,
+        ) -> CommandHandlerOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            CommandHandlerOutcome::PreStartError(CommandRejection::new(
+                "MYFORGE_CODEX_UNAVAILABLE",
+                "unexpected handler call",
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_processes_cancel_while_business_error_delivery_is_stalled() {
+        let handler = Arc::new(BusinessValidationHandler::default());
+        let runtime = ClientRuntime::new(handler.clone());
+        let gate = Arc::new(GateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            GateSink(gate.clone()),
+            receiver,
+            terminal_tx.clone(),
+            shutdown.child_token(),
+        ));
+        let outbound = test_outbound(sender, Duration::from_secs(30));
+        let command = test_command("unknown_profile");
+        let mut workers = JoinSet::new();
+
+        runtime
+            .handle_execute(
+                test_identity(),
+                "codex_exec",
+                test_effective_limits(),
+                JsonValue::Object(vec![(
+                    "requestId".to_string(),
+                    JsonValue::String(TEST_REQUEST_ID.to_string()),
+                )]),
+                command,
+                &outbound,
+                &terminal_tx,
+                &mut workers,
+            )
+            .await
+            .unwrap();
+        wait_for_gate_polls(&gate, 1).await;
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        let cancel_outbound = outbound.clone();
+        let cancel_registry = runtime.request_registry.clone();
+        let cancel_deadline_at_ms = SystemClock.now_ms() + 1_000;
+        let cancel = tokio::spawn(async move {
+            cancel_request_owned(
+                &test_identity(),
+                test_effective_limits(),
+                TEST_REQUEST_ID,
+                cancel_deadline_at_ms,
+                &cancel_outbound,
+                &SystemClock,
+                &cancel_registry,
+            )
+            .await
+        });
+        wait_for_gate_polls(&gate, 2).await;
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        gate.grant();
+        cancel.await.unwrap().unwrap();
+        assert_eq!(gate.writes.lock().unwrap().len(), 1);
+        let written = parse_written_frame(&gate, 0);
+        assert_eq!(written.string_field("type"), Some("command.result"));
+        assert_eq!(written.string_field("status"), Some("cancelled"));
+        assert!(terminal_rx.try_recv().is_err());
+
+        shutdown.cancel();
+        drain_workers(&mut workers).await;
+        await_task(writer).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_result_never_writes_after_the_original_cancel_deadline() {
+        let gate = Arc::new(GateState::default());
+        let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let writer = tokio::spawn(writer_task(
+            GateSink(gate.clone()),
+            receiver,
+            terminal_tx,
+            shutdown.child_token(),
+        ));
+        let outbound = OutboundHandle {
+            sender,
+            signing_key: Arc::new(SigningKey::from_bytes(&[7; 32])),
+            clock: Arc::new(SystemClock),
+            max_frame_bytes: Arc::new(AtomicU64::new(524_288)),
+            write_timeout: Duration::from_secs(30),
+        };
+        let now_ms = SystemClock.now_ms();
+        let cancel_deadline_at_ms = now_ms + 100;
+        let send_outbound = outbound.clone();
+        let send = tokio::spawn(async move {
+            send_command_result_owned(
+                &ConnectionIdentity {
+                    connection_id: "67da7da9-a653-4d6e-9e81-f5f8baf874bb".to_string(),
+                    agent_id: "dev-pc-001".to_string(),
+                    project_id: "myforge-local".to_string(),
+                },
+                test_effective_limits(),
+                "2d0465b1-dc92-46d2-bc45-c90ed9724f5a",
+                CommandResultSemantic {
+                    completed_at_ms: now_ms,
+                    ..cancelled_test_result()
+                },
+                Some(cancel_deadline_at_ms),
+                &send_outbound,
+                &SystemClock,
+            )
+            .await
+        });
+
+        while gate.polls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert_eq!(
+            send.await.unwrap().unwrap_err().code(),
+            "MYFORGE_AGENT_DISCONNECTED"
+        );
+        assert_eq!(terminal_rx.recv().await.unwrap().reason, "writer_deadline");
+        gate.grant();
+        tokio::task::yield_now().await;
+        assert!(gate.writes.lock().unwrap().is_empty());
+
+        shutdown.cancel();
+        await_task(writer).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1810,11 +4005,39 @@ mod tests {
         }
     }
 
+    fn cancelled_test_result() -> CommandResultSemantic {
+        CommandResultSemantic {
+            execution_mode: "codex_exec".to_string(),
+            status: "cancelled".to_string(),
+            exit_code: None,
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            artifact_file: "artifacts/fangyuan/result.ron".to_string(),
+            consumer_target_file: None,
+            artifact: ArtifactSummary::missing(),
+            audit: AuditSummary::skipped("cancelled"),
+            error_code: Some("MYFORGE_COMMAND_CANCELLED".to_string()),
+            error_message: Some("command was cancelled".to_string()),
+            started_at_ms: None,
+            completed_at_ms: 100,
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn termination_cancels_active_request_before_waiting_on_stalled_writer() {
         let registry = Arc::new(RequestRegistry::new(8));
         let decision = registry
-            .begin("connection", "request", "digest", 100)
+            .begin(
+                "connection",
+                "request",
+                "digest",
+                cancelled_test_result(),
+                100,
+            )
             .await
             .unwrap();
         let ExecuteDecision::New { cancellation } = decision else {
@@ -1852,11 +4075,18 @@ mod tests {
         await_task(writer).await;
         assert!(matches!(
             registry
-                .begin("connection", "request", "digest", 101)
+                .begin(
+                    "connection",
+                    "request",
+                    "digest",
+                    cancelled_test_result(),
+                    101,
+                )
                 .await
                 .unwrap(),
             ExecuteDecision::DuplicateCompleted {
-                response: CachedResponse::NoReplay
+                response: CachedResponse::NoReplay,
+                cancel_deadline_at_ms: None,
             }
         ));
     }

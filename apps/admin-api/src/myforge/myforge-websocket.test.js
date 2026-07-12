@@ -693,6 +693,48 @@ test("pre-start cancellation result enforces persisted lower and upper completio
   await t.test("rejects after cancel deadline plus skew", () => runCase(NOW + 17001, NOW + 12001, false));
 });
 
+test("started and cancellation accept both legal wire linearizations and reject terminal started", async (t) => {
+  await t.test("cancel before started accepts nullable startedAt and rejects later started", async () => {
+    const harness = createHarness();
+    const { socket, connection } = await handshake(harness);
+    installDispatchedTask(harness.store, connection);
+    const task = harness.store.tasks.get(REQUEST_ID);
+    task.cancelRequestedAt = new Date(NOW + 2000).toISOString();
+    task.cancelDeadlineAt = new Date(NOW + 12000).toISOString();
+
+    socket.receive(cancelledResultMessage(connection, harness.agentKeys.privateKey, 8, NOW + 3000));
+    await waitFor(() => task.status === "cancelled", "pre-start cancelled result");
+    assert.equal(task.startedAt, null);
+    assert.equal(connection.closed, false);
+
+    socket.receive(startedMessage(connection, harness.agentKeys.privateKey, 9));
+    await waitFor(() => connection.closed, "terminal started rejection");
+    assert.ok(harness.adminStore.events.some((event) => event.eventType === "MYFORGE_PROTOCOL_STATE_INVALID"));
+  });
+
+  await t.test("started after persisted cancel completes before non-null cancelled result", async () => {
+    const harness = createHarness();
+    t.after(() => harness.gateway.shutdown());
+    const { socket, connection } = await handshake(harness);
+    installDispatchedTask(harness.store, connection);
+    const task = harness.store.tasks.get(REQUEST_ID);
+    task.cancelRequestedAt = new Date(NOW + 2000).toISOString();
+    task.cancelDeadlineAt = new Date(NOW + 12000).toISOString();
+
+    socket.receive(startedMessage(connection, harness.agentKeys.privateKey, 8));
+    await waitFor(() => task.status === "running", "started after cancel request");
+    assert.equal(task.startedAt, new Date(NOW + 2000).toISOString());
+    assert.equal(task.cancelRequestedAt, new Date(NOW + 2000).toISOString());
+
+    socket.receive(cancelledResultMessage(connection, harness.agentKeys.privateKey, 9, NOW + 3000, {
+      startedAtMs: NOW + 2000,
+      errorMessage: "command was cancelled"
+    }));
+    await waitFor(() => task.status === "cancelled", "post-start cancelled result");
+    assert.equal(connection.closed, false);
+  });
+});
+
 test("terminal cancelled result remains semantically idempotent after its receive deadline", async (t) => {
   await t.test("same semantic retry is accepted and different semantic retry conflicts", async () => {
     let nowMs = NOW;

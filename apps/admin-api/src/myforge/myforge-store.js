@@ -745,7 +745,7 @@ export class MyforgeStore {
       if (existing.status === "running" && sameInstant(existing.startedAt, startedAt)) {
         return { outcome: "duplicate", task: existing };
       }
-      if (existing.status !== "dispatched" || existing.cancelRequestedAt) {
+      if (existing.status !== "dispatched") {
         throw createMyforgeStoreError("MYFORGE_PROTOCOL_STATE_INVALID", "Task cannot transition to running");
       }
       const { rows } = await client.query(
