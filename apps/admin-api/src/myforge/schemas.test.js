@@ -86,6 +86,10 @@ function audit(status, overrides = {}) {
       status: "skipped", errors: null, warnings: null, primitiveCount: null,
       mainCode: null, reasonCode: "artifact_missing", findingsPreview: []
     },
+    rules_not_provided: {
+      status: "skipped", errors: null, warnings: null, primitiveCount: null,
+      mainCode: null, reasonCode: "rules_not_provided", findingsPreview: []
+    },
     dry_run: {
       status: "skipped", errors: null, warnings: null, primitiveCount: null,
       mainCode: null, reasonCode: "dry_run", findingsPreview: []
@@ -133,6 +137,7 @@ test("command.result accepts every frozen result mapping", () => {
     })],
     ["codex audit passed", result()],
     ["codex audit unavailable", result({ audit: audit("unavailable") })],
+    ["codex without rules skips the local auditor", result({ audit: audit("rules_not_provided") })],
     ["codex audit warning", result({
       status: "completed_with_errors", audit: audit("warning"),
       errorCode: "FANGYUAN_BLUEPRINT_AUDIT_WARNING", errorMessage: "audit warning"
@@ -158,7 +163,7 @@ test("command.result accepts every frozen result mapping", () => {
       errorCode: "MYFORGE_OUTPUT_TOO_LARGE", errorMessage: "result too large"
     })],
     ["artifact missing", result({
-      status: "failed", exitCode: 0, artifact: artifact(false), audit: audit("artifact_missing"),
+      status: "completed_with_errors", exitCode: 0, artifact: artifact(false), audit: audit("artifact_missing"),
       errorCode: "MYFORGE_TARGET_FILE_MISSING", errorMessage: "artifact missing"
     })],
     ["pre-start cancellation", result({
@@ -263,7 +268,7 @@ test("agent.register requires a preflight-confirmed forge root", () => {
     forgeRootSummary: { name: "myforge", configured: true },
     capabilities: {
       profiles: ["codex_exec"], codexExec: true, fangyuanBlueprint: true,
-      audit: "unavailable", dryRun: false, maxConcurrentTasks: 1
+      audit: "unavailable", dryRun: false, dangerFullAccess: false, maxConcurrentTasks: 1
     },
     limits: {
       authTtlMs: 60000, commandTtlMs: 60000, clockSkewMs: 5000,
@@ -272,8 +277,48 @@ test("agent.register requires a preflight-confirmed forge root", () => {
     }
   };
   assert.doesNotThrow(() => validateMessageSchema(registration));
+  assert.doesNotThrow(() => validateMessageSchema({
+    ...registration,
+    capabilities: { ...registration.capabilities, dangerFullAccess: true }
+  }));
+  assert.throws(() => validateMessageSchema({
+    ...registration,
+    capabilities: { ...registration.capabilities, dangerFullAccess: undefined }
+  }), { code: "MYFORGE_MESSAGE_SCHEMA_INVALID" });
   assert.throws(() => validateMessageSchema({
     ...registration,
     forgeRootSummary: { name: "myforge", configured: false }
+  }), { code: "MYFORGE_MESSAGE_SCHEMA_INVALID" });
+});
+
+test("command.execute accepts explicit no-rules input and rejects remote permission switches", () => {
+  const command = {
+    ...envelope("command.execute"),
+    connectionId: CONNECTION_ID,
+    requestId: REQUEST_ID,
+    taskType: "fangyuan.blueprint.generate",
+    agentId: "dev-pc-001",
+    projectId: "myforge-local",
+    profile: "codex_exec",
+    input: {
+      artifactFile: "artifacts/fangyuan/new/result.ron",
+      consumerTargetFile: null,
+      rulesFile: null,
+      prompt: {
+        theme: "empty workspace",
+        primitiveLimit: 20,
+        bounds: { width: 10, depth: 10, height: 10 },
+        requirements: ["one room"]
+      },
+      renderedPrompt: "fixed prompt"
+    },
+    timeoutMs: 120000,
+    maxOutputBytes: 1048576
+  };
+
+  assert.doesNotThrow(() => validateMessageSchema(command));
+  assert.throws(() => validateMessageSchema({
+    ...command,
+    input: { ...command.input, dangerFullAccess: true }
   }), { code: "MYFORGE_MESSAGE_SCHEMA_INVALID" });
 });

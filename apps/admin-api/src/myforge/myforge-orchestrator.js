@@ -3,6 +3,7 @@ import { AsyncMutex, isUuidV4 } from "./protocol.js";
 import {
   assertEmptyAgentQuery,
   assertEmptyCancelBody,
+  buildCommandPreview,
   normalizeFangyuanBlueprintRequest,
   normalizeTaskListQuery
 } from "./myforge-task-input.js";
@@ -71,6 +72,7 @@ function publicTaskListItem(task) {
     status: task.status,
     queueReason: task.queueReason,
     executionMode: task.executionMode,
+    dangerFullAccess: task.dangerFullAccess,
     artifactFile: task.artifactFile,
     consumerTargetFile: task.consumerTargetFile,
     createdBy: createdBy(task),
@@ -94,6 +96,7 @@ function publicTaskDetail(task) {
     status: task.status,
     queueReason: task.queueReason,
     executionMode: task.executionMode,
+    dangerFullAccess: task.dangerFullAccess,
     artifactFile: task.artifactFile,
     consumerTargetFile: task.consumerTargetFile,
     rulesFile: task.rulesFile,
@@ -537,6 +540,11 @@ export class MyforgeOrchestrator {
               projectId,
               connectionId: operation.connection.connectionId,
               executionMode: operation.connection.capabilities.dryRun ? "dry_run" : "codex_exec",
+              dangerFullAccess: operation.connection.capabilities.dangerFullAccess,
+              commandPreview: buildCommandPreview(
+                task.renderedPrompt,
+                operation.connection.capabilities.dangerFullAccess
+              ),
               commandDigest: prepared.semanticDigest,
               commandExpiresAt: prepared.expiresAt,
               timeoutMs: operation.connection.effectiveLimits.commandTimeoutMs,

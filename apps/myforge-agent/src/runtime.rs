@@ -2811,7 +2811,7 @@ mod tests {
             input: CommandInput {
                 artifact_file: "artifacts/fangyuan/result.ron".to_string(),
                 consumer_target_file: None,
-                rules_file: "rules/fangyuan/rules.md".to_string(),
+                rules_file: Some("rules/fangyuan/rules.md".to_string()),
                 prompt: BlueprintPrompt {
                     theme: "test".to_string(),
                     primitive_limit: 10,

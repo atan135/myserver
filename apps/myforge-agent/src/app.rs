@@ -297,6 +297,10 @@ mod tests {
                 "MYFORGE_SHELL".to_string(),
                 "private-shell-value".to_string(),
             ),
+            (
+                "MYFORGE_CODEX_DANGEROUS_FULL_ACCESS".to_string(),
+                "true".to_string(),
+            ),
             ("LOG_ENABLE_FILE".to_string(), "false".to_string()),
         ]));
         let config = AgentConfig::from_environment(&environment).unwrap();
@@ -342,6 +346,7 @@ mod tests {
 
         assert!(json.contains("secret-external-root"));
         assert!(json.contains("legacyShellConfigured\":true"));
+        assert!(json.contains("dangerFullAccess\":true"));
         assert!(!json.contains(config.root().to_string_lossy().as_ref()));
         assert!(!json.contains("secret-private.pem"));
         assert!(!json.contains("secret-public.pem"));

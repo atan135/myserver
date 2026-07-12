@@ -78,6 +78,7 @@ function taskRow(overrides = {}) {
     status: "queued",
     queue_reason: "agent_offline",
     execution_mode: null,
+    danger_full_access: null,
     connection_id: null,
     artifact_file: "artifacts/fangyuan/home.ron",
     consumer_target_file: "project/assets/fangyuan/home.ron",
@@ -215,9 +216,10 @@ test("myforge createTask derives offline queueing and writes a redacted audit in
         insertedRequestId = params[0];
         assert.match(insertedRequestId, /^[0-9a-f-]{36}$/);
         assert.equal(params[4], "agent_offline");
+        assert.equal(params[7], null);
         assert.equal(params[9], "sensitive rendered prompt");
         return {
-          rows: [taskRow({ request_id: insertedRequestId })],
+          rows: [taskRow({ request_id: insertedRequestId, rules_file: null })],
           rowCount: 1
         };
       }
@@ -244,7 +246,7 @@ test("myforge createTask derives offline queueing and writes a redacted audit in
     agentId: "dev-pc-001",
     artifactFile: "artifacts/fangyuan/home.ron",
     consumerTargetFile: "project/assets/fangyuan/home.ron",
-    rulesFile: "rules/fangyuan/rules.md",
+    rulesFile: null,
     prompt: { theme: "home" },
     renderedPrompt: "sensitive rendered prompt",
     commandPreview: "codex exec [prompt]",
@@ -255,6 +257,7 @@ test("myforge createTask derives offline queueing and writes a redacted audit in
 
   assert.equal(task.requestId, insertedRequestId);
   assert.equal(task.queueReason, "agent_offline");
+  assert.equal(task.rulesFile, null);
   assert.doesNotMatch(auditJson, /sensitive rendered prompt/);
   assert.doesNotMatch(auditJson, /stdout|stderr/i);
   const details = JSON.parse(auditJson);
@@ -454,6 +457,8 @@ test("myforge replaced connection rejects stale heartbeat, dispatch and offline 
     projectId: "myforge-local",
     connectionId: CONNECTION_ID,
     executionMode: "codex_exec",
+    dangerFullAccess: false,
+    commandPreview: "codex exec --sandbox workspace-write [danger_full_access=false]",
     commandDigest: DIGEST_A,
     commandExpiresAt: new Date(NOW.getTime() + 60000),
     timeoutMs: 120000,
@@ -483,6 +488,8 @@ test("myforge dispatch claim is conditional, records negotiated fields and audit
     status: "dispatched",
     queue_reason: null,
     execution_mode: "dry_run",
+    danger_full_access: true,
+    command_preview: "codex exec --dangerously-bypass-approvals-and-sandbox [danger_full_access=true]",
     connection_id: CONNECTION_ID,
     command_digest: DIGEST_A,
     command_expires_at: new Date(NOW.getTime() + 60000),
@@ -508,7 +515,9 @@ test("myforge dispatch claim is conditional, records negotiated fields and audit
         assert.match(sql, /NOT EXISTS/);
         assert.equal(params[3], CONNECTION_ID);
         assert.equal(params[4], "dry_run");
-        assert.equal(params[5], DIGEST_A);
+        assert.equal(params[5], true);
+        assert.match(params[6], /danger_full_access=true/);
+        assert.equal(params[7], DIGEST_A);
         return { rows: [dispatched], rowCount: 1 };
       }
     },
@@ -516,6 +525,9 @@ test("myforge dispatch claim is conditional, records negotiated fields and audit
       pattern: /^INSERT INTO admin_audit_logs/,
       result: ({ params }) => {
         assert.equal(params[2], "myforge_task_dispatch");
+        const details = JSON.parse(params[4]);
+        assert.equal(details.execution.dangerFullAccess, true);
+        assert.match(details.execution.commandPreview, /danger_full_access=true/);
         return { rows: [], rowCount: 1 };
       }
     }
@@ -527,6 +539,8 @@ test("myforge dispatch claim is conditional, records negotiated fields and audit
     projectId: "myforge-local",
     connectionId: CONNECTION_ID,
     executionMode: "dry_run",
+    dangerFullAccess: true,
+    commandPreview: "codex exec --dangerously-bypass-approvals-and-sandbox [danger_full_access=true]",
     commandDigest: DIGEST_A,
     commandExpiresAt: new Date(NOW.getTime() + 60000),
     timeoutMs: 120000,
@@ -535,6 +549,7 @@ test("myforge dispatch claim is conditional, records negotiated fields and audit
   });
   assert.equal(task.status, "dispatched");
   assert.equal(task.executionMode, "dry_run");
+  assert.equal(task.dangerFullAccess, true);
   client.assertDone();
 });
 
@@ -1247,6 +1262,18 @@ test("myforge schema is present in both bootstrap paths with state and active-ta
   for (const source of [dbClient, initSql]) {
     assert.match(source, /CREATE TABLE IF NOT EXISTS myforge_agents/);
     assert.match(source, /CREATE TABLE IF NOT EXISTS myforge_task_runs/);
+    assert.match(source, /rules_file varchar\(512\) NULL/);
+    assert.match(source, /danger_full_access boolean NULL/);
+    assert.match(source, /ALTER COLUMN rules_file DROP NOT NULL/);
+    assert.match(source, /ADD COLUMN IF NOT EXISTS danger_full_access boolean NULL/);
+    assert.match(source, /SET danger_full_access = false\s+WHERE execution_mode IS NOT NULL AND danger_full_access IS NULL/);
+    assert.match(source, /FROM pg_constraint\s+WHERE conname = 'ck_myforge_tasks_danger_access'\s+AND conrelid = 'myforge_task_runs'::regclass/);
+    assert.match(source, /ADD CONSTRAINT ck_myforge_tasks_danger_access\s+CHECK \(\(execution_mode IS NULL\) = \(danger_full_access IS NULL\)\)/);
+    assert.doesNotMatch(source, /DROP CONSTRAINT(?: IF EXISTS)? ck_myforge_tasks_danger_access/);
+    const addColumnAt = source.indexOf("ADD COLUMN IF NOT EXISTS danger_full_access boolean NULL");
+    const backfillAt = source.indexOf("SET danger_full_access = false", addColumnAt);
+    const guardedConstraintAt = source.indexOf("FROM pg_constraint", backfillAt);
+    assert.ok(addColumnAt >= 0 && addColumnAt < backfillAt && backfillAt < guardedConstraintAt);
     assert.match(source, /ck_myforge_tasks_status/);
     assert.match(source, /ck_myforge_tasks_cancel_pair/);
     assert.match(source, /ck_myforge_tasks_dispatch_fields/);

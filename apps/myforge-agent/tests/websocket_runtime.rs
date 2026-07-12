@@ -447,6 +447,12 @@ async fn handshake(
     );
     let register = read_agent(socket, agent_key).await;
     assert_eq!(register.string_field("type"), Some("agent.register"));
+    assert!(matches!(
+        register
+            .object_field("capabilities")
+            .and_then(|capabilities| capabilities.object_field("dangerFullAccess")),
+        Some(JsonValue::Bool(false))
+    ));
     assert_eq!(
         register.string_field("connectionId"),
         Some(connection_id.as_str())

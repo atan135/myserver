@@ -57,6 +57,7 @@ pub struct Capabilities {
     pub fangyuan_blueprint: bool,
     pub audit: AuditAvailability,
     pub dry_run: bool,
+    pub danger_full_access: bool,
     pub max_concurrent_tasks: u8,
 }
 
@@ -197,6 +198,7 @@ pub fn run_preflight(
             fangyuan_blueprint: true,
             audit,
             dry_run: config.dry_run(),
+            danger_full_access: config.danger_full_access(),
             max_concurrent_tasks: 1,
         },
         limits: config.limits(),
@@ -654,6 +656,7 @@ mod tests {
         assert!(report.capabilities().fangyuan_blueprint);
         assert_eq!(report.capabilities().audit, AuditAvailability::Unavailable);
         assert!(!report.capabilities().dry_run);
+        assert!(!report.capabilities().danger_full_access);
         assert_eq!(report.capabilities().max_concurrent_tasks, 1);
         assert_eq!(probe.codex_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -714,6 +717,17 @@ mod tests {
         assert!(report.capabilities().dry_run);
         assert!(!report.capabilities().codex_exec);
         assert_eq!(probe.codex_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reports_dangerous_full_access_only_from_local_configuration() {
+        let mut fixture = Fixture::valid();
+        fixture.set("MYFORGE_CODEX_DANGEROUS_FULL_ACCESS", "true");
+        let report = run_preflight(&fixture.config(), &FakeProbe::new(true)).unwrap();
+
+        assert!(report.capabilities().danger_full_access);
+        let capabilities = serde_json::to_value(report.capabilities()).unwrap();
+        assert_eq!(capabilities["dangerFullAccess"], true);
     }
 
     #[test]

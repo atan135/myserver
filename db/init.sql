@@ -179,10 +179,11 @@ CREATE TABLE IF NOT EXISTS myforge_task_runs (
   status varchar(32) NOT NULL,
   queue_reason varchar(32) NULL,
   execution_mode varchar(32) NULL,
+  danger_full_access boolean NULL,
   connection_id uuid NULL,
   artifact_file varchar(512) NOT NULL,
   consumer_target_file varchar(512) NULL,
-  rules_file varchar(512) NOT NULL,
+  rules_file varchar(512) NULL,
   prompt_json jsonb NOT NULL,
   rendered_prompt text NOT NULL,
   command_preview text NOT NULL,
@@ -217,6 +218,7 @@ CREATE TABLE IF NOT EXISTS myforge_task_runs (
   CONSTRAINT ck_myforge_tasks_queue_reason CHECK (queue_reason IS NULL OR queue_reason IN ('agent_offline', 'agent_busy')),
   CONSTRAINT ck_myforge_tasks_queue_reason_status CHECK (queue_reason IS NULL OR status = 'queued'),
   CONSTRAINT ck_myforge_tasks_execution_mode CHECK (execution_mode IS NULL OR execution_mode IN ('codex_exec', 'dry_run')),
+  CONSTRAINT ck_myforge_tasks_danger_access CHECK ((execution_mode IS NULL) = (danger_full_access IS NULL)),
   CONSTRAINT ck_myforge_tasks_prompt_json CHECK (jsonb_typeof(prompt_json) = 'object'),
   CONSTRAINT ck_myforge_tasks_artifact_json CHECK (artifact_json IS NULL OR jsonb_typeof(artifact_json) = 'object'),
   CONSTRAINT ck_myforge_tasks_audit_json CHECK (audit_json IS NULL OR jsonb_typeof(audit_json) = 'object'),
@@ -237,6 +239,31 @@ CREATE TABLE IF NOT EXISTS myforge_task_runs (
     (connection_id IS NOT NULL AND execution_mode IS NOT NULL AND command_digest IS NOT NULL AND command_expires_at IS NOT NULL AND dispatched_at IS NOT NULL)
   )
 );
+
+ALTER TABLE myforge_task_runs
+  ALTER COLUMN rules_file DROP NOT NULL;
+
+ALTER TABLE myforge_task_runs
+  ADD COLUMN IF NOT EXISTS danger_full_access boolean NULL;
+
+UPDATE myforge_task_runs
+SET danger_full_access = false
+WHERE execution_mode IS NOT NULL AND danger_full_access IS NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'ck_myforge_tasks_danger_access'
+      AND conrelid = 'myforge_task_runs'::regclass
+  ) THEN
+    ALTER TABLE myforge_task_runs
+      ADD CONSTRAINT ck_myforge_tasks_danger_access
+      CHECK ((execution_mode IS NULL) = (danger_full_access IS NULL));
+  END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_myforge_tasks_agent_status_created
   ON myforge_task_runs (agent_id, status, created_at, request_id);

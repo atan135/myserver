@@ -82,6 +82,7 @@ function toTask(row) {
     status: row.status,
     queueReason: row.queue_reason ?? null,
     executionMode: row.execution_mode ?? null,
+    dangerFullAccess: row.danger_full_access ?? null,
     connectionId: row.connection_id ?? null,
     artifactFile: row.artifact_file,
     consumerTargetFile: row.consumer_target_file ?? null,
@@ -146,6 +147,11 @@ function auditDetails(task, extra = {}) {
       startedAt: task.startedAt,
       cancelRequestedAt: task.cancelRequestedAt,
       completedAt: task.completedAt
+    },
+    execution: {
+      mode: task.executionMode,
+      dangerFullAccess: task.dangerFullAccess,
+      commandPreview: task.commandPreview
     },
     ...extra
   };
@@ -640,6 +646,8 @@ export class MyforgeStore {
     projectId,
     connectionId,
     executionMode,
+    dangerFullAccess,
+    commandPreview,
     commandDigest,
     commandExpiresAt,
     timeoutMs,
@@ -647,6 +655,9 @@ export class MyforgeStore {
     dispatchedAt = new Date()
   }) {
     requireAllowed(executionMode, EXECUTION_MODES, "INVALID_REQUEST", "executionMode");
+    if (typeof dangerFullAccess !== "boolean") {
+      throw createMyforgeStoreError("INVALID_REQUEST", "dangerFullAccess is required");
+    }
     return this.withTransaction(async (client) => {
       const { rows: agentRows } = await client.query(
         `SELECT agent_id
@@ -667,17 +678,19 @@ export class MyforgeStore {
              queue_reason = NULL,
              connection_id = $4,
              execution_mode = $5,
-             command_digest = $6,
-             command_expires_at = $7,
-             timeout_ms = $8,
-             max_output_bytes = $9,
-             dispatched_at = $10,
+             danger_full_access = $6,
+             command_preview = $7,
+             command_digest = $8,
+             command_expires_at = $9,
+             timeout_ms = $10,
+             max_output_bytes = $11,
+             dispatched_at = $12,
              updated_at = current_timestamp
          WHERE request_id = $1
            AND agent_id = $2
            AND project_id = $3
            AND status = 'queued'
-           AND queue_expires_at > $10
+           AND queue_expires_at > $12
            AND EXISTS (
              SELECT 1 FROM myforge_agents current_agent
              WHERE current_agent.agent_id = task.agent_id
@@ -698,6 +711,8 @@ export class MyforgeStore {
           projectId,
           connectionId,
           executionMode,
+          dangerFullAccess,
+          commandPreview,
           commandDigest,
           commandExpiresAt,
           timeoutMs,

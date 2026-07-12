@@ -296,6 +296,7 @@ async function handshake(harness, socket = new FakeSocket(), registerOverrides =
       fangyuanBlueprint: true,
       audit: "unavailable",
       dryRun: false,
+      dangerFullAccess: false,
       maxConcurrentTasks: 1
     },
     limits: {

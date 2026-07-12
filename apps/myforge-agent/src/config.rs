@@ -94,6 +94,7 @@ pub struct AgentConfig {
     root: PathBuf,
     codex_bin: OsString,
     dry_run: bool,
+    danger_full_access: bool,
     legacy_shell_configured: bool,
     limits: AgentLimits,
     ws_write_timeout_ms: u64,
@@ -112,6 +113,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("root", &"[REDACTED]")
             .field("codex_bin", &"[REDACTED]")
             .field("dry_run", &self.dry_run)
+            .field("danger_full_access", &self.danger_full_access)
             .field("legacy_shell_configured", &self.legacy_shell_configured)
             .field("limits", &self.limits)
             .field("ws_write_timeout_ms", &self.ws_write_timeout_ms)
@@ -154,6 +156,8 @@ impl AgentConfig {
             1_024,
         )?;
         let dry_run = strict_boolean(environment, "MYFORGE_DRY_RUN", false)?;
+        let danger_full_access =
+            strict_boolean(environment, "MYFORGE_CODEX_DANGEROUS_FULL_ACCESS", false)?;
         let audit_enabled = strict_boolean(environment, "MYFORGE_AUDIT_ENABLED", false)?;
         let audit_program = optional_bounded_text(environment, "MYFORGE_AUDIT_PROGRAM", 512)?;
         let legacy_shell_configured = parse_legacy_shell(environment)?;
@@ -167,6 +171,7 @@ impl AgentConfig {
             root,
             codex_bin: OsString::from(codex_bin),
             dry_run,
+            danger_full_access,
             legacy_shell_configured,
             limits: parsed_limits.protocol,
             ws_write_timeout_ms: parsed_limits.ws_write_timeout_ms,
@@ -206,6 +211,10 @@ impl AgentConfig {
 
     pub const fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    pub const fn danger_full_access(&self) -> bool {
+        self.danger_full_access
     }
 
     pub const fn legacy_shell_configured(&self) -> bool {
@@ -617,6 +626,7 @@ mod tests {
         assert_eq!(config.project_id(), "myforge-local");
         assert_eq!(config.codex_bin(), "codex");
         assert!(!config.dry_run());
+        assert!(!config.danger_full_access());
         assert!(!config.audit().enabled());
         assert!(!config.legacy_shell_configured());
         assert_eq!(
@@ -690,10 +700,12 @@ mod tests {
         for (raw, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
             let mut fixture = Fixture::valid();
             fixture.set("MYFORGE_DRY_RUN", raw);
+            fixture.set("MYFORGE_CODEX_DANGEROUS_FULL_ACCESS", raw);
             fixture.set("MYFORGE_AUDIT_ENABLED", "false");
             fixture.set("LOG_ENABLE_CONSOLE", raw);
             let config = AgentConfig::from_environment(&fixture.environment).unwrap();
             assert_eq!(config.dry_run(), expected, "{raw}");
+            assert_eq!(config.danger_full_access(), expected, "{raw}");
             assert_eq!(config.logging().enable_console(), expected, "{raw}");
         }
 
@@ -704,6 +716,12 @@ mod tests {
             assert_eq!(error.code(), ErrorCode::ConfigInvalid, "{raw}");
             assert!(error.message().contains("invalid boolean"), "{raw}");
             assert!(!error.to_string().contains("tru:"));
+
+            let mut fixture = Fixture::valid();
+            fixture.set("MYFORGE_CODEX_DANGEROUS_FULL_ACCESS", raw);
+            let error = AgentConfig::from_environment(&fixture.environment).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::ConfigInvalid, "{raw}");
+            assert!(error.message().contains("invalid boolean"), "{raw}");
         }
     }
 

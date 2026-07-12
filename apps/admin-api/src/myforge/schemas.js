@@ -193,7 +193,8 @@ function validatePrompt(value) {
 
 function validateCapabilities(value) {
   exactObject(value, [
-    "profiles", "codexExec", "fangyuanBlueprint", "audit", "dryRun", "maxConcurrentTasks"
+    "profiles", "codexExec", "fangyuanBlueprint", "audit", "dryRun", "dangerFullAccess",
+    "maxConcurrentTasks"
   ], "capabilities");
   if (!Array.isArray(value.profiles) || value.profiles.length !== 1 || value.profiles[0] !== "codex_exec") {
     fail("capabilities.profiles must contain only codex_exec");
@@ -203,6 +204,7 @@ function validateCapabilities(value) {
   if (!value.fangyuanBlueprint) fail("capabilities.fangyuanBlueprint must be true");
   if (!new Set(["available", "unavailable"]).has(value.audit)) fail("capabilities.audit is invalid");
   boolean(value.dryRun, "capabilities.dryRun");
+  boolean(value.dangerFullAccess, "capabilities.dangerFullAccess");
   if (!value.dryRun && !value.codexExec) fail("capabilities.codexExec must be true outside dry-run");
   if (value.maxConcurrentTasks !== 1) fail("capabilities.maxConcurrentTasks must be 1");
 }
@@ -250,7 +252,7 @@ function validateAudit(value) {
     }
     const expected = value.status === "unavailable"
       ? "auditor_not_configured"
-      : new Set(["dry_run", "execution_failed", "artifact_missing", "cancelled"]);
+      : new Set(["dry_run", "execution_failed", "artifact_missing", "rules_not_provided", "cancelled"]);
     if (typeof expected === "string" ? value.reasonCode !== expected : !expected.has(value.reasonCode)) {
       fail("audit.reasonCode is invalid");
     }
@@ -320,7 +322,7 @@ const validators = {
     ], "input");
     validatePath(message.input.artifactFile, "input.artifactFile", "artifacts/fangyuan/", ".ron");
     validatePath(message.input.consumerTargetFile, "input.consumerTargetFile", "project/assets/fangyuan/", ".ron", true);
-    validatePath(message.input.rulesFile, "input.rulesFile", "rules/fangyuan/", ".md");
+    validatePath(message.input.rulesFile, "input.rulesFile", "rules/fangyuan/", ".md", true);
     validatePrompt(message.input.prompt);
     string(message.input.renderedPrompt, "input.renderedPrompt", { min: 1, max: 16384 });
     integer(message.timeoutMs, "timeoutMs", 1000, 1800000);
@@ -402,39 +404,42 @@ const validators = {
       }
     }
     if (message.executionMode === "codex_exec" && message.status === "completed") {
+      const auditAccepted = new Set(["passed", "unavailable"]).has(message.audit.status) ||
+        (message.audit.status === "skipped" && message.audit.reasonCode === "rules_not_provided");
       if (message.exitCode !== 0 || message.startedAtMs === null || !message.artifact.exists ||
-          !new Set(["passed", "unavailable"]).has(message.audit.status)) {
+          !auditAccepted) {
         fail("completed codex_exec result fields are inconsistent");
       }
     }
     if (message.status === "completed_with_errors") {
       const expectedError = message.audit.status === "warning"
         ? "FANGYUAN_BLUEPRINT_AUDIT_WARNING"
-        : message.audit.status === "failed" ? "FANGYUAN_BLUEPRINT_AUDIT_FAILED" : null;
+        : message.audit.status === "failed"
+          ? "FANGYUAN_BLUEPRINT_AUDIT_FAILED"
+          : message.audit.status === "skipped" && message.audit.reasonCode === "artifact_missing"
+            ? "MYFORGE_TARGET_FILE_MISSING"
+            : null;
+      const artifactConsistent = expectedError === "MYFORGE_TARGET_FILE_MISSING"
+        ? !message.artifact.exists
+        : message.artifact.exists;
       if (message.executionMode !== "codex_exec" || message.exitCode !== 0 || message.startedAtMs === null ||
-          !message.artifact.exists || expectedError === null || message.errorCode !== expectedError) {
+          !artifactConsistent || expectedError === null || message.errorCode !== expectedError) {
         fail("completed_with_errors result fields are inconsistent");
       }
     }
     if (message.status === "failed") {
       if (message.startedAtMs === null || message.audit.status !== "skipped" ||
-          !new Set(["execution_failed", "artifact_missing"]).has(message.audit.reasonCode)) {
+          message.audit.reasonCode !== "execution_failed") {
         fail("failed result fields are inconsistent");
       }
-      if (message.audit.reasonCode === "artifact_missing") {
-        if (message.errorCode !== "MYFORGE_TARGET_FILE_MISSING" || message.exitCode !== 0 || message.artifact.exists) {
-          fail("artifact-missing result fields are inconsistent");
-        }
-      } else {
-        if (!EXECUTION_FAILED_CODES.has(message.errorCode)) {
-          fail("execution-failed result errorCode is invalid");
-        }
-        if (message.errorCode === "MYFORGE_COMMAND_TIMEOUT" && message.exitCode !== null) {
-          fail("timeout result exitCode must be null");
-        }
-        if (message.errorCode === "MYFORGE_COMMAND_FAILED" && message.exitCode === 0) {
-          fail("command-failed result exitCode must be null or non-zero");
-        }
+      if (!EXECUTION_FAILED_CODES.has(message.errorCode)) {
+        fail("execution-failed result errorCode is invalid");
+      }
+      if (message.errorCode === "MYFORGE_COMMAND_TIMEOUT" && message.exitCode !== null) {
+        fail("timeout result exitCode must be null");
+      }
+      if (message.errorCode === "MYFORGE_COMMAND_FAILED" && message.exitCode === 0) {
+        fail("command-failed result exitCode must be null or non-zero");
       }
     }
     if (message.status === "cancelled" && (

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::config::AgentLimits;
 use crate::preflight::{Capabilities, ForgeRootSummary};
@@ -111,10 +111,20 @@ pub struct CommandExecute {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandInput {
     pub artifact_file: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub consumer_target_file: Option<String>,
-    pub rules_file: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub rules_file: Option<String>,
     pub prompt: BlueprintPrompt,
     pub rendered_prompt: String,
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq)]
@@ -842,13 +852,9 @@ pub fn validate_execute_business(
                 )
                 .is_ok()
             })
-        && validate_path(
-            &message.input.rules_file,
-            "input.rulesFile",
-            "rules/fangyuan/",
-            ".md",
-        )
-        .is_ok();
+        && message.input.rules_file.as_ref().is_none_or(|path| {
+            validate_path(path, "input.rulesFile", "rules/fangyuan/", ".md").is_ok()
+        });
     if !paths_valid {
         return Err(CommandRejection::new(
             "MYFORGE_TARGET_PATH_INVALID",
@@ -1034,7 +1040,9 @@ fn validate_command_result(
         && (result.exit_code != Some(0)
             || result.started_at_ms.is_none()
             || !result.artifact.exists
-            || !matches!(result.audit.status.as_str(), "passed" | "unavailable"))
+            || !(matches!(result.audit.status.as_str(), "passed" | "unavailable")
+                || (result.audit.status == "skipped"
+                    && result.audit.reason_code.as_deref() == Some("rules_not_provided"))))
     {
         return schema_error("completed codex_exec result fields are inconsistent");
     }
@@ -1042,12 +1050,20 @@ fn validate_command_result(
         let expected = match result.audit.status.as_str() {
             "warning" => Some("FANGYUAN_BLUEPRINT_AUDIT_WARNING"),
             "failed" => Some("FANGYUAN_BLUEPRINT_AUDIT_FAILED"),
+            "skipped" if result.audit.reason_code.as_deref() == Some("artifact_missing") => {
+                Some("MYFORGE_TARGET_FILE_MISSING")
+            }
             _ => None,
+        };
+        let artifact_consistent = if expected == Some("MYFORGE_TARGET_FILE_MISSING") {
+            !result.artifact.exists
+        } else {
+            result.artifact.exists
         };
         if result.execution_mode != "codex_exec"
             || result.exit_code != Some(0)
             || result.started_at_ms.is_none()
-            || !result.artifact.exists
+            || !artifact_consistent
             || expected != result.error_code.as_deref()
         {
             return schema_error("completed_with_errors result fields are inconsistent");
@@ -1056,21 +1072,11 @@ fn validate_command_result(
     if result.status == "failed" {
         if result.started_at_ms.is_none()
             || result.audit.status != "skipped"
-            || !matches!(
-                result.audit.reason_code.as_deref(),
-                Some("execution_failed" | "artifact_missing")
-            )
+            || result.audit.reason_code.as_deref() != Some("execution_failed")
         {
             return schema_error("failed result fields are inconsistent");
         }
-        if result.audit.reason_code.as_deref() == Some("artifact_missing") {
-            if result.error_code.as_deref() != Some("MYFORGE_TARGET_FILE_MISSING")
-                || result.exit_code != Some(0)
-                || result.artifact.exists
-            {
-                return schema_error("artifact-missing result fields are inconsistent");
-            }
-        } else if !matches!(
+        if !matches!(
             result.error_code.as_deref(),
             Some("MYFORGE_COMMAND_TIMEOUT" | "MYFORGE_COMMAND_FAILED" | "MYFORGE_OUTPUT_TOO_LARGE")
         ) || (result.error_code.as_deref() == Some("MYFORGE_COMMAND_TIMEOUT")
@@ -1174,7 +1180,13 @@ fn validate_audit_summary(audit: &AuditSummary) -> Result<(), ProtocolError> {
             } else {
                 matches!(
                     audit.reason_code.as_deref(),
-                    Some("dry_run" | "execution_failed" | "artifact_missing" | "cancelled")
+                    Some(
+                        "dry_run"
+                            | "execution_failed"
+                            | "artifact_missing"
+                            | "rules_not_provided"
+                            | "cancelled"
+                    )
                 )
             };
             if !valid_reason {
@@ -1485,5 +1497,50 @@ mod tests {
         validate_uuid("2d0465b1-dc92-46d2-bc45-c90ed9724f5a", "requestId").unwrap();
         assert!(validate_uuid("2D0465B1-DC92-46D2-BC45-C90ED9724F5A", "requestId").is_err());
         assert!(validate_uuid("2d0465b1-dc92-36d2-bc45-c90ed9724f5a", "requestId").is_err());
+    }
+
+    #[test]
+    fn command_input_requires_nullable_keys_and_rejects_remote_permission_switches() {
+        let nullable = serde_json::json!({
+            "artifactFile": "artifacts/fangyuan/new/result.ron",
+            "consumerTargetFile": null,
+            "rulesFile": null,
+            "prompt": {
+                "theme": "empty workspace",
+                "primitiveLimit": 20,
+                "bounds": { "width": 10, "depth": 10, "height": 10 },
+                "requirements": ["one room"]
+            },
+            "renderedPrompt": "fixed prompt"
+        });
+        let input: CommandInput = serde_json::from_value(nullable.clone()).unwrap();
+        assert_eq!(input.consumer_target_file, None);
+        assert_eq!(input.rules_file, None);
+
+        let mut values = nullable.clone();
+        values["consumerTargetFile"] = serde_json::json!("project/assets/fangyuan/result.ron");
+        values["rulesFile"] = serde_json::json!("rules/fangyuan/rules.md");
+        let input: CommandInput = serde_json::from_value(values).unwrap();
+        assert_eq!(
+            input.consumer_target_file.as_deref(),
+            Some("project/assets/fangyuan/result.ron")
+        );
+        assert_eq!(input.rules_file.as_deref(), Some("rules/fangyuan/rules.md"));
+
+        for field in ["consumerTargetFile", "rulesFile"] {
+            let mut missing = nullable.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CommandInput>(missing).is_err(),
+                "missing required nullable field was accepted: {field}"
+            );
+        }
+
+        let mut switched = nullable;
+        switched.as_object_mut().unwrap().insert(
+            "dangerFullAccess".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(serde_json::from_value::<CommandInput>(switched).is_err());
     }
 }

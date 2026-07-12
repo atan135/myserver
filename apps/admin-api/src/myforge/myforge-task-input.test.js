@@ -38,12 +38,24 @@ test("fangyuan typed request normalizes business text and renders a fixed non-sh
   assert.match(normalized.renderedPrompt, /MANDATORY CONSTRAINTS/);
   assert.match(normalized.renderedPrompt, /Use only cube and sphere primitives/);
   assert.match(normalized.renderedPrompt, /Modify only "artifacts\/fangyuan\/home\.ron"/);
-  assert.match(normalized.commandPreview, /^codex exec --sandbox workspace-write --ephemeral --color never/);
+  assert.match(normalized.commandPreview, /^codex exec <agent-local-permission-mode> --ephemeral --color never/);
+  assert.match(normalized.commandPreview, /danger_full_access=unresolved/);
   assert.doesNotMatch(normalized.commandPreview, /central furnace/);
 
   const withoutConsumer = normalizeFangyuanBlueprintRequest(validRequest({ consumerTargetFile: undefined }));
   assert.equal(withoutConsumer.consumerTargetFile, null);
   assert.match(withoutConsumer.renderedPrompt, /consumerTargetFile metadata: not provided/);
+
+  const withoutRules = normalizeFangyuanBlueprintRequest(validRequest({ rulesFile: null }));
+  assert.equal(withoutRules.rulesFile, null);
+  assert.match(withoutRules.renderedPrompt, /No repository rules file was provided/);
+  assert.doesNotMatch(withoutRules.renderedPrompt, /Read and follow only the rules copy/);
+  const missingRulesField = validRequest();
+  delete missingRulesField.rulesFile;
+  assert.throws(
+    () => normalizeFangyuanBlueprintRequest(missingRulesField),
+    assertCode("INVALID_REQUEST")
+  );
 });
 
 test("fangyuan typed request rejects unknown execution controls at every object boundary", () => {
@@ -57,6 +69,10 @@ test("fangyuan typed request rejects unknown execution controls at every object 
   );
   assert.throws(
     () => normalizeFangyuanBlueprintRequest(validRequest({ dryRun: true })),
+    assertCode("INVALID_REQUEST")
+  );
+  assert.throws(
+    () => normalizeFangyuanBlueprintRequest(validRequest({ dangerFullAccess: true })),
     assertCode("INVALID_REQUEST")
   );
   assert.throws(

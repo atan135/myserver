@@ -113,6 +113,7 @@ impl ControlledCommandHandler {
                 root_real: preflight.root_real().to_path_buf(),
                 auditor: preflight.auditor_identity().cloned(),
                 dry_run: config.dry_run(),
+                danger_full_access: config.danger_full_access(),
                 audit_timeout_ms: config.audit().timeout_ms(),
                 clock_skew_ms: config.limits().clock_skew_ms,
                 environment: minimal_environment(),
@@ -200,6 +201,11 @@ impl CommandHandler for ControlledCommandHandler {
         }
         let budget = CommandBudget::new(Duration::from_millis(command.timeout_ms));
         let specification = codex_specification(&self.settings, &command);
+        tracing::info!(
+            request_id = %command.request_id,
+            danger_full_access = self.settings.danger_full_access,
+            "starting controlled Codex command"
+        );
         let process = match self.runner.spawn(specification) {
             Ok(process) => process,
             Err(()) if control.cancellation().is_cancelled() => {
@@ -439,7 +445,7 @@ async fn complete_codex_execution(
     if !base.artifact.exists {
         apply_failure(
             &mut base,
-            "failed",
+            "completed_with_errors",
             "MYFORGE_TARGET_FILE_MISSING",
             "expected artifact was not created",
             "artifact_missing",
@@ -514,6 +520,7 @@ async fn complete_codex_execution(
     base.audit = audit;
     match base.audit.status.as_str() {
         "passed" | "unavailable" => {}
+        "skipped" if base.audit.reason_code.as_deref() == Some("rules_not_provided") => {}
         "warning" => {
             base.status = "completed_with_errors".to_string();
             base.error_code = Some("FANGYUAN_BLUEPRINT_AUDIT_WARNING".to_string());
@@ -622,6 +629,7 @@ struct ExecutionSettings {
     root_real: PathBuf,
     auditor: Option<AuditorIdentity>,
     dry_run: bool,
+    danger_full_access: bool,
     audit_timeout_ms: u64,
     clock_skew_ms: u64,
     environment: Vec<(OsString, OsString)>,
@@ -630,7 +638,7 @@ struct ExecutionSettings {
 struct ValidatedPaths {
     root_real: PathBuf,
     artifact_path: PathBuf,
-    rules_path: PathBuf,
+    rules_path: Option<PathBuf>,
     dry_run: bool,
 }
 
@@ -639,7 +647,9 @@ fn validate_workspace_paths(
     command: &CommandExecute,
 ) -> Result<ValidatedPaths, CommandRejection> {
     validate_relative_path(&command.input.artifact_file, "artifacts/fangyuan/", ".ron")?;
-    validate_relative_path(&command.input.rules_file, "rules/fangyuan/", ".md")?;
+    if let Some(rules_file) = &command.input.rules_file {
+        validate_relative_path(rules_file, "rules/fangyuan/", ".md")?;
+    }
     if let Some(consumer) = &command.input.consumer_target_file {
         validate_relative_path(consumer, "project/assets/fangyuan/", ".ron")?;
     }
@@ -661,35 +671,29 @@ fn validate_workspace_paths(
         ));
     }
 
-    let rules_candidate = root_real.join(path_from_wire(&command.input.rules_file));
-    let rules_path = match fs::canonicalize(&rules_candidate) {
-        Ok(path) => path,
-        Err(_) => {
-            return Err(CommandRejection::new(
-                "MYFORGE_RULES_FILE_MISSING",
-                "rules file is unavailable",
-                false,
-            ));
-        }
-    };
-    if !inside_root(&root_real, &rules_path)
-        || !fs::metadata(&rules_path).is_ok_and(|metadata| metadata.is_file())
-    {
-        return Err(path_rejection());
-    }
+    let rules_path = command
+        .input
+        .rules_file
+        .as_ref()
+        .map(|rules_file| {
+            let rules_candidate = root_real.join(path_from_wire(rules_file));
+            let rules_path = fs::canonicalize(&rules_candidate).map_err(|_| {
+                CommandRejection::new(
+                    "MYFORGE_RULES_FILE_MISSING",
+                    "rules file is unavailable",
+                    false,
+                )
+            })?;
+            if !inside_root(&root_real, &rules_path)
+                || !fs::metadata(&rules_path).is_ok_and(|metadata| metadata.is_file())
+            {
+                return Err(path_rejection());
+            }
+            Ok(rules_path)
+        })
+        .transpose()?;
 
-    let artifact_candidate = root_real.join(path_from_wire(&command.input.artifact_file));
-    let Some(parent) = artifact_candidate.parent() else {
-        return Err(path_rejection());
-    };
-    let parent_real = fs::canonicalize(parent).map_err(|_| path_rejection())?;
-    if !inside_root(&root_real, &parent_real)
-        || !fs::metadata(&parent_real).is_ok_and(|metadata| metadata.is_dir())
-    {
-        return Err(path_rejection());
-    }
-    let file_name = artifact_candidate.file_name().ok_or_else(path_rejection)?;
-    let artifact_path = parent_real.join(file_name);
+    let artifact_path = resolve_artifact_target(&root_real, &command.input.artifact_file)?;
     match fs::symlink_metadata(&artifact_path) {
         Ok(_) => {
             let artifact_real = fs::canonicalize(&artifact_path).map_err(|_| path_rejection())?;
@@ -709,6 +713,38 @@ fn validate_workspace_paths(
         rules_path,
         dry_run: false,
     })
+}
+
+fn resolve_artifact_target(root_real: &Path, wire_path: &str) -> Result<PathBuf, CommandRejection> {
+    let segments = wire_path.split('/').collect::<Vec<_>>();
+    let (file_name, directory_segments) = segments.split_last().ok_or_else(path_rejection)?;
+    let mut current = root_real.to_path_buf();
+    let mut index = 0;
+
+    while index < directory_segments.len() {
+        let candidate = current.join(directory_segments[index]);
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let real = fs::canonicalize(&candidate).map_err(|_| path_rejection())?;
+                if !inside_root(root_real, &real)
+                    || !fs::metadata(&real).is_ok_and(|metadata| metadata.is_dir())
+                {
+                    return Err(path_rejection());
+                }
+                current = real;
+                index += 1;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                for segment in &directory_segments[index..] {
+                    current.push(segment);
+                }
+                break;
+            }
+            Err(_) => return Err(path_rejection()),
+        }
+    }
+
+    Ok(current.join(file_name))
 }
 
 fn validate_relative_path(value: &str, prefix: &str, suffix: &str) -> Result<(), CommandRejection> {
@@ -776,17 +812,24 @@ fn codex_specification(
     settings: &ExecutionSettings,
     command: &CommandExecute,
 ) -> ProcessSpecification {
-    ProcessSpecification {
-        program: settings.codex_bin.clone(),
-        arguments: vec![
-            OsString::from("exec"),
+    let mut arguments = vec![OsString::from("exec")];
+    if settings.danger_full_access {
+        arguments.push(OsString::from("--dangerously-bypass-approvals-and-sandbox"));
+    } else {
+        arguments.extend([
             OsString::from("--sandbox"),
             OsString::from("workspace-write"),
-            OsString::from("--ephemeral"),
-            OsString::from("--color"),
-            OsString::from("never"),
-            OsString::from(&command.input.rendered_prompt),
-        ],
+        ]);
+    }
+    arguments.extend([
+        OsString::from("--ephemeral"),
+        OsString::from("--color"),
+        OsString::from("never"),
+        OsString::from(&command.input.rendered_prompt),
+    ]);
+    ProcessSpecification {
+        program: settings.codex_bin.clone(),
+        arguments,
         working_directory: settings.root_real.clone(),
         environment: settings.environment.clone(),
         stdout_preview_bytes: command.max_output_bytes as usize,
@@ -1368,6 +1411,9 @@ async fn run_audit(
     let Some(auditor) = settings.auditor.as_ref() else {
         return AuditOutcome::Summary(AuditSummary::unavailable());
     };
+    let Some(rules_file) = command.input.rules_file.as_ref() else {
+        return AuditOutcome::Summary(AuditSummary::skipped("rules_not_provided"));
+    };
     let auditor_real = match verify_audit_inputs(command, paths, auditor, &control, budget).await {
         Ok(real) => real,
         Err(ObservationFailure::Cancelled) => return AuditOutcome::Cancelled,
@@ -1388,7 +1434,7 @@ async fn run_audit(
             OsString::from("--format"),
             OsString::from("json"),
             OsString::from("--rules"),
-            OsString::from(&command.input.rules_file),
+            OsString::from(rules_file),
             OsString::from("--artifact"),
             OsString::from(&command.input.artifact_file),
         ],
@@ -1484,16 +1530,20 @@ async fn verify_audit_inputs(
         return Err(ObservationFailure::Invalid);
     }
 
-    verify_regular_path(
-        &paths
-            .root_real
-            .join(path_from_wire(&command.input.rules_file)),
-        &paths.rules_path,
-        &paths.root_real,
-        control,
-        budget,
-    )
-    .await?;
+    if let (Some(rules_file), Some(rules_path)) =
+        (command.input.rules_file.as_ref(), paths.rules_path.as_ref())
+    {
+        verify_regular_path(
+            &paths.root_real.join(path_from_wire(rules_file)),
+            rules_path,
+            &paths.root_real,
+            control,
+            budget,
+        )
+        .await?;
+    } else if command.input.rules_file.is_some() || paths.rules_path.is_some() {
+        return Err(ObservationFailure::Invalid);
+    }
     verify_regular_path(
         &paths
             .root_real
@@ -2044,6 +2094,7 @@ mod tests {
                     }
                 }),
                 dry_run,
+                danger_full_access: false,
                 audit_timeout_ms: 1_000,
                 clock_skew_ms: 5_000,
                 environment: vec![
@@ -2067,7 +2118,7 @@ mod tests {
             input: CommandInput {
                 artifact_file: "artifacts/fangyuan/result.ron".to_string(),
                 consumer_target_file: Some("project/assets/fangyuan/result.ron".to_string()),
-                rules_file: "rules/fangyuan/rules.md".to_string(),
+                rules_file: Some("rules/fangyuan/rules.md".to_string()),
                 prompt: BlueprintPrompt {
                     theme: "test".to_string(),
                     primitive_limit: 10,
@@ -2263,6 +2314,56 @@ mod tests {
                 .iter()
                 .all(|(name, _)| !name.to_string_lossy().starts_with("MYFORGE_"))
         );
+        for required in ["APPDATA", "CODEX_HOME", "HOME", "USERPROFILE"] {
+            assert!(ENVIRONMENT_ALLOWLIST.contains(&required));
+        }
+    }
+
+    #[tokio::test]
+    async fn dangerous_full_access_uses_the_exact_direct_codex_argument() {
+        let fixture = Fixture::new();
+        fs::write(&fixture.artifact, "artifact").unwrap();
+        let runner = Arc::new(RecordingRunner::new([Ok(process_output(
+            ProcessTermination::Exited,
+            Some(0),
+            b"done",
+            b"",
+        ))]));
+        let mut settings = fixture.settings(false, false);
+        settings.danger_full_access = true;
+        let handler = ControlledCommandHandler::with_dependencies(
+            settings,
+            runner.clone(),
+            Arc::new(FixedClock(system_time_ms(SystemTime::now()).unwrap())),
+        );
+        let command = command(system_time_ms(SystemTime::now()).unwrap());
+        let control = CommandControl::new(CancellationToken::new(), command.timestamp_ms);
+
+        let (_, result) = finish(handler.execute(command.clone(), control).await).await;
+
+        assert_eq!(result.status, "completed");
+        let specifications = runner.specifications.lock().unwrap();
+        assert_eq!(specifications.len(), 1);
+        assert_eq!(
+            specifications[0].arguments,
+            vec![
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ephemeral",
+                "--color",
+                "never",
+                command.input.rendered_prompt.as_str(),
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
+        );
+        assert!(
+            !specifications[0]
+                .arguments
+                .iter()
+                .any(|argument| argument == "--sandbox" || argument == "workspace-write")
+        );
     }
 
     #[tokio::test]
@@ -2362,6 +2463,81 @@ mod tests {
         };
         assert_eq!(rejection.error_code, "MYFORGE_TARGET_PATH_INVALID");
         assert!(runner.specifications.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_rules_and_missing_artifact_directories_are_valid_execution_inputs() {
+        let fixture = Fixture::new();
+        fs::remove_dir_all(fixture.root.join("artifacts")).unwrap();
+        let runner = Arc::new(RecordingRunner::new([Ok(process_output(
+            ProcessTermination::Exited,
+            Some(0),
+            b"codex stdout",
+            b"codex stderr",
+        ))]));
+        let now = system_time_ms(SystemTime::now()).unwrap();
+        let handler = ControlledCommandHandler::with_dependencies(
+            fixture.settings(false, true),
+            runner.clone(),
+            Arc::new(FixedClock(now)),
+        );
+        let mut command = command(now);
+        command.input.rules_file = None;
+        command.input.artifact_file = "artifacts/fangyuan/new-parent/result.ron".to_string();
+
+        let (_, result) = finish(
+            handler
+                .execute(command, CommandControl::new(CancellationToken::new(), now))
+                .await,
+        )
+        .await;
+
+        assert_eq!(result.status, "completed_with_errors");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout_preview, "codex stdout");
+        assert_eq!(result.stderr_preview, "codex stderr");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("MYFORGE_TARGET_FILE_MISSING")
+        );
+        assert_eq!(runner.specifications.lock().unwrap().len(), 1);
+        result.validate(4_096).unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_rules_skips_a_configured_auditor_after_artifact_generation() {
+        let fixture = Fixture::new();
+        fs::write(&fixture.artifact, "artifact").unwrap();
+        let runner = Arc::new(RecordingRunner::new([Ok(process_output(
+            ProcessTermination::Exited,
+            Some(0),
+            b"done",
+            b"",
+        ))]));
+        let now = system_time_ms(SystemTime::now()).unwrap();
+        let handler = ControlledCommandHandler::with_dependencies(
+            fixture.settings(false, true),
+            runner.clone(),
+            Arc::new(FixedClock(now)),
+        );
+        let mut command = command(now);
+        command.input.rules_file = None;
+
+        let (_, result) = finish(
+            handler
+                .execute(command, CommandControl::new(CancellationToken::new(), now))
+                .await,
+        )
+        .await;
+
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.audit.status, "skipped");
+        assert_eq!(
+            result.audit.reason_code.as_deref(),
+            Some("rules_not_provided")
+        );
+        assert_eq!(runner.specifications.lock().unwrap().len(), 1);
+        result.validate(4_096).unwrap();
     }
 
     #[tokio::test]
@@ -2501,6 +2677,11 @@ mod tests {
             missing.audit.reason_code.as_deref(),
             Some("artifact_missing")
         );
+        assert_eq!(missing.status, "completed_with_errors");
+        assert_eq!(missing.exit_code, Some(0));
+        assert_eq!(missing.stdout_preview, "done");
+        assert_eq!(missing.stdout_bytes, 4);
+        missing.validate(4_096).unwrap();
     }
 
     #[tokio::test]
