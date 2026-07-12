@@ -24,7 +24,22 @@ fangyuan.blueprint.generate
 
 WebSocket 内部消息名 command.execute 只是该 typed task 的传输封装，不表示存在通用命令管理接口。P0 不提供 command.execute HTTP API，不接受调用方提交 command、args、cwd、profile 或任意 shell 字符串。
 
-外部 myforge 是独立 Git 工作区，不是 MyServer 或 mybevy 的子目录。本机示例路径可以是 C:\project\myforge，但 MyServer 业务代码和数据库不得依赖该绝对路径。规则的上游参考可以来自 mybevy，P0 执行时只读取 myforge 内维护的规则副本。
+外部 myforge 是独立 Git 工作区，不是 MyServer 或 mybevy 的子目录。本机示例路径可以是 C:\project\myforge，但 MyServer 业务代码和数据库不得依赖该绝对路径。规则的上游参考可以来自 mybevy；任务提供非 null `rulesFile` 时，P0 执行只读取 myforge 内维护的规则副本。
+
+### 1.1 当前落地状态
+
+截至 2026-07，本文 P0 链路已按下列边界落地，后文继续作为实现契约和扩展约束：
+
+| 范围 | 已落地行为 |
+|------|------------|
+| 控制面 | `admin-api` 提供 `/api/v1/myforge/*` 管理员 HTTP API 和 `/api/v1/myforge/ws` agent WebSocket；`admin-web` 在 `/myforge` 提供 Agent、任务创建、列表、详情和取消操作。 |
+| 持久化 | PostgreSQL 使用 `myforge_agents` 保存配置同步后的 agent 身份、连接、capability 和协商限制，使用 `myforge_task_runs` 保存 typed task、权限快照、输出摘要、artifact/audit 摘要、错误和生命周期时间。 |
+| 空工作区 | `rulesFile` 是必须出现但可为 null 的键；显式 null 表示无规则执行。`artifactFile` 仍必填并限制在 `artifacts/fangyuan/*.ron`，其父目录可不存在并由 Codex 创建。 |
+| 执行结果 | Codex 退出 0 但未生成 artifact 时任务为 `completed_with_errors` / `MYFORGE_TARGET_FILE_MISSING`，仍保存 stdout、stderr、exitCode 和时间信息。 |
+| 本机权限 | 默认使用 `--sandbox workspace-write`；只有 agent 本机 `MYFORGE_CODEX_DANGEROUS_FULL_ACCESS=true` 才改用 `--dangerously-bypass-approvals-and-sandbox`，HTTP、WebSocket 和管理页面都不能远程切换。 |
+| 已验证链路 | 已完成 dry-run 和真实本机认证 Codex 的端到端闭环，包含无 `rules/`、无 `artifacts/` 的工作区；一次性 requestId 和逐项证据保留在对应 checklist。 |
+
+真实 Codex 部署在 Windows 时，agent 必须与完成 Codex 登录认证的用户相同，并把 PowerShell 7 `Get-CodexNativeExe` 返回的原生 executable 路径配置为 `MYFORGE_CODEX_BIN`。不得把 `codex` / `codex-admin` function 或 `.ps1` wrapper 当成可执行文件路径。子进程只继承固定 allowlist 中当前确实存在的环境变量；`APPDATA`、`CODEX_HOME`、`HOME`、`USERPROFILE` 用于复用该用户认证，不为缺失变量伪造值。
 
 ## 2. P0 目标与非目标
 
@@ -36,7 +51,7 @@ P0 必须完成：
 - admin-web 只通过 HTTP 创建任务和轮询状态，不新增浏览器 WebSocket 或 SSE。
 - admin-api 完成管理员 JWT 鉴权、权限校验、typed request 校验、受控提示词生成、任务持久化、审计、WebSocket 下发和 agent 结果验签。
 - Rust apps/myforge-agent 主动连接 admin-api，在 MYFORGE_ROOT 内执行固定 codex_exec profile，回传有限的输出、artifact 和 audit 摘要。
-- 外部 myforge 提供规则副本、Codex 上下文、可选审核器和 artifact 目录。
+- 外部 myforge 提供 Codex 上下文；规则副本和审核器可选，artifact 父目录可以不存在并由 Codex 创建。
 
 ### 2.2 P0 明确不实现
 
@@ -56,7 +71,7 @@ P0 必须完成：
 | admin-web | 管理员表单、列表、详情、取消按钮、HTTP 轮询、权限可见性 | agent WebSocket、签名、命令生成、本地文件访问 |
 | admin-api | 管理员鉴权和权限、字段校验、提示词渲染、任务状态、PostgreSQL、审计、agent WebSocket、双向验签 | 执行 Codex、访问 MYFORGE_ROOT、解析完整 RON、写 mybevy |
 | Rust myforge-agent | 主动连接、握手、验签、路径二次校验、固定 profile 执行、进程取消、输出截断、artifact/audit 摘要 | 管理员鉴权、自由解释任务类型、接受任意命令、发布资源 |
-| 外部 myforge | Codex skill/规则副本、项目上下文、审核脚本、artifacts | WebSocket、任务状态、管理员权限、服务端审计 |
+| 外部 myforge | Codex skill/项目上下文、可选规则副本和审核脚本、artifact 目标位置 | WebSocket、任务状态、管理员权限、服务端审计 |
 | game-server / NATS / mybevy | 无 | P0 全部链路 |
 
 admin-api 是唯一控制面。auth-http 不参与。agent 只接受来自其配置中 server 公钥签名的消息，admin-api 只接受配置中已登记 agent 公钥签名的消息。
@@ -239,7 +254,7 @@ MYFORGE_AGENT_PRIVATE_KEY_PATH=./keys/myforge_agent_private.pem
 MYFORGE_AGENT_PUBLIC_KEY_PATH=./keys/myforge_agent_public.pem
 MYFORGE_SERVER_PUBLIC_KEY_PATH=./keys/myforge_server_public.pem
 MYFORGE_ROOT=C:\project\myforge
-MYFORGE_CODEX_BIN=codex
+MYFORGE_CODEX_BIN=C:\path\to\codex.exe
 MYFORGE_CODEX_DANGEROUS_FULL_ACCESS=false
 MYFORGE_AUTH_TTL_MS=60000
 MYFORGE_COMMAND_TTL_MS=60000
@@ -1081,7 +1096,7 @@ myforge_task_cancelled
 }
 ~~~
 
-### 12.1 GET /myforge/agents
+### 12.1 GET /api/v1/myforge/agents
 
 权限：myforge.agent.read。
 
@@ -1143,7 +1158,7 @@ myforge_task_cancelled
 
 limits/effectiveLimits 用于定位部署不兼容；从未注册的 configured agent 两者为 null。不得返回公钥、fingerprint 以外的密钥信息或完整 MYFORGE_ROOT。
 
-### 12.2 GET /myforge/tasks
+### 12.2 GET /api/v1/myforge/tasks
 
 权限：myforge.task.read。
 
@@ -1151,7 +1166,7 @@ limits/effectiveLimits 用于定位部署不兼容；从未注册的 configured 
 
 返回 items、total、limit、offset。列表项包含 requestId、taskType、projectId、agentId、status、queueReason、executionMode、dangerFullAccess、artifactFile、consumerTargetFile、createdBy、createdAt、dispatchedAt、startedAt、cancelRequestedAt、cancelDeadlineAt、completedAt、durationMs、errorCode，不返回 stdout/stderr 和 renderedPrompt 全文。
 
-### 12.3 GET /myforge/tasks/:requestId
+### 12.3 GET /api/v1/myforge/tasks/:requestId
 
 权限：myforge.task.read。
 
@@ -1201,7 +1216,7 @@ limits/effectiveLimits 用于定位部署不兼容；从未注册的 configured 
 
 renderedPrompt 默认不返回，避免重复展示内部固定安全模板；commandPreview 和结构化 prompt 足够用于后台核对。
 
-### 12.4 POST /myforge/tasks/fangyuan-blueprint
+### 12.4 POST /api/v1/myforge/tasks/fangyuan-blueprint
 
 权限：myforge.task.create。请求体只允许第 5 节结构。
 
@@ -1221,7 +1236,7 @@ renderedPrompt 默认不返回，避免重复展示内部固定安全模板；co
 
 agent offline 或 busy 时同样返回 202，但 status 为 queued、executionMode=null，queueReason 分别为 agent_offline 或 agent_busy。在线下发时 executionMode 由该连接注册的 dryRun 能力确定。写 socket 失败时任务已经持久化，返回 202、status=failed 和 errorCode=MYFORGE_DISPATCH_FAILED，调用方继续使用 requestId 查询详情。known agent 规则以第 6.1 节配置映射为准；只有配置缺失才返回 404，配置存在但从未注册仍创建 queued。已知 agent 与 projectId 不匹配返回 409，不创建任务。
 
-### 12.5 POST /myforge/tasks/:requestId/cancel
+### 12.5 POST /api/v1/myforge/tasks/:requestId/cancel
 
 权限：myforge.task.cancel。P0 请求体必须为空或空 object，不接受任意原因。
 
