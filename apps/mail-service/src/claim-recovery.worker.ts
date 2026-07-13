@@ -42,7 +42,22 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    if (this.config.claimRecoveryEnabled === false) return;
+    if (this.config.claimRecoveryEnabled === false) {
+      const backlog = await this.mailStore.getMailClaimWorkflowBacklogSummary();
+      if (backlog.unfinished > 0) {
+        const error: any = new Error(
+          `MAIL_CLAIM_RECOVERY_DISABLE_BLOCKED: ${backlog.unfinished} unfinished mail claim workflows require recovery capability`
+        );
+        error.code = "MAIL_CLAIM_RECOVERY_DISABLE_BLOCKED";
+        error.backlog = backlog;
+        throw error;
+      }
+      log("warn", "mail.claim_recovery_disabled", {
+        claimNewRequestsEnabled: this.config.claimNewRequestsEnabled !== false,
+        unfinishedWorkflows: 0
+      });
+      return;
+    }
     try {
       await this.processRecoveries("startup");
     } catch (error: any) {

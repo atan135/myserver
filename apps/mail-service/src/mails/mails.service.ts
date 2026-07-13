@@ -1,7 +1,7 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 
-import { badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
+import { badRequest, conflict, forbidden, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
 import { computeGrantRequestFingerprint, normalizeGrantItems } from "../game-admin-client.js";
 import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
@@ -590,6 +590,44 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       let normalizedAttachments;
       let attachmentsFingerprint;
       const requestId = existingWorkflow?.claim_request_id || `mail_claim:${mailId}`;
+
+      if (this.config.claimNewRequestsEnabled === false) {
+        if (!existingWorkflow) {
+          mail = await this.mailStore.getMailById(mailId);
+          if (!mail) {
+            throw notFound("MAIL_NOT_FOUND", "Mail not found");
+          }
+          if (mail.to_player_id !== authenticatedPlayerId) {
+            throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+          }
+          if (mail.status === "claimed" || mail.claimed_at) {
+            return claimResponse(null, mail, { claimStatus: "claimed", alreadyClaimed: true });
+          }
+          throw serviceUnavailable(
+            "MAIL_CLAIM_INTAKE_DISABLED",
+            "New mail attachment claims are temporarily disabled"
+          );
+        }
+        if (existingWorkflow.player_id !== authenticatedPlayerId) {
+          throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+        }
+        mail = await this.mailStore.getMailById(mailId);
+        if (existingWorkflow.character_id !== characterId) {
+          return claimResponse(existingWorkflow, mail, {
+            claimStatus: "permanent_failure",
+            httpStatus: 409,
+            ok: false,
+            retryable: false,
+            errorCode: "MAIL_CLAIM_CHARACTER_MISMATCH",
+            errorCategory: "PERMANENT_FAILURE",
+            resultState: "not_applied"
+          });
+        }
+        return claimResponse(existingWorkflow, mail, {
+          claimStatus: existingWorkflow.status,
+          alreadyClaimed: existingWorkflow.status === "claimed"
+        });
+      }
 
       if (existingWorkflow) {
         normalizedAttachments = existingWorkflow.attachments_snapshot;

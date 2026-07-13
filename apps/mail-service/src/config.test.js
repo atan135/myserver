@@ -51,6 +51,7 @@ const CONFIG_ENV_NAMES = [
   "MAIL_OUTBOX_CLEANUP_INTERVAL_MS",
   "MAIL_OUTBOX_CLEANUP_BATCH_SIZE",
   "MAIL_CLAIM_LEASE_MS",
+  "MAIL_CLAIM_NEW_REQUESTS_ENABLED",
   "MAIL_CLAIM_RECOVERY_ENABLED",
   "MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS",
   "MAIL_CLAIM_RECOVERY_BATCH_SIZE",
@@ -99,6 +100,8 @@ async function withCapturedWarnings(values, callback) {
 
 test("mail-service base env example does not enable legacy direct game admin config by default", () => {
   const envExample = fs.readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  const productionExample = fs.readFileSync(new URL("../.env.production.example", import.meta.url), "utf8");
+  const testExample = fs.readFileSync(new URL("../.env.test.example", import.meta.url), "utf8");
 
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_HOST=/m);
   assert.doesNotMatch(envExample, /^GAME_SERVER_ADMIN_PORT=/m);
@@ -106,6 +109,10 @@ test("mail-service base env example does not enable legacy direct game admin con
   assert.match(envExample, /Rejected in strict\/test\/production discovery/);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_HOST=127\.0\.0\.1$/m);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_PORT=7500$/m);
+  for (const example of [envExample, productionExample, testExample]) {
+    assert.match(example, /^MAIL_CLAIM_NEW_REQUESTS_ENABLED=true$/m);
+    assert.match(example, /^MAIL_CLAIM_RECOVERY_ENABLED=true$/m);
+  }
 });
 
 test("mail-service reads bounded notification outbox settings", async () => {
@@ -136,6 +143,7 @@ test("mail-service reads bounded attachment claim lease", async () => {
 
 test("mail-service reads bounded claim recovery settings", async () => {
   await withEnv({
+    MAIL_CLAIM_NEW_REQUESTS_ENABLED: "false",
     MAIL_CLAIM_RECOVERY_ENABLED: "false",
     MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS: "250",
     MAIL_CLAIM_RECOVERY_BATCH_SIZE: "8",
@@ -146,6 +154,7 @@ test("mail-service reads bounded claim recovery settings", async () => {
     MAIL_CLAIM_RECOVERY_SHUTDOWN_TIMEOUT_MS: "2500"
   }, (getConfig) => {
     const config = getConfig();
+    assert.equal(config.claimNewRequestsEnabled, false);
     assert.equal(config.claimRecoveryEnabled, false);
     assert.equal(config.claimRecoveryPollIntervalMs, 250);
     assert.equal(config.claimRecoveryBatchSize, 8);
@@ -166,6 +175,30 @@ test("mail-service reads bounded claim recovery settings", async () => {
       MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS: "1000"
     }, (getConfig) => getConfig()),
     /MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS must be greater than or equal/
+  );
+});
+
+test("mail claim rollout switches default enabled and fail closed when recovery is disabled", async () => {
+  await withEnv({}, (getConfig) => {
+    const config = getConfig();
+    assert.equal(config.claimNewRequestsEnabled, true);
+    assert.equal(config.claimRecoveryEnabled, true);
+  });
+
+  await assert.rejects(
+    () => withEnv({
+      MAIL_CLAIM_NEW_REQUESTS_ENABLED: "true",
+      MAIL_CLAIM_RECOVERY_ENABLED: "false"
+    }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_RECOVERY_ENABLED=false requires MAIL_CLAIM_NEW_REQUESTS_ENABLED=false/
+  );
+  await assert.rejects(
+    () => withEnv({ MAIL_CLAIM_NEW_REQUESTS_ENABLED: "maybe" }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_NEW_REQUESTS_ENABLED must be true, false, 1, or 0/
+  );
+  await assert.rejects(
+    () => withEnv({ MAIL_CLAIM_RECOVERY_ENABLED: "yes" }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_RECOVERY_ENABLED must be true, false, 1, or 0/
   );
 });
 

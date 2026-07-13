@@ -82,6 +82,8 @@ function createConfig(overrides = {}) {
     port: 9103,
     mailPlayerAuthRequired: true,
     mailServiceToken: "test-mail-service-token",
+    claimNewRequestsEnabled: false,
+    claimRecoveryEnabled: true,
     serviceBuildVersion: "2026.06.18+mail",
     serviceZone: "zone-mail",
     ...overrides
@@ -124,6 +126,9 @@ test("RegistryClient registers mail-service http endpoint and metadata", async (
     service_instance_id: "mail-test-001",
     player_auth_required: true,
     service_token_enabled: true,
+    mail_notification_contract_version: 1,
+    claim_new_requests_enabled: false,
+    claim_recovery_enabled: true,
     build_version: "2026.06.18+mail",
     zone: "zone-mail"
   });

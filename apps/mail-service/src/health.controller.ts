@@ -14,7 +14,9 @@ export class HealthController {
       ok: true,
       service: this.config.appName,
       env: this.config.env,
-      storage: this.config.dbEnabled ? "postgresql" : "memory"
+      storage: this.config.dbEnabled ? "postgresql" : "memory",
+      mail_claim_new_requests_enabled: this.config.claimNewRequestsEnabled !== false,
+      mail_claim_recovery_enabled: this.config.claimRecoveryEnabled !== false
     };
   }
 }

@@ -67,6 +67,9 @@ export class RegistryClient {
         service_instance_id: this.instanceId,
         player_auth_required: this.config.mailPlayerAuthRequired === true,
         service_token_enabled: String(this.config.mailServiceToken || "").trim().length > 0,
+        mail_notification_contract_version: 1,
+        claim_new_requests_enabled: this.config.claimNewRequestsEnabled !== false,
+        claim_recovery_enabled: this.config.claimRecoveryEnabled !== false,
         build_version: this.config.serviceBuildVersion || "dev",
         zone: this.config.serviceZone || "local"
       }

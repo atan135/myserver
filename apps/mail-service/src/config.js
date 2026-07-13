@@ -20,6 +20,19 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseStrictBoolean(name, value, fallback) {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  throw new Error(`Invalid mail-service config: ${name} must be true, false, 1, or 0`);
+}
+
 function parseIntegerInRange(name, value, fallback, min, max) {
   if (value === undefined || value === "") {
     return fallback;
@@ -264,7 +277,8 @@ export function getConfig() {
     outboxCleanupIntervalMs: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_INTERVAL_MS", process.env.MAIL_OUTBOX_CLEANUP_INTERVAL_MS, 3_600_000, 10_000, 86_400_000),
     outboxCleanupBatchSize: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_BATCH_SIZE", process.env.MAIL_OUTBOX_CLEANUP_BATCH_SIZE, 500, 1, 10_000),
     claimLeaseMs: parseIntegerInRange("MAIL_CLAIM_LEASE_MS", process.env.MAIL_CLAIM_LEASE_MS, 30_000, 1000, 300_000),
-    claimRecoveryEnabled: parseBoolean(process.env.MAIL_CLAIM_RECOVERY_ENABLED, true),
+    claimNewRequestsEnabled: parseStrictBoolean("MAIL_CLAIM_NEW_REQUESTS_ENABLED", process.env.MAIL_CLAIM_NEW_REQUESTS_ENABLED, true),
+    claimRecoveryEnabled: parseStrictBoolean("MAIL_CLAIM_RECOVERY_ENABLED", process.env.MAIL_CLAIM_RECOVERY_ENABLED, true),
     claimRecoveryPollIntervalMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS", process.env.MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS, 5000, 100, 60_000),
     claimRecoveryBatchSize: parseIntegerInRange("MAIL_CLAIM_RECOVERY_BATCH_SIZE", process.env.MAIL_CLAIM_RECOVERY_BATCH_SIZE, 20, 1, 100),
     claimRecoveryLeaseMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_LEASE_MS", process.env.MAIL_CLAIM_RECOVERY_LEASE_MS, 60_000, 5000, 300_000),
@@ -321,6 +335,9 @@ export function getConfig() {
   }
   if (config.claimRecoveryBackoffMaxMs < config.claimRecoveryBackoffBaseMs) {
     throw new Error("Invalid mail-service config: MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS must be greater than or equal to MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS");
+  }
+  if (!config.claimRecoveryEnabled && config.claimNewRequestsEnabled) {
+    throw new Error("Invalid mail-service config: MAIL_CLAIM_RECOVERY_ENABLED=false requires MAIL_CLAIM_NEW_REQUESTS_ENABLED=false");
   }
   if (config.mailRetentionDays < config.claimWorkflowRetentionDays) {
     throw new Error("Invalid mail-service config: MAIL_RETENTION_DAYS must be greater than or equal to MAIL_CLAIM_WORKFLOW_RETENTION_DAYS");

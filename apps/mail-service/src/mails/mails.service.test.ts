@@ -4,6 +4,7 @@ import test from "node:test";
 import { DbMailStore } from "../db-store.js";
 import { computeGrantRequestFingerprint } from "../game-admin-client.js";
 import { configureLogger } from "../logger.js";
+import { HealthController } from "../health.controller.js";
 import { MailsController } from "./mails.controller.js";
 import { MailsService } from "./mails.service.js";
 
@@ -131,6 +132,77 @@ test("claim returns claimed compatibility fields without downstream grant", asyn
   assert.equal(result.claimed, false);
   assert.equal(result._http_status, 200);
   assert.equal(calls.length, 0);
+});
+
+test("disabled claim intake rejects a new workflow without reserving or granting", async () => {
+  const { service, calls, mailStore } = createService({
+    config: { claimNewRequestsEnabled: false }
+  });
+
+  await assert.rejects(
+    () => service.claim("mail-1", "player-1", "chr_1"),
+    (error: any) => {
+      assert.equal(error?.getStatus?.(), 503);
+      assert.equal(error?.getResponse?.()?.error, "MAIL_CLAIM_INTAKE_DISABLED");
+      return true;
+    }
+  );
+  assert.equal(await mailStore.getMailClaimWorkflow("mail-1"), null);
+  assert.equal((await mailStore.getMailById("mail-1")).status, "unread");
+  assert.equal(calls.length, 0);
+});
+
+test("disabled claim intake exposes existing workflow state without reacquiring its lease", async () => {
+  const { service, calls, mailStore } = createService({
+    config: { claimNewRequestsEnabled: false }
+  });
+  const reservation = await reserveWorkflow(mailStore);
+  await mailStore.recordMailClaimWorkflowFailure("mail-1", reservation.workflow.lease_token, {
+    status: "retryable_failure",
+    traceId: "1".repeat(32),
+    errorCode: "MAIL_CLAIM_ROUTE_UNAVAILABLE",
+    errorCategory: "ROUTE_UNAVAILABLE",
+    resultState: "not_applied",
+    retryable: true,
+    message: "route unavailable"
+  });
+  const before = await mailStore.getMailClaimWorkflow("mail-1");
+
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+  const after = await mailStore.getMailClaimWorkflow("mail-1");
+
+  assert.equal(result.claim_status, "retryable_failure");
+  assert.equal(result._http_status, 503);
+  assert.equal(after.attempts, before.attempts);
+  assert.equal(after.lease_token, null);
+  assert.equal(calls.length, 0);
+});
+
+test("disabled claim intake still returns an already claimed mail", async () => {
+  const { service, calls } = createService({
+    mail: createMail({ status: "claimed", claimed_at: new Date("2026-06-01T00:00:00.000Z") }),
+    config: { claimNewRequestsEnabled: false }
+  });
+
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "claimed");
+  assert.equal(result.already_claimed, true);
+  assert.equal(calls.length, 0);
+});
+
+test("health response exposes claim rollout switches without backlog details", () => {
+  const response = new HealthController({
+    appName: "mail-service",
+    env: "production",
+    dbEnabled: true,
+    claimNewRequestsEnabled: false,
+    claimRecoveryEnabled: true
+  }).healthz();
+
+  assert.equal(response.mail_claim_new_requests_enabled, false);
+  assert.equal(response.mail_claim_recovery_enabled, true);
+  assert.equal(Object.hasOwn(response, "backlog"), false);
 });
 
 test("active claim lease returns processing instead of issuing a concurrent grant", async () => {

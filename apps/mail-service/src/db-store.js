@@ -610,6 +610,68 @@ export class DbMailStore {
     return this.parseClaimWorkflowRow(rows[0]);
   }
 
+  async getMailClaimWorkflowBacklogSummary() {
+    const unfinishedStatuses = [
+      "processing",
+      "retryable_failure",
+      "permanent_failure",
+      "reconciliation_pending",
+      "manual_review"
+    ];
+    if (!this.pool) {
+      const now = Date.now();
+      const workflows = [...this.memoryClaimWorkflows.values()]
+        .filter((workflow) => unfinishedStatuses.includes(workflow.status));
+      const byStatus = Object.fromEntries(unfinishedStatuses.map((status) => [status, 0]));
+      let activeClaimLeases = 0;
+      let activeRecoveryLeases = 0;
+      for (const workflow of workflows) {
+        byStatus[workflow.status] += 1;
+        if (workflow.lease_token && new Date(workflow.lease_expires_at).getTime() > now) {
+          activeClaimLeases += 1;
+        }
+        if (workflow.recovery_lease_token && new Date(workflow.recovery_lease_expires_at).getTime() > now) {
+          activeRecoveryLeases += 1;
+        }
+      }
+      return {
+        unfinished: workflows.length,
+        activeClaimLeases,
+        activeRecoveryLeases,
+        byStatus
+      };
+    }
+
+    const { rows } = await this.pool.query(
+      `SELECT status,
+              COUNT(*)::bigint AS count,
+              COUNT(*) FILTER (
+                WHERE lease_token IS NOT NULL AND lease_expires_at > current_timestamp
+              )::bigint AS active_claim_leases,
+              COUNT(*) FILTER (
+                WHERE recovery_lease_token IS NOT NULL
+                  AND recovery_lease_expires_at > current_timestamp
+              )::bigint AS active_recovery_leases
+         FROM mail_claim_workflows
+        WHERE status <> 'claimed'
+        GROUP BY status`
+    );
+    const byStatus = Object.fromEntries(unfinishedStatuses.map((status) => [status, 0]));
+    let unfinished = 0;
+    let activeClaimLeases = 0;
+    let activeRecoveryLeases = 0;
+    for (const row of rows) {
+      const count = Number(row.count || 0);
+      if (Object.hasOwn(byStatus, row.status)) {
+        byStatus[row.status] = count;
+      }
+      unfinished += count;
+      activeClaimLeases += Number(row.active_claim_leases || 0);
+      activeRecoveryLeases += Number(row.active_recovery_leases || 0);
+    }
+    return { unfinished, activeClaimLeases, activeRecoveryLeases, byStatus };
+  }
+
   async reserveMailClaimWorkflow(input, options = {}) {
     const leaseMs = options.leaseMs || 30_000;
     const leaseOwner = options.leaseOwner || "mail-service";

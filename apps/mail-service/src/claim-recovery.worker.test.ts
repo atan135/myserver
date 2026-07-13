@@ -88,6 +88,80 @@ function succeededQuery() {
   };
 }
 
+test("recovery can be disabled only when no unfinished workflow exists", async () => {
+  const store = new DbMailStore(null);
+  const worker = new ClaimRecoveryWorker(store, {}, workerConfig({
+    claimNewRequestsEnabled: false,
+    claimRecoveryEnabled: false
+  }), null);
+
+  await worker.onModuleInit();
+  assert.deepEqual(await store.getMailClaimWorkflowBacklogSummary(), {
+    unfinished: 0,
+    activeClaimLeases: 0,
+    activeRecoveryLeases: 0,
+    byStatus: {
+      processing: 0,
+      retryable_failure: 0,
+      permanent_failure: 0,
+      reconciliation_pending: 0,
+      manual_review: 0
+    }
+  });
+});
+
+test("disabled recovery rejects startup while a persisted workflow is unfinished", async () => {
+  const store = new DbMailStore(null);
+  await createWorkflow(store, "processing");
+  const worker = new ClaimRecoveryWorker(store, {}, workerConfig({
+    claimNewRequestsEnabled: false,
+    claimRecoveryEnabled: false
+  }), null);
+
+  await assert.rejects(
+    () => worker.onModuleInit(),
+    (error: any) => {
+      assert.equal(error.code, "MAIL_CLAIM_RECOVERY_DISABLE_BLOCKED");
+      assert.equal(error.backlog.unfinished, 1);
+      assert.equal(error.backlog.byStatus.processing, 1);
+      return true;
+    }
+  );
+});
+
+test("disabled recovery uses the PostgreSQL backlog summary and blocks active leases", async () => {
+  let queryText = "";
+  const store = new DbMailStore({
+    async query(sql: string) {
+      queryText = sql;
+      return {
+        rows: [{
+          status: "reconciliation_pending",
+          count: "2",
+          active_claim_leases: "0",
+          active_recovery_leases: "1"
+        }]
+      };
+    }
+  });
+  const worker = new ClaimRecoveryWorker(store, {}, workerConfig({
+    claimNewRequestsEnabled: false,
+    claimRecoveryEnabled: false
+  }), null);
+
+  await assert.rejects(
+    () => worker.onModuleInit(),
+    (error: any) => {
+      assert.equal(error.code, "MAIL_CLAIM_RECOVERY_DISABLE_BLOCKED");
+      assert.equal(error.backlog.unfinished, 2);
+      assert.equal(error.backlog.activeRecoveryLeases, 1);
+      return true;
+    }
+  );
+  assert.match(queryText, /WHERE status <> 'claimed'/);
+  assert.match(queryText, /GROUP BY status/);
+});
+
 test("startup scan recovers an expired processing workflow after querying", async () => {
   const store = new DbMailStore(null);
   await createWorkflow(store, "processing");
