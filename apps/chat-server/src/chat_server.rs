@@ -672,14 +672,16 @@ where
     };
 
     // 注销聊天会话
-    chat_service::unregister_session(&chat_sessions, &player_id).await;
-    if let Err(e) = online_route::clear_online_route(
-        &config.redis_url,
-        &config.redis_key_prefix,
-        &player_id,
-        &config.service_instance_id,
-    )
-    .await
+    let removed_current_session =
+        chat_service::unregister_session(&chat_sessions, &player_id, &tx).await;
+    if removed_current_session
+        && let Err(e) = online_route::clear_online_route(
+            &config.redis_url,
+            &config.redis_key_prefix,
+            &player_id,
+            &config.service_instance_id,
+        )
+        .await
     {
         warn!(
             player_id = %player_id,

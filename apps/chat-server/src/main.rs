@@ -40,6 +40,11 @@ struct Config {
     global_id_origin_id: u64,
     global_id_worker_id: Option<u64>,
     nats_url: String,
+    mail_notify_max_payload_bytes: usize,
+    mail_notify_dedup_capacity: usize,
+    mail_notify_dedup_ttl_secs: u64,
+    mail_notify_reconnect_base_ms: u64,
+    mail_notify_reconnect_max_ms: u64,
     registry_enabled: bool,
     discovery_required: bool,
     registry_url: String,
@@ -94,6 +99,26 @@ impl Config {
             global_id_worker_id: parse_optional_u64_env("GLOBAL_ID_WORKER_ID"),
             nats_url: std::env::var("NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string()),
+            mail_notify_max_payload_bytes: parse_positive_usize_env(
+                "CHAT_MAIL_NOTIFY_MAX_PAYLOAD_BYTES",
+                mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
+            ),
+            mail_notify_dedup_capacity: parse_positive_usize_env(
+                "CHAT_MAIL_NOTIFY_DEDUP_CAPACITY",
+                mail_subscriber::DEFAULT_DEDUP_CAPACITY,
+            ),
+            mail_notify_dedup_ttl_secs: parse_positive_u64_env(
+                "CHAT_MAIL_NOTIFY_DEDUP_TTL_SECS",
+                mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
+            ),
+            mail_notify_reconnect_base_ms: parse_positive_u64_env(
+                "CHAT_MAIL_NOTIFY_RECONNECT_BASE_MS",
+                mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
+            ),
+            mail_notify_reconnect_max_ms: parse_positive_u64_env(
+                "CHAT_MAIL_NOTIFY_RECONNECT_MAX_MS",
+                mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
+            ),
             registry_enabled: std::env::var("REGISTRY_ENABLED")
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
@@ -273,6 +298,22 @@ fn parse_u64_env(name: &str, default_value: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_value)
+}
+
+fn parse_positive_u64_env(name: &str, default_value: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_value)
+}
+
+fn parse_positive_usize_env(name: &str, default_value: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(default_value)
 }
 
@@ -546,11 +587,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sessions_for_mail = chat_sessions.clone();
     let nats_url_for_mail = config.nats_url.clone();
     let instance_id_for_mail = config.service_instance_id.clone();
-    tokio::spawn(async move {
+    let mail_subscriber_config = mail_subscriber::SubscriberConfig {
+        max_payload_bytes: config.mail_notify_max_payload_bytes,
+        dedup_capacity: config.mail_notify_dedup_capacity,
+        dedup_ttl: std::time::Duration::from_secs(config.mail_notify_dedup_ttl_secs),
+        reconnect_base_delay: std::time::Duration::from_millis(
+            config.mail_notify_reconnect_base_ms,
+        ),
+        reconnect_max_delay: std::time::Duration::from_millis(
+            config
+                .mail_notify_reconnect_max_ms
+                .max(config.mail_notify_reconnect_base_ms),
+        ),
+    };
+    let (mail_shutdown_tx, mail_shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut mail_subscriber_handle = tokio::spawn(async move {
         if let Err(e) = mail_subscriber::subscribe_mail_notifications(
             nats_url_for_mail,
             instance_id_for_mail,
             sessions_for_mail,
+            mail_subscriber_config,
+            mail_shutdown_rx,
         )
         .await
         {
@@ -561,6 +618,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("mail notification subscriber started");
 
     let result = chat_server::run(server_config, chat_store.clone(), chat_sessions).await;
+
+    let _ = mail_shutdown_tx.send(true);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        &mut mail_subscriber_handle,
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "mail subscriber task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("mail subscriber did not stop in time; aborting task");
+            mail_subscriber_handle.abort();
+            let _ = mail_subscriber_handle.await;
+        }
+    }
 
     lease_renew_task.abort();
     let _ = lease_renew_task.await;
@@ -911,6 +986,11 @@ mod tests {
             global_id_origin_id: 1,
             global_id_worker_id: Some(4),
             nats_url: "nats://127.0.0.1:4222".to_string(),
+            mail_notify_max_payload_bytes: mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
+            mail_notify_dedup_capacity: mail_subscriber::DEFAULT_DEDUP_CAPACITY,
+            mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
+            mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
+            mail_notify_reconnect_max_ms: mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
             registry_enabled: true,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),
@@ -972,6 +1052,11 @@ mod tests {
             global_id_origin_id: 1,
             global_id_worker_id: Some(4),
             nats_url: "nats://127.0.0.1:4222".to_string(),
+            mail_notify_max_payload_bytes: mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
+            mail_notify_dedup_capacity: mail_subscriber::DEFAULT_DEDUP_CAPACITY,
+            mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
+            mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
+            mail_notify_reconnect_max_ms: mail_subscriber::DEFAULT_RECONNECT_MAX_MS,
             registry_enabled: true,
             discovery_required: false,
             registry_url: "redis://127.0.0.1:6379".to_string(),

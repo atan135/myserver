@@ -704,13 +704,26 @@ pub async fn register_session(
     METRICS.set_online_players(online_players);
 }
 
-pub async fn unregister_session(sessions: &ChatSessionMap, player_id: &str) {
-    let online_players = {
+pub async fn unregister_session(
+    sessions: &ChatSessionMap,
+    player_id: &str,
+    sender: &ChatOutboundSender,
+) -> bool {
+    let (online_players, removed) = {
         let mut guard = sessions.write().await;
-        guard.remove(player_id);
-        guard.len() as u64
+        let removed = if guard
+            .get(player_id)
+            .is_some_and(|current| current.same_channel(sender))
+        {
+            guard.remove(player_id);
+            true
+        } else {
+            false
+        };
+        (guard.len() as u64, removed)
     };
     METRICS.set_online_players(online_players);
+    removed
 }
 
 // ============================================================
@@ -759,5 +772,27 @@ mod tests {
 
         assert!(queue_message(&tx, MessageType::ErrorRes as u16, 1, &message).is_ok());
         assert!(queue_message(&tx, MessageType::ErrorRes as u16, 2, &message).is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_session_cannot_unregister_the_current_session() {
+        let sessions = new_chat_session_map();
+        let (old_sender, _old_receiver) = mpsc::channel(1);
+        let (current_sender, _current_receiver) = mpsc::channel(1);
+
+        register_session(&sessions, "player_001".to_string(), old_sender.clone()).await;
+        register_session(&sessions, "player_001".to_string(), current_sender.clone()).await;
+        assert!(!unregister_session(&sessions, "player_001", &old_sender).await);
+
+        assert!(
+            sessions
+                .read()
+                .await
+                .get("player_001")
+                .is_some_and(|sender| sender.same_channel(&current_sender))
+        );
+
+        assert!(unregister_session(&sessions, "player_001", &current_sender).await);
+        assert!(!sessions.read().await.contains_key("player_001"));
     }
 }

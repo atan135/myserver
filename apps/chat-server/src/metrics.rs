@@ -3,9 +3,9 @@
 //! 监控指标收集与 NATS 上报
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
@@ -79,6 +79,20 @@ pub struct MetricsCollector {
     latency_count: AtomicU64,
     /// 在线玩家数
     online_players: AtomicU64,
+    /// 收到的邮件通知数
+    mail_notification_received: AtomicU64,
+    /// 邮件通知解析或契约校验失败数
+    mail_notification_parse_failed: AtomicU64,
+    /// 因未知版本拒绝的邮件通知数
+    mail_notification_version_rejected: AtomicU64,
+    /// 按 event_id 命中的邮件通知去重数
+    mail_notification_deduplicated: AtomicU64,
+    /// 成功进入当前在线 session 队列的邮件通知数
+    mail_notification_pushed: AtomicU64,
+    /// 玩家离线而跳过的邮件通知数
+    mail_notification_offline_skipped: AtomicU64,
+    /// session 队列已满或关闭导致的邮件通知失败数
+    mail_notification_queue_failed: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -91,6 +105,13 @@ impl MetricsCollector {
             latency_sum: AtomicU64::new(0),
             latency_count: AtomicU64::new(0),
             online_players: AtomicU64::new(0),
+            mail_notification_received: AtomicU64::new(0),
+            mail_notification_parse_failed: AtomicU64::new(0),
+            mail_notification_version_rejected: AtomicU64::new(0),
+            mail_notification_deduplicated: AtomicU64::new(0),
+            mail_notification_pushed: AtomicU64::new(0),
+            mail_notification_offline_skipped: AtomicU64::new(0),
+            mail_notification_queue_failed: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -109,6 +130,41 @@ impl MetricsCollector {
     /// 设置在线玩家数
     pub fn set_online_players(&self, val: u64) {
         self.online_players.store(val, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_received(&self) {
+        self.mail_notification_received
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_parse_failed(&self) {
+        self.mail_notification_parse_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_version_rejected(&self) {
+        self.mail_notification_version_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_deduplicated(&self) {
+        self.mail_notification_deduplicated
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_pushed(&self) {
+        self.mail_notification_pushed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_offline_skipped(&self) {
+        self.mail_notification_offline_skipped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_queue_failed(&self) {
+        self.mail_notification_queue_failed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// 设置扩展字段
@@ -150,6 +206,25 @@ impl MetricsCollector {
                 let latency_sum = self.latency_sum.swap(0, Ordering::Relaxed);
                 let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
                 let online_players = self.online_players.load(Ordering::Relaxed);
+                let mail_notification_received =
+                    self.mail_notification_received.swap(0, Ordering::Relaxed);
+                let mail_notification_parse_failed = self
+                    .mail_notification_parse_failed
+                    .swap(0, Ordering::Relaxed);
+                let mail_notification_version_rejected = self
+                    .mail_notification_version_rejected
+                    .swap(0, Ordering::Relaxed);
+                let mail_notification_deduplicated = self
+                    .mail_notification_deduplicated
+                    .swap(0, Ordering::Relaxed);
+                let mail_notification_pushed =
+                    self.mail_notification_pushed.swap(0, Ordering::Relaxed);
+                let mail_notification_offline_skipped = self
+                    .mail_notification_offline_skipped
+                    .swap(0, Ordering::Relaxed);
+                let mail_notification_queue_failed = self
+                    .mail_notification_queue_failed
+                    .swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
@@ -169,6 +244,34 @@ impl MetricsCollector {
                     ("qps".to_string(), qps.to_string()),
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     ("online_players".to_string(), online_players.to_string()),
+                    (
+                        "mail_notification_received".to_string(),
+                        mail_notification_received.to_string(),
+                    ),
+                    (
+                        "mail_notification_parse_failed".to_string(),
+                        mail_notification_parse_failed.to_string(),
+                    ),
+                    (
+                        "mail_notification_version_rejected".to_string(),
+                        mail_notification_version_rejected.to_string(),
+                    ),
+                    (
+                        "mail_notification_deduplicated".to_string(),
+                        mail_notification_deduplicated.to_string(),
+                    ),
+                    (
+                        "mail_notification_pushed".to_string(),
+                        mail_notification_pushed.to_string(),
+                    ),
+                    (
+                        "mail_notification_offline_skipped".to_string(),
+                        mail_notification_offline_skipped.to_string(),
+                    ),
+                    (
+                        "mail_notification_queue_failed".to_string(),
+                        mail_notification_queue_failed.to_string(),
+                    ),
                 ];
 
                 for (k, v) in extra {
@@ -228,5 +331,51 @@ mod tests {
         assert_eq!(collector.latency_sum.load(Ordering::Relaxed), 100);
         assert_eq!(collector.latency_count.load(Ordering::Relaxed), 1);
         assert_eq!(collector.online_players.load(Ordering::Relaxed), 10);
+
+        collector.record_mail_notification_received();
+        collector.record_mail_notification_parse_failed();
+        collector.record_mail_notification_version_rejected();
+        collector.record_mail_notification_deduplicated();
+        collector.record_mail_notification_pushed();
+        collector.record_mail_notification_offline_skipped();
+        collector.record_mail_notification_queue_failed();
+        assert_eq!(
+            collector.mail_notification_received.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_parse_failed
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_version_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_deduplicated
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector.mail_notification_pushed.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_offline_skipped
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_queue_failed
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 }
