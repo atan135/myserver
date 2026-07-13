@@ -8,6 +8,15 @@ import { MailOperationsService } from "./mail-operations.service.js";
 import { MetricsCollector } from "../metrics.js";
 
 const fingerprint = `sha256:${"a".repeat(64)}`;
+const sensitiveFixture = {
+  ticket: "test-only-ticket-value.DO_NOT_LOG",
+  adminToken: "test-only-game-admin-token-DO_NOT_LOG",
+  content: "complete private mail body DO_NOT_LOG",
+  redisEndpoint: "redis://fixture-user:fixture-password@10.0.0.8:6379/0",
+  gameEndpoint: "tcp://10.0.0.9:7500",
+  bareEndpoint: "10.0.0.9:7500",
+  opaqueA: "V7mQ2xL9pR4cN8wK5hF3zJ6dS1"
+};
 
 function seedClaim(store: any, mailId: string, overrides: any = {}) {
   const id = overrides.id || store.memoryClaimWorkflowNextId++;
@@ -18,8 +27,8 @@ function seedClaim(store: any, mailId: string, overrides: any = {}) {
     to_player_id: overrides.player_id || "player-1",
     status: overrides.mail_status || "claiming",
     title: "must stay private",
-    content: "secret mail body",
-    attachments: [{ type: "item", id: 1001, count: 2 }],
+    content: overrides.content || "secret mail body",
+    attachments: overrides.mail_attachments || [{ type: "item", id: 1001, count: 2 }],
     created_at: now
   });
   store.memoryClaimWorkflows.set(mailId, {
@@ -28,7 +37,7 @@ function seedClaim(store: any, mailId: string, overrides: any = {}) {
     player_id: overrides.player_id || "player-1",
     claim_request_id: `mail_claim:${mailId}`,
     character_id: overrides.character_id || "chr_1",
-    attachments_snapshot: [{ itemId: 1001, count: 2, binded: false }],
+    attachments_snapshot: overrides.attachments_snapshot || [{ itemId: 1001, count: 2, binded: false }],
     attachments_fingerprint: fingerprint,
     status: overrides.status || "retryable_failure",
     attempts: 1,
@@ -39,14 +48,14 @@ function seedClaim(store: any, mailId: string, overrides: any = {}) {
     last_error_category: "ROUTE_UNAVAILABLE",
     last_result_state: "not_applied",
     last_error_retryable: true,
-    last_error_message: "bounded error",
+    last_error_message: overrides.last_error_message || "bounded error",
     recovery_attempts: overrides.recovery_attempts || 0,
     recovery_mode: null,
     recovery_lease_owner: null,
     recovery_lease_token: null,
     recovery_lease_expires_at: null,
     next_recovery_at: now,
-    last_query_instance_ids: [],
+    last_query_instance_ids: overrides.last_query_instance_ids || [],
     created_at: now,
     updated_at: now,
     completed_at: null,
@@ -154,6 +163,76 @@ test("ordinary retry schedules query-first recovery with frozen identity and ide
     () => service.scheduleClaim("mail-1", "retry_original", operation({ reason: "changed reason" })),
     (error: any) => error?.getResponse?.()?.error === "ADMIN_OPERATION_CONFLICT"
   );
+});
+
+test("claim query and operation audit exclude credentials, full mail content, unbounded attachments, and endpoints", async () => {
+  const store = new DbMailStore(null);
+  const privateAttachments = Array.from({ length: 200 }, (_, index) => ({
+    itemId: 1000 + index,
+    count: 1,
+    binded: false,
+    note: `private-attachment-${index}-DO_NOT_LOG`
+  }));
+  seedClaim(store, "mail-sensitive", {
+    content: sensitiveFixture.content,
+    mail_attachments: privateAttachments,
+    attachments_snapshot: privateAttachments,
+    last_error_message: JSON.stringify({
+      ticket: sensitiveFixture.ticket,
+      GAME_ADMIN_TOKEN: sensitiveFixture.adminToken,
+      redisEndpoint: sensitiveFixture.redisEndpoint
+    }),
+    last_query_instance_ids: [
+      "game-safe-instance",
+      sensitiveFixture.redisEndpoint,
+      sensitiveFixture.bareEndpoint,
+      sensitiveFixture.opaqueA
+    ]
+  });
+  const service = createService(store, async (requestId: string) => ({
+    queryStatus: "succeeded",
+    requestId,
+    requestFingerprint: fingerprint,
+    resultState: "applied",
+    resultSummary: {
+      characterId: "chr_1",
+      source: "mail-claim",
+      items: privateAttachments
+    },
+    instanceIds: [
+      "game-safe-instance",
+      sensitiveFixture.gameEndpoint,
+      sensitiveFixture.bareEndpoint,
+      sensitiveFixture.opaqueA
+    ]
+  }));
+
+  const queried = await service.queryClaims({ mail_id: "mail-sensitive" });
+  await service.scheduleClaim(
+    "mail-sensitive",
+    "retry_original",
+    operation({ operation_request_id: "op_sensitive_1" })
+  );
+  const output = JSON.stringify({ queried, audit: store.memoryAdminAudit });
+
+  assert.deepEqual(queried.items[0].last_query.instance_ids, ["game-safe-instance"]);
+  assert.deepEqual(queried.items[0].game_result.instance_ids, ["game-safe-instance"]);
+  assert.equal(queried.items[0].game_result.result_summary.item_count, 200);
+  assert.ok(Buffer.byteLength(output, "utf8") < 16_384);
+  for (const forbidden of [
+    sensitiveFixture.ticket,
+    sensitiveFixture.adminToken,
+    sensitiveFixture.content,
+    sensitiveFixture.redisEndpoint,
+    sensitiveFixture.gameEndpoint,
+    sensitiveFixture.bareEndpoint,
+    sensitiveFixture.opaqueA,
+    "private-attachment-199-DO_NOT_LOG",
+    "attachments_snapshot",
+    "last_error_message"
+  ]) {
+    assert.doesNotMatch(output, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
 
 test("hard-deleted mail keeps its frozen workflow queryable and recoverable", async () => {

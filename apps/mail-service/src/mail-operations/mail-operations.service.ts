@@ -8,6 +8,7 @@ const CLAIM_STATUSES = new Set([
   "reconciliation_pending", "manual_review", "claimed"
 ]);
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9:_-]+$/;
+const GAME_INSTANCE_ID_PATTERN = /^(?:game(?:-server)?-[a-z0-9][a-z0-9._-]{0,115}|local-fallback)$/;
 
 function boundedIdentifier(value: any, name: string, maxBytes = 128) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -49,15 +50,25 @@ function safeGameResultSummary(summary: any) {
   };
 }
 
+function safeInstanceIds(values: any) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .filter((value) =>
+      typeof value === "string" &&
+      Buffer.byteLength(value, "utf8") > 0 &&
+      Buffer.byteLength(value, "utf8") <= 128 &&
+      GAME_INSTANCE_ID_PATTERN.test(value)
+    )
+    .slice(0, 32);
+}
+
 function safeQueryEvidence(workflow: any) {
   return {
     status: workflow.last_query_status || null,
     fingerprint: workflow.last_query_fingerprint || null,
     error_code: workflow.last_query_error_code || null,
     result_state: workflow.last_query_result_state || null,
-    instance_ids: Array.isArray(workflow.last_query_instance_ids)
-      ? workflow.last_query_instance_ids.slice(0, 32)
-      : []
+    instance_ids: safeInstanceIds(workflow.last_query_instance_ids)
   };
 }
 
@@ -138,7 +149,7 @@ export class MailOperationsService {
           fingerprint: gameResult?.requestFingerprint || null,
           result_state: gameResult?.resultState || "unknown",
           error_code: gameResult?.errorCode || null,
-          instance_ids: Array.isArray(gameResult?.instanceIds) ? gameResult.instanceIds.slice(0, 32) : [],
+          instance_ids: safeInstanceIds(gameResult?.instanceIds),
           result_summary: gameResult?.queryStatus === "succeeded"
             ? safeGameResultSummary(gameResult.resultSummary)
             : null
