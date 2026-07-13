@@ -189,3 +189,38 @@ export function validateServiceToken(headers, config) {
 
   return true;
 }
+
+function validateDedicatedToken(headers, expectedValue, headerName, errorPrefix) {
+  const expectedToken = String(expectedValue || "").trim();
+  const authorizationToken = extractBearerToken(headers);
+  const providedToken = headers?.[headerName] || headers?.[headerName.toLowerCase()] || authorizationToken;
+  if (!expectedToken) {
+    throw createAuthError(`${errorPrefix}_NOT_CONFIGURED`, `${errorPrefix.toLowerCase()} is not configured`, 503);
+  }
+  if (!providedToken) {
+    throw createAuthError(`${errorPrefix}_REQUIRED`, `${headerName} is required`);
+  }
+  const expectedBuffer = Buffer.from(expectedToken);
+  const providedBuffer = Buffer.from(String(providedToken));
+  if (expectedBuffer.length !== providedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, providedBuffer)) {
+    throw createAuthError(`${errorPrefix}_INVALID`, `${headerName} is invalid`, 403);
+  }
+}
+
+export function validateMailOperationsToken(headers, config) {
+  validateDedicatedToken(
+    headers,
+    config?.mailOperationsToken,
+    "x-mail-operations-token",
+    "MAIL_OPERATIONS_TOKEN"
+  );
+}
+
+export function validateMailHighRiskToken(headers, config) {
+  validateDedicatedToken(
+    headers,
+    config?.mailHighRiskToken,
+    "x-mail-high-risk-token",
+    "MAIL_HIGH_RISK_TOKEN"
+  );
+}

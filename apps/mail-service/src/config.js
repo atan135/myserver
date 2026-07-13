@@ -86,6 +86,8 @@ const DEFAULT_MAIL_SERVICE_TOKENS = new Set([
   "default",
   "password"
 ]);
+const DEFAULT_MAIL_OPERATIONS_TOKENS = new Set(["dev-only-change-this-mail-operations-token"]);
+const DEFAULT_MAIL_HIGH_RISK_TOKENS = new Set(["dev-only-change-this-mail-high-risk-token"]);
 const DISALLOW_LEGACY_DIRECT_CONFIG_ENV_NAME = "DISALLOW_LEGACY_DIRECT_CONFIG";
 const LEGACY_DIRECT_CONFIG_ENV_NAMES = [
   "GAME_SERVER_ADMIN_HOST",
@@ -154,6 +156,8 @@ function validateProductionConfig(config) {
   const errors = [];
   const ticketSecret = String(config.ticketSecret || "").trim();
   const mailServiceToken = String(config.mailServiceToken || "").trim();
+  const mailOperationsToken = String(config.mailOperationsToken || "").trim();
+  const mailHighRiskToken = String(config.mailHighRiskToken || "").trim();
 
   if (!config.mailPlayerAuthRequired) {
     errors.push("MAIL_PLAYER_AUTH_REQUIRED must be true in production");
@@ -169,6 +173,18 @@ function validateProductionConfig(config) {
     isWeakSecret(mailServiceToken)
   ) {
     errors.push("MAIL_SERVICE_TOKEN must be set to a non-default value in production");
+  }
+  if (!mailOperationsToken || DEFAULT_MAIL_OPERATIONS_TOKENS.has(mailOperationsToken) || isWeakSecret(mailOperationsToken)) {
+    errors.push("MAIL_OPERATIONS_TOKEN must be a non-default secret with at least 16 characters");
+  }
+  if (!mailHighRiskToken || DEFAULT_MAIL_HIGH_RISK_TOKENS.has(mailHighRiskToken) || isWeakSecret(mailHighRiskToken)) {
+    errors.push("MAIL_HIGH_RISK_TOKEN must be a non-default secret with at least 16 characters");
+  }
+  if (mailOperationsToken && [mailServiceToken, config.gameAdminToken].includes(mailOperationsToken)) {
+    errors.push("MAIL_OPERATIONS_TOKEN must not reuse MAIL_SERVICE_TOKEN or GAME_ADMIN_TOKEN");
+  }
+  if (mailHighRiskToken && [mailServiceToken, mailOperationsToken, config.gameAdminToken].includes(mailHighRiskToken)) {
+    errors.push("MAIL_HIGH_RISK_TOKEN must be independent from service and downstream tokens");
   }
 
   if (errors.length > 0) {
@@ -191,7 +207,6 @@ function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
   if (!strictDiscovery) {
     return [];
   }
-
   return collectConfiguredLegacyDirectConfigNames(envNames)
     .map((name) => ({
       name,
@@ -283,6 +298,15 @@ export function getConfig() {
     ticketSecret: process.env.TICKET_SECRET || "dev-only-change-this-ticket-secret",
     mailPlayerAuthRequired: parseBoolean(process.env.MAIL_PLAYER_AUTH_REQUIRED, true),
     mailServiceToken: process.env.MAIL_SERVICE_TOKEN || "dev-only-change-this-mail-service-token",
+    mailOperationsToken: process.env.MAIL_OPERATIONS_TOKEN || "dev-only-change-this-mail-operations-token",
+    mailHighRiskToken: process.env.MAIL_HIGH_RISK_TOKEN || "dev-only-change-this-mail-high-risk-token",
+    mailRetentionDays: parseIntegerInRange("MAIL_RETENTION_DAYS", process.env.MAIL_RETENTION_DAYS, 400, 30, 3650),
+    claimWorkflowRetentionDays: parseIntegerInRange("MAIL_CLAIM_WORKFLOW_RETENTION_DAYS", process.env.MAIL_CLAIM_WORKFLOW_RETENTION_DAYS, 400, 30, 3650),
+    gameGrantRetentionDays: parseIntegerInRange("MAIL_GAME_GRANT_RETENTION_DAYS", process.env.MAIL_GAME_GRANT_RETENTION_DAYS, 400, 30, 3650),
+    claimAlertWindowMinutes: parseIntegerInRange("MAIL_CLAIM_ALERT_WINDOW_MINUTES", process.env.MAIL_CLAIM_ALERT_WINDOW_MINUTES, 10, 1, 1440),
+    claimAlertFailureRatePercent: parseIntegerInRange("MAIL_CLAIM_ALERT_FAILURE_RATE_PERCENT", process.env.MAIL_CLAIM_ALERT_FAILURE_RATE_PERCENT, 20, 1, 100),
+    claimAlertLongRunningMinutes: parseIntegerInRange("MAIL_CLAIM_ALERT_LONG_RUNNING_MINUTES", process.env.MAIL_CLAIM_ALERT_LONG_RUNNING_MINUTES, 15, 1, 10080),
+    claimAlertManualReviewCount: parseIntegerInRange("MAIL_CLAIM_ALERT_MANUAL_REVIEW_COUNT", process.env.MAIL_CLAIM_ALERT_MANUAL_REVIEW_COUNT, 1, 1, 100000),
     serviceName: process.env.SERVICE_NAME || "mail-service",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "mail-001",
@@ -297,6 +321,12 @@ export function getConfig() {
   }
   if (config.claimRecoveryBackoffMaxMs < config.claimRecoveryBackoffBaseMs) {
     throw new Error("Invalid mail-service config: MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS must be greater than or equal to MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS");
+  }
+  if (config.mailRetentionDays < config.claimWorkflowRetentionDays) {
+    throw new Error("Invalid mail-service config: MAIL_RETENTION_DAYS must be greater than or equal to MAIL_CLAIM_WORKFLOW_RETENTION_DAYS");
+  }
+  if (config.gameGrantRetentionDays < config.claimWorkflowRetentionDays) {
+    throw new Error("Invalid mail-service config: MAIL_GAME_GRANT_RETENTION_DAYS must be greater than or equal to MAIL_CLAIM_WORKFLOW_RETENTION_DAYS");
   }
 
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);

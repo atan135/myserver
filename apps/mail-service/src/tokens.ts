@@ -9,3 +9,4 @@ export const MAIL_GAME_ADMIN_CLIENT = Symbol("MAIL_GAME_ADMIN_CLIENT");
 export const MAIL_REGISTRY = Symbol("MAIL_REGISTRY");
 export const MAIL_METRICS = Symbol("MAIL_METRICS");
 export const MAIL_PLAYER_AUTH = Symbol("MAIL_PLAYER_AUTH");
+export const MAIL_OPERATIONS_SERVICE = Symbol("MAIL_OPERATIONS_SERVICE");

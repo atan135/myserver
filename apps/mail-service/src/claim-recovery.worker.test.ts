@@ -252,6 +252,64 @@ test("not_seen retries the original frozen request", async () => {
   assert.equal((await store.getMailClaimWorkflow("mail-1")).attempts, 2);
 });
 
+test("recovery grant failures record one matching attempt and failure classification", async () => {
+  const scenarios = [
+    {
+      name: "unknown",
+      error: Object.assign(new Error("read timeout"), {
+        code: "GAME_ADMIN_READ_TIMEOUT",
+        errorCategory: "RESULT_UNKNOWN",
+        resultState: "unknown",
+        requestWritten: true,
+        retryable: true
+      }),
+      expected: { attempt: 1, route: 0, grant: 1, unknown: 1, retryable: 0, permanent: 0 }
+    },
+    {
+      name: "route",
+      error: Object.assign(new Error("route unavailable"), {
+        code: "MAIL_CLAIM_ROUTE_UNAVAILABLE",
+        errorCategory: "ROUTE_UNAVAILABLE",
+        resultState: "not_applied",
+        requestWritten: false,
+        retryable: true
+      }),
+      expected: { attempt: 1, route: 1, grant: 0, unknown: 0, retryable: 1, permanent: 0 }
+    },
+    {
+      name: "permanent",
+      error: Object.assign(new Error("item unavailable"), {
+        code: "ITEM_NOT_FOUND",
+        errorCategory: "PERMANENT_FAILURE",
+        resultState: "not_applied",
+        requestWritten: true,
+        retryable: false
+      }),
+      expected: { attempt: 1, route: 0, grant: 1, unknown: 0, retryable: 0, permanent: 1 }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const store = new DbMailStore(null);
+    await createWorkflow(store, "retryable_failure", `mail-${scenario.name}`);
+    const counts = { attempt: 0, route: 0, grant: 0, unknown: 0, retryable: 0, permanent: 0 };
+    const worker = new ClaimRecoveryWorker(store, {
+      async queryMailAttachmentGrant() { throw new Error("query must not run for retryable failure"); },
+      async grantMailAttachments() { throw scenario.error; }
+    }, workerConfig(), {
+      recordMailClaimAttempt() { counts.attempt += 1; },
+      recordMailClaimRouteUnavailable() { counts.route += 1; },
+      recordMailClaimGrantFailure() { counts.grant += 1; },
+      recordMailClaimResultUnknown() { counts.unknown += 1; },
+      recordMailClaimRetryableFailure() { counts.retryable += 1; },
+      recordMailClaimPermanentFailure() { counts.permanent += 1; }
+    });
+
+    await worker.processRecoveries();
+    assert.deepEqual(counts, scenario.expected, scenario.name);
+  }
+});
+
 test("query unavailable backs off without grant", async () => {
   const store = new DbMailStore(null);
   await createWorkflow(store);

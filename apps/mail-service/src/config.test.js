@@ -20,6 +20,15 @@ const CONFIG_ENV_NAMES = [
   "REDIS_KEY_PREFIX",
   "MAIL_PLAYER_AUTH_REQUIRED",
   "MAIL_SERVICE_TOKEN",
+  "MAIL_OPERATIONS_TOKEN",
+  "MAIL_HIGH_RISK_TOKEN",
+  "MAIL_RETENTION_DAYS",
+  "MAIL_CLAIM_WORKFLOW_RETENTION_DAYS",
+  "MAIL_GAME_GRANT_RETENTION_DAYS",
+  "MAIL_CLAIM_ALERT_WINDOW_MINUTES",
+  "MAIL_CLAIM_ALERT_FAILURE_RATE_PERCENT",
+  "MAIL_CLAIM_ALERT_LONG_RUNNING_MINUTES",
+  "MAIL_CLAIM_ALERT_MANUAL_REVIEW_COUNT",
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
   "SERVICE_ZONE",
@@ -447,8 +456,69 @@ test("mail-service production environment ignores DISCOVERY_REQUIRED=false overr
       DISCOVERY_REQUIRED: "false",
       REGISTRY_ENABLED: "false",
       TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
-      MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy"
+      MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
+      MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
+      MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy"
     }, (getConfig) => getConfig()),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
+  );
+});
+
+test("mail-service reads bounded operations retention and alert policy", async () => {
+  await withEnv({
+    MAIL_RETENTION_DAYS: "500",
+    MAIL_CLAIM_WORKFLOW_RETENTION_DAYS: "450",
+    MAIL_GAME_GRANT_RETENTION_DAYS: "600",
+    MAIL_CLAIM_ALERT_WINDOW_MINUTES: "20",
+    MAIL_CLAIM_ALERT_FAILURE_RATE_PERCENT: "25",
+    MAIL_CLAIM_ALERT_LONG_RUNNING_MINUTES: "30",
+    MAIL_CLAIM_ALERT_MANUAL_REVIEW_COUNT: "3"
+  }, (getConfig) => {
+    const config = getConfig();
+    assert.equal(config.mailRetentionDays, 500);
+    assert.equal(config.claimWorkflowRetentionDays, 450);
+    assert.equal(config.gameGrantRetentionDays, 600);
+    assert.equal(config.claimAlertWindowMinutes, 20);
+    assert.equal(config.claimAlertFailureRatePercent, 25);
+    assert.equal(config.claimAlertLongRunningMinutes, 30);
+    assert.equal(config.claimAlertManualReviewCount, 3);
+  });
+});
+
+test("mail-service production requires distinct operations and high-risk credentials", async () => {
+  const base = {
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
+    MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
+    MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
+    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy"
+  };
+  await withEnv(base, (getConfig) => assert.equal(getConfig().mailOperationsToken, base.MAIL_OPERATIONS_TOKEN));
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_HIGH_RISK_TOKEN: base.MAIL_OPERATIONS_TOKEN }, (getConfig) => getConfig()),
+    /MAIL_HIGH_RISK_TOKEN must be independent/
+  );
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_OPERATIONS_TOKEN: base.MAIL_SERVICE_TOKEN }, (getConfig) => getConfig()),
+    /MAIL_OPERATIONS_TOKEN must not reuse/
+  );
+});
+
+test("mail-service rejects retention windows that break claim reconciliation", async () => {
+  await assert.rejects(
+    () => withEnv({
+      MAIL_RETENTION_DAYS: "399",
+      MAIL_CLAIM_WORKFLOW_RETENTION_DAYS: "400"
+    }, (getConfig) => getConfig()),
+    /MAIL_RETENTION_DAYS must be greater than or equal/
+  );
+  await assert.rejects(
+    () => withEnv({
+      MAIL_CLAIM_WORKFLOW_RETENTION_DAYS: "400",
+      MAIL_GAME_GRANT_RETENTION_DAYS: "399"
+    }, (getConfig) => getConfig()),
+    /MAIL_GAME_GRANT_RETENTION_DAYS must be greater than or equal/
   );
 });

@@ -47,6 +47,43 @@ function isValidLeaseToken(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function createMailStoreError(code, message = code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function safeClaimSnapshot(workflow, mail) {
+  return {
+    mail_id: workflow?.mail_id || mail?.mail_id || null,
+    request_id: workflow?.claim_request_id || null,
+    player_id: workflow?.player_id || mail?.to_player_id || null,
+    character_id: workflow?.character_id || null,
+    mail_status: mail?.status || null,
+    workflow_status: workflow?.status || null,
+    attachments_fingerprint: workflow?.attachments_fingerprint || null,
+    attempts: Number(workflow?.attempts) || 0,
+    recovery_attempts: Number(workflow?.recovery_attempts) || 0,
+    last_error_code: workflow?.last_error_code || null,
+    last_result_state: workflow?.last_result_state || null,
+    last_query_status: workflow?.last_query_status || null,
+    updated_at: workflow?.updated_at || null
+  };
+}
+
+function safeOutboxSnapshot(row) {
+  return {
+    outbox_id: row?.id || null,
+    event_id: row?.event_id || null,
+    mail_id: row?.mail_id || null,
+    status: row?.status || null,
+    attempts: Number(row?.attempts) || 0,
+    max_attempts: Number(row?.max_attempts) || 0,
+    terminal_at: row?.terminal_at || null,
+    sent_at: row?.sent_at || null
+  };
+}
+
 async function rollbackQuietly(client) {
   try {
     await client.query("ROLLBACK");
@@ -68,6 +105,8 @@ export class DbMailStore {
     this.memoryClaimWorkflowNextId = 1;
     this.memoryOutbox = new Map();
     this.memoryOutboxNextId = 1;
+    this.memoryAdminOperations = new Map();
+    this.memoryAdminAudit = [];
   }
 
   async createMail(mail) {
@@ -1458,6 +1497,417 @@ export class DbMailStore {
       ]
     );
     return this.parseClaimWorkflowRow(rows[0]);
+  }
+
+  async queryMailClaimWorkflows(filters = {}, options = {}) {
+    const limit = Math.max(1, Math.min(50, Number(options.limit) || 20));
+    const beforeId = options.beforeId || null;
+    if (!this.pool) {
+      const rows = Array.from(this.memoryClaimWorkflows.values())
+        .filter((row) => !filters.mailId || row.mail_id === filters.mailId)
+        .filter((row) => !filters.requestId || row.claim_request_id === filters.requestId)
+        .filter((row) => !filters.playerId || row.player_id === filters.playerId)
+        .filter((row) => !filters.characterId || row.character_id === filters.characterId)
+        .filter((row) => !filters.status || row.status === filters.status)
+        .filter((row) => !beforeId || Number(row.id) < beforeId)
+        .sort((left, right) => Number(right.id) - Number(left.id))
+        .slice(0, limit + 1)
+        .map((row) => {
+          const workflow = this.parseClaimWorkflowRow(row);
+          const mail = this.memory.get(row.mail_id);
+          const outbox = Array.from(this.memoryOutbox.values()).find((entry) => entry.mail_id === row.mail_id);
+          return {
+            ...workflow,
+            mail_status: mail?.status || null,
+            outbox_event_id: outbox?.event_id || null,
+            outbox_status: outbox?.status || null,
+            outbox_attempts: outbox?.attempts || 0,
+            outbox_terminal_at: outbox?.terminal_at || null
+          };
+        });
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit);
+      return { items, nextBeforeId: hasMore ? Number(items[items.length - 1].id) : null };
+    }
+
+    const params = [];
+    const clauses = [];
+    const add = (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+    if (filters.mailId) clauses.push(`workflow.mail_id = ${add(filters.mailId)}`);
+    if (filters.requestId) clauses.push(`workflow.claim_request_id = ${add(filters.requestId)}`);
+    if (filters.playerId) clauses.push(`workflow.player_id = ${add(filters.playerId)}`);
+    if (filters.characterId) clauses.push(`workflow.character_id = ${add(filters.characterId)}`);
+    if (filters.status) clauses.push(`workflow.status = ${add(filters.status)}`);
+    if (beforeId) clauses.push(`workflow.id < ${add(beforeId)}`);
+    params.push(limit + 1);
+    const { rows } = await this.pool.query(
+      `SELECT workflow.*,
+              mail.status AS mail_status,
+              outbox.event_id AS outbox_event_id,
+              outbox.status AS outbox_status,
+              outbox.attempts AS outbox_attempts,
+              outbox.terminal_at AS outbox_terminal_at
+         FROM mail_claim_workflows workflow
+         LEFT JOIN mails mail ON mail.mail_id = workflow.mail_id
+         LEFT JOIN mail_notification_outbox outbox ON outbox.mail_id = workflow.mail_id
+        WHERE ${clauses.length > 0 ? clauses.join(" AND ") : "true"}
+        ORDER BY workflow.id DESC
+        LIMIT $${params.length}`,
+      params
+    );
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map((row) => ({
+      ...this.parseClaimWorkflowRow(row),
+      mail_status: row.mail_status,
+      outbox_event_id: row.outbox_event_id,
+      outbox_status: row.outbox_status,
+      outbox_attempts: Number(row.outbox_attempts) || 0,
+      outbox_terminal_at: row.outbox_terminal_at
+    }));
+    return { items, nextBeforeId: hasMore ? Number(items[items.length - 1].id) : null };
+  }
+
+  async getMailAdminOperationAudits(targetType, targetValue, limit = 5) {
+    const boundedLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+    if (!this.pool) {
+      return this.memoryAdminAudit
+        .filter((row) => row.target_type === targetType && row.target_value === targetValue)
+        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+        .slice(0, boundedLimit)
+        .map((row) => ({
+          operation_request_id: row.operation_request_id,
+          action: row.action,
+          actor: row.actor,
+          reason: row.reason,
+          high_risk: row.high_risk === true,
+          before_snapshot: parseJson(row.before_snapshot),
+          after_snapshot: parseJson(row.after_snapshot),
+          result: parseJson(row.result),
+          created_at: row.created_at
+        }));
+    }
+    const { rows } = await this.pool.query(
+      `SELECT operation_request_id, action, actor, reason, high_risk,
+              before_snapshot, after_snapshot, result, created_at
+         FROM mail_admin_operation_audit
+        WHERE target_type = $1 AND target_value = $2
+        ORDER BY id DESC
+        LIMIT $3`,
+      [targetType, targetValue, boundedLimit]
+    );
+    return rows.map((row) => ({ ...row }));
+  }
+
+  validateExistingAdminOperation(existing, operation, targetType, targetValue) {
+    if (
+      existing.action !== operation.action ||
+      existing.target_type !== targetType ||
+      existing.target_value !== targetValue ||
+      existing.actor !== operation.actor ||
+      existing.reason !== operation.reason ||
+      Boolean(existing.high_risk) !== Boolean(operation.highRisk)
+    ) {
+      throw createMailStoreError(
+        "ADMIN_OPERATION_CONFLICT",
+        "operation_request_id was already used for a different action context"
+      );
+    }
+    return { ...parseJson(existing.result), idempotent_replay: true };
+  }
+
+  async scheduleMailClaimAdminRecovery(operation) {
+    const targetType = "mail_claim";
+    const targetValue = operation.mailId;
+    if (!this.pool) {
+      const existing = this.memoryAdminOperations.get(operation.operationRequestId);
+      if (existing) return this.validateExistingAdminOperation(existing, operation, targetType, targetValue);
+      const workflow = this.memoryClaimWorkflows.get(operation.mailId);
+      const mail = this.memory.get(operation.mailId);
+      if (!workflow) throw createMailStoreError("MAIL_CLAIM_NOT_FOUND");
+      const now = new Date();
+      const activePlayerLease = workflow.status === "processing" &&
+        toDateOrNull(workflow.lease_expires_at)?.getTime() > now.getTime();
+      const activeRecoveryLease = toDateOrNull(workflow.recovery_lease_expires_at)?.getTime() > now.getTime();
+      const manualAction = operation.action === "manual_recover";
+      const ordinaryAllowed = new Set([
+        "processing", "retryable_failure", "permanent_failure", "reconciliation_pending"
+      ]).has(workflow.status);
+      if (
+        workflow.status === "claimed" || activePlayerLease || activeRecoveryLease ||
+        (manualAction && (!operation.highRisk || workflow.status !== "manual_review")) ||
+        (!manualAction && !ordinaryAllowed)
+      ) {
+        throw createMailStoreError("MAIL_CLAIM_OPERATION_NOT_ALLOWED", "claim state is not eligible for this operation");
+      }
+      const before = safeClaimSnapshot(workflow, mail);
+      workflow.status = "reconciliation_pending";
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.recovery_mode = null;
+      workflow.recovery_lease_owner = null;
+      workflow.recovery_lease_token = null;
+      workflow.recovery_lease_expires_at = null;
+      workflow.next_recovery_at = now;
+      workflow.updated_at = now;
+      if (manualAction) {
+        workflow.recovery_attempts = 0;
+        workflow.manual_review_at = null;
+      }
+      this.memoryClaimWorkflows.set(operation.mailId, workflow);
+      const after = safeClaimSnapshot(workflow, mail);
+      const result = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        mail_id: operation.mailId,
+        request_id: workflow.claim_request_id,
+        workflow_status: workflow.status,
+        scheduled: true,
+        idempotent_replay: false
+      };
+      const audit = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        target_type: targetType,
+        target_value: targetValue,
+        actor: operation.actor,
+        reason: operation.reason,
+        high_risk: operation.highRisk === true,
+        before_snapshot: before,
+        after_snapshot: after,
+        result,
+        created_at: now
+      };
+      this.memoryAdminOperations.set(operation.operationRequestId, audit);
+      this.memoryAdminAudit.push(audit);
+      return result;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [operation.operationRequestId]);
+      const prior = await client.query(
+        "SELECT * FROM mail_admin_operation_audit WHERE operation_request_id = $1",
+        [operation.operationRequestId]
+      );
+      if (prior.rows[0]) {
+        const result = this.validateExistingAdminOperation(prior.rows[0], operation, targetType, targetValue);
+        await client.query("COMMIT");
+        return result;
+      }
+      const selected = await client.query(
+        `SELECT workflow.*, mail.status AS mail_status
+           FROM mail_claim_workflows workflow
+           LEFT JOIN mails mail ON mail.mail_id = workflow.mail_id
+          WHERE workflow.mail_id = $1
+          FOR UPDATE OF workflow`,
+        [operation.mailId]
+      );
+      if (!selected.rows[0]) throw createMailStoreError("MAIL_CLAIM_NOT_FOUND");
+      const row = selected.rows[0];
+      const activePlayerLease = row.status === "processing" && row.lease_expires_at && new Date(row.lease_expires_at) > new Date();
+      const activeRecoveryLease = row.recovery_lease_expires_at && new Date(row.recovery_lease_expires_at) > new Date();
+      const manualAction = operation.action === "manual_recover";
+      const ordinaryAllowed = new Set([
+        "processing", "retryable_failure", "permanent_failure", "reconciliation_pending"
+      ]).has(row.status);
+      if (
+        row.status === "claimed" || activePlayerLease || activeRecoveryLease ||
+        (manualAction && (!operation.highRisk || row.status !== "manual_review")) ||
+        (!manualAction && !ordinaryAllowed)
+      ) {
+        throw createMailStoreError("MAIL_CLAIM_OPERATION_NOT_ALLOWED", "claim state is not eligible for this operation");
+      }
+      const before = safeClaimSnapshot(row, { status: row.mail_status });
+      const updated = await client.query(
+        `UPDATE mail_claim_workflows
+            SET status = 'reconciliation_pending',
+                lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                recovery_mode = NULL, recovery_lease_owner = NULL,
+                recovery_lease_token = NULL, recovery_lease_expires_at = NULL,
+                next_recovery_at = current_timestamp,
+                recovery_attempts = CASE WHEN $2 THEN 0 ELSE recovery_attempts END,
+                manual_review_at = CASE WHEN $2 THEN NULL ELSE manual_review_at END,
+                updated_at = current_timestamp
+          WHERE mail_id = $1
+          RETURNING *`,
+        [operation.mailId, manualAction]
+      );
+      const after = safeClaimSnapshot(updated.rows[0], { status: row.mail_status });
+      const result = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        mail_id: operation.mailId,
+        request_id: row.claim_request_id,
+        workflow_status: "reconciliation_pending",
+        scheduled: true,
+        idempotent_replay: false
+      };
+      await client.query(
+        `INSERT INTO mail_admin_operation_audit
+          (operation_request_id, action, target_type, target_value, actor, reason,
+           high_risk, before_snapshot, after_snapshot, result)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)`,
+        [operation.operationRequestId, operation.action, targetType, targetValue,
+          operation.actor, operation.reason, operation.highRisk === true,
+          JSON.stringify(before), JSON.stringify(after), JSON.stringify(result)]
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async replayTerminalMailNotification(operation) {
+    const targetType = "mail_notification_event";
+    const targetValue = operation.eventId;
+    if (!this.pool) {
+      const existing = this.memoryAdminOperations.get(operation.operationRequestId);
+      if (existing) return this.validateExistingAdminOperation(existing, operation, targetType, targetValue);
+      const row = Array.from(this.memoryOutbox.values()).find((entry) => entry.event_id === operation.eventId);
+      if (!row) throw createMailStoreError("OUTBOX_EVENT_NOT_FOUND");
+      if (row.status !== "terminal") throw createMailStoreError("OUTBOX_REPLAY_NOT_ALLOWED", "only terminal events can be replayed");
+      const before = safeOutboxSnapshot(row);
+      row.status = "pending";
+      row.attempts = 0;
+      row.next_attempt_at = new Date();
+      row.locked_until = null;
+      row.lease_owner = null;
+      row.lease_token = null;
+      row.last_error = null;
+      row.sent_at = null;
+      row.terminal_at = null;
+      const after = safeOutboxSnapshot(row);
+      const result = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        event_id: row.event_id,
+        mail_id: row.mail_id,
+        status: row.status,
+        scheduled: true,
+        idempotent_replay: false
+      };
+      const audit = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        target_type: targetType,
+        target_value: targetValue,
+        actor: operation.actor,
+        reason: operation.reason,
+        high_risk: false,
+        before_snapshot: before,
+        after_snapshot: after,
+        result,
+        created_at: new Date()
+      };
+      this.memoryAdminOperations.set(operation.operationRequestId, audit);
+      this.memoryAdminAudit.push(audit);
+      return result;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [operation.operationRequestId]);
+      const prior = await client.query(
+        "SELECT * FROM mail_admin_operation_audit WHERE operation_request_id = $1",
+        [operation.operationRequestId]
+      );
+      if (prior.rows[0]) {
+        const result = this.validateExistingAdminOperation(prior.rows[0], operation, targetType, targetValue);
+        await client.query("COMMIT");
+        return result;
+      }
+      const selected = await client.query(
+        "SELECT * FROM mail_notification_outbox WHERE event_id = $1 FOR UPDATE",
+        [operation.eventId]
+      );
+      const row = selected.rows[0];
+      if (!row) throw createMailStoreError("OUTBOX_EVENT_NOT_FOUND");
+      if (row.status !== "terminal") throw createMailStoreError("OUTBOX_REPLAY_NOT_ALLOWED", "only terminal events can be replayed");
+      const before = safeOutboxSnapshot(row);
+      const updated = await client.query(
+        `UPDATE mail_notification_outbox
+            SET status = 'pending', attempts = 0, next_attempt_at = current_timestamp,
+                locked_until = NULL, lease_owner = NULL, lease_token = NULL,
+                last_error = NULL, sent_at = NULL, terminal_at = NULL
+          WHERE id = $1
+          RETURNING *`,
+        [row.id]
+      );
+      const after = safeOutboxSnapshot(updated.rows[0]);
+      const result = {
+        operation_request_id: operation.operationRequestId,
+        action: operation.action,
+        event_id: row.event_id,
+        mail_id: row.mail_id,
+        status: "pending",
+        scheduled: true,
+        idempotent_replay: false
+      };
+      await client.query(
+        `INSERT INTO mail_admin_operation_audit
+          (operation_request_id, action, target_type, target_value, actor, reason,
+           high_risk, before_snapshot, after_snapshot, result)
+         VALUES ($1, $2, $3, $4, $5, $6, false, $7::jsonb, $8::jsonb, $9::jsonb)`,
+        [operation.operationRequestId, operation.action, targetType, targetValue,
+          operation.actor, operation.reason, JSON.stringify(before), JSON.stringify(after), JSON.stringify(result)]
+      );
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getMailClaimOperationalStats(options = {}) {
+    const now = toDateOrNull(options.now) || new Date();
+    const longRunningBefore = new Date(now.getTime() - (Number(options.longRunningMs) || 15 * 60_000));
+    if (!this.pool) {
+      const rows = Array.from(this.memoryClaimWorkflows.values());
+      return {
+        longRunning: rows.filter((row) =>
+          new Set([
+            "processing", "retryable_failure", "permanent_failure", "reconciliation_pending"
+          ]).has(row.status) &&
+          new Date(row.recovery_started_at || row.updated_at) <= longRunningBefore
+        ).length,
+        fingerprintConflicts: rows.filter((row) =>
+          row.last_error_code === "REQUEST_FINGERPRINT_CONFLICT" || row.last_query_status === "conflict"
+        ).length,
+        manualReview: rows.filter((row) => row.status === "manual_review").length
+      };
+    }
+    const { rows } = await this.pool.query(
+      `SELECT COUNT(*) FILTER (
+                WHERE status IN (
+                  'processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending'
+                )
+                  AND COALESCE(recovery_started_at, updated_at) <= $1
+              )::bigint AS long_running,
+              COUNT(*) FILTER (
+                WHERE last_error_code = 'REQUEST_FINGERPRINT_CONFLICT' OR last_query_status = 'conflict'
+              )::bigint AS fingerprint_conflicts,
+              COUNT(*) FILTER (WHERE status = 'manual_review')::bigint AS manual_review
+         FROM mail_claim_workflows`,
+      [longRunningBefore]
+    );
+    return {
+      longRunning: Number(rows[0]?.long_running) || 0,
+      fingerprintConflicts: Number(rows[0]?.fingerprint_conflicts) || 0,
+      manualReview: Number(rows[0]?.manual_review) || 0
+    };
   }
 
   claimWorkflowReservation(workflow, mail, flags = {}) {

@@ -429,7 +429,10 @@ test("mail-service production config rejects weak auth settings", async () => {
       APP_ENV: undefined,
       TICKET_SECRET: "dev-only-change-this-ticket-secret",
       MAIL_PLAYER_AUTH_REQUIRED: "false",
-      MAIL_SERVICE_TOKEN: "dev-only-change-this-mail-service-token"
+      MAIL_SERVICE_TOKEN: "dev-only-change-this-mail-service-token",
+      MAIL_OPERATIONS_TOKEN: "dev-only-change-this-mail-operations-token",
+      MAIL_HIGH_RISK_TOKEN: "dev-only-change-this-mail-high-risk-token",
+      GAME_ADMIN_TOKEN: "dev-only-change-this-game-admin-token"
     },
     async () => {
       const { getConfig } = await import(`../../apps/mail-service/src/config.js?v=${Date.now()}`);
@@ -440,6 +443,8 @@ test("mail-service production config rejects weak auth settings", async () => {
           assert.match(error.message, /MAIL_PLAYER_AUTH_REQUIRED/);
           assert.match(error.message, /TICKET_SECRET/);
           assert.match(error.message, /MAIL_SERVICE_TOKEN/);
+          assert.match(error.message, /MAIL_OPERATIONS_TOKEN/);
+          assert.match(error.message, /MAIL_HIGH_RISK_TOKEN/);
           return true;
         }
       );
@@ -455,6 +460,9 @@ test("mail-service production config accepts strong auth settings", async () => 
       TICKET_SECRET: "prod-ticket-secret-123",
       MAIL_PLAYER_AUTH_REQUIRED: "true",
       MAIL_SERVICE_TOKEN: "prod-mail-service-token-123",
+      MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-456",
+      MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-789",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-321",
       REGISTRY_ENABLED: "true"
     },
     async () => {
@@ -464,6 +472,17 @@ test("mail-service production config accepts strong auth settings", async () => 
       assert.equal(config.mailPlayerAuthRequired, true);
       assert.equal(config.ticketSecret, "prod-ticket-secret-123");
       assert.equal(config.mailServiceToken, "prod-mail-service-token-123");
+      assert.equal(config.mailOperationsToken, "prod-mail-operations-token-456");
+      assert.equal(config.mailHighRiskToken, "prod-mail-high-risk-token-789");
+      assert.equal(
+        new Set([
+          config.mailServiceToken,
+          config.mailOperationsToken,
+          config.mailHighRiskToken,
+          config.gameAdminToken
+        ]).size,
+        4
+      );
     }
   );
 });
@@ -475,7 +494,10 @@ test("mail-service production config rejects short auth secrets", async () => {
       APP_ENV: undefined,
       TICKET_SECRET: "short",
       MAIL_PLAYER_AUTH_REQUIRED: "true",
-      MAIL_SERVICE_TOKEN: "also-short"
+      MAIL_SERVICE_TOKEN: "also-short",
+      MAIL_OPERATIONS_TOKEN: "ops-short",
+      MAIL_HIGH_RISK_TOKEN: "risk-short",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-321"
     },
     async () => {
       const { getConfig } = await import(`../../apps/mail-service/src/config.js?v=${Date.now()}`);
@@ -485,6 +507,8 @@ test("mail-service production config rejects short auth secrets", async () => {
         (error) => {
           assert.match(error.message, /TICKET_SECRET/);
           assert.match(error.message, /MAIL_SERVICE_TOKEN/);
+          assert.match(error.message, /MAIL_OPERATIONS_TOKEN/);
+          assert.match(error.message, /MAIL_HIGH_RISK_TOKEN/);
           return true;
         }
       );

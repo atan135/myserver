@@ -688,6 +688,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       }
 
       let grantResult;
+      this.metrics?.recordMailClaimAttempt?.();
       try {
         grantResult = await this.gameAdminClient.grantMailAttachments(
           existingWorkflow.character_id,
@@ -773,6 +774,8 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           alreadyClaimed: currentWorkflow?.status === "claimed"
         });
       }
+
+      this.metrics?.recordMailClaimSucceeded?.();
 
       log("info", "mail.claimed", {
         mailId,

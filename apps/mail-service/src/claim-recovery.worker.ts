@@ -116,6 +116,14 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
       manual: (batch.manualReviewCount || 0) + outcomes.filter((outcome) => outcome === "manual").length,
       skipped: false
     };
+    try {
+      const stats = await this.mailStore.getMailClaimOperationalStats?.({
+        longRunningMs: (this.config.claimAlertLongRunningMinutes || 15) * 60_000
+      });
+      if (stats) this.metrics?.setMailClaimOperationalSnapshot?.(stats);
+    } catch (error: any) {
+      log("warn", "mail.claim_operational_stats_failed", { error: error.message });
+    }
     if (summary.acquired > 0 || summary.manual > 0) {
       log("info", "mail.claim_recovery_scan_completed", { trigger, ...summary });
     }
@@ -185,6 +193,7 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
     );
     if (!prepared) return "stale";
     this.metrics?.recordMailClaimRecoveryGrantRetry?.();
+    this.metrics?.recordMailClaimAttempt?.();
     try {
       const grant = await this.gameAdminClient.grantMailAttachments(
         workflow.character_id,
@@ -207,12 +216,19 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
         }
       );
       if (!completed.claimed) return "stale";
+      this.metrics?.recordMailClaimSucceeded?.();
       this.recordRecovered(workflow);
       return "recovered";
     } catch (error: any) {
       const resultState = error?.resultState || (error?.requestWritten === true ? "unknown" : "not_applied");
       const errorCategory = error?.errorCategory || (resultState === "unknown" ? "RESULT_UNKNOWN" : "RETRYABLE_FAILURE");
+      if (errorCategory === "ROUTE_UNAVAILABLE") {
+        this.metrics?.recordMailClaimRouteUnavailable?.();
+      } else {
+        this.metrics?.recordMailClaimGrantFailure?.();
+      }
       if (resultState === "unknown" || errorCategory === "RESULT_UNKNOWN") {
+        this.metrics?.recordMailClaimResultUnknown?.();
         return this.deferOrManual(workflow, {
           ...queryEvidence(query),
           status: "reconciliation_pending",
@@ -226,6 +242,7 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
         });
       }
       if (error?.retryable === false || errorCategory === "PERMANENT_FAILURE") {
+        this.metrics?.recordMailClaimPermanentFailure?.();
         return this.moveToManual(workflow, {
           ...queryEvidence(query),
           traceId: error?.traceId || traceId,
@@ -236,6 +253,7 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
           instanceId: error?.instanceId || ""
         });
       }
+      this.metrics?.recordMailClaimRetryableFailure?.();
       return this.deferOrManual(workflow, {
         ...queryEvidence(query),
         status: "retryable_failure",

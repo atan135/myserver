@@ -9,6 +9,8 @@ import { HealthController } from "./health.controller.js";
 import { MailPlayerAuthService } from "./mail-auth.js";
 import { MailsController } from "./mails/mails.controller.js";
 import { MailsService } from "./mails/mails.service.js";
+import { MailOperationsController } from "./mail-operations/mail-operations.controller.js";
+import { MailOperationsService } from "./mail-operations/mail-operations.service.js";
 import { createMetricsCollector } from "./metrics.js";
 import { createDbPool } from "./db-client.js";
 import { DbMailStore } from "./db-store.js";
@@ -31,9 +33,10 @@ import {
 } from "./tokens.js";
 
 @Module({
-  controllers: [HealthController, MailsController],
+  controllers: [HealthController, MailsController, MailOperationsController],
   providers: [
     MailsService,
+    MailOperationsService,
     ClaimRecoveryWorker,
     {
       provide: MAIL_CONFIG,
