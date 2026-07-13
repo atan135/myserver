@@ -609,6 +609,67 @@ mod tests {
     }
 
     #[test]
+    fn shared_node_fixture_is_accepted_by_the_chat_v1_parser() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/mail-cross-service-v1.json"
+        ))
+        .unwrap();
+        let contract = &fixture["mail_notification_v1"];
+        let payload = serde_json::to_vec(&contract["expected_event"]).unwrap();
+        let parsed = parse_notification(&payload, DEFAULT_MAX_PAYLOAD_BYTES).unwrap();
+
+        assert_eq!(fixture["schema_version"], 1);
+        assert_eq!(
+            contract["limits"]["max_payload_bytes"],
+            DEFAULT_MAX_PAYLOAD_BYTES
+        );
+        assert_eq!(contract["expected_event"]["event_type"], EVENT_TYPE);
+        assert_eq!(contract["expected_event"]["version"], EVENT_VERSION);
+        assert_eq!(
+            payload.len() as u64,
+            contract["expected_json_bytes"].as_u64().unwrap()
+        );
+        assert_eq!(
+            parsed.event_id.as_deref(),
+            contract["expected_event"]["event_id"].as_str()
+        );
+        assert_eq!(
+            parsed.player_id,
+            contract["expected_event"]["player_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            parsed.mail_id,
+            contract["expected_event"]["mail"]["mail_id"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            parsed.title,
+            contract["expected_event"]["mail"]["title"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            parsed.from_player_id,
+            contract["expected_event"]["mail"]["from_player_id"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            parsed.mail_type,
+            contract["expected_event"]["mail"]["mail_type"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(
+            parsed.created_at,
+            contract["expected_event"]["mail"]["created_at"]
+                .as_i64()
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn builds_instance_subject_with_url_safe_base64_without_padding() {
         assert_eq!(
             build_instance_subject("chat.server.001"),

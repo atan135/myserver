@@ -200,4 +200,49 @@ mod tests {
             compute_grant_fingerprint("m", "c", "mail-claim", &right).unwrap()
         );
     }
+
+    #[test]
+    fn shared_node_fixture_has_the_same_normalization_and_fingerprint() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/mail-cross-service-v1.json"
+        ))
+        .unwrap();
+        let contract = &fixture["mail_attachment_grant_v1"];
+        let input = &contract["input"];
+        let items = input["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| GrantItemIntent {
+                item_id: item["itemId"].as_i64().unwrap() as i32,
+                count: item["count"].as_u64().unwrap() as u32,
+                binded: item["binded"].as_bool().unwrap(),
+            })
+            .collect::<Vec<_>>();
+        let expected_items = contract["expected_normalized_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| GrantItemIntent {
+                item_id: item["itemId"].as_i64().unwrap() as i32,
+                count: item["count"].as_u64().unwrap() as u32,
+                binded: item["binded"].as_bool().unwrap(),
+            })
+            .collect::<Vec<_>>();
+
+        let normalized = normalize_grant_items(&items).unwrap();
+        let fingerprint = compute_grant_fingerprint(
+            input["mail_id"].as_str().unwrap(),
+            input["character_id"].as_str().unwrap(),
+            input["source"].as_str().unwrap(),
+            &normalized,
+        )
+        .unwrap();
+
+        assert_eq!(normalized, expected_items);
+        assert_eq!(
+            fingerprint,
+            contract["expected_fingerprint"].as_str().unwrap()
+        );
+    }
 }

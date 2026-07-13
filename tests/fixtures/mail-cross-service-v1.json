@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "mail_notification_v1": {
+    "limits": {
+      "max_payload_bytes": 4096,
+      "event_id_max_bytes": 128,
+      "player_id_max_bytes": 128,
+      "mail_id_max_bytes": 64,
+      "title_max_bytes": 256,
+      "sender_id_max_bytes": 128,
+      "sender_name_max_bytes": 128,
+      "mail_type_max_bytes": 32,
+      "trace_id_hex_bytes": 32
+    },
+    "mail_input": {
+      "mail_id": "mail_01HQFIXTURE001",
+      "sender_id": "system",
+      "sender_name": "Fixture System",
+      "to_player_id": "player_fixture_001",
+      "title": "Cross-service fixture reward",
+      "mail_type": "system",
+      "created_at": 1783931896000
+    },
+    "build_options": {
+      "event_id": "mail.notify:mail_01HQFIXTURE001",
+      "occurred_at": 1783931896123,
+      "trace_id": "0123456789abcdef0123456789abcdef"
+    },
+    "expected_json_bytes": 376,
+    "expected_event": {
+      "event_id": "mail.notify:mail_01HQFIXTURE001",
+      "event_type": "mail.created",
+      "version": 1,
+      "occurred_at": 1783931896123,
+      "player_id": "player_fixture_001",
+      "mail": {
+        "mail_id": "mail_01HQFIXTURE001",
+        "title": "Cross-service fixture reward",
+        "from_player_id": "system",
+        "from_name": "Fixture System",
+        "mail_type": "system",
+        "created_at": 1783931896000
+      },
+      "trace_id": "0123456789abcdef0123456789abcdef"
+    }
+  },
+  "mail_attachment_grant_v1": {
+    "limits": {
+      "request_id_max_bytes": 128,
+      "mail_id_max_bytes": 64,
+      "character_id_max_bytes": 128,
+      "source_max_bytes": 64,
+      "reason_max_bytes": 512,
+      "trace_id_hex_bytes": 32,
+      "route_token_hex_bytes": 64,
+      "item_count_max": 4294967295
+    },
+    "input": {
+      "request_id": "mail_claim:mail_01HQFIXTURE001",
+      "mail_id": "mail_01HQFIXTURE001",
+      "character_id": "chr_0000000000042",
+      "source": "mail-claim",
+      "reason": "cross-service contract fixture",
+      "trace_id": "fedcba9876543210fedcba9876543210",
+      "route_generation": "42",
+      "route_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "attachments": [
+        { "itemId": 1002, "count": 3, "binded": true },
+        { "itemId": 1001, "count": 2, "binded": true },
+        { "itemId": 1001, "count": 4, "binded": false },
+        { "itemId": 1001, "count": 5, "binded": false },
+        { "itemId": 1002, "count": 7, "binded": false }
+      ]
+    },
+    "expected_normalized_items": [
+      { "itemId": 1001, "count": 9, "binded": false },
+      { "itemId": 1001, "count": 2, "binded": true },
+      { "itemId": 1002, "count": 7, "binded": false },
+      { "itemId": 1002, "count": 3, "binded": true }
+    ],
+    "expected_canonical_json": "{\"mail_id\":\"mail_01HQFIXTURE001\",\"character_id\":\"chr_0000000000042\",\"source\":\"mail-claim\",\"items\":[{\"item_id\":1001,\"count\":9,\"binded\":false},{\"item_id\":1001,\"count\":2,\"binded\":true},{\"item_id\":1002,\"count\":7,\"binded\":false},{\"item_id\":1002,\"count\":3,\"binded\":true}]}",
+    "expected_fingerprint": "sha256:aa2d6ee86c6c42d6e52f4ddb185067717080c3883dd87b45673015823ad5b408",
+    "expected_request": {
+      "requestId": "mail_claim:mail_01HQFIXTURE001",
+      "mailId": "mail_01HQFIXTURE001",
+      "characterId": "chr_0000000000042",
+      "items": [
+        { "itemId": 1001, "count": 9, "binded": false },
+        { "itemId": 1001, "count": 2, "binded": true },
+        { "itemId": 1002, "count": 7, "binded": false },
+        { "itemId": 1002, "count": 3, "binded": true }
+      ],
+      "requestFingerprint": "sha256:aa2d6ee86c6c42d6e52f4ddb185067717080c3883dd87b45673015823ad5b408",
+      "source": "mail-claim",
+      "reason": "cross-service contract fixture",
+      "traceId": "fedcba9876543210fedcba9876543210",
+      "routeGeneration": "42",
+      "routeToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  }
+}

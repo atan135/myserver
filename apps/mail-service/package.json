@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 --loader ts-node/esm src/config.test.js src/game-admin-client.test.js src/registry-client.test.js src/mails/mails.service.test.ts src/claim-recovery.worker.test.ts src/mail-operations/mail-operations.service.test.ts",
+    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 --loader ts-node/esm src/config.test.js src/game-admin-client.test.js src/registry-client.test.js src/logger.test.js src/mail-contract-fixture.test.js src/mails/mails.service.test.ts src/claim-recovery.worker.test.ts src/mail-operations/mail-operations.service.test.ts",
     "db:init": "node scripts/init-db.js"
   },
   "dependencies": {

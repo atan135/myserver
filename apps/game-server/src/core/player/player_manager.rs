@@ -608,6 +608,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grant_transaction_failure_does_not_publish_partial_inventory_or_record() {
+        let store = PgPlayerStore::new_failing_grant_save_for_test("inventory upsert failed");
+        let store_probe = store.clone();
+        let manager = PlayerManager::new(store);
+
+        let error = manager
+            .grant_items_with_request(
+                "chr_1",
+                "mail_claim:mail_1",
+                "sha256:first",
+                "mail-claim",
+                "claim",
+                grant_summary("chr_1", 2),
+                || Ok(vec![Item::new(10, 1001, 2, false)]),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, GrantItemsError::transaction_failed());
+        assert_eq!(store_probe.grant_save_attempts_for_test(), 1);
+        assert!(manager.get_player("chr_1").await.is_none());
+        assert_eq!(
+            manager
+                .find_grant_record("mail_claim:mail_1")
+                .await
+                .unwrap(),
+            GrantRecordLookup::NotFound
+        );
+    }
+
+    #[tokio::test]
     async fn sequential_unique_grants_reclaim_dead_keyed_locks() {
         let manager = PlayerManager::new(create_disabled_store());
         for index in 0..100u64 {

@@ -103,7 +103,8 @@ pub struct PgPlayerStore {
 #[cfg(test)]
 #[derive(Clone)]
 struct TestStoreBehavior {
-    load_error: String,
+    load_error: Option<String>,
+    grant_save_error: Option<String>,
     grant_save_attempts: Arc<AtomicUsize>,
 }
 
@@ -122,7 +123,20 @@ impl PgPlayerStore {
         Self {
             pool: None,
             test_behavior: Some(TestStoreBehavior {
-                load_error: error.into(),
+                load_error: Some(error.into()),
+                grant_save_error: None,
+                grant_save_attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_failing_grant_save_for_test(error: impl Into<String>) -> Self {
+        Self {
+            pool: None,
+            test_behavior: Some(TestStoreBehavior {
+                load_error: None,
+                grant_save_error: Some(error.into()),
                 grant_save_attempts: Arc::new(AtomicUsize::new(0)),
             }),
         }
@@ -216,6 +230,9 @@ impl PgPlayerStore {
         #[cfg(test)]
         if let Some(behavior) = &self.test_behavior {
             behavior.grant_save_attempts.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = &behavior.grant_save_error {
+                return Err(SaveGrantRecordError::NotApplied(error.clone()));
+            }
         }
         let Some(pool) = &self.pool else {
             return Err(SaveGrantRecordError::NotApplied(
@@ -314,7 +331,10 @@ impl PgPlayerStore {
     pub async fn load(&self, character_id: &str) -> Result<Option<PlayerData>, String> {
         #[cfg(test)]
         if let Some(behavior) = &self.test_behavior {
-            return Err(behavior.load_error.clone());
+            return match &behavior.load_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(None),
+            };
         }
         let Some(pool) = &self.pool else {
             return Err("database not enabled".to_string());

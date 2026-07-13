@@ -685,6 +685,45 @@ fn decode_gm_send_item_rejects_item_id_outside_i32_range() {
 }
 
 #[test]
+fn shared_node_fixture_is_decoded_by_the_game_grant_request_parser() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/mail-cross-service-v1.json"
+    ))
+    .unwrap();
+    let contract = &fixture["mail_attachment_grant_v1"];
+    let expected = &contract["expected_request"];
+    let packet = json_packet(MessageType::GmSendItemReq, &expected.to_string());
+
+    let parsed = decode_grant_items_request(&packet).unwrap();
+
+    assert_eq!(parsed.request_id, expected["requestId"].as_str().unwrap());
+    assert_eq!(parsed.mail_id, expected["mailId"].as_str().unwrap());
+    assert_eq!(
+        parsed.character_id,
+        expected["characterId"].as_str().unwrap()
+    );
+    assert_eq!(parsed.source, expected["source"].as_str().unwrap());
+    assert_eq!(parsed.reason, expected["reason"].as_str().unwrap());
+    assert_eq!(parsed.trace_id, expected["traceId"].as_str().unwrap());
+    assert_eq!(
+        parsed.request_fingerprint,
+        contract["expected_fingerprint"].as_str().unwrap()
+    );
+    assert_eq!(
+        parsed.route_generation,
+        expected["routeGeneration"].as_str().unwrap()
+    );
+    assert_eq!(parsed.route_token, expected["routeToken"].as_str().unwrap());
+    assert_eq!(parsed.items.len(), 4);
+    assert_eq!(parsed.items[0].item_id, 1001);
+    assert_eq!(parsed.items[0].count, 9);
+    assert!(!parsed.items[0].binded);
+    assert_eq!(parsed.items[3].item_id, 1002);
+    assert_eq!(parsed.items[3].count, 3);
+    assert!(parsed.items[3].binded);
+}
+
+#[test]
 fn grant_item_to_inventory_item_uses_config_snapshot_and_bound_character() {
     let table = ItemTable::load_from_csv(std::path::Path::new("csv/ItemTable.csv")).unwrap();
     let generator = ItemUidGenerator::new_for_test(10);
