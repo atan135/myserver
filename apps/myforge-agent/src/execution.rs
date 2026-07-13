@@ -4,10 +4,8 @@ use std::fs;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -1009,28 +1007,6 @@ trait ProcessRunner: Send + Sync {
     fn spawn(&self, specification: ProcessSpecification) -> Result<Box<dyn RunningProcess>, ()>;
 }
 
-struct AbortOnDropTask<T>(JoinHandle<T>);
-
-impl<T> AbortOnDropTask<T> {
-    fn new(task: JoinHandle<T>) -> Self {
-        Self(task)
-    }
-}
-
-impl<T> Future for AbortOnDropTask<T> {
-    type Output = Result<T, tokio::task::JoinError>;
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-
-impl<T> Drop for AbortOnDropTask<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 #[async_trait]
 trait RunningProcess: Send {
     async fn wait(
@@ -1111,19 +1087,10 @@ impl RunningProcess for SystemRunningProcess {
         let stdout = self.child.inner().stdout.take();
         let stderr = self.child.inner().stderr.take();
         let stdout_task = stdout.map(|stream| {
-            AbortOnDropTask::new(tokio::spawn(capture_stream(
-                stream,
-                self.stdout_preview_bytes,
-                self.stdout_raw_bytes,
-            )))
+            StreamCaptureTask::spawn(stream, self.stdout_preview_bytes, self.stdout_raw_bytes)
         });
-        let stderr_task = stderr.map(|stream| {
-            AbortOnDropTask::new(tokio::spawn(capture_stream(
-                stream,
-                self.stderr_preview_bytes,
-                None,
-            )))
-        });
+        let stderr_task =
+            stderr.map(|stream| StreamCaptureTask::spawn(stream, self.stderr_preview_bytes, None));
         let (termination, exit_code, forced_deadline) = loop {
             if control.cancellation().is_cancelled() {
                 let forced_deadline =
@@ -1183,24 +1150,33 @@ impl RunningProcess for SystemRunningProcess {
 }
 
 async fn finish_capture(
-    task: Option<AbortOnDropTask<StreamCapture>>,
+    task: Option<StreamCaptureTask>,
     deadline: tokio::time::Instant,
 ) -> (StreamCapture, CaptureFailure) {
     let Some(mut task) = task else {
         return (StreamCapture::empty(), CaptureFailure::None);
     };
-    match tokio::time::timeout_at(deadline, &mut task).await {
-        Ok(Ok(capture)) => {
-            let failure = if capture.read_failed {
-                CaptureFailure::Read
-            } else {
-                CaptureFailure::None
-            };
-            (capture, failure)
-        }
-        Ok(Err(_)) => (StreamCapture::empty(), CaptureFailure::Read),
-        Err(_) => (StreamCapture::empty(), CaptureFailure::Deadline),
+    let failure = match tokio::time::timeout_at(deadline, &mut task.task).await {
+        Ok(Ok(())) => CaptureFailure::None,
+        Ok(Err(_)) => CaptureFailure::Read,
+        Err(_) => CaptureFailure::Deadline,
+    };
+    if failure == CaptureFailure::Deadline {
+        task.task.abort();
+        let _ = (&mut task.task).await;
     }
+    let mut capture = task.take_capture();
+    if failure != CaptureFailure::None {
+        capture.truncated = true;
+        capture.raw_truncated = true;
+        capture.read_failed = true;
+    }
+    let failure = if failure == CaptureFailure::None && capture.read_failed {
+        CaptureFailure::Read
+    } else {
+        failure
+    };
+    (capture, failure)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1248,24 +1224,67 @@ impl StreamCapture {
     }
 }
 
+struct StreamCaptureTask {
+    task: JoinHandle<()>,
+    capture: Arc<StdMutex<Option<Utf8Capture>>>,
+}
+
+impl StreamCaptureTask {
+    fn spawn(
+        stream: impl AsyncRead + Unpin + Send + 'static,
+        preview_limit: usize,
+        raw_limit: Option<usize>,
+    ) -> Self {
+        let capture = Arc::new(StdMutex::new(Some(Utf8Capture::new(
+            preview_limit,
+            raw_limit,
+        ))));
+        let task_capture = Arc::clone(&capture);
+        let task = tokio::spawn(capture_stream(stream, task_capture));
+        Self { task, capture }
+    }
+
+    fn take_capture(&self) -> StreamCapture {
+        self.capture
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .map(Utf8Capture::finish)
+            .unwrap_or_else(StreamCapture::empty)
+    }
+}
+
+impl Drop for StreamCaptureTask {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 async fn capture_stream(
     mut stream: impl AsyncRead + Unpin,
-    preview_limit: usize,
-    raw_limit: Option<usize>,
-) -> StreamCapture {
-    let mut capture = Utf8Capture::new(preview_limit, raw_limit);
+    capture: Arc<StdMutex<Option<Utf8Capture>>>,
+) {
     let mut buffer = [0_u8; 16 * 1024];
     loop {
         match stream.read(&mut buffer).await {
             Ok(0) => break,
-            Ok(read) => capture.push(&buffer[..read]),
+            Ok(read) => capture
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_mut()
+                .expect("capture is retained until the reader exits")
+                .push(&buffer[..read]),
             Err(_) => {
-                capture.read_failed = true;
+                capture
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_mut()
+                    .expect("capture is retained until the reader exits")
+                    .read_failed = true;
                 break;
             }
         }
     }
-    capture.finish()
 }
 
 struct Utf8Capture {
@@ -3198,6 +3217,15 @@ mod tests {
                 let _ = spawned.kill();
                 let _ = spawned.wait();
             }
+            "partial_then_wait" => {
+                let mut stdout = std::io::stdout().lock();
+                let mut stderr = std::io::stderr().lock();
+                stdout.write_all(b"partial stdout\n").unwrap();
+                stderr.write_all(b"partial stderr\n").unwrap();
+                stdout.flush().unwrap();
+                stderr.flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
             "leaf" => {
                 std::thread::sleep(Duration::from_millis(800));
                 fs::write(
@@ -3300,6 +3328,32 @@ mod tests {
             !sentinel.exists(),
             "grandchild survived process-tree timeout"
         );
+    }
+
+    #[tokio::test]
+    async fn system_runner_timeout_preserves_output_captured_before_termination() {
+        let runner = SystemProcessRunner;
+        let process = runner
+            .spawn(fixture_process_specification(
+                "partial_then_wait",
+                None,
+                4_096,
+            ))
+            .unwrap();
+        let output = process
+            .wait(
+                system_control(CancellationToken::new()),
+                tokio::time::Instant::now() + Duration::from_millis(500),
+                Arc::new(SystemExecutionClock),
+            )
+            .await;
+        assert_eq!(output.termination, ProcessTermination::TimedOut);
+        assert!(output.stdout.preview.contains("partial stdout"));
+        assert!(output.stderr.preview.contains("partial stderr"));
+        assert!(output.stdout.bytes > 0);
+        assert!(output.stderr.bytes > 0);
+        assert!(output.stdout.truncated);
+        assert!(output.stderr.truncated);
     }
 
     #[tokio::test]

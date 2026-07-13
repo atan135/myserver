@@ -155,7 +155,7 @@ test("admin-api myforge config is disabled by default without requiring key file
     assert.equal(config.myforge.heartbeatIntervalMs, 15000);
     assert.equal(config.myforge.heartbeatTimeoutMs, 45000);
     assert.equal(config.myforge.queueTtlMs, 900000);
-    assert.equal(config.myforge.commandTimeoutMs, 120000);
+    assert.equal(config.myforge.commandTimeoutMs, 600000);
     assert.equal(config.myforge.cancelTimeoutMs, 10000);
     assert.equal(config.myforge.maxOutputBytes, 1048576);
     assert.equal(config.myforge.wsMaxMessageBytes, 16777216);

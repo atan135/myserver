@@ -47,7 +47,7 @@ const MYFORGE_NUMERIC_LIMITS = Object.freeze({
   MYFORGE_HEARTBEAT_INTERVAL_MS: { key: "heartbeatIntervalMs", fallback: 15000, min: 1000, max: 60000 },
   MYFORGE_HEARTBEAT_TIMEOUT_MS: { key: "heartbeatTimeoutMs", fallback: 45000, min: 3000, max: 180000 },
   MYFORGE_QUEUE_TTL_MS: { key: "queueTtlMs", fallback: 900000, min: 10000, max: 86400000 },
-  MYFORGE_COMMAND_TIMEOUT_MS: { key: "commandTimeoutMs", fallback: 120000, min: 1000, max: 1800000 },
+  MYFORGE_COMMAND_TIMEOUT_MS: { key: "commandTimeoutMs", fallback: 600000, min: 1000, max: 1800000 },
   MYFORGE_CANCEL_TIMEOUT_MS: { key: "cancelTimeoutMs", fallback: 10000, min: 1000, max: 30000 },
   MYFORGE_MAX_OUTPUT_BYTES: { key: "maxOutputBytes", fallback: 1048576, min: 4096, max: 4194304 },
   MYFORGE_WS_MAX_MESSAGE_BYTES: { key: "wsMaxMessageBytes", fallback: 16777216, min: 524288, max: 33554432 },

@@ -4,6 +4,7 @@ target/
 summary/
 .env
 .env.local
+keys/
 *.local.json
 local_help.txt
 *.log

@@ -384,7 +384,7 @@ fn parse_limits(environment: &impl Environment) -> Result<ParsedLimits, AgentErr
         max_command_timeout_ms: parse_decimal(
             environment,
             "MYFORGE_MAX_COMMAND_TIMEOUT_MS",
-            120_000,
+            600_000,
             1_000,
             1_800_000,
         )?,
@@ -636,7 +636,7 @@ mod tests {
                 command_ttl_ms: 60_000,
                 clock_skew_ms: 5_000,
                 heartbeat_interval_ms: 15_000,
-                max_command_timeout_ms: 120_000,
+                max_command_timeout_ms: 600_000,
                 cancel_timeout_ms: 10_000,
                 max_output_bytes: 1_048_576,
                 ws_max_message_bytes: 16_777_216,
