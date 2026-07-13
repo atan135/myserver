@@ -41,6 +41,8 @@ struct Config {
     global_id_worker_id: Option<u64>,
     nats_url: String,
     mail_notify_max_payload_bytes: usize,
+    mail_notify_accept_legacy_payload: bool,
+    mail_notify_legacy_compat_until_epoch_seconds: Option<u64>,
     mail_notify_dedup_capacity: usize,
     mail_notify_dedup_ttl_secs: u64,
     mail_notify_reconnect_base_ms: u64,
@@ -65,6 +67,17 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         let bind_addr = bind_addr_from_env("CHAT_BIND_ADDR", "0.0.0.0:9001");
+        let legacy_compatibility = resolve_mail_legacy_compatibility(
+            mail_legacy_strict_policy_from_env(),
+            std::env::var("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD")
+                .ok()
+                .as_deref(),
+            std::env::var("CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS")
+                .ok()
+                .as_deref(),
+            current_epoch_seconds(),
+        )
+        .unwrap_or_else(|error| panic!("invalid chat-server mail compatibility config: {error}"));
         let config = Self {
             db_enabled: parse_bool_env("DB_ENABLED", false),
             database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -103,6 +116,9 @@ impl Config {
                 "CHAT_MAIL_NOTIFY_MAX_PAYLOAD_BYTES",
                 mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
             ),
+            mail_notify_accept_legacy_payload: legacy_compatibility.accept_legacy_payload,
+            mail_notify_legacy_compat_until_epoch_seconds: legacy_compatibility
+                .compat_until_epoch_seconds,
             mail_notify_dedup_capacity: parse_positive_usize_env(
                 "CHAT_MAIL_NOTIFY_DEDUP_CAPACITY",
                 mail_subscriber::DEFAULT_DEDUP_CAPACITY,
@@ -218,6 +234,81 @@ fn is_production_env() -> bool {
             .ok()
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
     })
+}
+
+fn is_strict_runtime_env() -> bool {
+    ["NODE_ENV", "APP_ENV"].iter().any(|name| {
+        std::env::var(name).ok().is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "production" | "prod" | "staging" | "stage" | "test" | "testing"
+            )
+        })
+    })
+}
+
+fn mail_legacy_strict_policy_from_env() -> bool {
+    is_strict_runtime_env() || parse_bool_env("DISCOVERY_REQUIRED", false)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MailLegacyCompatibility {
+    accept_legacy_payload: bool,
+    compat_until_epoch_seconds: Option<u64>,
+}
+
+fn resolve_mail_legacy_compatibility(
+    strict_runtime: bool,
+    accept_raw: Option<&str>,
+    until_raw: Option<&str>,
+    now_epoch_seconds: u64,
+) -> Result<MailLegacyCompatibility, String> {
+    let accept_legacy_payload = match accept_raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => !strict_runtime,
+        Some("true" | "1") => true,
+        Some("false" | "0") => false,
+        Some(_) => {
+            return Err("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD must be true, false, 1, or 0".to_string());
+        }
+    };
+    let compat_until_epoch_seconds = match until_raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    "CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS must be a positive Unix timestamp"
+                        .to_string()
+                })?,
+        ),
+        None => None,
+    };
+    if accept_legacy_payload && strict_runtime && compat_until_epoch_seconds.is_none() {
+        return Err(
+            "strict environments require CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS when legacy payload compatibility is enabled"
+                .to_string(),
+        );
+    }
+    if accept_legacy_payload
+        && compat_until_epoch_seconds.is_some_and(|deadline| deadline <= now_epoch_seconds)
+    {
+        return Err("legacy payload compatibility deadline must be in the future".to_string());
+    }
+    Ok(MailLegacyCompatibility {
+        accept_legacy_payload,
+        compat_until_epoch_seconds,
+    })
+}
+
+fn current_epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn is_strict_discovery_env() -> bool {
@@ -338,6 +429,9 @@ fn registry_metadata(config: &Config) -> serde_json::Value {
         "service_instance_id": config.service_instance_id,
         "instance_id": config.service_instance_id,
         "online_route_ttl_secs": config.online_route_ttl_secs,
+        "mail_notification_contract_version": 1,
+        "mail_accept_legacy_payload": config.mail_notify_accept_legacy_payload,
+        "mail_legacy_compat_until_epoch_seconds": config.mail_notify_legacy_compat_until_epoch_seconds,
         "build_version": config.service_build_version,
         "zone": config.service_zone
     })
@@ -589,6 +683,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance_id_for_mail = config.service_instance_id.clone();
     let mail_subscriber_config = mail_subscriber::SubscriberConfig {
         max_payload_bytes: config.mail_notify_max_payload_bytes,
+        accept_legacy_payload: config.mail_notify_accept_legacy_payload,
+        legacy_compat_until_epoch_seconds: config.mail_notify_legacy_compat_until_epoch_seconds,
         dedup_capacity: config.mail_notify_dedup_capacity,
         dedup_ttl: std::time::Duration::from_secs(config.mail_notify_dedup_ttl_secs),
         reconnect_base_delay: std::time::Duration::from_millis(
@@ -716,6 +812,8 @@ mod tests {
         "DB_ENABLED",
         "GLOBAL_ID_ORIGIN_ID",
         "GLOBAL_ID_WORKER_ID",
+        "CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD",
+        "CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS",
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -775,6 +873,89 @@ mod tests {
             env::set_var("GLOBAL_ID_ORIGIN_ID", "1");
             env::set_var("GLOBAL_ID_WORKER_ID", "4");
         }
+    }
+
+    #[test]
+    fn mail_legacy_compatibility_defaults_open_locally_and_closed_in_strict_envs() {
+        assert_eq!(
+            resolve_mail_legacy_compatibility(false, None, None, 100).unwrap(),
+            MailLegacyCompatibility {
+                accept_legacy_payload: true,
+                compat_until_epoch_seconds: None,
+            }
+        );
+        assert_eq!(
+            resolve_mail_legacy_compatibility(true, None, None, 100).unwrap(),
+            MailLegacyCompatibility {
+                accept_legacy_payload: false,
+                compat_until_epoch_seconds: None,
+            }
+        );
+    }
+
+    #[test]
+    fn strict_mail_legacy_compatibility_requires_a_future_deadline() {
+        assert!(resolve_mail_legacy_compatibility(true, Some("true"), None, 100).is_err());
+        assert!(resolve_mail_legacy_compatibility(true, Some("true"), Some("100"), 100).is_err());
+        assert_eq!(
+            resolve_mail_legacy_compatibility(true, Some("true"), Some("101"), 100).unwrap(),
+            MailLegacyCompatibility {
+                accept_legacy_payload: true,
+                compat_until_epoch_seconds: Some(101),
+            }
+        );
+        assert!(
+            resolve_mail_legacy_compatibility(true, Some("invalid"), Some("101"), 100).is_err()
+        );
+    }
+
+    #[test]
+    fn required_discovery_applies_strict_mail_legacy_policy_through_env_wiring() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(TICKET_SECRET_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "development");
+            env::remove_var("APP_ENV");
+            env::set_var("DISCOVERY_REQUIRED", "true");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::remove_var("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD");
+            env::remove_var("CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS");
+        }
+        let disabled = Config::from_env();
+        assert!(!disabled.mail_notify_accept_legacy_payload);
+        assert_eq!(disabled.mail_notify_legacy_compat_until_epoch_seconds, None);
+
+        unsafe {
+            env::set_var("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD", "true");
+        }
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS"));
+
+        unsafe {
+            env::set_var(
+                "CHAT_MAIL_LEGACY_COMPAT_UNTIL_EPOCH_SECONDS",
+                u64::MAX.to_string(),
+            );
+        }
+        let enabled = Config::from_env();
+        assert!(enabled.mail_notify_accept_legacy_payload);
+        assert_eq!(
+            enabled.mail_notify_legacy_compat_until_epoch_seconds,
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn mail_legacy_switch_is_explicit_in_environment_examples() {
+        assert!(include_str!("../.env.example").contains("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD=false"));
+        assert!(
+            include_str!("../.env.production.example")
+                .contains("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD=false")
+        );
+        assert!(
+            include_str!("../.env.test.example").contains("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD=false")
+        );
     }
 
     #[test]
@@ -987,6 +1168,8 @@ mod tests {
             global_id_worker_id: Some(4),
             nats_url: "nats://127.0.0.1:4222".to_string(),
             mail_notify_max_payload_bytes: mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
+            mail_notify_accept_legacy_payload: true,
+            mail_notify_legacy_compat_until_epoch_seconds: None,
             mail_notify_dedup_capacity: mail_subscriber::DEFAULT_DEDUP_CAPACITY,
             mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
             mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,
@@ -1014,6 +1197,9 @@ mod tests {
         assert_eq!(instance.metadata["service_instance_id"], "chat-a");
         assert_eq!(instance.metadata["instance_id"], "chat-a");
         assert_eq!(instance.metadata["online_route_ttl_secs"], 75);
+        assert_eq!(instance.metadata["mail_notification_contract_version"], 1);
+        assert_eq!(instance.metadata["mail_accept_legacy_payload"], true);
+        assert!(instance.metadata["mail_legacy_compat_until_epoch_seconds"].is_null());
         assert_eq!(instance.metadata["build_version"], "build-42");
         assert_eq!(instance.metadata["zone"], "zone-chat");
         assert_eq!(instance.endpoints.len(), 1);
@@ -1028,6 +1214,9 @@ mod tests {
         assert_eq!(endpoint.metadata["service_instance_id"], "chat-a");
         assert_eq!(endpoint.metadata["instance_id"], "chat-a");
         assert_eq!(endpoint.metadata["online_route_ttl_secs"], 75);
+        assert_eq!(endpoint.metadata["mail_notification_contract_version"], 1);
+        assert_eq!(endpoint.metadata["mail_accept_legacy_payload"], true);
+        assert!(endpoint.metadata["mail_legacy_compat_until_epoch_seconds"].is_null());
         assert_eq!(endpoint.metadata["build_version"], "build-42");
         assert_eq!(endpoint.metadata["zone"], "zone-chat");
     }
@@ -1053,6 +1242,8 @@ mod tests {
             global_id_worker_id: Some(4),
             nats_url: "nats://127.0.0.1:4222".to_string(),
             mail_notify_max_payload_bytes: mail_subscriber::DEFAULT_MAX_PAYLOAD_BYTES,
+            mail_notify_accept_legacy_payload: true,
+            mail_notify_legacy_compat_until_epoch_seconds: None,
             mail_notify_dedup_capacity: mail_subscriber::DEFAULT_DEDUP_CAPACITY,
             mail_notify_dedup_ttl_secs: mail_subscriber::DEFAULT_DEDUP_TTL_SECS,
             mail_notify_reconnect_base_ms: mail_subscriber::DEFAULT_RECONNECT_BASE_MS,

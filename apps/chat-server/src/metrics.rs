@@ -85,6 +85,8 @@ pub struct MetricsCollector {
     mail_notification_parse_failed: AtomicU64,
     /// 因未知版本拒绝的邮件通知数
     mail_notification_version_rejected: AtomicU64,
+    /// 兼容开关关闭或截止时间到期后拒绝的旧格式通知数
+    mail_notification_legacy_rejected: AtomicU64,
     /// 按 event_id 命中的邮件通知去重数
     mail_notification_deduplicated: AtomicU64,
     /// 成功进入当前在线 session 队列的邮件通知数
@@ -108,6 +110,7 @@ impl MetricsCollector {
             mail_notification_received: AtomicU64::new(0),
             mail_notification_parse_failed: AtomicU64::new(0),
             mail_notification_version_rejected: AtomicU64::new(0),
+            mail_notification_legacy_rejected: AtomicU64::new(0),
             mail_notification_deduplicated: AtomicU64::new(0),
             mail_notification_pushed: AtomicU64::new(0),
             mail_notification_offline_skipped: AtomicU64::new(0),
@@ -144,6 +147,11 @@ impl MetricsCollector {
 
     pub fn record_mail_notification_version_rejected(&self) {
         self.mail_notification_version_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_mail_notification_legacy_rejected(&self) {
+        self.mail_notification_legacy_rejected
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -214,6 +222,9 @@ impl MetricsCollector {
                 let mail_notification_version_rejected = self
                     .mail_notification_version_rejected
                     .swap(0, Ordering::Relaxed);
+                let mail_notification_legacy_rejected = self
+                    .mail_notification_legacy_rejected
+                    .swap(0, Ordering::Relaxed);
                 let mail_notification_deduplicated = self
                     .mail_notification_deduplicated
                     .swap(0, Ordering::Relaxed);
@@ -255,6 +266,10 @@ impl MetricsCollector {
                     (
                         "mail_notification_version_rejected".to_string(),
                         mail_notification_version_rejected.to_string(),
+                    ),
+                    (
+                        "mail_notification_legacy_rejected".to_string(),
+                        mail_notification_legacy_rejected.to_string(),
                     ),
                     (
                         "mail_notification_deduplicated".to_string(),
@@ -335,6 +350,7 @@ mod tests {
         collector.record_mail_notification_received();
         collector.record_mail_notification_parse_failed();
         collector.record_mail_notification_version_rejected();
+        collector.record_mail_notification_legacy_rejected();
         collector.record_mail_notification_deduplicated();
         collector.record_mail_notification_pushed();
         collector.record_mail_notification_offline_skipped();
@@ -352,6 +368,12 @@ mod tests {
         assert_eq!(
             collector
                 .mail_notification_version_rejected
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .mail_notification_legacy_rejected
                 .load(Ordering::Relaxed),
             1
         );

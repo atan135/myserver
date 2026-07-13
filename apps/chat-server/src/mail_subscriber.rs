@@ -5,7 +5,7 @@
 //! deduplicator so an event is never pushed twice during a rolling upgrade.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures_util::StreamExt;
@@ -31,6 +31,8 @@ const EVENT_VERSION: i64 = 1;
 #[derive(Clone, Debug)]
 pub struct SubscriberConfig {
     pub max_payload_bytes: usize,
+    pub accept_legacy_payload: bool,
+    pub legacy_compat_until_epoch_seconds: Option<u64>,
     pub dedup_capacity: usize,
     pub dedup_ttl: Duration,
     pub reconnect_base_delay: Duration,
@@ -41,6 +43,8 @@ impl Default for SubscriberConfig {
     fn default() -> Self {
         Self {
             max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+            accept_legacy_payload: true,
+            legacy_compat_until_epoch_seconds: None,
             dedup_capacity: DEFAULT_DEDUP_CAPACITY,
             dedup_ttl: Duration::from_secs(DEFAULT_DEDUP_TTL_SECS),
             reconnect_base_delay: Duration::from_millis(DEFAULT_RECONNECT_BASE_MS),
@@ -100,6 +104,7 @@ enum ParseErrorKind {
     InvalidLegacy,
     UnsupportedEventType,
     UnsupportedVersion,
+    LegacyDisabled,
 }
 
 impl ParseErrorKind {
@@ -111,6 +116,7 @@ impl ParseErrorKind {
             Self::InvalidLegacy => "invalid_legacy_payload",
             Self::UnsupportedEventType => "unsupported_event_type",
             Self::UnsupportedVersion => "unsupported_version",
+            Self::LegacyDisabled => "legacy_payload_disabled",
         }
     }
 }
@@ -305,7 +311,7 @@ async fn run_subscriber(
             sessions,
             message.payload.as_ref(),
             route,
-            config.max_payload_bytes,
+            config,
             deduplicator,
         )
         .await;
@@ -351,15 +357,24 @@ async fn handle_notification(
     sessions: &ChatSessionMap,
     payload: &[u8],
     route: &'static str,
-    max_payload_bytes: usize,
+    config: &SubscriberConfig,
     deduplicator: &mut EventDeduplicator,
 ) {
     METRICS.record_mail_notification_received();
-    let notification = match parse_notification(payload, max_payload_bytes) {
+    let notification = match parse_notification_with_legacy_policy(
+        payload,
+        config.max_payload_bytes,
+        config.accept_legacy_payload,
+        config.legacy_compat_until_epoch_seconds,
+        current_epoch_seconds(),
+    ) {
         Ok(notification) => notification,
         Err(error) => {
             if error.kind == ParseErrorKind::UnsupportedVersion {
                 METRICS.record_mail_notification_version_rejected();
+            } else if error.kind == ParseErrorKind::LegacyDisabled {
+                METRICS.record_mail_notification_legacy_rejected();
+                METRICS.record_mail_notification_parse_failed();
             } else {
                 METRICS.record_mail_notification_parse_failed();
             }
@@ -409,9 +424,20 @@ async fn handle_notification(
     }
 }
 
+#[cfg(test)]
 fn parse_notification(
     payload: &[u8],
     max_payload_bytes: usize,
+) -> Result<MailNotification, ParseError> {
+    parse_notification_with_legacy_policy(payload, max_payload_bytes, true, None, 0)
+}
+
+fn parse_notification_with_legacy_policy(
+    payload: &[u8],
+    max_payload_bytes: usize,
+    accept_legacy_payload: bool,
+    legacy_compat_until_epoch_seconds: Option<u64>,
+    now_epoch_seconds: u64,
 ) -> Result<MailNotification, ParseError> {
     if payload.len() > max_payload_bytes {
         return Err(ParseError::new(ParseErrorKind::PayloadTooLarge));
@@ -429,8 +455,21 @@ fn parse_notification(
     if is_envelope {
         parse_envelope(value)
     } else {
+        if !accept_legacy_payload
+            || legacy_compat_until_epoch_seconds
+                .is_some_and(|deadline| now_epoch_seconds >= deadline)
+        {
+            return Err(ParseError::new(ParseErrorKind::LegacyDisabled));
+        }
         parse_legacy(value)
     }
+}
+
+fn current_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn parse_envelope(value: serde_json::Value) -> Result<MailNotification, ParseError> {
@@ -693,6 +732,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_payload_switch_and_deadline_do_not_affect_v1_envelopes() {
+        let disabled = parse_notification_with_legacy_policy(
+            &legacy_payload(),
+            DEFAULT_MAX_PAYLOAD_BYTES,
+            false,
+            None,
+            100,
+        )
+        .unwrap_err();
+        assert_eq!(disabled.kind, ParseErrorKind::LegacyDisabled);
+
+        let expired = parse_notification_with_legacy_policy(
+            &legacy_payload(),
+            DEFAULT_MAX_PAYLOAD_BYTES,
+            true,
+            Some(100),
+            100,
+        )
+        .unwrap_err();
+        assert_eq!(expired.kind, ParseErrorKind::LegacyDisabled);
+
+        assert!(
+            parse_notification_with_legacy_policy(
+                &envelope(),
+                DEFAULT_MAX_PAYLOAD_BYTES,
+                false,
+                Some(1),
+                100,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn rejects_payload_before_json_parsing_when_byte_limit_is_exceeded() {
         let error = parse_notification(br#"{"player_id":"player_001"}"#, 8).unwrap_err();
         assert_eq!(error.kind, ParseErrorKind::PayloadTooLarge);
@@ -798,7 +871,7 @@ mod tests {
             &sessions,
             &payload,
             "legacy",
-            DEFAULT_MAX_PAYLOAD_BYTES,
+            &SubscriberConfig::default(),
             &mut deduplicator,
         )
         .await;
@@ -806,7 +879,7 @@ mod tests {
             &sessions,
             &payload,
             "instance",
-            DEFAULT_MAX_PAYLOAD_BYTES,
+            &SubscriberConfig::default(),
             &mut deduplicator,
         )
         .await;
