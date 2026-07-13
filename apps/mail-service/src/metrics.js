@@ -37,6 +37,9 @@ export class MetricsCollector {
     this.outboxLeaseTakeovers = 0;
     this.mailClaimRouteUnavailable = 0;
     this.mailClaimGrantFailures = 0;
+    this.mailClaimResultUnknown = 0;
+    this.mailClaimRetryableFailures = 0;
+    this.mailClaimPermanentFailures = 0;
 
     this.flushTimer = null;
   }
@@ -90,6 +93,18 @@ export class MetricsCollector {
     this.mailClaimGrantFailures += 1;
   }
 
+  recordMailClaimResultUnknown() {
+    this.mailClaimResultUnknown += 1;
+  }
+
+  recordMailClaimRetryableFailure() {
+    this.mailClaimRetryableFailures += 1;
+  }
+
+  recordMailClaimPermanentFailure() {
+    this.mailClaimPermanentFailures += 1;
+  }
+
   /**
    * Flush metrics to NATS
    */
@@ -107,6 +122,9 @@ export class MetricsCollector {
     const outboxLeaseTakeovers = this.outboxLeaseTakeovers;
     const mailClaimRouteUnavailable = this.mailClaimRouteUnavailable;
     const mailClaimGrantFailures = this.mailClaimGrantFailures;
+    const mailClaimResultUnknown = this.mailClaimResultUnknown;
+    const mailClaimRetryableFailures = this.mailClaimRetryableFailures;
+    const mailClaimPermanentFailures = this.mailClaimPermanentFailures;
 
     // Reset counters
     this.qps = 0;
@@ -119,6 +137,9 @@ export class MetricsCollector {
     this.outboxLeaseTakeovers = 0;
     this.mailClaimRouteUnavailable = 0;
     this.mailClaimGrantFailures = 0;
+    this.mailClaimResultUnknown = 0;
+    this.mailClaimRetryableFailures = 0;
+    this.mailClaimPermanentFailures = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -143,6 +164,9 @@ export class MetricsCollector {
             mail_outbox_lease_takeovers: outboxLeaseTakeovers,
             mail_claim_route_unavailable: mailClaimRouteUnavailable,
             mail_claim_grant_failures: mailClaimGrantFailures,
+            mail_claim_result_unknown: mailClaimResultUnknown,
+            mail_claim_retryable_failures: mailClaimRetryableFailures,
+            mail_claim_permanent_failures: mailClaimPermanentFailures,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

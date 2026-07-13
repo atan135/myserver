@@ -28,6 +28,7 @@ async function loadMailsService() {
   await mkdir(path.join(outDir, "common"), { recursive: true });
   const outputText = compiled.outputText
     .replaceAll("../common/", "./common/")
+    .replaceAll("../game-admin-client.js", "./game-admin-client.js")
     .replaceAll("../global-id.js", "./global-id.js")
     .replaceAll("../logger.js", "./logger.js")
     .replaceAll("../notification-outbox.js", "./notification-outbox.js")
@@ -37,6 +38,11 @@ async function loadMailsService() {
   await writeFile(
     path.join(outDir, "common/http-exception.js"),
     "export * from '../../../../apps/mail-service/src/common/http-exception.ts';\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(outDir, "game-admin-client.js"),
+    "export { computeGrantRequestFingerprint, normalizeGrantItems } from '../../../apps/mail-service/src/game-admin-client.js';\n",
     "utf8"
   );
   await writeFile(
@@ -154,7 +160,9 @@ test("MailsService claim passes camelCase targetInstanceId to game admin grant",
   });
 
   assert.equal(gameAdminClient.grants.length, 1);
-  assert.deepEqual(gameAdminClient.grants[0].options, { targetInstanceId: "game-server-b" });
+  assert.equal(gameAdminClient.grants[0].options.targetInstanceId, "game-server-b");
+  assert.match(gameAdminClient.grants[0].options.traceId, /^[0-9a-f]{32}$/);
+  assert.match(gameAdminClient.grants[0].options.requestFingerprint, /^sha256:[0-9a-f]{64}$/);
 });
 
 test("MailsService claim accepts snake_case target_instance_id for game admin grant", async () => {
@@ -170,7 +178,7 @@ test("MailsService claim accepts snake_case target_instance_id for game admin gr
   });
 
   assert.equal(gameAdminClient.grants.length, 1);
-  assert.deepEqual(gameAdminClient.grants[0].options, { targetInstanceId: "game-server-c" });
+  assert.equal(gameAdminClient.grants[0].options.targetInstanceId, "game-server-c");
 });
 
 test("MailsService create keeps mail and outbox when notification publish fails", async () => {

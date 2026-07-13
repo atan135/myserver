@@ -83,6 +83,7 @@ async function loadMailControllerAndService() {
 
   await transpileTypeScriptModule(serviceSource, path.join(outDir, "mails.service.mjs"), {
     "../common/": "./common/",
+    "../game-admin-client.js": "./game-admin-client.js",
     "../global-id.js": "./global-id.js",
     "../logger.js": "./logger.js",
     "../notification-outbox.js": "./notification-outbox.js",
@@ -98,6 +99,11 @@ async function loadMailControllerAndService() {
   await writeFile(
     path.join(outDir, "common/http-exception.js"),
     "export * from '../../../../apps/mail-service/src/common/http-exception.ts';\n",
+    "utf8"
+  );
+  await writeFile(
+    path.join(outDir, "game-admin-client.js"),
+    "export { computeGrantRequestFingerprint, normalizeGrantItems } from '../../../apps/mail-service/src/game-admin-client.js';\n",
     "utf8"
   );
   await writeFile(

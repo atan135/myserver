@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { DbMailStore } from "../db-store.js";
+import { computeGrantRequestFingerprint } from "../game-admin-client.js";
 import { configureLogger } from "../logger.js";
+import { MailsController } from "./mails.controller.js";
 import { MailsService } from "./mails.service.js";
 
 configureLogger({
@@ -13,10 +16,22 @@ configureLogger({
 
 function createMail(overrides: Record<string, any> = {}) {
   return {
+    id: 1,
     mail_id: "mail-1",
+    sender_type: "system",
+    sender_id: "system",
+    sender_name: "系统",
+    from_player_id: "system",
     to_player_id: "player-1",
+    title: "Reward",
+    content: "",
     status: "unread",
     attachments: [{ type: "item", id: 1001, count: 2, binded: true }],
+    mail_type: "system",
+    created_by_type: "system",
+    created_by_id: "system",
+    created_by_name: "系统",
+    created_at: new Date(),
     read_at: null,
     claimed_at: null,
     expires_at: null,
@@ -24,405 +39,503 @@ function createMail(overrides: Record<string, any> = {}) {
   };
 }
 
-function getErrorCode(error: any) {
-  return error?.response?.error || error?.getResponse?.()?.error || error?.code;
-}
-
-function createService({
-  mail = createMail(),
-  beginResult,
-  completeResult,
-  grantError,
-  config = {},
-  metrics = null
-}: {
-  mail?: any;
-  beginResult?: any;
-  completeResult?: any;
-  grantError?: Error;
-  config?: any;
-  metrics?: any;
-} = {}) {
-  const calls: Record<string, any[]> = {
-    grant: [],
-    complete: [],
-    release: []
-  };
-
-  const mailStore = {
-    async getMailById(mailId: string) {
-      assert.equal(mailId, mail.mail_id);
-      return mail;
-    },
-    async beginClaimAttachments(mailId: string) {
-      assert.equal(mailId, mail.mail_id);
-      return beginResult ?? {
-        reserved: true,
-        alreadyClaimed: false,
-        inProgress: false,
-        mail
-      };
-    },
-    async completeClaimAttachments(mailId: string) {
-      calls.complete.push(mailId);
-      return completeResult ?? {
-        claimed: true,
-        mail: createMail({
-          status: "claimed",
-          read_at: new Date("2026-06-01T00:00:00.000Z"),
-          claimed_at: new Date("2026-06-01T00:00:00.000Z")
-        })
-      };
-    },
-    async releaseClaimAttachments(mailId: string) {
-      calls.release.push(mailId);
-      return true;
-    }
-  };
-
-  const gameAdminClient = {
-    async grantMailAttachments(...args: any[]) {
-      calls.grant.push(args);
-      if (grantError) {
-        throw grantError;
-      }
-      return { ok: true };
-    }
-  };
-
-  return {
-    calls,
-    service: new MailsService(mailStore, {}, gameAdminClient, config, metrics)
-  };
-}
-
 function createClaimMetrics() {
-  const counts = { route: 0, grant: 0 };
+  const counts = { route: 0, grant: 0, unknown: 0, retryable: 0, permanent: 0 };
   return {
     counts,
     metrics: {
       recordMailClaimRouteUnavailable() { counts.route += 1; },
-      recordMailClaimGrantFailure() { counts.grant += 1; }
+      recordMailClaimGrantFailure() { counts.grant += 1; },
+      recordMailClaimResultUnknown() { counts.unknown += 1; },
+      recordMailClaimRetryableFailure() { counts.retryable += 1; },
+      recordMailClaimPermanentFailure() { counts.permanent += 1; }
     }
   };
 }
 
-test("claim returns already_claimed without downstream grant when mail is already claimed", async () => {
-  const mail = createMail({
-    status: "claimed",
-    claimed_at: new Date("2026-06-01T00:00:00.000Z")
-  });
-  const { service, calls } = createService({
-    mail,
-    beginResult: {
-      reserved: false,
-      alreadyClaimed: true,
-      inProgress: false,
-      mail
+function createService({
+  mail = createMail(),
+  grant,
+  config = {},
+  metrics = null,
+  storeOptions = {}
+}: {
+  mail?: any;
+  grant?: (...args: any[]) => Promise<any>;
+  config?: any;
+  metrics?: any;
+  storeOptions?: any;
+} = {}) {
+  const calls: any[][] = [];
+  const mailStore = new DbMailStore(null, storeOptions);
+  if (mail) {
+    mailStore.memory.set(mail.mail_id, mail);
+  }
+  const gameAdminClient = {
+    async grantMailAttachments(...args: any[]) {
+      calls.push(args);
+      if (grant) {
+        return grant(...args);
+      }
+      const [characterId, , attachments, , options] = args;
+      return {
+        ok: true,
+        applied: true,
+        traceId: options.traceId,
+        instanceId: "game-1",
+        resultSummary: { characterId, source: "mail-claim", items: attachments }
+      };
     }
+  };
+  return {
+    calls,
+    mailStore,
+    service: new MailsService(
+      mailStore,
+      {},
+      gameAdminClient,
+      { claimLeaseMs: 30_000, serviceInstanceId: "mail-test", ...config },
+      metrics
+    )
+  };
+}
+
+async function reserveWorkflow(mailStore: any, overrides: Record<string, any> = {}, options: any = {}) {
+  const attachments = [{ itemId: 1001, count: 2, binded: true }];
+  return mailStore.reserveMailClaimWorkflow({
+    mailId: "mail-1",
+    playerId: "player-1",
+    characterId: "chr_1",
+    requestId: "mail_claim:mail-1",
+    attachmentsSnapshot: attachments,
+    attachmentsFingerprint: computeGrantRequestFingerprint("mail-1", "chr_1", attachments),
+    expectedAttachments: createMail().attachments,
+    traceId: "0123456789abcdef0123456789abcdef",
+    ...overrides
+  }, {
+    leaseMs: 30_000,
+    leaseOwner: "mail-a",
+    ...options
+  });
+}
+
+test("claim returns claimed compatibility fields without downstream grant", async () => {
+  const { service, calls } = createService({
+    mail: createMail({ status: "claimed", claimed_at: new Date("2026-06-01T00:00:00.000Z") })
   });
 
   const result = await service.claim("mail-1", "player-1", "chr_1");
 
+  assert.equal(result.claim_status, "claimed");
   assert.equal(result.already_claimed, true);
   assert.equal(result.claimed, false);
-  assert.equal(calls.grant.length, 0);
-  assert.equal(calls.complete.length, 0);
-  assert.equal(calls.release.length, 0);
+  assert.equal(result._http_status, 200);
+  assert.equal(calls.length, 0);
 });
 
-test("claim rejects in-progress reservations without downstream grant", async () => {
-  const { service, calls } = createService({
-    beginResult: {
-      reserved: false,
-      alreadyClaimed: false,
-      inProgress: true,
-      mail: createMail()
-    }
-  });
+test("active claim lease returns processing instead of issuing a concurrent grant", async () => {
+  const { service, calls, mailStore } = createService();
+  await reserveWorkflow(mailStore);
 
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "MAIL_CLAIM_IN_PROGRESS");
-      assert.equal(error.getStatus?.(), 409);
-      return true;
-    }
-  );
-  assert.equal(calls.grant.length, 0);
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "processing");
+  assert.equal(result._http_status, 202);
+  assert.equal(result.request_id, "mail_claim:mail-1");
+  assert.equal(calls.length, 0);
 });
 
-test("claim rejects unreserved begin result as in-progress", async () => {
-  const { service, calls } = createService({
-    beginResult: {
-      reserved: false,
-      alreadyClaimed: false,
-      inProgress: false,
-      mail: createMail()
-    }
-  });
-
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => getErrorCode(error) === "MAIL_CLAIM_IN_PROGRESS"
-  );
-  assert.equal(calls.grant.length, 0);
-});
-
-test("claim requires authenticated character id before downstream grant", async () => {
-  const { service, calls } = createService();
+test("claim requires authenticated character id before workflow reservation", async () => {
+  const { service, calls, mailStore } = createService();
 
   await assert.rejects(
     () => service.claim("mail-1", "player-1", ""),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "MISSING_CHARACTER_ID");
-      assert.equal(error.getStatus?.(), 400);
-      return true;
-    }
+    (error: any) => error?.getResponse?.()?.error === "MISSING_CHARACTER_ID"
   );
-
-  assert.equal(calls.grant.length, 0);
-  assert.equal(calls.complete.length, 0);
-  assert.equal(calls.release.length, 0);
+  assert.equal(calls.length, 0);
+  assert.equal(await mailStore.getMailClaimWorkflow("mail-1"), null);
 });
 
-test("claim grants once with stable request id, source semantics, and completes claimed state", async () => {
-  const { service, calls } = createService();
+test("claim freezes canonical request identity and completes the workflow", async () => {
+  const { service, calls, mailStore } = createService();
 
-  const result = await service.claim("mail-1", "player-1", " chr_1 ");
+  const result = await service.claim("mail-1", "player-1", " chr_1 ", {
+    character_id: "chr_attacker",
+    mail_id: "mail_attacker",
+    request_id: "attacker-request",
+    source: "gm",
+    attachments: [{ type: "item", id: 9999, count: 9999 }]
+  });
 
-  assert.equal(calls.grant.length, 1);
-  assert.deepEqual(calls.grant[0], [
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(0, 4), [
     "chr_1",
     "mail_claim:mail-1",
     [{ itemId: 1001, count: 2, binded: true }],
-    "claim mail mail-1",
-    { targetInstanceId: "" }
+    "claim mail mail-1"
   ]);
-  assert.deepEqual(calls.complete, ["mail-1"]);
+  assert.equal(calls[0][4].targetInstanceId, "");
+  assert.match(calls[0][4].traceId, /^[0-9a-f]{32}$/);
+  assert.match(calls[0][4].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(result.claim_status, "claimed");
   assert.equal(result.claimed, true);
-  assert.equal(result.already_claimed, false);
-  assert.equal(result.status, "claimed");
+  const workflow = await mailStore.getMailClaimWorkflow("mail-1");
+  assert.equal(workflow.status, "claimed");
+  assert.equal(workflow.attempts, 1);
+  assert.ok(workflow.completed_at);
 });
 
-test("claim ignores client attempts to override the authoritative grant payload", async () => {
+test("claim ignores client attachment, request id, source, and fingerprint overrides", async () => {
   const { service, calls } = createService();
 
   await service.claim("mail-1", "player-1", "chr_1", {
-    character_id: "chr_attacker",
-    mail_id: "mail_attacker",
     request_id: "attacker-request",
     source: "gm",
     attachments: [{ type: "item", id: 9999, count: 9999 }],
     requestFingerprint: "sha256:attacker"
   });
 
-  assert.deepEqual(calls.grant[0], [
-    "chr_1",
-    "mail_claim:mail-1",
-    [{ itemId: 1001, count: 2, binded: true }],
-    "claim mail mail-1",
-    { targetInstanceId: "" }
-  ]);
+  assert.equal(calls[0][1], "mail_claim:mail-1");
+  assert.deepEqual(calls[0][2], [{ itemId: 1001, count: 2, binded: true }]);
+  assert.match(calls[0][4].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
 });
 
-test("claim passes explicit targetInstanceId to downstream grant", async () => {
+test("claim passes explicit local target and rejects it in strict discovery", async () => {
+  const local = createService({
+    config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
+  });
+  await local.service.claim("mail-1", "player-1", "chr_1", { target_instance_id: "game-server-c" });
+  assert.equal(local.calls[0][4].targetInstanceId, "game-server-c");
+
+  const strict = createService({
+    config: { localDiscoveryFallbackEnabled: false, registryDiscoveryRequired: true }
+  });
+  await assert.rejects(
+    () => strict.service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" }),
+    (error: any) => error?.getResponse?.()?.error === "CLIENT_TARGET_INSTANCE_FORBIDDEN"
+  );
+  assert.equal(strict.calls.length, 0);
+});
+
+test("claim accepts camelCase local targetInstanceId", async () => {
   const { service, calls } = createService({
     config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
   });
 
   await service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" });
 
-  assert.equal(calls.grant.length, 1);
-  assert.equal(calls.grant[0][4].targetInstanceId, "game-server-b");
-  assert.deepEqual(calls.complete, ["mail-1"]);
-  assert.equal(calls.release.length, 0);
+  assert.equal(calls[0][4].targetInstanceId, "game-server-b");
 });
 
-test("claim accepts snake_case target_instance_id for downstream grant", async () => {
-  const { service, calls } = createService({
-    config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
-  });
-
-  await service.claim("mail-1", "player-1", "chr_1", { target_instance_id: "game-server-c" });
-
-  assert.equal(calls.grant[0][4].targetInstanceId, "game-server-c");
-});
-
-test("claim rejects client targetInstanceId before reservation in strict discovery", async () => {
-  const { service, calls } = createService({
-    config: { localDiscoveryFallbackEnabled: false, registryDiscoveryRequired: true }
-  });
-
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1", { targetInstanceId: "game-server-b" }),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "CLIENT_TARGET_INSTANCE_FORBIDDEN");
-      assert.equal(error.getStatus?.(), 403);
-      return true;
-    }
-  );
-
-  assert.equal(calls.grant.length, 0);
-  assert.equal(calls.release.length, 0);
-  assert.equal(calls.complete.length, 0);
-});
-
-test("claim maps route unavailable separately and records route metric", async () => {
-  const grantError = new Error("route missing");
-  (grantError as any).code = "MAIL_CLAIM_ROUTE_UNAVAILABLE";
-  (grantError as any).errorCategory = "ROUTE_UNAVAILABLE";
-  (grantError as any).requestId = "mail_claim:mail-1";
-  (grantError as any).traceId = "0123456789abcdef0123456789abcdef";
-  let routeFailures = 0;
-  let grantFailures = 0;
-  const { service, calls } = createService({
-    grantError,
-    metrics: {
-      recordMailClaimRouteUnavailable() { routeFailures += 1; },
-      recordMailClaimGrantFailure() { grantFailures += 1; }
-    }
-  });
-
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "MAIL_CLAIM_ROUTE_UNAVAILABLE");
-      assert.equal(error.getStatus?.(), 503);
-      return true;
-    }
-  );
-
-  assert.equal(routeFailures, 1);
-  assert.equal(grantFailures, 0);
-  assert.deepEqual(calls.release, ["mail-1"]);
-});
-
-test("claim records registry discovery failure as route unavailable", async () => {
-  const grantError = new Error("registry scan failed");
-  (grantError as any).code = "REDIS_SCAN_FAILED";
-  (grantError as any).errorCategory = "ROUTE_UNAVAILABLE";
-  (grantError as any).resultState = "not_applied";
-  (grantError as any).retryable = true;
-  (grantError as any).requestPhase = "discovery";
-  (grantError as any).requestWritten = false;
+test("explicit not_applied route failure persists retryable state and reuses request identity", async () => {
+  let attempt = 0;
   const claimMetrics = createClaimMetrics();
-  const { service, calls } = createService({
-    grantError,
-    metrics: claimMetrics.metrics
+  const { service, calls, mailStore } = createService({
+    metrics: claimMetrics.metrics,
+    grant: async (...args: any[]) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const error: any = new Error("route missing");
+        error.code = "MAIL_CLAIM_ROUTE_UNAVAILABLE";
+        error.errorCategory = "ROUTE_UNAVAILABLE";
+        error.resultState = "not_applied";
+        error.retryable = true;
+        error.requestWritten = false;
+        error.traceId = args[4].traceId;
+        throw error;
+      }
+      return {
+        ok: true,
+        traceId: args[4].traceId,
+        resultSummary: { characterId: args[0], source: "mail-claim", items: args[2] }
+      };
+    }
   });
 
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "MAIL_CLAIM_ROUTE_UNAVAILABLE");
-      assert.equal(error.getStatus?.(), 503);
-      return true;
-    }
-  );
+  const failed = await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(failed.claim_status, "retryable_failure");
+  assert.equal(failed._http_status, 503);
+  assert.equal(failed.retryable, true);
+  assert.equal((await mailStore.getMailById("mail-1")).status, "claiming");
 
-  assert.deepEqual(claimMetrics.counts, { route: 1, grant: 0 });
-  assert.deepEqual(calls.release, ["mail-1"]);
+  const retried = await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(retried.claim_status, "claimed");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][1], calls[1][1]);
+  assert.deepEqual(calls[0][2], calls[1][2]);
+  assert.equal((await mailStore.getMailClaimWorkflow("mail-1")).attempts, 2);
+  assert.deepEqual(claimMetrics.counts, { route: 1, grant: 0, unknown: 0, retryable: 1, permanent: 0 });
 });
 
-test("claim records connect refusal before request write as route unavailable", async () => {
-  const grantError = new Error("connect ECONNREFUSED");
-  (grantError as any).code = "ECONNREFUSED";
-  (grantError as any).errorCategory = "ROUTE_UNAVAILABLE";
-  (grantError as any).resultState = "not_applied";
-  (grantError as any).retryable = true;
-  (grantError as any).requestPhase = "connect";
-  (grantError as any).requestWritten = false;
+test("connect refusal before request write is a retryable route failure", async () => {
   const claimMetrics = createClaimMetrics();
-  const { service, calls } = createService({
-    grantError,
-    metrics: claimMetrics.metrics
+  const { service, mailStore } = createService({
+    metrics: claimMetrics.metrics,
+    grant: async () => {
+      const error: any = new Error("connect ECONNREFUSED");
+      error.code = "ECONNREFUSED";
+      error.errorCategory = "ROUTE_UNAVAILABLE";
+      error.resultState = "not_applied";
+      error.retryable = true;
+      error.requestWritten = false;
+      throw error;
+    }
   });
 
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "MAIL_CLAIM_ROUTE_UNAVAILABLE");
-      assert.equal(error.getStatus?.(), 503);
-      return true;
-    }
-  );
+  const result = await service.claim("mail-1", "player-1", "chr_1");
 
-  assert.deepEqual(claimMetrics.counts, { route: 1, grant: 0 });
-  assert.deepEqual(calls.release, ["mail-1"]);
+  assert.equal(result.claim_status, "retryable_failure");
+  assert.equal(result._http_status, 503);
+  assert.equal(result.error, "MAIL_CLAIM_ROUTE_UNAVAILABLE");
+  assert.equal(result.message, "Mail attachment claim could not be completed yet; retry later");
+  assert.equal((await mailStore.getMailClaimWorkflow("mail-1")).last_error_code, "ECONNREFUSED");
+  assert.deepEqual(claimMetrics.counts, { route: 1, grant: 0, unknown: 0, retryable: 1, permanent: 0 });
 });
 
-test("claim records response timeout after request write as grant result failure", async () => {
-  const grantError = new Error("game-server admin read timeout");
-  (grantError as any).code = "GAME_ADMIN_READ_TIMEOUT";
-  (grantError as any).errorCategory = "RESULT_UNKNOWN";
-  (grantError as any).resultState = "unknown";
-  (grantError as any).retryable = true;
-  (grantError as any).requestPhase = "response_read";
-  (grantError as any).requestWritten = true;
+test("unclassified pre-write failure is persisted as retryable instead of releasing the mail", async () => {
+  const { service, mailStore } = createService({
+    grant: async () => {
+      const error: any = new Error("target selection unavailable");
+      error.code = "GAME_SERVER_ADMIN_TARGET_REQUIRED";
+      error.requestWritten = false;
+      throw error;
+    }
+  });
+
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "retryable_failure");
+  assert.equal(result.error, "MAIL_CLAIM_RETRYABLE_FAILURE");
+  assert.equal((await mailStore.getMailById("mail-1")).status, "claiming");
+  assert.equal((await mailStore.getMailClaimWorkflow("mail-1")).last_error_code, "GAME_SERVER_ADMIN_TARGET_REQUIRED");
+});
+
+test("response timeout remains reconciliation_pending and player retries do not grant again", async () => {
   const claimMetrics = createClaimMetrics();
-  const { service, calls } = createService({
-    grantError,
-    metrics: claimMetrics.metrics
+  const { service, calls, mailStore } = createService({
+    metrics: claimMetrics.metrics,
+    grant: async (...args: any[]) => {
+      const error: any = new Error("game-server admin read timeout");
+      error.code = "GAME_ADMIN_READ_TIMEOUT";
+      error.errorCategory = "RESULT_UNKNOWN";
+      error.resultState = "unknown";
+      error.retryable = true;
+      error.requestWritten = true;
+      error.traceId = args[4].traceId;
+      throw error;
+    }
   });
 
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
-      assert.equal(error.getStatus?.(), 502);
-      return true;
-    }
-  );
+  const first = await service.claim("mail-1", "player-1", "chr_1");
+  const second = await service.claim("mail-1", "player-1", "chr_1");
 
-  assert.deepEqual(claimMetrics.counts, { route: 0, grant: 1 });
-  assert.deepEqual(calls.release, ["mail-1"]);
+  assert.equal(first.claim_status, "reconciliation_pending");
+  assert.equal(first._http_status, 202);
+  assert.equal(first.retryable, false);
+  assert.equal(second.claim_status, "reconciliation_pending");
+  assert.equal(calls.length, 1);
+  const workflow = await mailStore.getMailClaimWorkflow("mail-1");
+  assert.equal(workflow.status, "reconciliation_pending");
+  assert.equal(workflow.last_result_state, "unknown");
+  assert.equal(workflow.lease_token, null);
+  assert.deepEqual(claimMetrics.counts, { route: 0, grant: 1, unknown: 1, retryable: 0, permanent: 0 });
 });
 
-test("claim records ITEM_NOT_FOUND business failure as grant failure", async () => {
-  const grantError = new Error("item not found");
-  (grantError as any).code = "ITEM_NOT_FOUND";
-  (grantError as any).errorCategory = "PERMANENT_FAILURE";
-  (grantError as any).resultState = "not_applied";
-  (grantError as any).retryable = false;
-  (grantError as any).requestWritten = true;
-  const claimMetrics = createClaimMetrics();
-  const { service, calls } = createService({
-    grantError,
-    metrics: claimMetrics.metrics
+test("permanent business failure remains explainable and retries the frozen snapshot", async () => {
+  let attempt = 0;
+  const { service, calls, mailStore } = createService({
+    grant: async (...args: any[]) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const error: any = new Error("item not found");
+        error.code = "ITEM_NOT_FOUND";
+        error.errorCategory = "PERMANENT_FAILURE";
+        error.resultState = "not_applied";
+        error.retryable = false;
+        error.requestWritten = true;
+        throw error;
+      }
+      return {
+        ok: true,
+        traceId: args[4].traceId,
+        resultSummary: { characterId: args[0], source: "mail-claim", items: args[2] }
+      };
+    }
   });
 
-  await assert.rejects(
-    () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
-      assert.equal(error.getStatus?.(), 502);
-      return true;
-    }
-  );
+  const failed = await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(failed.claim_status, "permanent_failure");
+  assert.equal(failed._http_status, 422);
+  assert.equal(failed.error, "ITEM_NOT_FOUND");
 
-  assert.equal(calls.grant.length, 1);
-  assert.deepEqual(claimMetrics.counts, { route: 0, grant: 1 });
-  assert.deepEqual(calls.release, ["mail-1"]);
-  assert.equal(calls.complete.length, 0);
+  mailStore.memory.get("mail-1").attachments = [{ type: "item", id: 9999, count: 99 }];
+  const retried = await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(retried.claim_status, "claimed");
+  assert.deepEqual(calls[1][2], [{ itemId: 1001, count: 2, binded: true }]);
+  assert.equal(calls[1][1], "mail_claim:mail-1");
 });
 
-test("claim releases reservation when registry has multiple targets but targetInstanceId is missing", async () => {
-  const grantError = new Error("multiple game-server admin endpoints are available; targetInstanceId is required");
-  (grantError as any).code = "GAME_SERVER_ADMIN_TARGET_REQUIRED";
-  const { service, calls } = createService({ grantError });
+test("started workflow can finish from its frozen snapshot after hard mail deletion", async () => {
+  let attempt = 0;
+  const { service, mailStore } = createService({
+    grant: async (...args: any[]) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const error: any = new Error("inventory busy");
+        error.code = "INVENTORY_BUSY";
+        error.errorCategory = "RETRYABLE_FAILURE";
+        error.resultState = "not_applied";
+        error.retryable = true;
+        throw error;
+      }
+      return {
+        ok: true,
+        traceId: args[4].traceId,
+        resultSummary: { characterId: args[0], source: "mail-claim", items: args[2] }
+      };
+    }
+  });
+
+  await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(await mailStore.deleteMail("mail-1"), true);
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "claimed");
+  assert.equal(result.status, "claimed");
+  assert.equal((await mailStore.getMailClaimWorkflow("mail-1")).status, "claimed");
+  assert.equal(await mailStore.getMailById("mail-1"), null);
+});
+
+test("existing workflow rejects a different authenticated character", async () => {
+  const { service, mailStore, calls } = createService();
+  await reserveWorkflow(mailStore, {}, { leaseMs: 1 });
+  mailStore.memoryClaimWorkflows.get("mail-1").lease_expires_at = new Date(Date.now() - 1);
+
+  const result = await service.claim("mail-1", "player-1", "chr_2");
+
+  assert.equal(result.claim_status, "permanent_failure");
+  assert.equal(result.error, "MAIL_CLAIM_CHARACTER_MISMATCH");
+  assert.equal(result._http_status, 409);
+  assert.equal(calls.length, 0);
+});
+
+test("mail completion persistence failure never releases a successfully granted workflow", async () => {
+  const { service, mailStore, calls } = createService();
+  mailStore.completeMailClaimWorkflow = async () => {
+    throw new Error("database commit unavailable");
+  };
 
   await assert.rejects(
     () => service.claim("mail-1", "player-1", "chr_1"),
-    (error: any) => {
-      assert.equal(getErrorCode(error), "GAME_SERVER_GRANT_FAILED");
-      assert.equal(error.getStatus?.(), 502);
-      return true;
-    }
+    /database commit unavailable/
   );
 
-  assert.equal(calls.grant.length, 1);
-  assert.equal(calls.grant[0][4].targetInstanceId, "");
-  assert.deepEqual(calls.release, ["mail-1"]);
-  assert.equal(calls.complete.length, 0);
+  assert.equal(calls.length, 1);
+  const workflow = await mailStore.getMailClaimWorkflow("mail-1");
+  assert.equal(workflow.status, "processing");
+  assert.ok(workflow.lease_token);
+  assert.equal((await mailStore.getMailById("mail-1")).status, "claiming");
+});
+
+test("late failure from a stale attempt reports the current claimed result", async () => {
+  const routeError: any = new Error("late route error");
+  routeError.code = "ROUTE_UNAVAILABLE";
+  routeError.errorCategory = "ROUTE_UNAVAILABLE";
+  routeError.resultState = "not_applied";
+  routeError.retryable = true;
+  routeError.requestWritten = false;
+  const { service, mailStore } = createService({
+    grant: async () => { throw routeError; }
+  });
+  const originalRecordFailure = mailStore.recordMailClaimWorkflowFailure.bind(mailStore);
+  mailStore.recordMailClaimWorkflowFailure = async (mailId: string, leaseToken: string, failure: any) => {
+    await mailStore.completeMailClaimWorkflow(mailId, leaseToken, {
+      resultSummary: { characterId: "chr_1", source: "mail-claim", items: [] }
+    });
+    return originalRecordFailure(mailId, leaseToken, failure);
+  };
+
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "claimed");
+  assert.equal(result._http_status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.already_claimed, true);
+  assert.equal(result.error, undefined);
+});
+
+test("claim controller applies workflow HTTP status without leaking internal metadata", async () => {
+  const controller = new MailsController(
+    {
+      async claim() {
+        return { _http_status: 202, ok: true, claim_status: "reconciliation_pending" };
+      }
+    } as any,
+    { mailPlayerAuthRequired: false },
+    null
+  );
+  const response = {
+    statusCode: 0,
+    status(value: number) { this.statusCode = value; }
+  };
+
+  const result = await controller.claim(
+    "mail-1",
+    {},
+    { player_id: "player-1", character_id: "chr_1" },
+    response
+  );
+
+  assert.equal(response.statusCode, 202);
+  assert.equal(result.claim_status, "reconciliation_pending");
+  assert.equal("_http_status" in result, false);
+});
+
+test("claim responses never expose persisted endpoint, Redis, or token diagnostics", async () => {
+  const sensitiveMessage =
+    `connect ECONNREFUSED 127.0.0.1:7500 redis://admin:secret@127.0.0.1:6379 ` +
+    `GAME_ADMIN_TOKEN=token-like-secret ${"x".repeat(600)}`;
+  const { service, mailStore, calls } = createService({
+    grant: async () => {
+      const error: any = new Error(sensitiveMessage);
+      error.code = "ECONNRESET";
+      error.errorCategory = "RESULT_UNKNOWN";
+      error.resultState = "unknown";
+      error.retryable = true;
+      error.requestWritten = true;
+      throw error;
+    }
+  });
+
+  const first = await service.claim("mail-1", "player-1", "chr_1");
+  const workflow = await mailStore.getMailClaimWorkflow("mail-1");
+  const controller = new MailsController(
+    service,
+    { mailPlayerAuthRequired: false },
+    null
+  );
+  const response = {
+    statusCode: 0,
+    status(value: number) { this.statusCode = value; }
+  };
+  const second = await controller.claim(
+    "mail-1",
+    {},
+    { player_id: "player-1", character_id: "chr_1" },
+    response
+  );
+
+  assert.equal(workflow.last_error_message, sensitiveMessage.slice(0, 512));
+  assert.equal(first.error, "MAIL_CLAIM_RECONCILIATION_PENDING");
+  assert.equal(first.claim_status, "reconciliation_pending");
+  assert.equal(first._http_status, 202);
+  assert.equal(second.error, "MAIL_CLAIM_RECONCILIATION_PENDING");
+  assert.equal(second.claim_status, "reconciliation_pending");
+  assert.equal(response.statusCode, 202);
+  assert.equal(calls.length, 1);
+  for (const playerResponse of [first, second]) {
+    const serialized = JSON.stringify(playerResponse);
+    assert.doesNotMatch(serialized, /127\.0\.0\.1|redis:\/\/|GAME_ADMIN_TOKEN|token-like-secret|ECONNREFUSED/);
+    assert.equal(playerResponse.message, "Mail attachment claim result is being verified");
+  }
 });

@@ -40,7 +40,8 @@ const CONFIG_ENV_NAMES = [
   "MAIL_OUTBOX_SENT_RETENTION_DAYS",
   "MAIL_OUTBOX_TERMINAL_RETENTION_DAYS",
   "MAIL_OUTBOX_CLEANUP_INTERVAL_MS",
-  "MAIL_OUTBOX_CLEANUP_BATCH_SIZE"
+  "MAIL_OUTBOX_CLEANUP_BATCH_SIZE",
+  "MAIL_CLAIM_LEASE_MS"
 ];
 
 async function withEnv(values, callback) {
@@ -103,6 +104,17 @@ test("mail-service reads bounded notification outbox settings", async () => {
     assert.equal(config.outboxMaxAttempts, 12);
     assert.equal(config.outboxBackoffJitterRatio, 0.35);
   });
+});
+
+test("mail-service reads bounded attachment claim lease", async () => {
+  await withEnv({ MAIL_CLAIM_LEASE_MS: "45000" }, (getConfig) => {
+    assert.equal(getConfig().claimLeaseMs, 45000);
+  });
+
+  await assert.rejects(
+    () => withEnv({ MAIL_CLAIM_LEASE_MS: "500" }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_LEASE_MS must be an integer between 1000 and 300000/
+  );
 });
 
 test("mail-service rejects invalid notification outbox settings", async () => {

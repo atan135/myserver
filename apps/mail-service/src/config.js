@@ -248,6 +248,7 @@ export function getConfig() {
     outboxTerminalRetentionDays: parseIntegerInRange("MAIL_OUTBOX_TERMINAL_RETENTION_DAYS", process.env.MAIL_OUTBOX_TERMINAL_RETENTION_DAYS, 30, 1, 3650),
     outboxCleanupIntervalMs: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_INTERVAL_MS", process.env.MAIL_OUTBOX_CLEANUP_INTERVAL_MS, 3_600_000, 10_000, 86_400_000),
     outboxCleanupBatchSize: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_BATCH_SIZE", process.env.MAIL_OUTBOX_CLEANUP_BATCH_SIZE, 500, 1, 10_000),
+    claimLeaseMs: parseIntegerInRange("MAIL_CLAIM_LEASE_MS", process.env.MAIL_CLAIM_LEASE_MS, 30_000, 1000, 300_000),
     dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
     databaseUrl:
       process.env.DATABASE_URL ||

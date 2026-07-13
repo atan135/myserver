@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
 
+import { DbMailStore } from "./db-store.js";
 import {
   MESSAGE_TYPE,
   buildAdminAuthBody,
@@ -14,6 +15,15 @@ import {
   normalizeServiceActorCandidate,
   sendRequest
 } from "./game-admin-client.js";
+import { configureLogger } from "./logger.js";
+import { MailsService } from "./mails/mails.service.js";
+
+configureLogger({
+  appName: "mail-game-admin-test",
+  logEnableConsole: false,
+  logEnableFile: false,
+  logLevel: "fatal"
+});
 
 const config = {
   gameAdminToken: "secret-admin-token",
@@ -193,6 +203,67 @@ async function createGrantCaptureServer(label, onGrant = null) {
     port: server.address().port,
     requests,
     close: () => new Promise((resolve) => server.close(resolve))
+  };
+}
+
+function createCrossLayerClaimService(serverPort, characterId, mailId) {
+  const routeKey = gameOnlineRouteKey("", characterId);
+  const gameAdminClient = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers(
+    [createGameServerInstance("game-server-a", serverPort)],
+    new Map([[routeKey, onlineRoute(characterId, "game-server-a")]])
+  ));
+  const mailStore = new DbMailStore(null);
+  mailStore.memory.set(mailId, {
+    id: 1,
+    mail_id: mailId,
+    sender_type: "system",
+    sender_id: "system",
+    sender_name: "system",
+    from_player_id: "system",
+    to_player_id: "player-1",
+    title: "Reward",
+    content: "",
+    attachments: [{ type: "item", id: 1001, count: 1 }],
+    mail_type: "system",
+    created_by_type: "system",
+    created_by_id: "system",
+    created_by_name: "system",
+    status: "unread",
+    created_at: new Date(),
+    read_at: null,
+    claimed_at: null,
+    expires_at: null
+  });
+  let observedError = null;
+  const observingGameAdminClient = {
+    async grantMailAttachments(...args) {
+      try {
+        return await gameAdminClient.grantMailAttachments(...args);
+      } catch (error) {
+        observedError = error;
+        throw error;
+      }
+    }
+  };
+  return {
+    mailStore,
+    getObservedError: () => observedError,
+    service: new MailsService(
+      mailStore,
+      {},
+      observingGameAdminClient,
+      { claimLeaseMs: 30_000, serviceInstanceId: "mail-test" },
+      null
+    )
   };
 }
 
@@ -754,6 +825,75 @@ test("GameAdminClient does not retry after response timeout with request written
   }
 });
 
+test("corrupt applied response identity becomes reconciliation_pending without player regrant", async () => {
+  const characterId = "chr_1";
+  const mailId = "mail-corrupt-identity";
+  const server = await createGrantCaptureServer("game-server-a", (request) =>
+    encodeGrantResponse({ ...request, requestId: `${request.requestId}:corrupt` })
+  );
+
+  try {
+    const { service, mailStore, getObservedError } = createCrossLayerClaimService(
+      server.port,
+      characterId,
+      mailId
+    );
+
+    const first = await service.claim(mailId, "player-1", characterId);
+    const second = await service.claim(mailId, "player-1", characterId);
+
+    assert.equal(first.claim_status, "reconciliation_pending");
+    assert.equal(first._http_status, 202);
+    assert.equal(first.error, "MAIL_CLAIM_RECONCILIATION_PENDING");
+    assert.equal(second.claim_status, "reconciliation_pending");
+    assert.equal(server.requests.length, 1);
+    const workflow = await mailStore.getMailClaimWorkflow(mailId);
+    assert.equal(workflow.status, "reconciliation_pending");
+    assert.equal(workflow.last_error_category, "RESULT_UNKNOWN");
+    assert.equal(workflow.last_result_state, "unknown");
+    assert.equal(getObservedError().requestWritten, true);
+    assert.equal(getObservedError().requestPhase, "response_validation");
+    assert.equal(getObservedError().retryable, true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("malformed grant protobuf becomes reconciliation_pending without player regrant", async () => {
+  const characterId = "chr_1";
+  const mailId = "mail-malformed-protobuf";
+  const server = await createGrantCaptureServer(
+    "game-server-a",
+    () => Buffer.from([0x0f])
+  );
+
+  try {
+    const { service, mailStore, getObservedError } = createCrossLayerClaimService(
+      server.port,
+      characterId,
+      mailId
+    );
+
+    const first = await service.claim(mailId, "player-1", characterId);
+    const second = await service.claim(mailId, "player-1", characterId);
+
+    assert.equal(first.claim_status, "reconciliation_pending");
+    assert.equal(first._http_status, 202);
+    assert.equal(first.error, "MAIL_CLAIM_RECONCILIATION_PENDING");
+    assert.equal(second.claim_status, "reconciliation_pending");
+    assert.equal(server.requests.length, 1);
+    const workflow = await mailStore.getMailClaimWorkflow(mailId);
+    assert.equal(workflow.status, "reconciliation_pending");
+    assert.equal(workflow.last_error_code, "INVALID_PROTOBUF_RESPONSE");
+    assert.equal(workflow.last_error_category, "RESULT_UNKNOWN");
+    assert.equal(workflow.last_result_state, "unknown");
+    assert.equal(getObservedError().requestWritten, true);
+    assert.equal(getObservedError().requestPhase, "response_validation");
+  } finally {
+    await server.close();
+  }
+});
+
 test("GameAdminClient preserves validated business error code without route retry", async () => {
   const characterId = "chr_1";
   const routeKey = gameOnlineRouteKey("", characterId);
@@ -793,6 +933,9 @@ test("GameAdminClient preserves validated business error code without route retr
         assert.equal(error.errorCategory, "PERMANENT_FAILURE");
         assert.equal(error.resultState, "not_applied");
         assert.equal(error.retryable, false);
+        assert.equal(error.requestWritten, true);
+        assert.equal(error.requestPhase, "response_validation");
+        assert.equal(error.structuredGrantFailure, true);
         return true;
       }
     );

@@ -1,6 +1,8 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { randomBytes } from "node:crypto";
 
-import { badGateway, badRequest, conflict, forbidden, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
+import { badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
+import { computeGrantRequestFingerprint, normalizeGrantItems } from "../game-admin-client.js";
 import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
 import {
@@ -123,6 +125,109 @@ function normalizeMailAttachmentItems(attachments: any) {
       binded: attachment.binded === true
     };
   });
+}
+
+function classifyClaimFailure(error: any) {
+  const resultState = error?.resultState || (error?.requestWritten === true ? "unknown" : "not_applied");
+  const errorCategory = error?.errorCategory || (resultState === "unknown" ? "RESULT_UNKNOWN" : "RETRYABLE_FAILURE");
+  const permanentContractError = new Set([
+    "GRANT_REQUEST_FINGERPRINT_MISMATCH",
+    "INVALID_GRANT_ITEMS"
+  ]).has(error?.code);
+  if (resultState === "unknown" || errorCategory === "RESULT_UNKNOWN") {
+    return { status: "reconciliation_pending", httpStatus: 202, retryable: false, resultState: "unknown", errorCategory };
+  }
+  if (
+    errorCategory === "PERMANENT_FAILURE" ||
+    error?.retryable === false ||
+    permanentContractError
+  ) {
+    return {
+      status: "permanent_failure",
+      httpStatus: 422,
+      retryable: false,
+      resultState: "not_applied",
+      errorCategory: permanentContractError ? "PERMANENT_FAILURE" : errorCategory
+    };
+  }
+  return { status: "retryable_failure", httpStatus: 503, retryable: true, resultState: "not_applied", errorCategory };
+}
+
+function claimStatusHttpStatus(claimStatus: string) {
+  if (claimStatus === "processing" || claimStatus === "reconciliation_pending") return 202;
+  if (claimStatus === "retryable_failure") return 503;
+  if (claimStatus === "permanent_failure") return 422;
+  return 200;
+}
+
+function claimStatusIsOk(claimStatus: string) {
+  return claimStatus === "claimed" || claimStatus === "processing" || claimStatus === "reconciliation_pending";
+}
+
+const PUBLIC_PERMANENT_CLAIM_ERRORS = new Map([
+  ["ITEM_NOT_FOUND", "A mail attachment is currently unavailable"],
+  ["INVENTORY_FULL", "The character inventory does not have enough space"],
+  ["BACKPACK_FULL", "The character inventory does not have enough space"],
+  ["MAIL_CLAIM_CHARACTER_MISMATCH", "Continue this claim with the character that started it"]
+]);
+
+function publicClaimError(claimStatus: string, internalErrorCode: any, errorCategory: any) {
+  if (claimStatus === "retryable_failure") {
+    return errorCategory === "ROUTE_UNAVAILABLE"
+      ? "MAIL_CLAIM_ROUTE_UNAVAILABLE"
+      : "MAIL_CLAIM_RETRYABLE_FAILURE";
+  }
+  if (claimStatus === "permanent_failure") {
+    return PUBLIC_PERMANENT_CLAIM_ERRORS.has(internalErrorCode)
+      ? internalErrorCode
+      : "MAIL_CLAIM_PERMANENT_FAILURE";
+  }
+  if (claimStatus === "reconciliation_pending") {
+    return "MAIL_CLAIM_RECONCILIATION_PENDING";
+  }
+  return undefined;
+}
+
+function publicClaimMessage(claimStatus: string, publicErrorCode: any) {
+  if (claimStatus === "processing") return "Mail attachment claim is processing";
+  if (claimStatus === "retryable_failure") return "Mail attachment claim could not be completed yet; retry later";
+  if (claimStatus === "reconciliation_pending") return "Mail attachment claim result is being verified";
+  if (claimStatus === "permanent_failure") {
+    return PUBLIC_PERMANENT_CLAIM_ERRORS.get(publicErrorCode) || "Mail attachments cannot be claimed in the current state";
+  }
+  return undefined;
+}
+
+function claimResponse(workflow: any, mail: any, options: any = {}) {
+  const claimStatus = options.claimStatus || workflow?.status || (mail?.status === "claimed" ? "claimed" : "processing");
+  const isClaimed = claimStatus === "claimed";
+  const attachments = workflow?.attachments_snapshot ?? mail?.attachments ?? null;
+  const errorCategory = options.errorCategory || workflow?.last_error_category || undefined;
+  const internalErrorCode = options.errorCode || workflow?.last_error_code || undefined;
+  const publicErrorCode = publicClaimError(claimStatus, internalErrorCode, errorCategory);
+  return {
+    _http_status: options.httpStatus ?? claimStatusHttpStatus(claimStatus),
+    ok: options.ok ?? claimStatusIsOk(claimStatus),
+    mail_id: workflow?.mail_id || mail?.mail_id,
+    claim_status: claimStatus,
+    claimed: options.claimed ?? false,
+    already_claimed: options.alreadyClaimed ?? isClaimed,
+    processing: claimStatus === "processing",
+    retryable: options.retryable ?? workflow?.last_error_retryable ?? false,
+    request_id: workflow?.claim_request_id,
+    character_id: workflow?.character_id,
+    attachments_fingerprint: workflow?.attachments_fingerprint,
+    attempts: workflow?.attempts || 0,
+    error: publicErrorCode,
+    error_category: errorCategory,
+    result_state: options.resultState || workflow?.last_result_state || (isClaimed ? "applied" : undefined),
+    message: publicClaimMessage(claimStatus, publicErrorCode),
+    status: isClaimed ? "claimed" : (mail?.status || "claiming"),
+    attachments,
+    read_at: mail?.read_at || null,
+    claimed_at: mail?.claimed_at || workflow?.completed_at || null,
+    completed_at: workflow?.completed_at || null
+  };
 }
 
 @Injectable()
@@ -475,107 +580,200 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
-      const mail = await this.mailStore.getMailById(mailId);
-      if (!mail) {
-        throw notFound("MAIL_NOT_FOUND", "Mail not found");
+      let mail = null;
+      let existingWorkflow = await this.mailStore.getMailClaimWorkflow(mailId);
+      let normalizedAttachments;
+      let attachmentsFingerprint;
+      const requestId = existingWorkflow?.claim_request_id || `mail_claim:${mailId}`;
+
+      if (existingWorkflow) {
+        normalizedAttachments = existingWorkflow.attachments_snapshot;
+        attachmentsFingerprint = existingWorkflow.attachments_fingerprint;
+      } else {
+        mail = await this.mailStore.getMailById(mailId);
+        if (!mail) {
+          throw notFound("MAIL_NOT_FOUND", "Mail not found");
+        }
+        if (mail.to_player_id !== authenticatedPlayerId) {
+          throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
+        }
+        if (mail.status === "claimed" || mail.claimed_at) {
+          return claimResponse(null, mail, { claimStatus: "claimed", alreadyClaimed: true });
+        }
+        if (isExpired(mail.expires_at)) {
+          throw gone("MAIL_EXPIRED", "Mail has expired");
+        }
+        if (!hasAttachments(mail.attachments)) {
+          throw conflict("MAIL_HAS_NO_ATTACHMENTS", "Mail does not contain claimable attachments");
+        }
+        try {
+          normalizedAttachments = normalizeGrantItems(normalizeMailAttachmentItems(mail.attachments));
+        } catch (error: any) {
+          throw badRequest("UNSUPPORTED_ATTACHMENT_FORMAT", error.message);
+        }
+        attachmentsFingerprint = computeGrantRequestFingerprint(mailId, characterId, normalizedAttachments);
       }
 
-      if (mail.to_player_id !== authenticatedPlayerId) {
+      const traceId = randomBytes(16).toString("hex");
+      const claimBegin = await this.mailStore.reserveMailClaimWorkflow({
+        mailId,
+        playerId: authenticatedPlayerId,
+        characterId,
+        requestId,
+        attachmentsSnapshot: normalizedAttachments,
+        attachmentsFingerprint,
+        expectedAttachments: mail?.attachments,
+        traceId
+      }, {
+        leaseMs: this.config.claimLeaseMs || 30_000,
+        leaseOwner: this.config.serviceInstanceId || "mail-service"
+      });
+      existingWorkflow = claimBegin.workflow;
+
+      if (claimBegin.notFound) {
+        throw notFound("MAIL_NOT_FOUND", "Mail not found");
+      }
+      if (claimBegin.ownerMismatch) {
         throw forbidden("FORBIDDEN", "You can only claim attachments from your own mail");
       }
-
-      if (isExpired(mail.expires_at)) {
+      if (claimBegin.expired) {
         throw gone("MAIL_EXPIRED", "Mail has expired");
       }
-
-      if (!hasAttachments(mail.attachments)) {
-        throw conflict("MAIL_HAS_NO_ATTACHMENTS", "Mail does not contain claimable attachments");
+      if (claimBegin.attachmentChanged) {
+        throw conflict("MAIL_CHANGED_DURING_CLAIM", "Mail attachments changed while the claim was starting; retry the request");
       }
-
-      let normalizedAttachments;
-      try {
-        normalizedAttachments = normalizeMailAttachmentItems(mail.attachments);
-      } catch (error: any) {
-        throw badRequest("UNSUPPORTED_ATTACHMENT_FORMAT", error.message);
+      if (claimBegin.characterMismatch) {
+        return claimResponse(existingWorkflow, claimBegin.mail, {
+          claimStatus: "permanent_failure",
+          httpStatus: 409,
+          ok: false,
+          retryable: false,
+          errorCode: "MAIL_CLAIM_CHARACTER_MISMATCH",
+          errorCategory: "PERMANENT_FAILURE",
+          resultState: "not_applied"
+        });
       }
-
-      const claimBegin = await this.mailStore.beginClaimAttachments(mailId);
-      if (!claimBegin.mail) {
-        throw notFound("MAIL_NOT_FOUND", "Mail not found");
-      }
-
       if (claimBegin.alreadyClaimed) {
-        const currentMail = claimBegin.mail;
-        return {
-          ok: true,
-          mail_id: currentMail.mail_id,
-          claimed: false,
-          already_claimed: true,
-          status: currentMail.status,
-          attachments: currentMail.attachments,
-          read_at: currentMail.read_at,
-          claimed_at: currentMail.claimed_at
-        };
+        return claimResponse(existingWorkflow, claimBegin.mail || mail, {
+          claimStatus: "claimed",
+          alreadyClaimed: true
+        });
+      }
+      if (claimBegin.reconciliationPending) {
+        return claimResponse(existingWorkflow, claimBegin.mail, {
+          claimStatus: "reconciliation_pending",
+          httpStatus: 202,
+          retryable: false
+        });
+      }
+      if (claimBegin.inProgress || !claimBegin.acquired) {
+        return claimResponse(existingWorkflow, claimBegin.mail, {
+          claimStatus: "processing",
+          httpStatus: 202,
+          retryable: false
+        });
       }
 
-      if (claimBegin.inProgress || !claimBegin.reserved) {
-        throw conflict("MAIL_CLAIM_IN_PROGRESS", "Mail attachments are being claimed");
-      }
-
-      let result;
+      let grantResult;
       try {
-        await this.gameAdminClient.grantMailAttachments(
-          characterId,
-          `mail_claim:${mail.mail_id}`,
-          normalizedAttachments,
-          `claim mail ${mail.mail_id}`,
-          { targetInstanceId }
+        grantResult = await this.gameAdminClient.grantMailAttachments(
+          existingWorkflow.character_id,
+          existingWorkflow.claim_request_id,
+          existingWorkflow.attachments_snapshot,
+          `claim mail ${mailId}`,
+          {
+            targetInstanceId,
+            traceId,
+            requestFingerprint: existingWorkflow.attachments_fingerprint
+          }
         );
       } catch (error: any) {
-        await this.mailStore.releaseClaimAttachments(mailId);
-        const isRouteFailure = error?.errorCategory === "ROUTE_UNAVAILABLE";
+        const classification = classifyClaimFailure(error);
+        const failureResult = await this.mailStore.recordMailClaimWorkflowFailure(
+          mailId,
+          existingWorkflow.lease_token,
+          {
+            status: classification.status,
+            traceId: error?.traceId || traceId,
+            errorCode: error?.code || "GAME_SERVER_GRANT_FAILED",
+            errorCategory: classification.errorCategory,
+            resultState: classification.resultState,
+            retryable: classification.retryable,
+            message: error?.message || "game-server attachment grant failed",
+            instanceId: error?.instanceId || ""
+          }
+        );
+        const currentWorkflow = failureResult.workflow || await this.mailStore.getMailClaimWorkflow(mailId);
+        const isRouteFailure = classification.errorCategory === "ROUTE_UNAVAILABLE";
         if (isRouteFailure) {
           this.metrics?.recordMailClaimRouteUnavailable?.();
         } else {
           this.metrics?.recordMailClaimGrantFailure?.();
         }
+        if (classification.status === "reconciliation_pending") {
+          this.metrics?.recordMailClaimResultUnknown?.();
+        } else if (classification.status === "retryable_failure") {
+          this.metrics?.recordMailClaimRetryableFailure?.();
+        } else {
+          this.metrics?.recordMailClaimPermanentFailure?.();
+        }
         log("error", isRouteFailure ? "mail.claim_route_unavailable" : "mail.claim_grant_failed", {
           mailId,
           instanceId: error?.instanceId || "",
-          requestId: error?.requestId || `mail_claim:${mail.mail_id}`,
-          traceId: error?.traceId || "",
-          errorCode: error?.code || "GAME_SERVER_GRANT_FAILED"
+          requestId: error?.requestId || existingWorkflow.claim_request_id,
+          traceId: error?.traceId || traceId,
+          errorCode: error?.code || "GAME_SERVER_GRANT_FAILED",
+          claimStatus: currentWorkflow?.status,
+          persisted: failureResult.updated
         });
-        if (isRouteFailure) {
-          throw serviceUnavailable(
-            "MAIL_CLAIM_ROUTE_UNAVAILABLE",
-            "The authoritative game-server route is temporarily unavailable"
-          );
+        if (!failureResult.updated) {
+          return claimResponse(currentWorkflow, claimBegin.mail, {
+            claimStatus: currentWorkflow?.status || "processing",
+            alreadyClaimed: currentWorkflow?.status === "claimed"
+          });
         }
-        throw badGateway("GAME_SERVER_GRANT_FAILED", error.message);
+        return claimResponse(currentWorkflow, claimBegin.mail, {
+          claimStatus: currentWorkflow?.status || classification.status,
+          httpStatus: classification.httpStatus,
+          ok: classification.status === "reconciliation_pending",
+          retryable: classification.retryable,
+          errorCode: error?.code || "GAME_SERVER_GRANT_FAILED",
+          errorCategory: classification.errorCategory,
+          resultState: classification.resultState
+        });
       }
 
-      result = await this.mailStore.completeClaimAttachments(mailId);
-
+      const result = await this.mailStore.completeMailClaimWorkflow(
+        mailId,
+        existingWorkflow.lease_token,
+        {
+          traceId: grantResult?.traceId || traceId,
+          resultSummary: grantResult?.resultSummary || null,
+          instanceId: grantResult?.instanceId || ""
+        }
+      );
       const currentMail = result.mail || mail;
+      if (!result.claimed) {
+        const currentWorkflow = result.workflow || await this.mailStore.getMailClaimWorkflow(mailId);
+        return claimResponse(currentWorkflow, currentMail, {
+          claimStatus: currentWorkflow?.status || "processing",
+          alreadyClaimed: currentWorkflow?.status === "claimed"
+        });
+      }
 
-      log("info", result.claimed ? "mail.claimed" : "mail.claimed_idempotent", {
+      log("info", "mail.claimed", {
         mailId,
         playerId: authenticatedPlayerId,
-        characterId,
-        attachmentCount: Array.isArray(currentMail.attachments) ? currentMail.attachments.length : 1
+        characterId: existingWorkflow.character_id,
+        requestId: existingWorkflow.claim_request_id,
+        attachmentCount: existingWorkflow.attachments_snapshot.length
       });
 
-      return {
-        ok: true,
-        mail_id: currentMail.mail_id,
-        claimed: result.claimed,
-        already_claimed: !result.claimed,
-        status: currentMail.status,
-        attachments: currentMail.attachments,
-        read_at: currentMail.read_at,
-        claimed_at: currentMail.claimed_at
-      };
+      return claimResponse(result.workflow, currentMail, {
+        claimStatus: "claimed",
+        claimed: true,
+        alreadyClaimed: false
+      });
     } catch (error: any) {
       if (error?.getStatus?.()) {
         throw error;

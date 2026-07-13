@@ -63,6 +63,9 @@ export class DbMailStore {
     this.outboxLeaseOwner = options.outboxLeaseOwner || "mail-service";
     this.memory = new Map();
     this.memoryNextId = 1;
+    this.memoryClaimWorkflows = new Map();
+    this.memoryClaimWorkflowRequestIds = new Map();
+    this.memoryClaimWorkflowNextId = 1;
     this.memoryOutbox = new Map();
     this.memoryOutboxNextId = 1;
   }
@@ -556,169 +559,434 @@ export class DbMailStore {
     return result.rowCount > 0;
   }
 
-  async claimAttachments(mailId) {
+  async getMailClaimWorkflow(mailId) {
     if (!this.pool) {
-      const mail = this.memory.get(mailId);
-      if (!mail) {
-        return {
-          claimed: false,
-          mail: null
-        };
-      }
-
-      const claimed = mail.status !== "claimed" && !mail.claimed_at;
-      if (claimed) {
-        const now = new Date();
-        mail.status = "claimed";
-        mail.read_at ||= now;
-        mail.claimed_at ||= now;
-        this.memory.set(mailId, mail);
-      }
-
-      return {
-        claimed,
-        mail: this.parseMailRow(mail)
-      };
+      return this.parseClaimWorkflowRow(this.memoryClaimWorkflows.get(mailId));
     }
 
-    const updateSql = `UPDATE mails
-      SET status = 'claimed',
-          read_at = COALESCE(read_at, current_timestamp),
-          claimed_at = COALESCE(claimed_at, current_timestamp)
-      WHERE mail_id = $1
-        AND status <> 'claimed'
-        AND claimed_at IS NULL`;
-
-    const updateResult = await this.pool.query(updateSql, [mailId]);
-    const mail = await this.getMailById(mailId);
-
-    return {
-      claimed: updateResult.rowCount > 0,
-      mail
-    };
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mail_claim_workflows WHERE mail_id = $1`,
+      [mailId]
+    );
+    return this.parseClaimWorkflowRow(rows[0]);
   }
 
-  async beginClaimAttachments(mailId) {
+  async reserveMailClaimWorkflow(input, options = {}) {
+    const leaseMs = options.leaseMs || 30_000;
+    const leaseOwner = options.leaseOwner || "mail-service";
+    const leaseToken = options.leaseToken || randomUUID();
+    const now = new Date();
+    const leaseExpiresAt = new Date(now.getTime() + leaseMs);
+
     if (!this.pool) {
-      const mail = this.memory.get(mailId);
-      if (!mail) {
-        return {
-          reserved: false,
-          alreadyClaimed: false,
-          inProgress: false,
-          mail: null
-        };
+      const existing = this.memoryClaimWorkflows.get(input.mailId);
+      if (existing) {
+        return this.reserveExistingClaimWorkflowMemory(existing, input, {
+          leaseOwner,
+          leaseToken,
+          leaseExpiresAt,
+          now
+        });
       }
 
-      if (mail.status === "claimed" || mail.claimed_at) {
-        return {
-          reserved: false,
-          alreadyClaimed: true,
-          inProgress: false,
-          mail: this.parseMailRow(mail)
-        };
+      const mail = this.memory.get(input.mailId);
+      const precondition = this.validateNewClaimWorkflowMail(mail, input, now);
+      if (precondition) {
+        return precondition;
       }
 
-      if (mail.status === "claiming") {
-        return {
-          reserved: false,
-          alreadyClaimed: false,
-          inProgress: true,
-          mail: this.parseMailRow(mail)
-        };
+      const workflow = {
+        id: this.memoryClaimWorkflowNextId++,
+        mail_id: input.mailId,
+        player_id: input.playerId,
+        claim_request_id: input.requestId,
+        character_id: input.characterId,
+        attachments_snapshot: cloneAttachments(input.attachmentsSnapshot),
+        attachments_fingerprint: input.attachmentsFingerprint,
+        status: "processing",
+        attempts: 1,
+        lease_owner: leaseOwner,
+        lease_token: leaseToken,
+        lease_expires_at: leaseExpiresAt,
+        last_trace_id: input.traceId,
+        last_error_code: null,
+        last_error_category: null,
+        last_result_state: null,
+        last_error_retryable: null,
+        last_error_message: null,
+        result_summary: null,
+        game_instance_id: null,
+        created_at: now,
+        updated_at: now,
+        completed_at: null
+      };
+      const requestOwner = this.memoryClaimWorkflowRequestIds.get(input.requestId);
+      if (requestOwner && requestOwner !== input.mailId) {
+        throw new Error(`mail claim request id already belongs to ${requestOwner}`);
       }
-
       mail.status = "claiming";
-      this.memory.set(mailId, mail);
-
-      return {
-        reserved: true,
-        alreadyClaimed: false,
-        inProgress: false,
-        mail: this.parseMailRow(mail)
-      };
+      this.memory.set(input.mailId, mail);
+      this.memoryClaimWorkflows.set(input.mailId, workflow);
+      this.memoryClaimWorkflowRequestIds.set(input.requestId, input.mailId);
+      return this.claimWorkflowReservation(workflow, mail, { acquired: true });
     }
 
-    const updateSql = `UPDATE mails
-      SET status = 'claiming'
-      WHERE mail_id = $1
-        AND status <> 'claimed'
-        AND status <> 'claiming'
-        AND claimed_at IS NULL`;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const workflowResult = await client.query(
+        `SELECT * FROM mail_claim_workflows WHERE mail_id = $1 FOR UPDATE`,
+        [input.mailId]
+      );
+      const existing = workflowResult.rows[0];
+      if (existing) {
+        const existingResult = await this.reserveExistingClaimWorkflowPostgres(
+          client,
+          existing,
+          input,
+          { leaseMs, leaseOwner, leaseToken }
+        );
+        await client.query("COMMIT");
+        return existingResult;
+      }
 
-    const updateResult = await this.pool.query(updateSql, [mailId]);
-    const mail = await this.getMailById(mailId);
+      const mailResult = await client.query(
+        `SELECT * FROM mails WHERE mail_id = $1 FOR UPDATE`,
+        [input.mailId]
+      );
+      const mail = mailResult.rows[0];
+      // A missing-row SELECT does not take a PostgreSQL gap lock. Recheck after
+      // locking the mail so a concurrent first claimant cannot cause a unique-key 500.
+      const concurrentWorkflowResult = await client.query(
+        `SELECT * FROM mail_claim_workflows WHERE mail_id = $1 FOR UPDATE`,
+        [input.mailId]
+      );
+      if (concurrentWorkflowResult.rows[0]) {
+        const concurrentResult = await this.reserveExistingClaimWorkflowPostgres(
+          client,
+          concurrentWorkflowResult.rows[0],
+          input,
+          { leaseMs, leaseOwner, leaseToken }
+        );
+        await client.query("COMMIT");
+        return concurrentResult;
+      }
+      const precondition = this.validateNewClaimWorkflowMail(mail, input, now);
+      if (precondition) {
+        await client.query("COMMIT");
+        return precondition;
+      }
 
+      const insertResult = await client.query(
+        `INSERT INTO mail_claim_workflows
+          (mail_id, player_id, claim_request_id, character_id, attachments_snapshot,
+           attachments_fingerprint, status, attempts, lease_owner, lease_token,
+           lease_expires_at, last_trace_id)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'processing', 1, $7, $8,
+                 current_timestamp + ($9 * interval '1 millisecond'), $10)
+         RETURNING *`,
+        [
+          input.mailId,
+          input.playerId,
+          input.requestId,
+          input.characterId,
+          JSON.stringify(input.attachmentsSnapshot),
+          input.attachmentsFingerprint,
+          leaseOwner,
+          leaseToken,
+          leaseMs,
+          input.traceId
+        ]
+      );
+      await client.query(
+        `UPDATE mails SET status = 'claiming'
+          WHERE mail_id = $1 AND status <> 'claimed' AND claimed_at IS NULL`,
+        [input.mailId]
+      );
+      await client.query("COMMIT");
+      return this.claimWorkflowReservation(insertResult.rows[0], mail, { acquired: true });
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  validateNewClaimWorkflowMail(mail, input, now) {
+    if (!mail) {
+      return this.claimWorkflowReservation(null, null, { notFound: true });
+    }
+    if (mail.to_player_id !== input.playerId) {
+      return this.claimWorkflowReservation(null, mail, { ownerMismatch: true });
+    }
+    if (mail.status === "claimed" || mail.claimed_at) {
+      return this.claimWorkflowReservation(null, mail, { alreadyClaimed: true });
+    }
+    const expiresAt = toDateOrNull(mail.expires_at);
+    if (expiresAt && expiresAt.getTime() <= now.getTime()) {
+      return this.claimWorkflowReservation(null, mail, { expired: true });
+    }
+    if (JSON.stringify(parseAttachments(mail.attachments)) !== JSON.stringify(input.expectedAttachments)) {
+      return this.claimWorkflowReservation(null, mail, { attachmentChanged: true });
+    }
+    return null;
+  }
+
+  reserveExistingClaimWorkflowMemory(workflow, input, lease) {
+    const mail = this.memory.get(input.mailId);
+    const precondition = this.validateExistingClaimWorkflow(workflow, input, lease.now);
+    if (precondition) {
+      return this.claimWorkflowReservation(workflow, mail, precondition);
+    }
+
+    const leaseTakenOver = workflow.status === "processing";
+    workflow.status = "processing";
+    workflow.attempts += 1;
+    workflow.lease_owner = lease.leaseOwner;
+    workflow.lease_token = lease.leaseToken;
+    workflow.lease_expires_at = lease.leaseExpiresAt;
+    workflow.last_trace_id = input.traceId;
+    workflow.updated_at = lease.now;
+    if (mail && mail.status !== "claimed" && !mail.claimed_at) {
+      mail.status = "claiming";
+      this.memory.set(input.mailId, mail);
+    }
+    this.memoryClaimWorkflows.set(input.mailId, workflow);
+    return this.claimWorkflowReservation(workflow, mail, { acquired: true, leaseTakenOver });
+  }
+
+  async reserveExistingClaimWorkflowPostgres(client, workflow, input, lease) {
+    const now = new Date();
+    const precondition = this.validateExistingClaimWorkflow(workflow, input, now);
+    if (precondition) {
+      return this.claimWorkflowReservation(workflow, null, precondition);
+    }
+
+    const leaseTakenOver = workflow.status === "processing";
+    const { rows } = await client.query(
+      `UPDATE mail_claim_workflows
+          SET status = 'processing',
+              attempts = attempts + 1,
+              lease_owner = $2,
+              lease_token = $3,
+              lease_expires_at = current_timestamp + ($4 * interval '1 millisecond'),
+              last_trace_id = $5,
+              updated_at = current_timestamp
+        WHERE id = $1
+        RETURNING *`,
+      [workflow.id, lease.leaseOwner, lease.leaseToken, lease.leaseMs, input.traceId]
+    );
+    await client.query(
+      `UPDATE mails SET status = 'claiming'
+        WHERE mail_id = $1 AND status <> 'claimed' AND claimed_at IS NULL`,
+      [input.mailId]
+    );
+    return this.claimWorkflowReservation(rows[0], null, { acquired: true, leaseTakenOver });
+  }
+
+  validateExistingClaimWorkflow(workflow, input, now) {
+    if (workflow.player_id !== input.playerId) {
+      return { ownerMismatch: true };
+    }
+    if (workflow.status === "claimed") {
+      return { alreadyClaimed: true };
+    }
+    if (workflow.status === "reconciliation_pending") {
+      return { reconciliationPending: true };
+    }
+    if (
+      workflow.status === "processing" &&
+      toDateOrNull(workflow.lease_expires_at)?.getTime() > now.getTime()
+    ) {
+      return { inProgress: true };
+    }
+    if (workflow.character_id !== input.characterId) {
+      return { characterMismatch: true };
+    }
+    return null;
+  }
+
+  async recordMailClaimWorkflowFailure(mailId, leaseToken, failure) {
+    if (!isValidLeaseToken(leaseToken)) {
+      return { updated: false, workflow: await this.getMailClaimWorkflow(mailId) };
+    }
+    const status = failure.status;
+    if (!new Set(["retryable_failure", "permanent_failure", "reconciliation_pending"]).has(status)) {
+      throw new Error(`invalid mail claim failure status: ${status}`);
+    }
+
+    if (!this.pool) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      if (!workflow || workflow.status !== "processing" || workflow.lease_token !== leaseToken) {
+        return { updated: false, workflow: this.parseClaimWorkflowRow(workflow) };
+      }
+      workflow.status = status;
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.last_trace_id = failure.traceId || workflow.last_trace_id;
+      workflow.last_error_code = failure.errorCode || null;
+      workflow.last_error_category = failure.errorCategory || null;
+      workflow.last_result_state = failure.resultState || null;
+      workflow.last_error_retryable = failure.retryable ?? null;
+      workflow.last_error_message = String(failure.message || "").slice(0, 512) || null;
+      workflow.game_instance_id = failure.instanceId || null;
+      workflow.updated_at = new Date();
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      return { updated: true, workflow: this.parseClaimWorkflowRow(workflow) };
+    }
+
+    const { rows } = await this.pool.query(
+      `UPDATE mail_claim_workflows
+          SET status = $3,
+              lease_owner = NULL,
+              lease_token = NULL,
+              lease_expires_at = NULL,
+              last_trace_id = COALESCE($4, last_trace_id),
+              last_error_code = $5,
+              last_error_category = $6,
+              last_result_state = $7,
+              last_error_retryable = $8,
+              last_error_message = $9,
+              game_instance_id = $10,
+              updated_at = current_timestamp
+        WHERE mail_id = $1 AND status = 'processing' AND lease_token = $2
+        RETURNING *`,
+      [
+        mailId,
+        leaseToken,
+        status,
+        failure.traceId || null,
+        failure.errorCode || null,
+        failure.errorCategory || null,
+        failure.resultState || null,
+        failure.retryable ?? null,
+        String(failure.message || "").slice(0, 512) || null,
+        failure.instanceId || null
+      ]
+    );
     return {
-      reserved: updateResult.rowCount > 0,
-      alreadyClaimed: !!mail && (mail.status === "claimed" || !!mail.claimed_at),
-      inProgress: !!mail && mail.status === "claiming" && updateResult.rowCount === 0,
-      mail
+      updated: rows.length > 0,
+      workflow: rows.length > 0 ? this.parseClaimWorkflowRow(rows[0]) : await this.getMailClaimWorkflow(mailId)
     };
   }
 
-  async completeClaimAttachments(mailId) {
+  async completeMailClaimWorkflow(mailId, leaseToken, outcome = {}) {
+    if (!isValidLeaseToken(leaseToken)) {
+      return { claimed: false, workflow: await this.getMailClaimWorkflow(mailId), mail: null };
+    }
     if (!this.pool) {
-      const mail = this.memory.get(mailId);
-      if (!mail) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      if (!workflow || workflow.status !== "processing" || workflow.lease_token !== leaseToken) {
         return {
           claimed: false,
-          mail: null
+          workflow: this.parseClaimWorkflowRow(workflow),
+          mail: this.parseMailRow(this.memory.get(mailId))
         };
       }
-
-      const claimed = mail.status === "claiming" && !mail.claimed_at;
-      if (claimed) {
-        const now = new Date();
+      const now = new Date();
+      workflow.status = "claimed";
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.last_trace_id = outcome.traceId || workflow.last_trace_id;
+      workflow.last_error_code = null;
+      workflow.last_error_category = null;
+      workflow.last_result_state = "applied";
+      workflow.last_error_retryable = false;
+      workflow.last_error_message = null;
+      workflow.result_summary = cloneAttachments(outcome.resultSummary);
+      workflow.game_instance_id = outcome.instanceId || null;
+      workflow.updated_at = now;
+      workflow.completed_at = now;
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      const mail = this.memory.get(mailId);
+      if (mail) {
         mail.status = "claimed";
         mail.read_at ||= now;
         mail.claimed_at ||= now;
         this.memory.set(mailId, mail);
       }
-
       return {
-        claimed,
+        claimed: true,
+        workflow: this.parseClaimWorkflowRow(workflow),
         mail: this.parseMailRow(mail)
       };
     }
 
-    const updateSql = `UPDATE mails
-      SET status = 'claimed',
-          read_at = COALESCE(read_at, current_timestamp),
-          claimed_at = COALESCE(claimed_at, current_timestamp)
-      WHERE mail_id = $1
-        AND status = 'claiming'
-        AND claimed_at IS NULL`;
-
-    const updateResult = await this.pool.query(updateSql, [mailId]);
-    const mail = await this.getMailById(mailId);
-
-    return {
-      claimed: updateResult.rowCount > 0,
-      mail
-    };
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const workflowResult = await client.query(
+        `UPDATE mail_claim_workflows
+            SET status = 'claimed',
+                lease_owner = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                last_trace_id = COALESCE($3, last_trace_id),
+                last_error_code = NULL,
+                last_error_category = NULL,
+                last_result_state = 'applied',
+                last_error_retryable = false,
+                last_error_message = NULL,
+                result_summary = $4::jsonb,
+                game_instance_id = $5,
+                updated_at = current_timestamp,
+                completed_at = current_timestamp
+          WHERE mail_id = $1 AND status = 'processing' AND lease_token = $2
+          RETURNING *`,
+        [
+          mailId,
+          leaseToken,
+          outcome.traceId || null,
+          outcome.resultSummary ? JSON.stringify(outcome.resultSummary) : null,
+          outcome.instanceId || null
+        ]
+      );
+      if (workflowResult.rows.length === 0) {
+        await client.query("COMMIT");
+        return { claimed: false, workflow: await this.getMailClaimWorkflow(mailId), mail: null };
+      }
+      const mailResult = await client.query(
+        `UPDATE mails
+            SET status = 'claimed',
+                read_at = COALESCE(read_at, current_timestamp),
+                claimed_at = COALESCE(claimed_at, current_timestamp)
+          WHERE mail_id = $1 AND status <> 'claimed' AND claimed_at IS NULL
+          RETURNING *`,
+        [mailId]
+      );
+      await client.query("COMMIT");
+      return {
+        claimed: true,
+        workflow: this.parseClaimWorkflowRow(workflowResult.rows[0]),
+        mail: this.parseMailRow(mailResult.rows[0])
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async releaseClaimAttachments(mailId) {
-    if (!this.pool) {
-      const mail = this.memory.get(mailId);
-      if (!mail || mail.status !== "claiming") {
-        return false;
-      }
-
-      mail.status = mail.read_at ? "read" : "unread";
-      this.memory.set(mailId, mail);
-      return true;
-    }
-
-    const sql = `UPDATE mails
-      SET status = CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END
-      WHERE mail_id = $1
-        AND status = 'claiming'
-        AND claimed_at IS NULL`;
-
-    const result = await this.pool.query(sql, [mailId]);
-    return result.rowCount > 0;
+  claimWorkflowReservation(workflow, mail, flags = {}) {
+    return {
+      acquired: false,
+      alreadyClaimed: false,
+      inProgress: false,
+      reconciliationPending: false,
+      notFound: false,
+      ownerMismatch: false,
+      characterMismatch: false,
+      expired: false,
+      attachmentChanged: false,
+      leaseTakenOver: false,
+      ...flags,
+      workflow: this.parseClaimWorkflowRow(workflow),
+      mail: this.parseMailRow(mail)
+    };
   }
 
   async deleteMail(mailId) {
@@ -803,6 +1071,38 @@ export class DbMailStore {
       created_at: row.created_at,
       sent_at: row.sent_at,
       terminal_at: row.terminal_at
+    };
+  }
+
+  parseClaimWorkflowRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      mail_id: row.mail_id,
+      player_id: row.player_id,
+      claim_request_id: row.claim_request_id,
+      character_id: row.character_id,
+      attachments_snapshot: cloneAttachments(parseJson(row.attachments_snapshot)),
+      attachments_fingerprint: row.attachments_fingerprint,
+      status: row.status,
+      attempts: Number(row.attempts) || 0,
+      lease_owner: row.lease_owner,
+      lease_token: row.lease_token,
+      lease_expires_at: row.lease_expires_at,
+      last_trace_id: row.last_trace_id,
+      last_error_code: row.last_error_code,
+      last_error_category: row.last_error_category,
+      last_result_state: row.last_result_state,
+      last_error_retryable: row.last_error_retryable,
+      last_error_message: row.last_error_message,
+      result_summary: cloneAttachments(parseJson(row.result_summary)),
+      game_instance_id: row.game_instance_id,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      completed_at: row.completed_at
     };
   }
 }

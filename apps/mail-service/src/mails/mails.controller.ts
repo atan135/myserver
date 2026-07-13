@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Inject, Param, Post, Put, Query } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Inject, Param, Post, Put, Query, Res } from "@nestjs/common";
 import { ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
 import { forbidden, unauthorized } from "../common/http-exception.js";
@@ -75,8 +75,11 @@ export class MailsController {
   @Post(":mailId/claim")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Claim mail attachment" })
-  async claim(@Param("mailId") mailId: string, @Headers() headers: any, @Body() body: any) {
+  async claim(@Param("mailId") mailId: string, @Headers() headers: any, @Body() body: any, @Res({ passthrough: true }) response: any) {
     const auth = await this.authenticatePlayer(headers, body);
-    return this.mailsService.claim(mailId, auth.playerId, auth.characterId, body);
+    const result = await this.mailsService.claim(mailId, auth.playerId, auth.characterId, body);
+    const { _http_status: httpStatus = HttpStatus.OK, ...bodyResult } = result;
+    response.status(httpStatus);
+    return bodyResult;
   }
 }

@@ -711,6 +711,12 @@ export class GameAdminClient {
       characterId,
       normalizedItems
     );
+    if (options.requestFingerprint && options.requestFingerprint !== requestFingerprint) {
+      throw createAdminError(
+        "GRANT_REQUEST_FINGERPRINT_MISMATCH",
+        "persisted attachment fingerprint does not match the canonical grant request"
+      );
+    }
     const traceId = options.traceId || crypto.randomBytes(16).toString("hex");
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -740,14 +746,19 @@ export class GameAdminClient {
             actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
           }
         );
-        const result = decodeGrantItemsResponse(responseBody);
-        validateGrantItemsResponse(result, {
-          requestId,
-          requestFingerprint,
-          traceId,
-          characterId,
-          items: normalizedItems
-        });
+        let result;
+        try {
+          result = decodeGrantItemsResponse(responseBody);
+          validateGrantItemsResponse(result, {
+            requestId,
+            requestFingerprint,
+            traceId,
+            characterId,
+            items: normalizedItems
+          });
+        } catch (error) {
+          throw markGrantResponseValidationFailure(error);
+        }
 
         logSafely("info", "mail.claim_game_admin_succeeded", {
           instanceId: resolved.endpoint.instanceId,
@@ -821,6 +832,23 @@ function markRouteUnavailable(error, { code, phase } = {}) {
   return routeError;
 }
 
+function markGrantResponseValidationFailure(error) {
+  const validationError = normalizeRequestError(error, "INVALID_GRANT_RESPONSE");
+  validationError.requestWritten = true;
+  validationError.requestPhase ||= "response_validation";
+  const explicitNotApplied =
+    validationError.structuredGrantFailure === true &&
+    validationError.resultState === "not_applied" &&
+    validationError.errorCategory &&
+    validationError.errorCategory !== "RESULT_UNKNOWN";
+  if (!explicitNotApplied) {
+    validationError.errorCategory = "RESULT_UNKNOWN";
+    validationError.resultState = "unknown";
+    validationError.retryable = true;
+  }
+  return validationError;
+}
+
 function isResponseTransportFailure(error) {
   return new Set([
     "GAME_ADMIN_READ_TIMEOUT",
@@ -887,6 +915,7 @@ function validateGrantItemsResponse(result, expected) {
     error.resultState = result.resultState || "not_applied";
     error.retryable = result.retryable;
     error.requestWritten = true;
+    error.structuredGrantFailure = Boolean(result.errorCategory && result.resultState === "not_applied");
     throw error;
   }
 
