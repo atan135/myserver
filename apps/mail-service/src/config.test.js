@@ -29,7 +29,18 @@ const CONFIG_ENV_NAMES = [
   "SERVICE_ADVERTISED_HOST",
   "MAIL_PUBLIC_HOST",
   "HOST",
-  "TICKET_SECRET"
+  "TICKET_SECRET",
+  "MAIL_OUTBOX_POLL_INTERVAL_MS",
+  "MAIL_OUTBOX_BATCH_SIZE",
+  "MAIL_OUTBOX_LEASE_MS",
+  "MAIL_OUTBOX_MAX_ATTEMPTS",
+  "MAIL_OUTBOX_BACKOFF_BASE_MS",
+  "MAIL_OUTBOX_BACKOFF_MAX_MS",
+  "MAIL_OUTBOX_BACKOFF_JITTER_RATIO",
+  "MAIL_OUTBOX_SENT_RETENTION_DAYS",
+  "MAIL_OUTBOX_TERMINAL_RETENTION_DAYS",
+  "MAIL_OUTBOX_CLEANUP_INTERVAL_MS",
+  "MAIL_OUTBOX_CLEANUP_BATCH_SIZE"
 ];
 
 async function withEnv(values, callback) {
@@ -77,6 +88,35 @@ test("mail-service base env example does not enable legacy direct game admin con
   assert.match(envExample, /Rejected in strict\/test\/production discovery/);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_HOST=127\.0\.0\.1$/m);
   assert.match(envExample, /^# GAME_SERVER_ADMIN_PORT=7500$/m);
+});
+
+test("mail-service reads bounded notification outbox settings", async () => {
+  await withEnv({
+    MAIL_OUTBOX_BATCH_SIZE: "40",
+    MAIL_OUTBOX_LEASE_MS: "45000",
+    MAIL_OUTBOX_MAX_ATTEMPTS: "12",
+    MAIL_OUTBOX_BACKOFF_JITTER_RATIO: "0.35"
+  }, (getConfig) => {
+    const config = getConfig();
+    assert.equal(config.outboxBatchSize, 40);
+    assert.equal(config.outboxLeaseMs, 45000);
+    assert.equal(config.outboxMaxAttempts, 12);
+    assert.equal(config.outboxBackoffJitterRatio, 0.35);
+  });
+});
+
+test("mail-service rejects invalid notification outbox settings", async () => {
+  await assert.rejects(
+    () => withEnv({ MAIL_OUTBOX_MAX_ATTEMPTS: "0" }, (getConfig) => getConfig()),
+    /MAIL_OUTBOX_MAX_ATTEMPTS must be an integer between 1 and 100/
+  );
+  await assert.rejects(
+    () => withEnv({
+      MAIL_OUTBOX_BACKOFF_BASE_MS: "5000",
+      MAIL_OUTBOX_BACKOFF_MAX_MS: "1000"
+    }, (getConfig) => getConfig()),
+    /MAIL_OUTBOX_BACKOFF_MAX_MS must be greater than or equal/
+  );
 });
 
 test("mail-service config reads optional game admin actor", async () => {

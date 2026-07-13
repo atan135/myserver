@@ -20,6 +20,31 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseIntegerInRange(name, value, fallback, min, max) {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`Invalid mail-service config: ${name} must be an integer between ${min} and ${max}`);
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Invalid mail-service config: ${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function parseNumberInRange(name, value, fallback, min, max) {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Invalid mail-service config: ${name} must be a number between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
 function firstNonEmptyEnv(names) {
   for (const name of names) {
     const value = process.env[name];
@@ -212,6 +237,17 @@ export function getConfig() {
     redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
     registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
+    outboxPollIntervalMs: parseIntegerInRange("MAIL_OUTBOX_POLL_INTERVAL_MS", process.env.MAIL_OUTBOX_POLL_INTERVAL_MS, 5000, 100, 60_000),
+    outboxBatchSize: parseIntegerInRange("MAIL_OUTBOX_BATCH_SIZE", process.env.MAIL_OUTBOX_BATCH_SIZE, 20, 1, 1000),
+    outboxLeaseMs: parseIntegerInRange("MAIL_OUTBOX_LEASE_MS", process.env.MAIL_OUTBOX_LEASE_MS, 30_000, 1000, 300_000),
+    outboxMaxAttempts: parseIntegerInRange("MAIL_OUTBOX_MAX_ATTEMPTS", process.env.MAIL_OUTBOX_MAX_ATTEMPTS, 8, 1, 100),
+    outboxBackoffBaseMs: parseIntegerInRange("MAIL_OUTBOX_BACKOFF_BASE_MS", process.env.MAIL_OUTBOX_BACKOFF_BASE_MS, 1000, 100, 60_000),
+    outboxBackoffMaxMs: parseIntegerInRange("MAIL_OUTBOX_BACKOFF_MAX_MS", process.env.MAIL_OUTBOX_BACKOFF_MAX_MS, 60_000, 1000, 3_600_000),
+    outboxBackoffJitterRatio: parseNumberInRange("MAIL_OUTBOX_BACKOFF_JITTER_RATIO", process.env.MAIL_OUTBOX_BACKOFF_JITTER_RATIO, 0.2, 0, 1),
+    outboxSentRetentionDays: parseIntegerInRange("MAIL_OUTBOX_SENT_RETENTION_DAYS", process.env.MAIL_OUTBOX_SENT_RETENTION_DAYS, 7, 1, 3650),
+    outboxTerminalRetentionDays: parseIntegerInRange("MAIL_OUTBOX_TERMINAL_RETENTION_DAYS", process.env.MAIL_OUTBOX_TERMINAL_RETENTION_DAYS, 30, 1, 3650),
+    outboxCleanupIntervalMs: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_INTERVAL_MS", process.env.MAIL_OUTBOX_CLEANUP_INTERVAL_MS, 3_600_000, 10_000, 86_400_000),
+    outboxCleanupBatchSize: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_BATCH_SIZE", process.env.MAIL_OUTBOX_CLEANUP_BATCH_SIZE, 500, 1, 10_000),
     dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
     databaseUrl:
       process.env.DATABASE_URL ||
@@ -246,6 +282,10 @@ export function getConfig() {
     globalIdOriginId: process.env.GLOBAL_ID_ORIGIN_ID || "0",
     globalIdWorkerId: process.env.GLOBAL_ID_WORKER_ID
   };
+
+  if (config.outboxBackoffMaxMs < config.outboxBackoffBaseMs) {
+    throw new Error("Invalid mail-service config: MAIL_OUTBOX_BACKOFF_MAX_MS must be greater than or equal to MAIL_OUTBOX_BACKOFF_BASE_MS");
+  }
 
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);
   validateProductionConfig(config);

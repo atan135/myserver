@@ -85,6 +85,7 @@ async function loadMailControllerAndService() {
     "../common/": "./common/",
     "../global-id.js": "./global-id.js",
     "../logger.js": "./logger.js",
+    "../notification-outbox.js": "./notification-outbox.js",
     "../tokens.js": "./tokens.js"
   });
   await transpileTypeScriptModule(controllerSource, path.join(outDir, "mails.controller.mjs"), {
@@ -105,6 +106,11 @@ async function loadMailControllerAndService() {
     "utf8"
   );
   await writeFile(path.join(outDir, "logger.js"), "export function log() {}\n", "utf8");
+  await writeFile(
+    path.join(outDir, "notification-outbox.js"),
+    "export * from '../../../apps/mail-service/src/notification-outbox.js';\n",
+    "utf8"
+  );
   await writeFile(
     path.join(outDir, "tokens.js"),
     "export * from '../../../apps/mail-service/src/tokens.ts';\n",

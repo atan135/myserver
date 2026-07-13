@@ -58,13 +58,15 @@ export class PubSubClient {
     }
   }
 
-  async publishMailNotification(playerId, mail) {
+  async publishMailNotification(playerId, eventOrMail) {
     const route = await this.resolveMailNotificationSubject(playerId);
     const subject = route.subject;
+    const isEventEnvelope = eventOrMail?.event_type === "mail.created";
+    const mail = isEventEnvelope ? eventOrMail.mail : eventOrMail;
     const senderId = typeof mail.sender_id === "string" && mail.sender_id.toLowerCase() === "system"
       ? "system"
       : (mail.sender_id || mail.from_player_id);
-    const payload = {
+    const payload = isEventEnvelope ? eventOrMail : {
       player_id: playerId,
       mail_id: mail.mail_id,
       title: mail.title,
@@ -80,6 +82,8 @@ export class PubSubClient {
         subject,
         playerId,
         mailId: mail.mail_id,
+        eventId: isEventEnvelope ? eventOrMail.event_id : null,
+        traceId: isEventEnvelope ? eventOrMail.trace_id : null,
         routed: route.routed,
         instanceId: route.instanceId || null,
         routeReason: route.reason || null

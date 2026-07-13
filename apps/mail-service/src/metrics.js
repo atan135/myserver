@@ -28,6 +28,13 @@ export class MetricsCollector {
     this.qps = 0;
     this.latencySum = 0;
     this.latencyCount = 0;
+    this.outboxBacklog = 0;
+    this.outboxOldestAgeMs = 0;
+    this.outboxPublishLatencySum = 0;
+    this.outboxPublished = 0;
+    this.outboxRetries = 0;
+    this.outboxTerminal = 0;
+    this.outboxLeaseTakeovers = 0;
 
     this.flushTimer = null;
   }
@@ -51,6 +58,28 @@ export class MetricsCollector {
     this.latencyCount += 1;
   }
 
+  setOutboxSnapshot({ backlog = 0, oldestAgeMs = 0 } = {}) {
+    this.outboxBacklog = Math.max(0, Number(backlog) || 0);
+    this.outboxOldestAgeMs = Math.max(0, Number(oldestAgeMs) || 0);
+  }
+
+  recordOutboxPublished(latencyMs = 0) {
+    this.outboxPublished += 1;
+    this.outboxPublishLatencySum += Math.max(0, Number(latencyMs) || 0);
+  }
+
+  recordOutboxRetry() {
+    this.outboxRetries += 1;
+  }
+
+  recordOutboxTerminal() {
+    this.outboxTerminal += 1;
+  }
+
+  recordOutboxLeaseTakeover() {
+    this.outboxLeaseTakeovers += 1;
+  }
+
   /**
    * Flush metrics to NATS
    */
@@ -59,11 +88,23 @@ export class MetricsCollector {
 
     const qps = this.qps;
     const latencyMs = this.latencyCount > 0 ? Math.round(this.latencySum / this.latencyCount) : 0;
+    const outboxPublishLatencyMs = this.outboxPublished > 0
+      ? Math.round(this.outboxPublishLatencySum / this.outboxPublished)
+      : 0;
+    const outboxPublished = this.outboxPublished;
+    const outboxRetries = this.outboxRetries;
+    const outboxTerminal = this.outboxTerminal;
+    const outboxLeaseTakeovers = this.outboxLeaseTakeovers;
 
     // Reset counters
     this.qps = 0;
     this.latencySum = 0;
     this.latencyCount = 0;
+    this.outboxPublishLatencySum = 0;
+    this.outboxPublished = 0;
+    this.outboxRetries = 0;
+    this.outboxTerminal = 0;
+    this.outboxLeaseTakeovers = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -79,6 +120,13 @@ export class MetricsCollector {
           metrics: {
             qps,
             latency_ms: latencyMs,
+            mail_outbox_backlog: this.outboxBacklog,
+            mail_outbox_oldest_age_ms: this.outboxOldestAgeMs,
+            mail_outbox_publish_latency_ms: outboxPublishLatencyMs,
+            mail_outbox_published: outboxPublished,
+            mail_outbox_retries: outboxRetries,
+            mail_outbox_terminal: outboxTerminal,
+            mail_outbox_lease_takeovers: outboxLeaseTakeovers,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

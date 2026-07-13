@@ -3,7 +3,12 @@ import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/commo
 import { badGateway, badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
 import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
-import { MAIL_GAME_ADMIN_CLIENT, MAIL_PUBSUB_CLIENT, MAIL_STORE } from "../tokens.js";
+import {
+  calculateOutboxBackoffMs,
+  normalizeMailNotificationEvent,
+  PermanentOutboxPayloadError
+} from "../notification-outbox.js";
+import { MAIL_CONFIG, MAIL_GAME_ADMIN_CLIENT, MAIL_METRICS, MAIL_PUBSUB_CLIENT, MAIL_STORE } from "../tokens.js";
 
 function isSystemIdentity(value: any) {
   return typeof value === "string" && value.trim().toLowerCase() === "system";
@@ -123,12 +128,16 @@ function normalizeMailAttachmentItems(attachments: any) {
 @Injectable()
 export class MailsService implements OnModuleInit, OnModuleDestroy {
   private outboxTimer: NodeJS.Timeout | null = null;
+  private outboxCleanupTimer: NodeJS.Timeout | null = null;
   private outboxProcessing = false;
+  private outboxCleanupProcessing = false;
 
   constructor(
     @Inject(MAIL_STORE) private readonly mailStore: any,
     @Inject(MAIL_PUBSUB_CLIENT) private readonly pubsubClient: any,
-    @Inject(MAIL_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
+    @Inject(MAIL_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any,
+    @Inject(MAIL_CONFIG) private readonly config: any = {},
+    @Inject(MAIL_METRICS) private readonly metrics: any = null
   ) {}
 
   onModuleInit() {
@@ -136,8 +145,14 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       this.processPendingNotificationOutbox().catch((error: any) => {
         log("error", "mail.outbox_worker_failed", { error: error.message });
       });
-    }, 5000);
+    }, this.config.outboxPollIntervalMs || 5000);
     this.outboxTimer.unref?.();
+    this.outboxCleanupTimer = setInterval(() => {
+      this.cleanupNotificationOutbox().catch((error: any) => {
+        log("error", "mail.outbox_cleanup_failed", { error: error.message });
+      });
+    }, this.config.outboxCleanupIntervalMs || 3_600_000);
+    this.outboxCleanupTimer.unref?.();
   }
 
   onModuleDestroy() {
@@ -145,14 +160,19 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.outboxTimer);
       this.outboxTimer = null;
     }
+    if (this.outboxCleanupTimer) {
+      clearInterval(this.outboxCleanupTimer);
+      this.outboxCleanupTimer = null;
+    }
   }
 
-  async processPendingNotificationOutbox(limit = 20) {
+  async processPendingNotificationOutbox(limit = this.config.outboxBatchSize || 20) {
     if (this.outboxProcessing) {
       return {
         processed: 0,
         sent: 0,
         failed: 0,
+        terminal: 0,
         skipped: true
       };
     }
@@ -161,36 +181,118 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     let processed = 0;
     let sent = 0;
     let failed = 0;
+    let terminal = 0;
 
     try {
-      const entries = await this.mailStore.reservePendingMailNotificationOutbox(limit);
+      const entries = await this.mailStore.reservePendingMailNotificationOutbox(limit, {
+        leaseMs: this.config.outboxLeaseMs || 30_000,
+        leaseOwner: this.config.serviceInstanceId || "mail-service"
+      });
       for (const entry of entries) {
         processed += 1;
+        if (entry.lease_taken_over) {
+          this.metrics?.recordOutboxLeaseTakeover?.();
+        }
+        if (entry.attempts_exhausted) {
+          const marked = await this.mailStore.markMailNotificationOutboxTerminal(
+            entry.id,
+            "OUTBOX_MAX_ATTEMPTS_EXHAUSTED: previous publish result remained unknown after the maximum attempts",
+            { leaseToken: entry.lease_token }
+          );
+          terminal += marked ? 1 : 0;
+          if (marked) {
+            this.metrics?.recordOutboxTerminal?.();
+          }
+          log("warn", "mail.outbox_attempts_exhausted", {
+            outboxId: entry.id,
+            mailId: entry.mail_id,
+            attempts: entry.attempts,
+            maxAttempts: entry.max_attempts,
+            terminated: marked
+          });
+          continue;
+        }
         try {
-          const payload = entry.payload || {};
-          await this.pubsubClient.publishMailNotification(payload.to_player_id || entry.to_player_id, payload.mail);
-          await this.mailStore.markMailNotificationOutboxSent(entry.id);
-          sent += 1;
+          const event = normalizeMailNotificationEvent(entry);
+          await this.pubsubClient.publishMailNotification(event.player_id, event);
+          const marked = await this.mailStore.markMailNotificationOutboxSent(entry.id, entry.lease_token);
+          if (marked) {
+            sent += 1;
+            this.metrics?.recordOutboxPublished?.(Math.max(0, Date.now() - event.occurred_at));
+          } else {
+            log("warn", "mail.outbox_lease_lost_after_publish", {
+              outboxId: entry.id,
+              mailId: entry.mail_id,
+              eventId: event.event_id,
+              traceId: event.trace_id
+            });
+          }
         } catch (error: any) {
-          await this.mailStore.markMailNotificationOutboxFailed(entry.id, error.message);
-          failed += 1;
+          const errorSummary = `${error.code ? `${error.code}: ` : ""}${error.message || "unknown outbox error"}`;
+          const permanent = error instanceof PermanentOutboxPayloadError || entry.attempts >= entry.max_attempts;
+          if (permanent) {
+            const marked = await this.mailStore.markMailNotificationOutboxTerminal(entry.id, errorSummary, {
+              leaseToken: entry.lease_token
+            });
+            terminal += marked ? 1 : 0;
+            if (marked) {
+              this.metrics?.recordOutboxTerminal?.();
+            }
+          } else {
+            const delayMs = calculateOutboxBackoffMs(entry.attempts, {
+              baseMs: this.config.outboxBackoffBaseMs || 1000,
+              maxMs: this.config.outboxBackoffMaxMs || 60_000,
+              jitterRatio: this.config.outboxBackoffJitterRatio ?? 0.2
+            }, this.config.outboxRandom || Math.random);
+            const marked = await this.mailStore.markMailNotificationOutboxFailed(entry.id, errorSummary, {
+              delayMs,
+              leaseToken: entry.lease_token
+            });
+            failed += marked ? 1 : 0;
+            if (marked) {
+              this.metrics?.recordOutboxRetry?.();
+            }
+          }
           log("warn", "mail.outbox_publish_failed", {
             outboxId: entry.id,
             mailId: entry.mail_id,
             attempts: entry.attempts,
-            error: error.message
+            terminal: permanent,
+            error: String(error.message || "unknown outbox error").slice(0, 512)
           });
         }
       }
+
+      const stats = await this.mailStore.getMailNotificationOutboxStats();
+      this.metrics?.setOutboxSnapshot?.(stats);
 
       return {
         processed,
         sent,
         failed,
+        terminal,
         skipped: false
       };
     } finally {
       this.outboxProcessing = false;
+    }
+  }
+
+  async cleanupNotificationOutbox() {
+    if (this.outboxCleanupProcessing) {
+      return { deleted: 0, skipped: true };
+    }
+    this.outboxCleanupProcessing = true;
+    try {
+      const dayMs = 24 * 60 * 60 * 1000;
+      const deleted = await this.mailStore.cleanupMailNotificationOutbox({
+        sentRetentionMs: (this.config.outboxSentRetentionDays || 7) * dayMs,
+        terminalRetentionMs: (this.config.outboxTerminalRetentionDays || 30) * dayMs,
+        limit: this.config.outboxCleanupBatchSize || 500
+      });
+      return { deleted, skipped: false };
+    } finally {
+      this.outboxCleanupProcessing = false;
     }
   }
 
@@ -282,7 +384,15 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       };
 
       await this.mailStore.createMailWithNotificationOutbox(mail);
-      const outboxResult = await this.processPendingNotificationOutbox(1);
+      let outboxResult = { sent: 0, failed: 0, terminal: 0 };
+      try {
+        outboxResult = await this.processPendingNotificationOutbox(1);
+      } catch (error: any) {
+        log("warn", "mail.outbox_immediate_process_failed", {
+          mailId: mail.mail_id,
+          error: String(error.message || "unknown outbox error").slice(0, 512)
+        });
+      }
 
       log("info", outboxResult.sent > 0 ? "mail.sent" : "mail.outbox_pending", {
         mailId: mail.mail_id,

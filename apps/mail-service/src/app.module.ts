@@ -68,8 +68,12 @@ import {
     },
     {
       provide: MAIL_STORE,
-      inject: [MAIL_DB_POOL],
-      useFactory: (dbPool: any) => new DbMailStore(dbPool)
+      inject: [MAIL_DB_POOL, MAIL_CONFIG],
+      useFactory: (dbPool: any, config: any) => new DbMailStore(dbPool, {
+        outboxMaxAttempts: config.outboxMaxAttempts,
+        outboxLeaseMs: config.outboxLeaseMs,
+        outboxLeaseOwner: config.serviceInstanceId
+      })
     },
     {
       provide: MAIL_PUBSUB_CLIENT,

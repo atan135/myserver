@@ -92,7 +92,10 @@ test("mail creation writes notification outbox in memory store", async () => {
   assert.equal(outbox.to_player_id, "player_001");
   assert.equal(outbox.status, "pending");
   assert.equal(outbox.attempts, 0);
-  assert.equal(outbox.payload.to_player_id, "player_001");
+  assert.equal(outbox.event_id, "mail.notify:mail_001");
+  assert.equal(outbox.event_version, 1);
+  assert.match(outbox.trace_id, /^[0-9a-f]{32}$/);
+  assert.equal(outbox.payload.player_id, "player_001");
   assert.equal(outbox.payload.mail.mail_id, "mail_001");
 });
 
@@ -134,6 +137,31 @@ test("mail insert uses provided executor instead of pool", async () => {
   assert.equal(executor.calls[0].params[0], "mail_executor_001");
 });
 
+test("PostgreSQL mail and notification outbox rollback as one transaction", async () => {
+  const calls = [];
+  const client = {
+    async query(sql) {
+      calls.push(sql.trim());
+      if (sql.includes("INSERT INTO mails")) {
+        return { rows: [{ id: 123 }] };
+      }
+      if (sql.includes("INSERT INTO mail_notification_outbox")) {
+        throw new Error("outbox insert failed");
+      }
+      return { rows: [] };
+    },
+    release() {}
+  };
+  const store = new DbMailStore({ async connect() { return client; } });
+
+  await assert.rejects(() => createMail(store), /outbox insert failed/);
+  assert.equal(calls[0], "BEGIN");
+  assert.match(calls[1], /INSERT INTO mails/);
+  assert.match(calls[2], /INSERT INTO mail_notification_outbox/);
+  assert.equal(calls.at(-1), "ROLLBACK");
+  assert.equal(calls.includes("COMMIT"), false);
+});
+
 test("mail notification outbox can be reserved, failed, retried, and marked sent", async () => {
   const store = new DbMailStore(null);
   await createMail(store);
@@ -143,7 +171,9 @@ test("mail notification outbox can be reserved, failed, retried, and marked sent
   assert.equal(firstReserve[0].status, "sending");
   assert.equal(firstReserve[0].attempts, 1);
 
-  await store.markMailNotificationOutboxFailed(firstReserve[0].id, "nats down");
+  await store.markMailNotificationOutboxFailed(firstReserve[0].id, "nats down", {
+    leaseToken: firstReserve[0].lease_token
+  });
   let outbox = await store.getMailNotificationOutboxByMailId("mail_001");
   assert.equal(outbox.status, "failed");
   assert.equal(outbox.attempts, 1);
@@ -156,7 +186,7 @@ test("mail notification outbox can be reserved, failed, retried, and marked sent
   assert.equal(retryReserve.length, 1);
   assert.equal(retryReserve[0].attempts, 2);
 
-  await store.markMailNotificationOutboxSent(retryReserve[0].id);
+  await store.markMailNotificationOutboxSent(retryReserve[0].id, retryReserve[0].lease_token);
   outbox = await store.getMailNotificationOutboxByMailId("mail_001");
   assert.equal(outbox.status, "sent");
   assert.ok(outbox.sent_at);

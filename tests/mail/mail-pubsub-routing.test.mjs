@@ -49,6 +49,35 @@ test("PubSubClient publishes to chat instance subject when online route exists",
   assert.equal(published[0].payload.player_id, "player_001");
 });
 
+test("PubSubClient publishes a v1 event envelope without flattening it", async () => {
+  const published = [];
+  const client = new PubSubClient({
+    async publishJson(subject, payload) {
+      published.push({ subject, payload });
+    }
+  }, null);
+  const event = {
+    event_id: "mail.notify:mail_001",
+    event_type: "mail.created",
+    version: 1,
+    occurred_at: 1_783_931_896_000,
+    player_id: "player_001",
+    mail: {
+      mail_id: "mail_001",
+      title: "Reward",
+      from_player_id: "system",
+      from_name: "系统",
+      mail_type: "system",
+      created_at: 1_783_931_896_000
+    },
+    trace_id: "0123456789abcdef0123456789abcdef"
+  };
+
+  await client.publishMailNotification("player_001", event);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].payload, event);
+});
+
 test("PubSubClient falls back to legacy player subject when route is missing", async () => {
   const published = [];
   const redis = {

@@ -30,6 +30,7 @@ async function loadMailsService() {
     .replaceAll("../common/", "./common/")
     .replaceAll("../global-id.js", "./global-id.js")
     .replaceAll("../logger.js", "./logger.js")
+    .replaceAll("../notification-outbox.js", "./notification-outbox.js")
     .replaceAll("../tokens.js", "./tokens.js");
 
   await writeFile(outPath, outputText, "utf8");
@@ -49,6 +50,11 @@ async function loadMailsService() {
     "utf8"
   );
   await writeFile(
+    path.join(outDir, "notification-outbox.js"),
+    "export * from '../../../apps/mail-service/src/notification-outbox.js';\n",
+    "utf8"
+  );
+  await writeFile(
     path.join(outDir, "tokens.js"),
     "export * from '../../../apps/mail-service/src/tokens.ts';\n",
     "utf8"
@@ -58,14 +64,15 @@ async function loadMailsService() {
   return imported.MailsService;
 }
 
-function createService() {
+function createService(options = {}) {
   const MailsService = createService.MailsService;
-  const mailStore = new DbMailStore(null);
+  const mailStore = new DbMailStore(null, options.storeOptions);
   const pubsubClient = {
     publishes: [],
     failuresRemaining: 0,
-    async publishMailNotification(playerId, mail) {
-      this.publishes.push({ playerId, mailId: mail.mail_id });
+    async publishMailNotification(playerId, eventOrMail) {
+      const mail = eventOrMail.event_type === "mail.created" ? eventOrMail.mail : eventOrMail;
+      this.publishes.push({ playerId, mailId: mail.mail_id, event: eventOrMail });
       if (this.failuresRemaining > 0) {
         this.failuresRemaining -= 1;
         throw new Error("nats down");
@@ -84,7 +91,7 @@ function createService() {
     mailStore,
     pubsubClient,
     gameAdminClient,
-    service: new MailsService(mailStore, pubsubClient, gameAdminClient)
+    service: new MailsService(mailStore, pubsubClient, gameAdminClient, options.config || {}, options.metrics || null)
   };
 }
 
@@ -222,4 +229,77 @@ test("MailsService create marks outbox sent when immediate publish succeeds", as
   assert.equal(outbox.status, "sent");
   assert.equal(outbox.attempts, 1);
   assert.equal(pubsubClient.publishes.length, 1);
+});
+
+test("MailsService terminates notification after configured maximum attempts", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService({
+    storeOptions: { outboxMaxAttempts: 1 },
+    config: { outboxBackoffJitterRatio: 0 }
+  });
+  pubsubClient.failuresRemaining = 1;
+
+  const result = await service.create({ to_player_id: "player_001", title: "Reward" });
+  const outbox = await mailStore.getMailNotificationOutboxByMailId(result.mail_id);
+  assert.equal(result.ok, true);
+  assert.equal(outbox.status, "terminal");
+  assert.ok(outbox.terminal_at);
+  assert.match(outbox.last_error, /nats down/);
+});
+
+test("MailsService terminates permanently invalid notification payload without publishing", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService();
+  await createMail(mailStore, { mail_id: "mail_invalid_event" });
+  const outbox = await mailStore.getMailNotificationOutboxByMailId("mail_invalid_event");
+  outbox.payload.event_type = "mail.deleted";
+  mailStore.memoryOutbox.set(outbox.id, outbox);
+
+  const result = await service.processPendingNotificationOutbox();
+  const terminal = await mailStore.getMailNotificationOutboxByMailId("mail_invalid_event");
+  assert.equal(result.terminal, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(terminal.status, "terminal");
+  assert.match(terminal.last_error, /UNSUPPORTED_MAIL_NOTIFICATION_TYPE/);
+  assert.equal(pubsubClient.publishes.length, 0);
+});
+
+test("MailsService never starts a publish beyond max attempts after repeated lease expiry", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore, pubsubClient } = createService({
+    storeOptions: { outboxMaxAttempts: 2, outboxLeaseMs: 1000 },
+    config: { outboxLeaseMs: 1000 }
+  });
+  await createMail(mailStore, { mail_id: "mail_publish_limit" });
+
+  mailStore.markMailNotificationOutboxSent = async () => false;
+  await service.processPendingNotificationOutbox();
+  let row = await mailStore.getMailNotificationOutboxByMailId("mail_publish_limit");
+  assert.equal(row.attempts, 1);
+  mailStore.memoryOutbox.get(row.id).locked_until = new Date(Date.now() - 1);
+
+  await service.processPendingNotificationOutbox();
+  row = await mailStore.getMailNotificationOutboxByMailId("mail_publish_limit");
+  assert.equal(row.attempts, 2);
+  mailStore.memoryOutbox.get(row.id).locked_until = new Date(Date.now() - 1);
+
+  const exhausted = await service.processPendingNotificationOutbox();
+  row = await mailStore.getMailNotificationOutboxByMailId("mail_publish_limit");
+  assert.equal(exhausted.terminal, 1);
+  assert.equal(row.status, "terminal");
+  assert.equal(row.attempts, 2);
+  assert.equal(pubsubClient.publishes.length, 2);
+});
+
+test("MailsService returns mail success when immediate outbox scan fails", async () => {
+  createService.MailsService = await loadMailsService();
+  const { service, mailStore } = createService();
+  mailStore.reservePendingMailNotificationOutbox = async () => {
+    throw new Error("outbox database unavailable");
+  };
+
+  const result = await service.create({ to_player_id: "player_001", title: "Reward" });
+  assert.equal(result.ok, true);
+  assert.ok(await mailStore.getMailById(result.mail_id));
+  assert.equal((await mailStore.getMailNotificationOutboxByMailId(result.mail_id)).status, "pending");
 });

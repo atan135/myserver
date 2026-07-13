@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+
+import { buildMailNotificationEvent } from "./notification-outbox.js";
+
 function toDateOrNull(value) {
   if (!value) {
     return null;
@@ -27,22 +31,6 @@ function cloneAttachments(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function buildMailNotificationPayload(mail) {
-  return {
-    to_player_id: mail.to_player_id,
-    mail: {
-      mail_id: mail.mail_id,
-      sender_id: mail.sender_id,
-      sender_name: mail.sender_name,
-      from_player_id: mail.from_player_id,
-      to_player_id: mail.to_player_id,
-      title: mail.title,
-      mail_type: mail.mail_type || "system",
-      created_at: mail.created_at
-    }
-  };
-}
-
 function parseJson(value) {
   if (!value) {
     return null;
@@ -55,6 +43,10 @@ function parseJson(value) {
   return value;
 }
 
+function isValidLeaseToken(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 async function rollbackQuietly(client) {
   try {
     await client.query("ROLLBACK");
@@ -64,8 +56,11 @@ async function rollbackQuietly(client) {
 }
 
 export class DbMailStore {
-  constructor(pool) {
+  constructor(pool, options = {}) {
     this.pool = pool;
+    this.outboxMaxAttempts = options.outboxMaxAttempts || 8;
+    this.outboxLeaseMs = options.outboxLeaseMs || 30_000;
+    this.outboxLeaseOwner = options.outboxLeaseOwner || "mail-service";
     this.memory = new Map();
     this.memoryNextId = 1;
     this.memoryOutbox = new Map();
@@ -77,6 +72,7 @@ export class DbMailStore {
   }
 
   async createMailWithNotificationOutbox(mail) {
+    const event = buildMailNotificationEvent(mail);
     if (!this.pool) {
       const id = this.memoryNextId++;
       const createdAt = toDateOrNull(mail.created_at) || new Date();
@@ -110,7 +106,12 @@ export class DbMailStore {
       const outbox = this.enqueueMailNotificationOutboxMemory({
         mail_id: mail.mail_id,
         to_player_id: mail.to_player_id,
-        payload: buildMailNotificationPayload(mail),
+        event_id: event.event_id,
+        event_version: event.version,
+        trace_id: event.trace_id,
+        occurred_at: event.occurred_at,
+        max_attempts: this.outboxMaxAttempts,
+        payload: event,
         created_at: createdAt
       });
 
@@ -126,13 +127,19 @@ export class DbMailStore {
       const mailId = await this.insertMail(client, mail);
       const outboxResult = await client.query(
         `INSERT INTO mail_notification_outbox
-          (mail_id, to_player_id, payload, status, next_attempt_at)
-         VALUES ($1, $2, $3::jsonb, 'pending', current_timestamp)
+          (mail_id, to_player_id, event_id, event_version, trace_id, occurred_at,
+           payload, status, max_attempts, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', $8, current_timestamp)
          RETURNING id`,
         [
           mail.mail_id,
           mail.to_player_id,
-          JSON.stringify(buildMailNotificationPayload(mail))
+          event.event_id,
+          event.version,
+          event.trace_id,
+          event.occurred_at,
+          JSON.stringify(event),
+          this.outboxMaxAttempts
         ]
       );
       await client.query("COMMIT");
@@ -201,33 +208,50 @@ export class DbMailStore {
       id,
       mail_id: entry.mail_id,
       to_player_id: entry.to_player_id,
+      event_id: entry.event_id,
+      event_version: entry.event_version,
+      trace_id: entry.trace_id,
+      occurred_at: entry.occurred_at,
       payload: JSON.parse(JSON.stringify(entry.payload)),
       status: "pending",
       attempts: 0,
+      max_attempts: entry.max_attempts || this.outboxMaxAttempts,
       next_attempt_at: now,
       locked_until: null,
+      lease_owner: null,
+      lease_token: null,
       last_error: null,
       created_at: now,
-      sent_at: null
+      sent_at: null,
+      terminal_at: null
     };
     this.memoryOutbox.set(id, row);
     return this.parseOutboxRow(row);
   }
 
-  async reservePendingMailNotificationOutbox(limit = 20) {
+  async reservePendingMailNotificationOutbox(limit = 20, options = {}) {
+    const leaseMs = options.leaseMs || this.outboxLeaseMs;
+    const leaseOwner = options.leaseOwner || this.outboxLeaseOwner;
+    const leaseToken = options.leaseToken || randomUUID();
     if (!this.pool) {
       const now = Date.now();
       const reserved = Array.from(this.memoryOutbox.values())
-        .filter((row) => row.status !== "sent")
+        .filter((row) => row.status !== "sent" && row.status !== "terminal")
         .filter((row) => !row.next_attempt_at || new Date(row.next_attempt_at).getTime() <= now)
         .filter((row) => row.status !== "sending" || !row.locked_until || new Date(row.locked_until).getTime() <= now)
         .sort((a, b) => a.id - b.id)
         .slice(0, limit);
 
       for (const row of reserved) {
+        row.lease_taken_over = row.status === "sending";
+        row.attempts_exhausted = row.attempts >= row.max_attempts;
         row.status = "sending";
-        row.attempts += 1;
-        row.locked_until = new Date(now + 30_000);
+        if (!row.attempts_exhausted) {
+          row.attempts += 1;
+        }
+        row.locked_until = new Date(now + leaseMs);
+        row.lease_owner = leaseOwner;
+        row.lease_token = leaseToken;
         this.memoryOutbox.set(row.id, row);
       }
 
@@ -239,8 +263,8 @@ export class DbMailStore {
       await client.query("BEGIN");
       const { rows } = await client.query(
         `SELECT *
-           FROM mail_notification_outbox
-          WHERE status <> 'sent'
+          FROM mail_notification_outbox
+          WHERE status NOT IN ('sent', 'terminal')
             AND (next_attempt_at IS NULL OR next_attempt_at <= current_timestamp)
             AND (status <> 'sending' OR locked_until IS NULL OR locked_until <= current_timestamp)
           ORDER BY id ASC
@@ -254,10 +278,12 @@ export class DbMailStore {
         await client.query(
           `UPDATE mail_notification_outbox
               SET status = 'sending',
-                  attempts = attempts + 1,
-                  locked_until = current_timestamp + interval '30 seconds'
+                  attempts = attempts + CASE WHEN attempts < max_attempts THEN 1 ELSE 0 END,
+                  locked_until = current_timestamp + ($2 * interval '1 millisecond'),
+                  lease_owner = $3,
+                  lease_token = $4
             WHERE id = ANY($1::bigint[])`,
-          [ids]
+          [ids, leaseMs, leaseOwner, leaseToken]
         );
       }
 
@@ -265,7 +291,12 @@ export class DbMailStore {
       return rows.map((row) => this.parseOutboxRow({
         ...row,
         status: "sending",
-        attempts: row.attempts + 1
+        attempts: row.attempts < row.max_attempts ? row.attempts + 1 : row.attempts,
+        locked_until: new Date(Date.now() + leaseMs),
+        lease_owner: leaseOwner,
+        lease_token: leaseToken,
+        lease_taken_over: row.status === "sending",
+        attempts_exhausted: row.attempts >= row.max_attempts
       }));
     } catch (error) {
       await rollbackQuietly(client);
@@ -275,16 +306,21 @@ export class DbMailStore {
     }
   }
 
-  async markMailNotificationOutboxSent(outboxId) {
+  async markMailNotificationOutboxSent(outboxId, leaseToken) {
+    if (!isValidLeaseToken(leaseToken)) {
+      return false;
+    }
     if (!this.pool) {
       const row = this.memoryOutbox.get(outboxId);
-      if (!row) {
+      if (!row || row.status !== "sending" || row.lease_token !== leaseToken) {
         return false;
       }
 
       row.status = "sent";
       row.sent_at = new Date();
       row.locked_until = null;
+      row.lease_owner = null;
+      row.lease_token = null;
       this.memoryOutbox.set(outboxId, row);
       return true;
     }
@@ -293,25 +329,35 @@ export class DbMailStore {
       `UPDATE mail_notification_outbox
           SET status = 'sent',
               sent_at = current_timestamp,
-              locked_until = NULL
-        WHERE id = $1`,
-      [outboxId]
+              locked_until = NULL,
+              lease_owner = NULL,
+              lease_token = NULL
+        WHERE id = $1
+          AND status = 'sending'
+          AND lease_token = $2`,
+      [outboxId, leaseToken]
     );
     return result.rowCount > 0;
   }
 
-  async markMailNotificationOutboxFailed(outboxId, errorMessage) {
+  async markMailNotificationOutboxFailed(outboxId, errorMessage, options = {}) {
+    const leaseToken = options.leaseToken;
+    const delayMs = Math.max(0, options.delayMs ?? 1000);
+    if (!isValidLeaseToken(leaseToken)) {
+      return false;
+    }
     if (!this.pool) {
       const row = this.memoryOutbox.get(outboxId);
-      if (!row) {
+      if (!row || row.status !== "sending" || row.lease_token !== leaseToken) {
         return false;
       }
 
-      const delayMs = Math.min(60_000, 1000 * (2 ** Math.max(0, row.attempts - 1)));
       row.status = "failed";
       row.last_error = String(errorMessage || "").slice(0, 512);
       row.next_attempt_at = new Date(Date.now() + delayMs);
       row.locked_until = null;
+      row.lease_owner = null;
+      row.lease_token = null;
       this.memoryOutbox.set(outboxId, row);
       return true;
     }
@@ -320,14 +366,119 @@ export class DbMailStore {
       `UPDATE mail_notification_outbox
           SET status = 'failed',
               last_error = $1,
-              next_attempt_at = current_timestamp + (
-                LEAST(60, POWER(2, GREATEST(attempts - 1, 0))) * interval '1 second'
-              ),
-              locked_until = NULL
-        WHERE id = $2`,
-      [String(errorMessage || "").slice(0, 512), outboxId]
+              next_attempt_at = current_timestamp + ($2 * interval '1 millisecond'),
+              locked_until = NULL,
+              lease_owner = NULL,
+              lease_token = NULL
+        WHERE id = $3
+          AND status = 'sending'
+          AND lease_token = $4`,
+      [String(errorMessage || "").slice(0, 512), delayMs, outboxId, leaseToken]
     );
     return result.rowCount > 0;
+  }
+
+  async markMailNotificationOutboxTerminal(outboxId, errorMessage, options = {}) {
+    const leaseToken = options.leaseToken;
+    if (!isValidLeaseToken(leaseToken)) {
+      return false;
+    }
+    if (!this.pool) {
+      const row = this.memoryOutbox.get(outboxId);
+      if (!row || row.status !== "sending" || row.lease_token !== leaseToken) {
+        return false;
+      }
+      row.status = "terminal";
+      row.last_error = String(errorMessage || "").slice(0, 512);
+      row.next_attempt_at = null;
+      row.locked_until = null;
+      row.lease_owner = null;
+      row.lease_token = null;
+      row.terminal_at = new Date();
+      this.memoryOutbox.set(outboxId, row);
+      return true;
+    }
+
+    const result = await this.pool.query(
+      `UPDATE mail_notification_outbox
+          SET status = 'terminal',
+              last_error = $1,
+              next_attempt_at = NULL,
+              locked_until = NULL,
+              lease_owner = NULL,
+              lease_token = NULL,
+              terminal_at = current_timestamp
+        WHERE id = $2
+          AND status = 'sending'
+          AND lease_token = $3`,
+      [String(errorMessage || "").slice(0, 512), outboxId, leaseToken]
+    );
+    return result.rowCount > 0;
+  }
+
+  async getMailNotificationOutboxStats(now = new Date()) {
+    if (!this.pool) {
+      const active = Array.from(this.memoryOutbox.values())
+        .filter((row) => row.status !== "sent" && row.status !== "terminal");
+      const oldestCreatedAt = active.reduce((oldest, row) => {
+        const timestamp = new Date(row.created_at).getTime();
+        return oldest === null || timestamp < oldest ? timestamp : oldest;
+      }, null);
+      return {
+        backlog: active.length,
+        oldestAgeMs: oldestCreatedAt === null ? 0 : Math.max(0, now.getTime() - oldestCreatedAt)
+      };
+    }
+
+    const { rows } = await this.pool.query(
+      `SELECT COUNT(*) FILTER (WHERE status NOT IN ('sent', 'terminal'))::bigint AS backlog,
+              EXTRACT(EPOCH FROM ($1::timestamptz - MIN(created_at)
+                FILTER (WHERE status NOT IN ('sent', 'terminal')))) * 1000 AS oldest_age_ms
+         FROM mail_notification_outbox`,
+      [now]
+    );
+    return {
+      backlog: Number(rows[0]?.backlog || 0),
+      oldestAgeMs: Math.max(0, Number(rows[0]?.oldest_age_ms || 0))
+    };
+  }
+
+  async cleanupMailNotificationOutbox(options = {}) {
+    const now = options.now || new Date();
+    const sentRetentionMs = options.sentRetentionMs;
+    const terminalRetentionMs = options.terminalRetentionMs;
+    const limit = options.limit || 500;
+    const sentBefore = new Date(now.getTime() - sentRetentionMs);
+    const terminalBefore = new Date(now.getTime() - terminalRetentionMs);
+
+    if (!this.pool) {
+      let deleted = 0;
+      for (const [id, row] of Array.from(this.memoryOutbox.entries()).sort(([a], [b]) => a - b)) {
+        const shouldDelete = (row.status === "sent" && row.sent_at && new Date(row.sent_at) <= sentBefore)
+          || (row.status === "terminal" && row.terminal_at && new Date(row.terminal_at) <= terminalBefore);
+        if (shouldDelete && deleted < limit) {
+          this.memoryOutbox.delete(id);
+          deleted += 1;
+        }
+      }
+      return deleted;
+    }
+
+    const result = await this.pool.query(
+      `WITH expired AS (
+         SELECT id
+           FROM mail_notification_outbox
+          WHERE (status = 'sent' AND sent_at < $1)
+             OR (status = 'terminal' AND terminal_at < $2)
+          ORDER BY id ASC
+          LIMIT $3
+       )
+       DELETE FROM mail_notification_outbox outbox
+        USING expired
+        WHERE outbox.id = expired.id`,
+      [sentBefore, terminalBefore, limit]
+    );
+    return result.rowCount;
   }
 
   async getMailNotificationOutboxByMailId(mailId) {
@@ -635,13 +786,23 @@ export class DbMailStore {
       mail_id: row.mail_id,
       to_player_id: row.to_player_id,
       payload: parseJson(row.payload),
+      event_id: row.event_id,
+      event_version: row.event_version || 1,
+      trace_id: row.trace_id,
+      occurred_at: row.occurred_at,
       status: row.status,
       attempts: row.attempts || 0,
+      max_attempts: row.max_attempts || this.outboxMaxAttempts,
       next_attempt_at: row.next_attempt_at,
       locked_until: row.locked_until,
+      lease_owner: row.lease_owner,
+      lease_token: row.lease_token,
+      lease_taken_over: row.lease_taken_over === true,
+      attempts_exhausted: row.attempts_exhausted === true,
       last_error: row.last_error,
       created_at: row.created_at,
-      sent_at: row.sent_at
+      sent_at: row.sent_at,
+      terminal_at: row.terminal_at
     };
   }
 }
