@@ -402,7 +402,7 @@ test("character inventory table is character-scoped and has no legacy level colu
   assert.equal(/\baccount_player_id\b/i.test(tableSql), false);
 });
 
-test("character inventory grants are idempotent per request and target character ids", () => {
+test("character inventory grants persist the request fingerprint and first result", () => {
   assert.notEqual(
     characterInventoryGrantsTableMatch,
     null,
@@ -415,6 +415,9 @@ test("character inventory grants are idempotent per request and target character
     /character_id varchar\(64\) NOT NULL/,
     /source varchar\(64\) NOT NULL/,
     /items_json jsonb NOT NULL/,
+    /reason varchar\(512\) NULL/,
+    /request_fingerprint varchar\(71\) NOT NULL/,
+    /result_json jsonb NOT NULL/,
     /CONSTRAINT uk_character_inventory_grants_request_id UNIQUE \(request_id\)/
   ]) {
     assert.match(tableSql, pattern);

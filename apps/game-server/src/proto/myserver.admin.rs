@@ -49,6 +49,21 @@ pub struct GrantItemsReq {
     pub source: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
     pub reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub mail_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub request_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub trace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantItemsResultSummary {
+    #[prost(string, tag = "1")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "3")]
+    pub items: ::prost::alloc::vec::Vec<GrantItem>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GrantItemsRes {
@@ -58,4 +73,52 @@ pub struct GrantItemsRes {
     pub error_code: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub applied: bool,
+    #[prost(string, tag = "4")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub request_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub error_category: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub result_state: ::prost::alloc::string::String,
+    #[prost(bool, tag = "8")]
+    pub retryable: bool,
+    #[prost(message, optional, tag = "9")]
+    pub result_summary: ::core::option::Option<GrantItemsResultSummary>,
+    #[prost(string, tag = "10")]
+    pub trace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantItemsResultQueryReq {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub request_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub trace_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantItemsResultQueryRes {
+    #[prost(bool, tag = "1")]
+    pub ok: bool,
+    #[prost(string, tag = "2")]
+    pub query_status: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub request_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub error_category: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub result_state: ::prost::alloc::string::String,
+    #[prost(bool, tag = "8")]
+    pub retryable: bool,
+    #[prost(message, optional, tag = "9")]
+    pub result_summary: ::core::option::Option<GrantItemsResultSummary>,
+    #[prost(string, tag = "10")]
+    pub trace_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "11")]
+    pub created_at_ms: i64,
 }

@@ -1,5 +1,10 @@
-use sqlx::postgres::{PgDatabaseError, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use tracing::info;
+
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::Config;
 use crate::core::inventory::Item;
@@ -7,8 +12,7 @@ use crate::core::inventory::player_data::PlayerData;
 use crate::core::inventory::{
     AttrPanel, Buff, EquipmentSlots, ItemContainer, PlayerAttr, PlayerVisual,
 };
-
-const UNIQUE_VIOLATION: &str = "23505";
+use crate::core::player::grant_contract::GrantResultSummary;
 
 const CHARACTER_SCHEMA_STATEMENTS: &[&str] = &[
     r#"CREATE TABLE IF NOT EXISTS character_inventory (
@@ -34,29 +38,111 @@ const CHARACTER_SCHEMA_STATEMENTS: &[&str] = &[
         character_id varchar(64) NOT NULL,
         source varchar(64) NOT NULL,
         items_json jsonb NOT NULL,
-        reason varchar(255) NULL,
+        reason varchar(512) NULL,
+        request_fingerprint varchar(71) NOT NULL,
+        result_json jsonb NOT NULL,
         created_at timestamptz NOT NULL DEFAULT current_timestamp,
         CONSTRAINT uk_character_inventory_grants_request_id UNIQUE (request_id)
     )"#,
+    "ALTER TABLE character_inventory_grants ALTER COLUMN reason TYPE varchar(512)",
+    "ALTER TABLE character_inventory_grants ADD COLUMN IF NOT EXISTS request_fingerprint varchar(71) NULL",
+    "ALTER TABLE character_inventory_grants ADD COLUMN IF NOT EXISTS result_json jsonb NULL",
     "CREATE INDEX IF NOT EXISTS idx_character_inventory_grants_character_id ON character_inventory_grants (character_id)",
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRecord {
+    pub request_id: String,
+    pub character_id: String,
+    pub request_fingerprint: String,
+    pub result_summary: GrantResultSummary,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantRecordLookup {
+    NotFound,
+    Succeeded(GrantRecord),
+    ResultUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveGrantRecordOutcome {
+    Applied(GrantRecord),
+    Existing(GrantRecordLookup),
+}
+
+#[derive(Debug)]
+pub enum SaveGrantRecordError {
+    NotApplied(String),
+    ResultUnknown(String),
+}
+
+impl std::fmt::Display for SaveGrantRecordError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotApplied(error) => write!(formatter, "grant transaction not applied: {error}"),
+            Self::ResultUnknown(error) => {
+                write!(formatter, "grant transaction result unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SaveGrantRecordError {}
 
 /// PostgreSQL Character Inventory Store.
 /// 负责角色背包数据的持久化。
 #[derive(Clone)]
 pub struct PgPlayerStore {
     pool: Option<PgPool>,
+    #[cfg(test)]
+    test_behavior: Option<TestStoreBehavior>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TestStoreBehavior {
+    load_error: String,
+    grant_save_attempts: Arc<AtomicUsize>,
 }
 
 impl PgPlayerStore {
     /// 创建一个禁用的 store（用于测试和本地无数据库模式）。
     pub fn new_disabled() -> Self {
-        Self { pool: None }
+        Self {
+            pool: None,
+            #[cfg(test)]
+            test_behavior: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_failing_load_for_test(error: impl Into<String>) -> Self {
+        Self {
+            pool: None,
+            test_behavior: Some(TestStoreBehavior {
+                load_error: error.into(),
+                grant_save_attempts: Arc::new(AtomicUsize::new(0)),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn grant_save_attempts_for_test(&self) -> usize {
+        self.test_behavior
+            .as_ref()
+            .map(|behavior| behavior.grant_save_attempts.load(Ordering::Relaxed))
+            .unwrap_or_default()
     }
 
     pub async fn new(config: &Config) -> Result<Self, Box<dyn std::error::Error>> {
         if !config.db_enabled {
-            return Ok(Self { pool: None });
+            return Ok(Self {
+                pool: None,
+                #[cfg(test)]
+                test_behavior: None,
+            });
         }
 
         let pool = PgPoolOptions::new()
@@ -70,10 +156,18 @@ impl PgPlayerStore {
         }
 
         info!("PgPlayerStore initialized");
-        Ok(Self { pool: Some(pool) })
+        Ok(Self {
+            pool: Some(pool),
+            #[cfg(test)]
+            test_behavior: None,
+        })
     }
 
     pub fn enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.test_behavior.is_some() {
+            return true;
+        }
         self.pool.is_some()
     }
 
@@ -113,50 +207,71 @@ impl PgPlayerStore {
         character_id: &str,
         data: &PlayerData,
         request_id: &str,
+        request_fingerprint: &str,
         source: &str,
         reason: &str,
         items: &[Item],
-    ) -> Result<bool, String> {
+        result_summary: &GrantResultSummary,
+    ) -> Result<SaveGrantRecordOutcome, SaveGrantRecordError> {
+        #[cfg(test)]
+        if let Some(behavior) = &self.test_behavior {
+            behavior.grant_save_attempts.fetch_add(1, Ordering::Relaxed);
+        }
         let Some(pool) = &self.pool else {
-            return Err("database not enabled".to_string());
+            return Err(SaveGrantRecordError::NotApplied(
+                "database not enabled".to_string(),
+            ));
         };
 
-        if request_id.trim().is_empty() {
-            self.save(character_id, data).await?;
-            return Ok(true);
-        }
+        let json = serialize_player_data(data).map_err(SaveGrantRecordError::NotApplied)?;
+        let items_json = serde_json::to_value(items)
+            .map_err(|error| SaveGrantRecordError::NotApplied(error.to_string()))?;
+        let result_json = serde_json::to_value(result_summary)
+            .map_err(|error| SaveGrantRecordError::NotApplied(error.to_string()))?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| SaveGrantRecordError::NotApplied(error.to_string()))?;
 
-        let json = serialize_player_data(data)?;
-        let items_json = serde_json::to_value(items).map_err(|e| e.to_string())?;
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-
-        match sqlx::query(
+        let inserted_at_ms = match sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO character_inventory_grants (
                 request_id,
                 character_id,
                 source,
                 items_json,
-                reason
-            ) VALUES ($1, $2, $3, $4, $5)"#,
+                reason,
+                request_fingerprint,
+                result_json
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (request_id) DO NOTHING
+            RETURNING (extract(epoch from created_at) * 1000)::bigint"#,
         )
         .bind(request_id)
         .bind(character_id)
         .bind(source)
         .bind(items_json)
         .bind(reason)
-        .execute(&mut *tx)
+        .bind(request_fingerprint)
+        .bind(result_json)
+        .fetch_optional(&mut *tx)
         .await
         {
-            Ok(_) => {}
-            Err(error) if is_duplicate_request_error(&error) => {
-                tx.rollback().await.map_err(|e| e.to_string())?;
-                return Ok(false);
-            }
+            Ok(created_at_ms) => created_at_ms,
             Err(error) => {
-                tx.rollback().await.map_err(|e| e.to_string())?;
-                return Err(error.to_string());
+                let _ = tx.rollback().await;
+                return Err(SaveGrantRecordError::NotApplied(error.to_string()));
             }
-        }
+        };
+
+        let Some(created_at_ms) = inserted_at_ms else {
+            let existing = find_grant_record_with_executor(&mut *tx, request_id)
+                .await
+                .map_err(SaveGrantRecordError::ResultUnknown)?;
+            tx.rollback()
+                .await
+                .map_err(|error| SaveGrantRecordError::ResultUnknown(error.to_string()))?;
+            return Ok(SaveGrantRecordOutcome::Existing(existing));
+        };
 
         sqlx::query(UPSERT_CHARACTER_INVENTORY_SQL)
             .bind(character_id)
@@ -170,14 +285,37 @@ impl PgPlayerStore {
             .bind(json.progress)
             .execute(&mut *tx)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| SaveGrantRecordError::NotApplied(error.to_string()))?;
 
-        tx.commit().await.map_err(|e| e.to_string())?;
+        tx.commit()
+            .await
+            .map_err(|error| SaveGrantRecordError::ResultUnknown(error.to_string()))?;
         info!(character_id = %character_id, request_id = %request_id, "character inventory grant saved");
-        Ok(true)
+        Ok(SaveGrantRecordOutcome::Applied(GrantRecord {
+            request_id: request_id.to_string(),
+            character_id: character_id.to_string(),
+            request_fingerprint: request_fingerprint.to_string(),
+            result_summary: result_summary.clone(),
+            created_at_ms,
+        }))
+    }
+
+    pub async fn find_grant_record(&self, request_id: &str) -> Result<GrantRecordLookup, String> {
+        #[cfg(test)]
+        if self.test_behavior.is_some() {
+            return Ok(GrantRecordLookup::NotFound);
+        }
+        let Some(pool) = &self.pool else {
+            return Err("database not enabled".to_string());
+        };
+        find_grant_record_with_executor(pool, request_id).await
     }
 
     pub async fn load(&self, character_id: &str) -> Result<Option<PlayerData>, String> {
+        #[cfg(test)]
+        if let Some(behavior) = &self.test_behavior {
+            return Err(behavior.load_error.clone());
+        }
         let Some(pool) = &self.pool else {
             return Err("database not enabled".to_string());
         };
@@ -318,11 +456,58 @@ impl CharacterInventoryRow {
     }
 }
 
-fn is_duplicate_request_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|error| error.try_downcast_ref::<PgDatabaseError>())
-        .is_some_and(|error| error.code() == UNIQUE_VIOLATION)
+#[derive(sqlx::FromRow)]
+struct GrantRecordRow {
+    request_id: String,
+    character_id: String,
+    request_fingerprint: Option<String>,
+    result_json: Option<serde_json::Value>,
+    created_at_ms: i64,
+}
+
+impl GrantRecordRow {
+    fn into_lookup(self) -> GrantRecordLookup {
+        let (Some(request_fingerprint), Some(result_json)) =
+            (self.request_fingerprint, self.result_json)
+        else {
+            return GrantRecordLookup::ResultUnavailable;
+        };
+        let Ok(result_summary) = serde_json::from_value(result_json) else {
+            return GrantRecordLookup::ResultUnavailable;
+        };
+        GrantRecordLookup::Succeeded(GrantRecord {
+            request_id: self.request_id,
+            character_id: self.character_id,
+            request_fingerprint,
+            result_summary,
+            created_at_ms: self.created_at_ms,
+        })
+    }
+}
+
+async fn find_grant_record_with_executor<'e, E>(
+    executor: E,
+    request_id: &str,
+) -> Result<GrantRecordLookup, String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row = sqlx::query_as::<_, GrantRecordRow>(
+        r#"SELECT
+            request_id,
+            character_id,
+            request_fingerprint,
+            result_json,
+            (extract(epoch from created_at) * 1000)::bigint AS created_at_ms
+        FROM character_inventory_grants
+        WHERE request_id = $1"#,
+    )
+    .bind(request_id)
+    .fetch_optional(executor)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    Ok(row.map_or(GrantRecordLookup::NotFound, GrantRecordRow::into_lookup))
 }
 
 async fn initialize_schema(pool: &PgPool) -> Result<(), sqlx::Error> {

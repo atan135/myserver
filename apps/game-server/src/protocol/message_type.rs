@@ -110,6 +110,8 @@ pub enum MessageType {
     GmKickPlayerRes = 3006,
     GmBanPlayerReq = 3007,
     GmBanPlayerRes = 3008,
+    GrantItemsResultQueryReq = 3009,
+    GrantItemsResultQueryRes = 3010,
     ErrorRes = 9000,
 }
 
@@ -226,6 +228,8 @@ impl MessageType {
             3006 => Some(Self::GmKickPlayerRes),
             3007 => Some(Self::GmBanPlayerReq),
             3008 => Some(Self::GmBanPlayerRes),
+            3009 => Some(Self::GrantItemsResultQueryReq),
+            3010 => Some(Self::GrantItemsResultQueryRes),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }

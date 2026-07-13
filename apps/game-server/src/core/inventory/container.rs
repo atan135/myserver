@@ -76,7 +76,10 @@ impl ItemContainer {
         // 先尝试堆叠
         if item.count > 1 {
             if let Some(existing) = self.find_item_mut(item.uid) {
-                existing.count += item.count;
+                existing.count = existing
+                    .count
+                    .checked_add(item.count)
+                    .ok_or(ItemError::StackOverflow)?;
                 return Ok(());
             }
             // 找相同 item_id 的物品堆叠
@@ -84,7 +87,10 @@ impl ItemContainer {
                 if let Some(existing) = slot {
                     if existing.can_stack_with(&item) {
                         // 可以堆叠
-                        existing.count += item.count;
+                        existing.count = existing
+                            .count
+                            .checked_add(item.count)
+                            .ok_or(ItemError::StackOverflow)?;
                         return Ok(());
                     }
                 }
@@ -196,6 +202,20 @@ mod tests {
 
         let result = container.add_item(Item::new(3, 1003, 1, false));
         assert_eq!(result, Err(ItemError::InventoryFull));
+    }
+
+    #[test]
+    fn stacking_rejects_count_overflow_without_mutating_existing_item() {
+        let mut container = ItemContainer::new(2);
+        container
+            .add_item(Item::new(1, 1001, u32::MAX, false))
+            .unwrap();
+
+        assert_eq!(
+            container.add_item(Item::new(2, 1001, 2, false)),
+            Err(ItemError::StackOverflow)
+        );
+        assert_eq!(container.find_item(1).unwrap().count, u32::MAX);
     }
 
     #[test]

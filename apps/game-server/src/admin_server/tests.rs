@@ -312,6 +312,9 @@ async fn gm_send_item_audit_event_targets_character() {
         }],
         source: "gm".to_string(),
         reason: "unit-test".to_string(),
+        mail_id: String::new(),
+        request_fingerprint: String::new(),
+        trace_id: String::new(),
     };
     let packet = bytes_packet(MessageType::GmSendItemReq, 11, encode_body(&request));
     let target = AdminAuditTarget {
@@ -658,6 +661,17 @@ fn decode_gm_send_item_rejects_legacy_player_id_target() {
     };
 
     assert_eq!(error.to_string(), "INVALID_CHARACTER_ID");
+}
+
+#[test]
+fn decode_gm_send_item_rejects_item_id_outside_i32_range() {
+    let packet = json_packet(
+        MessageType::GmSendItemReq,
+        r#"{"characterId":"chr_1","itemId":4294967297,"itemCount":1}"#,
+    );
+
+    let error = decode_grant_items_request(&packet).unwrap_err();
+    assert_eq!(error.to_string(), "INVALID_ITEM_ID");
 }
 
 #[test]

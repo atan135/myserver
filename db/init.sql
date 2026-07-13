@@ -650,9 +650,13 @@ CREATE TABLE IF NOT EXISTS character_inventory_grants (
   character_id varchar(64) NOT NULL,
   source varchar(64) NOT NULL,
   items_json jsonb NOT NULL,
-  reason varchar(255) NULL,
+  reason varchar(512) NULL,
+  request_fingerprint varchar(71) NOT NULL,
+  result_json jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
-  CONSTRAINT uk_character_inventory_grants_request_id UNIQUE (request_id)
+  CONSTRAINT uk_character_inventory_grants_request_id UNIQUE (request_id),
+  CONSTRAINT chk_character_inventory_grants_fingerprint
+    CHECK (request_fingerprint ~ '^sha256:[0-9a-f]{64}$')
 );
 
 CREATE INDEX IF NOT EXISTS idx_character_inventory_grants_character_id

@@ -246,6 +246,7 @@ impl RoomManager {
                     error = %error,
                     "failed to queue character message"
                 );
+                return Err(std::io::Error::other(error.to_string()));
             }
         } else if stale_index {
             self.remove_character_indexes_for_room(character_id, &room_id)

@@ -82,6 +82,11 @@ pub struct MetricsCollector {
     online_players: AtomicU64,
     /// 房间数
     room_count: AtomicU64,
+    inventory_grant_first_success: AtomicU64,
+    inventory_grant_idempotent_hit: AtomicU64,
+    inventory_grant_fingerprint_conflict: AtomicU64,
+    inventory_grant_transaction_failure: AtomicU64,
+    inventory_grant_push_failure: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -95,6 +100,11 @@ impl MetricsCollector {
             latency_count: AtomicU64::new(0),
             online_players: AtomicU64::new(0),
             room_count: AtomicU64::new(0),
+            inventory_grant_first_success: AtomicU64::new(0),
+            inventory_grant_idempotent_hit: AtomicU64::new(0),
+            inventory_grant_fingerprint_conflict: AtomicU64::new(0),
+            inventory_grant_transaction_failure: AtomicU64::new(0),
+            inventory_grant_push_failure: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -118,6 +128,31 @@ impl MetricsCollector {
     /// 设置房间数
     pub fn set_room_count(&self, val: u64) {
         self.room_count.store(val, Ordering::Relaxed);
+    }
+
+    pub fn record_inventory_grant_first_success(&self) {
+        self.inventory_grant_first_success
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_inventory_grant_idempotent_hit(&self) {
+        self.inventory_grant_idempotent_hit
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_inventory_grant_fingerprint_conflict(&self) {
+        self.inventory_grant_fingerprint_conflict
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_inventory_grant_transaction_failure(&self) {
+        self.inventory_grant_transaction_failure
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_inventory_grant_push_failure(&self) {
+        self.inventory_grant_push_failure
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// 设置扩展字段
@@ -160,6 +195,20 @@ impl MetricsCollector {
                 let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
                 let online_players = self.online_players.load(Ordering::Relaxed);
                 let room_count = self.room_count.load(Ordering::Relaxed);
+                let inventory_grant_first_success = self
+                    .inventory_grant_first_success
+                    .swap(0, Ordering::Relaxed);
+                let inventory_grant_idempotent_hit = self
+                    .inventory_grant_idempotent_hit
+                    .swap(0, Ordering::Relaxed);
+                let inventory_grant_fingerprint_conflict = self
+                    .inventory_grant_fingerprint_conflict
+                    .swap(0, Ordering::Relaxed);
+                let inventory_grant_transaction_failure = self
+                    .inventory_grant_transaction_failure
+                    .swap(0, Ordering::Relaxed);
+                let inventory_grant_push_failure =
+                    self.inventory_grant_push_failure.swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
@@ -180,6 +229,26 @@ impl MetricsCollector {
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     ("online_players".to_string(), online_players.to_string()),
                     ("room_count".to_string(), room_count.to_string()),
+                    (
+                        "inventory_grant_first_success_total".to_string(),
+                        inventory_grant_first_success.to_string(),
+                    ),
+                    (
+                        "inventory_grant_idempotent_hit_total".to_string(),
+                        inventory_grant_idempotent_hit.to_string(),
+                    ),
+                    (
+                        "inventory_grant_fingerprint_conflict_total".to_string(),
+                        inventory_grant_fingerprint_conflict.to_string(),
+                    ),
+                    (
+                        "inventory_grant_transaction_failure_total".to_string(),
+                        inventory_grant_transaction_failure.to_string(),
+                    ),
+                    (
+                        "inventory_grant_push_failure_total".to_string(),
+                        inventory_grant_push_failure.to_string(),
+                    ),
                 ];
 
                 fields.extend(collect_discovery_metric_fields(true));
@@ -237,6 +306,11 @@ mod tests {
         collector.record_latency(100);
         collector.set_online_players(10);
         collector.set_room_count(5);
+        collector.record_inventory_grant_first_success();
+        collector.record_inventory_grant_idempotent_hit();
+        collector.record_inventory_grant_fingerprint_conflict();
+        collector.record_inventory_grant_transaction_failure();
+        collector.record_inventory_grant_push_failure();
 
         // 验证计数器工作正常
         assert_eq!(collector.qps_counter.load(Ordering::Relaxed), 1);
@@ -244,5 +318,35 @@ mod tests {
         assert_eq!(collector.latency_count.load(Ordering::Relaxed), 1);
         assert_eq!(collector.online_players.load(Ordering::Relaxed), 10);
         assert_eq!(collector.room_count.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            collector
+                .inventory_grant_first_success
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .inventory_grant_idempotent_hit
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .inventory_grant_fingerprint_conflict
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .inventory_grant_transaction_failure
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .inventory_grant_push_failure
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 }

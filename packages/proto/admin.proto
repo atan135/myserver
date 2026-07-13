@@ -34,10 +34,46 @@ message GrantItemsReq {
   repeated GrantItem items = 3;
   string source = 4;
   string reason = 5;
+  string mail_id = 6;
+  string request_fingerprint = 7;
+  string trace_id = 8;
+}
+
+message GrantItemsResultSummary {
+  string character_id = 1;
+  string source = 2;
+  repeated GrantItem items = 3;
 }
 
 message GrantItemsRes {
   bool ok = 1;
   string error_code = 2;
   bool applied = 3;
+  string request_id = 4;
+  string request_fingerprint = 5;
+  string error_category = 6;
+  string result_state = 7;
+  bool retryable = 8;
+  GrantItemsResultSummary result_summary = 9;
+  string trace_id = 10;
+}
+
+message GrantItemsResultQueryReq {
+  string request_id = 1;
+  string request_fingerprint = 2;
+  string trace_id = 3;
+}
+
+message GrantItemsResultQueryRes {
+  bool ok = 1;
+  string query_status = 2;
+  string request_id = 3;
+  string request_fingerprint = 4;
+  string error_code = 5;
+  string error_category = 6;
+  string result_state = 7;
+  bool retryable = 8;
+  GrantItemsResultSummary result_summary = 9;
+  string trace_id = 10;
+  int64 created_at_ms = 11;
 }

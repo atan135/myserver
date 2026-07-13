@@ -37,7 +37,10 @@ use audit::{
     AdminAuditTarget, audit_then_write_error, audit_then_write_message, ensure_admin_write_allowed,
 };
 use auth::authenticate_admin_packet;
-use gm::{handle_gm_ban_player, handle_gm_broadcast, handle_gm_kick_player, handle_gm_send_item};
+use gm::{
+    handle_gm_ban_player, handle_gm_broadcast, handle_gm_kick_player, handle_gm_send_item,
+    handle_grant_items_result_query,
+};
 use protocol_io::{read_packet, write_error, write_message};
 use rollout_status::{build_rollout_drain_status_response, build_server_shutdown_response};
 use runtime_config::apply_runtime_config;
@@ -227,6 +230,9 @@ async fn handle_admin_connection(
                     &item_uid_generator,
                 )
                 .await?;
+            }
+            Some(MessageType::GrantItemsResultQueryReq) => {
+                handle_grant_items_result_query(&mut writer, &packet, &player_manager).await?;
             }
             Some(MessageType::GmBroadcastReq) => {
                 handle_gm_broadcast(
