@@ -255,12 +255,18 @@ test("mail SQL defines durable claim workflow without cascading mail deletion", 
     assert.match(source, /claim_request_id varchar\(128\) NOT NULL/);
     assert.match(source, /attachments_snapshot jsonb NOT NULL/);
     assert.match(source, /reconciliation_pending/);
+    assert.match(source, /manual_review/);
+    assert.match(source, /recovery_lease_token varchar\(64\) NULL/);
+    assert.match(source, /next_recovery_at timestamptz NULL/);
     const claimTable = source.slice(
       source.indexOf("CREATE TABLE IF NOT EXISTS mail_claim_workflows"),
       source.indexOf("CREATE TABLE IF NOT EXISTS mail_notification_outbox")
     );
     assert.doesNotMatch(claimTable, /ON DELETE CASCADE/);
   }
+  const storeSource = await readFile("apps/mail-service/src/db-store.js", "utf8");
+  assert.match(storeSource, /FOR UPDATE SKIP LOCKED/);
+  assert.match(storeSource, /recovery_lease_token = \$2/);
 });
 
 function mailRow() {

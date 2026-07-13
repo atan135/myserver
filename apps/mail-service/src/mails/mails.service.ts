@@ -155,6 +155,7 @@ function classifyClaimFailure(error: any) {
 
 function claimStatusHttpStatus(claimStatus: string) {
   if (claimStatus === "processing" || claimStatus === "reconciliation_pending") return 202;
+  if (claimStatus === "manual_review") return 409;
   if (claimStatus === "retryable_failure") return 503;
   if (claimStatus === "permanent_failure") return 422;
   return 200;
@@ -185,6 +186,9 @@ function publicClaimError(claimStatus: string, internalErrorCode: any, errorCate
   if (claimStatus === "reconciliation_pending") {
     return "MAIL_CLAIM_RECONCILIATION_PENDING";
   }
+  if (claimStatus === "manual_review") {
+    return "MAIL_CLAIM_MANUAL_REVIEW_REQUIRED";
+  }
   return undefined;
 }
 
@@ -192,6 +196,7 @@ function publicClaimMessage(claimStatus: string, publicErrorCode: any) {
   if (claimStatus === "processing") return "Mail attachment claim is processing";
   if (claimStatus === "retryable_failure") return "Mail attachment claim could not be completed yet; retry later";
   if (claimStatus === "reconciliation_pending") return "Mail attachment claim result is being verified";
+  if (claimStatus === "manual_review") return "Mail attachment claim requires support review";
   if (claimStatus === "permanent_failure") {
     return PUBLIC_PERMANENT_CLAIM_ERRORS.get(publicErrorCode) || "Mail attachments cannot be claimed in the current state";
   }
@@ -663,6 +668,14 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         return claimResponse(existingWorkflow, claimBegin.mail, {
           claimStatus: "reconciliation_pending",
           httpStatus: 202,
+          retryable: false
+        });
+      }
+      if (claimBegin.manualReview) {
+        return claimResponse(existingWorkflow, claimBegin.mail, {
+          claimStatus: "manual_review",
+          httpStatus: 409,
+          ok: false,
           retryable: false
         });
       }

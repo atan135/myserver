@@ -49,13 +49,27 @@ const MAIL_SCHEMA_STATEMENTS = [
     last_error_message varchar(512) NULL,
     result_summary jsonb NULL,
     game_instance_id varchar(128) NULL,
+    recovery_attempts integer NOT NULL DEFAULT 0 CHECK (recovery_attempts >= 0),
+    next_recovery_at timestamptz NULL DEFAULT current_timestamp,
+    recovery_mode varchar(16) NULL,
+    recovery_lease_owner varchar(128) NULL,
+    recovery_lease_token varchar(64) NULL,
+    recovery_lease_expires_at timestamptz NULL,
+    recovery_started_at timestamptz NULL,
+    last_recovery_at timestamptz NULL,
+    last_query_status varchar(32) NULL,
+    last_query_fingerprint varchar(71) NULL,
+    last_query_error_code varchar(128) NULL,
+    last_query_result_state varchar(32) NULL,
+    last_query_instance_ids jsonb NULL,
+    manual_review_at timestamptz NULL,
     created_at timestamptz NOT NULL DEFAULT current_timestamp,
     updated_at timestamptz NOT NULL DEFAULT current_timestamp,
     completed_at timestamptz NULL,
     CONSTRAINT uk_mail_claim_workflows_mail_id UNIQUE (mail_id),
     CONSTRAINT uk_mail_claim_workflows_request_id UNIQUE (claim_request_id),
     CONSTRAINT ck_mail_claim_workflows_status CHECK (
-      status IN ('processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending', 'claimed')
+      status IN ('processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
     ),
     CONSTRAINT ck_mail_claim_workflows_snapshot CHECK (jsonb_typeof(attachments_snapshot) = 'array'),
     CONSTRAINT ck_mail_claim_workflows_fingerprint CHECK (attachments_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
@@ -63,12 +77,56 @@ const MAIL_SCHEMA_STATEMENTS = [
       (status = 'processing' AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
       OR
       (status <> 'processing' AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+    ),
+    CONSTRAINT ck_mail_claim_workflows_recovery_lease CHECK (
+      (recovery_mode IS NULL AND recovery_lease_owner IS NULL AND recovery_lease_token IS NULL AND recovery_lease_expires_at IS NULL)
+      OR
+      (recovery_mode IS NOT NULL AND recovery_lease_owner IS NOT NULL AND recovery_lease_token IS NOT NULL AND recovery_lease_expires_at IS NOT NULL)
+    ),
+    CONSTRAINT ck_mail_claim_workflows_recovery_mode CHECK (
+      recovery_mode IS NULL OR recovery_mode IN ('query', 'grant')
     )
   )`,
   `CREATE INDEX IF NOT EXISTS idx_mail_claim_workflows_recovery
      ON mail_claim_workflows (status, lease_expires_at, updated_at)`,
   `CREATE INDEX IF NOT EXISTS idx_mail_claim_workflows_player
      ON mail_claim_workflows (player_id, updated_at DESC)`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_attempts integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS next_recovery_at timestamptz NULL DEFAULT current_timestamp`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_mode varchar(16) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_lease_owner varchar(128) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_lease_token varchar(64) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_lease_expires_at timestamptz NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS recovery_started_at timestamptz NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_recovery_at timestamptz NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_status varchar(32) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_fingerprint varchar(71) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_error_code varchar(128) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_result_state varchar(32) NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_instance_ids jsonb NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS manual_review_at timestamptz NULL`,
+  `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_recovery_attempts`,
+  `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_recovery_attempts CHECK (recovery_attempts >= 0)`,
+  `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_status`,
+  `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_status CHECK (
+     status IN ('processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
+   )`,
+  `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_recovery_lease`,
+  `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_recovery_lease CHECK (
+     (recovery_mode IS NULL AND recovery_lease_owner IS NULL AND recovery_lease_token IS NULL AND recovery_lease_expires_at IS NULL)
+     OR
+     (recovery_mode IS NOT NULL AND recovery_lease_owner IS NOT NULL AND recovery_lease_token IS NOT NULL AND recovery_lease_expires_at IS NOT NULL)
+   )`,
+  `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_recovery_mode`,
+  `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_recovery_mode CHECK (
+     recovery_mode IS NULL OR recovery_mode IN ('query', 'grant')
+   )`,
+  `DROP INDEX IF EXISTS idx_mail_claim_workflows_recovery`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_claim_workflows_recovery
+     ON mail_claim_workflows (status, next_recovery_at, recovery_lease_expires_at, lease_expires_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uk_mail_claim_workflows_recovery_lease_token
+     ON mail_claim_workflows (recovery_lease_token)
+     WHERE recovery_lease_token IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS mail_notification_outbox (
     id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     mail_id varchar(64) NOT NULL,

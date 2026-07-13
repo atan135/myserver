@@ -6,6 +6,7 @@ import { FastifyAdapter, NestFastifyApplication } from "@nestjs/platform-fastify
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 
 import { AppModule } from "./app.module.js";
+import { ClaimRecoveryWorker } from "./claim-recovery.worker.js";
 import { HttpExceptionFilter } from "./common/http-exception.filter.js";
 import { releaseGlobalIdLease } from "./global-id.js";
 import { configureLogger, log } from "./logger.js";
@@ -56,11 +57,18 @@ export async function createNestApp() {
 }
 
 export async function closeNestApp(app: INestApplication) {
+  const claimRecoveryWorker = app.get<any>(ClaimRecoveryWorker, { strict: false });
   const metrics = app.get<any>(MAIL_METRICS, { strict: false });
   const registryClient = app.get<any>(MAIL_REGISTRY, { strict: false });
   const nats = app.get<any>(MAIL_NATS, { strict: false });
   const redis = app.get<any>(MAIL_REDIS, { strict: false });
   const dbPool = app.get<any>(MAIL_DB_POOL, { strict: false });
+
+  try {
+    await claimRecoveryWorker?.onModuleDestroy?.();
+  } catch (error: any) {
+    log("error", "shutdown.claim_recovery_stop_failed", { error: error.message });
+  }
 
   try {
     await metrics?.stop?.();

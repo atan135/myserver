@@ -13,6 +13,8 @@ const MESSAGE_TYPE = {
   ADMIN_AUTH_REQ: 2099,
   GM_SEND_ITEM_REQ: 3003,
   GM_SEND_ITEM_RES: 3004,
+  GRANT_ITEMS_RESULT_QUERY_REQ: 3009,
+  GRANT_ITEMS_RESULT_QUERY_RES: 3010,
   ERROR_RES: 9000
 };
 const ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
@@ -119,6 +121,33 @@ function protobufString(fields, fieldNumber) {
 
 function protobufBool(fields, fieldNumber) {
   return fields.get(fieldNumber)?.at(-1) === 1n;
+}
+
+function protobufNumber(fields, fieldNumber) {
+  const value = fields.get(fieldNumber)?.at(-1);
+  if (typeof value !== "bigint" || value > BigInt(Number.MAX_SAFE_INTEGER)) return 0;
+  return Number(value);
+}
+
+function encodeProtobufVarint(value) {
+  let remaining = BigInt(value);
+  const bytes = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining > 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining > 0n);
+  return Buffer.from(bytes);
+}
+
+function encodeProtobufString(fieldNumber, value) {
+  const body = Buffer.from(String(value || ""), "utf8");
+  return Buffer.concat([
+    encodeProtobufVarint((fieldNumber << 3) | 2),
+    encodeProtobufVarint(body.length),
+    body
+  ]);
 }
 
 function decodeError(body) {
@@ -245,6 +274,14 @@ function buildGrantMailAttachmentsPayload(characterId, requestId, attachments, r
     routeGeneration,
     routeToken
   }));
+}
+
+function buildGrantResultQueryPayload(requestId, requestFingerprint, traceId) {
+  return Buffer.concat([
+    encodeProtobufString(1, requestId),
+    encodeProtobufString(2, requestFingerprint),
+    encodeProtobufString(3, traceId)
+  ]);
 }
 
 function createAdminError(code, message = code) {
@@ -798,6 +835,94 @@ export class GameAdminClient {
 
     throw lastError;
   }
+
+  async queryMailAttachmentGrant(requestId, requestFingerprint, options = {}) {
+    const traceId = options.traceId || crypto.randomBytes(16).toString("hex");
+    let endpoints;
+    try {
+      endpoints = await this.listAdminEndpoints();
+    } catch (error) {
+      return queryUnavailableResult(requestId, requestFingerprint, traceId, [], [error]);
+    }
+    if (endpoints.length === 0) {
+      return queryUnavailableResult(requestId, requestFingerprint, traceId, [], [
+        createAdminError("GAME_SERVER_ADMIN_ENDPOINT_NOT_FOUND", "no healthy game-server admin endpoint is available")
+      ]);
+    }
+
+    const sortedEndpoints = [...endpoints].sort((left, right) =>
+      String(left.instanceId || "").localeCompare(String(right.instanceId || ""))
+    );
+    const responses = await Promise.all(sortedEndpoints.map(async (endpoint) => {
+      try {
+        const body = await sendRequest(
+          this.config,
+          MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_REQ,
+          buildGrantResultQueryPayload(requestId, requestFingerprint, traceId),
+          MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_RES,
+          {
+            endpoint,
+            actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
+          }
+        );
+        const result = decodeGrantResultQueryResponse(body);
+        validateGrantResultQueryResponse(result, {
+          requestId,
+          requestFingerprint,
+          traceId,
+          characterId: options.characterId,
+          items: options.items
+        });
+        return { ok: true, instanceId: endpoint.instanceId, result };
+      } catch (error) {
+        return { ok: false, instanceId: endpoint.instanceId, error: normalizeRequestError(error) };
+      }
+    }));
+
+    const instanceIds = responses.map((response) => response.instanceId).filter(Boolean);
+    const failures = responses.filter((response) => !response.ok);
+    if (failures.length > 0) {
+      return queryUnavailableResult(
+        requestId,
+        requestFingerprint,
+        traceId,
+        instanceIds,
+        failures.map((failure) => failure.error)
+      );
+    }
+
+    const results = responses.map((response) => response.result);
+    const conflicts = results.filter((result) => result.queryStatus === "conflict");
+    if (conflicts.length === results.length) {
+      const canonicalConflict = grantQueryConflictEvidence(conflicts[0]);
+      if (conflicts.every((result) => grantQueryConflictEvidence(result) === canonicalConflict)) {
+        return {
+          ...conflicts[0],
+          queryStatus: "conflict",
+          instanceIds,
+          errorCode: conflicts[0].errorCode || "REQUEST_FINGERPRINT_CONFLICT"
+        };
+      }
+      return queryInconsistentResult(requestId, requestFingerprint, traceId, instanceIds);
+    }
+    if (conflicts.length > 0) {
+      return queryInconsistentResult(requestId, requestFingerprint, traceId, instanceIds);
+    }
+    if (results.every((result) => result.queryStatus === "not_seen")) {
+      return { ...results[0], instanceIds };
+    }
+    if (results.every((result) => result.queryStatus === "result_unavailable")) {
+      return { ...results[0], instanceIds };
+    }
+    if (results.every((result) => result.queryStatus === "succeeded")) {
+      const canonical = JSON.stringify(results[0].resultSummary);
+      if (results.every((result) => JSON.stringify(result.resultSummary) === canonical)) {
+        return { ...results[0], instanceIds };
+      }
+    }
+
+    return queryInconsistentResult(requestId, requestFingerprint, traceId, instanceIds);
+  }
 }
 
 function gameOnlineRouteKey(prefix, characterId) {
@@ -894,6 +1019,130 @@ function decodeGrantItemsResponse(body) {
   };
 }
 
+function decodeGrantResultQueryResponse(body) {
+  const fields = decodeProtobufFields(body);
+  const summaryBytes = fields.get(9)?.at(-1);
+  let resultSummary = null;
+  if (summaryBytes instanceof Uint8Array) {
+    const summaryFields = decodeProtobufFields(summaryBytes);
+    resultSummary = {
+      characterId: protobufString(summaryFields, 1),
+      source: protobufString(summaryFields, 2),
+      items: (summaryFields.get(3) || []).map((itemBytes) => {
+        const itemFields = decodeProtobufFields(itemBytes);
+        return {
+          itemId: Number(itemFields.get(1)?.at(-1) || 0n),
+          count: Number(itemFields.get(2)?.at(-1) || 0n),
+          binded: protobufBool(itemFields, 3)
+        };
+      })
+    };
+  }
+  return {
+    ok: protobufBool(fields, 1),
+    queryStatus: protobufString(fields, 2),
+    requestId: protobufString(fields, 3),
+    requestFingerprint: protobufString(fields, 4),
+    errorCode: protobufString(fields, 5),
+    errorCategory: protobufString(fields, 6),
+    resultState: protobufString(fields, 7),
+    retryable: protobufBool(fields, 8),
+    resultSummary,
+    traceId: protobufString(fields, 10),
+    createdAtMs: protobufNumber(fields, 11)
+  };
+}
+
+function validateGrantResultQueryResponse(result, expected) {
+  if (result.requestId !== expected.requestId || result.traceId !== expected.traceId) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "grant query response identity does not match request");
+  }
+  if (!new Set(["not_seen", "succeeded", "conflict", "result_unavailable"]).has(result.queryStatus)) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "grant query response status is invalid");
+  }
+  if (result.queryStatus !== "conflict" && result.requestFingerprint !== expected.requestFingerprint) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "grant query response fingerprint does not match request");
+  }
+  if (
+    result.queryStatus === "conflict" &&
+    (!/^sha256:[0-9a-f]{64}$/.test(result.requestFingerprint) ||
+      result.requestFingerprint === expected.requestFingerprint)
+  ) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "grant query conflict lacks the stored fingerprint");
+  }
+  if (result.queryStatus === "not_seen") {
+    if (!result.ok || result.resultState !== "not_applied" || result.resultSummary) {
+      throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "not_seen query response is invalid");
+    }
+    return;
+  }
+  if (result.queryStatus === "succeeded") {
+    const expectedItems = normalizeGrantItems(expected.items || []);
+    if (
+      !result.ok ||
+      result.resultState !== "applied" ||
+      !result.resultSummary ||
+      result.resultSummary.characterId !== expected.characterId ||
+      result.resultSummary.source !== "mail-claim" ||
+      JSON.stringify(normalizeGrantItems(result.resultSummary.items)) !== JSON.stringify(expectedItems) ||
+      result.createdAtMs <= 0
+    ) {
+      throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "succeeded query response lacks matching grant evidence");
+    }
+    return;
+  }
+  if (
+    result.queryStatus === "conflict" &&
+    (result.errorCode !== "REQUEST_FINGERPRINT_CONFLICT" ||
+      result.errorCategory !== "PERMANENT_FAILURE" ||
+      result.resultState !== "not_applied" ||
+      result.retryable)
+  ) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "grant query conflict evidence is invalid");
+  }
+  if (result.ok || result.resultSummary) {
+    throw createAdminError("GRANT_QUERY_CONTRACT_MISMATCH", "failed grant query response is invalid");
+  }
+}
+
+function queryUnavailableResult(requestId, requestFingerprint, traceId, instanceIds, errors) {
+  const error = errors.find(Boolean);
+  return {
+    ok: false,
+    queryStatus: "result_unavailable",
+    requestId,
+    requestFingerprint,
+    errorCode: error?.code || "GRANT_RESULT_QUERY_UNAVAILABLE",
+    errorCategory: "RESULT_UNKNOWN",
+    resultState: "unknown",
+    retryable: true,
+    resultSummary: null,
+    traceId,
+    createdAtMs: 0,
+    instanceIds,
+    transportErrors: errors.map((entry) => entry?.code || "GAME_SERVER_ADMIN_ERROR")
+  };
+}
+
+function grantQueryConflictEvidence(result) {
+  return JSON.stringify({
+    requestFingerprint: result.requestFingerprint,
+    errorCode: result.errorCode || "REQUEST_FINGERPRINT_CONFLICT",
+    errorCategory: result.errorCategory,
+    resultState: result.resultState,
+    retryable: result.retryable
+  });
+}
+
+function queryInconsistentResult(requestId, requestFingerprint, traceId, instanceIds) {
+  return queryUnavailableResult(requestId, requestFingerprint, traceId, instanceIds, [
+    createAdminError(
+      "GRANT_RESULT_QUERY_INCONSISTENT",
+      "game-server instances returned inconsistent grant query results"
+    )
+  ]);
+}
+
 function validateGrantItemsResponse(result, expected) {
   if (
     result.requestId !== expected.requestId ||
@@ -980,14 +1229,17 @@ export {
   MESSAGE_TYPE,
   buildAdminAuthBody,
   buildGrantMailAttachmentsPayload,
+  buildGrantResultQueryPayload,
   computeGrantRequestFingerprint,
   createAdminError,
   decodeGrantItemsResponse,
+  decodeGrantResultQueryResponse,
   gameOnlineRouteKey,
   getDefaultGameAdminActor,
   normalizeGrantItems,
   normalizeGameAdminActor,
   normalizeServiceActorCandidate,
   sendRequest,
-  validateGrantItemsResponse
+  validateGrantItemsResponse,
+  validateGrantResultQueryResponse
 };

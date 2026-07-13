@@ -40,6 +40,18 @@ export class MetricsCollector {
     this.mailClaimResultUnknown = 0;
     this.mailClaimRetryableFailures = 0;
     this.mailClaimPermanentFailures = 0;
+    this.mailClaimRecoveryAcquired = 0;
+    this.mailClaimRecovered = 0;
+    this.mailClaimRecoveryUnknownAgeMs = 0;
+    this.mailClaimRecoveryQuerySucceeded = 0;
+    this.mailClaimRecoveryQueryNotSeen = 0;
+    this.mailClaimRecoveryQueryConflict = 0;
+    this.mailClaimRecoveryQueryUnavailable = 0;
+    this.mailClaimRecoveryGrantRetries = 0;
+    this.mailClaimRecoveryLeaseTakeovers = 0;
+    this.mailClaimRecoveryManualReviews = 0;
+    this.mailClaimRecoveryDurationSum = 0;
+    this.mailClaimRecoveryDurationCount = 0;
 
     this.flushTimer = null;
   }
@@ -105,6 +117,45 @@ export class MetricsCollector {
     this.mailClaimPermanentFailures += 1;
   }
 
+  recordMailClaimRecoveryAcquired() {
+    this.mailClaimRecoveryAcquired += 1;
+  }
+
+  recordMailClaimRecovered() {
+    this.mailClaimRecovered += 1;
+  }
+
+  recordMailClaimRecoveryUnknownAge(ageMs = 0) {
+    this.mailClaimRecoveryUnknownAgeMs = Math.max(
+      this.mailClaimRecoveryUnknownAgeMs,
+      Math.max(0, Number(ageMs) || 0)
+    );
+  }
+
+  recordMailClaimRecoveryQueryResult(status) {
+    if (status === "succeeded") this.mailClaimRecoveryQuerySucceeded += 1;
+    else if (status === "not_seen") this.mailClaimRecoveryQueryNotSeen += 1;
+    else if (status === "conflict") this.mailClaimRecoveryQueryConflict += 1;
+    else this.mailClaimRecoveryQueryUnavailable += 1;
+  }
+
+  recordMailClaimRecoveryGrantRetry() {
+    this.mailClaimRecoveryGrantRetries += 1;
+  }
+
+  recordMailClaimRecoveryLeaseTakeover() {
+    this.mailClaimRecoveryLeaseTakeovers += 1;
+  }
+
+  recordMailClaimRecoveryManualReview() {
+    this.mailClaimRecoveryManualReviews += 1;
+  }
+
+  recordMailClaimRecoveryDuration(durationMs = 0) {
+    this.mailClaimRecoveryDurationSum += Math.max(0, Number(durationMs) || 0);
+    this.mailClaimRecoveryDurationCount += 1;
+  }
+
   /**
    * Flush metrics to NATS
    */
@@ -125,6 +176,19 @@ export class MetricsCollector {
     const mailClaimResultUnknown = this.mailClaimResultUnknown;
     const mailClaimRetryableFailures = this.mailClaimRetryableFailures;
     const mailClaimPermanentFailures = this.mailClaimPermanentFailures;
+    const mailClaimRecoveryAcquired = this.mailClaimRecoveryAcquired;
+    const mailClaimRecovered = this.mailClaimRecovered;
+    const mailClaimRecoveryUnknownAgeMs = this.mailClaimRecoveryUnknownAgeMs;
+    const mailClaimRecoveryQuerySucceeded = this.mailClaimRecoveryQuerySucceeded;
+    const mailClaimRecoveryQueryNotSeen = this.mailClaimRecoveryQueryNotSeen;
+    const mailClaimRecoveryQueryConflict = this.mailClaimRecoveryQueryConflict;
+    const mailClaimRecoveryQueryUnavailable = this.mailClaimRecoveryQueryUnavailable;
+    const mailClaimRecoveryGrantRetries = this.mailClaimRecoveryGrantRetries;
+    const mailClaimRecoveryLeaseTakeovers = this.mailClaimRecoveryLeaseTakeovers;
+    const mailClaimRecoveryManualReviews = this.mailClaimRecoveryManualReviews;
+    const mailClaimRecoveryDurationMs = this.mailClaimRecoveryDurationCount > 0
+      ? Math.round(this.mailClaimRecoveryDurationSum / this.mailClaimRecoveryDurationCount)
+      : 0;
 
     // Reset counters
     this.qps = 0;
@@ -140,6 +204,18 @@ export class MetricsCollector {
     this.mailClaimResultUnknown = 0;
     this.mailClaimRetryableFailures = 0;
     this.mailClaimPermanentFailures = 0;
+    this.mailClaimRecoveryAcquired = 0;
+    this.mailClaimRecovered = 0;
+    this.mailClaimRecoveryUnknownAgeMs = 0;
+    this.mailClaimRecoveryQuerySucceeded = 0;
+    this.mailClaimRecoveryQueryNotSeen = 0;
+    this.mailClaimRecoveryQueryConflict = 0;
+    this.mailClaimRecoveryQueryUnavailable = 0;
+    this.mailClaimRecoveryGrantRetries = 0;
+    this.mailClaimRecoveryLeaseTakeovers = 0;
+    this.mailClaimRecoveryManualReviews = 0;
+    this.mailClaimRecoveryDurationSum = 0;
+    this.mailClaimRecoveryDurationCount = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -167,6 +243,17 @@ export class MetricsCollector {
             mail_claim_result_unknown: mailClaimResultUnknown,
             mail_claim_retryable_failures: mailClaimRetryableFailures,
             mail_claim_permanent_failures: mailClaimPermanentFailures,
+            mail_claim_recovery_acquired: mailClaimRecoveryAcquired,
+            mail_claim_recovered: mailClaimRecovered,
+            mail_claim_recovery_unknown_age_ms: mailClaimRecoveryUnknownAgeMs,
+            mail_claim_recovery_query_succeeded: mailClaimRecoveryQuerySucceeded,
+            mail_claim_recovery_query_not_seen: mailClaimRecoveryQueryNotSeen,
+            mail_claim_recovery_query_conflict: mailClaimRecoveryQueryConflict,
+            mail_claim_recovery_query_unavailable: mailClaimRecoveryQueryUnavailable,
+            mail_claim_recovery_grant_retries: mailClaimRecoveryGrantRetries,
+            mail_claim_recovery_lease_takeovers: mailClaimRecoveryLeaseTakeovers,
+            mail_claim_recovery_manual_reviews: mailClaimRecoveryManualReviews,
+            mail_claim_recovery_duration_ms: mailClaimRecoveryDurationMs,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

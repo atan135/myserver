@@ -616,6 +616,20 @@ export class DbMailStore {
         last_error_message: null,
         result_summary: null,
         game_instance_id: null,
+        recovery_attempts: 0,
+        next_recovery_at: now,
+        recovery_mode: null,
+        recovery_lease_owner: null,
+        recovery_lease_token: null,
+        recovery_lease_expires_at: null,
+        recovery_started_at: null,
+        last_recovery_at: null,
+        last_query_status: null,
+        last_query_fingerprint: null,
+        last_query_error_code: null,
+        last_query_result_state: null,
+        last_query_instance_ids: null,
+        manual_review_at: null,
         created_at: now,
         updated_at: now,
         completed_at: null
@@ -747,6 +761,10 @@ export class DbMailStore {
     workflow.lease_token = lease.leaseToken;
     workflow.lease_expires_at = lease.leaseExpiresAt;
     workflow.last_trace_id = input.traceId;
+    workflow.recovery_lease_owner = null;
+    workflow.recovery_lease_token = null;
+    workflow.recovery_lease_expires_at = null;
+    workflow.recovery_mode = null;
     workflow.updated_at = lease.now;
     if (mail && mail.status !== "claimed" && !mail.claimed_at) {
       mail.status = "claiming";
@@ -772,6 +790,10 @@ export class DbMailStore {
               lease_token = $3,
               lease_expires_at = current_timestamp + ($4 * interval '1 millisecond'),
               last_trace_id = $5,
+              recovery_lease_owner = NULL,
+              recovery_lease_token = NULL,
+              recovery_lease_expires_at = NULL,
+              recovery_mode = NULL,
               updated_at = current_timestamp
         WHERE id = $1
         RETURNING *`,
@@ -794,6 +816,12 @@ export class DbMailStore {
     }
     if (workflow.status === "reconciliation_pending") {
       return { reconciliationPending: true };
+    }
+    if (workflow.status === "manual_review") {
+      return { manualReview: true };
+    }
+    if (toDateOrNull(workflow.recovery_lease_expires_at)?.getTime() > now.getTime()) {
+      return { inProgress: true };
     }
     if (
       workflow.status === "processing" &&
@@ -832,6 +860,7 @@ export class DbMailStore {
       workflow.last_error_retryable = failure.retryable ?? null;
       workflow.last_error_message = String(failure.message || "").slice(0, 512) || null;
       workflow.game_instance_id = failure.instanceId || null;
+      workflow.next_recovery_at = new Date();
       workflow.updated_at = new Date();
       this.memoryClaimWorkflows.set(mailId, workflow);
       return { updated: true, workflow: this.parseClaimWorkflowRow(workflow) };
@@ -850,6 +879,7 @@ export class DbMailStore {
               last_error_retryable = $8,
               last_error_message = $9,
               game_instance_id = $10,
+              next_recovery_at = current_timestamp,
               updated_at = current_timestamp
         WHERE mail_id = $1 AND status = 'processing' AND lease_token = $2
         RETURNING *`,
@@ -898,6 +928,12 @@ export class DbMailStore {
       workflow.last_error_message = null;
       workflow.result_summary = cloneAttachments(outcome.resultSummary);
       workflow.game_instance_id = outcome.instanceId || null;
+      workflow.next_recovery_at = null;
+      workflow.recovery_mode = null;
+      workflow.recovery_lease_owner = null;
+      workflow.recovery_lease_token = null;
+      workflow.recovery_lease_expires_at = null;
+      workflow.last_recovery_at ||= now;
       workflow.updated_at = now;
       workflow.completed_at = now;
       this.memoryClaimWorkflows.set(mailId, workflow);
@@ -932,6 +968,12 @@ export class DbMailStore {
                 last_error_message = NULL,
                 result_summary = $4::jsonb,
                 game_instance_id = $5,
+                next_recovery_at = NULL,
+                recovery_mode = NULL,
+                recovery_lease_owner = NULL,
+                recovery_lease_token = NULL,
+                recovery_lease_expires_at = NULL,
+                last_recovery_at = COALESCE(last_recovery_at, current_timestamp),
                 updated_at = current_timestamp,
                 completed_at = current_timestamp
           WHERE mail_id = $1 AND status = 'processing' AND lease_token = $2
@@ -971,12 +1013,460 @@ export class DbMailStore {
     }
   }
 
+  async reserveMailClaimRecoveries(limit = 20, options = {}) {
+    const leaseMs = options.leaseMs || 60_000;
+    const leaseOwner = options.leaseOwner || "mail-service";
+    const maxAttempts = options.maxAttempts || 12;
+    const now = toDateOrNull(options.now) || new Date();
+    const leaseExpiresAt = new Date(now.getTime() + leaseMs);
+
+    if (!this.pool) {
+      const candidates = Array.from(this.memoryClaimWorkflows.values())
+        .filter((workflow) => isClaimRecoveryDue(workflow, now))
+        .sort(compareClaimRecoveryRows)
+        .slice(0, limit);
+      const workflows = [];
+      let manualReviewCount = 0;
+      for (const workflow of candidates) {
+        if ((Number(workflow.recovery_attempts) || 0) >= maxAttempts) {
+          moveClaimWorkflowToManualReview(workflow, now, {
+            preserveLastError: true,
+            errorCode: "MAIL_CLAIM_RECOVERY_ATTEMPTS_EXHAUSTED",
+            errorCategory: "RESULT_UNKNOWN",
+            resultState: workflow.last_result_state || "unknown",
+            message: "automatic mail claim recovery attempts exhausted"
+          });
+          this.memoryClaimWorkflows.set(workflow.mail_id, workflow);
+          manualReviewCount += 1;
+          continue;
+        }
+
+        const leaseTakenOver = Boolean(
+          workflow.recovery_lease_token &&
+          toDateOrNull(workflow.recovery_lease_expires_at)?.getTime() <= now.getTime()
+        );
+        if (workflow.status === "processing") {
+          workflow.status = "reconciliation_pending";
+          workflow.lease_owner = null;
+          workflow.lease_token = null;
+          workflow.lease_expires_at = null;
+        }
+        workflow.recovery_attempts = (Number(workflow.recovery_attempts) || 0) + 1;
+        workflow.recovery_mode = workflow.status === "retryable_failure" ? "grant" : "query";
+        workflow.recovery_lease_owner = leaseOwner;
+        workflow.recovery_lease_token = randomUUID();
+        workflow.recovery_lease_expires_at = leaseExpiresAt;
+        workflow.recovery_started_at ||= toDateOrNull(workflow.updated_at) || now;
+        workflow.last_recovery_at = now;
+        workflow.updated_at = now;
+        this.memoryClaimWorkflows.set(workflow.mail_id, workflow);
+        workflows.push({
+          ...this.parseClaimWorkflowRow(workflow),
+          recovery_lease_taken_over: leaseTakenOver
+        });
+      }
+      return { workflows, manualReviewCount };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `SELECT *
+           FROM mail_claim_workflows
+          WHERE (
+                  status IN ('retryable_failure', 'reconciliation_pending')
+                  OR (status = 'processing' AND lease_expires_at <= current_timestamp)
+                )
+            AND (next_recovery_at IS NULL OR next_recovery_at <= current_timestamp)
+            AND (recovery_lease_expires_at IS NULL OR recovery_lease_expires_at <= current_timestamp)
+          ORDER BY next_recovery_at ASC NULLS FIRST, updated_at ASC, id ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT $1`,
+        [limit]
+      );
+
+      const workflows = [];
+      let manualReviewCount = 0;
+      for (const row of rows) {
+        if ((Number(row.recovery_attempts) || 0) >= maxAttempts) {
+          await client.query(
+            `UPDATE mail_claim_workflows
+                SET status = 'manual_review',
+                    lease_owner = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    recovery_mode = NULL,
+                    recovery_lease_owner = NULL,
+                    recovery_lease_token = NULL,
+                    recovery_lease_expires_at = NULL,
+                    next_recovery_at = NULL,
+                    manual_review_at = current_timestamp,
+                    last_recovery_at = current_timestamp,
+                    last_error_code = COALESCE(last_error_code, 'MAIL_CLAIM_RECOVERY_ATTEMPTS_EXHAUSTED'),
+                    last_error_category = COALESCE(last_error_category, 'RESULT_UNKNOWN'),
+                    last_result_state = COALESCE(last_result_state, 'unknown'),
+                    last_error_retryable = false,
+                    last_error_message = COALESCE(last_error_message, 'automatic mail claim recovery attempts exhausted'),
+                    updated_at = current_timestamp
+              WHERE id = $1`,
+            [row.id]
+          );
+          manualReviewCount += 1;
+          continue;
+        }
+
+        const leaseToken = randomUUID();
+        const leaseTakenOver = Boolean(row.recovery_lease_token);
+        const mode = row.status === "retryable_failure" ? "grant" : "query";
+        const updated = await client.query(
+          `UPDATE mail_claim_workflows
+              SET status = CASE WHEN status = 'processing' THEN 'reconciliation_pending' ELSE status END,
+                  lease_owner = CASE WHEN status = 'processing' THEN NULL ELSE lease_owner END,
+                  lease_token = CASE WHEN status = 'processing' THEN NULL ELSE lease_token END,
+                  lease_expires_at = CASE WHEN status = 'processing' THEN NULL ELSE lease_expires_at END,
+                  recovery_attempts = recovery_attempts + 1,
+                  recovery_mode = $2,
+                  recovery_lease_owner = $3,
+                  recovery_lease_token = $4,
+                  recovery_lease_expires_at = current_timestamp + ($5 * interval '1 millisecond'),
+                  recovery_started_at = COALESCE(recovery_started_at, updated_at, current_timestamp),
+                  last_recovery_at = current_timestamp,
+                  updated_at = current_timestamp
+            WHERE id = $1
+            RETURNING *`,
+          [row.id, mode, leaseOwner, leaseToken, leaseMs]
+        );
+        workflows.push({
+          ...this.parseClaimWorkflowRow(updated.rows[0]),
+          recovery_lease_taken_over: leaseTakenOver
+        });
+      }
+      await client.query("COMMIT");
+      return { workflows, manualReviewCount };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async prepareMailClaimRecoveryGrant(mailId, recoveryLeaseToken, outcome = {}) {
+    if (!isValidLeaseToken(recoveryLeaseToken)) return null;
+    if (!this.pool) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      if (!hasActiveRecoveryLease(workflow, recoveryLeaseToken, new Date())) return null;
+      workflow.status = "reconciliation_pending";
+      workflow.attempts = (Number(workflow.attempts) || 0) + 1;
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.recovery_mode = "grant";
+      workflow.last_trace_id = outcome.traceId || workflow.last_trace_id;
+      applyClaimQueryEvidence(workflow, outcome);
+      workflow.updated_at = new Date();
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      return this.parseClaimWorkflowRow(workflow);
+    }
+
+    const { rows } = await this.pool.query(
+      `UPDATE mail_claim_workflows
+          SET status = 'reconciliation_pending',
+              attempts = attempts + 1,
+              lease_owner = NULL,
+              lease_token = NULL,
+              lease_expires_at = NULL,
+              recovery_mode = 'grant',
+              last_trace_id = COALESCE($3, last_trace_id),
+              last_query_status = COALESCE($4, last_query_status),
+              last_query_fingerprint = COALESCE($5, last_query_fingerprint),
+              last_query_error_code = $6,
+              last_query_result_state = COALESCE($7, last_query_result_state),
+              last_query_instance_ids = COALESCE($8::jsonb, last_query_instance_ids),
+              updated_at = current_timestamp
+        WHERE mail_id = $1
+          AND recovery_lease_token = $2
+          AND recovery_lease_expires_at > current_timestamp
+        RETURNING *`,
+      [
+        mailId,
+        recoveryLeaseToken,
+        outcome.traceId || null,
+        outcome.queryStatus || null,
+        outcome.queryFingerprint || null,
+        outcome.queryErrorCode || null,
+        outcome.queryResultState || null,
+        outcome.queryInstanceIds ? JSON.stringify(outcome.queryInstanceIds) : null
+      ]
+    );
+    return this.parseClaimWorkflowRow(rows[0]);
+  }
+
+  async rescheduleMailClaimRecovery(mailId, recoveryLeaseToken, outcome = {}) {
+    const status = outcome.status;
+    if (!new Set(["retryable_failure", "reconciliation_pending"]).has(status)) {
+      throw new Error(`invalid mail claim recovery status: ${status}`);
+    }
+    const delayMs = Math.max(0, Number(outcome.delayMs) || 0);
+    if (!this.pool) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      const now = new Date();
+      if (!hasActiveRecoveryLease(workflow, recoveryLeaseToken, now)) return null;
+      workflow.status = status;
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.recovery_mode = null;
+      workflow.recovery_lease_owner = null;
+      workflow.recovery_lease_token = null;
+      workflow.recovery_lease_expires_at = null;
+      workflow.next_recovery_at = new Date(now.getTime() + delayMs);
+      workflow.last_trace_id = outcome.traceId || workflow.last_trace_id;
+      workflow.last_error_code = outcome.errorCode || null;
+      workflow.last_error_category = outcome.errorCategory || null;
+      workflow.last_result_state = outcome.resultState || null;
+      workflow.last_error_retryable = outcome.retryable ?? true;
+      workflow.last_error_message = String(outcome.message || "").slice(0, 512) || null;
+      workflow.game_instance_id = outcome.instanceId || workflow.game_instance_id;
+      applyClaimQueryEvidence(workflow, outcome);
+      workflow.updated_at = now;
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      return this.parseClaimWorkflowRow(workflow);
+    }
+
+    const { rows } = await this.pool.query(
+      `UPDATE mail_claim_workflows
+          SET status = $3,
+              lease_owner = NULL,
+              lease_token = NULL,
+              lease_expires_at = NULL,
+              recovery_mode = NULL,
+              recovery_lease_owner = NULL,
+              recovery_lease_token = NULL,
+              recovery_lease_expires_at = NULL,
+              next_recovery_at = current_timestamp + ($4 * interval '1 millisecond'),
+              last_trace_id = COALESCE($5, last_trace_id),
+              last_error_code = $6,
+              last_error_category = $7,
+              last_result_state = $8,
+              last_error_retryable = $9,
+              last_error_message = $10,
+              game_instance_id = COALESCE($11, game_instance_id),
+              last_query_status = COALESCE($12, last_query_status),
+              last_query_fingerprint = COALESCE($13, last_query_fingerprint),
+              last_query_error_code = $14,
+              last_query_result_state = COALESCE($15, last_query_result_state),
+              last_query_instance_ids = COALESCE($16::jsonb, last_query_instance_ids),
+              updated_at = current_timestamp
+        WHERE mail_id = $1
+          AND recovery_lease_token = $2
+          AND recovery_lease_expires_at > current_timestamp
+        RETURNING *`,
+      [
+        mailId,
+        recoveryLeaseToken,
+        status,
+        delayMs,
+        outcome.traceId || null,
+        outcome.errorCode || null,
+        outcome.errorCategory || null,
+        outcome.resultState || null,
+        outcome.retryable ?? true,
+        String(outcome.message || "").slice(0, 512) || null,
+        outcome.instanceId || null,
+        outcome.queryStatus || null,
+        outcome.queryFingerprint || null,
+        outcome.queryErrorCode || null,
+        outcome.queryResultState || null,
+        outcome.queryInstanceIds ? JSON.stringify(outcome.queryInstanceIds) : null
+      ]
+    );
+    return this.parseClaimWorkflowRow(rows[0]);
+  }
+
+  async completeMailClaimRecovery(mailId, recoveryLeaseToken, outcome = {}) {
+    if (!isValidLeaseToken(recoveryLeaseToken)) return { claimed: false, workflow: null, mail: null };
+    if (!this.pool) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      const now = new Date();
+      if (!hasActiveRecoveryLease(workflow, recoveryLeaseToken, now)) {
+        return { claimed: false, workflow: this.parseClaimWorkflowRow(workflow), mail: null };
+      }
+      workflow.status = "claimed";
+      workflow.lease_owner = null;
+      workflow.lease_token = null;
+      workflow.lease_expires_at = null;
+      workflow.recovery_mode = null;
+      workflow.recovery_lease_owner = null;
+      workflow.recovery_lease_token = null;
+      workflow.recovery_lease_expires_at = null;
+      workflow.next_recovery_at = null;
+      workflow.last_trace_id = outcome.traceId || workflow.last_trace_id;
+      workflow.last_error_code = null;
+      workflow.last_error_category = null;
+      workflow.last_result_state = "applied";
+      workflow.last_error_retryable = false;
+      workflow.last_error_message = null;
+      workflow.result_summary = cloneAttachments(outcome.resultSummary);
+      workflow.game_instance_id = outcome.instanceId || workflow.game_instance_id;
+      applyClaimQueryEvidence(workflow, outcome);
+      workflow.last_recovery_at = now;
+      workflow.updated_at = now;
+      workflow.completed_at = now;
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      const mail = this.memory.get(mailId);
+      if (mail) {
+        mail.status = "claimed";
+        mail.read_at ||= now;
+        mail.claimed_at ||= now;
+        this.memory.set(mailId, mail);
+      }
+      return { claimed: true, workflow: this.parseClaimWorkflowRow(workflow), mail: this.parseMailRow(mail) };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query(
+        `UPDATE mail_claim_workflows
+            SET status = 'claimed',
+                lease_owner = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                recovery_mode = NULL,
+                recovery_lease_owner = NULL,
+                recovery_lease_token = NULL,
+                recovery_lease_expires_at = NULL,
+                next_recovery_at = NULL,
+                last_trace_id = COALESCE($3, last_trace_id),
+                last_error_code = NULL,
+                last_error_category = NULL,
+                last_result_state = 'applied',
+                last_error_retryable = false,
+                last_error_message = NULL,
+                result_summary = $4::jsonb,
+                game_instance_id = COALESCE($5, game_instance_id),
+                last_query_status = COALESCE($6, last_query_status),
+                last_query_fingerprint = COALESCE($7, last_query_fingerprint),
+                last_query_error_code = $8,
+                last_query_result_state = COALESCE($9, last_query_result_state),
+                last_query_instance_ids = COALESCE($10::jsonb, last_query_instance_ids),
+                last_recovery_at = current_timestamp,
+                updated_at = current_timestamp,
+                completed_at = current_timestamp
+          WHERE mail_id = $1
+            AND recovery_lease_token = $2
+            AND recovery_lease_expires_at > current_timestamp
+          RETURNING *`,
+        [
+          mailId,
+          recoveryLeaseToken,
+          outcome.traceId || null,
+          outcome.resultSummary ? JSON.stringify(outcome.resultSummary) : null,
+          outcome.instanceId || null,
+          outcome.queryStatus || null,
+          outcome.queryFingerprint || null,
+          outcome.queryErrorCode || null,
+          outcome.queryResultState || null,
+          outcome.queryInstanceIds ? JSON.stringify(outcome.queryInstanceIds) : null
+        ]
+      );
+      if (updated.rows.length === 0) {
+        await client.query("COMMIT");
+        return { claimed: false, workflow: await this.getMailClaimWorkflow(mailId), mail: null };
+      }
+      const mailResult = await client.query(
+        `UPDATE mails
+            SET status = 'claimed',
+                read_at = COALESCE(read_at, current_timestamp),
+                claimed_at = COALESCE(claimed_at, current_timestamp)
+          WHERE mail_id = $1 AND status <> 'claimed' AND claimed_at IS NULL
+          RETURNING *`,
+        [mailId]
+      );
+      await client.query("COMMIT");
+      return {
+        claimed: true,
+        workflow: this.parseClaimWorkflowRow(updated.rows[0]),
+        mail: this.parseMailRow(mailResult.rows[0])
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markMailClaimRecoveryManualReview(mailId, recoveryLeaseToken, outcome = {}) {
+    if (!isValidLeaseToken(recoveryLeaseToken)) return null;
+    if (!this.pool) {
+      const workflow = this.memoryClaimWorkflows.get(mailId);
+      const now = new Date();
+      if (!hasActiveRecoveryLease(workflow, recoveryLeaseToken, now)) return null;
+      moveClaimWorkflowToManualReview(workflow, now, outcome);
+      applyClaimQueryEvidence(workflow, outcome);
+      this.memoryClaimWorkflows.set(mailId, workflow);
+      return this.parseClaimWorkflowRow(workflow);
+    }
+
+    const { rows } = await this.pool.query(
+      `UPDATE mail_claim_workflows
+          SET status = 'manual_review',
+              lease_owner = NULL,
+              lease_token = NULL,
+              lease_expires_at = NULL,
+              recovery_mode = NULL,
+              recovery_lease_owner = NULL,
+              recovery_lease_token = NULL,
+              recovery_lease_expires_at = NULL,
+              next_recovery_at = NULL,
+              manual_review_at = current_timestamp,
+              last_recovery_at = current_timestamp,
+              last_trace_id = COALESCE($3, last_trace_id),
+              last_error_code = $4,
+              last_error_category = $5,
+              last_result_state = $6,
+              last_error_retryable = false,
+              last_error_message = $7,
+              game_instance_id = COALESCE($8, game_instance_id),
+              last_query_status = COALESCE($9, last_query_status),
+              last_query_fingerprint = COALESCE($10, last_query_fingerprint),
+              last_query_error_code = $11,
+              last_query_result_state = COALESCE($12, last_query_result_state),
+              last_query_instance_ids = COALESCE($13::jsonb, last_query_instance_ids),
+              updated_at = current_timestamp
+        WHERE mail_id = $1
+          AND recovery_lease_token = $2
+          AND recovery_lease_expires_at > current_timestamp
+        RETURNING *`,
+      [
+        mailId,
+        recoveryLeaseToken,
+        outcome.traceId || null,
+        outcome.errorCode || "MAIL_CLAIM_MANUAL_REVIEW_REQUIRED",
+        outcome.errorCategory || "RESULT_UNKNOWN",
+        outcome.resultState || "unknown",
+        String(outcome.message || "mail claim requires manual review").slice(0, 512),
+        outcome.instanceId || null,
+        outcome.queryStatus || null,
+        outcome.queryFingerprint || null,
+        outcome.queryErrorCode || null,
+        outcome.queryResultState || null,
+        outcome.queryInstanceIds ? JSON.stringify(outcome.queryInstanceIds) : null
+      ]
+    );
+    return this.parseClaimWorkflowRow(rows[0]);
+  }
+
   claimWorkflowReservation(workflow, mail, flags = {}) {
     return {
       acquired: false,
       alreadyClaimed: false,
       inProgress: false,
       reconciliationPending: false,
+      manualReview: false,
       notFound: false,
       ownerMismatch: false,
       characterMismatch: false,
@@ -1100,9 +1590,90 @@ export class DbMailStore {
       last_error_message: row.last_error_message,
       result_summary: cloneAttachments(parseJson(row.result_summary)),
       game_instance_id: row.game_instance_id,
+      recovery_attempts: Number(row.recovery_attempts) || 0,
+      next_recovery_at: row.next_recovery_at,
+      recovery_mode: row.recovery_mode,
+      recovery_lease_owner: row.recovery_lease_owner,
+      recovery_lease_token: row.recovery_lease_token,
+      recovery_lease_expires_at: row.recovery_lease_expires_at,
+      recovery_started_at: row.recovery_started_at,
+      last_recovery_at: row.last_recovery_at,
+      last_query_status: row.last_query_status,
+      last_query_fingerprint: row.last_query_fingerprint,
+      last_query_error_code: row.last_query_error_code,
+      last_query_result_state: row.last_query_result_state,
+      last_query_instance_ids: cloneAttachments(parseJson(row.last_query_instance_ids)),
+      manual_review_at: row.manual_review_at,
       created_at: row.created_at,
       updated_at: row.updated_at,
       completed_at: row.completed_at
     };
   }
+}
+
+function isClaimRecoveryDue(workflow, now) {
+  if (!workflow || !new Set(["processing", "retryable_failure", "reconciliation_pending"]).has(workflow.status)) {
+    return false;
+  }
+  if (
+    workflow.status === "processing" &&
+    (!toDateOrNull(workflow.lease_expires_at) || toDateOrNull(workflow.lease_expires_at).getTime() > now.getTime())
+  ) {
+    return false;
+  }
+  if (toDateOrNull(workflow.next_recovery_at)?.getTime() > now.getTime()) {
+    return false;
+  }
+  return !toDateOrNull(workflow.recovery_lease_expires_at) ||
+    toDateOrNull(workflow.recovery_lease_expires_at).getTime() <= now.getTime();
+}
+
+function compareClaimRecoveryRows(left, right) {
+  const leftNext = toDateOrNull(left.next_recovery_at)?.getTime() ?? 0;
+  const rightNext = toDateOrNull(right.next_recovery_at)?.getTime() ?? 0;
+  if (leftNext !== rightNext) return leftNext - rightNext;
+  const leftUpdated = toDateOrNull(left.updated_at)?.getTime() ?? 0;
+  const rightUpdated = toDateOrNull(right.updated_at)?.getTime() ?? 0;
+  if (leftUpdated !== rightUpdated) return leftUpdated - rightUpdated;
+  return Number(left.id) - Number(right.id);
+}
+
+function hasActiveRecoveryLease(workflow, token, now) {
+  return Boolean(
+    workflow &&
+    workflow.recovery_lease_token === token &&
+    toDateOrNull(workflow.recovery_lease_expires_at)?.getTime() > now.getTime()
+  );
+}
+
+function applyClaimQueryEvidence(workflow, outcome = {}) {
+  if (outcome.queryStatus) workflow.last_query_status = outcome.queryStatus;
+  if (outcome.queryFingerprint) workflow.last_query_fingerprint = outcome.queryFingerprint;
+  workflow.last_query_error_code = outcome.queryErrorCode || null;
+  if (outcome.queryResultState) workflow.last_query_result_state = outcome.queryResultState;
+  if (outcome.queryInstanceIds) workflow.last_query_instance_ids = cloneAttachments(outcome.queryInstanceIds);
+}
+
+function moveClaimWorkflowToManualReview(workflow, now, outcome = {}) {
+  workflow.status = "manual_review";
+  workflow.lease_owner = null;
+  workflow.lease_token = null;
+  workflow.lease_expires_at = null;
+  workflow.recovery_mode = null;
+  workflow.recovery_lease_owner = null;
+  workflow.recovery_lease_token = null;
+  workflow.recovery_lease_expires_at = null;
+  workflow.next_recovery_at = null;
+  workflow.manual_review_at = now;
+  workflow.last_recovery_at = now;
+  workflow.last_trace_id = outcome.traceId || workflow.last_trace_id;
+  if (!outcome.preserveLastError || !workflow.last_error_code) {
+    workflow.last_error_code = outcome.errorCode || "MAIL_CLAIM_MANUAL_REVIEW_REQUIRED";
+    workflow.last_error_category = outcome.errorCategory || "RESULT_UNKNOWN";
+    workflow.last_result_state = outcome.resultState || "unknown";
+    workflow.last_error_message = String(outcome.message || "mail claim requires manual review").slice(0, 512);
+  }
+  workflow.last_error_retryable = false;
+  workflow.game_instance_id = outcome.instanceId || workflow.game_instance_id;
+  workflow.updated_at = now;
 }

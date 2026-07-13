@@ -1,6 +1,7 @@
 import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 
 import { getConfig } from "./config.js";
+import { ClaimRecoveryWorker } from "./claim-recovery.worker.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import { GameAdminClient } from "./game-admin-client.js";
 import { initializeGlobalIdLease, releaseGlobalIdLease } from "./global-id.js";
@@ -33,6 +34,7 @@ import {
   controllers: [HealthController, MailsController],
   providers: [
     MailsService,
+    ClaimRecoveryWorker,
     {
       provide: MAIL_CONFIG,
       useFactory: () => getConfig()

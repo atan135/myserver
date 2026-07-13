@@ -41,7 +41,15 @@ const CONFIG_ENV_NAMES = [
   "MAIL_OUTBOX_TERMINAL_RETENTION_DAYS",
   "MAIL_OUTBOX_CLEANUP_INTERVAL_MS",
   "MAIL_OUTBOX_CLEANUP_BATCH_SIZE",
-  "MAIL_CLAIM_LEASE_MS"
+  "MAIL_CLAIM_LEASE_MS",
+  "MAIL_CLAIM_RECOVERY_ENABLED",
+  "MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS",
+  "MAIL_CLAIM_RECOVERY_BATCH_SIZE",
+  "MAIL_CLAIM_RECOVERY_LEASE_MS",
+  "MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS",
+  "MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS",
+  "MAIL_CLAIM_RECOVERY_MAX_ATTEMPTS",
+  "MAIL_CLAIM_RECOVERY_SHUTDOWN_TIMEOUT_MS"
 ];
 
 async function withEnv(values, callback) {
@@ -114,6 +122,41 @@ test("mail-service reads bounded attachment claim lease", async () => {
   await assert.rejects(
     () => withEnv({ MAIL_CLAIM_LEASE_MS: "500" }, (getConfig) => getConfig()),
     /MAIL_CLAIM_LEASE_MS must be an integer between 1000 and 300000/
+  );
+});
+
+test("mail-service reads bounded claim recovery settings", async () => {
+  await withEnv({
+    MAIL_CLAIM_RECOVERY_ENABLED: "false",
+    MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS: "250",
+    MAIL_CLAIM_RECOVERY_BATCH_SIZE: "8",
+    MAIL_CLAIM_RECOVERY_LEASE_MS: "45000",
+    MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS: "500",
+    MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS: "5000",
+    MAIL_CLAIM_RECOVERY_MAX_ATTEMPTS: "9",
+    MAIL_CLAIM_RECOVERY_SHUTDOWN_TIMEOUT_MS: "2500"
+  }, (getConfig) => {
+    const config = getConfig();
+    assert.equal(config.claimRecoveryEnabled, false);
+    assert.equal(config.claimRecoveryPollIntervalMs, 250);
+    assert.equal(config.claimRecoveryBatchSize, 8);
+    assert.equal(config.claimRecoveryLeaseMs, 45000);
+    assert.equal(config.claimRecoveryBackoffBaseMs, 500);
+    assert.equal(config.claimRecoveryBackoffMaxMs, 5000);
+    assert.equal(config.claimRecoveryMaxAttempts, 9);
+    assert.equal(config.claimRecoveryShutdownTimeoutMs, 2500);
+  });
+
+  await assert.rejects(
+    () => withEnv({ MAIL_CLAIM_RECOVERY_BATCH_SIZE: "0" }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_RECOVERY_BATCH_SIZE must be an integer between 1 and 100/
+  );
+  await assert.rejects(
+    () => withEnv({
+      MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS: "5000",
+      MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS: "1000"
+    }, (getConfig) => getConfig()),
+    /MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS must be greater than or equal/
   );
 });
 

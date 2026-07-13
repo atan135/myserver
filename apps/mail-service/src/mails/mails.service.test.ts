@@ -419,6 +419,36 @@ test("existing workflow rejects a different authenticated character", async () =
   assert.equal(calls.length, 0);
 });
 
+test("manual review workflow remains claiming and cannot be reacquired by the player", async () => {
+  const { service, mailStore, calls } = createService();
+  await reserveWorkflow(mailStore, {}, { leaseMs: 1 });
+  mailStore.memoryClaimWorkflows.get("mail-1").lease_expires_at = new Date(Date.now() - 1);
+  const recovery = await mailStore.reserveMailClaimRecoveries(1, {
+    leaseOwner: "recovery-a",
+    leaseMs: 30_000,
+    maxAttempts: 5
+  });
+  await mailStore.markMailClaimRecoveryManualReview(
+    "mail-1",
+    recovery.workflows[0].recovery_lease_token,
+    {
+      errorCode: "REQUEST_FINGERPRINT_CONFLICT",
+      errorCategory: "PERMANENT_FAILURE",
+      resultState: "not_applied",
+      message: "query conflict"
+    }
+  );
+
+  const result = await service.claim("mail-1", "player-1", "chr_1");
+
+  assert.equal(result.claim_status, "manual_review");
+  assert.equal(result._http_status, 409);
+  assert.equal(result.error, "MAIL_CLAIM_MANUAL_REVIEW_REQUIRED");
+  assert.equal(result.retryable, false);
+  assert.equal((await mailStore.getMailById("mail-1")).status, "claiming");
+  assert.equal(calls.length, 0);
+});
+
 test("mail completion persistence failure never releases a successfully granted workflow", async () => {
   const { service, mailStore, calls } = createService();
   mailStore.completeMailClaimWorkflow = async () => {

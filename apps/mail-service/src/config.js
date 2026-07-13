@@ -249,6 +249,14 @@ export function getConfig() {
     outboxCleanupIntervalMs: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_INTERVAL_MS", process.env.MAIL_OUTBOX_CLEANUP_INTERVAL_MS, 3_600_000, 10_000, 86_400_000),
     outboxCleanupBatchSize: parseIntegerInRange("MAIL_OUTBOX_CLEANUP_BATCH_SIZE", process.env.MAIL_OUTBOX_CLEANUP_BATCH_SIZE, 500, 1, 10_000),
     claimLeaseMs: parseIntegerInRange("MAIL_CLAIM_LEASE_MS", process.env.MAIL_CLAIM_LEASE_MS, 30_000, 1000, 300_000),
+    claimRecoveryEnabled: parseBoolean(process.env.MAIL_CLAIM_RECOVERY_ENABLED, true),
+    claimRecoveryPollIntervalMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS", process.env.MAIL_CLAIM_RECOVERY_POLL_INTERVAL_MS, 5000, 100, 60_000),
+    claimRecoveryBatchSize: parseIntegerInRange("MAIL_CLAIM_RECOVERY_BATCH_SIZE", process.env.MAIL_CLAIM_RECOVERY_BATCH_SIZE, 20, 1, 100),
+    claimRecoveryLeaseMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_LEASE_MS", process.env.MAIL_CLAIM_RECOVERY_LEASE_MS, 60_000, 5000, 300_000),
+    claimRecoveryBackoffBaseMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS", process.env.MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS, 1000, 100, 60_000),
+    claimRecoveryBackoffMaxMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS", process.env.MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS, 300_000, 1000, 3_600_000),
+    claimRecoveryMaxAttempts: parseIntegerInRange("MAIL_CLAIM_RECOVERY_MAX_ATTEMPTS", process.env.MAIL_CLAIM_RECOVERY_MAX_ATTEMPTS, 12, 1, 100),
+    claimRecoveryShutdownTimeoutMs: parseIntegerInRange("MAIL_CLAIM_RECOVERY_SHUTDOWN_TIMEOUT_MS", process.env.MAIL_CLAIM_RECOVERY_SHUTDOWN_TIMEOUT_MS, 10_000, 100, 60_000),
     dbEnabled: parseBoolean(process.env.DB_ENABLED, false),
     databaseUrl:
       process.env.DATABASE_URL ||
@@ -286,6 +294,9 @@ export function getConfig() {
 
   if (config.outboxBackoffMaxMs < config.outboxBackoffBaseMs) {
     throw new Error("Invalid mail-service config: MAIL_OUTBOX_BACKOFF_MAX_MS must be greater than or equal to MAIL_OUTBOX_BACKOFF_BASE_MS");
+  }
+  if (config.claimRecoveryBackoffMaxMs < config.claimRecoveryBackoffBaseMs) {
+    throw new Error("Invalid mail-service config: MAIL_CLAIM_RECOVERY_BACKOFF_MAX_MS must be greater than or equal to MAIL_CLAIM_RECOVERY_BACKOFF_BASE_MS");
   }
 
   emitLegacyDirectConfigWarnings(config.appName, config.legacyDirectConfigWarnings);

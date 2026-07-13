@@ -199,6 +199,17 @@ test("mail metrics expose outbox and claim routing failures separately", async (
   collector.recordOutboxLeaseTakeover();
   collector.recordMailClaimRouteUnavailable();
   collector.recordMailClaimGrantFailure();
+  collector.recordMailClaimRecoveryAcquired();
+  collector.recordMailClaimRecovered();
+  collector.recordMailClaimRecoveryUnknownAge(12_000);
+  collector.recordMailClaimRecoveryQueryResult("succeeded");
+  collector.recordMailClaimRecoveryQueryResult("not_seen");
+  collector.recordMailClaimRecoveryQueryResult("conflict");
+  collector.recordMailClaimRecoveryQueryResult("result_unavailable");
+  collector.recordMailClaimRecoveryGrantRetry();
+  collector.recordMailClaimRecoveryLeaseTakeover();
+  collector.recordMailClaimRecoveryManualReview();
+  collector.recordMailClaimRecoveryDuration(2500);
   await collector.flush();
 
   const metrics = published[0].payload.metrics;
@@ -210,4 +221,15 @@ test("mail metrics expose outbox and claim routing failures separately", async (
   assert.equal(metrics.mail_outbox_lease_takeovers, 1);
   assert.equal(metrics.mail_claim_route_unavailable, 1);
   assert.equal(metrics.mail_claim_grant_failures, 1);
+  assert.equal(metrics.mail_claim_recovery_acquired, 1);
+  assert.equal(metrics.mail_claim_recovered, 1);
+  assert.equal(metrics.mail_claim_recovery_unknown_age_ms, 12000);
+  assert.equal(metrics.mail_claim_recovery_query_succeeded, 1);
+  assert.equal(metrics.mail_claim_recovery_query_not_seen, 1);
+  assert.equal(metrics.mail_claim_recovery_query_conflict, 1);
+  assert.equal(metrics.mail_claim_recovery_query_unavailable, 1);
+  assert.equal(metrics.mail_claim_recovery_grant_retries, 1);
+  assert.equal(metrics.mail_claim_recovery_lease_takeovers, 1);
+  assert.equal(metrics.mail_claim_recovery_manual_reviews, 1);
+  assert.equal(metrics.mail_claim_recovery_duration_ms, 2500);
 });

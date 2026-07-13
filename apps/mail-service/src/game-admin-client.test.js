@@ -128,6 +128,40 @@ function encodeVarint(value) {
   return Buffer.from(bytes);
 }
 
+function decodeVarint(buffer, start) {
+  let value = 0n;
+  let shift = 0n;
+  let offset = start;
+  while (offset < buffer.length) {
+    const byte = buffer[offset++];
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value, offset };
+    shift += 7n;
+  }
+  throw new Error("invalid test protobuf varint");
+}
+
+function decodeGrantQueryRequest(buffer) {
+  const fields = new Map();
+  let offset = 0;
+  while (offset < buffer.length) {
+    const key = decodeVarint(buffer, offset);
+    offset = key.offset;
+    const fieldNumber = Number(key.value >> 3n);
+    assert.equal(Number(key.value & 7n), 2);
+    const length = decodeVarint(buffer, offset);
+    offset = length.offset;
+    const end = offset + Number(length.value);
+    fields.set(fieldNumber, buffer.subarray(offset, end).toString("utf8"));
+    offset = end;
+  }
+  return {
+    requestId: fields.get(1) || "",
+    requestFingerprint: fields.get(2) || "",
+    traceId: fields.get(3) || ""
+  };
+}
+
 function protobufField(fieldNumber, value, wireType = 2) {
   const key = encodeVarint((fieldNumber << 3) | wireType);
   if (wireType === 0) return Buffer.concat([key, encodeVarint(value)]);
@@ -142,6 +176,10 @@ function encodeGrantItem(item) {
   ];
   if (item.binded) fields.push(protobufField(3, 1, 0));
   return Buffer.concat(fields);
+}
+
+function frozenQueryItems() {
+  return [{ itemId: 1001, count: 2, binded: true }];
 }
 
 function encodeGrantResponse(request, overrides = {}) {
@@ -165,8 +203,35 @@ function encodeGrantResponse(request, overrides = {}) {
   return Buffer.concat(fields);
 }
 
-async function createGrantCaptureServer(label, onGrant = null) {
+function encodeGrantQueryResponse(request, overrides = {}) {
+  const queryStatus = overrides.queryStatus || "succeeded";
+  const ok = overrides.ok ?? ["succeeded", "not_seen"].includes(queryStatus);
+  const fields = [];
+  if (ok) fields.push(protobufField(1, 1, 0));
+  fields.push(protobufField(2, queryStatus));
+  fields.push(protobufField(3, overrides.requestId || request.requestId));
+  fields.push(protobufField(4, overrides.requestFingerprint || request.requestFingerprint));
+  if (overrides.errorCode) fields.push(protobufField(5, overrides.errorCode));
+  if (overrides.errorCategory) fields.push(protobufField(6, overrides.errorCategory));
+  fields.push(protobufField(7, overrides.resultState || (queryStatus === "succeeded" ? "applied" : (queryStatus === "not_seen" ? "not_applied" : "unknown"))));
+  if (overrides.retryable) fields.push(protobufField(8, 1, 0));
+  if (queryStatus === "succeeded") {
+    const summary = Buffer.concat([
+      protobufField(1, overrides.characterId || "chr_1"),
+      protobufField(2, "mail-claim"),
+      ...(overrides.items || [{ itemId: 1001, count: 2, binded: true }])
+        .map((item) => protobufField(3, encodeGrantItem(item)))
+    ]);
+    fields.push(protobufField(9, summary));
+  }
+  fields.push(protobufField(10, overrides.traceId || request.traceId));
+  if (queryStatus === "succeeded") fields.push(protobufField(11, overrides.createdAtMs || Date.now(), 0));
+  return Buffer.concat(fields);
+}
+
+async function createGrantCaptureServer(label, onGrant = null, onQuery = null) {
   const requests = [];
+  const queryRequests = [];
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
 
@@ -192,6 +257,13 @@ async function createGrantCaptureServer(label, onGrant = null) {
           if (response !== null && response !== undefined) {
             socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq, response));
           }
+        } else if (messageType === MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_REQ) {
+          const request = decodeGrantQueryRequest(body);
+          queryRequests.push({ label, body: request });
+          const response = onQuery ? onQuery(request) : encodeGrantQueryResponse(request);
+          if (response !== null && response !== undefined) {
+            socket.write(encodeTestPacket(MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_RES, seq, response));
+          }
         }
       }
     });
@@ -202,6 +274,7 @@ async function createGrantCaptureServer(label, onGrant = null) {
   return {
     port: server.address().port,
     requests,
+    queryRequests,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
@@ -1106,5 +1179,252 @@ test("GameAdminClient rejects a local fallback target that is not the authoritat
     assert.equal(server.requests.length, 0);
   } finally {
     await server.close();
+  }
+});
+
+test("GameAdminClient decodes and validates grant result query protobuf over TCP", async () => {
+  const server = await createGrantCaptureServer("game-a");
+  const requestFingerprint = `sha256:${"a".repeat(64)}`;
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([createGameServerInstance("game-a", server.port)]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      requestFingerprint,
+      {
+        traceId: "1".repeat(32),
+        characterId: "chr_1",
+        items: [{ itemId: 1001, count: 2, binded: true }]
+      }
+    );
+
+    assert.equal(result.queryStatus, "succeeded");
+    assert.deepEqual(result.instanceIds, ["game-a"]);
+    assert.deepEqual(result.resultSummary, {
+      characterId: "chr_1",
+      source: "mail-claim",
+      items: [{ itemId: 1001, count: 2, binded: true }]
+    });
+    assert.equal(server.queryRequests.length, 1);
+    assert.equal(server.queryRequests[0].body.requestId, "mail_claim:mail-1");
+    assert.equal(server.requests.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("GameAdminClient fails closed when game instances disagree on query result", async () => {
+  const succeeded = await createGrantCaptureServer("game-a");
+  const notSeen = await createGrantCaptureServer("game-b", null, (request) =>
+    encodeGrantQueryResponse(request, { queryStatus: "not_seen" })
+  );
+  const requestFingerprint = `sha256:${"b".repeat(64)}`;
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([
+    createGameServerInstance("game-a", succeeded.port),
+    createGameServerInstance("game-b", notSeen.port)
+  ]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      requestFingerprint,
+      {
+        traceId: "2".repeat(32),
+        characterId: "chr_1",
+        items: [{ itemId: 1001, count: 2, binded: true }]
+      }
+    );
+
+    assert.equal(result.queryStatus, "result_unavailable");
+    assert.equal(result.errorCode, "GRANT_RESULT_QUERY_INCONSISTENT");
+    assert.deepEqual(result.instanceIds, ["game-a", "game-b"]);
+    assert.equal(succeeded.queryRequests.length, 1);
+    assert.equal(notSeen.queryRequests.length, 1);
+  } finally {
+    await succeeded.close();
+    await notSeen.close();
+  }
+});
+
+test("GameAdminClient treats an invalid query response identity as unavailable", async () => {
+  const server = await createGrantCaptureServer("game-a", null, (request) =>
+    encodeGrantQueryResponse(request, { traceId: "f".repeat(32) })
+  );
+  const requestFingerprint = `sha256:${"c".repeat(64)}`;
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([createGameServerInstance("game-a", server.port)]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      requestFingerprint,
+      {
+        traceId: "3".repeat(32),
+        characterId: "chr_1",
+        items: [{ itemId: 1001, count: 2, binded: true }]
+      }
+    );
+
+    assert.equal(result.queryStatus, "result_unavailable");
+    assert.equal(result.errorCode, "GRANT_QUERY_CONTRACT_MISMATCH");
+    assert.equal(server.queryRequests.length, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("GameAdminClient fails closed for conflict mixed with not_seen", async () => {
+  const conflictFingerprint = `sha256:${"d".repeat(64)}`;
+  const conflict = await createGrantCaptureServer("game-a", null, (request) =>
+    encodeGrantQueryResponse(request, {
+      queryStatus: "conflict",
+      requestFingerprint: conflictFingerprint,
+      errorCode: "REQUEST_FINGERPRINT_CONFLICT",
+      errorCategory: "PERMANENT_FAILURE",
+      resultState: "not_applied"
+    })
+  );
+  const notSeen = await createGrantCaptureServer("game-b", null, (request) =>
+    encodeGrantQueryResponse(request, { queryStatus: "not_seen" })
+  );
+  const requestFingerprint = `sha256:${"e".repeat(64)}`;
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([
+    createGameServerInstance("game-a", conflict.port),
+    createGameServerInstance("game-b", notSeen.port)
+  ]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      requestFingerprint,
+      { traceId: "4".repeat(32), characterId: "chr_1", items: frozenQueryItems() }
+    );
+    assert.equal(result.queryStatus, "result_unavailable");
+    assert.equal(result.errorCode, "GRANT_RESULT_QUERY_INCONSISTENT");
+  } finally {
+    await conflict.close();
+    await notSeen.close();
+  }
+});
+
+test("GameAdminClient fails closed for different stored conflict fingerprints", async () => {
+  const first = await createGrantCaptureServer("game-a", null, (request) =>
+    encodeGrantQueryResponse(request, {
+      queryStatus: "conflict",
+      requestFingerprint: `sha256:${"f".repeat(64)}`,
+      errorCode: "REQUEST_FINGERPRINT_CONFLICT",
+      errorCategory: "PERMANENT_FAILURE",
+      resultState: "not_applied"
+    })
+  );
+  const second = await createGrantCaptureServer("game-b", null, (request) =>
+    encodeGrantQueryResponse(request, {
+      queryStatus: "conflict",
+      requestFingerprint: `sha256:${"1".repeat(64)}`,
+      errorCode: "REQUEST_FINGERPRINT_CONFLICT",
+      errorCategory: "PERMANENT_FAILURE",
+      resultState: "not_applied"
+    })
+  );
+  const requestFingerprint = `sha256:${"2".repeat(64)}`;
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([
+    createGameServerInstance("game-a", first.port),
+    createGameServerInstance("game-b", second.port)
+  ]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      requestFingerprint,
+      { traceId: "5".repeat(32), characterId: "chr_1", items: frozenQueryItems() }
+    );
+    assert.equal(result.queryStatus, "result_unavailable");
+    assert.equal(result.errorCode, "GRANT_RESULT_QUERY_INCONSISTENT");
+  } finally {
+    await first.close();
+    await second.close();
+  }
+});
+
+test("GameAdminClient returns conflict only when every endpoint has matching conflict evidence", async () => {
+  const storedFingerprint = `sha256:${"3".repeat(64)}`;
+  const conflictResponse = (request) => encodeGrantQueryResponse(request, {
+    queryStatus: "conflict",
+    requestFingerprint: storedFingerprint,
+    errorCode: "REQUEST_FINGERPRINT_CONFLICT",
+    errorCategory: "PERMANENT_FAILURE",
+    resultState: "not_applied"
+  });
+  const first = await createGrantCaptureServer("game-a", null, conflictResponse);
+  const second = await createGrantCaptureServer("game-b", null, conflictResponse);
+  const client = new GameAdminClient({
+    ...config,
+    registryDiscoveryEnabled: true,
+    registryDiscoveryRequired: true,
+    localDiscoveryFallbackEnabled: false,
+    gameAdminConnectTimeoutMs: 1000,
+    gameAdminWriteTimeoutMs: 1000,
+    gameAdminReadTimeoutMs: 1000,
+    gameAdminMaxResponseBytes: 4096
+  }, createRedisWithGameServers([
+    createGameServerInstance("game-a", first.port),
+    createGameServerInstance("game-b", second.port)
+  ]));
+
+  try {
+    const result = await client.queryMailAttachmentGrant(
+      "mail_claim:mail-1",
+      `sha256:${"4".repeat(64)}`,
+      { traceId: "6".repeat(32), characterId: "chr_1", items: frozenQueryItems() }
+    );
+    assert.equal(result.queryStatus, "conflict");
+    assert.equal(result.requestFingerprint, storedFingerprint);
+  } finally {
+    await first.close();
+    await second.close();
   }
 });
