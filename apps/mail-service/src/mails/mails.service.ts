@@ -1,6 +1,6 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 
-import { badGateway, badRequest, conflict, forbidden, gone, notFound } from "../common/http-exception.js";
+import { badGateway, badRequest, conflict, forbidden, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
 import { generateMailId } from "../global-id.js";
 import { log } from "../logger.js";
 import {
@@ -465,6 +465,15 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
       assertAuthenticatedPlayer(authenticatedPlayerId);
       const characterId = assertAuthenticatedCharacter(authenticatedCharacterId);
       assertPlayerIdMatches(authenticatedPlayerId, player_id);
+      if (
+        targetInstanceId &&
+        (!this.config.localDiscoveryFallbackEnabled || this.config.registryDiscoveryRequired)
+      ) {
+        throw forbidden(
+          "CLIENT_TARGET_INSTANCE_FORBIDDEN",
+          "targetInstanceId is only available for local development diagnostics"
+        );
+      }
 
       const mail = await this.mailStore.getMailById(mailId);
       if (!mail) {
@@ -524,13 +533,25 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         );
       } catch (error: any) {
         await this.mailStore.releaseClaimAttachments(mailId);
-        log("error", "mail.claim_grant_failed", {
+        const isRouteFailure = error?.errorCategory === "ROUTE_UNAVAILABLE";
+        if (isRouteFailure) {
+          this.metrics?.recordMailClaimRouteUnavailable?.();
+        } else {
+          this.metrics?.recordMailClaimGrantFailure?.();
+        }
+        log("error", isRouteFailure ? "mail.claim_route_unavailable" : "mail.claim_grant_failed", {
           mailId,
-          playerId: authenticatedPlayerId,
-          characterId,
-          error: error.message,
-          code: error.code || null
+          instanceId: error?.instanceId || "",
+          requestId: error?.requestId || `mail_claim:${mail.mail_id}`,
+          traceId: error?.traceId || "",
+          errorCode: error?.code || "GAME_SERVER_GRANT_FAILED"
         });
+        if (isRouteFailure) {
+          throw serviceUnavailable(
+            "MAIL_CLAIM_ROUTE_UNAVAILABLE",
+            "The authoritative game-server route is temporarily unavailable"
+          );
+        }
         throw badGateway("GAME_SERVER_GRANT_FAILED", error.message);
       }
 

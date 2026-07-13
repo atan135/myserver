@@ -17,7 +17,9 @@ use super::auth::{AdminAuthContext, authenticate_admin_packet};
 use super::gm::{
     GmBanPlayerCommand, GmKickPlayerCommand, KickOnlineOutcome, decode_gm_ban_player_request,
     decode_gm_broadcast_request, decode_gm_kick_player_request, decode_grant_items_request,
+    ensure_mail_claim_request_matches_handle, ensure_mail_claim_target_is_online,
     gm_disconnect_reason, grant_item_to_inventory_item, kick_online_player,
+    push_to_online_character,
 };
 use super::rollout_status::build_rollout_drain_status_response;
 use super::runtime_config::apply_runtime_config;
@@ -126,6 +128,10 @@ fn player_registry_fixture(
         character_id: "chr_0000000000001".to_string(),
         kick_notify: notify.clone(),
         session_id: 42,
+        online_authority: crate::core::online_route::OnlineAuthority {
+            generation: 42,
+            token: format!("{:064x}", 42),
+        },
         outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
         kick_reason: kick_reason.clone(),
     });
@@ -315,6 +321,8 @@ async fn gm_send_item_audit_event_targets_character() {
         mail_id: String::new(),
         request_fingerprint: String::new(),
         trace_id: String::new(),
+        route_generation: String::new(),
+        route_token: String::new(),
     };
     let packet = bytes_packet(MessageType::GmSendItemReq, 11, encode_body(&request));
     let target = AdminAuditTarget {
@@ -488,6 +496,8 @@ async fn admin_shutdown_request_writes_success_then_triggers_signal() {
                 PlayerManager::new(PgPlayerStore::new_disabled()),
                 config_tables,
                 ItemUidGenerator::new_for_test(1),
+                redis::Client::open("redis://127.0.0.1:6379/").unwrap(),
+                String::new(),
                 "game-server-test".to_string(),
                 "secret-admin-token".to_string(),
                 AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),
@@ -737,6 +747,169 @@ async fn kick_offline_player_returns_player_offline() {
     let result = kick_online_player(&registry, "player-offline", "gm_kick").await;
 
     assert_eq!(result, Err("PLAYER_OFFLINE"));
+}
+
+#[tokio::test]
+async fn mail_claim_authority_accepts_only_live_character_on_this_instance() {
+    let (registry, _notify, _kick_reason, rx) = player_registry_fixture("player-a");
+
+    assert_eq!(
+        ensure_mail_claim_target_is_online(&registry, "chr_0000000000001")
+            .await
+            .unwrap(),
+        42
+    );
+
+    let missing = ensure_mail_claim_target_is_online(&registry, "chr_missing")
+        .await
+        .unwrap_err();
+    assert_eq!(missing.error_code, "MAIL_CLAIM_ROUTE_MISMATCH");
+    assert_eq!(missing.error_category, "ROUTE_UNAVAILABLE");
+    assert_eq!(missing.result_state, "not_applied");
+    assert!(missing.retryable);
+
+    drop(rx);
+    let closed = ensure_mail_claim_target_is_online(&registry, "chr_0000000000001")
+        .await
+        .unwrap_err();
+    assert_eq!(closed.error_code, "MAIL_CLAIM_CONNECTION_UNAVAILABLE");
+    assert_eq!(closed.error_category, "ROUTE_UNAVAILABLE");
+    assert!(closed.retryable);
+}
+
+#[test]
+fn mail_claim_with_stale_route_fence_is_rejected_before_asset_side_effects() {
+    let (registry, _notify, _kick_reason, _rx) = player_registry_fixture("player-a");
+    let handle = registry
+        .blocking_read()
+        .get_by_character("chr_0000000000001")
+        .cloned()
+        .unwrap();
+    let request = GrantItemsReq {
+        request_id: "mail_claim:mail-1".to_string(),
+        character_id: handle.character_id.clone(),
+        items: vec![GrantItem {
+            item_id: 1001,
+            count: 1,
+            binded: false,
+        }],
+        source: "mail-claim".to_string(),
+        reason: String::new(),
+        mail_id: "mail-1".to_string(),
+        request_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        trace_id: "b".repeat(32),
+        route_generation: "41".to_string(),
+        route_token: format!("{:064x}", 41),
+    };
+    let mut asset_side_effects = 0;
+
+    let result = ensure_mail_claim_request_matches_handle(&request, &handle);
+    if result.is_ok() {
+        asset_side_effects += 1;
+    }
+
+    let failure = result.unwrap_err();
+    assert_eq!(failure.error_code, "MAIL_CLAIM_ROUTE_MISMATCH");
+    assert_eq!(failure.error_category, "ROUTE_UNAVAILABLE");
+    assert_eq!(failure.result_state, "not_applied");
+    assert_eq!(asset_side_effects, 0);
+}
+
+#[test]
+fn mail_claim_is_rejected_when_redis_owner_switches_after_route_resolution() {
+    use crate::core::online_route::{
+        OnlineAuthority, OnlineRoute, online_route_authority_matches_snapshot,
+    };
+
+    let (registry, _notify, _kick_reason, _rx) = player_registry_fixture("player-a");
+    let handle = registry
+        .blocking_read()
+        .get_by_character("chr_0000000000001")
+        .cloned()
+        .unwrap();
+    let request = GrantItemsReq {
+        request_id: "mail_claim:mail-1".to_string(),
+        character_id: handle.character_id.clone(),
+        items: vec![GrantItem {
+            item_id: 1001,
+            count: 1,
+            binded: false,
+        }],
+        source: "mail-claim".to_string(),
+        reason: String::new(),
+        mail_id: "mail-1".to_string(),
+        request_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        trace_id: "b".repeat(32),
+        route_generation: handle.online_authority.generation.to_string(),
+        route_token: handle.online_authority.token.clone(),
+    };
+    assert!(ensure_mail_claim_request_matches_handle(&request, &handle).is_ok());
+
+    let new_authority = OnlineAuthority {
+        generation: handle.online_authority.generation + 1,
+        token: "f".repeat(64),
+    };
+    let new_route = serde_json::to_string(&OnlineRoute::new(
+        &request.character_id,
+        "game-server-b",
+        1,
+        &new_authority,
+    ))
+    .unwrap();
+    let authoritative = online_route_authority_matches_snapshot(
+        Some(&new_route),
+        Some(&new_route),
+        Some(&new_authority.fence_value()),
+        &request.character_id,
+        "game-server-a",
+        handle.session_id,
+        &handle.online_authority,
+    );
+    let mut asset_side_effects = 0;
+    if authoritative {
+        asset_side_effects += 1;
+    }
+
+    assert!(!authoritative);
+    assert_eq!(asset_side_effects, 0);
+}
+
+#[tokio::test]
+async fn mail_grant_push_uses_the_current_registry_session() {
+    let (old_tx, mut old_rx) = mpsc::channel(8);
+    let (new_tx, mut new_rx) = mpsc::channel(8);
+    let mut state = OnlinePlayerRegistry::default();
+    for (session_id, tx) in [(41, old_tx), (42, new_tx)] {
+        state.insert_by_account(PlayerConnectionHandle {
+            account_player_id: "player-a".to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            kick_notify: Arc::new(Notify::new()),
+            session_id,
+            online_authority: crate::core::online_route::OnlineAuthority {
+                generation: session_id,
+                token: format!("{session_id:064x}"),
+            },
+            outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
+            kick_reason: Arc::new(RwLock::new("session_kicked".to_string())),
+        });
+    }
+    let registry = Arc::new(RwLock::new(state));
+
+    push_to_online_character(
+        &registry,
+        "chr_0000000000001",
+        MessageType::InventoryUpdatePush,
+        vec![1, 2, 3],
+    )
+    .await
+    .unwrap();
+
+    assert!(old_rx.try_recv().is_err());
+    let message = new_rx
+        .try_recv()
+        .expect("current session receives grant push");
+    assert_eq!(message.message_type, MessageType::InventoryUpdatePush);
+    assert_eq!(message.body, vec![1, 2, 3]);
 }
 
 #[tokio::test]

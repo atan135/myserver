@@ -14,15 +14,17 @@ use crate::admin_pb::{
     GrantItemsResultSummary,
 };
 use crate::core::config_table::ConfigTableRuntime;
-use crate::core::context::{PlayerRegistry, SharedRoomManager};
+use crate::core::context::PlayerRegistry;
 use crate::core::global_id::ItemUidGenerator;
 use crate::core::inventory::Item;
+use crate::core::online_route::validate_online_route_authority;
 use crate::core::player::PlayerManager;
 use crate::core::player::db_player_store::{GrantRecord, GrantRecordLookup};
 use crate::core::player::grant_contract::{
     GrantItemIntent, GrantResultSummary, compute_grant_fingerprint, normalize_grant_items,
 };
 use crate::core::player::player_manager::GrantItemsError;
+use crate::core::room::{OutboundMessage, OutboundQueueLogContext};
 use crate::csv_code::itemtable::ItemTable;
 use crate::gm_broadcast::{
     GM_BROADCAST_CONTENT_MAX_LEN, GM_BROADCAST_TITLE_MAX_LEN, GM_SENDER_MAX_LEN,
@@ -40,6 +42,7 @@ const GRANT_REQUEST_ID_MAX_LEN: usize = 128;
 const GRANT_MAIL_ID_MAX_LEN: usize = 64;
 const GRANT_SOURCE_MAX_LEN: usize = 64;
 const GRANT_TRACE_ID_LEN: usize = 32;
+const GRANT_ROUTE_TOKEN_LEN: usize = 64;
 const GM_BAN_DURATION_MAX_SECONDS: u64 = 31_536_000;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -75,10 +78,13 @@ pub(super) async fn handle_gm_send_item(
     audit_logger: &AdminAuditLogger,
     auth_context: &AdminAuthContext,
     packet: &Packet,
-    room_manager: &SharedRoomManager,
+    player_registry: &PlayerRegistry,
     player_manager: &PlayerManager,
     config_tables: &ConfigTableRuntime,
     item_uid_generator: &ItemUidGenerator,
+    redis_client: &redis::Client,
+    redis_key_prefix: &str,
+    owner_instance_id: &str,
 ) -> Result<(), std::io::Error> {
     let action = "gm_send_item";
     let request = match decode_grant_items_request(packet).map_err(|error| error.to_string()) {
@@ -129,6 +135,36 @@ pub(super) async fn handle_gm_send_item(
             return Ok(());
         }
     };
+    if request.source == "mail-claim"
+        && let Err(failure) = ensure_mail_claim_target_is_authoritative(
+            player_registry,
+            redis_client,
+            redis_key_prefix,
+            owner_instance_id,
+            &request,
+        )
+        .await
+    {
+        audit_then_write_message(
+            writer,
+            audit_logger,
+            auth_context,
+            packet,
+            action,
+            MessageType::GmSendItemRes,
+            &grant_failure_response(
+                &request.request_id,
+                &validated.request_fingerprint,
+                &request.trace_id,
+                &failure,
+            ),
+            false,
+            failure.error_code,
+            &target,
+        )
+        .await?;
+        return Ok(());
+    }
     let tables = config_tables.tables_snapshot().await;
     let result_summary = GrantResultSummary {
         character_id: request.character_id.clone(),
@@ -185,7 +221,7 @@ pub(super) async fn handle_gm_send_item(
             let mut push_failed = false;
             if outcome.applied {
                 let obtain_result = push_item_obtain_if_online(
-                    room_manager,
+                    player_registry,
                     &request.character_id,
                     &outcome.granted_items,
                     &request.source,
@@ -193,7 +229,7 @@ pub(super) async fn handle_gm_send_item(
                 .await;
                 let inventory_result = if let Some(player_data) = &outcome.player_data {
                     push_inventory_update_if_online(
-                        room_manager,
+                        player_registry,
                         &request.character_id,
                         player_data,
                     )
@@ -529,6 +565,87 @@ fn retryable_grant_failure(error_code: &'static str) -> GrantItemsError {
         result_state: "not_applied",
         retryable: true,
     }
+}
+
+fn route_unavailable_grant_failure(error_code: &'static str) -> GrantItemsError {
+    GrantItemsError {
+        error_code,
+        error_category: "ROUTE_UNAVAILABLE",
+        result_state: "not_applied",
+        retryable: true,
+    }
+}
+
+pub(super) async fn ensure_mail_claim_target_is_online(
+    player_registry: &PlayerRegistry,
+    character_id: &str,
+) -> Result<u64, GrantItemsError> {
+    let handle = {
+        let registry = player_registry.read().await;
+        registry.get_by_character(character_id).cloned()
+    }
+    .ok_or_else(|| route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_MISMATCH"))?;
+
+    if handle.outbound.is_closed() {
+        return Err(route_unavailable_grant_failure(
+            "MAIL_CLAIM_CONNECTION_UNAVAILABLE",
+        ));
+    }
+
+    Ok(handle.session_id)
+}
+
+async fn ensure_mail_claim_target_is_authoritative(
+    player_registry: &PlayerRegistry,
+    redis_client: &redis::Client,
+    redis_key_prefix: &str,
+    owner_instance_id: &str,
+    request: &GrantItemsReq,
+) -> Result<u64, GrantItemsError> {
+    let handle = {
+        let registry = player_registry.read().await;
+        registry.get_by_character(&request.character_id).cloned()
+    }
+    .ok_or_else(|| route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_MISMATCH"))?;
+
+    if handle.outbound.is_closed() {
+        return Err(route_unavailable_grant_failure(
+            "MAIL_CLAIM_CONNECTION_UNAVAILABLE",
+        ));
+    }
+    ensure_mail_claim_request_matches_handle(request, &handle)?;
+
+    let mut redis = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|_| route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_BACKEND_UNAVAILABLE"))?;
+    let authoritative = validate_online_route_authority(
+        &mut redis,
+        redis_key_prefix,
+        &request.character_id,
+        owner_instance_id,
+        handle.session_id,
+        &handle.online_authority,
+    )
+    .await
+    .map_err(|_| route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_BACKEND_UNAVAILABLE"))?;
+    if !authoritative {
+        return Err(route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_MISMATCH"));
+    }
+
+    Ok(handle.session_id)
+}
+
+pub(super) fn ensure_mail_claim_request_matches_handle(
+    request: &GrantItemsReq,
+    handle: &crate::core::context::PlayerConnectionHandle,
+) -> Result<(), GrantItemsError> {
+    if request.route_generation != handle.online_authority.generation.to_string()
+        || request.route_token != handle.online_authority.token
+    {
+        return Err(route_unavailable_grant_failure("MAIL_CLAIM_ROUTE_MISMATCH"));
+    }
+    Ok(())
 }
 
 fn is_trimmed_nonempty_with_max_bytes(value: &str, max_bytes: usize) -> bool {
@@ -936,6 +1053,18 @@ async fn validate_grant_items_request(
         if !is_lower_hex(&request.trace_id, GRANT_TRACE_ID_LEN) {
             return Err(invalid_grant_request("INVALID_TRACE_ID"));
         }
+        if request
+            .route_generation
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_none()
+        {
+            return Err(invalid_grant_request("INVALID_ROUTE_GENERATION"));
+        }
+        if !is_lower_hex(&request.route_token, GRANT_ROUTE_TOKEN_LEN) {
+            return Err(invalid_grant_request("INVALID_ROUTE_TOKEN"));
+        }
         request.mail_id.as_str()
     } else {
         ""
@@ -1000,6 +1129,10 @@ pub(super) fn decode_grant_items_request(
         request_fingerprint: Option<String>,
         #[serde(rename = "traceId")]
         trace_id: Option<String>,
+        #[serde(rename = "routeGeneration")]
+        route_generation: Option<String>,
+        #[serde(rename = "routeToken")]
+        route_token: Option<String>,
     }
 
     let request: GmSendItemRequest = serde_json::from_slice(&packet.body)?;
@@ -1048,6 +1181,8 @@ pub(super) fn decode_grant_items_request(
         mail_id: request.mail_id.unwrap_or_default(),
         request_fingerprint: request.request_fingerprint.unwrap_or_default(),
         trace_id: request.trace_id.unwrap_or_default(),
+        route_generation: request.route_generation.unwrap_or_default(),
+        route_token: request.route_token.unwrap_or_default(),
     })
 }
 
@@ -1107,46 +1242,78 @@ fn current_unix_ms() -> i64 {
 }
 
 async fn push_item_obtain_if_online(
-    room_manager: &SharedRoomManager,
+    player_registry: &PlayerRegistry,
     character_id: &str,
     items: &[Item],
     source: &str,
 ) -> Result<(), std::io::Error> {
-    room_manager
-        .send_to_character(
-            character_id,
-            MessageType::ItemObtainPush,
-            encode_body(&ItemObtainPush {
-                items: items.iter().map(inventory_item_to_pb_item).collect(),
-                source: source.to_string(),
-            }),
-        )
-        .await
+    push_to_online_character(
+        player_registry,
+        character_id,
+        MessageType::ItemObtainPush,
+        encode_body(&ItemObtainPush {
+            items: items.iter().map(inventory_item_to_pb_item).collect(),
+            source: source.to_string(),
+        }),
+    )
+    .await
 }
 
 async fn push_inventory_update_if_online(
-    room_manager: &SharedRoomManager,
+    player_registry: &PlayerRegistry,
     character_id: &str,
     player_data: &crate::core::inventory::PlayerData,
 ) -> Result<(), std::io::Error> {
-    room_manager
-        .send_to_character(
-            character_id,
-            MessageType::InventoryUpdatePush,
-            encode_body(&InventoryUpdatePush {
-                inventory_items: player_data
-                    .get_inventory_items()
-                    .iter()
-                    .map(|item| inventory_item_to_pb_item(item))
-                    .collect(),
-                warehouse_items: player_data
-                    .get_warehouse_items()
-                    .iter()
-                    .map(|item| inventory_item_to_pb_item(item))
-                    .collect(),
-            }),
+    push_to_online_character(
+        player_registry,
+        character_id,
+        MessageType::InventoryUpdatePush,
+        encode_body(&InventoryUpdatePush {
+            inventory_items: player_data
+                .get_inventory_items()
+                .iter()
+                .map(|item| inventory_item_to_pb_item(item))
+                .collect(),
+            warehouse_items: player_data
+                .get_warehouse_items()
+                .iter()
+                .map(|item| inventory_item_to_pb_item(item))
+                .collect(),
+        }),
+    )
+    .await
+}
+
+pub(super) async fn push_to_online_character(
+    player_registry: &PlayerRegistry,
+    character_id: &str,
+    message_type: MessageType,
+    body: Vec<u8>,
+) -> Result<(), std::io::Error> {
+    let handle = {
+        let registry = player_registry.read().await;
+        registry.get_by_character(character_id).cloned()
+    };
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+
+    handle
+        .outbound
+        .try_send(
+            OutboundMessage {
+                message_type,
+                seq: 0,
+                body,
+            },
+            OutboundQueueLogContext {
+                session_id: Some(handle.session_id),
+                subject_id: Some(character_id),
+                operation: "mail_inventory_grant_push",
+                ..OutboundQueueLogContext::default()
+            },
         )
-        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn inventory_item_to_pb_item(item: &Item) -> PbItem {

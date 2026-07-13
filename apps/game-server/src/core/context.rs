@@ -14,6 +14,7 @@ use crate::core::character_title::TitleService;
 use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::global_id::ItemUidGenerator;
+use crate::core::online_route::{OnlineAuthority, OnlineRouteCoordinator};
 use crate::core::player::PlayerManager;
 use crate::core::room::{
     ConnectionCloseState, OutboundChannel, OutboundMessage, OutboundQueueLogContext,
@@ -40,6 +41,7 @@ pub struct PlayerConnectionHandle {
     pub character_id: String,
     pub kick_notify: Arc<Notify>,
     pub session_id: u64,
+    pub online_authority: OnlineAuthority,
     pub outbound: OutboundChannel,
     pub kick_reason: Arc<RwLock<String>>,
 }
@@ -108,6 +110,18 @@ impl OnlinePlayerRegistry {
         self.by_account_player_id.values().cloned().collect()
     }
 
+    pub fn is_current_session(
+        &self,
+        account_player_id: &str,
+        character_id: &str,
+        session_id: u64,
+    ) -> bool {
+        self.get_by_account(account_player_id)
+            .is_some_and(|handle| {
+                handle.character_id == character_id && handle.session_id == session_id
+            })
+    }
+
     fn remove_character_index_if_current(&mut self, character_id: &str, account_player_id: &str) {
         if self
             .character_to_account_player_id
@@ -138,6 +152,7 @@ pub struct ServiceContext {
     pub character_push_service: CharacterPushService,
     pub online_player_count: Arc<AtomicU64>,
     pub player_registry: PlayerRegistry,
+    pub online_route_coordinator: OnlineRouteCoordinator,
     pub player_msg_rate_limiter: SharedPlayerMessageRateLimiter,
     pub player_input_anomaly_tracker: SharedPlayerInputAnomalyTracker,
     pub shutdown_signal: ShutdownSignal,
@@ -259,6 +274,10 @@ mod tests {
             character_id: character_id.to_string(),
             kick_notify: Arc::new(Notify::new()),
             session_id,
+            online_authority: OnlineAuthority {
+                generation: session_id,
+                token: format!("{session_id:064x}"),
+            },
             outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
             kick_reason: Arc::new(RwLock::new("session_kicked".to_string())),
         }
@@ -282,6 +301,8 @@ mod tests {
                 .map(|handle| handle.account_player_id.as_str()),
             Some("plr_0000000000001")
         );
+        assert!(registry.is_current_session("plr_0000000000001", "chr_0000000000001", 10));
+        assert!(!registry.is_current_session("plr_0000000000001", "chr_0000000000001", 9));
     }
 
     #[test]

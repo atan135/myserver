@@ -55,6 +55,10 @@ pub struct GrantItemsReq {
     pub request_fingerprint: ::prost::alloc::string::String,
     #[prost(string, tag = "8")]
     pub trace_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub route_generation: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub route_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GrantItemsResultSummary {

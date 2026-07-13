@@ -35,6 +35,8 @@ export class MetricsCollector {
     this.outboxRetries = 0;
     this.outboxTerminal = 0;
     this.outboxLeaseTakeovers = 0;
+    this.mailClaimRouteUnavailable = 0;
+    this.mailClaimGrantFailures = 0;
 
     this.flushTimer = null;
   }
@@ -80,6 +82,14 @@ export class MetricsCollector {
     this.outboxLeaseTakeovers += 1;
   }
 
+  recordMailClaimRouteUnavailable() {
+    this.mailClaimRouteUnavailable += 1;
+  }
+
+  recordMailClaimGrantFailure() {
+    this.mailClaimGrantFailures += 1;
+  }
+
   /**
    * Flush metrics to NATS
    */
@@ -95,6 +105,8 @@ export class MetricsCollector {
     const outboxRetries = this.outboxRetries;
     const outboxTerminal = this.outboxTerminal;
     const outboxLeaseTakeovers = this.outboxLeaseTakeovers;
+    const mailClaimRouteUnavailable = this.mailClaimRouteUnavailable;
+    const mailClaimGrantFailures = this.mailClaimGrantFailures;
 
     // Reset counters
     this.qps = 0;
@@ -105,6 +117,8 @@ export class MetricsCollector {
     this.outboxRetries = 0;
     this.outboxTerminal = 0;
     this.outboxLeaseTakeovers = 0;
+    this.mailClaimRouteUnavailable = 0;
+    this.mailClaimGrantFailures = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -127,6 +141,8 @@ export class MetricsCollector {
             mail_outbox_retries: outboxRetries,
             mail_outbox_terminal: outboxTerminal,
             mail_outbox_lease_takeovers: outboxLeaseTakeovers,
+            mail_claim_route_unavailable: mailClaimRouteUnavailable,
+            mail_claim_grant_failures: mailClaimGrantFailures,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

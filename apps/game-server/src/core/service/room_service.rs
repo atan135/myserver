@@ -2127,6 +2127,7 @@ mod tests {
             character_push_service,
             online_player_count: Arc::new(AtomicU64::new(0)),
             player_registry: PlayerRegistry::default(),
+            online_route_coordinator: Default::default(),
             player_msg_rate_limiter: Arc::new(Mutex::new(
                 crate::server::PlayerMessageRateLimiter::new(),
             )),

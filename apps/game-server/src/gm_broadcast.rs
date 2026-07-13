@@ -315,6 +315,10 @@ mod tests {
             character_id: "chr_0000000000001".to_string(),
             kick_notify: notify.clone(),
             session_id: 42,
+            online_authority: crate::core::online_route::OnlineAuthority {
+                generation: 42,
+                token: format!("{:064x}", 42),
+            },
             outbound: OutboundChannel::new(tx, ConnectionCloseState::new()),
             kick_reason: kick_reason.clone(),
         });

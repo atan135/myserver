@@ -37,6 +37,8 @@ message GrantItemsReq {
   string mail_id = 6;
   string request_fingerprint = 7;
   string trace_id = 8;
+  string route_generation = 9;
+  string route_token = 10;
 }
 
 message GrantItemsResultSummary {

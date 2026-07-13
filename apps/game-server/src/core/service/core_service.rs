@@ -4,6 +4,10 @@ use redis::AsyncCommands;
 use tracing::info;
 
 use crate::core::context::{ConnectionContext, PlayerConnectionHandle, ServiceContext};
+use crate::core::online_route::{
+    clear_online_route, online_route_ttl_secs, publish_online_route,
+    reserve_online_route_authority, session_can_replace,
+};
 use crate::core::room::OutboundChannel;
 use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
@@ -115,26 +119,215 @@ pub async fn handle_auth(
             }
 
             let previous_account_player_id = connection.session.account_player_id.clone();
+            let previous_character_id = connection.session.character_id.clone();
+            let previous_authority = connection.session.online_authority.clone();
             let was_authenticated = connection.session.state == SessionState::Authenticated;
+            let _route_guard = services
+                .online_route_coordinator
+                .lock_account(&account_player_id)
+                .await;
+            let existing_session_id = services
+                .player_registry
+                .read()
+                .await
+                .get_by_account(&account_player_id)
+                .map(|handle| handle.session_id);
+            if !session_can_replace(existing_session_id, connection.session.id) {
+                tracing::warn!(
+                    account_player_id = %account_player_id,
+                    character_id = %character_id,
+                    session_id = connection.session.id,
+                    "stale local session authenticated after a newer session; authority reservation skipped"
+                );
+                connection.queue_message(
+                    MessageType::AuthRes,
+                    packet.header.seq,
+                    AuthRes {
+                        ok: false,
+                        player_id: String::new(),
+                        error_code: "AUTHORITY_SUPERSEDED".to_string(),
+                    },
+                )?;
+                *connection.kick_reason.write().await = "new_login".to_string();
+                connection.kick_notify.notify_one();
+                return Ok(());
+            }
+
+            let route_ttl_secs = online_route_ttl_secs(services.config.heartbeat_timeout_secs);
+            let authority = match reserve_online_route_authority(
+                &mut connection.redis,
+                &services.config.redis_key_prefix,
+                &character_id,
+                &services.config.service_instance_id,
+                connection.session.id,
+                route_ttl_secs,
+            )
+            .await
+            {
+                Ok(authority) => authority,
+                Err(error) => {
+                    tracing::warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        error = %error,
+                        "failed to reserve game online authority"
+                    );
+                    connection.queue_message(
+                        MessageType::AuthRes,
+                        packet.header.seq,
+                        AuthRes {
+                            ok: false,
+                            player_id: String::new(),
+                            error_code: "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
+            match publish_online_route(
+                &mut connection.redis,
+                &services.config.redis_key_prefix,
+                &character_id,
+                &services.config.service_instance_id,
+                connection.session.id,
+                &authority,
+                route_ttl_secs,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        generation = authority.generation,
+                        "game online authority was superseded before route publication"
+                    );
+                    connection.queue_message(
+                        MessageType::AuthRes,
+                        packet.header.seq,
+                        AuthRes {
+                            ok: false,
+                            player_id: String::new(),
+                            error_code: "AUTHORITY_SUPERSEDED".to_string(),
+                        },
+                    )?;
+                    *connection.kick_reason.write().await = "authority_changed".to_string();
+                    connection.kick_notify.notify_one();
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        error = %error,
+                        "failed to publish game online route"
+                    );
+                    connection.queue_message(
+                        MessageType::AuthRes,
+                        packet.header.seq,
+                        AuthRes {
+                            ok: false,
+                            player_id: String::new(),
+                            error_code: "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            }
+
+            if let Some(previous_character_id) = previous_character_id.as_deref()
+                && previous_account_player_id.as_deref() == Some(account_player_id.as_str())
+                && previous_character_id != character_id
+                && let Some(previous_authority) = previous_authority.as_ref()
+                && let Err(error) = clear_online_route(
+                    &mut connection.redis,
+                    &services.config.redis_key_prefix,
+                    previous_character_id,
+                    &services.config.service_instance_id,
+                    connection.session.id,
+                    previous_authority,
+                )
+                .await
+            {
+                tracing::warn!(
+                    character_id = %previous_character_id,
+                    instance_id = %services.config.service_instance_id,
+                    error = %error,
+                    "failed to clear previous game online route"
+                );
+            }
+
             connection.session.set_authenticated_identity(
                 account_player_id.clone(),
                 character_id.clone(),
                 world_id,
             );
+            connection.session.set_online_authority(authority.clone());
+            let old_handle =
+                services
+                    .player_registry
+                    .write()
+                    .await
+                    .insert_by_account(PlayerConnectionHandle {
+                        account_player_id: account_player_id.clone(),
+                        character_id: character_id.clone(),
+                        kick_notify: connection.kick_notify.clone(),
+                        session_id: connection.session.id,
+                        online_authority: authority.clone(),
+                        outbound: OutboundChannel::new(
+                            connection.tx.clone(),
+                            connection.close_state.clone(),
+                        ),
+                        kick_reason: connection.kick_reason.clone(),
+                    });
+            drop(_route_guard);
+
+            if let Some(previous_account_player_id) = previous_account_player_id.as_deref()
+                && previous_account_player_id != account_player_id
+            {
+                let _previous_route_guard = services
+                    .online_route_coordinator
+                    .lock_account(previous_account_player_id)
+                    .await;
+                let removed = services
+                    .player_registry
+                    .write()
+                    .await
+                    .remove_by_account_if_session(
+                        previous_account_player_id,
+                        connection.session.id,
+                    );
+                if removed.is_some()
+                    && let Some(previous_character_id) = previous_character_id.as_deref()
+                    && let Some(previous_authority) = previous_authority.as_ref()
+                    && let Err(error) = clear_online_route(
+                        &mut connection.redis,
+                        &services.config.redis_key_prefix,
+                        previous_character_id,
+                        &services.config.service_instance_id,
+                        connection.session.id,
+                        previous_authority,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %error, "failed to clear previous account route");
+                }
+            }
+
             if !was_authenticated {
                 let online_players =
                     services.online_player_count.fetch_add(1, Ordering::Relaxed) + 1;
                 METRICS.set_online_players(online_players);
             }
-
             info!(
                 session_id = connection.session.id,
                 account_player_id = %account_player_id,
                 character_id = %character_id,
+                generation = authority.generation,
                 world_id = ?world_id,
                 "player authenticated"
             );
-
             connection.queue_message(
                 MessageType::AuthRes,
                 packet.header.seq,
@@ -157,35 +350,11 @@ pub async fn handle_auth(
                         "seq": packet.header.seq,
                         "accountPlayerId": account_player_id,
                         "characterId": character_id,
-                        "worldId": world_id
+                        "worldId": world_id,
+                        "authorityGeneration": authority.generation
                     })),
                 )
                 .await;
-
-            // Register in player registry; kick old connection on same server
-            let old_handle = {
-                let mut registry = services.player_registry.write().await;
-                if let Some(previous_account_player_id) = previous_account_player_id.as_deref() {
-                    if previous_account_player_id != account_player_id {
-                        registry.remove_by_account_if_session(
-                            previous_account_player_id,
-                            connection.session.id,
-                        );
-                    }
-                }
-                let handle = PlayerConnectionHandle {
-                    account_player_id: account_player_id.clone(),
-                    character_id: character_id.clone(),
-                    kick_notify: connection.kick_notify.clone(),
-                    session_id: connection.session.id,
-                    outbound: OutboundChannel::new(
-                        connection.tx.clone(),
-                        connection.close_state.clone(),
-                    ),
-                    kick_reason: connection.kick_reason.clone(),
-                };
-                registry.insert_by_account(handle)
-            };
             if let Some(old_handle) = old_handle {
                 if old_handle.session_id != connection.session.id {
                     info!(

@@ -36,6 +36,7 @@ pub struct Session {
     pub character_id: Option<String>,
     pub world_id: Option<u64>,
     pub room_id: Option<String>,
+    pub online_authority: Option<OnlineAuthority>,
 }
 
 impl Session {
@@ -47,7 +48,12 @@ impl Session {
             character_id: None,
             world_id: None,
             room_id: None,
+            online_authority: None,
         }
+    }
+
+    pub fn set_online_authority(&mut self, authority: OnlineAuthority) {
+        self.online_authority = Some(authority);
     }
 
     pub fn set_authenticated_identity(
@@ -117,3 +123,4 @@ mod tests {
         assert_eq!(session.authenticated_identity(), None);
     }
 }
+use crate::core::online_route::OnlineAuthority;

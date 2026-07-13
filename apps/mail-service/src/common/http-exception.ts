@@ -33,3 +33,7 @@ export function gone(error: string, message?: string): ApiHttpException {
 export function badGateway(error: string, message?: string): ApiHttpException {
   return new ApiHttpException(502, { ok: false, error, message: message || error });
 }
+
+export function serviceUnavailable(error: string, message?: string): ApiHttpException {
+  return new ApiHttpException(503, { ok: false, error, message: message || error });
+}

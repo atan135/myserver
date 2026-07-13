@@ -54,6 +54,8 @@ pub async fn run_listener(
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
     item_uid_generator: ItemUidGenerator,
+    redis_client: redis::Client,
+    redis_key_prefix: String,
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
@@ -68,6 +70,8 @@ pub async fn run_listener(
         let player_manager = player_manager.clone();
         let config_tables = config_tables.clone();
         let item_uid_generator = item_uid_generator.clone();
+        let redis_client = redis_client.clone();
+        let redis_key_prefix = redis_key_prefix.clone();
         let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
         let audit_logger = audit_logger.clone();
@@ -83,6 +87,8 @@ pub async fn run_listener(
                 player_manager,
                 config_tables,
                 item_uid_generator,
+                redis_client,
+                redis_key_prefix,
                 owner_server_id,
                 admin_token,
                 audit_logger,
@@ -105,6 +111,8 @@ async fn handle_admin_connection(
     player_manager: PlayerManager,
     config_tables: ConfigTableRuntime,
     item_uid_generator: ItemUidGenerator,
+    redis_client: redis::Client,
+    redis_key_prefix: String,
     owner_server_id: String,
     admin_token: String,
     audit_logger: AdminAuditLogger,
@@ -224,10 +232,13 @@ async fn handle_admin_connection(
                     &audit_logger,
                     &auth_context,
                     &packet,
-                    &room_manager,
+                    &player_registry,
                     &player_manager,
                     &config_tables,
                     &item_uid_generator,
+                    &redis_client,
+                    &redis_key_prefix,
+                    &owner_server_id,
                 )
                 .await?;
             }

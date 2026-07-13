@@ -185,7 +185,7 @@ test("sent and terminal rows are cleaned using separate retention windows", asyn
   assert.equal(store.memoryOutbox.size, 0);
 });
 
-test("outbox metrics expose backlog, latency, retry, terminal, and lease takeover", async () => {
+test("mail metrics expose outbox and claim routing failures separately", async () => {
   const published = [];
   const collector = new MetricsCollector({
     async publishJson(subject, payload) {
@@ -197,6 +197,8 @@ test("outbox metrics expose backlog, latency, retry, terminal, and lease takeove
   collector.recordOutboxRetry();
   collector.recordOutboxTerminal();
   collector.recordOutboxLeaseTakeover();
+  collector.recordMailClaimRouteUnavailable();
+  collector.recordMailClaimGrantFailure();
   await collector.flush();
 
   const metrics = published[0].payload.metrics;
@@ -206,4 +208,6 @@ test("outbox metrics expose backlog, latency, retry, terminal, and lease takeove
   assert.equal(metrics.mail_outbox_retries, 1);
   assert.equal(metrics.mail_outbox_terminal, 1);
   assert.equal(metrics.mail_outbox_lease_takeovers, 1);
+  assert.equal(metrics.mail_claim_route_unavailable, 1);
+  assert.equal(metrics.mail_claim_grant_failures, 1);
 });

@@ -143,7 +143,9 @@ test("MailsService claim grants once with stable requestId and repeats idempoten
 
 test("MailsService claim passes camelCase targetInstanceId to game admin grant", async () => {
   createService.MailsService = await loadMailsService();
-  const { service, mailStore, gameAdminClient } = createService();
+  const { service, mailStore, gameAdminClient } = createService({
+    config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
+  });
   await createMail(mailStore);
 
   await service.claim("mail_001", "player_001", "chr_0000000000001", {
@@ -157,7 +159,9 @@ test("MailsService claim passes camelCase targetInstanceId to game admin grant",
 
 test("MailsService claim accepts snake_case target_instance_id for game admin grant", async () => {
   createService.MailsService = await loadMailsService();
-  const { service, mailStore, gameAdminClient } = createService();
+  const { service, mailStore, gameAdminClient } = createService({
+    config: { localDiscoveryFallbackEnabled: true, registryDiscoveryRequired: false }
+  });
   await createMail(mailStore);
 
   await service.claim("mail_001", "player_001", "chr_0000000000001", {

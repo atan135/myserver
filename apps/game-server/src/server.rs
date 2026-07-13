@@ -21,6 +21,11 @@ use crate::core::character_title_unlock::TitleUnlockService;
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::context::{ConnectionContext, PlayerRegistry, ServerSharedState, ServiceContext};
 use crate::core::logic::SharedRoomLogicFactory;
+use crate::core::online_route::{
+    MissingRouteOwnership, RouteRefreshAction, RouteRefreshState, clear_online_route,
+    online_route_refresh_secs, online_route_ttl_secs, refresh_action, refresh_online_route,
+    restore_missing_online_route,
+};
 use crate::core::player::{PgPlayerStore, PlayerManager};
 use crate::core::room::{
     ConnectionCloseState, OutboundMessage, outbound_queue_error_kind_from_error,
@@ -539,6 +544,7 @@ pub async fn run(
         character_push_service,
         online_player_count: shared_state.online_player_count.clone(),
         player_registry: player_registry.clone(),
+        online_route_coordinator: Default::default(),
         player_msg_rate_limiter: shared_state.player_msg_rate_limiter.clone(),
         player_input_anomaly_tracker: shared_state.player_input_anomaly_tracker.clone(),
         shutdown_signal: shared_state.shutdown_signal.clone(),
@@ -562,6 +568,8 @@ pub async fn run(
         services.player_manager.clone(),
         services.config_tables.clone(),
         services.item_uid_generator.clone(),
+        redis_client.clone(),
+        config.redis_key_prefix.clone(),
         config.service_instance_id.clone(),
         config.admin_token.clone(),
         crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
@@ -756,6 +764,7 @@ where
     };
     let mut rate_limiter = ConnectionRateLimiter::new();
     let mut close_event_appended = false;
+    let mut next_online_route_refresh_at: Option<Instant> = None;
 
     let writer_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -1059,6 +1068,133 @@ where
             .await;
             break;
         }
+
+        if next_online_route_refresh_at.is_none_or(|deadline| started_at >= deadline)
+            && let (Some(account_player_id), Some(character_id), Some(authority)) = (
+                connection.session.account_player_id.clone(),
+                connection.session.character_id.clone(),
+                connection.session.online_authority.clone(),
+            )
+        {
+            let route_ttl_secs = online_route_ttl_secs(runtime.heartbeat_timeout_secs);
+            next_online_route_refresh_at = Some(
+                started_at
+                    + Duration::from_secs(online_route_refresh_secs(
+                        runtime.heartbeat_timeout_secs,
+                    )),
+            );
+            let _route_guard = services
+                .online_route_coordinator
+                .lock_account(&account_player_id)
+                .await;
+            let is_current_local_session = services
+                .player_registry
+                .read()
+                .await
+                .is_current_session(&account_player_id, &character_id, connection.session.id);
+            if !is_current_local_session {
+                warn!(
+                    character_id = %character_id,
+                    instance_id = %services.config.service_instance_id,
+                    session_id = connection.session.id,
+                    "stale local session cannot refresh or restore game online route"
+                );
+                *connection.kick_reason.write().await = "authority_changed".to_string();
+                connection.kick_notify.notify_one();
+                break;
+            }
+
+            let mut authority_lost = false;
+            match refresh_online_route(
+                &mut connection.redis,
+                &services.config.redis_key_prefix,
+                &character_id,
+                &services.config.service_instance_id,
+                connection.session.id,
+                &authority,
+                route_ttl_secs,
+            )
+            .await
+            {
+                Ok(state) if refresh_action(true, state) == RouteRefreshAction::RestoreMissing => {
+                    match restore_missing_online_route(
+                        &mut connection.redis,
+                        &services.config.redis_key_prefix,
+                        &character_id,
+                        &services.config.service_instance_id,
+                        connection.session.id,
+                        &authority,
+                        route_ttl_secs,
+                    )
+                    .await
+                    {
+                        Ok(true) => info!(
+                            character_id = %character_id,
+                            instance_id = %services.config.service_instance_id,
+                            session_id = connection.session.id,
+                            "restored missing game online route from matching owner witness"
+                        ),
+                        Ok(false) => {
+                            authority_lost = true;
+                            warn!(
+                                character_id = %character_id,
+                                instance_id = %services.config.service_instance_id,
+                                session_id = connection.session.id,
+                                "game online route changed before missing route restore"
+                            );
+                        }
+                        Err(error) => {
+                            authority_lost = true;
+                            warn!(
+                                character_id = %character_id,
+                                instance_id = %services.config.service_instance_id,
+                                error = %error,
+                                "failed to restore missing game online route"
+                            );
+                        }
+                    }
+                }
+                Ok(RouteRefreshState::Refreshed) => {}
+                Ok(RouteRefreshState::Missing(MissingRouteOwnership::Unknown)) => {
+                    authority_lost = true;
+                    warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        session_id = connection.session.id,
+                        "game online route authority is unprovable; disconnecting local session"
+                    );
+                }
+                Ok(RouteRefreshState::OwnershipChanged) => {
+                    authority_lost = true;
+                    warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        session_id = connection.session.id,
+                        "game online route ownership changed; disconnecting local session"
+                    );
+                }
+                Ok(RouteRefreshState::Missing(MissingRouteOwnership::Proven)) => unreachable!(),
+                Err(error) => {
+                    authority_lost = true;
+                    warn!(
+                        character_id = %character_id,
+                        instance_id = %services.config.service_instance_id,
+                        error = %error,
+                        "failed to refresh game online route; disconnecting fail closed"
+                    );
+                }
+            }
+            if authority_lost {
+                services
+                    .player_registry
+                    .write()
+                    .await
+                    .remove_by_account_if_session(&account_player_id, connection.session.id);
+                *connection.kick_reason.write().await = "authority_changed".to_string();
+                connection.kick_notify.notify_one();
+                break;
+            }
+        }
     }
 
     if !close_event_appended {
@@ -1078,9 +1214,38 @@ where
 
     // Unregister from online registry (only if our session_id still matches).
     // P0 registry uniqueness is account-scoped; character lookup is secondary.
-    if let Some(account_player_id) = connection.session.account_player_id.as_ref() {
-        let mut registry = services.player_registry.write().await;
-        registry.remove_by_account_if_session(account_player_id, connection.session.id);
+    if let (Some(account_player_id), Some(character_id)) = (
+        connection.session.account_player_id.clone(),
+        connection.session.character_id.clone(),
+    ) {
+        let _route_guard = services
+            .online_route_coordinator
+            .lock_account(&account_player_id)
+            .await;
+        let removed = services
+            .player_registry
+            .write()
+            .await
+            .remove_by_account_if_session(&account_player_id, connection.session.id);
+        if removed.is_some()
+            && let Some(authority) = connection.session.online_authority.as_ref()
+            && let Err(error) = clear_online_route(
+                &mut connection.redis,
+                &services.config.redis_key_prefix,
+                &character_id,
+                &services.config.service_instance_id,
+                connection.session.id,
+                authority,
+            )
+            .await
+        {
+            warn!(
+                character_id = %character_id,
+                instance_id = %services.config.service_instance_id,
+                error = %error,
+                "failed to clear game online route during disconnect"
+            );
+        }
     }
 
     if connection.session.state == crate::session::SessionState::Authenticated {
