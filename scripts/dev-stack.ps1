@@ -42,6 +42,12 @@ param(
     [switch]$WithAnnounce,
 
     [Parameter(Mandatory=$false)]
+    [switch]$WithMail,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$WithMyforgeAgent,
+
+    [Parameter(Mandatory=$false)]
     [switch]$NoMetricsCollector,
 
     [Parameter(Mandatory=$false)]
@@ -250,6 +256,42 @@ function Assert-TcpPort {
     }
 }
 
+function Assert-LogMessage {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+
+        [Parameter(Mandatory=$true)]
+        [int]$ProcessId,
+
+        [Parameter(Mandatory=$true)]
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ((Test-Path -LiteralPath $Path) -and
+            (Select-String -LiteralPath $Path -SimpleMatch $Message -Quiet)) {
+            Write-Host "$Name reported ready" -ForegroundColor Green
+            return
+        }
+
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            throw "$Name exited before reporting ready. Check logs under $LogDir."
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "$Name did not report ready within $TimeoutSeconds seconds. Check logs under $LogDir."
+}
+
 function Read-DevStackPids {
     if (-not (Test-Path $PidFile)) {
         return @()
@@ -331,6 +373,8 @@ function Get-ProjectProcessIds {
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "scripts\dev-")) -or
                 $_.CommandLine -match [regex]::Escape("dev:admin-api") -or
                 $_.CommandLine -match [regex]::Escape("dev:admin-web") -or
+                $_.CommandLine -match [regex]::Escape("dev:mail") -or
+                $_.CommandLine -match [regex]::Escape((Join-Path $ServiceScriptDir "dev-myforge-agent.ps1")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\admin-api")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\admin-web")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\game-server")) -or
@@ -338,6 +382,8 @@ function Get-ProjectProcessIds {
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\chat-server")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\match-service")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\announce-service")) -or
+                $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\mail-service")) -or
+                $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\myforge-agent")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "apps\metrics-collector")) -or
                 $_.CommandLine -match [regex]::Escape((Join-Path $ProjectRoot "bin\nats-server.exe"))
             )
@@ -672,6 +718,8 @@ $authEnv = Join-Path $ProjectRoot "apps\auth-http\.env"
 $adminApiEnv = Join-Path $ProjectRoot "apps\admin-api\.env"
 $gameEnv = Join-Path $ProjectRoot "apps\game-server\.env"
 $proxyEnv = Join-Path $ProjectRoot "apps\game-proxy\.env"
+$chatEnv = Join-Path $ProjectRoot "apps\chat-server\.env"
+$mailEnv = Join-Path $ProjectRoot "apps\mail-service\.env"
 
 # dev-stack is a manual local launcher. These ports are startup/probe defaults for local processes,
 # not test/production service discovery inputs.
@@ -683,6 +731,13 @@ $proxyPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_PORT" -Default "400
 $proxyAdminPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_ADMIN_PORT" -Default "7101")
 $proxyFallbackPort = [int](Get-EnvValue -Path $proxyEnv -Name "PROXY_TCP_FALLBACK_PORT" -Default ([string]($proxyPort + 10000)))
 $authGameProxyPort = [int](Get-EnvValue -Path $authEnv -Name "GAME_PROXY_PORT" -Default "4000")
+$chatBindAddr = Get-EnvValue -Path $chatEnv -Name "CHAT_BIND_ADDR" -Default "0.0.0.0:9001"
+if ($chatBindAddr -notmatch ':(\d+)$') {
+    throw "Invalid chat-server CHAT_BIND_ADDR: $chatBindAddr"
+}
+$chatPort = [int]$Matches[1]
+$mailPort = [int](Get-EnvValue -Path $mailEnv -Name "MAIL_PORT" -Default "9003")
+$announcePort = 9004
 
 if ($StopExistingProjectProcesses) {
     Stop-ExistingProjectProcesses
@@ -694,7 +749,10 @@ if ($StopExistingProjectProcesses) {
         $GameAdminPort,
         $proxyPort,
         $proxyFallbackPort,
-        $proxyAdminPort
+        $proxyAdminPort,
+        $(if ($WithChat) { $chatPort }),
+        $(if ($WithAnnounce) { $announcePort }),
+        $(if ($WithMail) { $mailPort })
     )
     Start-Sleep -Milliseconds 500
 }
@@ -706,6 +764,9 @@ if ($authGameProxyPort -ne $proxyPort) {
 Warn-IfDatabaseLooksUnavailable -ServiceName "auth-http" -EnvPath $authEnv
 Warn-IfDatabaseLooksUnavailable -ServiceName "admin-api" -EnvPath $adminApiEnv -Required
 Warn-IfDatabaseLooksUnavailable -ServiceName "game-server" -EnvPath $gameEnv
+if ($WithMail) {
+    Warn-IfDatabaseLooksUnavailable -ServiceName "mail-service" -EnvPath $mailEnv -Required
+}
 
 $started = @()
 $selectedServices = @()
@@ -843,6 +904,27 @@ try {
         $serviceProcesses["announce-service"] = $announceProcess
     }
 
+    if ($WithMail) {
+        $selectedServices += "mail-service"
+        $mailProcess = Start-NpmScriptIfNeeded `
+            -Name "mail-service" `
+            -ScriptName "dev:mail" `
+            -RequiredTcpPorts @($mailPort)
+        if ($mailProcess) {
+            $started += $mailProcess
+            $serviceProcesses["mail-service"] = $mailProcess
+        }
+    }
+
+    if ($WithMyforgeAgent) {
+        $selectedServices += "myforge-agent"
+        $myforgeAgentProcess = Start-PowerShellScript `
+            -Name "myforge-agent" `
+            -ScriptPath (Join-Path $ServiceScriptDir "dev-myforge-agent.ps1")
+        $started += $myforgeAgentProcess
+        $serviceProcesses["myforge-agent"] = $myforgeAgentProcess
+    }
+
     if (-not $NoMetricsCollector) {
         $selectedServices += "metrics-collector"
         $metricsCollectorProcess = Start-PowerShellScript `
@@ -892,6 +974,36 @@ try {
         $adminWebPid = if ($serviceProcesses.ContainsKey("admin-web")) { [int]$serviceProcesses["admin-web"].pid } else { 0 }
         Assert-TcpPort -Name "admin-web" -HostName $adminWebHost -Port $adminWebPort -ProcessId $adminWebPid -TimeoutSeconds $WaitTimeoutSeconds
     }
+    if ($WithMail) {
+        $mailPid = if ($serviceProcesses.ContainsKey("mail-service")) { [int]$serviceProcesses["mail-service"].pid } else { 0 }
+        Assert-TcpPort -Name "mail-service" -HostName "127.0.0.1" -Port $mailPort -ProcessId $mailPid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if ($WithChat) {
+        $chatPid = [int]$serviceProcesses["chat-server"].pid
+        Assert-TcpPort -Name "chat-server" -HostName "127.0.0.1" -Port $chatPort -ProcessId $chatPid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if ($WithAnnounce) {
+        $announcePid = [int]$serviceProcesses["announce-service"].pid
+        Assert-TcpPort -Name "announce-service" -HostName "127.0.0.1" -Port $announcePort -ProcessId $announcePid -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if ($WithMyforgeAgent) {
+        $myforgeAgentProcess = $serviceProcesses["myforge-agent"]
+        Assert-LogMessage `
+            -Name "myforge-agent" `
+            -Path $myforgeAgentProcess.stdout `
+            -Message "myforge-agent preflight completed" `
+            -ProcessId ([int]$myforgeAgentProcess.pid) `
+            -TimeoutSeconds $WaitTimeoutSeconds
+    }
+    if (-not $NoMetricsCollector) {
+        $metricsCollectorProcess = $serviceProcesses["metrics-collector"]
+        Assert-LogMessage `
+            -Name "metrics-collector" `
+            -Path $metricsCollectorProcess.stdout `
+            -Message "metrics-collector subscribed to" `
+            -ProcessId ([int]$metricsCollectorProcess.pid) `
+            -TimeoutSeconds $WaitTimeoutSeconds
+    }
 
     Write-Host ""
     Write-Host "Local dev stack started. Endpoints below are local bind/probe defaults, not registry discovery output." -ForegroundColor Green
@@ -918,6 +1030,12 @@ try {
     }
     if ($WithAnnounce) {
         Write-Host "  announce-service: enabled" -ForegroundColor Gray
+    }
+    if ($WithMail) {
+        Write-Host "  mail-service: http://127.0.0.1:$mailPort" -ForegroundColor Gray
+    }
+    if ($WithMyforgeAgent) {
+        Write-Host "  myforge-agent: enabled" -ForegroundColor Gray
     }
     if (-not $NoMetricsCollector) {
         Write-Host "  metrics-collector: enabled" -ForegroundColor Gray
