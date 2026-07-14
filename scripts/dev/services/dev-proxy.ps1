@@ -15,7 +15,7 @@ try {
       exit $LASTEXITCODE
     }
 
-    $binary = Join-Path (Get-Location) "target\debug\game-proxy.exe"
+    $binary = Join-Path $ProjectRoot "target\debug\game-proxy.exe"
     if (-not (Test-Path $binary)) {
       Write-Error "game-proxy.exe not found at $binary"
     }

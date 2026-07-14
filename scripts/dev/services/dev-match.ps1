@@ -30,7 +30,7 @@ try {
       exit $LASTEXITCODE
     }
 
-    $binary = Join-Path (Get-Location) "target\debug\match-service.exe"
+    $binary = Join-Path $ProjectRoot "target\debug\match-service.exe"
     if (-not (Test-Path $binary)) {
       Write-Error "match-service.exe not found at $binary"
     }

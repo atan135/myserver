@@ -18,7 +18,7 @@ try {
       exit $LASTEXITCODE
     }
 
-    $binary = Join-Path (Get-Location) "target\debug\chat-server.exe"
+    $binary = Join-Path $ProjectRoot "target\debug\chat-server.exe"
     if (-not (Test-Path $binary)) {
       Write-Error "chat-server.exe not found at $binary"
     }

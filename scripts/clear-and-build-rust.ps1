@@ -90,14 +90,12 @@ if ($shouldBuild) {
 Write-Host ""
 
 if ($shouldClear) {
-    foreach ($manifest in $manifests) {
-        $relativeManifest = Get-ProjectRelativePath $manifest.FullName
-        Write-Host "Clearing $relativeManifest" -ForegroundColor Yellow
-        Invoke-Cargo `
-            -Cargo $cargo `
-            -Arguments @("clean", "--manifest-path", $manifest.FullName) `
-            -FailureMessage "cargo clean failed for $relativeManifest"
-    }
+    $cleanManifest = $manifests[0]
+    Write-Host "Clearing shared Cargo target directory" -ForegroundColor Yellow
+    Invoke-Cargo `
+        -Cargo $cargo `
+        -Arguments @("clean", "--manifest-path", $cleanManifest.FullName) `
+        -FailureMessage "cargo clean failed for shared target directory"
 
     Write-Host ""
 }
