@@ -61,6 +61,51 @@ function encodePacket(messageType, seq, body = Buffer.from("{}")) {
   return Buffer.concat([header, body]);
 }
 
+function encodeVarint(value) {
+  let remaining = BigInt(value);
+  const bytes = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining > 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining > 0n);
+  return Buffer.from(bytes);
+}
+
+function protobufField(fieldNumber, value, wireType = 2) {
+  const key = encodeVarint((fieldNumber << 3) | wireType);
+  if (wireType === 0) return Buffer.concat([key, encodeVarint(value)]);
+  const body = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  return Buffer.concat([key, encodeVarint(body.length), body]);
+}
+
+function encodeGrantItem(item) {
+  const fields = [
+    protobufField(1, item.itemId, 0),
+    protobufField(2, item.count, 0)
+  ];
+  if (item.binded) fields.push(protobufField(3, 1, 0));
+  return Buffer.concat(fields);
+}
+
+function encodeGrantResponse(request) {
+  const summary = Buffer.concat([
+    protobufField(1, request.characterId),
+    protobufField(2, "mail-claim"),
+    ...request.items.map((item) => protobufField(3, encodeGrantItem(item)))
+  ]);
+  return Buffer.concat([
+    protobufField(1, 1, 0),
+    protobufField(3, 1, 0),
+    protobufField(4, request.requestId),
+    protobufField(5, request.requestFingerprint),
+    protobufField(7, "applied"),
+    protobufField(9, summary),
+    protobufField(10, request.traceId)
+  ]);
+}
+
 async function createGrantCaptureServer() {
   const requests = [];
   const authRequests = [];
@@ -87,8 +132,9 @@ async function createGrantCaptureServer() {
         }
 
         if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
-          requests.push(JSON.parse(body.toString("utf8")));
-          socket.write(encodePacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq));
+          const request = JSON.parse(body.toString("utf8"));
+          requests.push(request);
+          socket.write(encodePacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq, encodeGrantResponse(request)));
         }
       }
     });
@@ -121,6 +167,11 @@ function createGameTicket({ playerId: ticketPlayerId, characterId: ticketCharact
 function ticketKey(ticket) {
   const hash = crypto.createHash("sha256").update(ticket).digest("hex");
   return `${redisKeyPrefix}ticket:${hash}`;
+}
+
+function gameOnlineRouteKey(characterId) {
+  const hash = crypto.createHash("sha256").update(characterId).digest("hex");
+  return `${redisKeyPrefix}game:online-route:${hash}`;
 }
 
 function endpointMetadata() {
@@ -217,6 +268,14 @@ before(async () => {
   await redis.setex(ticketKey(ticket), 300, playerId);
   await redis.set(`${redisKeyPrefix}player-ticket-version:${playerId}`, "1", "EX", 300);
   await redis.set(buildChatOnlineRouteKey(playerId, redisKeyPrefix), chatInstanceId, "EX", 300);
+  await redis.set(gameOnlineRouteKey(characterId), JSON.stringify({
+    version: 2,
+    character_id: characterId,
+    instance_id: gameServerInstanceId,
+    session_id: "1",
+    authority_generation: "1",
+    authority_token: "a".repeat(64)
+  }), "EX", 300);
 
   mailService = await startMailService({
     host: "127.0.0.1",
@@ -281,15 +340,23 @@ test("mail create publishes online notification and claim grants attachments thr
   const notification = await notificationPromise;
   assert.equal(notification.subject, subject);
   assert.deepEqual(notification.payload, {
+    event_id: `mail.notify:${createResult.payload.mail_id}`,
+    event_type: "mail.created",
+    version: 1,
+    occurred_at: notification.payload.occurred_at,
     player_id: playerId,
-    mail_id: createResult.payload.mail_id,
-    title: "M7 mail notify claim drill",
-    from: "system",
-    from_name: "系统",
-    type: "system",
-    created_at: notification.payload.created_at
+    mail: {
+      mail_id: createResult.payload.mail_id,
+      title: "M7 mail notify claim drill",
+      from_player_id: "system",
+      from_name: "系统",
+      mail_type: "system",
+      created_at: notification.payload.occurred_at
+    },
+    trace_id: notification.payload.trace_id
   });
-  assert.ok(notification.payload.created_at);
+  assert.ok(notification.payload.occurred_at);
+  assert.match(notification.payload.trace_id, /^[0-9a-f]{32}$/);
 
   const discovery = new RegistryDiscoveryClient(redis, {
     registryKeyPrefix,
@@ -335,8 +402,7 @@ test("mail create publishes online notification and claim grants attachments thr
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      player_id: playerId,
-      target_instance_id: gameServerInstanceId
+      player_id: playerId
     })
   });
 
@@ -352,9 +418,16 @@ test("mail create publishes online notification and claim grants attachments thr
   });
   assert.deepEqual(grantServer.requests[0], {
     requestId: `mail_claim:${createResult.payload.mail_id}`,
+    mailId: createResult.payload.mail_id,
     characterId,
     items: [{ itemId: 1001, count: 2, binded: true }],
+    requestFingerprint: grantServer.requests[0].requestFingerprint,
     source: "mail-claim",
-    reason: `claim mail ${createResult.payload.mail_id}`
+    reason: `claim mail ${createResult.payload.mail_id}`,
+    traceId: grantServer.requests[0].traceId,
+    routeGeneration: "1",
+    routeToken: "a".repeat(64)
   });
+  assert.match(grantServer.requests[0].requestFingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.match(grantServer.requests[0].traceId, /^[0-9a-f]{32}$/);
 });
