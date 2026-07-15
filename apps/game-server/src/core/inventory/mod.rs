@@ -2,6 +2,7 @@ pub mod asset;
 pub mod attr;
 pub mod buff;
 pub mod container;
+pub mod compatibility;
 pub mod contract;
 pub mod equipment;
 pub mod item;
@@ -16,7 +17,11 @@ pub use asset::{
 };
 pub use attr::{AttrPanel, AttrRecord, AttrSource, AttrType, PlayerAttr};
 pub use buff::Buff;
-pub use container::ItemContainer;
+pub use compatibility::{
+    scan_jsonb_containers, scan_player_assets, AssetCompatibilityIssue,
+    AssetCompatibilityIssueCode,
+};
+pub use container::{ItemContainer, ItemContainerAdditionPlan};
 pub use contract::{
     ASSET_CHARACTER_ID_MAX_BYTES, ASSET_CONTRACT_SCHEMA_VERSION, ASSET_OPERATOR_ID_MAX_BYTES,
     ASSET_REASON_MAX_BYTES, ASSET_REQUEST_ID_MAX_BYTES, AssetBatchAtomicity, AssetCommand,

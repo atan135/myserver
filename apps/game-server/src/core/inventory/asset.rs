@@ -96,6 +96,12 @@ impl AssetConfigVersion {
     }
 }
 
+impl Default for AssetConfigVersion {
+    fn default() -> Self {
+        Self::legacy_item_table()
+    }
+}
+
 /// 决定物品能否与另一个格子合并的完整身份。
 ///
 /// UID、数量与所在格子不属于堆叠身份；绑定、属性/规则快照、配置版本、冻结状态和
@@ -106,6 +112,7 @@ pub struct ItemStackIdentity {
     pub binding: AssetBinding,
     pub lock_state: AssetLockState,
     pub config_version: AssetConfigVersion,
+    pub expires_at_ms: Option<i64>,
     pub template_elements: ItemElementValues,
     pub growth_elements: ItemElementValues,
     pub runtime_elements: ItemElementValues,
@@ -116,11 +123,7 @@ pub struct ItemStackIdentity {
 impl ItemStackIdentity {
     /// 从已持久化的当前 `Item` 生成身份。
     pub fn from_item(item: &Item) -> Self {
-        Self::from_item_state(
-            item,
-            AssetLockState::Unlocked,
-            AssetConfigVersion::legacy_item_table(),
-        )
+        Self::from_item_state(item, item.lock_state.clone(), item.config_version.clone())
     }
 
     /// 为后续拥有配置修订和锁定快照的资产事务构造身份。
@@ -134,6 +137,7 @@ impl ItemStackIdentity {
             binding: AssetBinding::from_item(item),
             lock_state,
             config_version,
+            expires_at_ms: item.expires_at_ms,
             template_elements: item.template_elements,
             growth_elements: item.growth_elements,
             runtime_elements: item.runtime_elements,

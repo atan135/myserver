@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use super::asset::{AssetConfigVersion, AssetLockState};
+use super::equipment::EquipSlot;
+use crate::core::config_table::CsvLoadError;
 use crate::csv_code::itemtable::{ItemTable, ItemTableRow};
 
 /// 物品实例
@@ -31,6 +34,15 @@ pub struct Item {
     /// 实例成长记录。
     #[serde(default)]
     pub growth_records: Vec<ItemGrowthRecord>,
+    /// 持久化的冻结状态。冻结物品不可被消费、移动、装备或再次冻结。
+    #[serde(default)]
+    pub lock_state: AssetLockState,
+    /// 创建时所用 ItemTable 规则快照版本，进入堆叠身份避免热更后混堆。
+    #[serde(default)]
+    pub config_version: AssetConfigVersion,
+    /// 实例有效期；不同有效期的物品不能堆叠。`None` 表示永久有效。
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
 }
 
 impl Item {
@@ -46,6 +58,9 @@ impl Item {
             bound_character_id: None,
             growth_rules: ItemGrowthRules::default(),
             growth_records: Vec::new(),
+            lock_state: AssetLockState::Unlocked,
+            config_version: AssetConfigVersion::legacy_item_table(),
+            expires_at_ms: None,
         }
     }
 
@@ -59,7 +74,8 @@ impl Item {
         item_table: &ItemTable,
     ) -> Self {
         let mut item = Self::new(uid, item_id, count, binded);
-        if binded {
+        let bind_on_pickup = item_table.resolve_string(row.bindtype) == Some("Pickup");
+        if binded || bind_on_pickup {
             if let Some(character_id) = bound_character_id {
                 item.bind_to_character(character_id);
             }
@@ -91,6 +107,47 @@ impl Item {
         self.bound_character_id
             .as_deref()
             .is_some_and(|bound_character_id| bound_character_id != character_id)
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        !matches!(self.lock_state, AssetLockState::Unlocked)
+    }
+
+    pub fn freeze(&mut self, reason: impl Into<String>) -> Result<(), ItemError> {
+        if self.is_frozen() {
+            return Err(ItemError::AssetFrozen);
+        }
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(ItemError::InvalidItemConfig);
+        }
+        self.lock_state = AssetLockState::Frozen { reason };
+        Ok(())
+    }
+
+    pub fn unfreeze(&mut self) -> Result<(), ItemError> {
+        if !self.is_frozen() {
+            return Err(ItemError::AssetNotFrozen);
+        }
+        self.lock_state = AssetLockState::Unlocked;
+        Ok(())
+    }
+
+    pub fn apply_equip_binding(
+        &mut self,
+        character_id: &str,
+        row: &ItemTableRow,
+        item_table: &ItemTable,
+    ) -> Result<(), ItemError> {
+        if self.is_bound_to_other_character(character_id) {
+            return Err(ItemError::CharacterBindingMismatch);
+        }
+        match item_table.resolve_string(row.bindtype) {
+            Some("Equip") => self.bind_to_character(character_id),
+            Some("Never") | Some("Pickup") => {}
+            _ => return Err(ItemError::InvalidItemConfig),
+        }
+        Ok(())
     }
 
     pub fn bind_to_character(&mut self, character_id: impl Into<String>) {
@@ -224,6 +281,89 @@ fn non_empty_string(value: Option<&str>) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Validates the ItemTable rules relied on by inventory transactions. This deliberately checks
+/// operational semantics rather than merely CSV shape, so invalid hot reloads are rejected before
+/// they can create unstackable or unequippable runtime items.
+pub fn validate_item_table(item_table: &ItemTable) -> Result<(), CsvLoadError> {
+    for row in item_table.all() {
+        validate_item_table_row(row, item_table)
+            .map_err(|error| CsvLoadError::InvalidRow(format!("ItemTable item {}: {}", row.id, error.as_str())))?;
+    }
+    Ok(())
+}
+
+pub fn validate_item_table_row(row: &ItemTableRow, item_table: &ItemTable) -> Result<(), ItemError> {
+    if row.id <= 0
+        || row.maxstack <= 0
+        || row.price < 0
+        || row.attack < 0
+        || row.defense < 0
+        || row.maxhp < 0
+        || !row.critrate.is_finite()
+        || !(0.0..=1.0).contains(&row.critrate)
+        || !row.movespeed.is_finite()
+        || !(0.0..=1_000.0).contains(&row.movespeed)
+        || row.cooldownms < 0
+        || !matches!(row.growthenabled, 0 | 1)
+        || ItemElementValues::from_template_row(row).has_negative()
+    {
+        return Err(ItemError::InvalidItemConfig);
+    }
+
+    let item_type = item_table.resolve_string(row.type_).unwrap_or("");
+    let equip_slot = item_table.resolve_string(row.equipslot).unwrap_or("");
+    let bind_type = item_table.resolve_string(row.bindtype).unwrap_or("");
+    let use_effect = item_table.resolve_string(row.useeffect).unwrap_or("");
+    let use_target = item_table.resolve_string(row.usetarget).unwrap_or("");
+
+    if !matches!(item_type, "Equipment" | "Food" | "Consumable" | "Material" | "QuestItem")
+        || !matches!(bind_type, "Never" | "Pickup" | "Equip")
+        || !matches!(use_effect, "None" | "Heal" | "RecoverMp" | "Buff" | "CharacterElementChange")
+    {
+        return Err(ItemError::InvalidItemConfig);
+    }
+
+    if item_type == "Equipment" {
+        if row.maxstack != 1
+            || EquipSlot::from_str(equip_slot).is_none()
+            || use_effect != "None"
+            || use_target != "None"
+        {
+            return Err(ItemError::InvalidItemConfig);
+        }
+    } else if equip_slot != "None" || bind_type == "Equip" {
+        return Err(ItemError::InvalidItemConfig);
+    }
+
+    if use_effect == "None" {
+        if row.usevalue != 0
+            || row.cooldownms != 0
+            || !all_use_deltas_zero(row)
+        {
+            return Err(ItemError::InvalidItemConfig);
+        }
+    } else if !matches!(item_type, "Food" | "Consumable") || use_target != "Self" {
+        return Err(ItemError::InvalidItemConfig);
+    } else if matches!(use_effect, "Heal" | "RecoverMp" | "Buff") && row.usevalue <= 0 {
+        return Err(ItemError::InvalidItemConfig);
+    } else if use_effect == "CharacterElementChange" && all_use_deltas_zero(row) {
+        return Err(ItemError::InvalidItemConfig);
+    }
+
+    Ok(())
+}
+
+fn all_use_deltas_zero(row: &ItemTableRow) -> bool {
+    row.useaffinityearthdelta == 0
+        && row.useaffinityfiredelta == 0
+        && row.useaffinitywaterdelta == 0
+        && row.useaffinitywinddelta == 0
+        && row.usemasteryearthdelta == 0
+        && row.usemasteryfiredelta == 0
+        && row.usemasterywaterdelta == 0
+        && row.usemasterywinddelta == 0
+}
+
 /// 物品操作错误
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemError {
@@ -239,6 +379,11 @@ pub enum ItemError {
     InvalidItemConfig,
     InvalidElementDelta,
     CharacterBindingMismatch,
+    InvalidItemCount,
+    DuplicateItemUid,
+    InvalidBinding,
+    AssetFrozen,
+    AssetNotFrozen,
     Unknown,
 }
 
@@ -257,6 +402,11 @@ impl ItemError {
             ItemError::InvalidItemConfig => "INVALID_ITEM_CONFIG",
             ItemError::InvalidElementDelta => "INVALID_ELEMENT_DELTA",
             ItemError::CharacterBindingMismatch => "ITEM_BINDING_MISMATCH",
+            ItemError::InvalidItemCount => "INVALID_ITEM_COUNT",
+            ItemError::DuplicateItemUid => "DUPLICATE_ITEM_UID",
+            ItemError::InvalidBinding => "INVALID_ITEM_BINDING",
+            ItemError::AssetFrozen => "ASSET_FROZEN",
+            ItemError::AssetNotFrozen => "ASSET_NOT_FROZEN",
             ItemError::Unknown => "UNKNOWN_ERROR",
         }
     }

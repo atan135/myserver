@@ -173,47 +173,62 @@ impl PlayerData {
             .cloned()
             .ok_or(ItemError::ItemNotFound)?;
 
+        if item.is_frozen() {
+            return Err(ItemError::AssetFrozen);
+        }
+
         // 2. 确定装备槽位
         let slot = self.determine_equip_slot(item.item_id, item_table)?;
 
-        // 3. 卸下当前装备到背包（如果有）
-        if let Some(old_item) = self.equipment.unequip(slot)? {
-            self.inventory.add_item(old_item)?;
+        // Apply the whole swap to a clone. An inventory-capacity failure therefore cannot leave
+        // the previous equipment removed from the live snapshot.
+        let mut next = self.clone();
+        let mut equipped = next.inventory.remove_item(item_uid, item.count)?;
+        let row = item_table.get(equipped.item_id).ok_or(ItemError::InvalidItemConfig)?;
+        equipped.apply_equip_binding(&next.character_id, row, item_table)?;
+        if let Some(old_item) = next.equipment.unequip(slot)? {
+            if old_item.is_frozen() {
+                return Err(ItemError::AssetFrozen);
+            }
+            next.inventory
+                .add_item_with_table(old_item, item_table, || Err(ItemError::Unknown))?;
         }
-
-        // 4. 从背包移除新装备
-        self.inventory.remove_item(item_uid, item.count)?;
-
-        // 5. 穿上新装备
-        self.equipment.equip(slot, item)?;
-
-        // 6. 触发重算和脏标记
-        self.recalculate_attr(item_table);
-        self.set_attr_dirty();
-        self.set_visual_dirty();
+        next.equipment.equip(slot, equipped)?;
+        next.recalculate_attr(item_table);
+        next.set_attr_dirty();
+        next.set_visual_dirty();
+        *self = next;
 
         Ok(())
     }
 
     /// 卸下装备
-    pub fn unequip_item(&mut self, slot: EquipSlot) -> Result<Option<Item>, ItemError> {
-        // 1. 卸下装备
-        let unequipped = self.equipment.unequip(slot)?;
-
-        // 2. 如果有装备，放入背包
+    pub fn unequip_item(
+        &mut self,
+        slot: EquipSlot,
+        item_table: &ItemTable,
+    ) -> Result<Option<Item>, ItemError> {
+        let mut next = self.clone();
+        let unequipped = next.equipment.unequip(slot)?;
         match unequipped {
             Some(item) => {
+                if item.is_frozen() {
+                    return Err(ItemError::AssetFrozen);
+                }
                 let item_clone = item.clone();
-                self.inventory.add_item(item)?;
-                self.attr_dirty = true;
-                self.visual_dirty = true;
-                self.data_dirty = true;
+                next.inventory
+                    .add_item_with_table(item, item_table, || Err(ItemError::Unknown))?;
+                next.attr_dirty = true;
+                next.visual_dirty = true;
+                next.data_dirty = true;
+                *self = next;
                 Ok(Some(item_clone))
             }
             None => {
-                self.attr_dirty = true;
-                self.visual_dirty = true;
-                self.data_dirty = true;
+                next.attr_dirty = true;
+                next.visual_dirty = true;
+                next.data_dirty = true;
+                *self = next;
                 Ok(None)
             }
         }
@@ -226,6 +241,7 @@ impl PlayerData {
         item_table: &ItemTable,
     ) -> Result<EquipSlot, ItemError> {
         let row = item_table.get(item_id).ok_or(ItemError::ItemNotFound)?;
+        super::item::validate_item_table_row(row, item_table)?;
 
         let slot_str = item_table
             .resolve_string(row.equipslot)
@@ -239,6 +255,23 @@ impl PlayerData {
     /// 添加物品到背包
     pub fn add_item(&mut self, item: Item) -> Result<(), ItemError> {
         self.inventory.add_item(item)?;
+        self.set_data_dirty();
+        Ok(())
+    }
+
+    pub fn add_item_with_table<F>(
+        &mut self,
+        item: Item,
+        item_table: &ItemTable,
+        next_uid: F,
+    ) -> Result<(), ItemError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        if self.contains_item_uid_anywhere(item.uid) {
+            return Err(ItemError::DuplicateItemUid);
+        }
+        self.inventory.add_item_with_table(item, item_table, next_uid)?;
         self.set_data_dirty();
         Ok(())
     }
@@ -293,6 +326,10 @@ impl PlayerData {
 
         if item.count == 0 {
             return Err(ItemError::NotEnoughCount);
+        }
+
+        if item.is_frozen() {
+            return Err(ItemError::AssetFrozen);
         }
 
         if item.is_bound_to_other_character(&self.character_id) {
@@ -388,19 +425,92 @@ impl PlayerData {
     // ========== 仓库操作 ==========
 
     /// 仓库存取（位置校验由调用方负责）
-    pub fn warehouse_deposit(&mut self, item_uid: u64, count: u32) -> Result<(), ItemError> {
-        let item = self.inventory.remove_item(item_uid, count)?;
-        self.warehouse.add_item(item)?;
-        self.set_data_dirty();
+    pub fn warehouse_deposit<F>(
+        &mut self,
+        item_uid: u64,
+        count: u32,
+        item_table: &ItemTable,
+        mut next_uid: F,
+    ) -> Result<(), ItemError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        let mut next = self.clone();
+        let source_count = next
+            .inventory
+            .find_item(item_uid)
+            .ok_or(ItemError::ItemNotFound)?
+            .count;
+        let mut item = next.inventory.remove_item(item_uid, count)?;
+        if source_count != count {
+            item.uid = next_uid()?;
+        }
+        next.warehouse
+            .add_item_with_table(item, item_table, &mut next_uid)?;
+        next.set_data_dirty();
+        *self = next;
         Ok(())
     }
 
     /// 仓库取出
-    pub fn warehouse_withdraw(&mut self, item_uid: u64, count: u32) -> Result<(), ItemError> {
-        let item = self.warehouse.remove_item(item_uid, count)?;
-        self.inventory.add_item(item)?;
+    pub fn warehouse_withdraw<F>(
+        &mut self,
+        item_uid: u64,
+        count: u32,
+        item_table: &ItemTable,
+        mut next_uid: F,
+    ) -> Result<(), ItemError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        let mut next = self.clone();
+        let source_count = next
+            .warehouse
+            .find_item(item_uid)
+            .ok_or(ItemError::ItemNotFound)?
+            .count;
+        let mut item = next.warehouse.remove_item(item_uid, count)?;
+        if source_count != count {
+            item.uid = next_uid()?;
+        }
+        next.inventory
+            .add_item_with_table(item, item_table, &mut next_uid)?;
+        next.set_data_dirty();
+        *self = next;
+        Ok(())
+    }
+
+    pub fn freeze_item(&mut self, item_uid: u64, reason: impl Into<String>) -> Result<(), ItemError> {
+        let item = self.find_item_mut_anywhere(item_uid).ok_or(ItemError::ItemNotFound)?;
+        item.freeze(reason)?;
         self.set_data_dirty();
         Ok(())
+    }
+
+    pub fn unfreeze_item(&mut self, item_uid: u64) -> Result<(), ItemError> {
+        let item = self.find_item_mut_anywhere(item_uid).ok_or(ItemError::ItemNotFound)?;
+        item.unfreeze()?;
+        self.set_data_dirty();
+        Ok(())
+    }
+
+    fn find_item_mut_anywhere(&mut self, item_uid: u64) -> Option<&mut Item> {
+        if let Some(item) = self.inventory.find_item_mut(item_uid) {
+            return Some(item);
+        }
+        if let Some(item) = self.warehouse.find_item_mut(item_uid) {
+            return Some(item);
+        }
+        let slot = self.equipment
+            .iter()
+            .find_map(|(slot, item)| (item.uid == item_uid).then_some(slot));
+        slot.and_then(|slot| self.equipment.get_mut(slot))
+    }
+
+    fn contains_item_uid_anywhere(&self, item_uid: u64) -> bool {
+        self.inventory.find_item(item_uid).is_some()
+            || self.warehouse.find_item(item_uid).is_some()
+            || self.equipment.iter().any(|(_, item)| item.uid == item_uid)
     }
 
     // ========== 属性重算 ==========
@@ -421,6 +531,15 @@ impl PlayerData {
 
     pub fn effective_item_elements(&self, item_table: &ItemTable) -> ItemElementValues {
         self.equipped_item_elements(item_table)
+    }
+
+    /// Read-only diagnostics for legacy JSONB snapshots. Findings never alter this player data
+    /// and are intentionally not treated as a login blocker.
+    pub fn asset_compatibility_issues(
+        &self,
+        item_table: &ItemTable,
+    ) -> Vec<super::compatibility::AssetCompatibilityIssue> {
+        super::compatibility::scan_player_assets(self, item_table)
     }
 
     // ========== 帧末处理 ==========

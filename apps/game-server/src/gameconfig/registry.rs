@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::core::config_table::{CsvLoadError, CsvTableLoader};
+use crate::core::inventory::item::validate_item_table;
 use crate::csv_code::bufferbase::BufferBase;
 use crate::csv_code::characterprogresstable::CharacterProgressTable;
 use crate::csv_code::disciplinetable::DisciplineTable;
@@ -97,6 +98,7 @@ impl ConfigTables {
         let testtable_100 = TestTable100::load_from_csv(&csv_dir.join(TESTTABLE_100_FILE))?;
         let testtable_110 = TestTable110::load_from_csv(&csv_dir.join(TESTTABLE_110_FILE))?;
         let itemtable = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
+        validate_item_table(&itemtable)?;
         let skillbase = SkillBase::load_from_csv(&csv_dir.join(SKILLBASE_FILE))?;
         let bufferbase = BufferBase::load_from_csv(&csv_dir.join(BUFFERBASE_FILE))?;
         let titletable = TitleTable::load_from_csv(&csv_dir.join(TITLETABLE_FILE))?;
@@ -211,7 +213,9 @@ impl ConfigTables {
         };
 
         let itemtable = if changed_files.contains(ITEMTABLE_FILE) {
-            Arc::new(ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?)
+            let table = ItemTable::load_from_csv(&csv_dir.join(ITEMTABLE_FILE))?;
+            validate_item_table(&table)?;
+            Arc::new(table)
         } else {
             self.item_table.clone()
         };

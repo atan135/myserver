@@ -1,15 +1,46 @@
 use std::slice::Iter;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::item::{Item, ItemError};
+use crate::csv_code::itemtable::ItemTable;
+
+/// A capacity-checked addition prepared against an immutable container snapshot.
+///
+/// `generated_uid_slots` are the extra stacks created when one incoming item crosses
+/// `ItemTable.MaxStack`. The caller allocates those UIDs only after capacity has been proven.
+#[derive(Debug, Clone)]
+pub struct ItemContainerAdditionPlan {
+    slots: Vec<Option<Item>>,
+    generated_uid_slots: Vec<usize>,
+}
 
 /// 物品容器（背包或仓库）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ItemContainer {
     slots: Vec<Option<Item>>,
     #[serde(skip)]
     capacity: usize,
+}
+
+impl<'de> Deserialize<'de> for ItemContainer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireContainer {
+            slots: Vec<Option<Item>>,
+        }
+
+        let wire = WireContainer::deserialize(deserializer)?;
+        // Historical JSONB intentionally omitted capacity. Slots are the authoritative fixed-grid
+        // shape, so deriving it here preserves old snapshots instead of loading a zero-capacity bag.
+        Ok(Self {
+            capacity: wire.slots.len(),
+            slots: wire.slots,
+        })
+    }
 }
 
 impl ItemContainer {
@@ -29,6 +60,10 @@ impl ItemContainer {
     /// 获取当前物品数量（非空格子数）
     pub fn item_count(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
     }
 
     /// 获取指定索引的格子
@@ -70,8 +105,126 @@ impl ItemContainer {
         None
     }
 
-    /// 添加物品到容器
-    /// 如果物品可堆叠且有足够空间，会合并到已有物品；否则放入空格子
+    /// Plans a full batch without changing this container. It validates all source items before
+    /// returning and therefore a capacity error cannot partially merge an earlier item.
+    pub fn plan_add_items(
+        &self,
+        items: &[Item],
+        item_table: &ItemTable,
+    ) -> Result<ItemContainerAdditionPlan, ItemError> {
+        let mut slots = self.slots.clone();
+        let mut known_uids = std::collections::HashSet::new();
+        for item in slots.iter().flatten() {
+            if item.uid == 0 || !known_uids.insert(item.uid) {
+                return Err(ItemError::DuplicateItemUid);
+            }
+            validate_item_for_container(item, item_table)?;
+        }
+
+        let mut generated_uid_slots = Vec::new();
+        for incoming in items {
+            validate_item_for_container(incoming, item_table)?;
+            if !known_uids.insert(incoming.uid) {
+                return Err(ItemError::DuplicateItemUid);
+            }
+
+            let max_stack = item_table
+                .get(incoming.item_id)
+                .and_then(|row| u32::try_from(row.maxstack).ok())
+                .filter(|max_stack| *max_stack > 0)
+                .ok_or(ItemError::InvalidItemConfig)?;
+            let mut remaining = incoming.count;
+
+            for existing in slots.iter_mut().flatten() {
+                if !existing.can_stack_with(incoming) {
+                    continue;
+                }
+                if existing.count > max_stack {
+                    return Err(ItemError::StackOverflow);
+                }
+                let available = max_stack - existing.count;
+                let merged = available.min(remaining);
+                existing.count = existing
+                    .count
+                    .checked_add(merged)
+                    .ok_or(ItemError::StackOverflow)?;
+                remaining -= merged;
+                if remaining == 0 {
+                    break;
+                }
+            }
+
+            let mut uses_input_uid = true;
+            while remaining > 0 {
+                let slot_index = slots
+                    .iter()
+                    .position(Option::is_none)
+                    .ok_or(ItemError::InventoryFull)?;
+                let count = remaining.min(max_stack);
+                let mut stack = incoming.clone();
+                stack.count = count;
+                if !uses_input_uid {
+                    // The plan cannot mutate a global UID generator. The caller fills these
+                    // placeholders after the complete capacity preflight succeeds.
+                    stack.uid = 0;
+                    generated_uid_slots.push(slot_index);
+                }
+                slots[slot_index] = Some(stack);
+                remaining -= count;
+                uses_input_uid = false;
+            }
+        }
+
+        Ok(ItemContainerAdditionPlan {
+            slots,
+            generated_uid_slots,
+        })
+    }
+
+    /// Applies a previously successful plan. UID generation failure leaves this container intact.
+    pub fn apply_addition_plan<F>(
+        &mut self,
+        mut plan: ItemContainerAdditionPlan,
+        mut next_uid: F,
+    ) -> Result<(), ItemError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        let mut known_uids = plan
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|item| (item.uid != 0).then_some(item.uid))
+            .collect::<std::collections::HashSet<_>>();
+        for index in plan.generated_uid_slots {
+            let uid = next_uid()?;
+            if uid == 0 || !known_uids.insert(uid) {
+                return Err(ItemError::DuplicateItemUid);
+            }
+            plan.slots[index].as_mut().ok_or(ItemError::Unknown)?.uid = uid;
+        }
+        *self = Self {
+            capacity: plan.slots.len(),
+            slots: plan.slots,
+        };
+        Ok(())
+    }
+
+    pub fn add_item_with_table<F>(
+        &mut self,
+        item: Item,
+        item_table: &ItemTable,
+        next_uid: F,
+    ) -> Result<(), ItemError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        let plan = self.plan_add_items(&[item], item_table)?;
+        self.apply_addition_plan(plan, next_uid)
+    }
+
+    /// Legacy non-transactional API kept until phase 7 migrates all old callers. New asset
+    /// mutations must use `plan_add_items` / `apply_addition_plan` with `ItemTable`.
     pub fn add_item(&mut self, item: Item) -> Result<(), ItemError> {
         // 先尝试堆叠
         if item.count > 1 {
@@ -110,10 +263,17 @@ impl ItemContainer {
 
     /// 从容器中移除物品
     pub fn remove_item(&mut self, uid: u64, count: u32) -> Result<Item, ItemError> {
+        if count == 0 {
+            return Err(ItemError::InvalidItemCount);
+        }
         let idx = self.find_item_index(uid).ok_or(ItemError::ItemNotFound)?;
 
         let slot = self.slots.get_mut(idx).unwrap();
         let item = slot.as_mut().ok_or(ItemError::ItemNotFound)?;
+
+        if item.is_frozen() {
+            return Err(ItemError::AssetFrozen);
+        }
 
         if item.count < count {
             return Err(ItemError::NotEnoughCount);
@@ -159,6 +319,26 @@ impl ItemContainer {
     }
 }
 
+fn validate_item_for_container(item: &Item, item_table: &ItemTable) -> Result<(), ItemError> {
+    if item.uid == 0 {
+        return Err(ItemError::DuplicateItemUid);
+    }
+    if item.count == 0 {
+        return Err(ItemError::InvalidItemCount);
+    }
+    if item.binded != item.bound_character_id.is_some()
+        || item
+            .bound_character_id
+            .as_deref()
+            .is_some_and(|character_id| character_id.trim().is_empty())
+    {
+        return Err(ItemError::InvalidBinding);
+    }
+    let row = item_table.get(item.item_id).ok_or(ItemError::InvalidItemConfig)?;
+    super::item::validate_item_table_row(row, item_table)?;
+    Ok(())
+}
+
 pub struct ItemContainerIter<'a>(Iter<'a, Option<Item>>);
 
 impl<'a> Iterator for ItemContainerIter<'a> {
@@ -172,6 +352,38 @@ impl<'a> Iterator for ItemContainerIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::csv_code::itemtable::ItemTableRow;
+    use std::collections::HashMap;
+
+    fn item_table(entries: &[(i32, i32)]) -> ItemTable {
+        let mut strings = HashMap::new();
+        strings.insert(1, "Material".to_string());
+        strings.insert(2, "None".to_string());
+        strings.insert(3, "Never".to_string());
+        let rows = entries
+            .iter()
+            .map(|(id, maxstack)| ItemTableRow {
+                id: *id,
+                type_: 1,
+                maxstack: *maxstack,
+                equipslot: 2,
+                bindtype: 3,
+                useeffect: 2,
+                usetarget: 2,
+                ..ItemTableRow::default()
+            })
+            .collect::<Vec<_>>();
+        let by_id = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+        ItemTable {
+            string_pool: strings,
+            rows,
+            by_id,
+        }
+    }
 
     #[test]
     fn test_container_add_remove() {
@@ -231,5 +443,57 @@ mod tests {
         assert_eq!(container.item_count(), 2);
         assert_eq!(container.find_item(1).unwrap().count, 2);
         assert_eq!(container.find_item(2).unwrap().count, 3);
+    }
+
+    #[test]
+    fn plan_splits_large_grant_after_full_capacity_preflight() {
+        let table = item_table(&[(1001, 3)]);
+        let mut container = ItemContainer::new(3);
+        let plan = container
+            .plan_add_items(&[Item::new(10, 1001, 8, false)], &table)
+            .unwrap();
+
+        container
+            .apply_addition_plan(plan, {
+                let mut next = 20;
+                move || {
+                    let value = next;
+                    next += 1;
+                    Ok(value)
+                }
+            })
+            .unwrap();
+
+        let items = container.non_empty_items();
+        assert_eq!(items.iter().map(|item| item.count).collect::<Vec<_>>(), vec![3, 3, 2]);
+        assert_eq!(items.iter().map(|item| item.uid).collect::<Vec<_>>(), vec![10, 20, 21]);
+    }
+
+    #[test]
+    fn capacity_plan_failure_leaves_source_container_unchanged() {
+        let table = item_table(&[(1001, 1), (1002, 1)]);
+        let mut container = ItemContainer::new(1);
+        container.add_item(Item::new(1, 1001, 1, false)).unwrap();
+
+        assert_eq!(
+            container
+                .plan_add_items(&[Item::new(2, 1002, 1, false)], &table)
+                .unwrap_err(),
+            ItemError::InventoryFull
+        );
+        assert_eq!(container.find_item(1).unwrap().count, 1);
+        assert!(container.find_item(2).is_none());
+    }
+
+    #[test]
+    fn frozen_item_cannot_be_removed_or_repeatedly_frozen() {
+        let mut container = ItemContainer::new(1);
+        let mut item = Item::new(1, 1001, 1, false);
+        item.freeze("trade").unwrap();
+        assert_eq!(item.freeze("again"), Err(ItemError::AssetFrozen));
+        container.add_item(item).unwrap();
+
+        assert_eq!(container.remove_item(1, 1).unwrap_err(), ItemError::AssetFrozen);
+        assert!(container.find_item(1).is_some());
     }
 }

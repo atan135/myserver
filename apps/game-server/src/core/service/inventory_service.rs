@@ -388,14 +388,25 @@ pub async fn handle_warehouse_access(
         "handle_warehouse_access"
     );
 
+    let config_tables = services.config_tables.tables_snapshot().await;
     let mut player_data = services
         .player_manager
         .get_or_create_player(&character_id)
         .await;
 
     let result = match request.action.as_str() {
-        "deposit" => player_data.warehouse_deposit(request.item_uid, request.count),
-        "withdraw" => player_data.warehouse_withdraw(request.item_uid, request.count),
+        "deposit" => player_data.warehouse_deposit(
+            request.item_uid,
+            request.count,
+            &config_tables.item_table,
+            || services.item_uid_generator.next().map_err(|_| ItemError::Unknown),
+        ),
+        "withdraw" => player_data.warehouse_withdraw(
+            request.item_uid,
+            request.count,
+            &config_tables.item_table,
+            || services.item_uid_generator.next().map_err(|_| ItemError::Unknown),
+        ),
         _ => Err(ItemError::Unknown),
     };
 
@@ -510,7 +521,9 @@ pub async fn handle_item_add(
     );
 
     // 添加物品
-    match player_data.add_item(item.clone()) {
+    match player_data.add_item_with_table(item.clone(), &config_tables.item_table, || {
+        services.item_uid_generator.next().map_err(|_| ItemError::Unknown)
+    }) {
         Ok(()) => {
             let player_data = match services
                 .player_manager
