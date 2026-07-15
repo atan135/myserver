@@ -80,10 +80,21 @@ pub async fn handle_apply_character_progress(
     match result {
         Ok(outcome) => {
             if outcome.applied {
-                services
+                if let Err(error) = services
                     .player_manager
                     .save_player(&identity.character_id, player_data)
-                    .await;
+                    .await
+                {
+                    queue_apply_progress_response(
+                        connection,
+                        packet.header.seq,
+                        false,
+                        error.error_code(),
+                        &identity.character_id,
+                        None,
+                    )?;
+                    return Ok(());
+                }
             }
             let rewards = outcome
                 .rewards

@@ -367,10 +367,25 @@ pub async fn handle_learn_character_discipline(
 
     match result {
         Ok(result) => {
-            services
+            if let Err(error) = services
                 .player_manager
                 .save_player(&identity.character_id, player_data)
-                .await;
+                .await
+            {
+                queue_learn_discipline_response(
+                    connection,
+                    packet.header.seq,
+                    false,
+                    error.error_code(),
+                    &identity.character_id,
+                    None,
+                    definition.map(to_discipline_definition_summary),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )?;
+                return Ok(());
+            }
             let unlocked = run_discipline_unlock_check(
                 services,
                 &identity,

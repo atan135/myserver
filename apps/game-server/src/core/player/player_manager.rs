@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use super::db_player_store::{
     GrantRecord, GrantRecordLookup, PgPlayerStore, SaveGrantRecordError, SaveGrantRecordOutcome,
+    SavePlayerError as StoreSavePlayerError,
 };
 use super::grant_contract::GrantResultSummary;
 use crate::core::inventory::{Item, ItemError, PlayerData};
@@ -25,6 +26,23 @@ pub struct GrantItemsError {
     pub error_category: &'static str,
     pub result_state: &'static str,
     pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerSaveError {
+    TransactionFailed,
+    VersionConflict,
+    ResultUnknown,
+}
+
+impl PlayerSaveError {
+    pub const fn error_code(&self) -> &'static str {
+        match self {
+            Self::TransactionFailed => "INVENTORY_TRANSACTION_FAILED",
+            Self::VersionConflict => "INVENTORY_VERSION_CONFLICT",
+            Self::ResultUnknown => "INVENTORY_COMMIT_RESULT_UNKNOWN",
+        }
+    }
 }
 
 impl GrantItemsError {
@@ -81,6 +99,15 @@ impl GrantItemsError {
             retryable: false,
         }
     }
+
+    fn from_player_save(error: PlayerSaveError) -> Self {
+        match error {
+            PlayerSaveError::TransactionFailed | PlayerSaveError::VersionConflict => {
+                Self::transaction_failed()
+            }
+            PlayerSaveError::ResultUnknown => Self::commit_result_unknown(),
+        }
+    }
 }
 
 /// 玩家数据管理器
@@ -91,7 +118,7 @@ pub struct PlayerManager {
     store: PgPlayerStore,
     grant_records: Arc<RwLock<HashMap<String, GrantRecord>>>,
     grant_request_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
-    grant_character_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    asset_character_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 impl PlayerManager {
@@ -102,7 +129,7 @@ impl PlayerManager {
             store,
             grant_records: Arc::new(RwLock::new(HashMap::new())),
             grant_request_locks: Arc::new(Mutex::new(HashMap::new())),
-            grant_character_locks: Arc::new(Mutex::new(HashMap::new())),
+            asset_character_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -120,6 +147,14 @@ impl PlayerManager {
             if let Some(data) = players.get(character_id) {
                 return data.clone();
             }
+        }
+
+        // 同角色的首次加载也进入资产并发边界；不同角色不会相互等待数据库 IO。
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
+
+        if let Some(data) = self.players.read().await.get(character_id).cloned() {
+            return data;
         }
 
         // 尝试从数据库加载
@@ -146,31 +181,60 @@ impl PlayerManager {
         new_player
     }
 
-    /// 保存角色玩法数据
-    pub async fn save_player(&self, character_id: &str, data: PlayerData) {
-        // 先更新内存
-        let mut players = self.players.write().await;
-        players.insert(character_id.to_string(), data.clone());
+    /// 保存角色玩法数据。只有持久化事务确认提交后才会发布新的在线快照。
+    pub async fn save_player(
+        &self,
+        character_id: &str,
+        mut data: PlayerData,
+    ) -> Result<PlayerData, PlayerSaveError> {
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
 
-        // 异步持久化到数据库
-        if let Err(e) = self.store.save(character_id, &data).await {
-            warn!(character_id = %character_id, error = %e, "failed to persist character gameplay data");
+        if let Some(current) = self.players.read().await.get(character_id)
+            && current.persistence_revision() != data.persistence_revision()
+        {
+            return Err(PlayerSaveError::VersionConflict);
         }
+
+        if self.store.enabled() {
+            let outcome = self.store.save(character_id, &data).await.map_err(|error| {
+                warn!(character_id = %character_id, error = %error, "failed to persist character gameplay data");
+                match error {
+                    StoreSavePlayerError::NotApplied(_) => PlayerSaveError::TransactionFailed,
+                    StoreSavePlayerError::VersionConflict => PlayerSaveError::VersionConflict,
+                    StoreSavePlayerError::ResultUnknown(_) => PlayerSaveError::ResultUnknown,
+                }
+            })?;
+            data.set_persistence_revision(outcome.revision);
+        } else {
+            // Explicit database-disabled development mode still serializes and versions online
+            // snapshots so stale clones cannot overwrite a same-process asset mutation.
+            data.set_persistence_revision(data.persistence_revision().saturating_add(1));
+        }
+
+        self.players
+            .write()
+            .await
+            .insert(character_id.to_string(), data.clone());
+        Ok(data)
     }
 
     pub async fn grant_items(
         &self,
         character_id: &str,
         items: &[Item],
-    ) -> Result<PlayerData, ItemError> {
+    ) -> Result<PlayerData, GrantItemsError> {
         let mut player_data = self.get_or_create_player(character_id).await;
 
         for item in items {
-            player_data.add_item(item.clone())?;
+            player_data
+                .add_item(item.clone())
+                .map_err(|error| GrantItemsError::item_failure(&error))?;
         }
 
-        self.save_player(character_id, player_data.clone()).await;
-        Ok(player_data)
+        self.save_player(character_id, player_data)
+            .await
+            .map_err(GrantItemsError::from_player_save)
     }
 
     pub async fn find_grant_record(&self, request_id: &str) -> Result<GrantRecordLookup, String> {
@@ -202,7 +266,7 @@ impl PlayerManager {
     {
         let request_lock = keyed_lock(&self.grant_request_locks, request_id).await;
         let _request_guard = request_lock.lock().await;
-        let character_lock = keyed_lock(&self.grant_character_locks, character_id).await;
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
         let _character_guard = character_lock.lock().await;
 
         match self
@@ -220,6 +284,11 @@ impl PlayerManager {
         }
 
         let mut player_data = self.load_or_create_player_for_grant(character_id).await?;
+        if let Some(current) = self.players.read().await.get(character_id)
+            && current.persistence_revision() != player_data.persistence_revision()
+        {
+            return Err(GrantItemsError::transaction_failed());
+        }
         let items = build_items()?;
 
         for item in &items {
@@ -274,6 +343,8 @@ impl PlayerManager {
 
         match save_outcome {
             SaveGrantRecordOutcome::Applied(record) => {
+                player_data
+                    .set_persistence_revision(player_data.persistence_revision().saturating_add(1));
                 let mut players = self.players.write().await;
                 players.insert(character_id.to_string(), player_data.clone());
                 Ok(GrantItemsOutcome {
@@ -436,7 +507,8 @@ mod tests {
         // 保存后再次获取
         manager
             .save_player("chr_0000000000001", player.clone())
-            .await;
+            .await
+            .unwrap();
         let saved = manager.get_player("chr_0000000000001").await;
         assert!(saved.is_some());
 
@@ -639,6 +711,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_failure_does_not_publish_a_normal_player_mutation() {
+        let store = PgPlayerStore::new_failing_save_for_test("inventory update failed");
+        let store_probe = store.clone();
+        let manager = PlayerManager::new(store);
+        let mut candidate = PlayerData::new("chr_1".to_string());
+        candidate.add_item(Item::new(10, 1001, 1, false)).unwrap();
+
+        let error = manager.save_player("chr_1", candidate).await.unwrap_err();
+
+        assert_eq!(error, PlayerSaveError::TransactionFailed);
+        assert_eq!(store_probe.save_attempts_for_test(), 1);
+        assert!(manager.get_player("chr_1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_grant_commit_is_query_first_and_does_not_publish_memory() {
+        let store = PgPlayerStore::new_unknown_grant_commit_for_test("connection dropped");
+        let store_probe = store.clone();
+        let manager = PlayerManager::new(store);
+
+        let error = manager
+            .grant_items_with_request(
+                "chr_1",
+                "mail_claim:mail_1",
+                "sha256:first",
+                "mail-claim",
+                "claim",
+                grant_summary("chr_1", 2),
+                || Ok(vec![Item::new(10, 1001, 2, false)]),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, GrantItemsError::commit_result_unknown());
+        assert_eq!(error.result_state, "unknown");
+        assert_eq!(store_probe.grant_save_attempts_for_test(), 1);
+        assert!(manager.get_player("chr_1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_player_snapshot_cannot_overwrite_a_committed_grant() {
+        let manager = PlayerManager::new(create_disabled_store());
+        let mut stale_player_operation = manager.get_or_create_player("chr_1").await;
+
+        manager
+            .grant_items_with_request(
+                "chr_1",
+                "mail_claim:mail_1",
+                "sha256:first",
+                "mail-claim",
+                "claim",
+                grant_summary("chr_1", 2),
+                || Ok(vec![Item::new(10, 1001, 2, false)]),
+            )
+            .await
+            .unwrap();
+
+        stale_player_operation
+            .add_item(Item::new(11, 1002, 1, false))
+            .unwrap();
+        let error = manager
+            .save_player("chr_1", stale_player_operation)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, PlayerSaveError::VersionConflict);
+        let current = manager.get_player("chr_1").await.unwrap();
+        assert_eq!(current.inventory.find_item(10).unwrap().count, 2);
+        assert!(current.inventory.find_item(11).is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_player_save_returns_version_conflict_without_replacing_newer_snapshot() {
+        let manager = PlayerManager::new(create_disabled_store());
+        let initial = manager.get_or_create_player("chr_1").await;
+        let mut first = initial.clone();
+        first.add_item(Item::new(10, 1001, 1, false)).unwrap();
+        manager.save_player("chr_1", first).await.unwrap();
+
+        let mut stale = initial;
+        stale.add_item(Item::new(11, 1002, 1, false)).unwrap();
+        let error = manager.save_player("chr_1", stale).await.unwrap_err();
+
+        assert_eq!(error, PlayerSaveError::VersionConflict);
+        let current = manager.get_player("chr_1").await.unwrap();
+        assert!(current.inventory.find_item(10).is_some());
+        assert!(current.inventory.find_item(11).is_none());
+    }
+
+    #[tokio::test]
+    async fn different_character_asset_locks_do_not_wait_for_each_other() {
+        let manager = PlayerManager::new(create_disabled_store());
+        let first_lock = keyed_lock(&manager.asset_character_locks, "chr_1").await;
+        let _first_guard = first_lock.lock().await;
+        let second_lock = keyed_lock(&manager.asset_character_locks, "chr_2").await;
+
+        let second_guard =
+            tokio::time::timeout(std::time::Duration::from_millis(50), second_lock.lock()).await;
+        assert!(
+            second_guard.is_ok(),
+            "different characters must not share a write lock"
+        );
+    }
+
+    #[tokio::test]
     async fn sequential_unique_grants_reclaim_dead_keyed_locks() {
         let manager = PlayerManager::new(create_disabled_store());
         for index in 0..100u64 {
@@ -658,7 +835,7 @@ mod tests {
         }
 
         assert!(manager.grant_request_locks.lock().await.len() <= 1);
-        assert!(manager.grant_character_locks.lock().await.len() <= 1);
+        assert!(manager.asset_character_locks.lock().await.len() <= 1);
     }
 
     #[tokio::test]
@@ -682,7 +859,8 @@ mod tests {
 
         manager
             .save_player("chr_0000000000001", first_character)
-            .await;
+            .await
+            .unwrap();
         let other_character = manager.get_or_create_player("chr_0000000000002").await;
         let saved_first_character = manager.get_player("chr_0000000000001").await.unwrap();
 

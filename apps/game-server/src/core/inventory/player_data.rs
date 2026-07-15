@@ -44,6 +44,12 @@ pub struct PlayerData {
     /// 角色 ID
     pub character_id: String,
 
+    /// `character_inventory.asset_revision` 的本地快照。
+    ///
+    /// 它只用于提交时的乐观并发校验，不属于 JSONB 玩法快照。所有资产写入必须在
+    /// 持久化层确认该 revision 后才能发布到在线内存。
+    persistence_revision: u64,
+
     // ========== 物品存储 ==========
     /// 背包（随身）
     pub inventory: ItemContainer,
@@ -92,6 +98,7 @@ impl PlayerData {
     ) -> Self {
         Self {
             character_id: character_id.clone(),
+            persistence_revision: 0,
             inventory: ItemContainer::new(inventory_capacity),
             warehouse: ItemContainer::new(warehouse_capacity),
             equipment: EquipmentSlots::new(),
@@ -103,6 +110,16 @@ impl PlayerData {
             visual_dirty: false,
             data_dirty: true,
         }
+    }
+
+    /// 返回此玩法快照从持久化层读取时的 revision。
+    pub fn persistence_revision(&self) -> u64 {
+        self.persistence_revision
+    }
+
+    /// 仅由玩家持久化事务在成功提交后推进 revision。
+    pub(crate) fn set_persistence_revision(&mut self, revision: u64) {
+        self.persistence_revision = revision;
     }
 
     // ========== 脏标记操作 ==========

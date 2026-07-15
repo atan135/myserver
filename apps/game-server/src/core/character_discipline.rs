@@ -210,6 +210,7 @@ pub enum DisciplineError {
     InvalidDisciplineTier,
     InvalidDisciplineAction,
     InvalidDisciplineConfig { message: String },
+    CrossStoreAssetTransactionUnavailable,
     CharacterElement(CharacterElementError),
     Title(TitleError),
     Item(ItemError),
@@ -234,6 +235,9 @@ impl DisciplineError {
             Self::InvalidDisciplineTier => "INVALID_DISCIPLINE_TIER",
             Self::InvalidDisciplineAction => "INVALID_DISCIPLINE_ACTION",
             Self::InvalidDisciplineConfig { .. } => "INVALID_DISCIPLINE_CONFIG",
+            Self::CrossStoreAssetTransactionUnavailable => {
+                "ASSET_CROSS_STORE_ATOMICITY_UNAVAILABLE"
+            }
             Self::CharacterElement(error) => error.error_code(),
             Self::Title(error) => error.error_code(),
             Self::Item(error) => error.as_str(),
@@ -273,6 +277,10 @@ impl std::fmt::Display for DisciplineError {
             Self::InvalidDisciplineConfig { message } => {
                 write!(formatter, "invalid discipline config: {message}")
             }
+            Self::CrossStoreAssetTransactionUnavailable => write!(
+                formatter,
+                "discipline learning with item costs requires a shared asset transaction"
+            ),
             Self::CharacterElement(error) => write!(formatter, "character element error: {error}"),
             Self::Title(error) => write!(formatter, "title error: {error}"),
             Self::Item(error) => write!(formatter, "item error: {}", error.as_str()),
@@ -400,6 +408,11 @@ impl DisciplineService {
             titles.as_deref(),
             player_data,
         )?;
+        if !consumed_items.is_empty() {
+            // `character_disciplines` and `character_inventory` are committed by different
+            // stores today. Do not create the discipline and then attempt an item deduction.
+            return Err(DisciplineError::CrossStoreAssetTransactionUnavailable);
+        }
         let upsert = DisciplineUpsert::new(
             request.discipline_id.clone(),
             tier_rules.initial_points,
@@ -1851,7 +1864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn formal_learn_uses_identity_character_consumes_items_and_logs() {
+    async fn item_cost_learning_is_rejected_before_discipline_or_inventory_write() {
         let identity = identity();
         let service = DisciplineService::new_in_memory();
         let element_service = CharacterElementService::new_in_memory();
@@ -1876,7 +1889,7 @@ mod tests {
         let mut player_data = PlayerData::new(identity.character_id.clone());
         player_data.add_item(Item::new(7, 4101, 1, false)).unwrap();
 
-        let result = service
+        let error = service
             .learn_for_identity(
                 &identity,
                 LearnDisciplineRequest::new("fire_art"),
@@ -1889,24 +1902,20 @@ mod tests {
                 context(),
             )
             .await
-            .expect("formal learn should succeed");
+            .unwrap_err();
 
-        assert_eq!(result.discipline.character_id, identity.character_id);
-        assert_eq!(result.discipline.discipline_id, "fire_art");
-        assert_eq!(result.discipline.tier, "novice");
-        assert_eq!(result.consumed_items.len(), 1);
-        assert!(player_data.inventory.find_item(7).is_none());
-
-        let logs = service.logs().await;
-        let learn_log = logs
-            .iter()
-            .find(|log| log.discipline_id == "fire_art")
-            .expect("learn log should be written");
-        assert_eq!(learn_log.action, "learn");
-        assert_eq!(learn_log.source_type.as_deref(), Some("player"));
-        assert_eq!(learn_log.operator_id.as_deref(), Some("plr_0000000000001"));
-        assert!(learn_log.before_json.is_none());
-        assert!(learn_log.after_json.is_some());
+        assert_eq!(
+            error.error_code(),
+            "ASSET_CROSS_STORE_ATOMICITY_UNAVAILABLE"
+        );
+        assert_eq!(player_data.inventory.find_item(7).unwrap().count, 1);
+        assert!(
+            service
+                .logs()
+                .await
+                .iter()
+                .all(|log| log.discipline_id != "fire_art")
+        );
     }
 
     #[tokio::test]

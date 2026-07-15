@@ -1,13 +1,8 @@
 use tracing::{info, warn};
 
-use crate::core::character_element::{
-    CharacterElementApplyResult, CharacterElementChangeSource, CharacterElementError,
-    CharacterElementService,
-};
 use crate::core::context::{ConnectionContext, ServiceContext};
 use crate::core::inventory::player_data::PreparedItemUseEffect;
 use crate::core::inventory::{EquipSlot, ItemError, PlayerData};
-use crate::core::service::character_element_service::queue_character_element_push;
 use crate::pb::{
     AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryRes,
     InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq, ItemDiscardRes,
@@ -77,10 +72,25 @@ pub async fn handle_item_equip(
     match result {
         Ok(()) => {
             // 保存更新后的角色玩法数据
-            services
+            let player_data = match services
                 .player_manager
-                .save_player(&character_id, player_data.clone())
-                .await;
+                .save_player(&character_id, player_data)
+                .await
+            {
+                Ok(player_data) => player_data,
+                Err(error) => {
+                    connection.queue_message(
+                        MessageType::ItemEquipRes,
+                        packet.header.seq,
+                        ItemEquipRes {
+                            ok: false,
+                            error_code: error.error_code().to_string(),
+                            unequipped_item: None,
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
 
             connection.queue_message(
                 MessageType::ItemEquipRes,
@@ -174,29 +184,21 @@ pub async fn handle_item_use(
         }
     };
 
-    let element_change_result = match apply_prepared_item_element_change(
-        &services.character_element_service,
-        &character_id,
-        &account_player_id,
-        &prepared_use,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            connection.queue_message(
-                MessageType::ItemUseRes,
-                packet.header.seq,
-                ItemUseRes {
-                    ok: false,
-                    error_code: error.error_code().to_string(),
-                    hp_change: 0,
-                    new_buff_ids: vec![],
-                },
-            )?;
-            return Ok(());
-        }
-    };
+    if requires_cross_store_asset_commit(&prepared_use.effect) {
+        // The item snapshot and character elements currently use independently owned stores.
+        // Reject this compound operation until it can use one durable transaction boundary.
+        connection.queue_message(
+            MessageType::ItemUseRes,
+            packet.header.seq,
+            ItemUseRes {
+                ok: false,
+                error_code: "ASSET_CROSS_STORE_ATOMICITY_UNAVAILABLE".to_string(),
+                hp_change: 0,
+                new_buff_ids: vec![],
+            },
+        )?;
+        return Ok(());
+    }
 
     let result = player_data.finalize_prepared_item_use(&prepared_use, &config_tables.item_table);
 
@@ -204,10 +206,26 @@ pub async fn handle_item_use(
         Ok(()) => {
             let hp_change = player_data.get_hp() - hp_before;
 
-            services
+            let player_data = match services
                 .player_manager
-                .save_player(&character_id, player_data.clone())
-                .await;
+                .save_player(&character_id, player_data)
+                .await
+            {
+                Ok(player_data) => player_data,
+                Err(error) => {
+                    connection.queue_message(
+                        MessageType::ItemUseRes,
+                        packet.header.seq,
+                        ItemUseRes {
+                            ok: false,
+                            error_code: error.error_code().to_string(),
+                            hp_change: 0,
+                            new_buff_ids: vec![],
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
 
             connection.queue_message(
                 MessageType::ItemUseRes,
@@ -227,29 +245,6 @@ pub async fn handle_item_use(
 
             // 发送背包更新
             send_inventory_update_push(connection, &player_data).await;
-
-            if let Some(result) = element_change_result.as_ref() {
-                queue_character_element_push(
-                    services,
-                    connection,
-                    &crate::session::AuthenticatedSessionIdentity {
-                        account_player_id: account_player_id.clone(),
-                        character_id: character_id.clone(),
-                        world_id,
-                    },
-                    result,
-                    crate::core::character_push::CharacterPushSource::new(
-                        "item_use",
-                        format!(
-                            "item_id:{}:uid:{}",
-                            prepared_use.item_id, prepared_use.item_uid
-                        ),
-                        "element_change",
-                        format!("use item {}", prepared_use.item_id),
-                    ),
-                )
-                .await?;
-            }
         }
         Err(e) => {
             connection.queue_message(
@@ -268,29 +263,8 @@ pub async fn handle_item_use(
     Ok(())
 }
 
-async fn apply_prepared_item_element_change(
-    character_element_service: &CharacterElementService,
-    character_id: &str,
-    account_player_id: &str,
-    prepared_use: &crate::core::inventory::player_data::PreparedItemUse,
-) -> Result<Option<CharacterElementApplyResult>, CharacterElementError> {
-    let PreparedItemUseEffect::CharacterElementChange { change } = &prepared_use.effect else {
-        return Ok(None);
-    };
-
-    let source = CharacterElementChangeSource::new("item_use")
-        .with_source_id(format!(
-            "item_id:{}:uid:{}",
-            prepared_use.item_id, prepared_use.item_uid
-        ))
-        .with_operator("player", account_player_id.to_string());
-    let reason = format!("use item {}", prepared_use.item_id);
-
-    let result = character_element_service
-        .apply_change(character_id, *change, source, Some(reason.as_str()))
-        .await?;
-
-    Ok(Some(result))
+fn requires_cross_store_asset_commit(effect: &PreparedItemUseEffect) -> bool {
+    matches!(effect, PreparedItemUseEffect::CharacterElementChange { .. })
 }
 
 /// 处理物品丢弃请求
@@ -333,10 +307,24 @@ pub async fn handle_item_discard(
 
     match result {
         Ok(_item) => {
-            services
+            let player_data = match services
                 .player_manager
-                .save_player(&character_id, player_data.clone())
-                .await;
+                .save_player(&character_id, player_data)
+                .await
+            {
+                Ok(player_data) => player_data,
+                Err(error) => {
+                    connection.queue_message(
+                        MessageType::ItemDiscardRes,
+                        packet.header.seq,
+                        ItemDiscardRes {
+                            ok: false,
+                            error_code: error.error_code().to_string(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
 
             connection.queue_message(
                 MessageType::ItemDiscardRes,
@@ -413,10 +401,24 @@ pub async fn handle_warehouse_access(
 
     match result {
         Ok(()) => {
-            services
+            let player_data = match services
                 .player_manager
-                .save_player(&character_id, player_data.clone())
-                .await;
+                .save_player(&character_id, player_data)
+                .await
+            {
+                Ok(player_data) => player_data,
+                Err(error) => {
+                    connection.queue_message(
+                        MessageType::WarehouseAccessRes,
+                        packet.header.seq,
+                        WarehouseAccessRes {
+                            ok: false,
+                            error_code: error.error_code().to_string(),
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
 
             connection.queue_message(
                 MessageType::WarehouseAccessRes,
@@ -510,10 +512,25 @@ pub async fn handle_item_add(
     // 添加物品
     match player_data.add_item(item.clone()) {
         Ok(()) => {
-            services
+            let player_data = match services
                 .player_manager
-                .save_player(&character_id, player_data.clone())
-                .await;
+                .save_player(&character_id, player_data)
+                .await
+            {
+                Ok(player_data) => player_data,
+                Err(error) => {
+                    connection.queue_message(
+                        MessageType::ItemAddRes,
+                        packet.header.seq,
+                        ItemAddRes {
+                            ok: false,
+                            error_code: error.error_code().to_string(),
+                            item: None,
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
 
             connection.queue_message(
                 MessageType::ItemAddRes,
@@ -706,98 +723,17 @@ async fn send_inventory_update_push(connection: &ConnectionContext, player_data:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::character_element::{
-        CharacterElementChange, CharacterElementService, CharacterElements, ElementDeltas,
-        ElementValues,
-    };
-    use crate::core::inventory::player_data::{PreparedItemUse, PreparedItemUseEffect};
+    use crate::core::character_element::{CharacterElementChange, ElementDeltas};
 
-    #[tokio::test]
-    async fn item_element_use_calls_character_element_service_with_stable_source() {
-        let service = CharacterElementService::new_in_memory();
-        service
-            .set_elements(CharacterElements {
-                character_id: "chr_0000000000001".to_string(),
-                affinity: ElementValues::new(2500, 2500, 2500, 2500),
-                mastery: ElementValues::zero(),
-            })
-            .await;
-        let prepared = PreparedItemUse {
-            item_uid: 7,
-            item_id: 4101,
-            effect: PreparedItemUseEffect::CharacterElementChange {
-                change: CharacterElementChange::new(
-                    ElementDeltas::zero(),
-                    ElementDeltas::new(0, 10, 0, 0),
-                ),
-            },
+    #[test]
+    fn item_element_effect_is_rejected_before_any_external_write() {
+        let effect = PreparedItemUseEffect::CharacterElementChange {
+            change: CharacterElementChange::new(
+                ElementDeltas::zero(),
+                ElementDeltas::new(0, 10, 0, 0),
+            ),
         };
 
-        apply_prepared_item_element_change(
-            &service,
-            "chr_0000000000001",
-            "plr_0000000000001",
-            &prepared,
-        )
-        .await
-        .unwrap();
-
-        let after = service
-            .get_elements_for_identity(&crate::session::AuthenticatedSessionIdentity {
-                account_player_id: "plr_0000000000001".to_string(),
-                character_id: "chr_0000000000001".to_string(),
-                world_id: Some(0),
-            })
-            .await
-            .unwrap();
-        assert_eq!(after.mastery.fire, 10);
-
-        let logs = service.applied_change_logs().await;
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].source.source_type, "item_use");
-        assert_eq!(
-            logs[0].source.source_id.as_deref(),
-            Some("item_id:4101:uid:7")
-        );
-        assert_eq!(logs[0].source.operator_type.as_deref(), Some("player"));
-        assert_eq!(
-            logs[0].source.operator_id.as_deref(),
-            Some("plr_0000000000001")
-        );
-        assert_eq!(logs[0].reason.as_deref(), Some("use item 4101"));
-    }
-
-    #[tokio::test]
-    async fn item_element_use_failure_does_not_write_log() {
-        let service = CharacterElementService::new_in_memory();
-        service
-            .set_elements(CharacterElements {
-                character_id: "chr_0000000000001".to_string(),
-                affinity: ElementValues::new(2500, 2500, 2500, 2500),
-                mastery: ElementValues::zero(),
-            })
-            .await;
-        let prepared = PreparedItemUse {
-            item_uid: 8,
-            item_id: 4102,
-            effect: PreparedItemUseEffect::CharacterElementChange {
-                change: CharacterElementChange::new(
-                    ElementDeltas::new(100, 0, 0, 0),
-                    ElementDeltas::zero(),
-                ),
-            },
-        };
-
-        let error = apply_prepared_item_element_change(
-            &service,
-            "chr_0000000000001",
-            "plr_0000000000001",
-            &prepared,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.error_code(), "INVALID_AFFINITY_TOTAL");
-        assert!(service.applied_change_logs().await.is_empty());
+        assert!(requires_cross_store_asset_commit(&effect));
     }
 }
