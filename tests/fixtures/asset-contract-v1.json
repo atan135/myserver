@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "asset_contract_v1": {
+    "reward_order": {
+      "request_id": "reward:achievement:chr_0000000000042:42",
+      "character_id": "chr_0000000000042",
+      "origin_type": "achievement",
+      "origin_id": "achievement:42",
+      "delivery_policy": "PREFER_INVENTORY",
+      "items": [
+        {
+          "item_id": 1002,
+          "count": 2,
+          "binding": "unbound"
+        },
+        {
+          "item_id": 1001,
+          "count": 1,
+          "binding": {
+            "character_bound": {
+              "character_id": "chr_0000000000042"
+            }
+          }
+        },
+        {
+          "item_id": 1002,
+          "count": 3,
+          "binding": "unbound"
+        }
+      ],
+      "reason": "achievement reward",
+      "operator": {
+        "operator_type": "service",
+        "operator_id": "achievement-service",
+        "permissions": [
+          "grant"
+        ]
+      }
+    },
+    "expected_normalized_items": [
+      {
+        "item_id": 1001,
+        "count": 1,
+        "binding": {
+          "character_bound": {
+            "character_id": "chr_0000000000042"
+          }
+        }
+      },
+      {
+        "item_id": 1002,
+        "count": 5,
+        "binding": "unbound"
+      }
+    ],
+    "expected_reward_order": {
+      "request_id": "reward:achievement:chr_0000000000042:42",
+      "character_id": "chr_0000000000042",
+      "origin_type": "achievement",
+      "origin_id": "achievement:42",
+      "delivery_policy": "PREFER_INVENTORY",
+      "items": [
+        {
+          "item_id": 1001,
+          "count": 1,
+          "binding": {
+            "character_bound": {
+              "character_id": "chr_0000000000042"
+            }
+          }
+        },
+        {
+          "item_id": 1002,
+          "count": 5,
+          "binding": "unbound"
+        }
+      ],
+      "reason": "achievement reward",
+      "operator": {
+        "operator_type": "service",
+        "operator_id": "achievement-service",
+        "permissions": [
+          "grant"
+        ]
+      }
+    },
+    "expected_fingerprint_canonical_json": "{\"schema_version\":1,\"kind\":\"reward_order\",\"character_id\":\"chr_0000000000042\",\"origin_type\":\"achievement\",\"origin_id\":\"achievement:42\",\"delivery_policy\":\"PREFER_INVENTORY\",\"items\":[{\"item_id\":1001,\"count\":1,\"binding\":{\"character_bound\":{\"character_id\":\"chr_0000000000042\"}}},{\"item_id\":1002,\"count\":5,\"binding\":\"unbound\"}]}",
+    "expected_fingerprint": "sha256:f09411c0544c6e6d6230cca97ba77d7ff85ac99491898d4961ba88757af96700",
+    "expected_result": {
+      "request_id": "reward:achievement:chr_0000000000042:42",
+      "request_fingerprint": "sha256:f09411c0544c6e6d6230cca97ba77d7ff85ac99491898d4961ba88757af96700",
+      "result_state": "applied",
+      "error_code": null,
+      "actual_deltas": [
+        {
+          "asset_type": "item",
+          "item_id": 1002,
+          "binding": "unbound",
+          "delta": 5
+        }
+      ],
+      "container_versions": [
+        {
+          "container": "inventory",
+          "version": 7
+        }
+      ],
+      "asset_ledger_ids": [
+        "asset-ledger-0001"
+      ],
+      "delivery": {
+        "semantics": {
+          "delivery_method": "direct",
+          "settlement_target": "inventory",
+          "post_commit_notification": "push"
+        },
+        "delivery_id": "delivery-0001",
+        "fallback_reason": null
+      }
+    }
+  }
+}
