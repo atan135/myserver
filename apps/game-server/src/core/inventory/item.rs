@@ -70,15 +70,8 @@ impl Item {
     }
 
     pub fn can_stack_with(&self, other: &Item) -> bool {
-        self.item_id == other.item_id
-            && self.binded == other.binded
-            && self.template_elements == other.template_elements
-            && self.growth_elements == other.growth_elements
-            && self.runtime_elements == other.runtime_elements
-            && self.bound_character_id == other.bound_character_id
-            && self.growth_rules == other.growth_rules
-            && self.growth_records.is_empty()
-            && other.growth_records.is_empty()
+        self.asset_stack_identity()
+            .can_stack_with(&other.asset_stack_identity())
     }
 
     pub fn effective_elements(&self, row: Option<&ItemTableRow>) -> ItemElementValues {

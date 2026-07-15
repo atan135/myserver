@@ -1,3 +1,4 @@
+pub mod asset;
 pub mod attr;
 pub mod buff;
 pub mod container;
@@ -6,6 +7,12 @@ pub mod item;
 pub mod player_data;
 pub mod visual;
 
+pub use asset::{
+    AssetBinding, AssetConfigTable, AssetConfigVersion, AssetContainer, AssetDeliveryMethod,
+    AssetDeliverySemantics, AssetLockState, AssetOrigin, AssetOriginError, AssetOriginType,
+    AssetPostCommitNotification, AssetSettlementTarget, AssetStackIdentity, AssetType,
+    ItemStackIdentity,
+};
 pub use attr::{AttrPanel, AttrRecord, AttrSource, AttrType, PlayerAttr};
 pub use buff::Buff;
 pub use container::ItemContainer;
