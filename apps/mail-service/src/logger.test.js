@@ -1,7 +1,34 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
+import { attachPoolErrorHandler } from "./db-client.js";
 import { formatLogPayload } from "./logger.js";
+
+test("database pool client errors are handled with a bounded stable code", () => {
+  const pool = new EventEmitter();
+  const client = new EventEmitter();
+  const observed = [];
+  attachPoolErrorHandler(pool, (errorCode) => observed.push(errorCode));
+
+  pool.emit("error", Object.assign(new Error("postgres://secret@127.0.0.1/db"), { code: "ECONNRESET" }));
+  pool.emit("error", new Error("free-form database failure"));
+  pool.emit("connect", client);
+  client.emit("error", Object.assign(new Error("checked-out client failed"), { code: "ECONNREFUSED" }));
+
+  assert.deepEqual(observed, ["ECONNRESET", "DATABASE_POOL_ERROR", "ECONNREFUSED"]);
+});
+
+test("database pool client error handling never throws when reporting is unavailable", () => {
+  const pool = new EventEmitter();
+  attachPoolErrorHandler(pool, () => {
+    throw new Error("logger is not configured");
+  });
+
+  assert.doesNotThrow(() => {
+    pool.emit("error", Object.assign(new Error("database disconnected"), { code: "ECONNRESET" }));
+  });
+});
 
 test("log formatting bounds nested data and removes credentials, mail bodies, attachments, and endpoints", () => {
   const secrets = {

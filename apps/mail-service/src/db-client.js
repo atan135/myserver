@@ -1,5 +1,7 @@
 import pg from "pg";
 
+import { log } from "./logger.js";
+
 const { Pool } = pg;
 
 const MAIL_SCHEMA_STATEMENTS = [
@@ -257,12 +259,30 @@ function createPoolOptions(config) {
   };
 }
 
+export function attachPoolErrorHandler(pool, report = (errorCode) => {
+  log("error", "database.pool_client_error", { errorCode });
+}) {
+  const handleError = (error) => {
+    const errorCode = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(error.code)
+      ? error.code
+      : "DATABASE_POOL_ERROR";
+    try {
+      report(errorCode);
+    } catch {
+      // Nest initializes providers before configuring log4js; pool listeners must never throw.
+    }
+  };
+  pool.on("error", handleError);
+  pool.on("connect", (client) => client.on("error", handleError));
+  return pool;
+}
+
 export async function createDbPool(config) {
   if (!config.dbEnabled) {
     return null;
   }
 
-  const pool = new Pool(createPoolOptions(config));
+  const pool = attachPoolErrorHandler(new Pool(createPoolOptions(config)));
 
   let client = null;
   try {
