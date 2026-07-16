@@ -1,0 +1,2 @@
+# Golden protobuf bodies must retain exact bytes across Windows and CI checkouts.
+tests/proto/fixtures/compatibility/*.bin binary

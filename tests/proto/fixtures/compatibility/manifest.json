@@ -1,0 +1,267 @@
+{
+  "schema": "myserver.protobuf.binary-fixtures/v1",
+  "bodyFormat": "protobuf_body_without_tcp_header",
+  "syntheticData": {
+    "declared": true,
+    "identityPrefix": "fixture_",
+    "statement": "Every fixture value is deterministic synthetic test data; no production payloads or credentials are permitted."
+  },
+  "limits": {
+    "maxFixtureBodyBytes": 67584,
+    "largePayloadReason": "The payload is 64 KiB; its 65,630-byte protobuf body stays under this 66 KiB cap and well below the 1 MiB mock-client packet guard."
+  },
+  "integerCompatibility": {
+    "int32": "Uses both signed int32 endpoints.",
+    "int64": "Uses 9007199254740991, the largest integer the current Node mock-client can round-trip exactly.",
+    "uint32": "Uses 4294967295, the uint32 endpoint."
+  },
+  "fixtures": [
+    {
+      "file": "get-room-data-res-empty.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "GetRoomDataRes"
+      },
+      "messageType": 1302,
+      "byteLength": 4,
+      "sha256": "sha256:d5a296d38accb493d74aff9a89d56130e6bddcc518a0dd3124ad095cb22d7021",
+      "source": {
+        "description": "Explicit empty error_code and omitted empty repeated field_0_list.",
+        "fields": {
+          "ok": true,
+          "field_0_list": [],
+          "error_code": ""
+        }
+      },
+      "expectations": {
+        "kind": "exact",
+        "decoded": {
+          "ok": true,
+          "field0List": [],
+          "errorCode": ""
+        }
+      }
+    },
+    {
+      "file": "get-character-elements-int32-boundaries.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "GetCharacterElementsRes"
+      },
+      "messageType": 1414,
+      "byteLength": 51,
+      "sha256": "sha256:461750e4cdb9fd4cd5b8f4176b2d543738a781982464c58005371827348709c8",
+      "source": {
+        "description": "Nested ElementValues carries the signed int32 lower and upper bounds.",
+        "fields": {
+          "ok": true,
+          "character_id": "fixture_character_boundary",
+          "elements": {
+            "affinity": {
+              "earth": -2147483648,
+              "fire": 2147483647,
+              "water": 0,
+              "wind": 0
+            }
+          }
+        }
+      },
+      "expectations": {
+        "kind": "exact",
+        "decoded": {
+          "ok": true,
+          "errorCode": "",
+          "characterId": "fixture_character_boundary",
+          "elements": {
+            "affinity": {
+              "earth": -2147483648,
+              "fire": 2147483647,
+              "water": 0,
+              "wind": 0
+            },
+            "mastery": null
+          }
+        }
+      }
+    },
+    {
+      "file": "attr-change-int64-u32-boundaries.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "AttrChangePush"
+      },
+      "messageType": 1502,
+      "byteLength": 30,
+      "sha256": "sha256:09f51679971b461fe2d9bedfd67d6b07923b7a0fd6446e19712041fb31549f9e",
+      "source": {
+        "description": "AttrPanel uses the largest integer exactly representable by the Node mock-client and uint32 max.",
+        "fields": {
+          "base": {
+            "hp": 9007199254740991,
+            "max_hp": 9007199254740990,
+            "attack": 42,
+            "defense": 0,
+            "speed": 4294967295
+          },
+          "bonus": [],
+          "final": null
+        }
+      },
+      "expectations": {
+        "kind": "exact",
+        "decoded": {
+          "base": {
+            "hp": 9007199254740991,
+            "maxHp": 9007199254740990,
+            "attack": 42,
+            "defense": 0,
+            "speed": 4294967295,
+            "critRate": 0,
+            "critDmg": 0
+          },
+          "bonus": [],
+          "final": null
+        }
+      }
+    },
+    {
+      "file": "movement-snapshot-v1.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "MovementSnapshotPush"
+      },
+      "messageType": 1206,
+      "byteLength": 98,
+      "sha256": "sha256:13bc8d0d27f328b298439eb6e7f2acf5c8f89d6c6a16702697e45c8e0b49348a",
+      "source": {
+        "description": "Historical v1 projection with fields 1 through 5 only.",
+        "fields": {
+          "room_id": "fixture_room_legacy",
+          "frame_id": 4294967295,
+          "entities": [
+            {
+              "entity_id": 9007199254740991,
+              "character_id": "fixture_character_legacy",
+              "scene_id": 7,
+              "x": 1.25,
+              "y": -2.5,
+              "dir_x": 0,
+              "dir_y": 0,
+              "moving": true,
+              "last_input_frame": 4294967295
+            }
+          ],
+          "full_sync": false,
+          "reason": ""
+        }
+      },
+      "expectations": {
+        "kind": "exact",
+        "decoded": {
+          "roomId": "fixture_room_legacy",
+          "frameId": 4294967295,
+          "entities": [
+            {
+              "entityId": 9007199254740991,
+              "characterId": "fixture_character_legacy",
+              "sceneId": 7,
+              "x": 1.25,
+              "y": -2.5,
+              "dirX": 0,
+              "dirY": 0,
+              "moving": true,
+              "lastInputFrame": 4294967295
+            }
+          ],
+          "fullSync": false,
+          "reason": "",
+          "correctionKind": 0,
+          "reasonCode": 0,
+          "targetCharacterIds": [],
+          "referenceFrameId": 0
+        }
+      }
+    },
+    {
+      "file": "movement-snapshot-future-fields.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "MovementSnapshotPush"
+      },
+      "messageType": 1206,
+      "byteLength": 125,
+      "sha256": "sha256:858907a3c5ac9db23bf0c578008049462873419905efed9ef63b9fa40c2d0167",
+      "source": {
+        "description": "v1 body plus a future unknown enum number in fields 6/7 and an unknown length-delimited field 190.",
+        "extends": "movement-snapshot-v1.bin",
+        "appended_fields": {
+          "correction_kind": 99,
+          "reason_code": 77,
+          "field_190": "fixture_future_field"
+        }
+      },
+      "expectations": {
+        "kind": "exact",
+        "decoded": {
+          "roomId": "fixture_room_legacy",
+          "frameId": 4294967295,
+          "entities": [
+            {
+              "entityId": 9007199254740991,
+              "characterId": "fixture_character_legacy",
+              "sceneId": 7,
+              "x": 1.25,
+              "y": -2.5,
+              "dirX": 0,
+              "dirY": 0,
+              "moving": true,
+              "lastInputFrame": 4294967295
+            }
+          ],
+          "fullSync": false,
+          "reason": "",
+          "correctionKind": 99,
+          "reasonCode": 77,
+          "targetCharacterIds": [],
+          "referenceFrameId": 0
+        }
+      }
+    },
+    {
+      "file": "game-message-large-payload.bin",
+      "proto": {
+        "file": "packages/proto/game.proto",
+        "message": "GameMessagePush"
+      },
+      "messageType": 1202,
+      "byteLength": 65630,
+      "sha256": "sha256:66aaaa6fff896b1a65fea2e5dfbbdf4220ae6c62d20e58f24054c95634f0e287",
+      "source": {
+        "description": "A deterministic JSON payload with a 64 KiB UTF-8 body of x characters.",
+        "fields": {
+          "event": "fixture_large_payload",
+          "room_id": "fixture_room_large",
+          "character_id": "fixture_character_large",
+          "action": "fixture_action_large",
+          "payload_json": {
+            "format": "{\"fixture\":\"<x repeated>\"}",
+            "utf8_bytes": 65536,
+            "fill": "x"
+          }
+        }
+      },
+      "expectations": {
+        "kind": "large_payload",
+        "decoded": {
+          "event": "fixture_large_payload",
+          "roomId": "fixture_room_large",
+          "characterId": "fixture_character_large",
+          "action": "fixture_action_large",
+          "payloadUtf8Bytes": 65536,
+          "payloadPrefix": "{\"fixture\":\"",
+          "payloadSuffix": "\"}"
+        }
+      }
+    }
+  ]
+}
