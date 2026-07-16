@@ -39,6 +39,9 @@ message GrantItemsReq {
   string trace_id = 8;
   string route_generation = 9;
   string route_token = 10;
+  // Zero is the original v1 wire shape. Mail claim callers now send one explicitly
+  // so rolling-upgrade peers remain compatible.
+  uint32 contract_version = 11;
 }
 
 message GrantItemsResultSummary {
@@ -58,6 +61,9 @@ message GrantItemsRes {
   bool retryable = 8;
   GrantItemsResultSummary result_summary = 9;
   string trace_id = 10;
+  // A capacity-blocked mail claim is not infrastructure-retryable, but a player
+  // may retry the same frozen request after clearing inventory space.
+  bool player_retryable = 11;
 }
 
 message GrantItemsResultQueryReq {
@@ -78,4 +84,5 @@ message GrantItemsResultQueryRes {
   GrantItemsResultSummary result_summary = 9;
   string trace_id = 10;
   int64 created_at_ms = 11;
+  uint32 contract_version = 12;
 }

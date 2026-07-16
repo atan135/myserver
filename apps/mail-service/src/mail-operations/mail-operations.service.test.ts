@@ -436,7 +436,7 @@ test("claim operational snapshots and rate counters are emitted without high-car
   seedClaim(store, "mail-3", { status: "retryable_failure", updated_at: old });
   seedClaim(store, "mail-4", { status: "permanent_failure", updated_at: old });
   const snapshot = await store.getMailClaimOperationalStats({ longRunningMs: 15 * 60_000 });
-  assert.deepEqual(snapshot, { longRunning: 3, fingerprintConflicts: 1, manualReview: 1 });
+  assert.deepEqual(snapshot, { longRunning: 3, fingerprintConflicts: 1, manualReview: 1, blockedCapacity: 0 });
 
   const messages: any[] = [];
   const metrics = new MetricsCollector({
@@ -453,6 +453,7 @@ test("claim operational snapshots and rate counters are emitted without high-car
   assert.equal(fields.mail_claim_long_running, 3);
   assert.equal(fields.mail_claim_fingerprint_conflicts, 1);
   assert.equal(fields.mail_claim_manual_review_backlog, 1);
+  assert.equal(fields.mail_claim_blocked_capacity_backlog, 0);
   assert.equal("mail_id" in fields, false);
   assert.equal("player_id" in fields, false);
 });

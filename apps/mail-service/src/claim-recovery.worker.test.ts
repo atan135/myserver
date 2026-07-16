@@ -103,6 +103,7 @@ test("recovery can be disabled only when no unfinished workflow exists", async (
     byStatus: {
       processing: 0,
       retryable_failure: 0,
+      blocked_capacity: 0,
       permanent_failure: 0,
       reconciliation_pending: 0,
       manual_review: 0
@@ -433,6 +434,36 @@ test("unknown grant result returns to reconciliation instead of direct retry", a
   const workflow = await store.getMailClaimWorkflow("mail-1");
   assert.equal(workflow.status, "reconciliation_pending");
   assert.equal(workflow.last_result_state, "unknown");
+});
+
+test("recovery capacity block stops automatic retries and leaves the original claim for the player", async () => {
+  const store = new DbMailStore(null);
+  await createWorkflow(store, "retryable_failure");
+  let grants = 0;
+  const worker = new ClaimRecoveryWorker(store, {
+    async queryMailAttachmentGrant() { throw new Error("query must not run for retryable failure"); },
+    async grantMailAttachments() {
+      grants += 1;
+      const error: any = new Error("inventory full");
+      error.code = "CAPACITY_BLOCKED";
+      error.errorCategory = "CAPACITY_BLOCKED";
+      error.resultState = "not_applied";
+      error.retryable = false;
+      error.playerRetryable = true;
+      throw error;
+    }
+  }, workerConfig(), null);
+
+  const result = await worker.processRecoveries();
+  const workflow = await store.getMailClaimWorkflow("mail-1");
+  const next = await worker.processRecoveries();
+
+  assert.equal(grants, 1);
+  assert.equal(result.recovered, 0);
+  assert.equal(workflow.status, "blocked_capacity");
+  assert.equal(workflow.claim_request_id, "mail_claim:mail-1");
+  assert.deepEqual(workflow.attachments_snapshot, frozenItems);
+  assert.equal(next.acquired, 0);
 });
 
 test("recovery attempt limit moves workflow to manual review", async () => {

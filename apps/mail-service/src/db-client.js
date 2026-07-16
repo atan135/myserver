@@ -20,6 +20,13 @@ const MAIL_SCHEMA_STATEMENTS = [
     created_by_type varchar(32) NOT NULL DEFAULT 'system',
     created_by_id varchar(64) NULL,
     created_by_name varchar(128) NULL,
+    delivery_request_id varchar(128) NULL,
+    delivery_character_id varchar(64) NULL,
+    delivery_fingerprint varchar(71) NULL,
+    origin_type varchar(32) NULL,
+    origin_id varchar(128) NULL,
+    delivery_policy varchar(32) NULL,
+    operator_json jsonb NULL,
     status varchar(32) NOT NULL DEFAULT 'unread',
     created_at timestamptz NOT NULL DEFAULT current_timestamp,
     read_at timestamptz NULL,
@@ -38,6 +45,7 @@ const MAIL_SCHEMA_STATEMENTS = [
     character_id varchar(64) NOT NULL,
     attachments_snapshot jsonb NOT NULL,
     attachments_fingerprint varchar(71) NOT NULL,
+    grant_contract_version smallint NOT NULL DEFAULT 1,
     status varchar(32) NOT NULL,
     attempts integer NOT NULL DEFAULT 1 CHECK (attempts > 0),
     lease_owner varchar(128) NULL,
@@ -71,7 +79,7 @@ const MAIL_SCHEMA_STATEMENTS = [
     CONSTRAINT uk_mail_claim_workflows_mail_id UNIQUE (mail_id),
     CONSTRAINT uk_mail_claim_workflows_request_id UNIQUE (claim_request_id),
     CONSTRAINT ck_mail_claim_workflows_status CHECK (
-      status IN ('processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
+      status IN ('processing', 'retryable_failure', 'blocked_capacity', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
     ),
     CONSTRAINT ck_mail_claim_workflows_snapshot CHECK (jsonb_typeof(attachments_snapshot) = 'array'),
     CONSTRAINT ck_mail_claim_workflows_fingerprint CHECK (attachments_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
@@ -107,12 +115,15 @@ const MAIL_SCHEMA_STATEMENTS = [
   `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_result_state varchar(32) NULL`,
   `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS last_query_instance_ids jsonb NULL`,
   `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS manual_review_at timestamptz NULL`,
+  `ALTER TABLE mail_claim_workflows ADD COLUMN IF NOT EXISTS grant_contract_version smallint NOT NULL DEFAULT 1`,
   `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_recovery_attempts`,
   `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_recovery_attempts CHECK (recovery_attempts >= 0)`,
   `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_status`,
   `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_status CHECK (
-     status IN ('processing', 'retryable_failure', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
+     status IN ('processing', 'retryable_failure', 'blocked_capacity', 'permanent_failure', 'reconciliation_pending', 'manual_review', 'claimed')
    )`,
+  `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_contract_version`,
+  `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_contract_version CHECK (grant_contract_version = 1)`,
   `ALTER TABLE mail_claim_workflows DROP CONSTRAINT IF EXISTS ck_mail_claim_workflows_recovery_lease`,
   `ALTER TABLE mail_claim_workflows ADD CONSTRAINT ck_mail_claim_workflows_recovery_lease CHECK (
      (recovery_mode IS NULL AND recovery_lease_owner IS NULL AND recovery_lease_token IS NULL AND recovery_lease_expires_at IS NULL)
@@ -223,6 +234,27 @@ const MAIL_SCHEMA_STATEMENTS = [
   `ALTER TABLE mails ADD COLUMN IF NOT EXISTS created_by_type varchar(32) NOT NULL DEFAULT 'system'`,
   `ALTER TABLE mails ADD COLUMN IF NOT EXISTS created_by_id varchar(64) NULL`,
   `ALTER TABLE mails ADD COLUMN IF NOT EXISTS created_by_name varchar(128) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS delivery_request_id varchar(128) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS delivery_character_id varchar(64) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS delivery_fingerprint varchar(71) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS origin_type varchar(32) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS origin_id varchar(128) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS delivery_policy varchar(32) NULL`,
+  `ALTER TABLE mails ADD COLUMN IF NOT EXISTS operator_json jsonb NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uk_mails_delivery_request_id
+     ON mails (delivery_request_id) WHERE delivery_request_id IS NOT NULL`,
+  `ALTER TABLE mails DROP CONSTRAINT IF EXISTS ck_mails_reward_delivery_metadata`,
+  `ALTER TABLE mails ADD CONSTRAINT ck_mails_reward_delivery_metadata CHECK (
+     delivery_request_id IS NULL OR (
+       delivery_fingerprint ~ '^sha256:[0-9a-f]{64}$'
+       AND delivery_character_id IS NOT NULL
+       AND origin_type IS NOT NULL
+       AND origin_id IS NOT NULL
+       AND delivery_policy = 'MAIL_ONLY'
+       AND operator_json IS NOT NULL
+       AND jsonb_typeof(operator_json) = 'object'
+     )
+   )`,
   `ALTER TABLE mails ADD COLUMN IF NOT EXISTS claimed_at timestamptz NULL`,
   `UPDATE mails
    SET sender_type = CASE

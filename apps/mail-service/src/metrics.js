@@ -40,6 +40,7 @@ export class MetricsCollector {
     this.mailClaimResultUnknown = 0;
     this.mailClaimRetryableFailures = 0;
     this.mailClaimPermanentFailures = 0;
+    this.mailClaimCapacityBlocked = 0;
     this.mailClaimAttempts = 0;
     this.mailClaimSucceeded = 0;
     this.mailClaimRecoveryAcquired = 0;
@@ -57,6 +58,7 @@ export class MetricsCollector {
     this.mailClaimLongRunning = 0;
     this.mailClaimFingerprintConflicts = 0;
     this.mailClaimManualReviewBacklog = 0;
+    this.mailClaimBlockedCapacityBacklog = 0;
 
     this.flushTimer = null;
   }
@@ -122,6 +124,10 @@ export class MetricsCollector {
     this.mailClaimPermanentFailures += 1;
   }
 
+  recordMailClaimCapacityBlocked() {
+    this.mailClaimCapacityBlocked += 1;
+  }
+
   recordMailClaimAttempt() {
     this.mailClaimAttempts += 1;
   }
@@ -130,10 +136,11 @@ export class MetricsCollector {
     this.mailClaimSucceeded += 1;
   }
 
-  setMailClaimOperationalSnapshot({ longRunning = 0, fingerprintConflicts = 0, manualReview = 0 } = {}) {
+  setMailClaimOperationalSnapshot({ longRunning = 0, fingerprintConflicts = 0, manualReview = 0, blockedCapacity = 0 } = {}) {
     this.mailClaimLongRunning = Math.max(0, Number(longRunning) || 0);
     this.mailClaimFingerprintConflicts = Math.max(0, Number(fingerprintConflicts) || 0);
     this.mailClaimManualReviewBacklog = Math.max(0, Number(manualReview) || 0);
+    this.mailClaimBlockedCapacityBacklog = Math.max(0, Number(blockedCapacity) || 0);
   }
 
   recordMailClaimRecoveryAcquired() {
@@ -195,6 +202,7 @@ export class MetricsCollector {
     const mailClaimResultUnknown = this.mailClaimResultUnknown;
     const mailClaimRetryableFailures = this.mailClaimRetryableFailures;
     const mailClaimPermanentFailures = this.mailClaimPermanentFailures;
+    const mailClaimCapacityBlocked = this.mailClaimCapacityBlocked;
     const mailClaimAttempts = this.mailClaimAttempts;
     const mailClaimSucceeded = this.mailClaimSucceeded;
     const mailClaimRecoveryAcquired = this.mailClaimRecoveryAcquired;
@@ -225,6 +233,7 @@ export class MetricsCollector {
     this.mailClaimResultUnknown = 0;
     this.mailClaimRetryableFailures = 0;
     this.mailClaimPermanentFailures = 0;
+    this.mailClaimCapacityBlocked = 0;
     this.mailClaimAttempts = 0;
     this.mailClaimSucceeded = 0;
     this.mailClaimRecoveryAcquired = 0;
@@ -266,11 +275,13 @@ export class MetricsCollector {
             mail_claim_result_unknown: mailClaimResultUnknown,
             mail_claim_retryable_failures: mailClaimRetryableFailures,
             mail_claim_permanent_failures: mailClaimPermanentFailures,
+            mail_claim_capacity_blocked: mailClaimCapacityBlocked,
             mail_claim_attempts: mailClaimAttempts,
             mail_claim_succeeded: mailClaimSucceeded,
             mail_claim_long_running: this.mailClaimLongRunning,
             mail_claim_fingerprint_conflicts: this.mailClaimFingerprintConflicts,
             mail_claim_manual_review_backlog: this.mailClaimManualReviewBacklog,
+            mail_claim_blocked_capacity_backlog: this.mailClaimBlockedCapacityBacklog,
             mail_claim_recovery_acquired: mailClaimRecoveryAcquired,
             mail_claim_recovered: mailClaimRecovered,
             mail_claim_recovery_unknown_age_ms: mailClaimRecoveryUnknownAgeMs,

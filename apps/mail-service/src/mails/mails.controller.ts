@@ -64,6 +64,14 @@ export class MailsController {
     return this.mailsService.create(body);
   }
 
+  @Post("reward-deliveries")
+  @ApiOperation({ summary: "Create an idempotent system reward mail from a trusted service" })
+  @ApiCreatedResponse({ schema: { example: { ok: true, mail_id: "mail_1", delivery_request_id: "reward_mail:1" } } })
+  createRewardDelivery(@Headers() headers: any, @Body() body: any) {
+    this.authenticateService(headers);
+    return this.mailsService.createRewardDelivery(body);
+  }
+
   @Put(":mailId/read")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Mark mail as read" })

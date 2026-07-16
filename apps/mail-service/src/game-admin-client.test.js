@@ -394,7 +394,8 @@ test("grant mail attachments payload keeps stable idempotency fields", () => {
     reason: "claim mail mail-1",
     traceId: "0123456789abcdef0123456789abcdef",
     routeGeneration: "",
-    routeToken: ""
+    routeToken: "",
+    contractVersion: 1
   });
   assert.equal("playerId" in JSON.parse(body.toString("utf8")), false);
 });

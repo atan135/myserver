@@ -447,6 +447,84 @@ test("permanent business failure remains explainable and retries the frozen snap
   assert.equal(calls[1][1], "mail_claim:mail-1");
 });
 
+test("capacity blocked preserves the frozen mail claim for a player-only retry", async () => {
+  let attempt = 0;
+  const { service, calls, mailStore } = createService({
+    grant: async (...args: any[]) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const error: any = new Error("inventory full");
+        error.code = "CAPACITY_BLOCKED";
+        error.errorCategory = "CAPACITY_BLOCKED";
+        error.resultState = "not_applied";
+        error.retryable = false;
+        error.playerRetryable = true;
+        throw error;
+      }
+      return {
+        ok: true,
+        traceId: args[4].traceId,
+        resultSummary: { characterId: args[0], source: "mail-claim", items: args[2] }
+      };
+    }
+  });
+
+  const blocked = await service.claim("mail-1", "player-1", "chr_1");
+  const beforeRetry = await mailStore.getMailClaimWorkflow("mail-1");
+  const recovery = await mailStore.reserveMailClaimRecoveries(10, { leaseOwner: "recovery", leaseMs: 30_000 });
+
+  assert.equal(blocked.claim_status, "blocked_capacity");
+  assert.equal(blocked._http_status, 409);
+  assert.equal(blocked.retryable, false);
+  assert.equal(blocked.player_retryable, true);
+  assert.equal(beforeRetry.status, "blocked_capacity");
+  assert.equal(beforeRetry.claim_request_id, "mail_claim:mail-1");
+  assert.deepEqual(beforeRetry.attachments_snapshot, [{ itemId: 1001, count: 2, binded: true }]);
+  assert.equal(recovery.workflows.length, 0);
+
+  const claimed = await service.claim("mail-1", "player-1", "chr_1");
+  assert.equal(claimed.claim_status, "claimed");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][1], calls[1][1]);
+  assert.deepEqual(calls[0][2], calls[1][2]);
+  assert.equal((await mailStore.getMailClaimWorkflow("mail-1")).status, "claimed");
+});
+
+test("trusted reward delivery is idempotent and protects unclaimed attachments from deletion", async () => {
+  const { service, mailStore } = createService({ mail: null });
+  const delivery = {
+    delivery_request_id: "reward_mail:quest-42",
+    mail_id: "mail-reward-42",
+    to_player_id: "player-1",
+    character_id: "chr_1",
+    origin_type: "quest",
+    origin_id: "quest:42",
+    delivery_policy: "MAIL_ONLY",
+    operator: { type: "service", id: "quest-service", name: "Quest Service" },
+    title: "Quest reward",
+    content: "",
+    attachments: [{ type: "item", id: 1001, count: 2, binded: true }]
+  };
+
+  const first = await service.createRewardDelivery(delivery);
+  const replay = await service.createRewardDelivery({ ...delivery, attachments: [{ type: "item", id: 1001, count: 2, binded: true }] });
+  const mail = await mailStore.getMailById("mail-reward-42");
+
+  assert.equal(first.idempotent_replay, false);
+  assert.equal(replay.idempotent_replay, true);
+  assert.equal(mail.delivery_request_id, delivery.delivery_request_id);
+  assert.equal(mail.origin_type, "quest");
+  assert.equal(mail.delivery_policy, "MAIL_ONLY");
+  await assert.rejects(
+    () => mailStore.deleteMail("mail-reward-42"),
+    (error: any) => error.code === "REWARD_MAIL_RETENTION_PROTECTED"
+  );
+  await assert.rejects(
+    () => service.createRewardDelivery({ ...delivery, title: "forged replacement" }),
+    (error: any) => error?.getResponse?.()?.error === "REWARD_DELIVERY_CONFLICT"
+  );
+});
+
 test("started workflow can finish from its frozen snapshot after hard mail deletion", async () => {
   let attempt = 0;
   const { service, mailStore } = createService({

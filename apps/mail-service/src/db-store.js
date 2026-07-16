@@ -84,6 +84,32 @@ function safeOutboxSnapshot(row) {
   };
 }
 
+function rewardMailIdentity(mail) {
+  return JSON.stringify({
+    delivery_request_id: mail.delivery_request_id || null,
+    delivery_character_id: mail.delivery_character_id || null,
+    delivery_fingerprint: mail.delivery_fingerprint || null,
+    mail_id: mail.mail_id || null,
+    to_player_id: mail.to_player_id || null,
+    origin_type: mail.origin_type || null,
+    origin_id: mail.origin_id || null,
+    delivery_policy: mail.delivery_policy || null,
+    title: mail.title || null,
+    content: mail.content || null,
+    attachments: parseAttachments(mail.attachments),
+    operator_json: parseJson(mail.operator_json)
+  });
+}
+
+function assertMatchingRewardMail(existing, candidate) {
+  if (rewardMailIdentity(existing) !== rewardMailIdentity(candidate)) {
+    throw createMailStoreError(
+      "REWARD_DELIVERY_CONFLICT",
+      "delivery_request_id was already used for different reward mail data"
+    );
+  }
+}
+
 async function rollbackQuietly(client) {
   try {
     await client.query("ROLLBACK");
@@ -100,6 +126,7 @@ export class DbMailStore {
     this.outboxLeaseOwner = options.outboxLeaseOwner || "mail-service";
     this.memory = new Map();
     this.memoryNextId = 1;
+    this.memoryRewardDeliveryRequests = new Map();
     this.memoryClaimWorkflows = new Map();
     this.memoryClaimWorkflowRequestIds = new Map();
     this.memoryClaimWorkflowNextId = 1;
@@ -138,6 +165,13 @@ export class DbMailStore {
         created_by_type: mail.created_by_type || (isSystemSender ? "system" : "player"),
         created_by_id: mail.created_by_id || normalizedSenderId,
         created_by_name: mail.created_by_name || mail.sender_name || (isSystemSender ? "系统" : normalizedSenderId),
+        delivery_request_id: mail.delivery_request_id || null,
+        delivery_character_id: mail.delivery_character_id || null,
+        delivery_fingerprint: mail.delivery_fingerprint || null,
+        origin_type: mail.origin_type || null,
+        origin_id: mail.origin_id || null,
+        delivery_policy: mail.delivery_policy || null,
+        operator_json: cloneAttachments(mail.operator_json),
         status: mail.status || "unread",
         created_at: createdAt,
         read_at: toDateOrNull(mail.read_at),
@@ -198,6 +232,92 @@ export class DbMailStore {
     }
   }
 
+  async createRewardMailWithNotificationOutbox(mail) {
+    if (!mail?.delivery_request_id || !mail?.delivery_fingerprint || mail.delivery_policy !== "MAIL_ONLY") {
+      throw createMailStoreError("INVALID_REWARD_DELIVERY", "reward mail requires immutable delivery metadata");
+    }
+
+    if (!this.pool) {
+      const existingMailId = this.memoryRewardDeliveryRequests.get(mail.delivery_request_id);
+      if (existingMailId) {
+        const existing = this.memory.get(existingMailId);
+        assertMatchingRewardMail(existing, mail);
+        const outbox = Array.from(this.memoryOutbox.values())
+          .find((entry) => entry.mail_id === existingMailId);
+        return { mailId: existing?.id, outboxId: outbox?.id || null, idempotent: true };
+      }
+
+      const created = await this.createMailWithNotificationOutbox(mail);
+      this.memoryRewardDeliveryRequests.set(mail.delivery_request_id, mail.mail_id);
+      return { ...created, idempotent: false };
+    }
+
+    const event = buildMailNotificationEvent(mail);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existingResult = await client.query(
+        `SELECT * FROM mails WHERE delivery_request_id = $1 FOR UPDATE`,
+        [mail.delivery_request_id]
+      );
+      if (existingResult.rows[0]) {
+        assertMatchingRewardMail(existingResult.rows[0], mail);
+        const outboxResult = await client.query(
+          `SELECT id FROM mail_notification_outbox WHERE mail_id = $1`,
+          [mail.mail_id]
+        );
+        await client.query("COMMIT");
+        return {
+          mailId: existingResult.rows[0].id,
+          outboxId: outboxResult.rows[0]?.id || null,
+          idempotent: true
+        };
+      }
+
+      const mailId = await this.insertMail(client, mail);
+      const outboxResult = await client.query(
+        `INSERT INTO mail_notification_outbox
+          (mail_id, to_player_id, event_id, event_version, trace_id, occurred_at,
+           payload, status, max_attempts, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', $8, current_timestamp)
+         RETURNING id`,
+        [
+          mail.mail_id,
+          mail.to_player_id,
+          event.event_id,
+          event.version,
+          event.trace_id,
+          event.occurred_at,
+          JSON.stringify(event),
+          this.outboxMaxAttempts
+        ]
+      );
+      await client.query("COMMIT");
+      return { mailId, outboxId: outboxResult.rows[0].id, idempotent: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      // A concurrently committed matching delivery is an idempotent replay, not a 500. Read it
+      // only after the failed transaction is rolled back so PostgreSQL exposes the winner.
+      if (error?.code === "23505") {
+        const { rows } = await this.pool.query(
+          `SELECT * FROM mails WHERE delivery_request_id = $1`,
+          [mail.delivery_request_id]
+        );
+        if (rows[0]) {
+          assertMatchingRewardMail(rows[0], mail);
+          const outbox = await this.pool.query(
+            `SELECT id FROM mail_notification_outbox WHERE mail_id = $1`,
+            [mail.mail_id]
+          );
+          return { mailId: rows[0].id, outboxId: outbox.rows[0]?.id || null, idempotent: true };
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async insertMail(executor, mail) {
     const sql = `INSERT INTO mails
       (
@@ -214,9 +334,16 @@ export class DbMailStore {
         created_by_type,
         created_by_id,
         created_by_name,
+        delivery_request_id,
+        delivery_character_id,
+        delivery_fingerprint,
+        origin_type,
+        origin_id,
+        delivery_policy,
+        operator_json,
         expires_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb)
       RETURNING id`;
 
     const attachments = mail.attachments
@@ -237,6 +364,13 @@ export class DbMailStore {
       mail.created_by_type,
       mail.created_by_id || null,
       mail.created_by_name || null,
+      mail.delivery_request_id || null,
+      mail.delivery_character_id || null,
+      mail.delivery_fingerprint || null,
+      mail.origin_type || null,
+      mail.origin_id || null,
+      mail.delivery_policy || null,
+      mail.operator_json ? JSON.stringify(mail.operator_json) : null,
       mail.expires_at || null
     ]);
 
@@ -614,6 +748,7 @@ export class DbMailStore {
     const unfinishedStatuses = [
       "processing",
       "retryable_failure",
+      "blocked_capacity",
       "permanent_failure",
       "reconciliation_pending",
       "manual_review"
@@ -704,6 +839,7 @@ export class DbMailStore {
         character_id: input.characterId,
         attachments_snapshot: cloneAttachments(input.attachmentsSnapshot),
         attachments_fingerprint: input.attachmentsFingerprint,
+        grant_contract_version: input.grantContractVersion || 1,
         status: "processing",
         attempts: 1,
         lease_owner: leaseOwner,
@@ -793,12 +929,12 @@ export class DbMailStore {
       }
 
       const insertResult = await client.query(
-        `INSERT INTO mail_claim_workflows
+         `INSERT INTO mail_claim_workflows
           (mail_id, player_id, claim_request_id, character_id, attachments_snapshot,
-           attachments_fingerprint, status, attempts, lease_owner, lease_token,
+           attachments_fingerprint, grant_contract_version, status, attempts, lease_owner, lease_token,
            lease_expires_at, last_trace_id)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'processing', 1, $7, $8,
-                 current_timestamp + ($9 * interval '1 millisecond'), $10)
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'processing', 1, $8, $9,
+                  current_timestamp + ($10 * interval '1 millisecond'), $11)
          RETURNING *`,
         [
           input.mailId,
@@ -807,6 +943,7 @@ export class DbMailStore {
           input.characterId,
           JSON.stringify(input.attachmentsSnapshot),
           input.attachmentsFingerprint,
+          input.grantContractVersion || 1,
           leaseOwner,
           leaseToken,
           leaseMs,
@@ -941,7 +1078,7 @@ export class DbMailStore {
       return { updated: false, workflow: await this.getMailClaimWorkflow(mailId) };
     }
     const status = failure.status;
-    if (!new Set(["retryable_failure", "permanent_failure", "reconciliation_pending"]).has(status)) {
+    if (!new Set(["retryable_failure", "blocked_capacity", "permanent_failure", "reconciliation_pending"]).has(status)) {
       throw new Error(`invalid mail claim failure status: ${status}`);
     }
 
@@ -1306,7 +1443,7 @@ export class DbMailStore {
 
   async rescheduleMailClaimRecovery(mailId, recoveryLeaseToken, outcome = {}) {
     const status = outcome.status;
-    if (!new Set(["retryable_failure", "reconciliation_pending"]).has(status)) {
+    if (!new Set(["retryable_failure", "blocked_capacity", "reconciliation_pending"]).has(status)) {
       throw new Error(`invalid mail claim recovery status: ${status}`);
     }
     const delayMs = Math.max(0, Number(outcome.delayMs) || 0);
@@ -1581,6 +1718,10 @@ export class DbMailStore {
           return {
             ...workflow,
             mail_status: mail?.status || null,
+            delivery_request_id: mail?.delivery_request_id || null,
+            origin_type: mail?.origin_type || null,
+            origin_id: mail?.origin_id || null,
+            delivery_policy: mail?.delivery_policy || null,
             outbox_event_id: outbox?.event_id || null,
             outbox_status: outbox?.status || null,
             outbox_attempts: outbox?.attempts || 0,
@@ -1606,9 +1747,13 @@ export class DbMailStore {
     if (beforeId) clauses.push(`workflow.id < ${add(beforeId)}`);
     params.push(limit + 1);
     const { rows } = await this.pool.query(
-      `SELECT workflow.*,
-              mail.status AS mail_status,
-              outbox.event_id AS outbox_event_id,
+       `SELECT workflow.*,
+               mail.status AS mail_status,
+               mail.delivery_request_id AS delivery_request_id,
+               mail.origin_type AS origin_type,
+               mail.origin_id AS origin_id,
+               mail.delivery_policy AS delivery_policy,
+               outbox.event_id AS outbox_event_id,
               outbox.status AS outbox_status,
               outbox.attempts AS outbox_attempts,
               outbox.terminal_at AS outbox_terminal_at
@@ -1624,6 +1769,10 @@ export class DbMailStore {
     const items = rows.slice(0, limit).map((row) => ({
       ...this.parseClaimWorkflowRow(row),
       mail_status: row.mail_status,
+      delivery_request_id: row.delivery_request_id || null,
+      origin_type: row.origin_type || null,
+      origin_id: row.origin_id || null,
+      delivery_policy: row.delivery_policy || null,
       outbox_event_id: row.outbox_event_id,
       outbox_status: row.outbox_status,
       outbox_attempts: Number(row.outbox_attempts) || 0,
@@ -1948,7 +2097,8 @@ export class DbMailStore {
         fingerprintConflicts: rows.filter((row) =>
           row.last_error_code === "REQUEST_FINGERPRINT_CONFLICT" || row.last_query_status === "conflict"
         ).length,
-        manualReview: rows.filter((row) => row.status === "manual_review").length
+        manualReview: rows.filter((row) => row.status === "manual_review").length,
+        blockedCapacity: rows.filter((row) => row.status === "blocked_capacity").length
       };
     }
     const { rows } = await this.pool.query(
@@ -1961,14 +2111,16 @@ export class DbMailStore {
               COUNT(*) FILTER (
                 WHERE last_error_code = 'REQUEST_FINGERPRINT_CONFLICT' OR last_query_status = 'conflict'
               )::bigint AS fingerprint_conflicts,
-              COUNT(*) FILTER (WHERE status = 'manual_review')::bigint AS manual_review
+              COUNT(*) FILTER (WHERE status = 'manual_review')::bigint AS manual_review,
+              COUNT(*) FILTER (WHERE status = 'blocked_capacity')::bigint AS blocked_capacity
          FROM mail_claim_workflows`,
       [longRunningBefore]
     );
     return {
       longRunning: Number(rows[0]?.long_running) || 0,
       fingerprintConflicts: Number(rows[0]?.fingerprint_conflicts) || 0,
-      manualReview: Number(rows[0]?.manual_review) || 0
+      manualReview: Number(rows[0]?.manual_review) || 0,
+      blockedCapacity: Number(rows[0]?.blocked_capacity) || 0
     };
   }
 
@@ -1991,13 +2143,30 @@ export class DbMailStore {
     };
   }
 
-  async deleteMail(mailId) {
+  async deleteMail(mailId, options = {}) {
     if (!this.pool) {
-      return this.memory.delete(mailId);
+      const mail = this.memory.get(mailId);
+      if (mail?.delivery_request_id && mail?.attachments && !mail.claimed_at && mail.status !== "claimed" && !options.allowRewardRetentionBypass) {
+        throw createMailStoreError(
+          "REWARD_MAIL_RETENTION_PROTECTED",
+          "unclaimed system reward mail cannot be hard deleted"
+        );
+      }
+      const deleted = this.memory.delete(mailId);
+      if (deleted && mail?.delivery_request_id) this.memoryRewardDeliveryRequests.delete(mail.delivery_request_id);
+      return deleted;
     }
 
-    const sql = `DELETE FROM mails WHERE mail_id = $1`;
-    const result = await this.pool.query(sql, [mailId]);
+    const sql = `DELETE FROM mails
+                  WHERE mail_id = $1
+                    AND (
+                      $2::boolean
+                      OR delivery_request_id IS NULL
+                      OR claimed_at IS NOT NULL
+                      OR status = 'claimed'
+                      OR attachments IS NULL
+                    )`;
+    const result = await this.pool.query(sql, [mailId, options.allowRewardRetentionBypass === true]);
     return result.rowCount > 0;
   }
 
@@ -2038,6 +2207,13 @@ export class DbMailStore {
       created_by_type: row.created_by_type || (isSystemSender ? "system" : "player"),
       created_by_id: row.created_by_id || normalizedSenderId,
       created_by_name: row.created_by_name || row.sender_name || (isSystemSender ? "系统" : normalizedSenderId),
+      delivery_request_id: row.delivery_request_id || null,
+      delivery_character_id: row.delivery_character_id || null,
+      delivery_fingerprint: row.delivery_fingerprint || null,
+      origin_type: row.origin_type || null,
+      origin_id: row.origin_id || null,
+      delivery_policy: row.delivery_policy || null,
+      operator_json: cloneAttachments(parseJson(row.operator_json)),
       status: row.status,
       created_at: row.created_at,
       read_at: row.read_at,
@@ -2089,6 +2265,7 @@ export class DbMailStore {
       character_id: row.character_id,
       attachments_snapshot: cloneAttachments(parseJson(row.attachments_snapshot)),
       attachments_fingerprint: row.attachments_fingerprint,
+      grant_contract_version: Number(row.grant_contract_version) || 1,
       status: row.status,
       attempts: Number(row.attempts) || 0,
       lease_owner: row.lease_owner,

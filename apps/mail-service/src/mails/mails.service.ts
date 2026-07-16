@@ -1,5 +1,5 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { badRequest, conflict, forbidden, gone, notFound, serviceUnavailable } from "../common/http-exception.js";
 import { computeGrantRequestFingerprint, normalizeGrantItems } from "../game-admin-client.js";
@@ -127,6 +127,90 @@ function normalizeMailAttachmentItems(attachments: any) {
   });
 }
 
+const REWARD_ORIGIN_TYPES = new Set([
+  "achievement", "quest", "battle", "scene_pickup", "activity", "ranking",
+  "world_event", "gm", "system"
+]);
+const STABLE_IDENTIFIER = /^[A-Za-z0-9:_-]+$/;
+
+function boundedRewardIdentifier(value: any, field: string, maxBytes = 128) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized || Buffer.byteLength(normalized, "utf8") > maxBytes || !STABLE_IDENTIFIER.test(normalized)) {
+    throw badRequest(`INVALID_${field.toUpperCase()}`, `${field} is invalid`);
+  }
+  return normalized;
+}
+
+function normalizedRewardDelivery(body: any = {}) {
+  const deliveryRequestId = boundedRewardIdentifier(body.delivery_request_id, "delivery_request_id");
+  const mailId = boundedRewardIdentifier(body.mail_id, "mail_id", 64);
+  const playerId = boundedRewardIdentifier(body.to_player_id, "to_player_id", 64);
+  const characterId = boundedRewardIdentifier(body.character_id, "character_id", 64);
+  const originType = typeof body.origin_type === "string" ? body.origin_type.trim() : "";
+  if (!REWARD_ORIGIN_TYPES.has(originType)) {
+    throw badRequest("INVALID_ORIGIN_TYPE", "origin_type is invalid");
+  }
+  const originId = boundedRewardIdentifier(body.origin_id, "origin_id");
+  if (body.delivery_policy !== "MAIL_ONLY") {
+    throw badRequest("INVALID_DELIVERY_POLICY", "system reward mail requires MAIL_ONLY delivery_policy");
+  }
+  if (body.expires_at) {
+    throw badRequest("REWARD_MAIL_EXPIRY_FORBIDDEN", "unclaimed system reward mail cannot expire");
+  }
+  const operator = body.operator;
+  if (!operator || typeof operator !== "object" || Array.isArray(operator)) {
+    throw badRequest("INVALID_OPERATOR", "operator is required for reward delivery");
+  }
+  const operatorType = boundedRewardIdentifier(operator.type, "operator_type", 32);
+  const operatorId = boundedRewardIdentifier(operator.id, "operator_id", 128);
+  const operatorName = typeof operator.name === "string" ? operator.name.trim().slice(0, 128) : "";
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  if (!title || Buffer.byteLength(title, "utf8") > 256) {
+    throw badRequest("INVALID_TITLE", "title is required and must be at most 256 bytes");
+  }
+  const normalizedItems = normalizeGrantItems(normalizeMailAttachmentItems(body.attachments));
+  const attachments = normalizedItems.map((item) => ({
+    type: "item",
+    id: item.itemId,
+    count: item.count,
+    binded: item.binded
+  }));
+  const canonical = JSON.stringify({
+    delivery_request_id: deliveryRequestId,
+    mail_id: mailId,
+    to_player_id: playerId,
+    character_id: characterId,
+    origin_type: originType,
+    origin_id: originId,
+    delivery_policy: "MAIL_ONLY",
+    attachments: normalizedItems,
+    operator: { type: operatorType, id: operatorId, name: operatorName }
+  });
+  return {
+    mail_id: mailId,
+    to_player_id: playerId,
+    title,
+    content: typeof body.content === "string" ? body.content : "",
+    attachments,
+    mail_type: "system_reward",
+    sender_type: "system",
+    sender_id: "system",
+    sender_name: "系统",
+    from_player_id: "system",
+    created_by_type: "system",
+    created_by_id: "system",
+    created_by_name: "系统",
+    delivery_request_id: deliveryRequestId,
+    delivery_fingerprint: `sha256:${createHash("sha256").update(canonical).digest("hex")}`,
+    origin_type: originType,
+    origin_id: originId,
+    delivery_policy: "MAIL_ONLY",
+    operator_json: { type: operatorType, id: operatorId, name: operatorName },
+    // Bound to this delivery at creation; it is never sourced from a player claim request.
+    delivery_character_id: characterId
+  };
+}
+
 function classifyClaimFailure(error: any) {
   const resultState = error?.resultState || (error?.requestWritten === true ? "unknown" : "not_applied");
   const errorCategory = error?.errorCategory || (resultState === "unknown" ? "RESULT_UNKNOWN" : "RETRYABLE_FAILURE");
@@ -136,6 +220,19 @@ function classifyClaimFailure(error: any) {
   ]).has(error?.code);
   if (resultState === "unknown" || errorCategory === "RESULT_UNKNOWN") {
     return { status: "reconciliation_pending", httpStatus: 202, retryable: false, resultState: "unknown", errorCategory };
+  }
+  if (
+    resultState === "not_applied" &&
+    (error?.code === "CAPACITY_BLOCKED" || error?.code === "INVENTORY_FULL" || error?.playerRetryable === true)
+  ) {
+    return {
+      status: "blocked_capacity",
+      httpStatus: 409,
+      retryable: false,
+      playerRetryable: true,
+      resultState: "not_applied",
+      errorCategory: "CAPACITY_BLOCKED"
+    };
   }
   if (
     errorCategory === "PERMANENT_FAILURE" ||
@@ -156,6 +253,7 @@ function classifyClaimFailure(error: any) {
 function claimStatusHttpStatus(claimStatus: string) {
   if (claimStatus === "processing" || claimStatus === "reconciliation_pending") return 202;
   if (claimStatus === "manual_review") return 409;
+  if (claimStatus === "blocked_capacity") return 409;
   if (claimStatus === "retryable_failure") return 503;
   if (claimStatus === "permanent_failure") return 422;
   return 200;
@@ -183,6 +281,7 @@ function publicClaimError(claimStatus: string, internalErrorCode: any, errorCate
       ? internalErrorCode
       : "MAIL_CLAIM_PERMANENT_FAILURE";
   }
+  if (claimStatus === "blocked_capacity") return "INVENTORY_CAPACITY_BLOCKED";
   if (claimStatus === "reconciliation_pending") {
     return "MAIL_CLAIM_RECONCILIATION_PENDING";
   }
@@ -197,6 +296,7 @@ function publicClaimMessage(claimStatus: string, publicErrorCode: any) {
   if (claimStatus === "retryable_failure") return "Mail attachment claim could not be completed yet; retry later";
   if (claimStatus === "reconciliation_pending") return "Mail attachment claim result is being verified";
   if (claimStatus === "manual_review") return "Mail attachment claim requires support review";
+  if (claimStatus === "blocked_capacity") return "Make inventory space, then claim this mail again";
   if (claimStatus === "permanent_failure") {
     return PUBLIC_PERMANENT_CLAIM_ERRORS.get(publicErrorCode) || "Mail attachments cannot be claimed in the current state";
   }
@@ -219,6 +319,7 @@ function claimResponse(workflow: any, mail: any, options: any = {}) {
     already_claimed: options.alreadyClaimed ?? isClaimed,
     processing: claimStatus === "processing",
     retryable: options.retryable ?? workflow?.last_error_retryable ?? false,
+    player_retryable: options.playerRetryable ?? claimStatus === "blocked_capacity",
     request_id: workflow?.claim_request_id,
     character_id: workflow?.character_id,
     attachments_fingerprint: workflow?.attachments_fingerprint,
@@ -462,6 +563,44 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async createRewardDelivery(body: any) {
+    try {
+      const mail = normalizedRewardDelivery(body);
+      const created = await this.mailStore.createRewardMailWithNotificationOutbox(mail);
+      let outboxResult = { sent: 0, failed: 0, terminal: 0 };
+      try {
+        outboxResult = await this.processPendingNotificationOutbox(1);
+      } catch (error: any) {
+        log("warn", "mail.reward_delivery_outbox_immediate_process_failed", {
+          deliveryRequestId: mail.delivery_request_id,
+          mailId: mail.mail_id,
+          error: String(error.message || "unknown outbox error").slice(0, 512)
+        });
+      }
+      log("info", created.idempotent ? "mail.reward_delivery_replayed" : "mail.reward_delivery_created", {
+        deliveryRequestId: mail.delivery_request_id,
+        mailId: mail.mail_id,
+        originType: mail.origin_type,
+        originId: mail.origin_id,
+        outboxSent: outboxResult.sent,
+        outboxFailed: outboxResult.failed
+      });
+      return {
+        ok: true,
+        mail_id: mail.mail_id,
+        delivery_request_id: mail.delivery_request_id,
+        idempotent_replay: created.idempotent === true
+      };
+    } catch (error: any) {
+      if (error?.getStatus?.()) throw error;
+      if (error?.code === "REWARD_DELIVERY_CONFLICT") {
+        throw conflict("REWARD_DELIVERY_CONFLICT", "delivery request conflicts with an existing reward mail");
+      }
+      log("error", "route.create_reward_delivery_failed", { error: error.message });
+      throw error;
+    }
+  }
+
   async create(body: any) {
     try {
       const { to_player_id, title, content, attachments, mail_type, expires_at } = body || {};
@@ -665,6 +804,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
         requestId,
         attachmentsSnapshot: normalizedAttachments,
         attachmentsFingerprint,
+        grantContractVersion: existingWorkflow?.grant_contract_version || 1,
         expectedAttachments: mail?.attachments,
         traceId
       }, {
@@ -736,7 +876,8 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           {
             targetInstanceId,
             traceId,
-            requestFingerprint: existingWorkflow.attachments_fingerprint
+            requestFingerprint: existingWorkflow.attachments_fingerprint,
+            contractVersion: existingWorkflow.grant_contract_version || 1
           }
         );
       } catch (error: any) {
@@ -766,6 +907,8 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           this.metrics?.recordMailClaimResultUnknown?.();
         } else if (classification.status === "retryable_failure") {
           this.metrics?.recordMailClaimRetryableFailure?.();
+        } else if (classification.status === "blocked_capacity") {
+          this.metrics?.recordMailClaimCapacityBlocked?.();
         } else {
           this.metrics?.recordMailClaimPermanentFailure?.();
         }
@@ -789,6 +932,7 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
           httpStatus: classification.httpStatus,
           ok: classification.status === "reconciliation_pending",
           retryable: classification.retryable,
+          playerRetryable: classification.playerRetryable,
           errorCode: error?.code || "GAME_SERVER_GRANT_FAILED",
           errorCategory: classification.errorCategory,
           resultState: classification.resultState

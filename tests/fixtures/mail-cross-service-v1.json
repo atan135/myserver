@@ -95,7 +95,8 @@
       "reason": "cross-service contract fixture",
       "traceId": "fedcba9876543210fedcba9876543210",
       "routeGeneration": "42",
-      "routeToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "routeToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contractVersion": 1
     }
   }
 }

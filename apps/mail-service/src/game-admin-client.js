@@ -262,6 +262,10 @@ function buildGrantMailAttachmentsPayload(characterId, requestId, attachments, r
   const traceId = options.traceId || crypto.randomBytes(16).toString("hex");
   const routeGeneration = options.routeGeneration || "";
   const routeToken = options.routeToken || "";
+  const contractVersion = options.contractVersion === undefined ? 1 : Number(options.contractVersion);
+  if (!Number.isInteger(contractVersion) || contractVersion !== 1) {
+    throw createAdminError("UNSUPPORTED_MAIL_CLAIM_CONTRACT_VERSION", "unsupported mail claim contract version");
+  }
   return Buffer.from(JSON.stringify({
     requestId,
     mailId,
@@ -272,7 +276,8 @@ function buildGrantMailAttachmentsPayload(characterId, requestId, attachments, r
     reason,
     traceId,
     routeGeneration,
-    routeToken
+    routeToken,
+    contractVersion
   }));
 }
 
@@ -754,6 +759,10 @@ export class GameAdminClient {
         "persisted attachment fingerprint does not match the canonical grant request"
       );
     }
+    const contractVersion = options.contractVersion === undefined ? 1 : Number(options.contractVersion);
+    if (!Number.isInteger(contractVersion) || contractVersion !== 1) {
+      throw createAdminError("UNSUPPORTED_MAIL_CLAIM_CONTRACT_VERSION", "unsupported mail claim contract version");
+    }
     const traceId = options.traceId || crypto.randomBytes(16).toString("hex");
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -770,7 +779,8 @@ export class GameAdminClient {
             requestFingerprint,
             traceId,
             routeGeneration: resolved.route.authorityGeneration,
-            routeToken: resolved.route.authorityToken
+            routeToken: resolved.route.authorityToken,
+            contractVersion
           }
         );
         const responseBody = await sendRequest(
@@ -1015,7 +1025,8 @@ function decodeGrantItemsResponse(body) {
     resultState: protobufString(fields, 7),
     retryable: protobufBool(fields, 8),
     resultSummary,
-    traceId: protobufString(fields, 10)
+    traceId: protobufString(fields, 10),
+    playerRetryable: protobufBool(fields, 11)
   };
 }
 
@@ -1049,7 +1060,8 @@ function decodeGrantResultQueryResponse(body) {
     retryable: protobufBool(fields, 8),
     resultSummary,
     traceId: protobufString(fields, 10),
-    createdAtMs: protobufNumber(fields, 11)
+    createdAtMs: protobufNumber(fields, 11),
+    contractVersion: protobufNumber(fields, 12)
   };
 }
 
@@ -1163,6 +1175,7 @@ function validateGrantItemsResponse(result, expected) {
     error.errorCategory = result.errorCategory || "RETRYABLE_FAILURE";
     error.resultState = result.resultState || "not_applied";
     error.retryable = result.retryable;
+    error.playerRetryable = result.playerRetryable === true;
     error.requestWritten = true;
     error.structuredGrantFailure = Boolean(result.errorCategory && result.resultState === "not_applied");
     throw error;

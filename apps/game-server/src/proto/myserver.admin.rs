@@ -59,6 +59,10 @@ pub struct GrantItemsReq {
     pub route_generation: ::prost::alloc::string::String,
     #[prost(string, tag = "10")]
     pub route_token: ::prost::alloc::string::String,
+    /// Zero is the original v1 wire shape. Mail claim callers now send one explicitly
+    /// so rolling-upgrade peers remain compatible.
+    #[prost(uint32, tag = "11")]
+    pub contract_version: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GrantItemsResultSummary {
@@ -91,6 +95,10 @@ pub struct GrantItemsRes {
     pub result_summary: ::core::option::Option<GrantItemsResultSummary>,
     #[prost(string, tag = "10")]
     pub trace_id: ::prost::alloc::string::String,
+    /// A capacity-blocked mail claim is not infrastructure-retryable, but a player
+    /// may retry the same frozen request after clearing inventory space.
+    #[prost(bool, tag = "11")]
+    pub player_retryable: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GrantItemsResultQueryReq {
@@ -125,4 +133,6 @@ pub struct GrantItemsResultQueryRes {
     pub trace_id: ::prost::alloc::string::String,
     #[prost(int64, tag = "11")]
     pub created_at_ms: i64,
+    #[prost(uint32, tag = "12")]
+    pub contract_version: u32,
 }

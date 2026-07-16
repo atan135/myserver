@@ -275,6 +275,7 @@ pub(super) async fn handle_gm_send_item(
                         &outcome.record.result_summary,
                     )),
                     trace_id: request.trace_id.clone(),
+                    player_retryable: false,
                 },
                 true,
                 audit_result,
@@ -283,6 +284,14 @@ pub(super) async fn handle_gm_send_item(
             .await
         }
         Err(failure) => {
+            // Capacity is a definite, uncommitted outcome only for the frozen mail-claim
+            // workflow. Keep the legacy GM error unchanged for every other source.
+            let failure =
+                if request.source == "mail-claim" && failure.error_code == "INVENTORY_FULL" {
+                    capacity_blocked_grant_failure()
+                } else {
+                    failure
+                };
             if request.source == "mail-claim" {
                 if failure.error_code == "REQUEST_FINGERPRINT_CONFLICT" {
                     METRICS.record_inventory_grant_fingerprint_conflict();
@@ -376,6 +385,7 @@ pub(super) async fn handle_grant_items_result_query(
             result_summary: None,
             trace_id: request.trace_id.clone(),
             created_at_ms: 0,
+            contract_version: 1,
         },
         Ok(GrantRecordLookup::Succeeded(record))
             if !request.request_fingerprint.is_empty()
@@ -476,6 +486,7 @@ fn grant_failure_response(
         retryable: failure.retryable,
         result_summary: None,
         trace_id: trace_id.to_string(),
+        player_retryable: failure.error_code == "CAPACITY_BLOCKED",
     }
 }
 
@@ -492,6 +503,7 @@ fn grant_query_success_response(record: &GrantRecord, trace_id: &str) -> GrantIt
         result_summary: Some(grant_result_summary_to_proto(&record.result_summary)),
         trace_id: trace_id.to_string(),
         created_at_ms: record.created_at_ms,
+        contract_version: 1,
     }
 }
 
@@ -521,6 +533,7 @@ fn grant_query_failure_response(
         result_summary: None,
         trace_id: trace_id.to_string(),
         created_at_ms: 0,
+        contract_version: 1,
     }
 }
 
@@ -573,6 +586,15 @@ fn route_unavailable_grant_failure(error_code: &'static str) -> GrantItemsError 
         error_category: "ROUTE_UNAVAILABLE",
         result_state: "not_applied",
         retryable: true,
+    }
+}
+
+fn capacity_blocked_grant_failure() -> GrantItemsError {
+    GrantItemsError {
+        error_code: "CAPACITY_BLOCKED",
+        error_category: "CAPACITY_BLOCKED",
+        result_state: "not_applied",
+        retryable: false,
     }
 }
 
@@ -1065,6 +1087,13 @@ async fn validate_grant_items_request(
         if !is_lower_hex(&request.route_token, GRANT_ROUTE_TOKEN_LEN) {
             return Err(invalid_grant_request("INVALID_ROUTE_TOKEN"));
         }
+        // Existing v1 callers omit this field, which protobuf decodes as zero. We accept that
+        // shape while rejecting future semantics the mail-service cannot safely interpret.
+        if request.contract_version > 1 {
+            return Err(invalid_grant_request(
+                "UNSUPPORTED_MAIL_CLAIM_CONTRACT_VERSION",
+            ));
+        }
         request.mail_id.as_str()
     } else {
         ""
@@ -1133,6 +1162,8 @@ pub(super) fn decode_grant_items_request(
         route_generation: Option<String>,
         #[serde(rename = "routeToken")]
         route_token: Option<String>,
+        #[serde(rename = "contractVersion")]
+        contract_version: Option<u32>,
     }
 
     let request: GmSendItemRequest = serde_json::from_slice(&packet.body)?;
@@ -1183,6 +1214,8 @@ pub(super) fn decode_grant_items_request(
         trace_id: request.trace_id.unwrap_or_default(),
         route_generation: request.route_generation.unwrap_or_default(),
         route_token: request.route_token.unwrap_or_default(),
+        // Omitted means the historical v1 JSON request. Newer mail-service callers send one.
+        contract_version: request.contract_version.unwrap_or(0),
     })
 }
 

@@ -217,7 +217,8 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
         "recover mail attachment claim",
         {
           traceId,
-          requestFingerprint: workflow.attachments_fingerprint
+          requestFingerprint: workflow.attachments_fingerprint,
+          contractVersion: workflow.grant_contract_version || 1
         }
       );
       const completed = await this.mailStore.completeMailClaimRecovery(
@@ -255,6 +256,28 @@ export class ClaimRecoveryWorker implements OnModuleInit, OnModuleDestroy {
           message: error?.message || "game-server grant result is unknown",
           instanceId: error?.instanceId || ""
         });
+      }
+      if (
+        resultState === "not_applied" &&
+        (error?.code === "CAPACITY_BLOCKED" || error?.code === "INVENTORY_FULL" || error?.playerRetryable === true)
+      ) {
+        this.metrics?.recordMailClaimCapacityBlocked?.();
+        const updated = await this.mailStore.rescheduleMailClaimRecovery(
+          workflow.mail_id,
+          workflow.recovery_lease_token,
+          {
+            ...queryEvidence(query),
+            status: "blocked_capacity",
+            traceId: error?.traceId || traceId,
+            errorCode: "CAPACITY_BLOCKED",
+            errorCategory: "CAPACITY_BLOCKED",
+            resultState: "not_applied",
+            retryable: false,
+            message: "inventory capacity is full; wait for the player to retry after making space",
+            instanceId: error?.instanceId || ""
+          }
+        );
+        return updated ? "blocked" : "stale";
       }
       if (error?.retryable === false || errorCategory === "PERMANENT_FAILURE") {
         this.metrics?.recordMailClaimPermanentFailure?.();

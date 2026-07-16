@@ -323,6 +323,7 @@ async fn gm_send_item_audit_event_targets_character() {
         trace_id: String::new(),
         route_generation: String::new(),
         route_token: String::new(),
+        contract_version: 1,
     };
     let packet = bytes_packet(MessageType::GmSendItemReq, 11, encode_body(&request));
     let target = AdminAuditTarget {
@@ -714,6 +715,10 @@ fn shared_node_fixture_is_decoded_by_the_game_grant_request_parser() {
         expected["routeGeneration"].as_str().unwrap()
     );
     assert_eq!(parsed.route_token, expected["routeToken"].as_str().unwrap());
+    assert_eq!(
+        parsed.contract_version,
+        expected["contractVersion"].as_u64().unwrap() as u32
+    );
     assert_eq!(parsed.items.len(), 4);
     assert_eq!(parsed.items[0].item_id, 1001);
     assert_eq!(parsed.items[0].count, 9);
@@ -839,6 +844,7 @@ fn mail_claim_with_stale_route_fence_is_rejected_before_asset_side_effects() {
         trace_id: "b".repeat(32),
         route_generation: "41".to_string(),
         route_token: format!("{:064x}", 41),
+        contract_version: 1,
     };
     let mut asset_side_effects = 0;
 
@@ -881,6 +887,7 @@ fn mail_claim_is_rejected_when_redis_owner_switches_after_route_resolution() {
         trace_id: "b".repeat(32),
         route_generation: handle.online_authority.generation.to_string(),
         route_token: handle.online_authority.token.clone(),
+        contract_version: 1,
     };
     assert!(ensure_mail_claim_request_matches_handle(&request, &handle).is_ok());
 

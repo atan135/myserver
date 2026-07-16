@@ -4,7 +4,7 @@ import { badRequest, conflict, notFound, serviceUnavailable } from "../common/ht
 import { MAIL_CONFIG, MAIL_GAME_ADMIN_CLIENT, MAIL_STORE } from "../tokens.js";
 
 const CLAIM_STATUSES = new Set([
-  "processing", "retryable_failure", "permanent_failure",
+  "processing", "retryable_failure", "blocked_capacity", "permanent_failure",
   "reconciliation_pending", "manual_review", "claimed"
 ]);
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9:_-]+$/;
@@ -138,6 +138,11 @@ export class MailOperationsService {
         character_id: row.character_id,
         mail_status: row.mail_status,
         workflow_status: row.status,
+        delivery_request_id: row.delivery_request_id || null,
+        origin_type: row.origin_type || null,
+        origin_id: row.origin_id || null,
+        delivery_policy: row.delivery_policy || null,
+        grant_contract_version: row.grant_contract_version || 1,
         attachments_fingerprint: row.attachments_fingerprint,
         attempts: row.attempts,
         recovery_attempts: row.recovery_attempts,
@@ -225,6 +230,7 @@ export class MailOperationsService {
       notification_outbox_terminal_days: this.config.outboxTerminalRetentionDays || 30,
       claim_workflows_days: this.config.claimWorkflowRetentionDays || 400,
       game_grant_idempotency_days: this.config.gameGrantRetentionDays || 400,
+      unclaimed_system_reward_mail: "no_expiry_no_hard_delete_until_claimed",
       operation_audit: "append_only_no_automatic_delete"
     };
   }
