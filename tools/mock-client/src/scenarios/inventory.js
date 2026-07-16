@@ -4,7 +4,6 @@ import {
   encodeItemUseReq,
   encodeItemDiscardReq,
   encodeWarehouseAccessReq,
-  encodeItemAddReq,
   encodeGetInventoryReq,
   encodeRoomJoinReq,
   encodeRoomLeaveReq
@@ -262,56 +261,6 @@ export async function runInventoryWarehouse(options) {
     }
 
     console.log(`\n--- INVENTORY WAREHOUSE TEST COMPLETE ---`);
-  } finally {
-    client.close();
-  }
-}
-
-/**
- * Test adding items to inventory (for testing purposes)
- * Requires: --add-item-id <item_id> --add-count <count>
- */
-export async function runInventoryAdd(options) {
-  const login = await fetchTicket(options);
-  console.log("login:", JSON.stringify(formatLoginSummary(login), null, 2));
-  printInventoryTarget(login);
-
-  const client = new TcpProtocolClient(options, "client");
-  await client.connect();
-
-  try {
-    const roomId = options.roomId || "room-inventory-test";
-    await authenticateAndJoinRoom(client, options, login, roomId);
-
-    const itemId = options.addItemId || 1;
-    const count = options.addCount || 1;
-    const binded = options.addBinded || false;
-
-    console.log(`\n--- INVENTORY ADD TEST ---`);
-    console.log(`itemId: ${itemId}, count: ${count}, binded: ${binded}`);
-
-    await client.send(MESSAGE_TYPE.ITEM_ADD_REQ, 10, encodeItemAddReq(itemId, count, binded));
-
-    const addRes = await waitForPush(client, [MESSAGE_TYPE.ITEM_ADD_RES], options.timeoutMs, "itemAddRes");
-    console.log("Add result:", JSON.stringify(addRes, null, 2));
-
-    if (!addRes.ok) {
-      console.log(`[WARN] Add item failed: ${addRes.errorCode}`);
-    } else {
-      console.log("[OK] Add item succeeded");
-      if (addRes.item) {
-        console.log("Added item:", JSON.stringify(addRes.item, null, 2));
-      }
-    }
-
-    // Wait for inventory update push
-    try {
-      await waitForPush(client, [MESSAGE_TYPE.INVENTORY_UPDATE_PUSH], options.timeoutMs, "inventoryUpdate");
-    } catch (e) {
-      console.log("[INFO] No inventory update received");
-    }
-
-    console.log(`\n--- INVENTORY ADD TEST COMPLETE ---`);
   } finally {
     client.close();
   }

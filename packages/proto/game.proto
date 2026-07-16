@@ -629,18 +629,8 @@ message ItemDiscardRes {
   string error_code = 2;
 }
 
-message ItemAddReq {
-  int32 item_id = 1;
-  uint32 count = 2;
-  bool binded = 3;
-}
-
-message ItemAddRes {
-  bool ok = 1;
-  string error_code = 2;
-  Item item = 3;
-}
-
+// Message ids 1407 and 1408 are permanently reserved for the retired player-side ItemAdd
+// request/response. They intentionally have no protobuf payload and must never be reused.
 message WarehouseAccessReq {
   string action = 1;
   uint64 item_uid = 2;

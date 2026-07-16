@@ -61,8 +61,8 @@ pub enum MessageType {
     ItemUseRes = 1404,
     ItemDiscardReq = 1405,
     ItemDiscardRes = 1406,
-    ItemAddReq = 1407,
-    ItemAddRes = 1408,
+    DeprecatedItemAddReq = 1407,
+    DeprecatedItemAddRes = 1408,
     WarehouseAccessReq = 1409,
     WarehouseAccessRes = 1410,
     GetInventoryReq = 1411,
@@ -179,8 +179,8 @@ impl MessageType {
             1404 => Some(Self::ItemUseRes),
             1405 => Some(Self::ItemDiscardReq),
             1406 => Some(Self::ItemDiscardRes),
-            1407 => Some(Self::ItemAddReq),
-            1408 => Some(Self::ItemAddRes),
+            1407 => Some(Self::DeprecatedItemAddReq),
+            1408 => Some(Self::DeprecatedItemAddRes),
             1409 => Some(Self::WarehouseAccessReq),
             1410 => Some(Self::WarehouseAccessRes),
             1411 => Some(Self::GetInventoryReq),
@@ -233,5 +233,22 @@ impl MessageType {
             9000 => Some(Self::ErrorRes),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MessageType;
+
+    #[test]
+    fn item_add_numbers_remain_reserved_as_deprecated_message_types() {
+        assert_eq!(
+            MessageType::from_u16(1407),
+            Some(MessageType::DeprecatedItemAddReq)
+        );
+        assert_eq!(
+            MessageType::from_u16(1408),
+            Some(MessageType::DeprecatedItemAddRes)
+        );
     }
 }

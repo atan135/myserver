@@ -96,7 +96,6 @@ export {
   runInventoryUse,
   runInventoryDiscard,
   runInventoryWarehouse,
-  runInventoryAdd,
   runGetInventory,
   runInventoryFull
 } from "./inventory.js";

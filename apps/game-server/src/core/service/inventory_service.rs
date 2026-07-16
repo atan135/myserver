@@ -1,13 +1,12 @@
 use tracing::{info, warn};
 
 use crate::core::context::{ConnectionContext, ServiceContext};
-use crate::core::inventory::player_data::PreparedItemUseEffect;
-use crate::core::inventory::{EquipSlot, ItemError, PlayerData};
+use crate::core::inventory::{EquipSlot, PlayerData};
+use crate::core::player::player_manager::WarehouseAssetAction;
 use crate::pb::{
     AttrChangePush, AttrPanel as PbAttrPanel, AttrRecord as PbAttrRecord, GetInventoryRes,
-    InventoryUpdatePush, Item as PbItem, ItemAddReq, ItemAddRes, ItemDiscardReq, ItemDiscardRes,
-    ItemEquipReq, ItemEquipRes, ItemUseReq, ItemUseRes, VisualChangePush, WarehouseAccessReq,
-    WarehouseAccessRes,
+    InventoryUpdatePush, Item as PbItem, ItemDiscardReq, ItemDiscardRes, ItemEquipReq,
+    ItemEquipRes, ItemUseReq, ItemUseRes, VisualChangePush, WarehouseAccessReq, WarehouseAccessRes,
 };
 use crate::protocol::{MessageType, Packet};
 
@@ -42,12 +41,7 @@ pub async fn handle_item_equip(
         "handle_item_equip"
     );
 
-    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
-    let mut player_data = services
-        .player_manager
-        .get_or_create_player(&character_id)
-        .await;
 
     // 解析装备槽位
     let _slot = match EquipSlot::from_str(&request.equip_slot) {
@@ -66,32 +60,12 @@ pub async fn handle_item_equip(
         }
     };
 
-    // 执行装备操作
-    let result = player_data.equip_item(request.item_uid, &config_tables.item_table);
-
-    match result {
-        Ok(()) => {
-            // 保存更新后的角色玩法数据
-            let player_data = match services
-                .player_manager
-                .save_player(&character_id, player_data)
-                .await
-            {
-                Ok(player_data) => player_data,
-                Err(error) => {
-                    connection.queue_message(
-                        MessageType::ItemEquipRes,
-                        packet.header.seq,
-                        ItemEquipRes {
-                            ok: false,
-                            error_code: error.error_code().to_string(),
-                            unequipped_item: None,
-                        },
-                    )?;
-                    return Ok(());
-                }
-            };
-
+    match services
+        .player_manager
+        .equip_item_in_asset_transaction(&character_id, request.item_uid, &config_tables.item_table)
+        .await
+    {
+        Ok(player_data) => {
             connection.queue_message(
                 MessageType::ItemEquipRes,
                 packet.header.seq,
@@ -111,13 +85,13 @@ pub async fn handle_item_equip(
             // 发送背包更新推送
             send_inventory_update_push(connection, &player_data).await;
         }
-        Err(e) => {
+        Err(error) => {
             connection.queue_message(
                 MessageType::ItemEquipRes,
                 packet.header.seq,
                 ItemEquipRes {
                     ok: false,
-                    error_code: e.as_str().to_string(),
+                    error_code: error.error_code().to_string(),
                     unequipped_item: None,
                 },
             )?;
@@ -157,75 +131,15 @@ pub async fn handle_item_use(
         "handle_item_use"
     );
 
-    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
-    let mut player_data = services
+    match services
         .player_manager
-        .get_or_create_player(&character_id)
-        .await;
-
-    let hp_before = player_data.get_hp();
-    let prepared_use = player_data.prepare_item_use(request.item_uid, &config_tables.item_table);
-
-    let prepared_use = match prepared_use {
-        Ok(prepared_use) => prepared_use,
-        Err(e) => {
-            connection.queue_message(
-                MessageType::ItemUseRes,
-                packet.header.seq,
-                ItemUseRes {
-                    ok: false,
-                    error_code: e.as_str().to_string(),
-                    hp_change: 0,
-                    new_buff_ids: vec![],
-                },
-            )?;
-            return Ok(());
-        }
-    };
-
-    if requires_cross_store_asset_commit(&prepared_use.effect) {
-        // The item snapshot and character elements currently use independently owned stores.
-        // Reject this compound operation until it can use one durable transaction boundary.
-        connection.queue_message(
-            MessageType::ItemUseRes,
-            packet.header.seq,
-            ItemUseRes {
-                ok: false,
-                error_code: "ASSET_CROSS_STORE_ATOMICITY_UNAVAILABLE".to_string(),
-                hp_change: 0,
-                new_buff_ids: vec![],
-            },
-        )?;
-        return Ok(());
-    }
-
-    let result = player_data.finalize_prepared_item_use(&prepared_use, &config_tables.item_table);
-
-    match result {
-        Ok(()) => {
-            let hp_change = player_data.get_hp() - hp_before;
-
-            let player_data = match services
-                .player_manager
-                .save_player(&character_id, player_data)
-                .await
-            {
-                Ok(player_data) => player_data,
-                Err(error) => {
-                    connection.queue_message(
-                        MessageType::ItemUseRes,
-                        packet.header.seq,
-                        ItemUseRes {
-                            ok: false,
-                            error_code: error.error_code().to_string(),
-                            hp_change: 0,
-                            new_buff_ids: vec![],
-                        },
-                    )?;
-                    return Ok(());
-                }
-            };
+        .use_item_in_asset_transaction(&character_id, request.item_uid, &config_tables.item_table)
+        .await
+    {
+        Ok(outcome) => {
+            let player_data = outcome.player_data;
+            let hp_change = outcome.hp_change;
 
             connection.queue_message(
                 MessageType::ItemUseRes,
@@ -246,13 +160,13 @@ pub async fn handle_item_use(
             // 发送背包更新
             send_inventory_update_push(connection, &player_data).await;
         }
-        Err(e) => {
+        Err(error) => {
             connection.queue_message(
                 MessageType::ItemUseRes,
                 packet.header.seq,
                 ItemUseRes {
                     ok: false,
-                    error_code: e.as_str().to_string(),
+                    error_code: error.error_code().to_string(),
                     hp_change: 0,
                     new_buff_ids: vec![],
                 },
@@ -261,10 +175,6 @@ pub async fn handle_item_use(
     }
 
     Ok(())
-}
-
-fn requires_cross_store_asset_commit(effect: &PreparedItemUseEffect) -> bool {
-    matches!(effect, PreparedItemUseEffect::CharacterElementChange { .. })
 }
 
 /// 处理物品丢弃请求
@@ -298,34 +208,12 @@ pub async fn handle_item_discard(
         "handle_item_discard"
     );
 
-    let mut player_data = services
+    match services
         .player_manager
-        .get_or_create_player(&character_id)
-        .await;
-
-    let result = player_data.remove_item(request.item_uid, request.count);
-
-    match result {
-        Ok(_item) => {
-            let player_data = match services
-                .player_manager
-                .save_player(&character_id, player_data)
-                .await
-            {
-                Ok(player_data) => player_data,
-                Err(error) => {
-                    connection.queue_message(
-                        MessageType::ItemDiscardRes,
-                        packet.header.seq,
-                        ItemDiscardRes {
-                            ok: false,
-                            error_code: error.error_code().to_string(),
-                        },
-                    )?;
-                    return Ok(());
-                }
-            };
-
+        .discard_item_in_asset_transaction(&character_id, request.item_uid, request.count)
+        .await
+    {
+        Ok(player_data) => {
             connection.queue_message(
                 MessageType::ItemDiscardRes,
                 packet.header.seq,
@@ -337,13 +225,13 @@ pub async fn handle_item_discard(
 
             send_inventory_update_push(connection, &player_data).await;
         }
-        Err(e) => {
+        Err(error) => {
             connection.queue_message(
                 MessageType::ItemDiscardRes,
                 packet.header.seq,
                 ItemDiscardRes {
                     ok: false,
-                    error_code: e.as_str().to_string(),
+                    error_code: error.error_code().to_string(),
                 },
             )?;
         }
@@ -388,189 +276,58 @@ pub async fn handle_warehouse_access(
         "handle_warehouse_access"
     );
 
-    let config_tables = services.config_tables.tables_snapshot().await;
-    let mut player_data = services
-        .player_manager
-        .get_or_create_player(&character_id)
-        .await;
-
-    let result = match request.action.as_str() {
-        "deposit" => player_data.warehouse_deposit(
-            request.item_uid,
-            request.count,
-            &config_tables.item_table,
-            || services.item_uid_generator.next().map_err(|_| ItemError::Unknown),
-        ),
-        "withdraw" => player_data.warehouse_withdraw(
-            request.item_uid,
-            request.count,
-            &config_tables.item_table,
-            || services.item_uid_generator.next().map_err(|_| ItemError::Unknown),
-        ),
-        _ => Err(ItemError::Unknown),
-    };
-
-    match result {
-        Ok(()) => {
-            let player_data = match services
-                .player_manager
-                .save_player(&character_id, player_data)
-                .await
-            {
-                Ok(player_data) => player_data,
-                Err(error) => {
-                    connection.queue_message(
-                        MessageType::WarehouseAccessRes,
-                        packet.header.seq,
-                        WarehouseAccessRes {
-                            ok: false,
-                            error_code: error.error_code().to_string(),
-                        },
-                    )?;
-                    return Ok(());
-                }
-            };
-
-            connection.queue_message(
-                MessageType::WarehouseAccessRes,
-                packet.header.seq,
-                WarehouseAccessRes {
-                    ok: true,
-                    error_code: String::new(),
-                },
-            )?;
-
-            send_inventory_update_push(connection, &player_data).await;
-        }
-        Err(e) => {
+    let action = match request.action.as_str() {
+        "deposit" => WarehouseAssetAction::Deposit,
+        "withdraw" => WarehouseAssetAction::Withdraw,
+        _ => {
             connection.queue_message(
                 MessageType::WarehouseAccessRes,
                 packet.header.seq,
                 WarehouseAccessRes {
                     ok: false,
-                    error_code: e.as_str().to_string(),
+                    error_code: "UNKNOWN_ERROR".to_string(),
                 },
             )?;
-        }
-    }
-
-    Ok(())
-}
-
-/// 处理添加物品请求（测试用）
-pub async fn handle_item_add(
-    services: &ServiceContext,
-    connection: &ConnectionContext,
-    packet: &Packet,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(identity) = connection.ensure_authenticated_identity(packet.header.seq)? else {
-        return Ok(());
-    };
-    let account_player_id = identity.account_player_id;
-    let character_id = identity.character_id;
-    let world_id = identity.world_id;
-
-    let request = match packet.decode_body::<ItemAddReq>("INVALID_ITEM_ADD_BODY") {
-        Ok(value) => value,
-        Err(error_code) => {
-            connection.queue_error(packet.header.seq, error_code, "invalid item add body")?;
             return Ok(());
         }
     };
-
-    info!(
-        session_id = connection.session.id,
-        account_player_id = %account_player_id,
-        character_id = %character_id,
-        world_id = ?world_id,
-        item_id = request.item_id,
-        count = request.count,
-        binded = request.binded,
-        "handle_item_add"
-    );
-
-    // 获取角色玩法数据
     let config_tables = services.config_tables.tables_snapshot().await;
-    let mut player_data = services
+    let item_uid_generator = services.item_uid_generator.clone();
+    match services
         .player_manager
-        .get_or_create_player(&character_id)
-        .await;
-
-    // 检查物品配置是否存在
-    let Some(item_row) = config_tables.item_table.get(request.item_id) else {
-        connection.queue_message(
-            MessageType::ItemAddRes,
-            packet.header.seq,
-            ItemAddRes {
-                ok: false,
-                error_code: "ITEM_NOT_FOUND".to_string(),
-                item: None,
+        .move_warehouse_item_in_asset_transaction(
+            &character_id,
+            action,
+            request.item_uid,
+            request.count,
+            &config_tables.item_table,
+            move || {
+                item_uid_generator
+                    .next()
+                    .map_err(|_| crate::core::inventory::ItemError::Unknown)
             },
-        )?;
-        return Ok(());
-    };
-
-    let item = crate::core::inventory::Item::from_config(
-        services.item_uid_generator.next()?,
-        request.item_id,
-        request.count,
-        request.binded,
-        Some(&character_id),
-        item_row,
-        &config_tables.item_table,
-    );
-
-    // 添加物品
-    match player_data.add_item_with_table(item.clone(), &config_tables.item_table, || {
-        services.item_uid_generator.next().map_err(|_| ItemError::Unknown)
-    }) {
-        Ok(()) => {
-            let player_data = match services
-                .player_manager
-                .save_player(&character_id, player_data)
-                .await
-            {
-                Ok(player_data) => player_data,
-                Err(error) => {
-                    connection.queue_message(
-                        MessageType::ItemAddRes,
-                        packet.header.seq,
-                        ItemAddRes {
-                            ok: false,
-                            error_code: error.error_code().to_string(),
-                            item: None,
-                        },
-                    )?;
-                    return Ok(());
-                }
-            };
-
+        )
+        .await
+    {
+        Ok(player_data) => {
             connection.queue_message(
-                MessageType::ItemAddRes,
+                MessageType::WarehouseAccessRes,
                 packet.header.seq,
-                ItemAddRes {
+                WarehouseAccessRes {
                     ok: true,
                     error_code: String::new(),
-                    item: Some(PbItem {
-                        uid: item.uid,
-                        item_id: item.item_id,
-                        count: item.count,
-                        binded: item.binded,
-                    }),
                 },
             )?;
 
-            // 发送背包更新推送
             send_inventory_update_push(connection, &player_data).await;
         }
-        Err(e) => {
+        Err(error) => {
             connection.queue_message(
-                MessageType::ItemAddRes,
+                MessageType::WarehouseAccessRes,
                 packet.header.seq,
-                ItemAddRes {
+                WarehouseAccessRes {
                     ok: false,
-                    error_code: e.as_str().to_string(),
-                    item: None,
+                    error_code: error.error_code().to_string(),
                 },
             )?;
         }
@@ -730,23 +487,5 @@ async fn send_inventory_update_push(connection: &ConnectionContext, player_data:
 
     if let Err(e) = connection.queue_message(MessageType::InventoryUpdatePush, 0, push) {
         warn!(error = %e, "failed to send InventoryUpdatePush");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::character_element::{CharacterElementChange, ElementDeltas};
-
-    #[test]
-    fn item_element_effect_is_rejected_before_any_external_write() {
-        let effect = PreparedItemUseEffect::CharacterElementChange {
-            change: CharacterElementChange::new(
-                ElementDeltas::zero(),
-                ElementDeltas::new(0, 10, 0, 0),
-            ),
-        };
-
-        assert!(requires_cross_store_asset_commit(&effect));
     }
 }

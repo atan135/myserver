@@ -26,7 +26,7 @@
 | CSV 文件 | 当前状态 | 主要原因 | 推荐验证方式 |
 |------|------|------|------|
 | `TestTable_100.csv` | `可直接生效` | `GetRoomData` 请求处理时会重新读取最新 raw table 快照 | `mock-client --scenario get-room-data` |
-| `ItemTable.csv` | `部分可直接生效` | 背包/物品相关请求会重新读取最新 raw table 快照 | `inventory-add` / `inventory-equip` / `inventory-use` |
+| `ItemTable.csv` | `部分可直接生效` | 背包/物品相关请求会重新读取最新 raw table 快照 | `inventory-equip` / `inventory-use` / 受保护 admin grant |
 | `TestTable_110.csv` | `当前未接入业务` | 当前只看到装载与 reload, 没有实际业务消费路径 | 暂无业务验证入口 |
 | `SceneTable.csv` | `派生配置热更生效` | reload 成功后重建并替换 `SceneCatalog` | movement demo 新玩家出生 / 后续移动校验 |
 | `SceneSpawnPoint.csv` | `派生配置热更生效` | reload 成功后重建并替换 `SceneCatalog` | movement demo 新玩家出生点 |

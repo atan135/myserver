@@ -10,7 +10,7 @@ use super::db_player_store::{
     SavePlayerError as StoreSavePlayerError,
 };
 use super::grant_contract::GrantResultSummary;
-use crate::core::inventory::{Item, ItemError, PlayerData};
+use crate::core::inventory::{EquipSlot, Item, ItemError, PlayerData};
 use crate::csv_code::itemtable::ItemTable;
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,42 @@ pub enum PlayerSaveError {
     TransactionFailed,
     VersionConflict,
     ResultUnknown,
+}
+
+/// Errors returned by the only runtime path allowed to mutate a player's item snapshot.
+///
+/// Protocol handlers intentionally receive this rather than a mutable `PlayerData`: the
+/// character lock, revision check, durable save, and publish-after-commit ordering must remain
+/// one operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerAssetMutationError {
+    Item(ItemError),
+    Persistence(PlayerSaveError),
+    CrossStoreAtomicityUnavailable,
+    MigrationDisabled,
+}
+
+impl PlayerAssetMutationError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::Item(error) => error.as_str(),
+            Self::Persistence(error) => error.error_code(),
+            Self::CrossStoreAtomicityUnavailable => "ASSET_CROSS_STORE_ATOMICITY_UNAVAILABLE",
+            Self::MigrationDisabled => "ASSET_TRANSACTION_MIGRATION_DISABLED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarehouseAssetAction {
+    Deposit,
+    Withdraw,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlayerItemUseOutcome {
+    pub player_data: PlayerData,
+    pub hp_change: i64,
 }
 
 impl PlayerSaveError {
@@ -218,6 +254,178 @@ impl PlayerManager {
             .await
             .insert(character_id.to_string(), data.clone());
         Ok(data)
+    }
+
+    /// Run one player-originated inventory operation under the same per-character transaction
+    /// boundary used by grants. The closure is private to this module's named operations below;
+    /// protocol services never receive a mutable snapshot or call `save_player` directly.
+    async fn commit_asset_mutation<T, F>(
+        &self,
+        character_id: &str,
+        mutate: F,
+    ) -> Result<(PlayerData, T), PlayerAssetMutationError>
+    where
+        F: FnOnce(&mut PlayerData) -> Result<T, PlayerAssetMutationError>,
+    {
+        if !asset_player_operations_enabled() {
+            return Err(PlayerAssetMutationError::MigrationDisabled);
+        }
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
+
+        let mut player_data = self
+            .load_or_create_player_for_asset_mutation(character_id)
+            .await?;
+        if let Some(current) = self.players.read().await.get(character_id)
+            && current.persistence_revision() != player_data.persistence_revision()
+        {
+            return Err(PlayerAssetMutationError::Persistence(
+                PlayerSaveError::VersionConflict,
+            ));
+        }
+
+        let result = mutate(&mut player_data)?;
+        if self.store.enabled() {
+            let outcome = self
+                .store
+                .save(character_id, &player_data)
+                .await
+                .map_err(|error| {
+                    warn!(
+                        character_id = %character_id,
+                        error = %error,
+                        "failed to persist player asset transaction"
+                    );
+                    PlayerAssetMutationError::Persistence(match error {
+                        StoreSavePlayerError::NotApplied(_) => PlayerSaveError::TransactionFailed,
+                        StoreSavePlayerError::VersionConflict => PlayerSaveError::VersionConflict,
+                        StoreSavePlayerError::ResultUnknown(_) => PlayerSaveError::ResultUnknown,
+                    })
+                })?;
+            player_data.set_persistence_revision(outcome.revision);
+        } else {
+            // DB-disabled local mode retains the same stale-snapshot protection as production.
+            player_data
+                .set_persistence_revision(player_data.persistence_revision().saturating_add(1));
+        }
+
+        self.players
+            .write()
+            .await
+            .insert(character_id.to_string(), player_data.clone());
+        Ok((player_data, result))
+    }
+
+    /// Equip an inventory item through the shared asset transaction boundary.
+    pub async fn equip_item_in_asset_transaction(
+        &self,
+        character_id: &str,
+        item_uid: u64,
+        item_table: &ItemTable,
+    ) -> Result<PlayerData, PlayerAssetMutationError> {
+        self.commit_asset_mutation(character_id, |player_data| {
+            player_data
+                .equip_item(item_uid, item_table)
+                .map_err(PlayerAssetMutationError::Item)
+        })
+        .await
+        .map(|(player_data, ())| player_data)
+    }
+
+    /// Unequip an item through the shared asset transaction boundary. There is no public player
+    /// packet for this legacy operation yet, but internal callers must use this method.
+    pub async fn unequip_item_in_asset_transaction(
+        &self,
+        character_id: &str,
+        slot: EquipSlot,
+        item_table: &ItemTable,
+    ) -> Result<(PlayerData, Option<Item>), PlayerAssetMutationError> {
+        self.commit_asset_mutation(character_id, |player_data| {
+            player_data
+                .unequip_item(slot, item_table)
+                .map_err(PlayerAssetMutationError::Item)
+        })
+        .await
+    }
+
+    /// Consume a player item only after its effect has been proven to fit the same durable
+    /// snapshot. Effects owned by another store remain rejected rather than risking a partial
+    /// commit.
+    pub async fn use_item_in_asset_transaction(
+        &self,
+        character_id: &str,
+        item_uid: u64,
+        item_table: &ItemTable,
+    ) -> Result<PlayerItemUseOutcome, PlayerAssetMutationError> {
+        let (player_data, hp_change) = self
+            .commit_asset_mutation(character_id, |player_data| {
+                let hp_before = player_data.get_hp();
+                let prepared = player_data
+                    .prepare_item_use(item_uid, item_table)
+                    .map_err(PlayerAssetMutationError::Item)?;
+                if matches!(
+                    prepared.effect,
+                    crate::core::inventory::player_data::PreparedItemUseEffect::CharacterElementChange { .. }
+                ) {
+                    return Err(PlayerAssetMutationError::CrossStoreAtomicityUnavailable);
+                }
+                player_data
+                    .finalize_prepared_item_use(&prepared, item_table)
+                    .map_err(PlayerAssetMutationError::Item)?;
+                Ok(player_data.get_hp() - hp_before)
+            })
+            .await?;
+
+        Ok(PlayerItemUseOutcome {
+            player_data,
+            hp_change,
+        })
+    }
+
+    /// Discard an inventory item through the shared asset transaction boundary.
+    pub async fn discard_item_in_asset_transaction(
+        &self,
+        character_id: &str,
+        item_uid: u64,
+        count: u32,
+    ) -> Result<PlayerData, PlayerAssetMutationError> {
+        self.commit_asset_mutation(character_id, |player_data| {
+            player_data
+                .remove_item(item_uid, count)
+                .map(|_| ())
+                .map_err(PlayerAssetMutationError::Item)
+        })
+        .await
+        .map(|(player_data, ())| player_data)
+    }
+
+    /// Move an item between inventory and warehouse without exposing either container to the
+    /// protocol layer.
+    pub async fn move_warehouse_item_in_asset_transaction<F>(
+        &self,
+        character_id: &str,
+        action: WarehouseAssetAction,
+        item_uid: u64,
+        count: u32,
+        item_table: &ItemTable,
+        mut next_uid: F,
+    ) -> Result<PlayerData, PlayerAssetMutationError>
+    where
+        F: FnMut() -> Result<u64, ItemError>,
+    {
+        self.commit_asset_mutation(character_id, |player_data| {
+            let mutation = match action {
+                WarehouseAssetAction::Deposit => {
+                    player_data.warehouse_deposit(item_uid, count, item_table, &mut next_uid)
+                }
+                WarehouseAssetAction::Withdraw => {
+                    player_data.warehouse_withdraw(item_uid, count, item_table, &mut next_uid)
+                }
+            };
+            mutation.map_err(PlayerAssetMutationError::Item)
+        })
+        .await
+        .map(|(player_data, ())| player_data)
     }
 
     pub async fn grant_items(
@@ -562,6 +770,34 @@ impl PlayerManager {
             }
         }
     }
+
+    async fn load_or_create_player_for_asset_mutation(
+        &self,
+        character_id: &str,
+    ) -> Result<PlayerData, PlayerAssetMutationError> {
+        if let Some(player_data) = self.players.read().await.get(character_id).cloned() {
+            return Ok(player_data);
+        }
+
+        if !self.store.enabled() {
+            return Ok(PlayerData::new(character_id.to_string()));
+        }
+
+        match self.store.load(character_id).await {
+            Ok(Some(player_data)) => Ok(player_data),
+            Ok(None) => Ok(PlayerData::new(character_id.to_string())),
+            Err(error) => {
+                warn!(
+                    character_id,
+                    error = %error,
+                    "failed to load player data for asset transaction"
+                );
+                Err(PlayerAssetMutationError::Persistence(
+                    PlayerSaveError::TransactionFailed,
+                ))
+            }
+        }
+    }
 }
 
 async fn keyed_lock(locks: &Mutex<HashMap<String, Weak<Mutex<()>>>>, key: &str) -> Arc<Mutex<()>> {
@@ -589,6 +825,13 @@ fn replay_or_conflict(
         granted_items: Vec::new(),
         record,
     })
+}
+
+fn asset_player_operations_enabled() -> bool {
+    std::env::var("PLAYER_ASSET_TRANSACTIONS_ENABLED")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(true)
 }
 
 fn current_unix_ms() -> i64 {
@@ -648,6 +891,37 @@ mod tests {
         let removed = manager.remove_player("chr_0000000000001").await;
         assert!(removed.is_some());
         assert_eq!(manager.online_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn player_discard_commits_through_asset_transaction_before_publishing_snapshot() {
+        let manager = PlayerManager::new(create_disabled_store());
+        let mut initial = manager.get_or_create_player("chr_asset_txn").await;
+        initial.add_item(Item::new(90, 5001, 2, false)).unwrap();
+        let initial = manager.save_player("chr_asset_txn", initial).await.unwrap();
+
+        let committed = manager
+            .discard_item_in_asset_transaction("chr_asset_txn", 90, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            committed.persistence_revision(),
+            initial.persistence_revision() + 1
+        );
+        assert_eq!(
+            committed.inventory.find_item(90).map(|item| item.count),
+            Some(1)
+        );
+        let published = manager.get_player("chr_asset_txn").await.unwrap();
+        assert_eq!(
+            published.persistence_revision(),
+            committed.persistence_revision()
+        );
+        assert_eq!(
+            published.inventory.find_item(90).map(|item| item.count),
+            Some(1)
+        );
     }
 
     fn grant_summary(character_id: &str, count: u32) -> GrantResultSummary {

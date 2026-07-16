@@ -75,7 +75,6 @@ import {
   runInventoryUse,
   runInventoryDiscard,
   runInventoryWarehouse,
-  runInventoryAdd,
   runGetInventory,
   runInventoryFull,
   // Character scenarios
@@ -684,9 +683,6 @@ async function main() {
         break;
       case SCENARIO.INVENTORY_WAREHOUSE:
         await runInventoryWarehouse(options);
-        break;
-      case SCENARIO.INVENTORY_ADD:
-        await runInventoryAdd(options);
         break;
       case SCENARIO.INVENTORY_GET:
         await runGetInventory(options);

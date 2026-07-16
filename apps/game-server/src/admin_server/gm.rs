@@ -135,6 +135,27 @@ pub(super) async fn handle_gm_send_item(
             return Ok(());
         }
     };
+    if let Err(failure) = ensure_asset_grant_entry_enabled(&request, auth_context) {
+        audit_then_write_message(
+            writer,
+            audit_logger,
+            auth_context,
+            packet,
+            action,
+            MessageType::GmSendItemRes,
+            &grant_failure_response(
+                &request.request_id,
+                &validated.request_fingerprint,
+                &request.trace_id,
+                &failure,
+            ),
+            false,
+            failure.error_code,
+            &target,
+        )
+        .await?;
+        return Ok(());
+    }
     if request.source == "mail-claim"
         && let Err(failure) = ensure_mail_claim_target_is_authoritative(
             player_registry,
@@ -166,21 +187,27 @@ pub(super) async fn handle_gm_send_item(
         return Ok(());
     }
     let tables = config_tables.tables_snapshot().await;
+    let item_table = tables.item_table.clone();
+    let item_table_for_materialization = item_table.clone();
     let result_summary = GrantResultSummary {
         character_id: request.character_id.clone(),
         source: request.source.clone(),
         items: validated.items.clone(),
     };
 
+    let materializer_uid_generator = item_uid_generator.clone();
+    let split_uid_generator = item_uid_generator.clone();
+    let request_character_id = request.character_id.clone();
     let result = player_manager
-        .grant_items_with_request(
+        .grant_items_with_request_using_table(
             &request.character_id,
             &request.request_id,
             &validated.request_fingerprint,
             &request.source,
             &request.reason,
             result_summary,
-            || {
+            item_table.as_ref(),
+            move || {
                 validated
                     .items
                     .iter()
@@ -191,9 +218,9 @@ pub(super) async fn handle_gm_send_item(
                                 count: item.count,
                                 binded: item.binded,
                             },
-                            &request.character_id,
-                            item_uid_generator,
-                            &tables.item_table,
+                            &request_character_id,
+                            &materializer_uid_generator,
+                            item_table_for_materialization.as_ref(),
                         )
                         .map_err(|error| {
                             warn!(error = %error, "failed to build inventory item for grant");
@@ -205,6 +232,11 @@ pub(super) async fn handle_gm_send_item(
                         })
                     })
                     .collect()
+            },
+            move || {
+                split_uid_generator
+                    .next()
+                    .map_err(|_| crate::core::inventory::ItemError::Unknown)
             },
         )
         .await;
@@ -1096,6 +1128,9 @@ async fn validate_grant_items_request(
         }
         request.mail_id.as_str()
     } else {
+        if !matches!(request.source.as_str(), "gm" | "gm-emergency-correction") {
+            return Err(invalid_grant_request("INVALID_SOURCE"));
+        }
         ""
     };
 
@@ -1118,6 +1153,32 @@ async fn validate_grant_items_request(
         items,
         request_fingerprint,
     })
+}
+
+fn ensure_asset_grant_entry_enabled(
+    request: &GrantItemsReq,
+    auth_context: &AdminAuthContext,
+) -> Result<(), GrantItemsError> {
+    let enabled = match request.source.as_str() {
+        "mail-claim" => environment_flag_enabled("MAIL_CLAIM_ASSET_TRANSACTIONS_ENABLED", true),
+        "gm" => environment_flag_enabled("GM_ASSET_CONSTRUCTION_ENABLED", false),
+        "gm-emergency-correction" => {
+            !auth_context.actor_missing
+                && environment_flag_enabled("GM_EMERGENCY_ASSET_CORRECTION_ENABLED", false)
+        }
+        _ => false,
+    };
+
+    enabled
+        .then_some(())
+        .ok_or_else(|| permanent_grant_failure("ASSET_TRANSACTION_MIGRATION_DISABLED"))
+}
+
+fn environment_flag_enabled(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(default)
 }
 
 pub(super) fn decode_grant_items_request(

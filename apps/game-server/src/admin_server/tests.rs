@@ -1,6 +1,6 @@
 use std::fs;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -103,12 +103,18 @@ fn bytes_packet(message_type: MessageType, seq: u32, body: Vec<u8>) -> Packet {
     )
 }
 
+static TEMP_AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 fn temp_audit_path(name: &str) -> std::path::PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("myserver-{name}-{unique}.jsonl"))
+    let sequence = TEMP_AUDIT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "myserver-{name}-{}-{unique}-{sequence}.jsonl",
+        std::process::id()
+    ))
 }
 
 fn player_registry_fixture(

@@ -52,8 +52,8 @@ export const MESSAGE_TYPE = {
   ITEM_USE_RES: 1404,
   ITEM_DISCARD_REQ: 1405,
   ITEM_DISCARD_RES: 1406,
-  ITEM_ADD_REQ: 1407,
-  ITEM_ADD_RES: 1408,
+  DEPRECATED_ITEM_ADD_REQ: 1407,
+  DEPRECATED_ITEM_ADD_RES: 1408,
   WAREHOUSE_ACCESS_REQ: 1409,
   WAREHOUSE_ACCESS_RES: 1410,
   GET_INVENTORY_REQ: 1411,
@@ -243,7 +243,6 @@ export const SCENARIO = {
   INVENTORY_USE: "inventory-use",
   INVENTORY_DISCARD: "inventory-discard",
   INVENTORY_WAREHOUSE: "inventory-warehouse",
-  INVENTORY_ADD: "inventory-add",
   INVENTORY_GET: "inventory-get",
   INVENTORY_FULL: "inventory-full",
   // Character scenarios

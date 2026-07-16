@@ -1371,8 +1371,13 @@ async fn dispatch_packet(
         Some(MessageType::ItemDiscardReq) => {
             inventory_service::handle_item_discard(services, connection, packet).await
         }
-        Some(MessageType::ItemAddReq) => {
-            inventory_service::handle_item_add(services, connection, packet).await
+        Some(MessageType::DeprecatedItemAddReq | MessageType::DeprecatedItemAddRes) => {
+            connection.queue_error(
+                packet.header.seq,
+                "MESSAGE_TYPE_DEPRECATED",
+                "message type is permanently retired",
+            )?;
+            Ok(())
         }
         Some(MessageType::WarehouseAccessReq) => {
             inventory_service::handle_warehouse_access(services, connection, packet).await

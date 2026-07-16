@@ -522,12 +522,31 @@ function checkMybevyClientProtocol(expectedMessageTypes) {
     checkedFiles.push(protocolPath);
     const mybevyProtocolSource = readFile(protocolPath);
     const mybevyMessageTypes = parseRustMessageTypes(mybevyProtocolSource);
-    errors.push(...compareSubset("mybevy MessageType", expectedMessageTypes, mybevyMessageTypes));
+    // 1407/1408 are permanently reserved retired ItemAdd numbers. External clients can retain
+    // their historical enum names during a rolling upgrade, but this repository no longer
+    // requires or validates their payload implementation.
+    const retiredItemAddNames = new Set([
+      "DEPRECATED_ITEM_ADD_REQ",
+      "DEPRECATED_ITEM_ADD_RES",
+      "ITEM_ADD_REQ",
+      "ITEM_ADD_RES"
+    ]);
+    const activeExpectedMessageTypes = Object.fromEntries(
+      Object.entries(expectedMessageTypes).filter(([name]) => !retiredItemAddNames.has(name))
+    );
+    const activeMybevyMessageTypes = Object.fromEntries(
+      Object.entries(mybevyMessageTypes).filter(([name]) => !retiredItemAddNames.has(name))
+    );
+    errors.push(...compareSubset("mybevy MessageType", activeExpectedMessageTypes, activeMybevyMessageTypes));
     errors.push(
       ...compareObject(
         "mybevy MessageType::from_u16",
-        mybevyMessageTypes,
-        parseRustMessageTypeFromU16(mybevyProtocolSource)
+        activeMybevyMessageTypes,
+        Object.fromEntries(
+          Object.entries(parseRustMessageTypeFromU16(mybevyProtocolSource)).filter(
+            ([name]) => !retiredItemAddNames.has(name)
+          )
+        )
       )
     );
   }

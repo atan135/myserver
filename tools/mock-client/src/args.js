@@ -136,9 +136,6 @@ const DEFAULT_OPTIONS = {
   depositUid: 0,
   depositCount: 0,
   warehouseAction: "deposit",
-  addItemId: 0,
-  addCount: 1,
-  addBinded: false,
   // Internal API token
   serviceToken: "",
   shutdownReason: "mock-client",
@@ -625,20 +622,6 @@ export function parseArgs(argv) {
         break;
       case "--warehouse-action":
         ({ value: result.warehouseAction, nextIndex: index } = collectOptionValue(argv, index));
-        break;
-      case "--add-item-id":
-        result.addItemId = Number.parseInt(collectOptionValue(argv, index).value, 10);
-        index = collectOptionValue(argv, index).nextIndex;
-        break;
-      case "--add-count":
-        result.addCount = Number.parseInt(collectOptionValue(argv, index).value, 10);
-        index = collectOptionValue(argv, index).nextIndex;
-        break;
-      case "--add-binded":
-        result.addBinded =
-          collectOptionValue(argv, index).value === "true" ||
-          collectOptionValue(argv, index).value === "1";
-        index = collectOptionValue(argv, index).nextIndex;
         break;
       case "--service-token":
         ({ value: result.serviceToken, nextIndex: index } = collectOptionValue(argv, index));

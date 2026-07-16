@@ -202,7 +202,6 @@ Protobuf 风格的编解码工具：
 | `inventory-use` | 使用背包中的消耗品 |
 | `inventory-discard` | 丢弃背包中的物品 |
 | `inventory-warehouse` | 仓库存取操作 |
-| `inventory-add` | 添加物品到背包（测试用） |
 | `inventory-get` | 获取当前背包和仓库状态 |
 | `inventory-full` | 完整背包流程测试 |
 

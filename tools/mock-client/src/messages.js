@@ -199,14 +199,6 @@ export function encodeWarehouseAccessReq(action, itemUid, count) {
   ]);
 }
 
-export function encodeItemAddReq(itemId, count, binded) {
-  return Buffer.concat([
-    encodeInt32Field(1, itemId),
-    encodeUInt32Field(2, count),
-    encodeBoolField(3, binded)
-  ]);
-}
-
 export function encodeGetInventoryReq() {
   return Buffer.alloc(0);
 }
@@ -705,12 +697,6 @@ export function decodeByMessageType(messageType, body) {
       return {
         ok: readBool(fields, 1),
         errorCode: readString(fields, 2)
-      };
-    case MESSAGE_TYPE.ITEM_ADD_RES:
-      return {
-        ok: readBool(fields, 1),
-        errorCode: readString(fields, 2),
-        item: fields.get(3) ? decodeItem(fields.get(3)) : null
       };
     case MESSAGE_TYPE.WAREHOUSE_ACCESS_RES:
       return {
