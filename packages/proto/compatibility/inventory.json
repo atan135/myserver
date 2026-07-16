@@ -7,7 +7,16 @@
     "generator": "tools/proto-compatibility-baseline.js",
     "canonicalization": "The baseline records protobuf declarations, field numbers/types/labels/oneofs, reserved names/numbers/ranges, enum values, and RPC request/response streaming shapes. Comments, formatting, declaration order, and source paths outside the inventory do not affect it.",
     "descriptorSetStatus": "deferred",
-    "descriptorSetRationale": "The repository does not yet pin protoc or plugin versions. This checked-in normalized semantic baseline is deterministic on Windows and CI using Node.js only; phase 2 may add a pinned descriptor set without replacing this audit baseline."
+    "descriptorSetRationale": "The Rust protoc/plugins are pinned through protoc-bin-vendored, prost-build, and tonic-build. This checked-in normalized semantic baseline remains the chosen deterministic audit format for declaration-level review on Windows and CI; a descriptor set may be added later without replacing this audit baseline."
+  },
+  "publishedReference": {
+    "baselineFile": "packages/proto/compatibility/release-baseline.json",
+    "manifestFile": "packages/proto/compatibility/release-reference.json",
+    "promotionPolicy": "Only node tools/check-proto-breaking-changes.js --promote-release with a reviewed release id, reason, owner approval, and approval date may move this reference. The committed release-reference.json is the audit record."
+  },
+  "breakingExemptions": {
+    "file": "packages/proto/compatibility/breaking-exemptions.json",
+    "schema": "Every exemption has one exact breaking rule and declaration target plus reason, owner, and expiresAt. Expired, invalid, ambiguous, or unused entries fail the check."
   },
   "protocols": [
     {

@@ -1,0 +1,6575 @@
+{
+  "files": [
+    {
+      "path": "packages/proto/admin.proto",
+      "package": "myserver.admin",
+      "messages": [
+        {
+          "name": "GrantItem",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_id",
+              "number": 1,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "binded",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GrantItemsReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "items",
+              "number": 3,
+              "oneof": "",
+              "type": "GrantItem"
+            },
+            {
+              "label": "singular",
+              "name": "source",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mail_id",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_fingerprint",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "trace_id",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "route_generation",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "route_token",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "contract_version",
+              "number": 11,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GrantItemsRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "applied",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_fingerprint",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_category",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "result_state",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "retryable",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "result_summary",
+              "number": 9,
+              "oneof": "",
+              "type": "GrantItemsResultSummary"
+            },
+            {
+              "label": "singular",
+              "name": "trace_id",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "player_retryable",
+              "number": 11,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GrantItemsResultQueryReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_fingerprint",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "trace_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GrantItemsResultQueryRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "query_status",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_fingerprint",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_category",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "result_state",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "retryable",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "result_summary",
+              "number": 9,
+              "oneof": "",
+              "type": "GrantItemsResultSummary"
+            },
+            {
+              "label": "singular",
+              "name": "trace_id",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "created_at_ms",
+              "number": 11,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "contract_version",
+              "number": 12,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GrantItemsResultSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "source",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "items",
+              "number": 3,
+              "oneof": "",
+              "type": "GrantItem"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ServerStatusReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ServerStatusRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "connection_count",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "room_count",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "max_body_len",
+              "number": 4,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "heartbeat_timeout_secs",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "UpdateConfigReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "key",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "value",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "UpdateConfigRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "enums": [],
+      "services": []
+    },
+    {
+      "path": "packages/proto/chat.proto",
+      "package": "myserver.chat",
+      "messages": [
+        {
+          "name": "ChatAuthReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "player_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "token",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatAuthRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatGroupReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "content",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatGroupRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "msg_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatHistoryReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "chat_type",
+              "number": 1,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "target_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "before_time",
+              "number": 3,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "limit",
+              "number": 4,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatHistoryRes",
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "messages",
+              "number": 1,
+              "oneof": "",
+              "type": "ChatPush"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatPrivateReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "target_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "content",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatPrivateRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "msg_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ChatPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "msg_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "chat_type",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "sender_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "sender_name",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "content",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "timestamp",
+              "number": 6,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "target_id",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ErrorRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "message",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupCreateReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "name",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupCreateRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupDismissReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupDismissRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupInfo",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "name",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "member_count",
+              "number": 3,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupJoinReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupJoinRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupLeaveReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "group_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupLeaveRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupListReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GroupListRes",
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "groups",
+              "number": 1,
+              "oneof": "",
+              "type": "GroupInfo"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MailNotifyPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "mail_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "title",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "from_player_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mail_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "created_at",
+              "number": 5,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "enums": [],
+      "services": []
+    },
+    {
+      "path": "packages/proto/game.proto",
+      "package": "myserver.game",
+      "messages": [
+        {
+          "name": "AddCharacterDisciplinePointsReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "points_delta",
+              "number": 2,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AddCharacterDisciplinePointsRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "disciplines",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "active_skill_pool",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 7,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ApplyCharacterProgressReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "progress_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ApplyCharacterProgressRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "applied",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "progress_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "source_type",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "source_id",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "rewards",
+              "number": 8,
+              "oneof": "",
+              "type": "CharacterProgressRewardSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AttrChangePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "base",
+              "number": 1,
+              "oneof": "",
+              "type": "AttrPanel"
+            },
+            {
+              "label": "repeated",
+              "name": "bonus",
+              "number": 2,
+              "oneof": "",
+              "type": "AttrRecord"
+            },
+            {
+              "label": "singular",
+              "name": "final_",
+              "number": 3,
+              "oneof": "",
+              "type": "AttrPanel"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AttrPanel",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "hp",
+              "number": 1,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "max_hp",
+              "number": 2,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "attack",
+              "number": 3,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "defense",
+              "number": 4,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "speed",
+              "number": 5,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "crit_rate",
+              "number": 6,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "crit_dmg",
+              "number": 7,
+              "oneof": "",
+              "type": "float"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AttrRecord",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "source",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "attr_type",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "value",
+              "number": 3,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthorityEndpoint",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "kind",
+              "number": 1,
+              "oneof": "",
+              "type": "AuthorityKind"
+            },
+            {
+              "label": "singular",
+              "name": "authority_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "host",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "port",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "transport",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "authority_epoch",
+              "number": 8,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthorityInput",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload_json",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthorityMigrationCompletePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "authority_epoch",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "authority",
+              "number": 3,
+              "oneof": "",
+              "type": "AuthorityEndpoint"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 4,
+              "oneof": "",
+              "type": "AuthoritySnapshot"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthorityMigrationPayload",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "authority_epoch",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "frozen_frame_id",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "old_authority",
+              "number": 4,
+              "oneof": "",
+              "type": "AuthorityEndpoint"
+            },
+            {
+              "label": "singular",
+              "name": "new_authority",
+              "number": 5,
+              "oneof": "",
+              "type": "AuthorityEndpoint"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 6,
+              "oneof": "",
+              "type": "AuthoritySnapshot"
+            },
+            {
+              "label": "repeated",
+              "name": "pending_inputs",
+              "number": 7,
+              "oneof": "",
+              "type": "AuthorityInput"
+            },
+            {
+              "label": "singular",
+              "name": "logic_state_json",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "runtime_state_json",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthorityMigrationStartPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload",
+              "number": 2,
+              "oneof": "",
+              "type": "AuthorityMigrationPayload"
+            },
+            {
+              "label": "singular",
+              "name": "reconnect_required",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "retry_after_ms",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthoritySnapshot",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "authority_epoch",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "authority_character_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "character_ids",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "game_state_json",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ticket",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "AuthRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "player_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterDisciplineChangePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "meta",
+              "number": 1,
+              "oneof": "",
+              "type": "CharacterPushMeta"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 2,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "disciplines",
+              "number": 3,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "active_skill_pool",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterDisciplineDefinitionSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "name",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "description",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "initial_tier",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "initial_points",
+              "number": 5,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "repeated",
+              "name": "skill_pool",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "interaction_permissions",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "display_fields_json",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterDisciplineSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "points",
+              "number": 2,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "tier",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "active",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "learned_at",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "updated_at",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterElements",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "affinity",
+              "number": 1,
+              "oneof": "",
+              "type": "ElementValues"
+            },
+            {
+              "label": "singular",
+              "name": "mastery",
+              "number": 2,
+              "oneof": "",
+              "type": "ElementValues"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterElementsChangePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "meta",
+              "number": 1,
+              "oneof": "",
+              "type": "CharacterPushMeta"
+            },
+            {
+              "label": "singular",
+              "name": "before",
+              "number": 2,
+              "oneof": "",
+              "type": "CharacterElements"
+            },
+            {
+              "label": "singular",
+              "name": "after",
+              "number": 3,
+              "oneof": "",
+              "type": "CharacterElements"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterProgressRewardSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reward_type",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reward_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "title",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "singular",
+              "name": "eligibility",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterPushMeta",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "sequence",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "revision",
+              "number": 3,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "source_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "source_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "summary",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot_compensation",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterTitleChangePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "meta",
+              "number": 1,
+              "oneof": "",
+              "type": "CharacterPushMeta"
+            },
+            {
+              "label": "singular",
+              "name": "title",
+              "number": 2,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "titles",
+              "number": 3,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            },
+            {
+              "label": "singular",
+              "name": "equipped_title",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterTitleDefinitionSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "name",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "type",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rarity",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "icon",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "color",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "tags",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "hidden",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "limited",
+              "number": 9,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "sort_order",
+              "number": 10,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CharacterTitleSummary",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "definition",
+              "number": 1,
+              "oneof": "",
+              "type": "CharacterTitleDefinitionSummary"
+            },
+            {
+              "label": "singular",
+              "name": "owned",
+              "number": 2,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "equipped",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "source_type",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "source_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "unlocked_at",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "expires_at",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "expired",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ConfirmRoomOwnershipReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 4,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ConfirmRoomOwnershipRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CreateMatchedRoomReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "character_ids",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mode",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CreateMatchedRoomRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "DebugApplyCharacterElementChangeReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "affinity_delta",
+              "number": 1,
+              "oneof": "",
+              "type": "ElementValues"
+            },
+            {
+              "label": "singular",
+              "name": "mastery_delta",
+              "number": 2,
+              "oneof": "",
+              "type": "ElementValues"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "debug_token",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "DebugApplyCharacterElementChangeRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "before",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterElements"
+            },
+            {
+              "label": "singular",
+              "name": "after",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterElements"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "DebugCharacterTitleReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "title_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline_tier",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline_points",
+              "number": 5,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "discipline_active",
+              "number": 6,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "trigger_unlock_check",
+              "number": 7,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "debug_token",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "expires_at",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "DebugCharacterTitleRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "title",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 6,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 7,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "DisciplineItemCost",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "item_id",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ElementValues",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "earth",
+              "number": 1,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "fire",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "water",
+              "number": 3,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "wind",
+              "number": 4,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "EntityTransform",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "entity_id",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "scene_id",
+              "number": 3,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "x",
+              "number": 4,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "y",
+              "number": 5,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "dir_x",
+              "number": 6,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "dir_y",
+              "number": 7,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "moving",
+              "number": 8,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "last_input_frame",
+              "number": 9,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "EquipCharacterTitleReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "title_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "EquipCharacterTitleRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "equipped_title",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ErrorRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "message",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ExportRoomTransferReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ExportRoomTransferRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomTransferPayload"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "FrameBundlePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "fps",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "inputs",
+              "number": 4,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "is_silent_frame",
+              "number": 5,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 6,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "FrameInput",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload_json",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "FreezeRoomForTransferReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "FreezeRoomForTransferRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "migration_state",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomMigrationState"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GameMessagePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "event",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload_json",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterDisciplinesReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterDisciplinesRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "disciplines",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterElementsReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterElementsRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "elements",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterElements"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterTitlesReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetCharacterTitlesRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "titles",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            },
+            {
+              "label": "singular",
+              "name": "equipped_title",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetInventoryReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetInventoryRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "inventory_items",
+              "number": 3,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "repeated",
+              "name": "warehouse_items",
+              "number": 4,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetRolloutDrainStatusReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetRolloutDrainStatusRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "owner_server_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "owned_room_count",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "migrating_room_count",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "connection_count",
+              "number": 7,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "repeated",
+              "name": "routes",
+              "number": 8,
+              "oneof": "",
+              "type": "RoomRouteStatus"
+            },
+            {
+              "label": "singular",
+              "name": "drain_mode_enabled",
+              "number": 9,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "drain_mode_entered_at_ms",
+              "number": 10,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "transferable_empty_room_count",
+              "number": 11,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "repeated",
+              "name": "transferable_empty_room_samples",
+              "number": 12,
+              "oneof": "",
+              "type": "RoomRouteStatus"
+            },
+            {
+              "label": "singular",
+              "name": "drain_mode_reason",
+              "number": 13,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "drain_mode_source",
+              "number": 14,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "retired_room_count",
+              "number": 15,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetRoomDataReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "id_start",
+              "number": 1,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "id_end",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "GetRoomDataRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "repeated",
+              "name": "field_0_list",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ImportRoomTransferReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "payload",
+              "number": 1,
+              "oneof": "",
+              "type": "RoomTransferPayload"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ImportRoomTransferRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "InventoryUpdatePush",
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "inventory_items",
+              "number": 1,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "repeated",
+              "name": "warehouse_items",
+              "number": 2,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "Item",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "item_id",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "binded",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemDiscardReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemDiscardRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemEquipReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "equip_slot",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemEquipRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "unequipped_item",
+              "number": 3,
+              "oneof": "",
+              "type": "Item"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemObtainPush",
+          "fields": [
+            {
+              "label": "repeated",
+              "name": "items",
+              "number": 1,
+              "oneof": "",
+              "type": "Item"
+            },
+            {
+              "label": "singular",
+              "name": "source",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemUseReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ItemUseRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "hp_change",
+              "number": 3,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "repeated",
+              "name": "new_buff_ids",
+              "number": 4,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "LearnCharacterDisciplineReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "LearnCharacterDisciplineRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "singular",
+              "name": "definition",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterDisciplineDefinitionSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "consumed_items",
+              "number": 6,
+              "oneof": "",
+              "type": "DisciplineItemCost"
+            },
+            {
+              "label": "repeated",
+              "name": "active_skill_pool",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 8,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MoveInputReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "input_type",
+              "number": 2,
+              "oneof": "",
+              "type": "MoveInputType"
+            },
+            {
+              "label": "singular",
+              "name": "dir_x",
+              "number": 3,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "dir_y",
+              "number": 4,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "has_client_state",
+              "number": 5,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "client_x",
+              "number": 6,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "client_y",
+              "number": 7,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "client_frame_id",
+              "number": 8,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "client_timestamp_ms",
+              "number": 9,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MoveInputRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MovementRecoveryState",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "entities",
+              "number": 2,
+              "oneof": "",
+              "type": "EntityTransform"
+            },
+            {
+              "label": "singular",
+              "name": "correction_kind",
+              "number": 3,
+              "oneof": "",
+              "type": "MovementCorrectionKind"
+            },
+            {
+              "label": "singular",
+              "name": "reason_code",
+              "number": 4,
+              "oneof": "",
+              "type": "MovementCorrectionReason"
+            },
+            {
+              "label": "singular",
+              "name": "reference_frame_id",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "aoi_enabled",
+              "number": 6,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "aoi_radius",
+              "number": 7,
+              "oneof": "",
+              "type": "float"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MovementRejectPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "corrected",
+              "number": 5,
+              "oneof": "",
+              "type": "EntityTransform"
+            },
+            {
+              "label": "singular",
+              "name": "correction_kind",
+              "number": 6,
+              "oneof": "",
+              "type": "MovementCorrectionKind"
+            },
+            {
+              "label": "singular",
+              "name": "reason_code",
+              "number": 7,
+              "oneof": "",
+              "type": "MovementCorrectionReason"
+            },
+            {
+              "label": "singular",
+              "name": "reference_frame_id",
+              "number": 8,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "has_client_state",
+              "number": 9,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "client_x",
+              "number": 10,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "client_y",
+              "number": 11,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "server_x",
+              "number": 12,
+              "oneof": "",
+              "type": "float"
+            },
+            {
+              "label": "singular",
+              "name": "server_y",
+              "number": 13,
+              "oneof": "",
+              "type": "float"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MovementSnapshotPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "entities",
+              "number": 3,
+              "oneof": "",
+              "type": "EntityTransform"
+            },
+            {
+              "label": "singular",
+              "name": "full_sync",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "correction_kind",
+              "number": 6,
+              "oneof": "",
+              "type": "MovementCorrectionKind"
+            },
+            {
+              "label": "singular",
+              "name": "reason_code",
+              "number": 7,
+              "oneof": "",
+              "type": "MovementCorrectionReason"
+            },
+            {
+              "label": "repeated",
+              "name": "target_character_ids",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reference_frame_id",
+              "number": 9,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PingReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "client_time",
+              "number": 1,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PingRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "server_time",
+              "number": 1,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerInputReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "frame_id",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "payload_json",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_timestamp_ms",
+              "number": 4,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerInputRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RequestServerShutdownReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RequestServerShutdownRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "connection_count",
+              "number": 3,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "owned_room_count",
+              "number": 4,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "migrating_room_count",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "drain_mode_enabled",
+              "number": 6,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "retired_room_count",
+              "number": 7,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RetireTransferredRoomReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RetireTransferredRoomRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomEndReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomEndRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomFrameRatePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "fps",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomJoinAsObserverReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomJoinAsObserverRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            },
+            {
+              "label": "singular",
+              "name": "current_frame_id",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "recent_inputs",
+              "number": 6,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "waiting_frame_id",
+              "number": 7,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "waiting_inputs",
+              "number": 8,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "input_delay_frames",
+              "number": 9,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "movement_recovery",
+              "number": 10,
+              "oneof": "",
+              "type": "MovementRecoveryState"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomJoinReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "policy_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomJoinRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomLeaveReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomLeaveRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomMember",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "ready",
+              "number": 2,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "is_owner",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "offline",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "role",
+              "number": 5,
+              "oneof": "",
+              "type": "MemberRole"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomMemberOfflinePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "offline",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomReadyReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ready",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomReadyRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "ready",
+              "number": 3,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomReconnectReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "last_character_push_sequence",
+              "number": 1,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomReconnectRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            },
+            {
+              "label": "singular",
+              "name": "current_frame_id",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "recent_inputs",
+              "number": 6,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "waiting_frame_id",
+              "number": 7,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "waiting_inputs",
+              "number": 8,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "input_delay_frames",
+              "number": 9,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "movement_recovery",
+              "number": 10,
+              "oneof": "",
+              "type": "MovementRecoveryState"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomRouteStatus",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "owner_server_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "migration_state",
+              "number": 3,
+              "oneof": "",
+              "type": "RoomMigrationState"
+            },
+            {
+              "label": "singular",
+              "name": "member_count",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "online_member_count",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "empty_since_ms",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 7,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomSnapshot",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "owner_character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "state",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "members",
+              "number": 4,
+              "oneof": "",
+              "type": "RoomMember"
+            },
+            {
+              "label": "singular",
+              "name": "current_frame_id",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "game_state",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomStartReq",
+          "fields": [],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomStartRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomStatePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "event",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 2,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "RoomTransferPayload",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_version",
+              "number": 3,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "policy_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "owner_character_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_phase",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "current_frame_id",
+              "number": 7,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "last_applied_frame_id",
+              "number": 8,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "snapshot",
+              "number": 9,
+              "oneof": "",
+              "type": "RoomSnapshot"
+            },
+            {
+              "label": "repeated",
+              "name": "recent_inputs",
+              "number": 10,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "waiting_frame_id",
+              "number": 11,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "waiting_inputs",
+              "number": 12,
+              "oneof": "",
+              "type": "FrameInput"
+            },
+            {
+              "label": "singular",
+              "name": "movement_state_json",
+              "number": 13,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "logic_state_json",
+              "number": 14,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "runtime_timers_json",
+              "number": 15,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 16,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "checksum",
+              "number": 17,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "ServerRedirectPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reconnect_required",
+              "number": 4,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "retry_after_ms",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "target_host",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_port",
+              "number": 7,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "target_server_id",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "transport",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "SessionKickPush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "timestamp",
+              "number": 2,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "SetCharacterDisciplineActiveReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "active",
+              "number": 2,
+              "oneof": "",
+              "type": "bool"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "SetCharacterDisciplineActiveRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "disciplines",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "active_skill_pool",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 7,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "SwitchCharacterDisciplineReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "discipline_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "SwitchCharacterDisciplineRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "discipline",
+              "number": 4,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "disciplines",
+              "number": 5,
+              "oneof": "",
+              "type": "CharacterDisciplineSummary"
+            },
+            {
+              "label": "repeated",
+              "name": "active_skill_pool",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "unlocked_titles",
+              "number": 7,
+              "oneof": "",
+              "type": "CharacterTitleSummary"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "TriggerRolloutDrainNoticeReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "message",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "retry_after_ms",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "deadline_ms",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "TriggerRolloutDrainNoticeRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "delivered_count",
+              "number": 4,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "failed_count",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "online_member_count",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "TriggerServerRedirectReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rollout_epoch",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_host",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_port",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "target_server_id",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "transport",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "retry_after_ms",
+              "number": 8,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "TriggerServerRedirectRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "delivered_count",
+              "number": 4,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "failed_count",
+              "number": 5,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "online_member_count",
+              "number": 6,
+              "oneof": "",
+              "type": "uint64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "VisualChangePush",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "appearance",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "repeated",
+              "name": "active_buff_ids",
+              "number": 2,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "WarehouseAccessReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "action",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "item_uid",
+              "number": 2,
+              "oneof": "",
+              "type": "uint64"
+            },
+            {
+              "label": "singular",
+              "name": "count",
+              "number": 3,
+              "oneof": "",
+              "type": "uint32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "WarehouseAccessRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "enums": [
+        {
+          "name": "AuthorityKind",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "AUTHORITY_KIND_SERVER",
+              "number": 0
+            },
+            {
+              "name": "AUTHORITY_KIND_CLIENT",
+              "number": 1
+            },
+            {
+              "name": "AUTHORITY_KIND_LOCAL",
+              "number": 2
+            }
+          ]
+        },
+        {
+          "name": "MemberRole",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "MEMBER_ROLE_PLAYER",
+              "number": 0
+            },
+            {
+              "name": "MEMBER_ROLE_OBSERVER",
+              "number": 1
+            }
+          ]
+        },
+        {
+          "name": "MoveInputType",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "MOVE_INPUT_TYPE_UNKNOWN",
+              "number": 0
+            },
+            {
+              "name": "MOVE_INPUT_TYPE_MOVE_DIR",
+              "number": 1
+            },
+            {
+              "name": "MOVE_INPUT_TYPE_MOVE_STOP",
+              "number": 2
+            },
+            {
+              "name": "MOVE_INPUT_TYPE_FACE_TO",
+              "number": 3
+            }
+          ]
+        },
+        {
+          "name": "MovementCorrectionKind",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "MOVEMENT_CORRECTION_KIND_INCREMENTAL",
+              "number": 0
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_KIND_FULL_SYNC",
+              "number": 1
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_KIND_STRONG",
+              "number": 2
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_KIND_RECOVERY",
+              "number": 3
+            }
+          ]
+        },
+        {
+          "name": "MovementCorrectionReason",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_UNKNOWN",
+              "number": 0
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_PERIODIC",
+              "number": 1
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_CLIENT_DRIFT",
+              "number": 2
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_MOVEMENT_REJECTED",
+              "number": 3
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_COLLISION_BLOCKED",
+              "number": 4
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_GAME_STARTED",
+              "number": 5
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_RECONNECT_RECOVERY",
+              "number": 6
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_OBSERVER_RECOVERY",
+              "number": 7
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_PLAYER_OFFLINE",
+              "number": 8
+            },
+            {
+              "name": "MOVEMENT_CORRECTION_REASON_CONTROL_TIMEOUT",
+              "number": 9
+            }
+          ]
+        },
+        {
+          "name": "RoomMigrationState",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          },
+          "values": [
+            {
+              "name": "ROOM_MIGRATION_STATE_OWNED_BY_OLD",
+              "number": 0
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_DRAINING_ON_OLD",
+              "number": 1
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_FROZEN_FOR_TRANSFER",
+              "number": 2
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_IMPORTING_TO_NEW",
+              "number": 3
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_OWNED_BY_NEW",
+              "number": 4
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_TRANSFER_FAILED",
+              "number": 5
+            },
+            {
+              "name": "ROOM_MIGRATION_STATE_RETIRED_ON_OLD",
+              "number": 6
+            }
+          ]
+        }
+      ],
+      "services": []
+    },
+    {
+      "path": "packages/proto/match.proto",
+      "package": "myserver.matchservice",
+      "messages": [
+        {
+          "name": "CreateRoomAndJoinReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "repeated",
+              "name": "character_ids",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mode",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "CreateRoomAndJoinRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchCancelReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchCancelRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchEndReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchEndRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchEvent",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "event",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "token",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchEventStreamReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchStartReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mode",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "rank_tier",
+              "number": 3,
+              "oneof": "",
+              "type": "int32"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchStartRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchStatusReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "MatchStatusRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "status",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "token",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "estimated_wait_secs",
+              "number": 5,
+              "oneof": "",
+              "type": "int64"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerJoinedReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "room_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerJoinedRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerLeftReq",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "match_id",
+              "number": 1,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "reason",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "name": "PlayerLeftRes",
+          "fields": [
+            {
+              "label": "singular",
+              "name": "ok",
+              "number": 1,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "match_should_abort",
+              "number": 2,
+              "oneof": "",
+              "type": "bool"
+            },
+            {
+              "label": "singular",
+              "name": "error_code",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            }
+          ],
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        }
+      ],
+      "enums": [],
+      "services": [
+        {
+          "name": "MatchInternal",
+          "rpcs": [
+            {
+              "name": "CreateRoomAndJoin",
+              "request": {
+                "stream": false,
+                "type": "CreateRoomAndJoinReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "CreateRoomAndJoinRes"
+              }
+            },
+            {
+              "name": "MatchEnd",
+              "request": {
+                "stream": false,
+                "type": "MatchEndReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "MatchEndRes"
+              }
+            },
+            {
+              "name": "PlayerJoined",
+              "request": {
+                "stream": false,
+                "type": "PlayerJoinedReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "PlayerJoinedRes"
+              }
+            },
+            {
+              "name": "PlayerLeft",
+              "request": {
+                "stream": false,
+                "type": "PlayerLeftReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "PlayerLeftRes"
+              }
+            }
+          ]
+        },
+        {
+          "name": "MatchService",
+          "rpcs": [
+            {
+              "name": "MatchCancel",
+              "request": {
+                "stream": false,
+                "type": "MatchCancelReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "MatchCancelRes"
+              }
+            },
+            {
+              "name": "MatchEventStream",
+              "request": {
+                "stream": false,
+                "type": "MatchEventStreamReq"
+              },
+              "response": {
+                "stream": true,
+                "type": "MatchEvent"
+              }
+            },
+            {
+              "name": "MatchStart",
+              "request": {
+                "stream": false,
+                "type": "MatchStartReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "MatchStartRes"
+              }
+            },
+            {
+              "name": "MatchStatus",
+              "request": {
+                "stream": false,
+                "type": "MatchStatusReq"
+              },
+              "response": {
+                "stream": false,
+                "type": "MatchStatusRes"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "format": "myserver.protobuf.compatibility-baseline/v1",
+  "digest": "sha256:2c20a25476bb20588cd698b131ef6af5d1ebe2080fd5dd93a1a6e60833bdc3ce"
+}

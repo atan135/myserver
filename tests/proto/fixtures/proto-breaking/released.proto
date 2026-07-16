@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package fixture.compatibility;
+
+message Request {}
+message Response {}
+
+message Example {
+  string text = 1;
+  optional string mode = 2;
+  oneof body {
+    string body_text = 3;
+  }
+  string legacy = 4;
+}
+
+enum Status {
+  STATUS_UNKNOWN = 0;
+  STATUS_READY = 1;
+  STATUS_LEGACY = 2;
+}
+
+service Demo {
+  rpc Get(Request) returns (Response);
+  rpc Delete(Request) returns (Response);
+}

@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const FORMAT = "myserver.protobuf.compatibility-baseline/v1";
+export const BASELINE_FORMAT = "myserver.protobuf.compatibility-baseline/v1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const inventoryPath = path.join(rootDir, "packages", "proto", "compatibility", "inventory.json");
@@ -470,9 +470,23 @@ export function buildBaseline(inventory, root = rootDir) {
   });
   const projection = {
     files,
-    format: FORMAT
+    format: BASELINE_FORMAT
   };
   return { ...projection, digest: digest(projection) };
+}
+
+export function validateBaselineSnapshot(snapshot, label = "compatibility baseline") {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    fail(`${label} must be a JSON object`);
+  }
+  if (snapshot.format !== BASELINE_FORMAT || !Array.isArray(snapshot.files)) {
+    fail(`${label} has an unsupported format or missing files`);
+  }
+  const projection = { files: snapshot.files, format: snapshot.format };
+  if (typeof snapshot.digest !== "string" || snapshot.digest !== digest(projection)) {
+    fail(`${label} digest is invalid`);
+  }
+  return snapshot;
 }
 
 function compareText(left, right) {
@@ -501,7 +515,7 @@ export function validateInventory(inventory, root = rootDir) {
   }
 
   const repositoryProtos = listProtoFiles(root)
-    .filter((filePath) => !filePath.startsWith("docs/历史归档/"))
+    .filter((filePath) => !filePath.startsWith("docs/历史归档/") && !filePath.startsWith("tests/proto/fixtures/"))
     .sort();
   if (stableJson(repositoryProtos) !== stableJson(expected)) {
     const extra = repositoryProtos.filter((filePath) => !expected.includes(filePath));
@@ -525,10 +539,7 @@ export function checkBaseline(inventory = readInventory(), root = rootDir) {
     fail(`compatibility baseline does not exist: ${normalizePath(path.relative(root, baselinePath))}`);
   }
   const recorded = JSON.parse(readFileSync(baselinePath, "utf8"));
-  const recordedProjection = { files: recorded.files, format: recorded.format };
-  if (recorded.format !== FORMAT || recorded.digest !== digest(recordedProjection)) {
-    fail(`compatibility baseline digest is invalid: ${normalizePath(path.relative(root, baselinePath))}`);
-  }
+  validateBaselineSnapshot(recorded, `compatibility baseline ${normalizePath(path.relative(root, baselinePath))}`);
   const current = buildBaseline(inventory, root);
   const difference = compareText(stableJson(recorded), stableJson(current));
   if (difference) {

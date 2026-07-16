@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package fixture.compatibility;
+
+message Request {}
+message Response {}
+message ResponseV2 {}
+
+message Example {
+  bytes replacement = 1;
+  repeated string mode = 2;
+  string body_text = 3;
+}
+
+enum Status {
+  STATUS_UNKNOWN = 0;
+  STATUS_STOPPED = 1;
+}
+
+service Demo {
+  rpc Get(stream Request) returns (stream ResponseV2);
+}
