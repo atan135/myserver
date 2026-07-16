@@ -48,7 +48,7 @@
     "check:registry-fallback-observability": "node tools/check-registry-fallback-observability.js",
     "check:discovery-config": "node tools/check-discovery-config.js",
     "check:deployment-discovery": "node tools/check-deployment-discovery-dry-run.js",
-    "check:proto": "npm run check:mock-client-protocol",
+    "check:proto": "node tools/check-proto.js",
     "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
     "global-id:decode": "node tools/global-id-decode.js",
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",

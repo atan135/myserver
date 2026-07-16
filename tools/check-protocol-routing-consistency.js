@@ -286,7 +286,7 @@ function lineNumber(source, index) {
 function parseLiteralErrorCodeUses(source, file) {
   const codes = new Map();
   const patterns = [
-    /\b(?:queue_error|write_error|audit_then_write_error)\s*\([\s\S]{0,280}?\"([A-Z][A-Z0-9_]+)\"/g,
+    /\b(?:queue_error|write_error|audit_then_write_error|auth_response)\s*\([\s\S]{0,280}?\"([A-Z][A-Z0-9_]+)\"/g,
     /\berror_code\s*:\s*\"([A-Z][A-Z0-9_]+)\"(?:\.to_string\(\))?/g,
     /\bErr\s*\(\s*\"([A-Z][A-Z0-9_]+)\"\s*\)/g
   ];

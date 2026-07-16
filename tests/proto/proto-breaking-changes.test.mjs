@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,6 +15,7 @@ import { buildBaseline, parseProto } from "../../tools/proto-compatibility-basel
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureDirectory = path.join(__dirname, "fixtures", "proto-breaking");
+const repositoryRoot = path.resolve(__dirname, "..", "..");
 
 function fileSnapshot(file, source) {
   return { path: file, ...parseProto(source, file) };
@@ -173,6 +175,72 @@ test("published reference catches a breaking source even after candidate baselin
     const result = checkBreakingChangesForRepository(fixtureInventory, root, "2026-07-16");
     assert.ok(result.errors.some((diagnostic) => diagnostic.rule === "FIELD_TYPE_CHANGED"));
     assert.ok(result.errors.some((diagnostic) => diagnostic.rule === "FIELD_REMOVED_NOT_RESERVED"));
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test("breaking-check CLI rejects a changed released field with rule, file, message, and field diagnostics", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "myserver-proto-breaking-cli-test-"));
+  try {
+    const compatibilityDirectory = path.join(root, "packages", "proto", "compatibility");
+    const protoPath = path.join(root, "packages", "proto", "game.proto");
+    const toolsDirectory = path.join(root, "tools");
+    mkdirSync(compatibilityDirectory, { recursive: true });
+    mkdirSync(toolsDirectory, { recursive: true });
+    writeFileSync(path.join(root, "package.json"), "{\n  \"type\": \"module\"\n}\n");
+    copyFileSync(
+      path.join(repositoryRoot, "tools", "check-proto-breaking-changes.js"),
+      path.join(toolsDirectory, "check-proto-breaking-changes.js")
+    );
+    copyFileSync(
+      path.join(repositoryRoot, "tools", "proto-compatibility-baseline.js"),
+      path.join(toolsDirectory, "proto-compatibility-baseline.js")
+    );
+
+    const fixtureInventory = {
+      baseline: { file: "packages/proto/compatibility/baseline.json" },
+      breakingExemptions: { file: "packages/proto/compatibility/breaking-exemptions.json" },
+      protocols: [protocol("packages/proto/game.proto")],
+      publishedReference: {
+        baselineFile: "packages/proto/compatibility/release-baseline.json",
+        manifestFile: "packages/proto/compatibility/release-reference.json"
+      }
+    };
+    writeFileSync(path.join(compatibilityDirectory, "inventory.json"), `${JSON.stringify(fixtureInventory, null, 2)}\n`);
+    writeFileSync(protoPath, releasedSource);
+    const released = buildBaseline(fixtureInventory, root);
+    writeFileSync(path.join(compatibilityDirectory, "release-baseline.json"), `${JSON.stringify(released, null, 2)}\n`);
+    writeFileSync(path.join(compatibilityDirectory, "release-reference.json"), `${JSON.stringify({
+      baselineDigest: released.digest,
+      baselineFile: "packages/proto/compatibility/release-baseline.json",
+      release: {
+        approvedAt: "2026-07-16",
+        approvedBy: "protocol-owner",
+        reason: "fixture release",
+        releaseId: "fixture-v1"
+      },
+      schemaVersion: 1
+    }, null, 2)}\n`);
+    writeFileSync(path.join(compatibilityDirectory, "breaking-exemptions.json"), "{\n  \"schemaVersion\": 1,\n  \"exemptions\": []\n}\n");
+
+    // Simulate a candidate PR that updates its own baseline along with an incompatible proto edit.
+    writeFileSync(protoPath, breakingSource);
+    const candidate = buildBaseline(fixtureInventory, root);
+    writeFileSync(path.join(compatibilityDirectory, "baseline.json"), `${JSON.stringify(candidate, null, 2)}\n`);
+
+    const result = spawnSync(
+      process.execPath,
+      [path.join(toolsDirectory, "check-proto-breaking-changes.js"), "--check"],
+      { cwd: root, encoding: "utf8" }
+    );
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(result.status, 1, output);
+    assert.match(output, /FIELD_TYPE_CHANGED/);
+    assert.match(output, /packages\/proto\/game\.proto/);
+    assert.match(output, /message=Example/);
+    assert.match(output, /fieldNumber=1/);
+    assert.match(output, /Example\.text \(#1\)/);
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

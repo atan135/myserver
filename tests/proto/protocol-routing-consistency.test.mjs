@@ -152,6 +152,25 @@ test("error-code analysis records shared fields and explicit dynamic-source meta
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.rule === "ERROR_CODE_UNUSED"));
 });
 
+test("error-code analysis recognizes AuthRes error literals emitted through auth_response", () => {
+  const result = analyzeErrorCodes({
+    config: {
+      errorCodes: {
+        definitionMode: "implementation_literals",
+        staticCodes: ["AUTHORITY_BACKEND_UNAVAILABLE"]
+      }
+    },
+    implementationSources: {
+      "core_service.rs": `auth_response(false, String::new(), "AUTHORITY_BACKEND_UNAVAILABLE".to_string())`
+    },
+    protoSources: {
+      "packages/proto/game.proto": `message AuthRes { string error_code = 3; }`
+    }
+  });
+  assert.equal(result.literalCodes.has("AUTHORITY_BACKEND_UNAVAILABLE"), true);
+  assert.equal(result.diagnostics.some((diagnostic) => diagnostic.rule === "ERROR_CODE_UNUSED"), false);
+});
+
 test("error-code analysis rejects an implementation literal absent from the static catalog", () => {
   const result = analyzeErrorCodes({
     config: { errorCodes: { definitionMode: "implementation_literals", staticCodes: [] } },

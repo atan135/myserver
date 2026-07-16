@@ -1,0 +1,72 @@
+name: Protocol Compatibility
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/protocol-compatibility.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/proto/**"
+      - "tools/check-mock-client-protocol.js"
+      - "tools/check-proto.js"
+      - "tools/check-proto-compatibility-fixtures.js"
+      - "tools/check-proto-breaking-changes.js"
+      - "tools/check-protocol-routing-consistency.js"
+      - "tools/client-protocol-version-policy.js"
+      - "tools/proto-compatibility-baseline.js"
+      - "tools/proto-generate.js"
+      - "tools/generate-proto-compatibility-fixtures.js"
+      - "tools/mock-client/src/**"
+      - "tests/proto/**"
+      - "apps/**/Cargo.toml"
+      - "apps/**/Cargo.lock"
+      - "apps/**/build.rs"
+      - "apps/**/src/proto/**"
+      - "apps/game-server/src/**"
+      - "apps/game-proxy/src/**"
+      - "apps/match-service/src/**"
+      - "docs/协议与客户端/**"
+  push:
+    paths:
+      - ".github/workflows/protocol-compatibility.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/proto/**"
+      - "tools/check-mock-client-protocol.js"
+      - "tools/check-proto.js"
+      - "tools/check-proto-compatibility-fixtures.js"
+      - "tools/check-proto-breaking-changes.js"
+      - "tools/check-protocol-routing-consistency.js"
+      - "tools/client-protocol-version-policy.js"
+      - "tools/proto-compatibility-baseline.js"
+      - "tools/proto-generate.js"
+      - "tools/generate-proto-compatibility-fixtures.js"
+      - "tools/mock-client/src/**"
+      - "tests/proto/**"
+      - "apps/**/Cargo.toml"
+      - "apps/**/Cargo.lock"
+      - "apps/**/build.rs"
+      - "apps/**/src/proto/**"
+      - "apps/game-server/src/**"
+      - "apps/game-proxy/src/**"
+      - "apps/match-service/src/**"
+      - "docs/协议与客户端/**"
+
+jobs:
+  check:
+    name: Windows protocol gate
+    runs-on: windows-latest
+    env:
+      # mybevy is an optional, read-only local integration and is not part of this CI checkout.
+      MYSERVER_CLIENT_ROOT: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install locked Node.js dependencies
+        run: npm ci
+      - name: Check protocol compatibility
+        run: npm run check:proto
