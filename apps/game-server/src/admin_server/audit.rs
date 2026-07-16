@@ -76,7 +76,10 @@ impl AdminAuditLogger {
         line.push('\n');
         file.write_all(line.as_bytes())
             .await
-            .map_err(AdminAuditError::Io)
+            .map_err(AdminAuditError::Io)?;
+        // Tokio file writes can remain buffered after `write_all`; admin callers and tests may
+        // immediately query this audit record, so complete the flush before acknowledging it.
+        file.flush().await.map_err(AdminAuditError::Io)
     }
 }
 
