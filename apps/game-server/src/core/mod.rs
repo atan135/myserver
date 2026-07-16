@@ -12,6 +12,7 @@ pub mod inventory;
 pub mod logic;
 pub mod online_route;
 pub mod player;
+pub mod reward_source;
 pub mod room;
 pub mod runtime;
 pub mod service;

@@ -17,6 +17,7 @@ use crate::core::inventory::item::ItemElementValues;
 use crate::core::inventory::player_data::{
     CharacterProgressRecord, CharacterProgressRewardLog, PlayerData,
 };
+use crate::core::reward_source::RewardSource;
 use crate::csv_code::characterprogresstable::{CharacterProgressTable, CharacterProgressTableRow};
 use crate::csv_code::disciplinetable::DisciplineTable;
 use crate::session::AuthenticatedSessionIdentity;
@@ -189,6 +190,11 @@ impl CharacterProgressService {
         if source_id.is_empty() {
             return Err(invalid_config("SourceId must not be empty"));
         }
+        // Keep the existing progress record fields for compatibility, while requiring every
+        // configuration-backed reward source to also have a stable canonical AssetOrigin ID.
+        // Item rewards added to this source later must use this same mapping.
+        RewardSource::from_character_progress(&source_type, &source_id)
+            .map_err(|error| invalid_config(error.to_string()))?;
 
         let repeatable = row.repeatable != 0;
         if !repeatable && player_data.progress.completed.contains_key(progress_id) {
