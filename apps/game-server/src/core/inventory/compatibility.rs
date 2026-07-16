@@ -27,7 +27,10 @@ pub struct AssetCompatibilityIssue {
     pub detail: String,
 }
 
-pub fn scan_player_assets(player: &PlayerData, item_table: &ItemTable) -> Vec<AssetCompatibilityIssue> {
+pub fn scan_player_assets(
+    player: &PlayerData,
+    item_table: &ItemTable,
+) -> Vec<AssetCompatibilityIssue> {
     let mut issues = Vec::new();
     let mut seen_uids = HashSet::new();
     scan_container(
@@ -44,12 +47,7 @@ pub fn scan_player_assets(player: &PlayerData, item_table: &ItemTable) -> Vec<As
         &mut seen_uids,
         &mut issues,
     );
-    scan_equipment(
-        &player.equipment,
-        item_table,
-        &mut seen_uids,
-        &mut issues,
-    );
+    scan_equipment(&player.equipment, item_table, &mut seen_uids, &mut issues);
     issues
 }
 
@@ -105,7 +103,10 @@ fn scan_json_container(
             code: AssetCompatibilityIssueCode::ContainerCapacityMismatch,
             container,
             asset_uid: None,
-            detail: format!("declared capacity {declared_capacity} differs from {} slots", slots.len()),
+            detail: format!(
+                "declared capacity {declared_capacity} differs from {} slots",
+                slots.len()
+            ),
         });
     }
     match serde_json::from_value::<ItemContainer>(json.clone()) {
@@ -146,7 +147,13 @@ fn scan_equipment(
     issues: &mut Vec<AssetCompatibilityIssue>,
 ) {
     for (_, item) in equipment.iter() {
-        scan_item(item, AssetContainer::Equipment, item_table, seen_uids, issues);
+        scan_item(
+            item,
+            AssetContainer::Equipment,
+            item_table,
+            seen_uids,
+            issues,
+        );
     }
 }
 
@@ -158,24 +165,63 @@ fn scan_item(
     issues: &mut Vec<AssetCompatibilityIssue>,
 ) {
     if item.count == 0 {
-        issue(issues, AssetCompatibilityIssueCode::ZeroQuantity, container, item.uid, "item count is zero");
+        issue(
+            issues,
+            AssetCompatibilityIssueCode::ZeroQuantity,
+            container,
+            item.uid,
+            "item count is zero",
+        );
     }
     if item.uid == 0 || !seen_uids.insert(item.uid) {
-        issue(issues, AssetCompatibilityIssueCode::DuplicateUid, container, item.uid, "UID is zero or repeats in another asset slot");
+        issue(
+            issues,
+            AssetCompatibilityIssueCode::DuplicateUid,
+            container,
+            item.uid,
+            "UID is zero or repeats in another asset slot",
+        );
     }
     match item_table.get(item.item_id) {
-        None => issue(issues, AssetCompatibilityIssueCode::UnknownItemConfig, container, item.uid, "item id is absent from ItemTable"),
+        None => issue(
+            issues,
+            AssetCompatibilityIssueCode::UnknownItemConfig,
+            container,
+            item.uid,
+            "item id is absent from ItemTable",
+        ),
         Some(row) => {
             if item.count > row.maxstack.max(0) as u32 {
-                issue(issues, AssetCompatibilityIssueCode::StackExceedsMax, container, item.uid, "item count exceeds ItemTable.MaxStack");
+                issue(
+                    issues,
+                    AssetCompatibilityIssueCode::StackExceedsMax,
+                    container,
+                    item.uid,
+                    "item count exceeds ItemTable.MaxStack",
+                );
             }
             if super::item::validate_item_table_row(row, item_table).is_err() {
-                issue(issues, AssetCompatibilityIssueCode::InvalidItemConfig, container, item.uid, "item references an invalid ItemTable row");
+                issue(
+                    issues,
+                    AssetCompatibilityIssueCode::InvalidItemConfig,
+                    container,
+                    item.uid,
+                    "item references an invalid ItemTable row",
+                );
             }
         }
     }
-    if matches!(AssetBinding::from_item(item), AssetBinding::LegacyBoundWithoutCharacter | AssetBinding::LegacyUnboundWithCharacter { .. }) {
-        issue(issues, AssetCompatibilityIssueCode::InvalidBinding, container, item.uid, "binded and bound_character_id are inconsistent");
+    if matches!(
+        AssetBinding::from_item(item),
+        AssetBinding::LegacyBoundWithoutCharacter | AssetBinding::LegacyUnboundWithCharacter { .. }
+    ) {
+        issue(
+            issues,
+            AssetCompatibilityIssueCode::InvalidBinding,
+            container,
+            item.uid,
+            "binded and bound_character_id are inconsistent",
+        );
     }
 }
 
@@ -229,17 +275,36 @@ mod tests {
         let mut zero_quantity = Item::new(7, 1001, 0, false);
         zero_quantity.growth_elements = super::super::item::ItemElementValues::new(1, 0, 0, 0);
         player.inventory.add_item(zero_quantity).unwrap();
-        player.inventory.add_item(Item::new(8, 1001, 4, false)).unwrap();
+        player
+            .inventory
+            .add_item(Item::new(8, 1001, 4, false))
+            .unwrap();
         let mut duplicate = Item::new(7, 1001, 1, false);
         duplicate.bound_character_id = Some("chr_01".to_string());
         player.warehouse.add_item(duplicate).unwrap();
 
         let issues = scan_player_assets(&player, &table);
 
-        assert!(issues.iter().any(|issue| issue.code == AssetCompatibilityIssueCode::ZeroQuantity));
-        assert!(issues.iter().any(|issue| issue.code == AssetCompatibilityIssueCode::StackExceedsMax));
-        assert!(issues.iter().any(|issue| issue.code == AssetCompatibilityIssueCode::DuplicateUid));
-        assert!(issues.iter().any(|issue| issue.code == AssetCompatibilityIssueCode::InvalidBinding));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == AssetCompatibilityIssueCode::ZeroQuantity)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == AssetCompatibilityIssueCode::StackExceedsMax)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == AssetCompatibilityIssueCode::DuplicateUid)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == AssetCompatibilityIssueCode::InvalidBinding)
+        );
         assert_eq!(player.inventory.find_item(8).unwrap().count, 4);
     }
 }

@@ -81,7 +81,9 @@ pub enum AssetConfigTable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetConfigVersion {
-    LegacyUnversioned { table: AssetConfigTable },
+    LegacyUnversioned {
+        table: AssetConfigTable,
+    },
     Revision {
         table: AssetConfigTable,
         revision: String,
@@ -308,9 +310,11 @@ mod tests {
         let second = Item::new(2, 1001, 3, false);
 
         assert_eq!(first.asset_stack_identity().asset_type(), AssetType::Item);
-        assert!(first
-            .asset_stack_identity()
-            .can_stack_with(&second.asset_stack_identity()));
+        assert!(
+            first
+                .asset_stack_identity()
+                .can_stack_with(&second.asset_stack_identity())
+        );
     }
 
     #[test]
@@ -340,9 +344,11 @@ mod tests {
         let mut inconsistent = Item::new(2, 1001, 1, false);
         inconsistent.bound_character_id = Some("chr_legacy".to_string());
 
-        assert!(!unbound
-            .asset_stack_identity()
-            .can_stack_with(&inconsistent.asset_stack_identity()));
+        assert!(
+            !unbound
+                .asset_stack_identity()
+                .can_stack_with(&inconsistent.asset_stack_identity())
+        );
     }
 
     #[test]
@@ -350,7 +356,10 @@ mod tests {
         let semantics = AssetDeliverySemantics::to_inventory(AssetDeliveryMethod::Mail);
 
         assert_eq!(semantics.delivery_method, AssetDeliveryMethod::Mail);
-        assert_eq!(semantics.settlement_target, AssetSettlementTarget::Inventory);
+        assert_eq!(
+            semantics.settlement_target,
+            AssetSettlementTarget::Inventory
+        );
         assert_eq!(
             semantics.post_commit_notification,
             Some(AssetPostCommitNotification::Push)

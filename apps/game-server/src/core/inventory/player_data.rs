@@ -184,7 +184,9 @@ impl PlayerData {
         // the previous equipment removed from the live snapshot.
         let mut next = self.clone();
         let mut equipped = next.inventory.remove_item(item_uid, item.count)?;
-        let row = item_table.get(equipped.item_id).ok_or(ItemError::InvalidItemConfig)?;
+        let row = item_table
+            .get(equipped.item_id)
+            .ok_or(ItemError::InvalidItemConfig)?;
         equipped.apply_equip_binding(&next.character_id, row, item_table)?;
         if let Some(old_item) = next.equipment.unequip(slot)? {
             if old_item.is_frozen() {
@@ -271,7 +273,8 @@ impl PlayerData {
         if self.contains_item_uid_anywhere(item.uid) {
             return Err(ItemError::DuplicateItemUid);
         }
-        self.inventory.add_item_with_table(item, item_table, next_uid)?;
+        self.inventory
+            .add_item_with_table(item, item_table, next_uid)?;
         self.set_data_dirty();
         Ok(())
     }
@@ -480,15 +483,23 @@ impl PlayerData {
         Ok(())
     }
 
-    pub fn freeze_item(&mut self, item_uid: u64, reason: impl Into<String>) -> Result<(), ItemError> {
-        let item = self.find_item_mut_anywhere(item_uid).ok_or(ItemError::ItemNotFound)?;
+    pub fn freeze_item(
+        &mut self,
+        item_uid: u64,
+        reason: impl Into<String>,
+    ) -> Result<(), ItemError> {
+        let item = self
+            .find_item_mut_anywhere(item_uid)
+            .ok_or(ItemError::ItemNotFound)?;
         item.freeze(reason)?;
         self.set_data_dirty();
         Ok(())
     }
 
     pub fn unfreeze_item(&mut self, item_uid: u64) -> Result<(), ItemError> {
-        let item = self.find_item_mut_anywhere(item_uid).ok_or(ItemError::ItemNotFound)?;
+        let item = self
+            .find_item_mut_anywhere(item_uid)
+            .ok_or(ItemError::ItemNotFound)?;
         item.unfreeze()?;
         self.set_data_dirty();
         Ok(())
@@ -501,7 +512,8 @@ impl PlayerData {
         if let Some(item) = self.warehouse.find_item_mut(item_uid) {
             return Some(item);
         }
-        let slot = self.equipment
+        let slot = self
+            .equipment
             .iter()
             .find_map(|(slot, item)| (item.uid == item_uid).then_some(slot));
         slot.and_then(|slot| self.equipment.get_mut(slot))

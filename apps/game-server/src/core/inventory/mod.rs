@@ -7,6 +7,7 @@ pub mod contract;
 pub mod equipment;
 pub mod item;
 pub mod player_data;
+pub mod reward_delivery;
 pub mod visual;
 
 pub use asset::{
@@ -34,4 +35,10 @@ pub use contract::{
 pub use equipment::{EquipSlot, EquipmentSlots};
 pub use item::{Item, ItemError};
 pub use player_data::PlayerData;
+pub use reward_delivery::{
+    InMemoryRewardDeliveryStore, NoopRewardDeliveryNotifier, PgRewardDeliveryStore,
+    PlayerManagerRewardInventoryPort, RewardDeliveryError, RewardDeliveryNotifier,
+    RewardDeliveryRecord, RewardDeliveryService, RewardDeliveryStore, RewardInventoryPort,
+    RewardInventoryPortError, RewardMailOutboxEntry, RewardMailOutboxWrite,
+};
 pub use visual::PlayerVisual;

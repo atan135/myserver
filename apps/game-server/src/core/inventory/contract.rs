@@ -130,7 +130,11 @@ pub struct NormalizedAssetItem {
 }
 
 impl NormalizedAssetItem {
-    pub fn new(item_id: i32, count: u32, binding: AssetBinding) -> Result<Self, AssetCommandErrorCode> {
+    pub fn new(
+        item_id: i32,
+        count: u32,
+        binding: AssetBinding,
+    ) -> Result<Self, AssetCommandErrorCode> {
         let item = Self {
             item_id,
             count,
@@ -175,7 +179,10 @@ impl NormalizedAssetItem {
     }
 
     fn sort_key(&self) -> Result<(i32, NormalizedBindingKey), AssetCommandErrorCode> {
-        Ok((self.item_id, NormalizedBindingKey::from_binding(&self.binding)?))
+        Ok((
+            self.item_id,
+            NormalizedBindingKey::from_binding(&self.binding)?,
+        ))
     }
 }
 
@@ -320,8 +327,12 @@ pub struct AssetConsumption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum AssetOperation {
-    Grant { items: Vec<NormalizedAssetItem> },
-    Consume { assets: Vec<AssetConsumption> },
+    Grant {
+        items: Vec<NormalizedAssetItem>,
+    },
+    Consume {
+        assets: Vec<AssetConsumption>,
+    },
     Move {
         asset_uid: u64,
         count: u32,
@@ -333,9 +344,17 @@ pub enum AssetOperation {
         from: AssetContainer,
         slot: EquipSlot,
     },
-    Unequip { slot: EquipSlot, to: AssetContainer },
-    Freeze { asset_uid: u64, reason: String },
-    Unfreeze { asset_uid: u64 },
+    Unequip {
+        slot: EquipSlot,
+        to: AssetContainer,
+    },
+    Freeze {
+        asset_uid: u64,
+        reason: String,
+    },
+    Unfreeze {
+        asset_uid: u64,
+    },
 }
 
 impl AssetOperation {
@@ -853,13 +872,9 @@ impl AssetCommandResult {
         {
             return Err(AssetCommandErrorCode::InvalidResultContract);
         }
-        if self
-            .actual_deltas
-            .iter()
-            .any(|delta| {
-                delta.asset_type != AssetType::Item || delta.item_id <= 0 || delta.delta == 0
-            })
-        {
+        if self.actual_deltas.iter().any(|delta| {
+            delta.asset_type != AssetType::Item || delta.item_id <= 0 || delta.delta == 0
+        }) {
             return Err(AssetCommandErrorCode::InvalidResultContract);
         }
         if self.asset_ledger_ids.iter().any(|id| id.trim().is_empty()) {
@@ -872,7 +887,9 @@ impl AssetCommandResult {
         match self.result_state {
             AssetResultState::Applied if self.error_code.is_none() => Ok(()),
             AssetResultState::NotApplied
-                if self.error_code.is_some_and(|code| code.result_state() == AssetResultState::NotApplied)
+                if self
+                    .error_code
+                    .is_some_and(|code| code.result_state() == AssetResultState::NotApplied)
                     && self.actual_deltas.is_empty()
                     && self.container_versions.is_empty()
                     && self.asset_ledger_ids.is_empty()
@@ -998,9 +1015,9 @@ fn is_trimmed_nonempty_with_max_bytes(value: &str, max_bytes: usize) -> bool {
 fn is_sha256_fingerprint(value: &str) -> bool {
     value.len() == "sha256:".len() + 64
         && value.starts_with("sha256:")
-        && value["sha256:".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit()))
+        && value["sha256:".len()..].bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+        })
 }
 
 #[cfg(test)]
@@ -1133,7 +1150,10 @@ mod tests {
             },
         ]);
 
-        assert_eq!(left.expected_container_versions, right.expected_container_versions);
+        assert_eq!(
+            left.expected_container_versions,
+            right.expected_container_versions
+        );
         assert_eq!(left.request_fingerprint(), right.request_fingerprint());
 
         let mut bypassed_constructor = left.clone();

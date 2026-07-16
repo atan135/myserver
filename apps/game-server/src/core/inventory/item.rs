@@ -286,13 +286,17 @@ fn non_empty_string(value: Option<&str>) -> Option<String> {
 /// they can create unstackable or unequippable runtime items.
 pub fn validate_item_table(item_table: &ItemTable) -> Result<(), CsvLoadError> {
     for row in item_table.all() {
-        validate_item_table_row(row, item_table)
-            .map_err(|error| CsvLoadError::InvalidRow(format!("ItemTable item {}: {}", row.id, error.as_str())))?;
+        validate_item_table_row(row, item_table).map_err(|error| {
+            CsvLoadError::InvalidRow(format!("ItemTable item {}: {}", row.id, error.as_str()))
+        })?;
     }
     Ok(())
 }
 
-pub fn validate_item_table_row(row: &ItemTableRow, item_table: &ItemTable) -> Result<(), ItemError> {
+pub fn validate_item_table_row(
+    row: &ItemTableRow,
+    item_table: &ItemTable,
+) -> Result<(), ItemError> {
     if row.id <= 0
         || row.maxstack <= 0
         || row.price < 0
@@ -316,9 +320,14 @@ pub fn validate_item_table_row(row: &ItemTableRow, item_table: &ItemTable) -> Re
     let use_effect = item_table.resolve_string(row.useeffect).unwrap_or("");
     let use_target = item_table.resolve_string(row.usetarget).unwrap_or("");
 
-    if !matches!(item_type, "Equipment" | "Food" | "Consumable" | "Material" | "QuestItem")
-        || !matches!(bind_type, "Never" | "Pickup" | "Equip")
-        || !matches!(use_effect, "None" | "Heal" | "RecoverMp" | "Buff" | "CharacterElementChange")
+    if !matches!(
+        item_type,
+        "Equipment" | "Food" | "Consumable" | "Material" | "QuestItem"
+    ) || !matches!(bind_type, "Never" | "Pickup" | "Equip")
+        || !matches!(
+            use_effect,
+            "None" | "Heal" | "RecoverMp" | "Buff" | "CharacterElementChange"
+        )
     {
         return Err(ItemError::InvalidItemConfig);
     }
@@ -336,10 +345,7 @@ pub fn validate_item_table_row(row: &ItemTableRow, item_table: &ItemTable) -> Re
     }
 
     if use_effect == "None" {
-        if row.usevalue != 0
-            || row.cooldownms != 0
-            || !all_use_deltas_zero(row)
-        {
+        if row.usevalue != 0 || row.cooldownms != 0 || !all_use_deltas_zero(row) {
             return Err(ItemError::InvalidItemConfig);
         }
     } else if !matches!(item_type, "Food" | "Consumable") || use_target != "Self" {

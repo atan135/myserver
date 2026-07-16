@@ -334,7 +334,9 @@ fn validate_item_for_container(item: &Item, item_table: &ItemTable) -> Result<()
     {
         return Err(ItemError::InvalidBinding);
     }
-    let row = item_table.get(item.item_id).ok_or(ItemError::InvalidItemConfig)?;
+    let row = item_table
+        .get(item.item_id)
+        .ok_or(ItemError::InvalidItemConfig)?;
     super::item::validate_item_table_row(row, item_table)?;
     Ok(())
 }
@@ -465,8 +467,14 @@ mod tests {
             .unwrap();
 
         let items = container.non_empty_items();
-        assert_eq!(items.iter().map(|item| item.count).collect::<Vec<_>>(), vec![3, 3, 2]);
-        assert_eq!(items.iter().map(|item| item.uid).collect::<Vec<_>>(), vec![10, 20, 21]);
+        assert_eq!(
+            items.iter().map(|item| item.count).collect::<Vec<_>>(),
+            vec![3, 3, 2]
+        );
+        assert_eq!(
+            items.iter().map(|item| item.uid).collect::<Vec<_>>(),
+            vec![10, 20, 21]
+        );
     }
 
     #[test]
@@ -493,7 +501,10 @@ mod tests {
         assert_eq!(item.freeze("again"), Err(ItemError::AssetFrozen));
         container.add_item(item).unwrap();
 
-        assert_eq!(container.remove_item(1, 1).unwrap_err(), ItemError::AssetFrozen);
+        assert_eq!(
+            container.remove_item(1, 1).unwrap_err(),
+            ItemError::AssetFrozen
+        );
         assert!(container.find_item(1).is_some());
     }
 }

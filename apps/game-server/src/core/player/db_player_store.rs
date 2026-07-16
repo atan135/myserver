@@ -890,6 +890,9 @@ async fn initialize_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     for statement in CHARACTER_SCHEMA_STATEMENTS {
         sqlx::query(statement).execute(pool).await?;
     }
+    for statement in crate::core::inventory::reward_delivery::REWARD_DELIVERY_SCHEMA_STATEMENTS {
+        sqlx::query(statement).execute(pool).await?;
+    }
 
     Ok(())
 }

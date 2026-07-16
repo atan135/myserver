@@ -11,6 +11,7 @@ use super::db_player_store::{
 };
 use super::grant_contract::GrantResultSummary;
 use crate::core::inventory::{Item, ItemError, PlayerData};
+use crate::csv_code::itemtable::ItemTable;
 
 #[derive(Debug, Clone)]
 pub struct GrantItemsOutcome {
@@ -316,6 +317,134 @@ impl PlayerManager {
                         character_id,
                         error = %error,
                         "failed to persist inventory grant transaction"
+                    );
+                    match error {
+                        SaveGrantRecordError::NotApplied(_) => {
+                            GrantItemsError::transaction_failed()
+                        }
+                        SaveGrantRecordError::ResultUnknown(_) => {
+                            GrantItemsError::commit_result_unknown()
+                        }
+                    }
+                })?
+        } else {
+            let record = GrantRecord {
+                request_id: request_id.to_string(),
+                character_id: character_id.to_string(),
+                request_fingerprint: request_fingerprint.to_string(),
+                result_summary,
+                created_at_ms: current_unix_ms(),
+            };
+            self.grant_records
+                .write()
+                .await
+                .insert(request_id.to_string(), record.clone());
+            SaveGrantRecordOutcome::Applied(record)
+        };
+
+        match save_outcome {
+            SaveGrantRecordOutcome::Applied(record) => {
+                player_data
+                    .set_persistence_revision(player_data.persistence_revision().saturating_add(1));
+                let mut players = self.players.write().await;
+                players.insert(character_id.to_string(), player_data.clone());
+                Ok(GrantItemsOutcome {
+                    applied: true,
+                    player_data: Some(player_data),
+                    granted_items: items,
+                    record,
+                })
+            }
+            SaveGrantRecordOutcome::Existing(GrantRecordLookup::Succeeded(record)) => {
+                replay_or_conflict(record, character_id, request_fingerprint)
+            }
+            SaveGrantRecordOutcome::Existing(GrantRecordLookup::ResultUnavailable) => {
+                Err(GrantItemsError::result_unavailable())
+            }
+            SaveGrantRecordOutcome::Existing(GrantRecordLookup::NotFound) => {
+                Err(GrantItemsError::transaction_failed())
+            }
+        }
+    }
+
+    /// Reward-delivery entry point. Unlike the legacy grant path retained for rolling migration,
+    /// this performs one MaxStack capacity preflight for the complete reward before mutating the
+    /// candidate snapshot. The same request, revision, ledger, and publish-after-commit rules
+    /// are shared with `grant_items_with_request`.
+    pub async fn grant_items_with_request_using_table<F, G>(
+        &self,
+        character_id: &str,
+        request_id: &str,
+        request_fingerprint: &str,
+        source: &str,
+        reason: &str,
+        result_summary: GrantResultSummary,
+        item_table: &ItemTable,
+        build_items: F,
+        mut next_uid: G,
+    ) -> Result<GrantItemsOutcome, GrantItemsError>
+    where
+        F: FnOnce() -> Result<Vec<Item>, GrantItemsError>,
+        G: FnMut() -> Result<u64, ItemError>,
+    {
+        let request_lock = keyed_lock(&self.grant_request_locks, request_id).await;
+        let _request_guard = request_lock.lock().await;
+        let character_lock = keyed_lock(&self.asset_character_locks, character_id).await;
+        let _character_guard = character_lock.lock().await;
+
+        match self
+            .find_grant_record(request_id)
+            .await
+            .map_err(|_| GrantItemsError::result_query_failed())?
+        {
+            GrantRecordLookup::NotFound => {}
+            GrantRecordLookup::Succeeded(record) => {
+                return replay_or_conflict(record, character_id, request_fingerprint);
+            }
+            GrantRecordLookup::ResultUnavailable => {
+                return Err(GrantItemsError::result_unavailable());
+            }
+        }
+
+        let mut player_data = self.load_or_create_player_for_grant(character_id).await?;
+        if let Some(current) = self.players.read().await.get(character_id)
+            && current.persistence_revision() != player_data.persistence_revision()
+        {
+            return Err(GrantItemsError::transaction_failed());
+        }
+        let items = build_items()?;
+
+        // `plan_add_items` clones the whole container and validates every split/merge before a
+        // single slot is changed. UID allocation for split stacks only begins after that proof.
+        let plan = player_data
+            .inventory
+            .plan_add_items(&items, item_table)
+            .map_err(|error| GrantItemsError::item_failure(&error))?;
+        player_data
+            .inventory
+            .apply_addition_plan(plan, &mut next_uid)
+            .map_err(|error| GrantItemsError::item_failure(&error))?;
+        player_data.set_data_dirty();
+
+        let save_outcome = if self.store.enabled() {
+            self.store
+                .save_with_grant_record(
+                    character_id,
+                    &player_data,
+                    request_id,
+                    request_fingerprint,
+                    source,
+                    reason,
+                    &items,
+                    &result_summary,
+                )
+                .await
+                .map_err(|error| {
+                    warn!(
+                        request_id,
+                        character_id,
+                        error = %error,
+                        "failed to persist capacity-checked inventory grant transaction"
                     );
                     match error {
                         SaveGrantRecordError::NotApplied(_) => {
