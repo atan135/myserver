@@ -32,11 +32,11 @@ function getMaintenanceDatabaseUrl(url) {
 }
 
 async function initDatabase() {
-  console.log("Initializing mail service database...");
-  console.log(`Database URL: ${databaseUrl}`);
-
   const url = new URL(databaseUrl);
   const dbName = getDatabaseName(url);
+  const port = url.port ? `:${url.port}` : "";
+  console.log("Initializing mail service database...");
+  console.log(`Database target: ${url.protocol}//${url.hostname}${port}/${dbName}`);
   let adminClient;
   let client;
   try {

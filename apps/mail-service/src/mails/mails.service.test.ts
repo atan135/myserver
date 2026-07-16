@@ -40,6 +40,35 @@ function createMail(overrides: Record<string, any> = {}) {
   };
 }
 
+test("mail database insert casts operator JSON without casting expires_at", async () => {
+  const store = new DbMailStore(null);
+  const queries: Array<{ sql: string; params: any[] }> = [];
+  const expiresAt = "2030-01-01T00:00:00.000Z";
+
+  const id = await store.insertMail({
+    async query(sql: string, params: any[]) {
+      queries.push({ sql, params });
+      return { rows: [{ id: 42 }] };
+    }
+  }, {
+    ...createMail(),
+    delivery_request_id: "reward_mail:stage10",
+    delivery_character_id: "chr_stage10",
+    delivery_fingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    origin_type: "gm",
+    origin_id: "stage10",
+    delivery_policy: "MAIL_ONLY",
+    operator_json: { type: "gm", id: "stage10" },
+    expires_at: expiresAt
+  });
+
+  assert.equal(id, 42);
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /\$20::jsonb,\s*\$21\)/);
+  assert.equal(queries[0].params[19], JSON.stringify({ type: "gm", id: "stage10" }));
+  assert.equal(queries[0].params[20], expiresAt);
+});
+
 function createClaimMetrics() {
   const counts = { route: 0, grant: 0, unknown: 0, retryable: 0, permanent: 0 };
   return {
