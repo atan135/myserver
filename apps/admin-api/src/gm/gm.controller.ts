@@ -5,6 +5,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
 import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
+import { appendSecurityAuditLog, getSecurityAuditClientIp } from "../common/security-audit.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
 import { encodeSubjectToken } from "../nats-client.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
@@ -13,6 +14,9 @@ import { randomUUID } from "node:crypto";
 import { getTitleDefinitions } from "../players/title-table.js";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
+const ASSET_GRANT_LARGE_QUANTITY = 10_000;
+const ASSET_GRANT_HIGH_FREQUENCY_LIMIT = 10;
+const ASSET_GRANT_HIGH_FREQUENCY_WINDOW_MS = 60_000;
 const GM_BROADCAST_SUBJECT = "myserver.gm.broadcast";
 const GAME_ADMIN_ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 const ELEMENT_KEYS = ["earth", "fire", "water", "wind"] as const;
@@ -437,7 +441,7 @@ export class GmController {
       throw badRequest("INVALID_ITEM_ID", "itemId is required");
     }
 
-    if (!itemCount || typeof itemCount !== "number" || itemCount <= 0) {
+    if (!itemCount || typeof itemCount !== "number" || !Number.isSafeInteger(itemCount) || itemCount <= 0) {
       throw badRequest("INVALID_ITEM_COUNT", "itemCount must be a positive number");
     }
 
@@ -470,8 +474,73 @@ export class GmController {
         },
         ip: getClientIp(req, this.config)
       });
+      await this.appendAssetGrantSecurityAudit(req, {
+        action: "gm_send_item",
+        characterId: normalizedCharacterId,
+        itemId,
+        itemCount,
+        emergency: false
+      });
 
       return { ok: true, message: "Item sent" };
+    } catch (error: any) {
+      throw gameServerError(error);
+    }
+  }
+
+  @Post("emergency-compensate-item")
+  @Permissions("gm.asset_correction.emergency")
+  @HttpCode(HttpStatus.OK)
+  async emergencyCompensateItem(@Body() body: any, @Req() req: any) {
+    const characterId = normalizeCharacterId(body?.characterId);
+    const itemId = normalizeRequiredText(body?.itemId, "INVALID_ITEM_ID", "itemId", 32);
+    const itemCount = Number(body?.itemCount);
+    const reason = normalizeReason(body?.reason);
+    if (!Number.isSafeInteger(itemCount) || itemCount <= 0) {
+      throw badRequest("INVALID_ITEM_COUNT", "itemCount must be a positive integer");
+    }
+
+    const gameAdminOptions = {
+      ...createGameAdminOptions(req, body),
+      requestId: `gm-emergency-correction:${randomUUID()}`,
+      source: "gm-emergency-correction"
+    };
+    try {
+      const gameAdminResult = await this.gameAdminClient.sendItem(
+        characterId,
+        itemId,
+        itemCount,
+        reason,
+        gameAdminOptions
+      );
+      await this.adminStore.appendAuditLog({
+        adminId: req.admin.sub,
+        adminUsername: req.admin.username,
+        action: "gm_emergency_asset_correction",
+        targetType: "character",
+        targetValue: characterId,
+        details: {
+          itemId,
+          itemCount,
+          reason,
+          requestId: gameAdminOptions.requestId,
+          permission: "gm.asset_correction.emergency",
+          gameAdmin: {
+            ok: gameAdminResult?.ok === true,
+            instanceId: gameAdminResult?.instanceId,
+            endpoint: gameAdminResult?.endpoint
+          }
+        },
+        ip: getClientIp(req, this.config)
+      });
+      await this.appendAssetGrantSecurityAudit(req, {
+        action: "gm_emergency_asset_correction",
+        characterId,
+        itemId,
+        itemCount,
+        emergency: true
+      });
+      return { ok: true, message: "Emergency compensation submitted", requestId: gameAdminOptions.requestId };
     } catch (error: any) {
       throw gameServerError(error);
     }
@@ -905,6 +974,57 @@ export class GmController {
       targetValue: characterId,
       details,
       ip: getClientIp(req, this.config)
+    });
+  }
+
+  private async appendAssetGrantSecurityAudit(
+    req: any,
+    {
+      action,
+      characterId,
+      itemId,
+      itemCount,
+      emergency
+    }: {
+      action: string;
+      characterId: string;
+      itemId: string;
+      itemCount: number;
+      emergency: boolean;
+    }
+  ) {
+    const since = new Date(Date.now() - ASSET_GRANT_HIGH_FREQUENCY_WINDOW_MS).toISOString();
+    const recentCount = typeof this.adminStore.countRecentAdminAuditActions === "function"
+      ? await this.adminStore.countRecentAdminAuditActions({
+        adminId: req.admin.sub,
+        action,
+        since
+      })
+      : 0;
+    const large = itemCount >= ASSET_GRANT_LARGE_QUANTITY;
+    const highFrequency = recentCount >= ASSET_GRANT_HIGH_FREQUENCY_LIMIT;
+    if (!emergency && !large && !highFrequency) {
+      return;
+    }
+
+    await appendSecurityAuditLog(this.adminStore, {
+      eventType: emergency ? "asset_emergency_correction" : "asset_grant_anomaly",
+      targetType: "character",
+      targetValue: characterId,
+      severity: emergency || large ? "critical" : "warning",
+      clientIp: getSecurityAuditClientIp(req, this.config),
+      details: {
+        action,
+        adminId: req.admin.sub,
+        username: req.admin.username,
+        itemId,
+        itemCount,
+        emergency,
+        largeQuantity: large,
+        highFrequency,
+        recentActionCount: recentCount,
+        windowMs: ASSET_GRANT_HIGH_FREQUENCY_WINDOW_MS
+      }
     });
   }
 }

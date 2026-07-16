@@ -700,6 +700,49 @@ CREATE INDEX IF NOT EXISTS idx_character_asset_ledger_character_created_at
 CREATE INDEX IF NOT EXISTS idx_character_asset_ledger_request_id
   ON character_asset_ledger (request_id);
 
+-- Asset ledger rows are append-only evidence.  New columns are additive so existing grant
+-- history stays queryable during a rolling upgrade; legacy rows retain explicit legacy values.
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS origin_type varchar(32) NOT NULL DEFAULT 'legacy';
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS origin_id varchar(128) NOT NULL DEFAULT '';
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS delivery_method varchar(32) NOT NULL DEFAULT 'direct';
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS delivery_id varchar(128) NULL;
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS mail_id varchar(64) NULL;
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS fallback_reason varchar(64) NULL;
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS rule_version varchar(256) NOT NULL DEFAULT 'legacy-unversioned';
+ALTER TABLE character_asset_ledger
+  ADD COLUMN IF NOT EXISTS operator_id varchar(128) NULL;
+
+CREATE INDEX IF NOT EXISTS idx_character_asset_ledger_origin_created_at
+  ON character_asset_ledger (origin_type, origin_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_character_asset_ledger_delivery_id
+  ON character_asset_ledger (delivery_id);
+CREATE INDEX IF NOT EXISTS idx_character_asset_ledger_mail_id
+  ON character_asset_ledger (mail_id);
+
+CREATE OR REPLACE FUNCTION reject_character_asset_ledger_mutation()
+RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'character_asset_ledger is append-only; write a compensating asset transaction instead';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_character_asset_ledger_immutable_row ON character_asset_ledger;
+CREATE TRIGGER trg_character_asset_ledger_immutable_row
+BEFORE UPDATE OR DELETE ON character_asset_ledger
+FOR EACH ROW EXECUTE FUNCTION reject_character_asset_ledger_mutation();
+
+DROP TRIGGER IF EXISTS trg_character_asset_ledger_immutable_truncate ON character_asset_ledger;
+CREATE TRIGGER trg_character_asset_ledger_immutable_truncate
+BEFORE TRUNCATE ON character_asset_ledger
+FOR EACH STATEMENT EXECUTE FUNCTION reject_character_asset_ledger_mutation();
+
 -- Reward delivery keeps the direct/mail decision separate from the inventory request record.
 -- A pending row is a durable mail-service creation intent; later workflow stages consume it.
 CREATE TABLE IF NOT EXISTS reward_delivery_records (

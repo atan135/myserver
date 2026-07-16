@@ -16,6 +16,7 @@ import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
 import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
+import { AssetLedgerController } from "./assets/asset-ledger.controller.js";
 import { PlayersController } from "./players/players.controller.js";
 import { MaintenanceController } from "./maintenance/maintenance.controller.js";
 import { GmController } from "./gm/gm.controller.js";
@@ -60,6 +61,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     AuthController,
     AdminsController,
     AuditController,
+    AssetLedgerController,
     PlayersController,
     MaintenanceController,
     GmController,

@@ -20,6 +20,9 @@
             <el-menu-item v-if="authStore.hasPermission(P.AUDIT_READ)" index="/audit-logs">
               <span>审计日志</span>
             </el-menu-item>
+            <el-menu-item v-if="authStore.hasPermission(P.ASSET_LEDGER_READ)" index="/asset-ledger">
+              <span>资产流水</span>
+            </el-menu-item>
             <el-menu-item v-if="authStore.hasPermission(P.SECURITY_READ)" index="/security-logs">
               <span>安全日志</span>
             </el-menu-item>

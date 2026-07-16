@@ -152,6 +152,69 @@ test("send-item rejects legacy playerId target field", async () => {
   assert.equal(called, false);
 });
 
+test("large GM item grant produces a redacted security audit event", async () => {
+  const securityAudits = [];
+  const { controller } = makeController({
+    async sendItem() {
+      return { ok: true };
+    }
+  }, {
+    adminStore: {
+      async countRecentAdminAuditActions() {
+        return 1;
+      },
+      async appendSecurityAuditLog(entry) {
+        securityAudits.push(entry);
+      }
+    }
+  });
+
+  await controller.sendItem(
+    { characterId: "chr_1", itemId: "1001", itemCount: 10_000, reason: "restore" },
+    makeReq()
+  );
+
+  assert.equal(securityAudits.length, 1);
+  assert.equal(securityAudits[0].eventType, "asset_grant_anomaly");
+  assert.equal(securityAudits[0].severity, "critical");
+  assert.equal(securityAudits[0].details.itemCount, 10_000);
+  assert.equal("reason" in securityAudits[0].details, false);
+});
+
+test("emergency compensation uses its dedicated source, request ID, permission audit, and security event", async () => {
+  let captured = null;
+  const securityAudits = [];
+  const { controller, audits } = makeController({
+    async sendItem(characterId, itemId, itemCount, reason, options) {
+      captured = { characterId, itemId, itemCount, reason, options };
+      return { ok: true };
+    }
+  }, {
+    adminStore: {
+      async countRecentAdminAuditActions() {
+        return 1;
+      },
+      async appendSecurityAuditLog(entry) {
+        securityAudits.push(entry);
+      }
+    }
+  });
+
+  const result = await controller.emergencyCompensateItem(
+    { characterId: "chr_1", itemId: "1001", itemCount: 2, reason: "incident-42" },
+    makeReq()
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(captured.options.source, "gm-emergency-correction");
+  assert.match(captured.options.requestId, /^gm-emergency-correction:/);
+  assert.equal(captured.options.actor, "ops");
+  assert.equal(audits[0].action, "gm_emergency_asset_correction");
+  assert.equal(audits[0].details.permission, "gm.asset_correction.emergency");
+  assert.equal(securityAudits[0].eventType, "asset_emergency_correction");
+  assert.equal(securityAudits[0].severity, "critical");
+});
+
 test("kick-player returns explicit target required error from GameAdminClient", async () => {
   const error = new Error("multiple game-server admin endpoints are available; targetInstanceId is required");
   error.code = "GAME_SERVER_ADMIN_TARGET_REQUIRED";

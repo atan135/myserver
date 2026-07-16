@@ -496,7 +496,10 @@ export class GameAdminClient {
   }
 
   async sendItem(characterId, itemId, itemCount, reason = "", options = {}) {
-    const payload = Buffer.from(JSON.stringify({ characterId, itemId, itemCount, reason }));
+    const payloadBody = { characterId, itemId, itemCount, reason };
+    if (options.requestId) payloadBody.requestId = options.requestId;
+    if (options.source) payloadBody.source = options.source;
+    const payload = Buffer.from(JSON.stringify(payloadBody));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
       await sendRequest(

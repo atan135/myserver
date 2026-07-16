@@ -59,6 +59,8 @@ export class MetricsCollector {
     this.mailClaimFingerprintConflicts = 0;
     this.mailClaimManualReviewBacklog = 0;
     this.mailClaimBlockedCapacityBacklog = 0;
+    this.rewardMailCreated = 0;
+    this.rewardMailIdempotentReplay = 0;
 
     this.flushTimer = null;
   }
@@ -134,6 +136,14 @@ export class MetricsCollector {
 
   recordMailClaimSucceeded() {
     this.mailClaimSucceeded += 1;
+  }
+
+  recordRewardMailCreated() {
+    this.rewardMailCreated += 1;
+  }
+
+  recordRewardMailIdempotentReplay() {
+    this.rewardMailIdempotentReplay += 1;
   }
 
   setMailClaimOperationalSnapshot({ longRunning = 0, fingerprintConflicts = 0, manualReview = 0, blockedCapacity = 0 } = {}) {
@@ -218,6 +228,8 @@ export class MetricsCollector {
     const mailClaimRecoveryDurationMs = this.mailClaimRecoveryDurationCount > 0
       ? Math.round(this.mailClaimRecoveryDurationSum / this.mailClaimRecoveryDurationCount)
       : 0;
+    const rewardMailCreated = this.rewardMailCreated;
+    const rewardMailIdempotentReplay = this.rewardMailIdempotentReplay;
 
     // Reset counters
     this.qps = 0;
@@ -248,6 +260,8 @@ export class MetricsCollector {
     this.mailClaimRecoveryManualReviews = 0;
     this.mailClaimRecoveryDurationSum = 0;
     this.mailClaimRecoveryDurationCount = 0;
+    this.rewardMailCreated = 0;
+    this.rewardMailIdempotentReplay = 0;
 
     try {
       const discoveryMetrics = collectDiscoveryMetricFields({ reset: true });
@@ -293,6 +307,8 @@ export class MetricsCollector {
             mail_claim_recovery_lease_takeovers: mailClaimRecoveryLeaseTakeovers,
             mail_claim_recovery_manual_reviews: mailClaimRecoveryManualReviews,
             mail_claim_recovery_duration_ms: mailClaimRecoveryDurationMs,
+            reward_mail_created: rewardMailCreated,
+            reward_mail_idempotent_replay: rewardMailIdempotentReplay,
             ...discoveryMetrics,
             ...capacityMetrics,
             ...lifecycleMetrics

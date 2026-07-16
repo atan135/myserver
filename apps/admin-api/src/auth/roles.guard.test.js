@@ -81,6 +81,8 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
   assert.equal(roleHasPermission("operator", "gm.character_elements.write"), true);
   assert.equal(roleHasPermission("operator", "gm.character_titles.write"), true);
   assert.equal(roleHasPermission("operator", "gm.character_disciplines.write"), true);
+  assert.equal(roleHasPermission("operator", "assets.ledger.read"), false);
+  assert.equal(roleHasPermission("operator", "gm.asset_correction.emergency"), false);
   assert.equal(roleHasPermission("operator", "id.read"), true);
   assert.equal(roleHasPermission("operator", "id.manage"), false);
   assert.equal(roleHasPermission("operator", "maintenance.write"), false);
@@ -97,6 +99,8 @@ test("admin-api role permission matrix covers read, player, GM, maintenance, mon
   }
   assert.equal(roleHasPermission("admin", "id.manage"), true);
   assert.equal(roleHasPermission("admin", "admins.reset_password"), true);
+  assert.equal(roleHasPermission("admin", "assets.ledger.read"), true);
+  assert.equal(roleHasPermission("admin", "gm.asset_correction.emergency"), true);
   assert.equal(roleHasPermission("super_admin", "monitoring.archive"), true);
   assert.equal(roleHasPermission("unknown", "players.read"), false);
 });

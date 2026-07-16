@@ -627,6 +627,85 @@ function readTotal(rows) {
   return Number.parseInt(String(rows[0]?.total ?? "0"), 10);
 }
 
+function assetLedgerFilters({ characterId, requestId, originType, originId, deliveryId, from, to } = {}) {
+  let where = " WHERE 1=1";
+  const params = [];
+  const add = (column, value) => {
+    if (!value) return;
+    params.push(value);
+    where += ` AND ${column} = ${nextParam(params)}`;
+  };
+
+  add("character_id", characterId);
+  add("request_id", requestId);
+  add("origin_type", originType);
+  add("origin_id", originId);
+  add("delivery_id", deliveryId);
+  if (from) {
+    params.push(from);
+    where += ` AND created_at >= ${nextParam(params)}::timestamptz`;
+  }
+  if (to) {
+    params.push(to);
+    where += ` AND created_at <= ${nextParam(params)}::timestamptz`;
+  }
+  return { where, params };
+}
+
+function assetLedgerQuery(filters) {
+  const { where, params } = assetLedgerFilters(filters);
+  return {
+    query: `SELECT
+              id,
+              character_id,
+              request_id,
+              asset_type,
+              item_id,
+              COALESCE((binding_json ->> 'binded')::boolean, false) AS is_bound,
+              quantity_before,
+              quantity_after,
+              quantity_delta,
+              container,
+              source,
+              origin_type,
+              origin_id,
+              delivery_method,
+              delivery_id,
+              mail_id,
+              fallback_reason,
+              rule_version,
+              snapshot_revision,
+              created_at
+            FROM character_asset_ledger${where}`,
+    params
+  };
+}
+
+function toAssetLedgerEntry(row) {
+  return {
+    id: toNumericId(row.id),
+    characterId: row.character_id,
+    requestId: row.request_id,
+    assetType: row.asset_type,
+    itemId: Number(row.item_id),
+    isBound: row.is_bound === true,
+    quantityBefore: Number(row.quantity_before),
+    quantityAfter: Number(row.quantity_after),
+    quantityDelta: Number(row.quantity_delta),
+    container: row.container,
+    source: row.source,
+    originType: row.origin_type,
+    originId: row.origin_id,
+    deliveryMethod: row.delivery_method,
+    deliveryId: row.delivery_id || null,
+    mailId: row.mail_id || null,
+    fallbackReason: row.fallback_reason || null,
+    ruleVersion: row.rule_version,
+    snapshotRevision: Number(row.snapshot_revision),
+    createdAt: toIsoString(row.created_at)
+  };
+}
+
 export class AdminStore {
   constructor(pool, redis = null, config = {}, gamePool = null) {
     this.pool = pool;
@@ -883,6 +962,68 @@ export class AdminStore {
     }
 
     const { rows } = await this.pool.query(query, params);
+    return readTotal(rows);
+  }
+
+  async countRecentAdminAuditActions({ adminId, action, since }) {
+    const { rows } = await this.pool.query(
+      `SELECT COUNT(*) AS total
+       FROM admin_audit_logs
+       WHERE admin_id = $1 AND action = $2 AND created_at >= $3::timestamptz`,
+      [adminId, action, since]
+    );
+    return readTotal(rows);
+  }
+
+  // Asset ledger is owned by the game database.  This is a deliberately read-only projection:
+  // there is no admin-store method to update or delete a ledger row.
+  async getAssetLedger({
+    characterId,
+    requestId,
+    originType,
+    originId,
+    deliveryId,
+    from,
+    to,
+    limit = 50,
+    offset = 0
+  } = {}) {
+    if (!this.gamePool) {
+      throw new Error("GAME_DATABASE_UNAVAILABLE");
+    }
+
+    const { query, params } = assetLedgerQuery({
+      characterId,
+      requestId,
+      originType,
+      originId,
+      deliveryId,
+      from,
+      to
+    });
+    params.push(limit);
+    const limitParam = nextParam(params);
+    params.push(offset);
+    const offsetParam = nextParam(params);
+    const { rows } = await this.gamePool.query(
+      `${query}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${limitParam} OFFSET ${offsetParam}`,
+      params
+    );
+    return rows.map(toAssetLedgerEntry);
+  }
+
+  async countAssetLedger(filters = {}) {
+    if (!this.gamePool) {
+      throw new Error("GAME_DATABASE_UNAVAILABLE");
+    }
+
+    const { where, params } = assetLedgerFilters(filters);
+    const { rows } = await this.gamePool.query(
+      `SELECT COUNT(*) AS total FROM character_asset_ledger${where}`,
+      params
+    );
     return readTotal(rows);
   }
 

@@ -444,6 +444,8 @@ test("claim operational snapshots and rate counters are emitted without high-car
   }, "mail-service", "mail-1");
   metrics.recordMailClaimAttempt();
   metrics.recordMailClaimSucceeded();
+  metrics.recordRewardMailCreated();
+  metrics.recordRewardMailIdempotentReplay();
   metrics.setMailClaimOperationalSnapshot(snapshot);
   await metrics.flush();
 
@@ -454,6 +456,8 @@ test("claim operational snapshots and rate counters are emitted without high-car
   assert.equal(fields.mail_claim_fingerprint_conflicts, 1);
   assert.equal(fields.mail_claim_manual_review_backlog, 1);
   assert.equal(fields.mail_claim_blocked_capacity_backlog, 0);
+  assert.equal(fields.reward_mail_created, 1);
+  assert.equal(fields.reward_mail_idempotent_replay, 1);
   assert.equal("mail_id" in fields, false);
   assert.equal("player_id" in fields, false);
 });

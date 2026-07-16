@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -20,6 +20,7 @@ use crate::core::inventory::Item;
 use crate::core::online_route::validate_online_route_authority;
 use crate::core::player::PlayerManager;
 use crate::core::player::db_player_store::{GrantRecord, GrantRecordLookup};
+use crate::core::player::db_player_store::AssetLedgerContext;
 use crate::core::player::grant_contract::{
     GrantItemIntent, GrantResultSummary, compute_grant_fingerprint, normalize_grant_items,
 };
@@ -86,6 +87,7 @@ pub(super) async fn handle_gm_send_item(
     redis_key_prefix: &str,
     owner_instance_id: &str,
 ) -> Result<(), std::io::Error> {
+    let transaction_started = Instant::now();
     let action = "gm_send_item";
     let request = match decode_grant_items_request(packet).map_err(|error| error.to_string()) {
         Ok(request) => request,
@@ -198,6 +200,15 @@ pub(super) async fn handle_gm_send_item(
     let materializer_uid_generator = item_uid_generator.clone();
     let split_uid_generator = item_uid_generator.clone();
     let request_character_id = request.character_id.clone();
+    let mut ledger_context = if request.source == "mail-claim" {
+        AssetLedgerContext::mail_claim(&request.source, &request.request_id, &request.mail_id)
+    } else {
+        AssetLedgerContext::direct(&request.source, &request.request_id)
+    };
+    if request.source == "gm-emergency-correction" {
+        ledger_context.origin_type = "gm".to_string();
+        ledger_context.operator_id = Some(auth_context.actor.clone());
+    }
     let result = player_manager
         .grant_items_with_request_using_table(
             &request.character_id,
@@ -205,6 +216,7 @@ pub(super) async fn handle_gm_send_item(
             &validated.request_fingerprint,
             &request.source,
             &request.reason,
+            ledger_context,
             result_summary,
             item_table.as_ref(),
             move || {
@@ -240,6 +252,9 @@ pub(super) async fn handle_gm_send_item(
             },
         )
         .await;
+    METRICS.record_asset_transaction_duration(
+        u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
 
     match result {
         Ok(outcome) => {

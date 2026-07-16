@@ -1,11 +1,13 @@
 export const ADMIN_PERMISSIONS = Object.freeze({
   AUDIT_READ: "audit.read",
+  ASSET_LEDGER_READ: "assets.ledger.read",
   SECURITY_READ: "security.read",
   PLAYERS_READ: "players.read",
   PLAYERS_STATUS_UPDATE: "players.status.update",
   PLAYERS_BAN: "players.ban",
   GM_BROADCAST: "gm.broadcast",
   GM_SEND_ITEM: "gm.send_item",
+  GM_ASSET_CORRECTION_EMERGENCY: "gm.asset_correction.emergency",
   GM_KICK_PLAYER: "gm.kick_player",
   GM_BAN_PLAYER: "gm.ban_player",
   GM_CHARACTER_ELEMENTS_WRITE: "gm.character_elements.write",

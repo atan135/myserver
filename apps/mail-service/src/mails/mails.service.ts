@@ -567,6 +567,11 @@ export class MailsService implements OnModuleInit, OnModuleDestroy {
     try {
       const mail = normalizedRewardDelivery(body);
       const created = await this.mailStore.createRewardMailWithNotificationOutbox(mail);
+      if (created.idempotent) {
+        this.metrics?.recordRewardMailIdempotentReplay?.();
+      } else {
+        this.metrics?.recordRewardMailCreated?.();
+      }
       let outboxResult = { sent: 0, failed: 0, terminal: 0 };
       try {
         outboxResult = await this.processPendingNotificationOutbox(1);

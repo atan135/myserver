@@ -87,6 +87,11 @@ pub struct MetricsCollector {
     inventory_grant_fingerprint_conflict: AtomicU64,
     inventory_grant_transaction_failure: AtomicU64,
     inventory_grant_push_failure: AtomicU64,
+    asset_transaction_duration_ms: AtomicU64,
+    asset_transaction_count: AtomicU64,
+    asset_version_conflict: AtomicU64,
+    asset_capacity_fallback: AtomicU64,
+    reward_mail_created: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -105,6 +110,11 @@ impl MetricsCollector {
             inventory_grant_fingerprint_conflict: AtomicU64::new(0),
             inventory_grant_transaction_failure: AtomicU64::new(0),
             inventory_grant_push_failure: AtomicU64::new(0),
+            asset_transaction_duration_ms: AtomicU64::new(0),
+            asset_transaction_count: AtomicU64::new(0),
+            asset_version_conflict: AtomicU64::new(0),
+            asset_capacity_fallback: AtomicU64::new(0),
+            reward_mail_created: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -153,6 +163,24 @@ impl MetricsCollector {
     pub fn record_inventory_grant_push_failure(&self) {
         self.inventory_grant_push_failure
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_asset_transaction_duration(&self, duration_ms: u64) {
+        self.asset_transaction_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        self.asset_transaction_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_asset_version_conflict(&self) {
+        self.asset_version_conflict.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_asset_capacity_fallback(&self) {
+        self.asset_capacity_fallback.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_reward_mail_created(&self) {
+        self.reward_mail_created.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 设置扩展字段
@@ -209,10 +237,23 @@ impl MetricsCollector {
                     .swap(0, Ordering::Relaxed);
                 let inventory_grant_push_failure =
                     self.inventory_grant_push_failure.swap(0, Ordering::Relaxed);
+                let asset_transaction_duration_ms = self
+                    .asset_transaction_duration_ms
+                    .swap(0, Ordering::Relaxed);
+                let asset_transaction_count =
+                    self.asset_transaction_count.swap(0, Ordering::Relaxed);
+                let asset_version_conflict = self.asset_version_conflict.swap(0, Ordering::Relaxed);
+                let asset_capacity_fallback = self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
+                let reward_mail_created = self.reward_mail_created.swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
                     latency_sum / latency_count
+                } else {
+                    0
+                };
+                let asset_transaction_latency_ms = if asset_transaction_count > 0 {
+                    asset_transaction_duration_ms / asset_transaction_count
                 } else {
                     0
                 };
@@ -248,6 +289,26 @@ impl MetricsCollector {
                     (
                         "inventory_grant_push_failure_total".to_string(),
                         inventory_grant_push_failure.to_string(),
+                    ),
+                    (
+                        "asset_transaction_latency_ms".to_string(),
+                        asset_transaction_latency_ms.to_string(),
+                    ),
+                    (
+                        "asset_transaction_count".to_string(),
+                        asset_transaction_count.to_string(),
+                    ),
+                    (
+                        "asset_version_conflict_total".to_string(),
+                        asset_version_conflict.to_string(),
+                    ),
+                    (
+                        "asset_capacity_fallback_total".to_string(),
+                        asset_capacity_fallback.to_string(),
+                    ),
+                    (
+                        "reward_mail_created_total".to_string(),
+                        reward_mail_created.to_string(),
                     ),
                 ];
 
@@ -311,6 +372,10 @@ mod tests {
         collector.record_inventory_grant_fingerprint_conflict();
         collector.record_inventory_grant_transaction_failure();
         collector.record_inventory_grant_push_failure();
+        collector.record_asset_transaction_duration(12);
+        collector.record_asset_version_conflict();
+        collector.record_asset_capacity_fallback();
+        collector.record_reward_mail_created();
 
         // 验证计数器工作正常
         assert_eq!(collector.qps_counter.load(Ordering::Relaxed), 1);
@@ -348,5 +413,10 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+        assert_eq!(collector.asset_transaction_duration_ms.load(Ordering::Relaxed), 12);
+        assert_eq!(collector.asset_transaction_count.load(Ordering::Relaxed), 1);
+        assert_eq!(collector.asset_version_conflict.load(Ordering::Relaxed), 1);
+        assert_eq!(collector.asset_capacity_fallback.load(Ordering::Relaxed), 1);
+        assert_eq!(collector.reward_mail_created.load(Ordering::Relaxed), 1);
     }
 }

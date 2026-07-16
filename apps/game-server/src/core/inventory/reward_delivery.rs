@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,10 +9,11 @@ use tokio::sync::Mutex;
 
 use crate::core::config_table::ConfigTableRuntime;
 use crate::core::global_id::ItemUidGenerator;
-use crate::core::player::db_player_store::GrantRecordLookup;
+use crate::core::player::db_player_store::{AssetLedgerContext, GrantRecordLookup};
 use crate::core::player::grant_contract::{GrantItemIntent, GrantResultSummary};
 use crate::core::player::{PlayerManager, player_manager::GrantItemsError};
 use crate::csv_code::itemtable::ItemTable;
+use crate::metrics::METRICS;
 
 use super::{
     AssetBinding, AssetCommandErrorCode, AssetCommandResult, AssetContainer, AssetContainerVersion,
@@ -198,11 +200,21 @@ impl RewardInventoryPort for PlayerManagerRewardInventoryPort {
             .clone();
         let materializer_table = item_table.clone();
         let result_summary = reward_grant_summary(order);
+        let ledger_context = AssetLedgerContext {
+            origin_type: order.origin.origin_type.as_str().to_string(),
+            origin_id: order.origin.origin_id.clone(),
+            delivery_method: "direct".to_string(),
+            delivery_id: Some(order.request_id.clone()),
+            mail_id: None,
+            fallback_reason: None,
+            operator_id: Some(order.operator.operator_id.clone()),
+        };
         let materializer_uid_generator = self.item_uid_generator.clone();
         let split_uid_generator = self.item_uid_generator.clone();
         let order_for_items = order.clone();
 
-        match self
+        let transaction_started = Instant::now();
+        let outcome = self
             .player_manager
             .grant_items_with_request_using_table(
                 &order.character_id,
@@ -210,6 +222,7 @@ impl RewardInventoryPort for PlayerManagerRewardInventoryPort {
                 order.request_fingerprint().as_str(),
                 order.origin.origin_type.as_str(),
                 &order.reason,
+                ledger_context,
                 result_summary,
                 item_table.as_ref(),
                 move || {
@@ -221,8 +234,11 @@ impl RewardInventoryPort for PlayerManagerRewardInventoryPort {
                 },
                 move || split_uid_generator.next().map_err(|_| ItemError::Unknown),
             )
-            .await
-        {
+            .await;
+        METRICS.record_asset_transaction_duration(
+            u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+        match outcome {
             Ok(outcome) => self.result_from_outcome(order, outcome),
             Err(error) => self.result_from_grant_error(order, error),
         }
@@ -644,7 +660,19 @@ where
             .await
             .map_err(RewardDeliveryError::RewardMailOutboxUnavailable)?
         {
-            RewardMailOutboxWrite::Created(entry) | RewardMailOutboxWrite::Existing(entry) => {
+            RewardMailOutboxWrite::Created(entry) => {
+                METRICS.record_reward_mail_created();
+                if fallback_reason.is_some() {
+                    METRICS.record_asset_capacity_fallback();
+                }
+                if entry.character_id != order.character_id
+                    || entry.request_fingerprint != order.request_fingerprint()
+                {
+                    return self.request_conflict(order);
+                }
+                entry
+            }
+            RewardMailOutboxWrite::Existing(entry) => {
                 if entry.character_id != order.character_id
                     || entry.request_fingerprint != order.request_fingerprint()
                 {
@@ -692,7 +720,9 @@ where
 
         // A failed push is intentionally ignored. The persisted direct delivery / reward mail is
         // still the source of truth and a replay can issue another best-effort notification.
-        let _ = self.notifier.notify_committed(order, &result).await;
+        if self.notifier.notify_committed(order, &result).await.is_err() {
+            METRICS.record_inventory_grant_push_failure();
+        }
         Ok(result)
     }
 
@@ -704,7 +734,14 @@ where
         if !record.matches(order) {
             return self.request_conflict(order);
         }
-        let _ = self.notifier.notify_committed(order, &record.result).await;
+        if self
+            .notifier
+            .notify_committed(order, &record.result)
+            .await
+            .is_err()
+        {
+            METRICS.record_inventory_grant_push_failure();
+        }
         Ok(record.result)
     }
 

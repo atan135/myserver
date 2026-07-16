@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6,12 +7,15 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use super::db_player_store::{
-    GrantRecord, GrantRecordLookup, PgPlayerStore, SaveGrantRecordError, SaveGrantRecordOutcome,
-    SavePlayerError as StoreSavePlayerError,
+    AssetLedgerContext, GrantRecord, GrantRecordLookup, PgPlayerStore, SaveGrantRecordError,
+    SaveGrantRecordOutcome, SavePlayerError as StoreSavePlayerError,
 };
 use super::grant_contract::GrantResultSummary;
 use crate::core::inventory::{EquipSlot, Item, ItemError, PlayerData};
 use crate::csv_code::itemtable::ItemTable;
+use crate::metrics::METRICS;
+
+static PLAYER_ASSET_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct GrantItemsOutcome {
@@ -230,6 +234,7 @@ impl PlayerManager {
         if let Some(current) = self.players.read().await.get(character_id)
             && current.persistence_revision() != data.persistence_revision()
         {
+            METRICS.record_asset_version_conflict();
             return Err(PlayerSaveError::VersionConflict);
         }
 
@@ -262,6 +267,7 @@ impl PlayerManager {
     async fn commit_asset_mutation<T, F>(
         &self,
         character_id: &str,
+        operation: &'static str,
         mutate: F,
     ) -> Result<(PlayerData, T), PlayerAssetMutationError>
     where
@@ -279,16 +285,31 @@ impl PlayerManager {
         if let Some(current) = self.players.read().await.get(character_id)
             && current.persistence_revision() != player_data.persistence_revision()
         {
+            METRICS.record_asset_version_conflict();
             return Err(PlayerAssetMutationError::Persistence(
                 PlayerSaveError::VersionConflict,
             ));
         }
 
+        let before = player_data.clone();
         let result = mutate(&mut player_data)?;
         if self.store.enabled() {
+            let request_id = format!(
+                "player-op:{}:{}",
+                current_unix_ms(),
+                PLAYER_ASSET_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            );
             let outcome = self
                 .store
-                .save(character_id, &player_data)
+                .save_with_asset_ledger(
+                    character_id,
+                    &before,
+                    &player_data,
+                    &request_id,
+                    "player-operation",
+                    operation,
+                    AssetLedgerContext::player_operation(operation, &request_id),
+                )
                 .await
                 .map_err(|error| {
                     warn!(
@@ -298,7 +319,10 @@ impl PlayerManager {
                     );
                     PlayerAssetMutationError::Persistence(match error {
                         StoreSavePlayerError::NotApplied(_) => PlayerSaveError::TransactionFailed,
-                        StoreSavePlayerError::VersionConflict => PlayerSaveError::VersionConflict,
+                        StoreSavePlayerError::VersionConflict => {
+                            METRICS.record_asset_version_conflict();
+                            PlayerSaveError::VersionConflict
+                        }
                         StoreSavePlayerError::ResultUnknown(_) => PlayerSaveError::ResultUnknown,
                     })
                 })?;
@@ -323,7 +347,7 @@ impl PlayerManager {
         item_uid: u64,
         item_table: &ItemTable,
     ) -> Result<PlayerData, PlayerAssetMutationError> {
-        self.commit_asset_mutation(character_id, |player_data| {
+        self.commit_asset_mutation(character_id, "equip", |player_data| {
             player_data
                 .equip_item(item_uid, item_table)
                 .map_err(PlayerAssetMutationError::Item)
@@ -340,7 +364,7 @@ impl PlayerManager {
         slot: EquipSlot,
         item_table: &ItemTable,
     ) -> Result<(PlayerData, Option<Item>), PlayerAssetMutationError> {
-        self.commit_asset_mutation(character_id, |player_data| {
+        self.commit_asset_mutation(character_id, "unequip", |player_data| {
             player_data
                 .unequip_item(slot, item_table)
                 .map_err(PlayerAssetMutationError::Item)
@@ -358,7 +382,7 @@ impl PlayerManager {
         item_table: &ItemTable,
     ) -> Result<PlayerItemUseOutcome, PlayerAssetMutationError> {
         let (player_data, hp_change) = self
-            .commit_asset_mutation(character_id, |player_data| {
+            .commit_asset_mutation(character_id, "use", |player_data| {
                 let hp_before = player_data.get_hp();
                 let prepared = player_data
                     .prepare_item_use(item_uid, item_table)
@@ -389,7 +413,7 @@ impl PlayerManager {
         item_uid: u64,
         count: u32,
     ) -> Result<PlayerData, PlayerAssetMutationError> {
-        self.commit_asset_mutation(character_id, |player_data| {
+        self.commit_asset_mutation(character_id, "discard", |player_data| {
             player_data
                 .remove_item(item_uid, count)
                 .map(|_| ())
@@ -413,7 +437,11 @@ impl PlayerManager {
     where
         F: FnMut() -> Result<u64, ItemError>,
     {
-        self.commit_asset_mutation(character_id, |player_data| {
+        let operation = match action {
+            WarehouseAssetAction::Deposit => "warehouse_deposit",
+            WarehouseAssetAction::Withdraw => "warehouse_withdraw",
+        };
+        self.commit_asset_mutation(character_id, operation, |player_data| {
             let mutation = match action {
                 WarehouseAssetAction::Deposit => {
                     player_data.warehouse_deposit(item_uid, count, item_table, &mut next_uid)
@@ -496,6 +524,7 @@ impl PlayerManager {
         if let Some(current) = self.players.read().await.get(character_id)
             && current.persistence_revision() != player_data.persistence_revision()
         {
+            METRICS.record_asset_version_conflict();
             return Err(GrantItemsError::transaction_failed());
         }
         let items = build_items()?;
@@ -586,6 +615,7 @@ impl PlayerManager {
         request_fingerprint: &str,
         source: &str,
         reason: &str,
+        ledger_context: AssetLedgerContext,
         result_summary: GrantResultSummary,
         item_table: &ItemTable,
         build_items: F,
@@ -618,6 +648,7 @@ impl PlayerManager {
         if let Some(current) = self.players.read().await.get(character_id)
             && current.persistence_revision() != player_data.persistence_revision()
         {
+            METRICS.record_asset_version_conflict();
             return Err(GrantItemsError::transaction_failed());
         }
         let items = build_items()?;
@@ -636,7 +667,7 @@ impl PlayerManager {
 
         let save_outcome = if self.store.enabled() {
             self.store
-                .save_with_grant_record(
+                .save_with_grant_record_and_ledger_context(
                     character_id,
                     &player_data,
                     request_id,
@@ -645,6 +676,7 @@ impl PlayerManager {
                     reason,
                     &items,
                     &result_summary,
+                    ledger_context,
                 )
                 .await
                 .map_err(|error| {

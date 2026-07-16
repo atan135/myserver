@@ -5,12 +5,14 @@ export const PERMISSIONS_KEY = "permissions";
 export type AdminRole = "viewer" | "operator" | "admin" | "super_admin";
 export type AdminPermission =
   | "audit.read"
+  | "assets.ledger.read"
   | "security.read"
   | "players.read"
   | "players.status.update"
   | "players.ban"
   | "gm.broadcast"
   | "gm.send_item"
+  | "gm.asset_correction.emergency"
   | "gm.kick_player"
   | "gm.ban_player"
   | "gm.character_elements.write"

@@ -23,6 +23,12 @@ const routes = [
     meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.AUDIT_READ }
   },
   {
+    path: "/asset-ledger",
+    name: "AssetLedger",
+    component: () => import("../views/AssetLedger.vue"),
+    meta: { requiresAuth: true, permission: ADMIN_PERMISSIONS.ASSET_LEDGER_READ }
+  },
+  {
     path: "/security-logs",
     name: "SecurityLogs",
     component: () => import("../views/SecurityLogs.vue"),

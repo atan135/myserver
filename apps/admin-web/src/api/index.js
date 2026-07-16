@@ -43,6 +43,10 @@ export const auditApi = {
     api.get("/audit-logs", { params })
 };
 
+export const assetApi = {
+  getLedger: (params) => api.get("/assets/ledger", { params })
+};
+
 export const securityApi = {
   getLogs: (params) =>
     api.get("/security-logs", { params })
