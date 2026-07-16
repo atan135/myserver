@@ -8,6 +8,12 @@ mod maintenance;
 mod metrics;
 mod proto;
 mod protocol;
+mod protocol_version_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/proto/compatibility/version-policy.rs"
+    ));
+}
 mod proxy_server;
 mod rollout_drain_status;
 mod route_store;

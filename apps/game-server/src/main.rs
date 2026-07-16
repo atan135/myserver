@@ -19,6 +19,12 @@ pub use proto::myserver::game as pb;
 mod csv_code;
 mod db_store;
 mod protocol;
+mod protocol_version_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/proto/compatibility/version-policy.rs"
+    ));
+}
 mod server;
 mod session;
 mod ticket;

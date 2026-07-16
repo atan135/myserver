@@ -13,6 +13,8 @@ use service_registry::collect_discovery_metric_fields;
 use tokio::time::interval;
 use tracing::{error, info};
 
+use crate::protocol_version_policy::ClientProtocolVersionMetric;
+
 /// 计算当前 bucket 时间戳（5秒对齐）
 fn current_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -92,6 +94,11 @@ pub struct MetricsCollector {
     asset_version_conflict: AtomicU64,
     asset_capacity_fallback: AtomicU64,
     reward_mail_created: AtomicU64,
+    client_protocol_auth_accepted_legacy: AtomicU64,
+    client_protocol_auth_accepted_current: AtomicU64,
+    client_protocol_auth_accepted_supported_older: AtomicU64,
+    client_protocol_auth_rejected_too_old: AtomicU64,
+    client_protocol_auth_rejected_too_new: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -115,6 +122,11 @@ impl MetricsCollector {
             asset_version_conflict: AtomicU64::new(0),
             asset_capacity_fallback: AtomicU64::new(0),
             reward_mail_created: AtomicU64::new(0),
+            client_protocol_auth_accepted_legacy: AtomicU64::new(0),
+            client_protocol_auth_accepted_current: AtomicU64::new(0),
+            client_protocol_auth_accepted_supported_older: AtomicU64::new(0),
+            client_protocol_auth_rejected_too_old: AtomicU64::new(0),
+            client_protocol_auth_rejected_too_new: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -183,6 +195,27 @@ impl MetricsCollector {
         self.reward_mail_created.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_client_protocol_version(&self, metric: ClientProtocolVersionMetric) {
+        let counter = match metric {
+            ClientProtocolVersionMetric::AcceptedLegacy => {
+                &self.client_protocol_auth_accepted_legacy
+            }
+            ClientProtocolVersionMetric::AcceptedCurrent => {
+                &self.client_protocol_auth_accepted_current
+            }
+            ClientProtocolVersionMetric::AcceptedSupportedOlder => {
+                &self.client_protocol_auth_accepted_supported_older
+            }
+            ClientProtocolVersionMetric::RejectedTooOld => {
+                &self.client_protocol_auth_rejected_too_old
+            }
+            ClientProtocolVersionMetric::RejectedTooNew => {
+                &self.client_protocol_auth_rejected_too_new
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 设置扩展字段
     pub fn set_extra(&self, key: impl Into<String>, value: impl Into<String>) {
         let mut extra = self.extra.lock().unwrap();
@@ -243,8 +276,24 @@ impl MetricsCollector {
                 let asset_transaction_count =
                     self.asset_transaction_count.swap(0, Ordering::Relaxed);
                 let asset_version_conflict = self.asset_version_conflict.swap(0, Ordering::Relaxed);
-                let asset_capacity_fallback = self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
+                let asset_capacity_fallback =
+                    self.asset_capacity_fallback.swap(0, Ordering::Relaxed);
                 let reward_mail_created = self.reward_mail_created.swap(0, Ordering::Relaxed);
+                let client_protocol_auth_accepted_legacy = self
+                    .client_protocol_auth_accepted_legacy
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_accepted_current = self
+                    .client_protocol_auth_accepted_current
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_accepted_supported_older = self
+                    .client_protocol_auth_accepted_supported_older
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_rejected_too_old = self
+                    .client_protocol_auth_rejected_too_old
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_rejected_too_new = self
+                    .client_protocol_auth_rejected_too_new
+                    .swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
@@ -309,6 +358,26 @@ impl MetricsCollector {
                     (
                         "reward_mail_created_total".to_string(),
                         reward_mail_created.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_accepted_legacy_total".to_string(),
+                        client_protocol_auth_accepted_legacy.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_accepted_current_total".to_string(),
+                        client_protocol_auth_accepted_current.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_accepted_supported_older_total".to_string(),
+                        client_protocol_auth_accepted_supported_older.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_rejected_too_old_total".to_string(),
+                        client_protocol_auth_rejected_too_old.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_rejected_too_new_total".to_string(),
+                        client_protocol_auth_rejected_too_new.to_string(),
                     ),
                 ];
 
@@ -376,6 +445,10 @@ mod tests {
         collector.record_asset_version_conflict();
         collector.record_asset_capacity_fallback();
         collector.record_reward_mail_created();
+        collector.record_client_protocol_version(ClientProtocolVersionMetric::AcceptedLegacy);
+        collector
+            .record_client_protocol_version(ClientProtocolVersionMetric::AcceptedSupportedOlder);
+        collector.record_client_protocol_version(ClientProtocolVersionMetric::RejectedTooNew);
 
         // 验证计数器工作正常
         assert_eq!(collector.qps_counter.load(Ordering::Relaxed), 1);
@@ -413,10 +486,33 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
-        assert_eq!(collector.asset_transaction_duration_ms.load(Ordering::Relaxed), 12);
+        assert_eq!(
+            collector
+                .asset_transaction_duration_ms
+                .load(Ordering::Relaxed),
+            12
+        );
         assert_eq!(collector.asset_transaction_count.load(Ordering::Relaxed), 1);
         assert_eq!(collector.asset_version_conflict.load(Ordering::Relaxed), 1);
         assert_eq!(collector.asset_capacity_fallback.load(Ordering::Relaxed), 1);
         assert_eq!(collector.reward_mail_created.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            collector
+                .client_protocol_auth_accepted_legacy
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .client_protocol_auth_rejected_too_new
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .client_protocol_auth_accepted_supported_older
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 }

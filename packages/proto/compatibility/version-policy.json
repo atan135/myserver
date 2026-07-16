@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "packetHeaderVersion": 1,
+  "applicationProtocol": {
+    "currentClientProtocolVersion": 1,
+    "minimumClientProtocolVersion": 1,
+    "legacyImplicitProtocolVersion": 1,
+    "legacyRule": "AuthReq.client_protocol_version omitted or zero is treated as legacyImplicitProtocolVersion."
+  },
+  "rejections": {
+    "tooOld": {
+      "errorCode": "CLIENT_PROTOCOL_VERSION_TOO_OLD",
+      "defaultUpgradeMessage": "A newer game client is required. Please update and try again.",
+      "defaultUpgradeUrl": ""
+    },
+    "tooNew": {
+      "errorCode": "CLIENT_PROTOCOL_VERSION_TOO_NEW",
+      "defaultUpgradeMessage": "This game service is not ready for this client version. Please retry shortly.",
+      "defaultUpgradeUrl": ""
+    }
+  },
+  "upgradeUrlBoundary": "A release owner may set a non-empty AuthRes.upgrade_url only to a publicly available absolute HTTPS URL. Empty means no authoritative update link is configured."
+}

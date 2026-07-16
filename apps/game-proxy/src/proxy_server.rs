@@ -23,6 +23,10 @@ use crate::pb::{
     RoomJoinRes, RoomReconnectReq, RoomReconnectRes,
 };
 use crate::protocol::{MessageType, Packet, encode_body, encode_packet, read_packet};
+use crate::protocol_version_policy::{
+    CURRENT_CLIENT_PROTOCOL_VERSION, MINIMUM_CLIENT_PROTOCOL_VERSION,
+    negotiate_client_protocol_version,
+};
 use crate::route_store::{
     ProxyRouteStore, UpstreamHealthState, UpstreamOperationState, UpstreamRoute,
 };
@@ -971,6 +975,28 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
         }
     };
 
+    let protocol_decision = negotiate_client_protocol_version(request.client_protocol_version);
+    METRICS.record_client_protocol_version(protocol_decision.metric());
+    if let Some(rejection) = protocol_decision.rejection() {
+        clear_authenticated_identity(deferred_auth, session, player_connection_tracker);
+        tracing::info!(
+            session_id = session.id,
+            declared_protocol_version = request.client_protocol_version,
+            effective_protocol_version = protocol_decision.effective_version(),
+            protocol_version_source = ?protocol_decision.source(),
+            error_code = rejection.error_code,
+            "proxy auth rejected by client protocol version policy"
+        );
+        write_message(
+            client_stream,
+            MessageType::AuthRes,
+            packet.header.seq,
+            &protocol_rejection_auth_response(rejection),
+        )
+        .await?;
+        return Ok(false);
+    }
+
     let local_enabled = *local_maintenance.read().await;
     let global_enabled = if local_enabled {
         false
@@ -983,11 +1009,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                     client_stream,
                     MessageType::AuthRes,
                     packet.header.seq,
-                    &AuthRes {
-                        ok: false,
-                        player_id: String::new(),
-                        error_code: error_code.to_string(),
-                    },
+                    &auth_response(false, String::new(), error_code.to_string()),
                 )
                 .await?;
                 return Ok(false);
@@ -1000,11 +1022,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
             client_stream,
             MessageType::AuthRes,
             packet.header.seq,
-            &AuthRes {
-                ok: false,
-                player_id: String::new(),
-                error_code: MAINTENANCE_MODE_ERROR.to_string(),
-            },
+            &auth_response(false, String::new(), MAINTENANCE_MODE_ERROR.to_string()),
         )
         .await?;
         return Ok(false);
@@ -1032,11 +1050,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                         client_stream,
                         MessageType::AuthRes,
                         packet.header.seq,
-                        &AuthRes {
-                            ok: false,
-                            player_id: String::new(),
-                            error_code: error_code.to_string(),
-                        },
+                        &auth_response(false, String::new(), error_code.to_string()),
                     )
                     .await?;
                     return Ok(false);
@@ -1056,11 +1070,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                         client_stream,
                         MessageType::AuthRes,
                         packet.header.seq,
-                        &AuthRes {
-                            ok: false,
-                            player_id: String::new(),
-                            error_code: error_code.to_string(),
-                        },
+                        &auth_response(false, String::new(), error_code.to_string()),
                     )
                     .await?;
                     return Ok(false);
@@ -1085,11 +1095,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                     client_stream,
                     MessageType::AuthRes,
                     packet.header.seq,
-                    &AuthRes {
-                        ok: false,
-                        player_id: String::new(),
-                        error_code: error_code.to_string(),
-                    },
+                    &auth_response(false, String::new(), error_code.to_string()),
                 )
                 .await?;
                 return Ok(false);
@@ -1108,11 +1114,7 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 client_stream,
                 MessageType::AuthRes,
                 packet.header.seq,
-                &AuthRes {
-                    ok: true,
-                    player_id: account_player_id,
-                    error_code: String::new(),
-                },
+                &auth_response(true, account_player_id, String::new()),
             )
             .await?;
             Ok(true)
@@ -1123,15 +1125,33 @@ async fn handle_local_auth<S: AsyncWrite + Unpin>(
                 client_stream,
                 MessageType::AuthRes,
                 packet.header.seq,
-                &AuthRes {
-                    ok: false,
-                    player_id: String::new(),
-                    error_code: error_code.to_string(),
-                },
+                &auth_response(false, String::new(), error_code.to_string()),
             )
             .await?;
             Ok(false)
         }
+    }
+}
+
+fn auth_response(ok: bool, player_id: String, error_code: String) -> AuthRes {
+    AuthRes {
+        ok,
+        player_id,
+        error_code,
+        server_protocol_version: CURRENT_CLIENT_PROTOCOL_VERSION,
+        minimum_client_protocol_version: MINIMUM_CLIENT_PROTOCOL_VERSION,
+        upgrade_message: String::new(),
+        upgrade_url: String::new(),
+    }
+}
+
+fn protocol_rejection_auth_response(
+    rejection: crate::protocol_version_policy::ClientProtocolVersionRejection,
+) -> AuthRes {
+    AuthRes {
+        upgrade_message: rejection.upgrade_message.to_string(),
+        upgrade_url: rejection.upgrade_url.to_string(),
+        ..auth_response(false, String::new(), rejection.error_code.to_string())
     }
 }
 
@@ -1566,6 +1586,8 @@ mod tests {
             7,
             &encode_body(&crate::pb::AuthReq {
                 ticket: ticket.to_string(),
+                client_protocol_version:
+                    crate::protocol_version_policy::CURRENT_CLIENT_PROTOCOL_VERSION,
             }),
         )
     }
@@ -1698,6 +1720,7 @@ mod tests {
                 ok: true,
                 player_id: "player-1".to_string(),
                 error_code: String::new(),
+                ..Default::default()
             };
             upstream_side
                 .write_all(&encode_packet(
@@ -1729,6 +1752,7 @@ mod tests {
                 ok: true,
                 player_id: "player-2".to_string(),
                 error_code: String::new(),
+                ..Default::default()
             };
             upstream_side
                 .write_all(&encode_packet(

@@ -21,9 +21,13 @@ import { MESSAGE_TYPE } from "./constants.js";
 
 // ============ Message Encoders ============
 
-// Auth
-export function encodeAuthReq(ticket) {
-  return encodeStringField(1, ticket);
+// Auth. Pass 0 to exercise the pre-version-field legacy encoding.
+export function encodeAuthReq(ticket, clientProtocolVersion = 1) {
+  const fields = [encodeStringField(1, ticket)];
+  if (clientProtocolVersion !== 0) {
+    fields.push(encodeUInt32Field(2, clientProtocolVersion));
+  }
+  return Buffer.concat(fields);
 }
 
 export function encodeChatAuthReq(ticket) {
@@ -545,7 +549,11 @@ export function decodeByMessageType(messageType, body) {
       return {
         ok: readBool(fields, 1),
         accountPlayerId: readString(fields, 2),
-        errorCode: readString(fields, 3)
+        errorCode: readString(fields, 3),
+        serverProtocolVersion: readUInt32(fields, 4),
+        minimumClientProtocolVersion: readUInt32(fields, 5),
+        upgradeMessage: readString(fields, 6),
+        upgradeUrl: readString(fields, 7)
       };
     case MESSAGE_TYPE.PING_RES:
       return {

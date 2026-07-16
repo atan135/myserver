@@ -1,5 +1,5 @@
 {
-  "digest": "sha256:2c20a25476bb20588cd698b131ef6af5d1ebe2080fd5dd93a1a6e60833bdc3ce",
+  "digest": "sha256:e09afcc2207770c10345312a6dee4426b8d34cd0620b725a4d5beef6320e0fa5",
   "files": [
     {
       "enums": [],
@@ -1854,6 +1854,13 @@
               "number": 1,
               "oneof": "",
               "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "client_protocol_version",
+              "number": 2,
+              "oneof": "",
+              "type": "uint32"
             }
           ],
           "name": "AuthReq",
@@ -1883,6 +1890,34 @@
               "label": "singular",
               "name": "error_code",
               "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "server_protocol_version",
+              "number": 4,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "minimum_client_protocol_version",
+              "number": 5,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "upgrade_message",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "upgrade_url",
+              "number": 7,
               "oneof": "",
               "type": "string"
             }
