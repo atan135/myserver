@@ -35,6 +35,7 @@
     "generate:proto": "node tools/proto-generate.js --write",
     "check:generated-proto": "node tools/proto-generate.js --check",
     "check:proto-breaking": "node tools/check-proto-breaking-changes.js --check",
+    "check:proto-routing": "node tools/check-protocol-routing-consistency.js",
     "check:asset-write-boundaries": "node tools/check-asset-write-boundaries.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",
