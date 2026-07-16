@@ -32,6 +32,8 @@
     "rollout:transfer": "npm run rollout-transfer --workspace mock-client --",
     "rollout:fault-drill": "npm run rollout-fault-drill --workspace mock-client --",
     "check:mock-client-protocol": "node tools/check-mock-client-protocol.js",
+    "generate:proto": "node tools/proto-generate.js --write",
+    "check:generated-proto": "node tools/proto-generate.js --check",
     "check:asset-write-boundaries": "node tools/check-asset-write-boundaries.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",

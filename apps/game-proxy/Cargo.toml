@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "=0.13.5"
+protoc-bin-vendored = "=3.2.0"
 
 [dependencies]
 base64 = "0.22"
