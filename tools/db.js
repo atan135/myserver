@@ -5,6 +5,11 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
+import {
+  buildMigrationMetricEvent,
+  migrationMetricErrorCategory
+} from "./db-migration-metrics.js";
+
 const { Client } = pg;
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,6 +20,8 @@ const baselineAllowlistPath = join(projectRoot, "db", "schema", "baseline-allowl
 const catalogSnapshotPath = join(projectRoot, "db", "schema", "catalog-snapshot.sql");
 const driftPolicyPath = join(projectRoot, "db", "schema", "drift-policy.json");
 const backfillsRoot = join(projectRoot, "db", "backfills");
+const lockRunnerPath = join(projectRoot, "tools", "db-lock-runner.js");
+const migrationMetricsEmitterPath = join(projectRoot, "tools", "db-migration-metrics.js");
 
 const SAFETY_HEADER_KEYS = Object.freeze([
   "Logical owner",
@@ -1307,9 +1314,9 @@ export function validateMigrationFiles(directory, options = {}) {
 export function classifyFailure(output) {
   const message = String(output || "").toLowerCase();
   if (/refuse baseline|catalog fingerprint|baseline fingerprint/.test(message)) return EXIT.BASELINE_OR_DRIFT;
-  if (/checksum|migration.*(missing|invalid)|duplicate.*migration|version.*(order|invalid)/.test(message)) return EXIT.VALIDATION;
-  if (/advisory lock|lock.*timeout|could not obtain lock/.test(message)) return EXIT.LOCK;
-  if (/password authentication|authentication failed|connection refused|could not connect|tls|certificate/.test(message)) return EXIT.CONNECTION;
+  if (/checksum|duplicate migration|version (?:order|invalid)|migration(?: history)? (?:is )?(?:missing|invalid)|migration .*previously applied.*missing/.test(message)) return EXIT.VALIDATION;
+  if (/advisory lock|lock.*timeout|could not obtain lock|\u9501.*\u8d85\u65f6|\u9501\u7b49\u5f85/.test(message)) return EXIT.LOCK;
+  if (/password authentication|authentication failed|connection refused|could not connect|tls|certificate|server closed the connection|terminating connection|administrator command|error communicating with database|database communication error|connection(?:closed|aborted|reset)|broken pipe|unexpected eof|end of file|protocol.*(?:error|closed|unexpected)|(?:connection|server).*(?:closed|reset|lost|terminated|interrupted|aborted|unexpectedly)|\u4e2d\u65ad(?:\u8054\u63a5|\u8fde\u63a5)/.test(message)) return EXIT.CONNECTION;
   return EXIT.EXECUTION;
 }
 
@@ -1337,6 +1344,77 @@ function run(command, args, environment) {
   };
 }
 
+const METRICS_CHILD_RUNTIME_KEYS = Object.freeze([
+  "PATH",
+  "SystemRoot",
+  "WINDIR",
+  "ComSpec",
+  "PATHEXT"
+]);
+const METRICS_CHILD_TRANSPORT_KEYS = Object.freeze([
+  "MYSERVER_DB_MIGRATION_METRICS_ENABLED",
+  "MYSERVER_DB_MIGRATION_METRICS_NATS_URL",
+  "MYSERVER_DB_MIGRATION_METRICS_TIMEOUT_MS",
+  "NATS_URL"
+]);
+
+function environmentValue(environment, key) {
+  const matchedKey = Object.keys(environment || {}).find((candidate) => candidate.toLowerCase() === key.toLowerCase());
+  return matchedKey ? environment[matchedKey] : undefined;
+}
+
+export function migrationMetricsEnvironment(environment, event) {
+  const childEnvironment = {};
+  for (const key of [...METRICS_CHILD_RUNTIME_KEYS, ...METRICS_CHILD_TRANSPORT_KEYS]) {
+    const value = environmentValue(environment, key);
+    if (value !== undefined) childEnvironment[key] = String(value);
+  }
+  childEnvironment.MYSERVER_DB_MIGRATION_METRIC_EVENT = JSON.stringify(event);
+  return childEnvironment;
+}
+
+function emitMigrationMetric(event, environment) {
+  if (environment.MYSERVER_DB_MIGRATION_METRICS_ENABLED !== "1") {
+    return { delivered: false, state: "disabled" };
+  }
+  try {
+    const result = run(process.execPath, [migrationMetricsEmitterPath], migrationMetricsEnvironment(environment, event));
+    if (result.status !== 0) return { delivered: false, state: "unavailable" };
+    const report = JSON.parse(result.output);
+    if (report?.state === "delivered" || report?.state === "disabled" || report?.state === "unavailable" || report?.state === "invalid-event") {
+      return { delivered: report.delivered === true, state: report.state };
+    }
+  } catch {
+    // Metrics are best effort and must never change a migration outcome.
+  }
+  return { delivered: false, state: "unavailable" };
+}
+
+function runLockedSqlx(sqlx, args, environment, database) {
+  let runner;
+  try {
+    runner = run(process.execPath, [lockRunnerPath, sqlx, ...args], {
+      ...environment,
+      MYSERVER_DB_LOCK_RUNNER_LOCK_ID: sqlxPostgresLockId(database.defaultDatabase)
+    });
+  } catch {
+    return { status: 1, output: "controlled migration lock runner unavailable" };
+  }
+  if (runner.status !== 0) return { status: 1, output: "controlled migration lock runner unavailable" };
+  let report;
+  try {
+    report = JSON.parse(runner.output);
+  } catch {
+    return { status: 1, output: "controlled migration lock runner returned an invalid report" };
+  }
+  if (report?.kind === "lock-unavailable") return { status: 1, output: "could not obtain advisory lock" };
+  if (report?.kind === "connection-failure") return { status: 1, output: "could not connect to database" };
+  if (report?.kind !== "sqlx" || !Number.isInteger(report.status) || typeof report.output !== "string") {
+    return { status: 1, output: "controlled migration lock runner failed" };
+  }
+  return { status: report.status, output: report.output };
+}
+
 function runSqlx(sqlx, action, database, url, runtime, migrations, safetyConfig) {
   const directory = join(projectRoot, database.migrationDirectory);
   const safety = migrations || migrationSafetyForDirectory(directory, {
@@ -1344,11 +1422,14 @@ function runSqlx(sqlx, action, database, url, runtime, migrations, safetyConfig)
     safetyConfig
   });
   const budget = migrationTimeoutBudget(safety, safetyConfig);
-  const result = runtime.run(sqlx.binary, ["migrate", action, "--source", directory], {
+  const args = ["migrate", action, "--source", directory];
+  const environment = {
     ...migrationChildEnvironment(runtime.environment, database, budget),
     DATABASE_URL: url
-  });
-  return result;
+  };
+  return action === "run"
+    ? runtime.runMigration(sqlx.binary, args, environment, database)
+    : runtime.run(sqlx.binary, args, environment);
 }
 
 function inspectDatabase(url, runtime, database, budget) {
@@ -1368,6 +1449,39 @@ function inspectDatabase(url, runtime, database, budget) {
     const [history, managedTables] = result.output.trim().split(",");
     return { ok: true, history: history === "t", managedTables: managedTables === "t" };
   } catch (error) {
+    return { ok: false, code: EXIT.SQLX };
+  }
+}
+
+function inspectMigrationHistory(url, runtime, database, budget, migrations) {
+  try {
+    const result = runtime.run("psql", [
+      "--no-psqlrc",
+      "--tuples-only",
+      "--no-align",
+      "--quiet",
+      "--field-separator=|",
+      "--command",
+      "SELECT version::text, description, encode(checksum, 'hex'), success FROM public._sqlx_migrations ORDER BY version"
+    ], {
+      ...migrationChildEnvironment(psqlConnectionEnvironment(url, runtime.environment), database, budget)
+    });
+    if (result.status !== 0) return { ok: false, code: classifyFailure(result.output) };
+    const expectedByVersion = new Map(migrations.map((migration) => [migration.version, migration]));
+    const rows = result.output.trim() === "" ? [] : result.output.trim().split(/\r?\n/);
+    const versions = [];
+    for (const row of rows) {
+      const fields = row.split("|");
+      if (fields.length !== 4) return { ok: false, code: EXIT.VALIDATION };
+      const [version, description, checksum, success] = fields;
+      const expected = expectedByVersion.get(version);
+      if (!expected || description !== expected.description || checksum.toLowerCase() !== expected.checksum.toLowerCase() || success !== "t") {
+        return { ok: false, code: EXIT.VALIDATION };
+      }
+      versions.push(version);
+    }
+    return { ok: true, versions };
+  } catch {
     return { ok: false, code: EXIT.SQLX };
   }
 }
@@ -1393,7 +1507,7 @@ function writeAudit(url, database, actor, startedAt, outcome, runtime, budget) {
     const result = runtime.run("psql", [
     "--no-psqlrc",
     "--command",
-    `CREATE TABLE IF NOT EXISTS public._myserver_migration_audit (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, operation text NOT NULL, actor text NOT NULL, started_at timestamptz NOT NULL, completed_at timestamptz NOT NULL, outcome text NOT NULL, history_summary text NOT NULL); INSERT INTO public._myserver_migration_audit (operation, actor, started_at, completed_at, outcome, history_summary) VALUES ('up', ${sqlLiteral(actor)}, ${sqlLiteral(startedAt)}::timestamptz, clock_timestamp(), 'success', (SELECT concat('count=', count(*), ';min=', coalesce(min(version)::text, ''), ';max=', coalesce(max(version)::text, '')) FROM public._sqlx_migrations));`
+    `CREATE TABLE IF NOT EXISTS public._myserver_migration_audit (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, operation text NOT NULL, actor text NOT NULL, started_at timestamptz NOT NULL, completed_at timestamptz NOT NULL, outcome text NOT NULL, history_summary text NOT NULL); INSERT INTO public._myserver_migration_audit (operation, actor, started_at, completed_at, outcome, history_summary) VALUES ('up', ${sqlLiteral(actor)}, ${sqlLiteral(startedAt)}::timestamptz, clock_timestamp(), 'success', (SELECT concat('count=', count(*), ';min=', coalesce(min(version)::text, ''), ';max=', coalesce(max(version)::text, ''), ';versions=', coalesce(string_agg(version::text, ',' ORDER BY version), '')) FROM public._sqlx_migrations));`
     ], {
       ...migrationChildEnvironment(psqlConnectionEnvironment(url, runtime.environment), database, budget)
     });
@@ -1410,6 +1524,36 @@ export function executeDatabase(command, database, actor, overrides = {}) {
     resolveSqlxBinary: overrides.resolveSqlxBinary || resolveSqlxBinary,
     connectBaseline: overrides.connectBaseline,
     now: overrides.now || (() => new Date().toISOString())
+  };
+  runtime.runMigration = overrides.runMigration || (overrides.run
+    ? ((sqlx, args, environment) => runtime.run(sqlx, args, environment))
+    : runLockedSqlx);
+  runtime.emitMigrationMetric = overrides.emitMigrationMetric || ((event) => emitMigrationMetric(event, runtime.environment));
+  const metricState = {
+    targetMigrationVersion: "unknown",
+    appliedMigrationVersions: [],
+    attemptedMigrationVersions: []
+  };
+  const complete = (report) => {
+    if (command !== "up") return report;
+    let metrics = { delivered: false, state: "unavailable" };
+    try {
+      const event = buildMigrationMetricEvent({
+        databaseKey: database.key,
+        targetMigrationVersion: metricState.targetMigrationVersion,
+        appliedMigrationVersions: metricState.appliedMigrationVersions,
+        attemptedMigrationVersions: metricState.attemptedMigrationVersions,
+        outcome: report.ok ? "success" : "failure",
+        errorCategory: report.ok ? "none" : migrationMetricErrorCategory(report.code)
+      });
+      const delivery = runtime.emitMigrationMetric(event);
+      if (delivery?.state && typeof delivery.state === "string") {
+        metrics = { delivered: delivery.delivered === true, state: delivery.state };
+      }
+    } catch {
+      // Metrics are best effort and must never change a migration outcome.
+    }
+    return { ...report, metrics };
   };
   const startedAt = runtime.now();
   if (command === "baseline") {
@@ -1449,41 +1593,46 @@ export function executeDatabase(command, database, actor, overrides = {}) {
   try {
     url = connectionUrl(database, runtime.environment);
   } catch (error) {
-    return { database: database.key, ok: false, code: EXIT.CONFIG, error: redact(error.message) };
+    return complete({ database: database.key, ok: false, code: EXIT.CONFIG, error: redact(error.message) });
   }
 
   let safetyConfig;
   let migrations = [];
+  let migrationMetadata = [];
   try {
     safetyConfig = migrationSafetyConfig(overrides.migrationSafetyConfig);
     if (command !== "status") {
-      migrations = migrationSafetyForDirectory(join(projectRoot, database.migrationDirectory), {
+      const directory = join(projectRoot, database.migrationDirectory);
+      migrations = migrationSafetyForDirectory(directory, {
         expectedOwner: database.logicalOwner,
         safetyConfig
       });
+      migrationMetadata = sqlxMigrationMetadata(directory);
     }
   } catch (error) {
-    return { database: database.key, ok: false, code: EXIT.VALIDATION, error: redact(error.message) };
+    return complete({ database: database.key, ok: false, code: EXIT.VALIDATION, error: redact(error.message) });
   }
+  const migrationVersions = migrationMetadata.map(({ version }) => String(version));
+  metricState.targetMigrationVersion = migrationVersions.at(-1) || "unknown";
+  metricState.attemptedMigrationVersions = [...migrationVersions];
   const timeoutBudget = migrationTimeoutBudget(migrations, safetyConfig);
   const inspection = inspectDatabase(url, runtime, database, timeoutBudget);
-  if (!inspection.ok) return { database: database.key, ok: false, code: inspection.code, error: diagnostic(inspection.code, "database preflight") };
+  if (!inspection.ok) return complete({ database: database.key, ok: false, code: inspection.code, error: diagnostic(inspection.code, "database preflight") });
   if (!inspection.history && command === "status") {
     return { database: database.key, ok: true, code: EXIT.OK, output: "_sqlx_migrations is absent" };
   }
   if (!inspection.history && command === "validate") {
     return { database: database.key, ok: false, code: EXIT.VALIDATION, error: "_sqlx_migrations is absent" };
   }
-
   if (command === "up") {
-    if (!actor) return { database: database.key, ok: false, code: EXIT.CONFIG, error: "--actor is required for up audit events" };
+    if (!actor) return complete({ database: database.key, ok: false, code: EXIT.CONFIG, error: "--actor is required for up audit events" });
     if (!inspection.history && inspection.managedTables) {
-      return {
+      return complete({
         database: database.key,
         ok: false,
         code: EXIT.BASELINE_OR_DRIFT,
         error: "public user tables exist but _sqlx_migrations is absent; refuse to migrate an unbaselined database. Run the stage 3 fingerprint baseline workflow."
-      };
+      });
     }
   }
 
@@ -1491,32 +1640,47 @@ export function executeDatabase(command, database, actor, overrides = {}) {
   try {
     sqlx = runtime.resolveSqlxBinary();
   } catch (error) {
-    return { database: database.key, ok: false, code: EXIT.SQLX, error: diagnostic(EXIT.SQLX, "sqlx artifact check") };
+    return complete({ database: database.key, ok: false, code: EXIT.SQLX, error: diagnostic(EXIT.SQLX, "sqlx artifact check") });
   }
   const version = verifySqlxVersion(sqlx, runtime);
-  if (!version.ok) return { database: database.key, ok: false, code: EXIT.SQLX, error: diagnostic(EXIT.SQLX, "sqlx version check") };
+  if (!version.ok) return complete({ database: database.key, ok: false, code: EXIT.SQLX, error: diagnostic(EXIT.SQLX, "sqlx version check") });
+  if (inspection.history && command !== "status") {
+    const history = inspectMigrationHistory(url, runtime, database, timeoutBudget, migrationMetadata);
+    if (!history.ok) return complete({ database: database.key, ok: false, code: history.code, error: diagnostic(history.code, "SQLx migration history") });
+    metricState.appliedMigrationVersions = history.versions;
+    metricState.attemptedMigrationVersions = migrationVersions.filter((migrationVersion) => !history.versions.includes(migrationVersion));
+  }
   const validation = runSqlx(sqlx, "info", database, url, runtime, migrations, safetyConfig);
   if (validation.status !== 0) {
     const code = classifyFailure(validation.output);
-    return { database: database.key, ok: false, code, error: diagnostic(code, "sqlx migrate info") };
+    return complete({ database: database.key, ok: false, code, error: diagnostic(code, "sqlx migrate info") });
   }
   if (command === "up") {
     const migration = runSqlx(sqlx, "run", database, url, runtime, migrations, safetyConfig);
     if (migration.status !== 0) {
       const code = classifyFailure(migration.output);
-      return { database: database.key, ok: false, code, error: diagnostic(code, "sqlx migrate run") };
+      const history = inspectMigrationHistory(url, runtime, database, timeoutBudget, migrationMetadata);
+      if (history.ok) metricState.appliedMigrationVersions = history.versions;
+      return complete({ database: database.key, ok: false, code, error: diagnostic(code, "sqlx migrate run") });
     }
+    metricState.appliedMigrationVersions = migrationVersions;
     if (!writeAudit(url, database, actor, startedAt, "success", runtime, timeoutBudget)) {
-      return { database: database.key, ok: false, code: EXIT.EXECUTION, error: "migration audit write failed" };
+      return complete({ database: database.key, ok: false, code: EXIT.EXECUTION, error: "migration audit write failed" });
     }
   }
-  return {
+  return complete({
     database: database.key,
     ok: true,
     code: EXIT.OK,
-    audit: command === "up" ? { actor, startedAt, completedAt: runtime.now() } : undefined,
+    audit: command === "up" ? {
+      actor,
+      startedAt,
+      completedAt: runtime.now(),
+      migrationVersions,
+      targetMigrationVersion: migrationVersions.at(-1)
+    } : undefined,
     output: validation.output || "sqlx migration command completed"
-  };
+  });
 }
 
 export async function main(argv = process.argv.slice(2)) {

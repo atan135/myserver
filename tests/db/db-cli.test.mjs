@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { EXIT, baselinePolicy, canonicalizeCatalog, catalogQuery, classifyFailure, executeDatabase, migrationSafetyForDirectory, migrationSafetyForFile, migrationTimeoutBudget, parseArguments, redact, resolveDatabases, resolveSqlxBinary, sqlxMigrationMetadata, sqlxPostgresLockId, validateMigrationFiles } from "../../tools/db.js";
+import { EXIT, baselinePolicy, canonicalizeCatalog, catalogQuery, classifyFailure, executeDatabase, migrationMetricsEnvironment, migrationSafetyForDirectory, migrationSafetyForFile, migrationTimeoutBudget, parseArguments, redact, resolveDatabases, resolveSqlxBinary, sqlxMigrationMetadata, sqlxPostgresLockId, validateMigrationFiles } from "../../tools/db.js";
 
 const authDatabase = {
   key: "auth",
@@ -18,6 +18,12 @@ const authDatabase = {
 };
 
 const testEnvironment = { TEST_DATABASE_URL: "postgres://migration:secret@example.test:6543/myserver_auth?sslmode=require&application_name=db-test" };
+
+function sqlxHistoryOutput(directory = "db/migrations/auth") {
+  return sqlxMigrationMetadata(join(process.cwd(), directory))
+    .map(({ version, description, checksum }) => `${version}|${description}|${checksum}|t`)
+    .join("\n");
+}
 
 function withoutMigrationUrls() {
   const environment = { ...process.env };
@@ -311,6 +317,66 @@ test("redaction removes PostgreSQL userinfo and password-like values", () => {
   assert.match(value, /postgres:\/\/\*\*\*:\*\*\*@example\.test/);
 });
 
+test("migration metrics child uses an explicit runtime and NATS-only environment allowlist", () => {
+  const environment = migrationMetricsEnvironment({
+    Path: "C:\\Windows\\System32",
+    SystemRoot: "C:\\Windows",
+    WINDIR: "C:\\Windows",
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    NATS_URL: "nats://metrics.example.test:4222",
+    MYSERVER_DB_MIGRATION_METRICS_ENABLED: "1",
+    MYSERVER_DB_MIGRATION_METRICS_NATS_URL: "nats://metrics.example.test:4222",
+    MYSERVER_DB_MIGRATION_METRICS_TIMEOUT_MS: "750",
+    MYSERVER_DB_MIGRATION_AUTH_URL: "postgres://migration:secret@database.example.test/myserver_auth",
+    MYSERVER_DB_MIGRATION_AUTH_PASSWORD: "secret",
+    MYSERVER_STAGE7_POSTGRES_PASSWORD: "stage7-secret",
+    MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgres://postgres:secret@localhost/postgres",
+    DATABASE_URL: "postgres://migration:secret@database.example.test/myserver_auth",
+    REDIS_URL: "redis://redis-user:redis-secret@redis.example.test:6379/0",
+    AUTH_HTTP_URL: "https://service-user:service-secret@auth.example.test",
+    SERVICE_DISCOVERY_URL: "https://discovery.example.test",
+    PGHOST: "database.example.test",
+    PGPASSWORD: "pg-secret",
+    API_TOKEN: "irrelevant-secret",
+    EXTERNAL_SECRET: "external-secret"
+  }, { subject: "myserver.metrics.db-migration.dGVzdA", payload: { service: "db-migration", metrics: { event_type: "migration" } } });
+  assert.equal(environment.PATH, "C:\\Windows\\System32");
+  assert.equal(environment.SystemRoot, "C:\\Windows");
+  assert.equal(environment.WINDIR, "C:\\Windows");
+  assert.equal(environment.ComSpec, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(environment.PATHEXT, ".COM;.EXE;.BAT;.CMD");
+  assert.equal(environment.NATS_URL, "nats://metrics.example.test:4222");
+  assert.equal(environment.MYSERVER_DB_MIGRATION_METRICS_ENABLED, "1");
+  assert.equal(environment.MYSERVER_DB_MIGRATION_METRICS_NATS_URL, "nats://metrics.example.test:4222");
+  assert.equal(environment.MYSERVER_DB_MIGRATION_METRICS_TIMEOUT_MS, "750");
+  assert.equal(environment.MYSERVER_DB_MIGRATION_AUTH_URL, undefined);
+  assert.equal(environment.MYSERVER_DB_MIGRATION_AUTH_PASSWORD, undefined);
+  assert.equal(environment.MYSERVER_STAGE7_POSTGRES_PASSWORD, undefined);
+  assert.equal(environment.MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL, undefined);
+  assert.equal(environment.DATABASE_URL, undefined);
+  assert.equal(environment.REDIS_URL, undefined);
+  assert.equal(environment.AUTH_HTTP_URL, undefined);
+  assert.equal(environment.SERVICE_DISCOVERY_URL, undefined);
+  assert.equal(environment.PGHOST, undefined);
+  assert.equal(environment.PGPASSWORD, undefined);
+  assert.equal(environment.API_TOKEN, undefined);
+  assert.equal(environment.EXTERNAL_SECRET, undefined);
+  assert.deepEqual(Object.keys(environment).sort(), [
+    "ComSpec",
+    "MYSERVER_DB_MIGRATION_METRICS_ENABLED",
+    "MYSERVER_DB_MIGRATION_METRICS_NATS_URL",
+    "MYSERVER_DB_MIGRATION_METRICS_TIMEOUT_MS",
+    "MYSERVER_DB_MIGRATION_METRIC_EVENT",
+    "NATS_URL",
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "WINDIR"
+  ].sort());
+  assert.equal(JSON.stringify(environment).includes("secret"), false);
+});
+
 test("known sqlx failure classes map to stable exit codes", () => {
   assert.equal(classifyFailure("migration checksum mismatch"), EXIT.VALIDATION);
   assert.equal(classifyFailure("could not obtain advisory lock"), EXIT.LOCK);
@@ -486,22 +552,28 @@ test("up rejects unbaselined user tables before SQLx is resolved", () => {
 
 test("psql preflight and audit receive the resolved PostgreSQL connection through child environment", () => {
   const calls = [];
+  const emitted = [];
   const report = executeDatabase("up", authDatabase, "deploy", {
     environment: testEnvironment,
     resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
     run(command, args, environment) {
       calls.push({ command, args, environment });
+      if (command === "psql" && args.includes("--tuples-only") && args.includes("--field-separator=|")) return { status: 0, output: sqlxHistoryOutput() };
       if (command === "psql" && args.includes("--tuples-only")) return { status: 0, output: "t,f" };
       if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
       if (command === "sqlx.exe" && args[1] === "info") return { status: 0, output: "migration info" };
       if (command === "sqlx.exe" && args[1] === "run") return { status: 0, output: "migration run" };
       if (command === "psql") return { status: 0, output: "" };
       throw new Error(`unexpected command: ${command}`);
+    },
+    emitMigrationMetric(event) {
+      emitted.push(event);
+      return { delivered: true, state: "delivered" };
     }
   });
   assert.equal(report.ok, true);
   const psqlCalls = calls.filter(({ command }) => command === "psql");
-  assert.equal(psqlCalls.length, 2);
+  assert.equal(psqlCalls.length, 3);
   for (const { args, environment } of psqlCalls) {
     assert.equal(args.includes("--dbname"), false);
     assert.equal(args.includes(testEnvironment.TEST_DATABASE_URL), false);
@@ -517,6 +589,22 @@ test("psql preflight and audit receive the resolved PostgreSQL connection throug
   }
   const sqlxCalls = calls.filter(({ command, args }) => command === "sqlx.exe" && args[0] === "migrate");
   assert.equal(sqlxCalls.every(({ environment }) => environment.PGOPTIONS === "-c lock_timeout=5000ms -c statement_timeout=60000ms"), true);
+  const audit = psqlCalls.find(({ args }) => args.some((argument) => String(argument).includes("_myserver_migration_audit")));
+  assert.match(audit.args.join(" "), /versions=/);
+  assert.deepEqual(report.audit.migrationVersions, ["20260718161350"]);
+  assert.equal(report.audit.targetMigrationVersion, "20260718161350");
+  assert.deepEqual(report.metrics, { delivered: true, state: "delivered" });
+  assert.equal(emitted.length, 1);
+  assert.deepEqual(emitted[0].payload.metrics, {
+    event_type: "migration",
+    database_key: "auth",
+    target_migration_version: "20260718161350",
+    applied_migration_versions: "20260718161350",
+    attempted_migration_versions: "none",
+    outcome: "success",
+    error_category: "none"
+  });
+  assert.equal(JSON.stringify(emitted[0]).includes("secret"), false);
 });
 
 test("a mixed migration batch injects the approved long timeout into SQLx", () => {
@@ -532,6 +620,7 @@ test("a mixed migration batch injects the approved long timeout into SQLx", () =
     resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
     run(command, args, environment) {
       calls.push({ command, args, environment });
+      if (command === "psql" && args.includes("--tuples-only") && args.includes("--field-separator=|")) return { status: 0, output: sqlxHistoryOutput("tests/fixtures/db/stage4-rollout/expand") };
       if (command === "psql" && args.includes("--tuples-only")) return { status: 0, output: "t,f" };
       if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
       if (command === "sqlx.exe" && args[1] === "info") return { status: 0, output: "migration info" };
@@ -544,6 +633,60 @@ test("a mixed migration batch injects the approved long timeout into SQLx", () =
   const sqlxCalls = calls.filter(({ command, args }) => command === "sqlx.exe" && args[0] === "migrate");
   assert.equal(sqlxCalls.length, 2);
   assert.equal(sqlxCalls.every(({ environment }) => environment.PGOPTIONS === "-c lock_timeout=5000ms -c statement_timeout=300000ms"), true);
+});
+
+test("up delegates SQLx run through the migration lock runner hook", () => {
+  const calls = [];
+  const emitted = [];
+  const report = executeDatabase("up", authDatabase, "deploy", {
+    environment: testEnvironment,
+    resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
+    run(command, args) {
+      calls.push([command, args]);
+      if (command === "psql" && args.includes("--field-separator=|")) return { status: 0, output: sqlxHistoryOutput() };
+      if (command === "psql") return { status: 0, output: "t,f" };
+      if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
+      if (command === "sqlx.exe" && args[1] === "info") return { status: 0, output: "migration info" };
+      throw new Error(`unexpected command: ${command}`);
+    },
+    runMigration(binary, args, environment, database) {
+      calls.push(["lock-runner", [binary, ...args, database.defaultDatabase, environment.PGOPTIONS]]);
+      return { status: 1, output: "could not obtain advisory lock" };
+    },
+    emitMigrationMetric(event) {
+      emitted.push(event);
+      return { delivered: false, state: "unavailable" };
+    }
+  });
+  assert.equal(report.ok, false);
+  assert.equal(report.code, EXIT.LOCK);
+  const lockRunner = calls.find(([command]) => command === "lock-runner");
+  assert.deepEqual(lockRunner[1].slice(0, 4), ["sqlx.exe", "migrate", "run", "--source"]);
+  assert.equal(lockRunner[1].at(-2), "myserver_auth");
+  assert.deepEqual(report.metrics, { delivered: false, state: "unavailable" });
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].payload.metrics.outcome, "failure");
+  assert.equal(emitted[0].payload.metrics.error_category, "lock");
+});
+
+test("history checksum drift is rejected before SQLx migration execution", () => {
+  const calls = [];
+  const report = executeDatabase("validate", authDatabase, undefined, {
+    environment: testEnvironment,
+    resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
+    run(command, args) {
+      calls.push([command, args]);
+      if (command === "psql" && args.includes("--field-separator=|")) {
+        return { status: 0, output: "20260718161350|initial schema|deadbeef|t" };
+      }
+      if (command === "psql") return { status: 0, output: "t,f" };
+      if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
+      throw new Error(`unexpected command: ${command}`);
+    }
+  });
+  assert.equal(report.ok, false);
+  assert.equal(report.code, EXIT.VALIDATION);
+  assert.equal(calls.some(([command, args]) => command === "sqlx.exe" && args[0] === "migrate"), false);
 });
 
 test("initialized database rejects an unapproved SQLx artifact", () => {
@@ -585,6 +728,7 @@ test("audit write failure prevents an up command from succeeding", () => {
       calls.push([command, args]);
       if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
       if (command === "sqlx.exe") return { status: 0, output: "ok" };
+      if (args.includes("--field-separator=|")) return { status: 0, output: sqlxHistoryOutput() };
       if (args.some((argument) => String(argument).includes("_myserver_migration_audit"))) return { status: 1, output: "permission denied" };
       return { status: 0, output: "t,f" };
     }

@@ -59,8 +59,9 @@
     "db:drift": "node tools/db.js drift",
     "db:deploy": "node tools/db-deploy.js",
     "db:deploy:validate": "node tools/db-deploy.js validate --environment ci",
-    "db:ci": "npm run db:deploy:validate && node --test tests/db/db-cli.test.mjs tests/db/stage4-rollout.test.mjs tests/db/stage5-drift-backfill.test.mjs tests/db/stage6-deploy.test.mjs",
+    "db:ci": "npm run db:deploy:validate && node --test tests/db/db-cli.test.mjs tests/db/stage4-rollout.test.mjs tests/db/stage5-drift-backfill.test.mjs tests/db/stage6-deploy.test.mjs tests/db/stage7-verification.test.mjs",
     "db:ci:rebuild": "node tools/db-deploy.js rebuild-check --environment ci --confirm-temporary-rebuild stage6-temporary-rebuild",
+    "db:stage7:drill": "node tools/db-stage7-drill.js",
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
@@ -70,6 +71,7 @@
   },
   "dependencies": {
     "node-kcp-x": "^1.2.3",
+    "nats": "^2.29.3",
     "pg": "^8.16.3"
   }
 }

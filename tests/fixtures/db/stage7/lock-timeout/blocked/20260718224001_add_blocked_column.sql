@@ -1,0 +1,9 @@
+-- Logical owner: stage7-lock-timeout-test
+-- Compatibility phase: expand
+-- Irreversible risk: none
+-- Transaction: required
+-- Lock timeout: 500ms
+-- Statement timeout: 5s
+-- Backup point: not-required
+-- Recovery command: Release the reviewed table lock, then rerun db up.
+ALTER TABLE stage7_lock_timeout_fixture ADD COLUMN blocked_value text;

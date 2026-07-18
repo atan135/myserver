@@ -10,7 +10,14 @@ on:
       - "scripts/db-deploy.ps1"
       - "tools/db.js"
       - "tools/db-deploy.js"
+      - "tools/db-lock-runner.js"
+      - "tools/db-migration-metrics.js"
+      - "tools/db-stage7-drill.js"
+      - "tools/db-stage7-worker.js"
       - "tests/db/**"
+      - "tests/fixtures/db/**"
+      - "apps/metrics-collector/src/**"
+      - "apps/metrics-collector/package.json"
       - "docs/数据库/**"
   push:
     paths:
@@ -21,7 +28,14 @@ on:
       - "scripts/db-deploy.ps1"
       - "tools/db.js"
       - "tools/db-deploy.js"
+      - "tools/db-lock-runner.js"
+      - "tools/db-migration-metrics.js"
+      - "tools/db-stage7-drill.js"
+      - "tools/db-stage7-worker.js"
       - "tests/db/**"
+      - "tests/fixtures/db/**"
+      - "apps/metrics-collector/src/**"
+      - "apps/metrics-collector/package.json"
       - "docs/数据库/**"
 
 jobs:
