@@ -81,7 +81,15 @@ function transactionalSafetyHeader(overrides = {}) {
 }
 
 test("database CLI accepts only supported commands and options", () => {
-  assert.deepEqual(parseArguments(["status", "--database", "auth"]), { command: "status", database: "auth", actor: undefined, expectedFingerprint: undefined });
+  assert.deepEqual(parseArguments(["status", "--database", "auth"]), {
+    command: "status",
+    database: "auth",
+    actor: undefined,
+    expectedFingerprint: undefined,
+    environment: undefined,
+    task: undefined,
+    maxBatches: undefined
+  });
   assert.throws(() => parseArguments(["baseline", "--database", "auth"]), /--actor/);
   assert.throws(() => parseArguments(["status", "--database", "auth", "--force", "yes"]), /only --database/);
   assert.throws(() => parseArguments(["baseline", "--database", "all", "--actor", "deploy", "--expected-fingerprint", "a".repeat(64)]), /one database/);

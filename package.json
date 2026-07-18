@@ -56,6 +56,7 @@
     "db:up": "node tools/db.js up",
     "db:validate": "node tools/db.js validate",
     "db:baseline": "node tools/db.js baseline",
+    "db:drift": "node tools/db.js drift",
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",

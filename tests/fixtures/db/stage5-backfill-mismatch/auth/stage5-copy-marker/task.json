@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "id": "stage5-other-task",
+  "database": "auth",
+  "batch_sql": "batch.sql"
+}
