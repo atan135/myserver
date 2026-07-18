@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "databases": {
+    "auth": {
+      "defaultDatabase": "myserver_auth",
+      "migrationDirectory": "db/migrations/auth",
+      "logicalOwner": "auth-http",
+      "urlEnvironment": "MYSERVER_DB_MIGRATION_AUTH_URL",
+      "userEnvironment": "MYSERVER_DB_MIGRATION_AUTH_USER",
+      "passwordEnvironment": "MYSERVER_DB_MIGRATION_AUTH_PASSWORD"
+    },
+    "game": {
+      "defaultDatabase": "myserver_game",
+      "migrationDirectory": "db/migrations/game",
+      "logicalOwner": "game-server",
+      "urlEnvironment": "MYSERVER_DB_MIGRATION_GAME_URL",
+      "userEnvironment": "MYSERVER_DB_MIGRATION_GAME_USER",
+      "passwordEnvironment": "MYSERVER_DB_MIGRATION_GAME_PASSWORD"
+    },
+    "chat": {
+      "defaultDatabase": "myserver_chat",
+      "migrationDirectory": "db/migrations/chat",
+      "logicalOwner": "chat-server",
+      "urlEnvironment": "MYSERVER_DB_MIGRATION_CHAT_URL",
+      "userEnvironment": "MYSERVER_DB_MIGRATION_CHAT_USER",
+      "passwordEnvironment": "MYSERVER_DB_MIGRATION_CHAT_PASSWORD"
+    },
+    "announce": {
+      "defaultDatabase": "myserver_announce",
+      "migrationDirectory": "db/migrations/announce",
+      "logicalOwner": "announce-service",
+      "urlEnvironment": "MYSERVER_DB_MIGRATION_ANNOUNCE_URL",
+      "userEnvironment": "MYSERVER_DB_MIGRATION_ANNOUNCE_USER",
+      "passwordEnvironment": "MYSERVER_DB_MIGRATION_ANNOUNCE_PASSWORD"
+    },
+    "mail": {
+      "defaultDatabase": "myserver_mail",
+      "migrationDirectory": "db/migrations/mail",
+      "logicalOwner": "mail-service",
+      "urlEnvironment": "MYSERVER_DB_MIGRATION_MAIL_URL",
+      "userEnvironment": "MYSERVER_DB_MIGRATION_MAIL_USER",
+      "passwordEnvironment": "MYSERVER_DB_MIGRATION_MAIL_PASSWORD"
+    }
+  }
+}

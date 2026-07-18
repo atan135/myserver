@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "version": "0.8.6",
+  "platforms": {
+    "win32-x64": {
+      "binary": "bin/sqlx.exe",
+      "artifactUrl": null,
+      "sha256": null,
+      "provisioned": false
+    }
+  }
+}
