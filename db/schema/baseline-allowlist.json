@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "fingerprintAlgorithm": "sha256",
+  "canonicalCatalogFormat": "myserver-postgresql-catalog-v1",
+  "databases": {
+    "auth": { "fingerprints": [] },
+    "game": { "fingerprints": [] },
+    "chat": { "fingerprints": [] },
+    "announce": { "fingerprints": [] },
+    "mail": { "fingerprints": [] }
+  },
+  "note": "No catalog fingerprint is approved until it is captured from a reviewed PostgreSQL baseline. Unknown fingerprints must be rejected."
+}

@@ -4,9 +4,9 @@
   "platforms": {
     "win32-x64": {
       "binary": "bin/sqlx.exe",
-      "artifactUrl": null,
-      "sha256": null,
-      "provisioned": false
+      "artifactUrl": "local://cargo-install/sqlx-cli-0.8.6?locked=true&features=postgres%2Crustls",
+      "sha256": "9666c3b3bb05498f78cb99f5f127587accbdffeeffd17f23de3119e7348501e1",
+      "provisioned": true
     }
   }
 }

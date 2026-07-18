@@ -55,6 +55,7 @@
     "db:status": "node tools/db.js status",
     "db:up": "node tools/db.js up",
     "db:validate": "node tools/db.js validate",
+    "db:baseline": "node tools/db.js baseline",
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
@@ -63,6 +64,7 @@
     "count:lines": "node tools/checkfile/count-lines.js"
   },
   "dependencies": {
-    "node-kcp-x": "^1.2.3"
+    "node-kcp-x": "^1.2.3",
+    "pg": "^8.16.3"
   }
 }
