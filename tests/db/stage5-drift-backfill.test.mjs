@@ -136,6 +136,27 @@ test("drift report separates definition changes, missing targets and actual extr
   assert.equal(differences.find(({ direction }) => direction === "target-missing").object_identity, "public.stage5_widget.stage5_widget_audit");
 });
 
+test("clean target and actual drift manifests share the semantic digest while changes remain visible", () => {
+  const expected = catalogRows();
+  // Compact targets expand object_name from object_identity, while live catalog rows retain a display label.
+  const target = normalizeDriftCatalog(expected.map((row) => ({ ...row, object_name: row.object_identity })));
+  const actual = normalizeDriftCatalog(expected);
+  assert.equal(target.manifest_sha256, actual.manifest_sha256);
+  assert.deepEqual(compareDriftCatalog({ objects: target.objects }, actual), []);
+
+  const changed = normalizeDriftCatalog(expected.map((row) => row.object_identity === "public.stage5_widget.marker" ? { ...row, definition: "marker text not null " } : row));
+  assert.notEqual(changed.manifest_sha256, target.manifest_sha256);
+  assert.equal(compareDriftCatalog({ objects: target.objects }, changed).some(({ direction }) => direction === "definition-change"), true);
+
+  const missing = normalizeDriftCatalog(expected.filter(({ object_kind }) => object_kind !== "trigger"));
+  assert.notEqual(missing.manifest_sha256, target.manifest_sha256);
+  assert.equal(compareDriftCatalog({ objects: target.objects }, missing).some(({ direction }) => direction === "target-missing"), true);
+
+  const extra = normalizeDriftCatalog([...expected, { object_kind: "index", object_name: "public.idx_stage5_manual", object_identity: "public.idx_stage5_manual", definition: "CREATE INDEX idx_stage5_manual ON public.stage5_widget USING btree (marker)" }]);
+  assert.notEqual(extra.manifest_sha256, target.manifest_sha256);
+  assert.equal(compareDriftCatalog({ objects: target.objects }, extra).some(({ direction }) => direction === "actual-extra"), true);
+});
+
 test("drift accepts only an exact reviewed allowance and reports unapproved manual drift", async () => {
   const expected = catalogRows();
   const extra = { object_kind: "index", object_name: "public.idx_stage5_allowed", object_identity: "public.idx_stage5_allowed", definition: "CREATE INDEX idx_stage5_allowed ON public.stage5_widget USING btree (marker)" };

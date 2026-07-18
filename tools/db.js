@@ -219,6 +219,16 @@ function parseCatalogRow(row) {
   return value;
 }
 
+function driftManifestSha256(objects) {
+  // object_name is a report label and is intentionally absent from compact targets.
+  const canonical = objects.map(({ object_kind, object_identity, definition_sha256 }) => [
+    object_kind,
+    object_identity,
+    definition_sha256.toLowerCase()
+  ]).sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]) || left[2].localeCompare(right[2]));
+  return sha256(JSON.stringify(canonical));
+}
+
 export function normalizeDriftCatalog(rows) {
   if (!Array.isArray(rows)) throw new Error("drift catalog must be an array");
   const seen = new Set();
@@ -238,7 +248,7 @@ export function normalizeDriftCatalog(rows) {
       definition_sha256: sha256(row.definition)
     };
   }).sort((left, right) => left.object_kind.localeCompare(right.object_kind) || left.object_identity.localeCompare(right.object_identity));
-  return { objects, manifest_sha256: sha256(JSON.stringify(objects)) };
+  return { objects, manifest_sha256: driftManifestSha256(objects) };
 }
 
 function validateTargetObjects(objects) {
@@ -312,7 +322,7 @@ function validateDriftTargetManifest(manifest, database, policyTarget) {
     },
     catalog_sha256: manifest.catalog_sha256.toLowerCase(),
     objects,
-    manifest_sha256: sha256(JSON.stringify(objects))
+    manifest_sha256: driftManifestSha256(objects)
   };
 }
 
@@ -934,7 +944,7 @@ export function resolveDatabases(databaseKey, config = loadJson(databaseConfigPa
   return keys.map((key) => ({ key, ...config.databases[key] }));
 }
 
-function connectionUrl(database, environment = process.env) {
+export function connectionUrl(database, environment = process.env) {
   const rawUrl = environment[database.urlEnvironment];
   if (!rawUrl) throw new Error(`${database.urlEnvironment} is required`);
   let url;

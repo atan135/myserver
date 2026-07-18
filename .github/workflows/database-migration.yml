@@ -1,0 +1,40 @@
+name: Database Migration Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/database-migration.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "db/**"
+      - "scripts/db-deploy.ps1"
+      - "tools/db.js"
+      - "tools/db-deploy.js"
+      - "tests/db/**"
+      - "docs/数据库/**"
+  push:
+    paths:
+      - ".github/workflows/database-migration.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "db/**"
+      - "scripts/db-deploy.ps1"
+      - "tools/db.js"
+      - "tools/db-deploy.js"
+      - "tests/db/**"
+      - "docs/数据库/**"
+
+jobs:
+  static-gate:
+    name: Windows database migration static gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked Node.js dependencies
+        run: npm ci
+      - name: Validate database deployment gate
+        run: npm run db:ci
