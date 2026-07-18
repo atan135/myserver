@@ -1,0 +1,11 @@
+-- Logical owner: replace-with-logical-owner
+-- Compatibility phase: contract
+-- Irreversible risk: data-loss
+-- Transaction: required
+-- Lock timeout: 5s
+-- Statement timeout: 60s
+-- Backup point: pgdump-example-table-before-drop-20260718
+-- Recovery command: Restore the verified backup point with the approved runbook, then rerun only the compatible expand migration.
+-- Risk summary: Dropping the old column discards data written by an obsolete service version.
+-- Confirm no old service can read or write old_column before replacing the placeholder identifiers.
+ALTER TABLE example_table DROP COLUMN old_column;

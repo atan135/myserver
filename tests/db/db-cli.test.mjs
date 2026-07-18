@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { EXIT, baselinePolicy, canonicalizeCatalog, catalogQuery, classifyFailure, executeDatabase, parseArguments, redact, resolveDatabases, resolveSqlxBinary, sqlxMigrationMetadata, sqlxPostgresLockId, validateMigrationFiles } from "../../tools/db.js";
+import { EXIT, baselinePolicy, canonicalizeCatalog, catalogQuery, classifyFailure, executeDatabase, migrationSafetyForDirectory, migrationSafetyForFile, migrationTimeoutBudget, parseArguments, redact, resolveDatabases, resolveSqlxBinary, sqlxMigrationMetadata, sqlxPostgresLockId, validateMigrationFiles } from "../../tools/db.js";
 
 const authDatabase = {
   key: "auth",
@@ -42,19 +42,42 @@ function fakeBaselineClient(snapshotRows, failure = {}) {
   };
 }
 
-function testOnlyAllowlist(fingerprint) {
+function testOnlyAllowlist(fingerprint, entryOverrides = {}) {
+  const target = sqlxMigrationMetadata(join(process.cwd(), "db/migrations/auth"))[0];
   return {
-    schema: 1,
+    schema: 2,
     fingerprintAlgorithm: "sha256",
     canonicalCatalogFormat: "myserver-postgresql-catalog-v1",
     databases: {
-      auth: { fingerprints: [{ sha256: fingerprint, kind: "test-fixture" }] },
+      auth: {
+        fingerprints: [{
+          sha256: fingerprint,
+          version: target.version,
+          description: target.description,
+          kind: "test-fixture",
+          ...entryOverrides
+        }]
+      },
       game: { fingerprints: [] },
       chat: { fingerprints: [] },
       announce: { fingerprints: [] },
       mail: { fingerprints: [] }
     }
   };
+}
+
+function transactionalSafetyHeader(overrides = {}) {
+  return [
+    `-- Logical owner: ${overrides.logicalOwner || "test-owner"}`,
+    `-- Compatibility phase: ${overrides.compatibilityPhase || "expand"}`,
+    `-- Irreversible risk: ${overrides.irreversibleRisk || "none"}`,
+    `-- Transaction: ${overrides.transaction || "required"}`,
+    `-- Lock timeout: ${overrides.lockTimeout || "5s"}`,
+    `-- Statement timeout: ${overrides.statementTimeout || "60s"}`,
+    `-- Backup point: ${overrides.backupPoint || "not-required"}`,
+    `-- Recovery command: ${overrides.recoveryCommand || "SQLx rolls back the transaction; correct the migration and rerun db up."}`,
+    ...(overrides.riskSummary ? [`-- Risk summary: ${overrides.riskSummary}`] : [])
+  ].join("\n");
 }
 
 test("database CLI accepts only supported commands and options", () => {
@@ -99,6 +122,62 @@ test("baseline locks before catalog read and writes SQLx history in the same ses
   assert.deepEqual(insert.parameters, [migration.version, "initial schema", migration.checksum]);
   const lock = client.calls.find(({ sql: value }) => value.startsWith("SELECT pg_advisory_lock"));
   assert.deepEqual(lock.parameters, [sqlxPostgresLockId("myserver_auth")]);
+  const audit = client.calls.find(({ sql: value }) => value.includes("INSERT INTO public._myserver_migration_audit"));
+  assert.match(audit.parameters[1], new RegExp(`target_version=${migration.version};target_description=${migration.description}`));
+  assert.equal(report.audit.targetVersion, migration.version);
+});
+
+test("baseline allowlist requires a reviewed version and description in the local migration directory", () => {
+  const fingerprint = "b".repeat(64);
+  const migrations = sqlxMigrationMetadata(join(process.cwd(), "db/migrations/auth"));
+  assert.equal(baselinePolicy("auth", fingerprint, testOnlyAllowlist(fingerprint), migrations).allowed, true);
+  assert.match(
+    baselinePolicy("auth", fingerprint, { ...testOnlyAllowlist(fingerprint), schema: 1 }, migrations).reason,
+    /schema must be 2/
+  );
+  for (const [entryOverrides, expectedReason] of [
+    [{ version: undefined }, /must bind/],
+    [{ version: "invalid" }, /must bind/],
+    [{ version: "20260718161349" }, /do not match a local migration/],
+    [{ version: "20260718161351" }, /beyond the local migration directory/],
+    [{ description: "different description" }, /do not match a local migration/]
+  ]) {
+    const policy = baselinePolicy("auth", fingerprint, testOnlyAllowlist(fingerprint, entryOverrides), migrations);
+    assert.equal(policy.allowed, false);
+    assert.match(policy.reason, expectedReason);
+  }
+});
+
+test("baseline writes only the reviewed target version when later local migrations exist", async () => {
+  const fixture = [{ object_kind: "table", object_name: "public.simulated_baseline_fixture", definition: "r" }];
+  const fingerprint = canonicalizeCatalog(fixture).sha256;
+  const relativeDirectory = join("tests", `.tmp-baseline-future-${process.pid}-${Date.now()}`);
+  const directory = join(process.cwd(), relativeDirectory);
+  const initialFilename = "20260718161350_initial_schema.sql";
+  const futureFilename = "20260718161351_future_additive_column.sql";
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, initialFilename), readFileSync(join(process.cwd(), "db/migrations/auth", initialFilename)));
+  writeFileSync(join(directory, futureFilename), `${transactionalSafetyHeader({ logicalOwner: "auth-http" })}\nCREATE TABLE baseline_future_fixture (id bigint PRIMARY KEY);\n`);
+  const client = fakeBaselineClient(fixture);
+  try {
+    const initial = sqlxMigrationMetadata(directory)[0];
+    const report = await executeDatabase("baseline", { ...authDatabase, migrationDirectory: relativeDirectory }, "baseline-test", {
+      expectedFingerprint: fingerprint,
+      environment: testEnvironment,
+      allowlist: testOnlyAllowlist(fingerprint),
+      async connectBaseline() { return client; }
+    });
+    assert.equal(report.ok, true);
+    assert.equal(report.output, `baseline recorded 1 SQLx migration(s) through version ${initial.version}`);
+    const historyInserts = client.calls.filter(({ sql }) => sql.includes("INSERT INTO _sqlx_migrations"));
+    assert.equal(historyInserts.length, 1);
+    assert.deepEqual(historyInserts[0].parameters, [initial.version, initial.description, initial.checksum]);
+    const audit = client.calls.find(({ sql }) => sql.includes("INSERT INTO public._myserver_migration_audit"));
+    assert.match(audit.parameters[1], new RegExp(`target_version=${initial.version};target_description=${initial.description}`));
+    assert.doesNotMatch(audit.parameters[1], /20260718161351/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("baseline rejects catalog mismatch, existing history, lock and audit transaction failures", async () => {
@@ -162,6 +241,8 @@ test("catalog fingerprint inputs cover the reviewed schema object kinds", () => 
   assert.match(query, /_sqlx_migrations/);
   assert.match(query, /_myserver_migration_audit/);
   const allowlist = JSON.parse(readFileSync(join(process.cwd(), "db/schema/baseline-allowlist.json"), "utf8"));
+  assert.equal(allowlist.schema, 2);
+  assert.deepEqual(allowlist.reviewedFingerprintEntry.required, ["sha256", "version", "description"]);
   assert.deepEqual(Object.keys(allowlist.databases), ["auth", "game", "chat", "announce", "mail"]);
   assert.equal(Object.values(allowlist.databases).every(({ fingerprints }) => fingerprints.length === 0), true);
   const fixture = JSON.parse(readFileSync(join(process.cwd(), "tests/fixtures/db/simulated-auth-catalog.json"), "utf8"));
@@ -266,15 +347,116 @@ test("sqlx binary accepts the pinned local cargo-install artifact", () => {
 
 test("migration files require monotonic UTC timestamp names", () => {
   const directory = mkdtempSync(join(tmpdir(), "myserver-migrations-"));
-  writeFileSync(join(directory, "20260718120000_first.sql"), "SELECT 1;");
-  writeFileSync(join(directory, "20260718120001_second_step.sql"), "SELECT 1;");
+  writeFileSync(join(directory, "20260718120000_first.sql"), `${transactionalSafetyHeader()}\nSELECT 1;\n`);
+  writeFileSync(join(directory, "20260718120001_second_step.sql"), `${transactionalSafetyHeader()}\nSELECT 1;\n`);
   assert.deepEqual(validateMigrationFiles(directory), ["20260718120000_first.sql", "20260718120001_second_step.sql"]);
   const invalid = join(directory, "invalid");
   mkdirSync(invalid);
-  writeFileSync(join(invalid, "1_bad.sql"), "SELECT 1;");
+  writeFileSync(join(invalid, "1_bad.sql"), `${transactionalSafetyHeader()}\nSELECT 1;\n`);
   assert.throws(() => validateMigrationFiles(invalid), /invalid migration filename/);
-  writeFileSync(join(invalid, "20260718120002__double.sql"), "SELECT 1;");
+  writeFileSync(join(invalid, "20260718120002__double.sql"), `${transactionalSafetyHeader()}\nSELECT 1;\n`);
   assert.throws(() => validateMigrationFiles(invalid), /invalid migration filename/);
+});
+
+test("migration safety metadata enforces transaction, rollback and irreversible change rules", () => {
+  const legacyInitial = readFileSync(join(process.cwd(), "db/migrations/auth/20260718161350_initial_schema.sql"), "utf8");
+  assert.equal(migrationSafetyForFile("20260718161350_initial_schema.sql", legacyInitial, { expectedOwner: "auth-http" }).legacy, true);
+  assert.throws(
+    () => migrationSafetyForFile("20260718161350_initial_schema.sql", `${legacyInitial}\n-- altered`, { expectedOwner: "auth-http" }),
+    /Transaction metadata is required/
+  );
+
+  const normal = `${transactionalSafetyHeader()}\nALTER TABLE example_table ADD COLUMN new_column text;\n`;
+  const normalPolicy = migrationSafetyForFile("20260718120000_expand_column.sql", normal, { expectedOwner: "test-owner" });
+  assert.equal(normalPolicy.transaction, "required");
+  assert.equal(normalPolicy.lockTimeoutMs, 5000);
+  assert.equal(normalPolicy.statementTimeoutMs, 60000);
+
+  const concurrentIndex = [
+    "-- no-transaction",
+    transactionalSafetyHeader({ transaction: "no-transaction", statementTimeout: "5min", recoveryCommand: "Inspect pg_index.indisvalid; drop the invalid index concurrently, then rerun db up." }),
+    "-- Non-transaction reason: create-index-concurrently",
+    "CREATE INDEX CONCURRENTLY idx_example_table_new_column ON example_table (new_column);"
+  ].join("\n");
+  const noTransactionPolicy = migrationSafetyForFile("20260718120001_add_index.sql", concurrentIndex, { expectedOwner: "test-owner" });
+  assert.equal(noTransactionPolicy.transaction, "no-transaction");
+  assert.equal(noTransactionPolicy.nonTransactionReason, "create-index-concurrently");
+
+  assert.throws(
+    () => migrationSafetyForFile("20260718120002_missing_directive.sql", transactionalSafetyHeader({ transaction: "no-transaction" }), { expectedOwner: "test-owner" }),
+    /must agree/
+  );
+  assert.throws(
+    () => migrationSafetyForFile("20260718120003_bad_reason.sql", concurrentIndex.replace("create-index-concurrently", "vacuum"), { expectedOwner: "test-owner" }),
+    /approved Non-transaction reason/
+  );
+  assert.throws(
+    () => migrationSafetyForFile("20260718120003_wrong_operation.sql", concurrentIndex.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX"), { expectedOwner: "test-owner" }),
+    /does not contain the declared approved operation/
+  );
+  assert.throws(
+    () => migrationSafetyForFile("20260718120004_manual_commit.sql", `${normal}\nCOMMIT;`, { expectedOwner: "test-owner" }),
+    /must not issue BEGIN, COMMIT or ROLLBACK/
+  );
+  assert.throws(
+    () => migrationSafetyForFile("20260718120004_expand_drop.sql", `${normal}\nALTER TABLE example_table DROP COLUMN old_column;`, { expectedOwner: "test-owner" }),
+    /expand migrations must be additive/
+  );
+  assert.throws(
+    () => migrationSafetyForFile("20260718120005_unbacked_contract.sql", `${transactionalSafetyHeader({ compatibilityPhase: "contract", irreversibleRisk: "data-loss" })}\nALTER TABLE example_table DROP COLUMN old_column;`, { expectedOwner: "test-owner" }),
+    /named backup point/
+  );
+  const irreversible = migrationSafetyForFile(
+    "20260718120006_backed_contract.sql",
+    `${transactionalSafetyHeader({ compatibilityPhase: "contract", irreversibleRisk: "data-loss", backupPoint: "stage4-backup-20260718", recoveryCommand: "Restore the verified backup point using the approved runbook.", riskSummary: "Dropping old_column removes values used by an obsolete service." })}\nALTER TABLE example_table DROP COLUMN old_column;`,
+    { expectedOwner: "test-owner" }
+  );
+  assert.equal(irreversible.irreversibleRisk, "data-loss");
+});
+
+test("stage 4 rollout fixtures and templates have a machine-valid safety policy", () => {
+  const root = process.cwd();
+  for (const phase of ["legacy", "expand", "contract"]) {
+    const migrations = migrationSafetyForDirectory(join(root, "tests/fixtures/db/stage4-rollout", phase), { expectedOwner: "stage4-rollout-test" });
+    assert.equal(migrations.length > 0, true);
+    const budget = migrationTimeoutBudget(migrations);
+    assert.deepEqual(budget, {
+      lockTimeoutMs: 5000,
+      statementTimeoutMs: phase === "legacy" ? 60000 : 300000
+    });
+  }
+  const templates = readdirSync(join(root, "db/migrations/templates")).sort();
+  assert.deepEqual(templates, ["contract-drop-column.sql.example", "expand-add-column.sql.example", "no-transaction-create-index.sql.example"]);
+  const noTransactionTemplate = readFileSync(join(root, "db/migrations/templates/no-transaction-create-index.sql.example"), "utf8");
+  assert.equal(noTransactionTemplate.startsWith("-- no-transaction\n"), true);
+});
+
+test("mixed migration budgets use the bounded approved maximum for one SQLx batch", () => {
+  const defaultBudgetMigration = {
+    lockTimeoutMs: 5000,
+    statementTimeoutMs: 60000
+  };
+  const approvedLongMigration = {
+    lockTimeoutMs: 5000,
+    statementTimeoutMs: 300000
+  };
+  assert.deepEqual(
+    migrationTimeoutBudget([defaultBudgetMigration, approvedLongMigration]),
+    { lockTimeoutMs: 5000, statementTimeoutMs: 300000 }
+  );
+  assert.deepEqual(
+    migrationTimeoutBudget([{ lockTimeoutMs: 999999, statementTimeoutMs: 999999 }]),
+    { lockTimeoutMs: 15000, statementTimeoutMs: 300000 }
+  );
+});
+
+test("migration connection URLs cannot override the CLI timeout budget", () => {
+  const report = executeDatabase("status", authDatabase, undefined, {
+    environment: { ...testEnvironment, TEST_DATABASE_URL: "postgres://migration:secret@example.test:6543/myserver_auth?options=-c%20statement_timeout%3D0" },
+    run() { throw new Error("connection preflight must not run"); }
+  });
+  assert.equal(report.code, EXIT.CONFIG);
+  assert.match(report.error, /must not set PostgreSQL options/);
 });
 
 test("up rejects unbaselined user tables before SQLx is resolved", () => {
@@ -322,8 +504,38 @@ test("psql preflight and audit receive the resolved PostgreSQL connection throug
     assert.equal(environment.PGPASSWORD, "secret");
     assert.equal(environment.PGDATABASE, "myserver_auth");
     assert.equal(environment.PGSSLMODE, "require");
-    assert.equal(environment.PGAPPNAME, "db-test");
+    assert.equal(environment.PGAPPNAME, "myserver-db-migrate-auth");
+    assert.equal(environment.PGOPTIONS, "-c lock_timeout=5000ms -c statement_timeout=60000ms");
   }
+  const sqlxCalls = calls.filter(({ command, args }) => command === "sqlx.exe" && args[0] === "migrate");
+  assert.equal(sqlxCalls.every(({ environment }) => environment.PGOPTIONS === "-c lock_timeout=5000ms -c statement_timeout=60000ms"), true);
+});
+
+test("a mixed migration batch injects the approved long timeout into SQLx", () => {
+  const calls = [];
+  const database = {
+    ...authDatabase,
+    key: "stage4-rollout",
+    logicalOwner: "stage4-rollout-test",
+    migrationDirectory: "tests/fixtures/db/stage4-rollout/expand"
+  };
+  const report = executeDatabase("up", database, "deploy", {
+    environment: testEnvironment,
+    resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
+    run(command, args, environment) {
+      calls.push({ command, args, environment });
+      if (command === "psql" && args.includes("--tuples-only")) return { status: 0, output: "t,f" };
+      if (command === "sqlx.exe" && args[0] === "--version") return { status: 0, output: "sqlx-cli 0.8.6" };
+      if (command === "sqlx.exe" && args[1] === "info") return { status: 0, output: "migration info" };
+      if (command === "sqlx.exe" && args[1] === "run") return { status: 0, output: "migration run" };
+      if (command === "psql") return { status: 0, output: "" };
+      throw new Error(`unexpected command: ${command}`);
+    }
+  });
+  assert.equal(report.ok, true);
+  const sqlxCalls = calls.filter(({ command, args }) => command === "sqlx.exe" && args[0] === "migrate");
+  assert.equal(sqlxCalls.length, 2);
+  assert.equal(sqlxCalls.every(({ environment }) => environment.PGOPTIONS === "-c lock_timeout=5000ms -c statement_timeout=300000ms"), true);
 });
 
 test("initialized database rejects an unapproved SQLx artifact", () => {

@@ -1,0 +1,10 @@
+-- Logical owner: replace-with-logical-owner
+-- Compatibility phase: expand
+-- Irreversible risk: none
+-- Transaction: required
+-- Lock timeout: 5s
+-- Statement timeout: 60s
+-- Backup point: not-required
+-- Recovery command: SQLx rolls back the transaction; correct the migration and rerun db up.
+-- Replace the placeholder identifiers after the owning service approves dual-read and dual-write behavior.
+ALTER TABLE example_table ADD COLUMN new_column text;

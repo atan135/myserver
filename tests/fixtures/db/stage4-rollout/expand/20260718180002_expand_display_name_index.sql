@@ -1,0 +1,11 @@
+-- no-transaction
+-- Logical owner: stage4-rollout-test
+-- Compatibility phase: expand
+-- Irreversible risk: none
+-- Transaction: no-transaction
+-- Non-transaction reason: create-index-concurrently
+-- Lock timeout: 5s
+-- Statement timeout: 5min
+-- Backup point: not-required
+-- Recovery command: Inspect pg_index.indisvalid; drop the invalid index concurrently, then rerun db up.
+CREATE INDEX CONCURRENTLY idx_stage4_rollout_display_name ON stage4_rollout_accounts (display_name);

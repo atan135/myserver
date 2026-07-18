@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "fingerprintAlgorithm": "sha256",
   "canonicalCatalogFormat": "myserver-postgresql-catalog-v1",
   "databases": {
@@ -9,5 +9,10 @@
     "announce": { "fingerprints": [] },
     "mail": { "fingerprints": [] }
   },
-  "note": "No catalog fingerprint is approved until it is captured from a reviewed PostgreSQL baseline. Unknown fingerprints must be rejected."
+  "reviewedFingerprintEntry": {
+    "required": ["sha256", "version", "description"],
+    "versionFormat": "YYYYMMDDHHMMSS",
+    "descriptionFormat": "SQLx migration description derived from the approved filename"
+  },
+  "note": "No catalog fingerprint is approved until it is captured from a reviewed PostgreSQL baseline. Every approved fingerprint must bind the exact reviewed migration version and description; unknown fingerprints or target versions must be rejected."
 }
