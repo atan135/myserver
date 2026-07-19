@@ -791,8 +791,12 @@ export function temporaryBootstrapUrl(environment = process.env) {
     throw new Error("MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL must be a PostgreSQL URL");
   }
   const host = url.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  if (!["postgres:", "postgresql:"].includes(url.protocol) || !loopbackHosts.has(host) || Number(url.port || "5432") !== 5432 || decodeURIComponent(url.pathname.replace(/^\//, "")) !== "postgres") {
-    throw new Error("temporary rebuild bootstrap URL must target localhost:5432/postgres");
+  const port = Number(url.port || "5432");
+  if (!["postgres:", "postgresql:"].includes(url.protocol) || !loopbackHosts.has(host) || !Number.isInteger(port) || port < 1 || port > 65535 || decodeURIComponent(url.pathname.replace(/^\//, "")) !== "postgres") {
+    throw new Error("temporary rebuild bootstrap URL must target a loopback PostgreSQL postgres database on a valid port");
+  }
+  if ([...url.searchParams.keys()].some((key) => ["host", "port"].includes(key.toLowerCase()))) {
+    throw new Error("temporary rebuild bootstrap URL must not override host or port with query parameters");
   }
   if ([...url.searchParams.keys()].some((key) => key === "options" || /^options\[.*\]$/.test(key))) {
     throw new Error("temporary rebuild bootstrap URL must not set PostgreSQL options");

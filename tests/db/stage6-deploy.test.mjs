@@ -155,22 +155,25 @@ test("explicit unhealthy readiness response blocks postflight without starting a
   assert.match(report.recovery.join(" "), /last compatible service version/);
 });
 
-test("temporary rebuild guards only allow explicit localhost stage6 database names", () => {
+test("temporary rebuild guards only allow loopback PostgreSQL postgres databases on valid ports", () => {
   assert.equal(temporaryDatabaseName("abc123", "auth"), "myserver_stage6_abc123_auth");
   assert.throws(() => temporaryDatabaseName("abc123", "AUTH"), /invalid/);
   const environment = {
     MYSERVER_DB_DEPLOY_TEMPORARY_REBUILD: "1",
-    MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:5432/postgres",
+    MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:55432/postgres",
     MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_PASSWORD: "test-secret"
   };
   const url = temporaryBootstrapUrl(environment);
   assert.equal(new URL(url).hostname, "localhost");
-  assert.equal(new URL(url).port, "5432");
+  assert.equal(new URL(url).port, "55432");
   assert.equal(new URL(url).pathname, "/postgres");
   assert.equal(url.includes("test-secret"), true);
-  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@database.example:5432/postgres" }), /localhost/);
-  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:5433/postgres" }), /localhost/);
-  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:5432/postgres?options%5Bstatement_timeout%5D=0" }), /must not set PostgreSQL options/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@database.example:55432/postgres" }), /loopback/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:55432/template1" }), /loopback PostgreSQL postgres database/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:55432/postgres?host=database.example" }), /must not override host or port/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:55432/postgres?port=5432" }), /must not override host or port/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:55432/postgres?options%5Bstatement_timeout%5D=0" }), /must not set PostgreSQL options/);
+  assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_POSTGRES_URL: "postgresql://postgres@localhost:0/postgres" }), /valid port/);
   assert.throws(() => temporaryBootstrapUrl({ ...environment, MYSERVER_DB_DEPLOY_TEMPORARY_REBUILD: "0" }), /TEMPORARY_REBUILD=1/);
 });
 
