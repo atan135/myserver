@@ -144,6 +144,7 @@ test("baseline locks before catalog read and writes SQLx history in the same ses
 test("baseline allowlist requires a reviewed version and description in the local migration directory", () => {
   const fingerprint = "b".repeat(64);
   const migrations = sqlxMigrationMetadata(join(process.cwd(), "db/migrations/auth"));
+  const beyondLocalVersion = (BigInt(migrations.at(-1).version) + 1n).toString();
   assert.equal(baselinePolicy("auth", fingerprint, testOnlyAllowlist(fingerprint), migrations).allowed, true);
   assert.match(
     baselinePolicy("auth", fingerprint, { ...testOnlyAllowlist(fingerprint), schema: 1 }, migrations).reason,
@@ -153,7 +154,7 @@ test("baseline allowlist requires a reviewed version and description in the loca
     [{ version: undefined }, /must bind/],
     [{ version: "invalid" }, /must bind/],
     [{ version: "20260718161349" }, /do not match a local migration/],
-    [{ version: "20260718161351" }, /beyond the local migration directory/],
+    [{ version: beyondLocalVersion }, /beyond the local migration directory/],
     [{ description: "different description" }, /do not match a local migration/]
   ]) {
     const policy = baselinePolicy("auth", fingerprint, testOnlyAllowlist(fingerprint, entryOverrides), migrations);
@@ -232,9 +233,12 @@ test("baseline schema is split from bootstrap and development seed", () => {
   assert.match(seed, /local-dev/);
   for (const database of ["auth", "game", "chat", "announce", "mail"]) {
     const directory = join(root, "db/migrations", database);
-    const files = readdirSync(directory).filter((file) => file.endsWith(".sql"));
-    assert.deepEqual(files, ["20260718161350_initial_schema.sql"]);
-    const schema = readFileSync(join(directory, files[0]), "utf8");
+    const files = readdirSync(directory).filter((file) => file.endsWith(".sql")).sort();
+    const expectedFiles = database === "auth"
+      ? ["20260718161350_initial_schema.sql", "20260719100000_add_admin_authorization_policy.sql"]
+      : ["20260718161350_initial_schema.sql"];
+    assert.deepEqual(files, expectedFiles);
+    const schema = readFileSync(join(directory, "20260718161350_initial_schema.sql"), "utf8");
     assert.match(schema, new RegExp(`^-- Logical owner: ${owners[database]}\\r?\\n-- Compatibility phase: expand\\r?\\n-- Irreversible risk: `));
     assert.doesNotMatch(schema, /\\connect|CREATE DATABASE/i);
     assert.doesNotMatch(schema, /local-dev|INSERT INTO id_origins|INSERT INTO worlds/i);
@@ -553,6 +557,9 @@ test("up rejects unbaselined user tables before SQLx is resolved", () => {
 test("psql preflight and audit receive the resolved PostgreSQL connection through child environment", () => {
   const calls = [];
   const emitted = [];
+  const migrations = sqlxMigrationMetadata(join(process.cwd(), authDatabase.migrationDirectory));
+  const migrationVersions = migrations.map(({ version }) => version);
+  const targetMigrationVersion = migrationVersions.at(-1);
   const report = executeDatabase("up", authDatabase, "deploy", {
     environment: testEnvironment,
     resolveSqlxBinary: () => ({ binary: "sqlx.exe", version: "0.8.6" }),
@@ -591,15 +598,15 @@ test("psql preflight and audit receive the resolved PostgreSQL connection throug
   assert.equal(sqlxCalls.every(({ environment }) => environment.PGOPTIONS === "-c lock_timeout=5000ms -c statement_timeout=60000ms"), true);
   const audit = psqlCalls.find(({ args }) => args.some((argument) => String(argument).includes("_myserver_migration_audit")));
   assert.match(audit.args.join(" "), /versions=/);
-  assert.deepEqual(report.audit.migrationVersions, ["20260718161350"]);
-  assert.equal(report.audit.targetMigrationVersion, "20260718161350");
+  assert.deepEqual(report.audit.migrationVersions, migrationVersions);
+  assert.equal(report.audit.targetMigrationVersion, targetMigrationVersion);
   assert.deepEqual(report.metrics, { delivered: true, state: "delivered" });
   assert.equal(emitted.length, 1);
   assert.deepEqual(emitted[0].payload.metrics, {
     event_type: "migration",
     database_key: "auth",
-    target_migration_version: "20260718161350",
-    applied_migration_versions: "20260718161350",
+    target_migration_version: targetMigrationVersion,
+    applied_migration_versions: migrationVersions.join(","),
     attempted_migration_versions: "none",
     outcome: "success",
     error_category: "none"

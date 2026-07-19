@@ -16,12 +16,12 @@ import {
 
 const root = process.cwd();
 
-function migrationFor(database) {
-  return sqlxMigrationMetadata(join(root, database.migrationDirectory)).at(-1);
+function migrationsFor(database) {
+  return sqlxMigrationMetadata(join(root, database.migrationDirectory));
 }
 
 function healthyClient(database, options = {}) {
-  const migration = migrationFor(database);
+  const migrations = migrationsFor(database);
   return {
     async query(sql) {
       if (sql.startsWith("SELECT current_database()")) {
@@ -35,12 +35,12 @@ function healthyClient(database, options = {}) {
       }
       if (sql.startsWith("SELECT version::text")) {
         return {
-          rows: [{
+          rows: migrations.map((migration) => ({
             version: migration.version,
             description: migration.description,
             checksum: migration.checksum,
             success: options.success !== false
-          }]
+          }))
         };
       }
       if (sql.startsWith("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: options.lockAvailable !== false }] };

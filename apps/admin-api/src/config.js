@@ -580,6 +580,7 @@ export function getConfig() {
     initialAdminUsername: process.env.ADMIN_USERNAME || "admin",
     initialAdminPassword: process.env.ADMIN_PASSWORD || "AdminPass123!",
     initialAdminDisplayName: process.env.ADMIN_DISPLAY_NAME || "Administrator",
+    bootstrapAdminRole: process.env.ADMIN_BOOTSTRAP_ROLE || "super_admin",
     myforge
   };
 

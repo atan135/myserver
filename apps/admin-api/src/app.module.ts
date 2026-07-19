@@ -3,6 +3,7 @@ import { JwtModule } from "@nestjs/jwt";
 
 import { AdminStore } from "./admin-store.js";
 import { AdminSessionStore } from "./auth/admin-session-store.js";
+import { AdminPolicyService } from "./auth/admin-policy.service.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
@@ -36,6 +37,7 @@ import {
   ADMIN_GAME_ADMIN_CLIENT,
   ADMIN_METRICS,
   ADMIN_NATS,
+  ADMIN_POLICY,
   ADMIN_REDIS,
   ADMIN_REGISTRY,
   ADMIN_SESSION_STORE,
@@ -72,6 +74,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
   ],
   providers: [
     AuthService,
+    AdminPolicyService,
     JwtAuthGuard,
     RolesGuard,
     GameDbPoolShutdown,
@@ -108,6 +111,10 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
       }
+    },
+    {
+      provide: ADMIN_POLICY,
+      useExisting: AdminPolicyService
     },
     {
       provide: MYFORGE_STORE,

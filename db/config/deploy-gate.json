@@ -10,12 +10,12 @@
         {
           "name": "auth-http",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260718161350"
+          "maximumMigrationVersion": "20260719100000"
         },
         {
           "name": "admin-api",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260718161350"
+          "maximumMigrationVersion": "20260719100000"
         }
       ],
       "readiness": [

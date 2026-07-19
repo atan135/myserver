@@ -128,6 +128,10 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_target
 CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at
   ON admin_audit_logs (created_at);
 
+-- Keep the compatibility initializer aligned with the latest reviewed auth
+-- migration. This file is executed by psql, so \ir is resolved relative to db/.
+\ir migrations/auth/20260719100000_add_admin_authorization_policy.sql
+
 CREATE TABLE IF NOT EXISTS myforge_agents (
   agent_id varchar(128) PRIMARY KEY,
   project_id varchar(128) NOT NULL,

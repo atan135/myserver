@@ -17,6 +17,15 @@ const DISCIPLINE_TIER_ORDER = [
   "master",
   "grandmaster"
 ];
+const BOOTSTRAP_POLICY_SCOPE = Object.freeze({
+  world_ids: ["*"],
+  service_names: ["*"],
+  instance_ids: ["*"],
+  field_allowlist: ["*"],
+  target_types: ["*"],
+  target_ids: ["*"],
+  max_targets: 10000
+});
 
 function maintenanceStateKey(prefix = "") {
   return `${prefix || ""}${MAINTENANCE_STATE_KEY}`;
@@ -754,23 +763,8 @@ export class AdminStore {
   }
 
   async createAdmin({ username, displayName, password, role = "viewer" }) {
-    const passwordSalt = crypto.randomBytes(16).toString("hex");
-    const passwordHash = hashPassword(password);
-
     try {
-      const { rows } = await this.pool.query(
-        `INSERT INTO admin_accounts (username, display_name, password_algo, password_salt, password_hash, role, status)
-         VALUES ($1, $2, 'bcrypt', $3, $4, $5, 'active')
-         RETURNING id`,
-        [username, displayName || username, passwordSalt, passwordHash, role]
-      );
-
-      return {
-        id: toNumericId(rows[0].id),
-        username,
-        displayName: displayName || username,
-        role
-      };
+      return await this.createAdminWithClient(this.pool, { username, displayName, password, role });
     } catch (error) {
       if (error.code === UNIQUE_VIOLATION) {
         throw new Error("ADMIN_ALREADY_EXISTS");
@@ -779,18 +773,340 @@ export class AdminStore {
     }
   }
 
+  async createAdminWithClient(client, { username, displayName, password, role = "viewer" }) {
+    const passwordSalt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = hashPassword(password);
+    const { rows } = await client.query(
+      `INSERT INTO admin_accounts (username, display_name, password_algo, password_salt, password_hash, role, status)
+       VALUES ($1, $2, 'bcrypt', $3, $4, $5, 'active')
+       RETURNING id`,
+      [username, displayName || username, passwordSalt, passwordHash, role]
+    );
+
+    return {
+      id: toNumericId(rows[0].id),
+      username,
+      displayName: displayName || username,
+      role
+    };
+  }
+
   async ensureInitialAdmin(config) {
     const existing = await this.findAdminByUsername(config.initialAdminUsername);
     if (existing) {
       return existing;
     }
 
-    return this.createAdmin({
-      username: config.initialAdminUsername,
-      displayName: config.initialAdminDisplayName,
-      password: config.initialAdminPassword,
-      role: "admin"
-    });
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const admin = await this.createAdminWithClient(client, {
+        username: config.initialAdminUsername,
+        displayName: config.initialAdminDisplayName,
+        password: config.initialAdminPassword,
+        role: "admin"
+      });
+      await this.grantBootstrapAdminRoleInTransaction(client, admin, config);
+      await client.query("COMMIT");
+      return admin;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (error.code === UNIQUE_VIOLATION) {
+        const concurrentAdmin = await this.findAdminByUsername(config.initialAdminUsername);
+        if (concurrentAdmin) {
+          return concurrentAdmin;
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantBootstrapAdminRole(admin, config = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.grantBootstrapAdminRoleInTransaction(client, admin, config);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantBootstrapAdminRoleInTransaction(client, admin, config = {}) {
+    const roleKey = String(config.bootstrapAdminRole || "super_admin").trim();
+    if (!roleKey) {
+      throw createAdminStoreError("BOOTSTRAP_ADMIN_ROLE_REQUIRED", "Bootstrap admin role is required");
+    }
+
+    const scope = config.bootstrapAdminScope || BOOTSTRAP_POLICY_SCOPE;
+    const subject = `bootstrap:${String(config.env || "development").trim() || "development"}:${admin.username}`;
+    const reason = "initial admin bootstrap";
+    const role = await client.query(
+      `SELECT role_key FROM admin_roles WHERE role_key = $1 AND active = true LIMIT 1`,
+      [roleKey]
+    );
+    if (role.rows.length === 0) {
+      throw createAdminStoreError("BOOTSTRAP_ADMIN_ROLE_UNKNOWN", "Bootstrap admin role is not available", { roleKey });
+    }
+
+    const assignment = await client.query(
+      `INSERT INTO admin_account_roles (
+         admin_id, role_key, scope_json, granted_by_subject, reason, effective_at
+       ) VALUES ($1, $2, $3::jsonb, $4, $5, current_timestamp)
+       RETURNING id, effective_at`,
+      [admin.id, roleKey, toRequiredJsonb(scope), subject, reason]
+    );
+    await client.query(
+      `INSERT INTO admin_authorization_audit_events (
+         event_type, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+       ) VALUES ('account_role_granted', $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
+      [
+        subject,
+        admin.id,
+        roleKey,
+        assignment.rows[0].id,
+        reason,
+        toRequiredJsonb(scope),
+        toRequiredJsonb({ bootstrap: true, effectiveAt: toIsoString(assignment.rows[0].effective_at) })
+      ]
+    );
+  }
+
+  async findAdminPolicyPermission(permissionKey) {
+    const { rows } = await this.pool.query(
+      `SELECT permission_key, resource, action, risk_level, scope_dimensions, active
+       FROM admin_permissions
+       WHERE permission_key = $1
+       LIMIT 1`,
+      [permissionKey]
+    );
+    return rows[0] || null;
+  }
+
+  async listEffectiveAdminPolicyGrants(adminId, permissionKey = null, at = new Date()) {
+    const params = [adminId, at];
+    const permissionFilter = permissionKey
+      ? ` AND p.permission_key = $${params.push(permissionKey)}`
+      : "";
+    const { rows } = await this.pool.query(
+      `SELECT p.permission_key, p.resource, p.action, p.risk_level, p.scope_dimensions,
+              ar.scope_json, 'role'::text AS grant_source, ar.id AS source_id
+       FROM admin_account_roles ar
+       JOIN admin_roles r ON r.role_key = ar.role_key AND r.active = true
+       JOIN admin_role_permissions rp ON rp.role_key = ar.role_key
+       JOIN admin_permissions p ON p.permission_key = rp.permission_key AND p.active = true
+       WHERE ar.admin_id = $1
+         AND ar.effective_at <= $2
+         AND (ar.expires_at IS NULL OR ar.expires_at > $2)
+         AND ar.revoked_at IS NULL${permissionFilter}
+       UNION ALL
+       SELECT p.permission_key, p.resource, p.action, p.risk_level, p.scope_dimensions,
+              pg.scope_json, 'direct'::text AS grant_source, pg.id AS source_id
+       FROM admin_permission_grants pg
+       JOIN admin_permissions p ON p.permission_key = pg.permission_key AND p.active = true
+       WHERE pg.admin_id = $1
+         AND pg.effective_at <= $2
+         AND (pg.expires_at IS NULL OR pg.expires_at > $2)
+         AND pg.revoked_at IS NULL${permissionFilter}
+       ORDER BY permission_key, grant_source, source_id`,
+      params
+    );
+    return rows;
+  }
+
+  async grantAdminPermission({
+    adminId,
+    permissionKey,
+    scope,
+    grantedByAdminId = null,
+    grantedBySubject,
+    reason,
+    effectiveAt = null,
+    expiresAt = null
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const permission = await client.query(
+        `SELECT permission_key FROM admin_permissions WHERE permission_key = $1 AND active = true LIMIT 1`,
+        [permissionKey]
+      );
+      if (permission.rows.length === 0) {
+        throw createAdminStoreError("UNKNOWN_PERMISSION", "Permission is not available", { permissionKey });
+      }
+      const { rows } = await client.query(
+        `INSERT INTO admin_permission_grants (
+           admin_id, permission_key, scope_json, granted_by_admin_id, granted_by_subject, reason, effective_at, expires_at
+         ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, COALESCE($7::timestamptz, current_timestamp), $8::timestamptz)
+         RETURNING id, effective_at, expires_at`,
+        [adminId, permissionKey, toRequiredJsonb(scope), grantedByAdminId, grantedBySubject, reason, effectiveAt, expiresAt]
+      );
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, permission_key, grant_id, reason, scope_json, details_json
+         ) VALUES ('permission_granted', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          grantedByAdminId,
+          grantedBySubject,
+          adminId,
+          permissionKey,
+          rows[0].id,
+          reason,
+          toRequiredJsonb(scope),
+          toRequiredJsonb({ effectiveAt: toIsoString(rows[0].effective_at), expiresAt: toIsoString(rows[0].expires_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantAdminRole({
+    adminId,
+    roleKey,
+    scope,
+    grantedByAdminId = null,
+    grantedBySubject,
+    reason,
+    effectiveAt = null,
+    expiresAt = null
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const role = await client.query(
+        `SELECT role_key FROM admin_roles WHERE role_key = $1 AND active = true LIMIT 1`,
+        [roleKey]
+      );
+      if (role.rows.length === 0) {
+        throw createAdminStoreError("UNKNOWN_ADMIN_ROLE", "Admin role is not available", { roleKey });
+      }
+      const { rows } = await client.query(
+        `INSERT INTO admin_account_roles (
+           admin_id, role_key, scope_json, granted_by_admin_id, granted_by_subject, reason, effective_at, expires_at
+         ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, COALESCE($7::timestamptz, current_timestamp), $8::timestamptz)
+         RETURNING id, effective_at, expires_at`,
+        [adminId, roleKey, toRequiredJsonb(scope), grantedByAdminId, grantedBySubject, reason, effectiveAt, expiresAt]
+      );
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+         ) VALUES ('account_role_granted', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          grantedByAdminId,
+          grantedBySubject,
+          adminId,
+          roleKey,
+          rows[0].id,
+          reason,
+          toRequiredJsonb(scope),
+          toRequiredJsonb({ effectiveAt: toIsoString(rows[0].effective_at), expiresAt: toIsoString(rows[0].expires_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAdminPermission({ grantId, revokedByAdminId = null, revokedBySubject, reason }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `UPDATE admin_permission_grants
+         SET revoked_at = current_timestamp,
+             revoked_by_admin_id = $2,
+             revoked_by_subject = $3,
+             revocation_reason = $4
+         WHERE id = $1 AND revoked_at IS NULL
+         RETURNING id, admin_id, permission_key, scope_json, revoked_at`,
+        [grantId, revokedByAdminId, revokedBySubject, reason]
+      );
+      if (rows.length === 0) {
+        throw createAdminStoreError("ADMIN_PERMISSION_GRANT_NOT_ACTIVE", "Permission grant is not active", { grantId });
+      }
+      const grant = rows[0];
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, permission_key, grant_id, reason, scope_json, details_json
+         ) VALUES ('permission_revoked', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          revokedByAdminId,
+          revokedBySubject,
+          grant.admin_id,
+          grant.permission_key,
+          grant.id,
+          reason,
+          toRequiredJsonb(grant.scope_json),
+          toRequiredJsonb({ revokedAt: toIsoString(grant.revoked_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return grant;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAdminRole({ assignmentId, revokedByAdminId = null, revokedBySubject, reason }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `UPDATE admin_account_roles
+         SET revoked_at = current_timestamp,
+             revoked_by_admin_id = $2,
+             revoked_by_subject = $3,
+             revocation_reason = $4
+         WHERE id = $1 AND revoked_at IS NULL
+         RETURNING id, admin_id, role_key, scope_json, revoked_at`,
+        [assignmentId, revokedByAdminId, revokedBySubject, reason]
+      );
+      if (rows.length === 0) {
+        throw createAdminStoreError("ADMIN_ROLE_ASSIGNMENT_NOT_ACTIVE", "Admin role assignment is not active", { assignmentId });
+      }
+      const assignment = rows[0];
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+         ) VALUES ('account_role_revoked', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          revokedByAdminId,
+          revokedBySubject,
+          assignment.admin_id,
+          assignment.role_key,
+          assignment.id,
+          reason,
+          toRequiredJsonb(assignment.scope_json),
+          toRequiredJsonb({ revokedAt: toIsoString(assignment.revoked_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return assignment;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async updateLastLogin(adminId) {

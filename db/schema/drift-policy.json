@@ -4,9 +4,9 @@
   "targets": {
     "auth": {
       "file": "db/schema/targets/auth.json",
-      "version": "20260718161350",
-      "description": "initial schema",
-      "checksum": "880b0807f925b0dcefe3610d323e26dad3ce2043f680338aeb3e7eaa3699afd519f3352217aaf86563cb73d8991e8e08"
+      "version": "20260719100000",
+      "description": "add admin authorization policy",
+      "checksum": "96340c7268ca125bb7fb1af84e95b0a140fcc1c6f79ba9aab4c701b819db6d0a1d1e4b5d586a7ea66aa1a2b1aa2ba359"
     },
     "game": {
       "file": "db/schema/targets/game.json",
