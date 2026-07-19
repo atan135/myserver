@@ -61,6 +61,7 @@ export class MaintenanceController {
         message: "High-risk operation service is unavailable"
       });
     }
+    let maintenanceEvidence: Record<string, unknown> | null = null;
     const outcome = await this.highRiskOperations.run({
       request: req,
       permission: "maintenance.write",
@@ -70,6 +71,7 @@ export class MaintenanceController {
       impactSummary: { targetType: "maintenance", targetCount: 1, nextState: enabled ? "enabled" : "disabled" },
       reason: normalizedReason,
       execute: async () => {
+        const before = await this.adminStore.getMaintenanceStatus();
         const updatedAt = new Date().toISOString();
         const updatedBy = req.admin.username || String(req.admin.sub);
         const status = await this.adminStore.setMaintenanceMode(enabled, {
@@ -88,13 +90,23 @@ export class MaintenanceController {
           ip: getClientIp(req, this.config)
         });
 
+        maintenanceEvidence = {
+          beforeEnabled: before?.enabled === true,
+          afterEnabled: status?.enabled === true,
+          stateRecord: "redis_maintenance_state"
+        };
+
         return {
           ok: true,
           message: enabled ? "Maintenance mode enabled" : "Maintenance mode disabled",
           ...status
         };
       },
-      resultSummary: () => ({ action: "maintenance.write", outcome: "succeeded" })
+      resultSummary: () => ({
+        action: "maintenance.write",
+        outcome: "succeeded",
+        maintenance: maintenanceEvidence || { evidenceUnavailable: "maintenance state was not returned" }
+      })
     });
     return outcome.state === "executed" ? outcome.result : outcome.response;
   }

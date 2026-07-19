@@ -102,6 +102,17 @@ class MemoryOperationStore {
     return { kind: "completed", operation };
   }
 
+  async markAdminOperationExecutionUncertain({ operationId, errorSummary }) {
+    const operation = [...this.operations.values()].find((entry) => entry.operationId === operationId);
+    if (!operation) throw new Error("not found");
+    if (operation.status === "executing") {
+      operation.status = "execution_uncertain";
+      operation.errorSummary = errorSummary;
+      return { kind: "marked_uncertain", operation };
+    }
+    return { kind: "terminal_or_conflict", operation };
+  }
+
   async createAdminBreakglassGrant(input) {
     const existing = this.breakglass.get(input.activationRequestId);
     if (existing) return { kind: existing.semanticSha256 === input.semanticSha256 ? "existing" : "conflict", grant: existing };
@@ -196,6 +207,22 @@ test("high-risk preflight persists only payload hash, returns a short-lived nonc
     (error) => error.code === "ADMIN_OPERATION_SENSITIVE_SUMMARY"
   );
 });
+
+test("operation reasons reject explicit credentials but allow ordinary token rotation text", async () => {
+  const { store, operations } = services();
+  await assert.rejects(
+    () => operations.preflight(preflightInput({ reason: "Authorization: Bearer secret-value-123" })),
+    (error) => error.code === "ADMIN_OPERATION_SENSITIVE_REASON"
+  );
+  assert.equal(store.operations.size, 0);
+
+  const allowed = await operations.preflight(preflightInput({
+    requestId: "request-token-rotation",
+    reason: "token rotation completed"
+  }));
+  assert.equal(allowed.state, "preflighted");
+  assert.equal(store.operations.get("request-token-rotation").reason, "token rotation completed");
+});
 test("request semantics, payload and preview binding fail closed while duplicate execution reports in-progress", async () => {
   const { store, operations } = services();
   const created = await operations.preflight(preflightInput());
@@ -233,6 +260,24 @@ test("request semantics, payload and preview binding fail closed while duplicate
     }),
     (error) => error.code === "ADMIN_OPERATION_NONCE_REPLAYED"
   );
+});
+
+test("execution uncertainty marker persists recovery state without depending on another audit append", async () => {
+  const { store, operations } = services();
+  const created = await operations.preflight(preflightInput());
+  await operations.claimExecution({
+    ...preflightInput(),
+    nonce: created.preflight.nonce,
+    preflightSummarySha256: created.preflight.summarySha256
+  });
+  const auditCount = store.audit.length;
+  const marked = await operations.markExecutionUncertain({
+    operationId: store.operations.get("request-0001").operationId,
+    errorSummary: { code: "ADMIN_OPERATION_RESULT_PERSISTENCE_FAILED" }
+  });
+  assert.equal(marked.kind, "marked_uncertain");
+  assert.equal(store.operations.get("request-0001").status, "execution_uncertain");
+  assert.equal(store.audit.length, auditCount);
 });
 
 test("expired, altered summary and approval-pending previews never claim execution", async () => {
@@ -290,6 +335,19 @@ test("break-glass requires its own permission, binds an emergency action and tar
   await assert.rejects(
     () => breakglass.activate({
       actor: ACTOR,
+      requestId: "breakglass-sensitive-reason",
+      permission: "gm.asset_correction.emergency",
+      scope: HIGH_SCOPE,
+      targetSummary: { playerId: "player-1" },
+      reason: "cookie=session-secret-value",
+      ttlMs: 60000
+    }),
+    (error) => error.code === "ADMIN_BREAKGLASS_SENSITIVE_REASON"
+  );
+  assert.equal(store.breakglass.size, 0);
+  await assert.rejects(
+    () => breakglass.activate({
+      actor: ACTOR,
       requestId: "breakglass-request-1",
       permission: "gm.asset_correction.emergency",
       scope: HIGH_SCOPE,
@@ -324,6 +382,15 @@ test("break-glass requires its own permission, binds an emergency action and tar
     }),
     (error) => error.code === "ADMIN_BREAKGLASS_GRANT_REQUIRED"
   );
+  await assert.rejects(
+    () => breakglass.revoke({
+      grantId: activated.grant.grantId,
+      actor: ACTOR,
+      reason: "private_key=never-store-this-value"
+    }),
+    (error) => error.code === "ADMIN_BREAKGLASS_SENSITIVE_REASON"
+  );
+  assert.equal(activated.grant.revokedAt, null);
   await breakglass.revoke({ grantId: activated.grant.grantId, actor: ACTOR, reason: "incident resolved" });
   assert.deepEqual(store.audit.map((event) => event.event), ["breakglass_activated", "breakglass_revoked"]);
 });

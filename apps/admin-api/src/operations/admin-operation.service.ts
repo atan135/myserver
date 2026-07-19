@@ -4,6 +4,7 @@ import { Inject, Injectable } from "@nestjs/common";
 
 import { ADMIN_CONFIG, ADMIN_POLICY, ADMIN_STORE } from "../tokens.js";
 import { adminPolicyScopeToDatabase, AdminPolicyScopeRequest } from "../auth/admin-policy.service.js";
+import { containsSensitiveAuditReason } from "./audit-reason.js";
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -67,6 +68,9 @@ function reason(value: unknown, field = "reason") {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized || Buffer.byteLength(normalized, "utf8") > 512 || /[\u0000-\u001f\u007f]/.test(normalized)) {
     throw operationError("ADMIN_OPERATION_INPUT_INVALID", `${field} is invalid`, { field });
+  }
+  if (containsSensitiveAuditReason(normalized)) {
+    throw operationError("ADMIN_OPERATION_SENSITIVE_REASON", `${field} contains a credential-like value`, { field });
   }
   return normalized;
 }
@@ -354,6 +358,19 @@ export class AdminOperationService {
       resultSummary: resultSummary === null ? null : safeSummary(resultSummary, "resultSummary"),
       errorSummary: errorSummary === null ? null : safeSummary(errorSummary, "errorSummary"),
       details: safeSummary(details, "details")
+    });
+  }
+
+  async markExecutionUncertain({
+    operationId,
+    errorSummary
+  }: {
+    operationId: string;
+    errorSummary: Record<string, unknown>;
+  }) {
+    return this.adminStore.markAdminOperationExecutionUncertain({
+      operationId: identifier(operationId, "operationId"),
+      errorSummary: safeSummary(errorSummary, "errorSummary")
     });
   }
 

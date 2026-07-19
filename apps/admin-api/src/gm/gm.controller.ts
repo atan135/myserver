@@ -11,7 +11,7 @@ import { ApiHttpException, badRequest, notFound } from "../common/http-exception
 import { encodeSubjectToken } from "../nats-client.js";
 import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
 import { computeBanExpiresAt } from "../ban-utils.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getTitleDefinitions } from "../players/title-table.js";
 
 const GM_BAN_DURATION_MAX_SECONDS = 31_536_000;
@@ -241,6 +241,39 @@ function normalizeReason(value: any) {
   return normalizeRequiredText(value, "MISSING_REASON", "reason", 255);
 }
 
+function broadcastPayloadAuditSummary(title: string, content: string, sender: string) {
+  const combined = `${title}\n${content}\n${sender}`;
+  return {
+    payloadSha256: createHash("sha256").update(combined, "utf8").digest("hex"),
+    titleBytes: Buffer.byteLength(title, "utf8"),
+    contentBytes: Buffer.byteLength(content, "utf8"),
+    senderBytes: Buffer.byteLength(sender, "utf8")
+  };
+}
+
+function broadcastDeliveryAuditSummary(globalBroadcast: any, legacyBroadcast: any) {
+  const summarizeInstances = (instances: unknown) => Array.isArray(instances)
+    ? instances.slice(0, 100).map((instance: any) => ({
+        ok: instance?.ok === true,
+        instanceId: typeof instance?.instanceId === "string" ? instance.instanceId : null
+      }))
+    : [];
+  return {
+    global: {
+      ok: globalBroadcast?.ok === true,
+      subject: typeof globalBroadcast?.subject === "string" ? globalBroadcast.subject : null,
+      broadcastId: typeof globalBroadcast?.payload?.broadcast_id === "string" ? globalBroadcast.payload.broadcast_id : null,
+      error: typeof globalBroadcast?.error === "string" ? globalBroadcast.error : null
+    },
+    legacy: {
+      ok: legacyBroadcast?.ok === true,
+      skipped: legacyBroadcast?.skipped === true,
+      fallback: legacyBroadcast?.fallback === true,
+      instances: summarizeInstances(legacyBroadcast?.instances)
+    }
+  };
+}
+
 function auditErrorCode(error: any) {
   return error?.getResponse?.().error || error?.code || error?.message || "UNKNOWN_ERROR";
 }
@@ -429,6 +462,7 @@ export class GmController {
     const normalizedContent = content.trim();
     const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
     const normalizedReason = normalizeReason(reason);
+    const broadcastEvidence = broadcastPayloadAuditSummary(normalizedTitle, normalizedContent, normalizedSender);
     return this.runHighRiskOperation({
       request: req,
       permission: "gm.broadcast",
@@ -485,12 +519,9 @@ export class GmController {
           targetType: "system",
           targetValue: "all",
           details: {
-            title: normalizedTitle,
-            content: normalizedContent,
-            sender: normalizedSender,
+            broadcast: broadcastEvidence,
             requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
-            globalBroadcast,
-            legacyBroadcast
+            delivery: broadcastDeliveryAuditSummary(globalBroadcast, legacyBroadcast)
           },
           ip: getClientIp(req, this.config)
         });
@@ -506,7 +537,7 @@ export class GmController {
           legacyBroadcast
         };
       },
-      resultSummary: () => ({ action: "gm.broadcast", outcome: "succeeded" })
+      resultSummary: () => ({ action: "gm.broadcast", outcome: "succeeded", broadcast: broadcastEvidence })
     });
   }
 
@@ -526,6 +557,11 @@ export class GmController {
     }
     const normalizedReason = normalizeReason(reason);
     const scope = await this.characterOperationScope(normalizedCharacterId);
+    const assetEvidence = {
+      itemId,
+      itemDelta: itemCount,
+      ledgerReference: "unavailable: game-server admin response does not return an asset ledger id"
+    };
 
     return this.runHighRiskOperation({
       request: req,
@@ -586,7 +622,12 @@ export class GmController {
           throw gameServerError(error);
         }
       },
-      resultSummary: () => ({ action: "gm.send_item", targetCount: 1, outcome: "succeeded" })
+      resultSummary: () => ({
+        action: "gm.send_item",
+        targetCount: 1,
+        outcome: "succeeded",
+        asset: assetEvidence
+      })
     });
   }
 
@@ -602,6 +643,11 @@ export class GmController {
       throw badRequest("INVALID_ITEM_COUNT", "itemCount must be a positive integer");
     }
     const scope = await this.characterOperationScope(characterId);
+    const assetEvidence = {
+      itemId,
+      itemDelta: itemCount,
+      ledgerReference: "unavailable: game-server admin response does not return an asset ledger id"
+    };
 
     return this.runHighRiskOperation({
       request: req,
@@ -667,7 +713,12 @@ export class GmController {
           throw gameServerError(error);
         }
       },
-      resultSummary: () => ({ action: "gm.asset_correction.emergency", targetCount: 1, outcome: "succeeded" })
+      resultSummary: () => ({
+        action: "gm.asset_correction.emergency",
+        targetCount: 1,
+        outcome: "succeeded",
+        asset: assetEvidence
+      })
     });
   }
 

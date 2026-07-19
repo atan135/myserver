@@ -461,6 +461,7 @@ export class PlayersController {
       throw badRequest("INVALID_STATUS", "status must be active, disabled, banned, or pending_review");
     }
 
+    let banEvidence: Record<string, unknown> | null = null;
     const applyStatus = async () => {
       const player = await this.adminStore.findPlayerById(playerId);
       if (!player) {
@@ -484,6 +485,16 @@ export class PlayersController {
         ip: getClientIp(req, this.config)
       });
 
+      if (status === "banned") {
+        banEvidence = {
+          beforeStatus: player.status,
+          afterStatus: "banned",
+          beforeBanExpiresAt: player.banExpiresAt || null,
+          afterBanExpiresAt: null,
+          businessRecord: "admin_audit_logs:player_status_change"
+        };
+      }
+
       return { ok: true, message: "Player status updated", banExpiresAt: null };
     };
 
@@ -506,7 +517,12 @@ export class PlayersController {
       impactSummary: { targetType: "player", targetCount: 1, action: "player_ban" },
       reason: body?.reason,
       execute: applyStatus,
-      resultSummary: () => ({ action: "players.ban", targetCount: 1, outcome: "succeeded" })
+      resultSummary: () => ({
+        action: "players.ban",
+        targetCount: 1,
+        outcome: "succeeded",
+        ban: banEvidence || { evidenceUnavailable: "ban result was not returned" }
+      })
     });
     return outcome.state === "executed" ? outcome.result : outcome.response;
   }

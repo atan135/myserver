@@ -3,6 +3,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { ApiHttpException } from "../common/http-exception.js";
 import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS } from "../tokens.js";
 import { AdminPolicyScopeRequest } from "../auth/admin-policy.service.js";
+import { containsSensitiveAuditReason } from "./audit-reason.js";
 
 type ProtocolActor = {
   adminId: number | string;
@@ -40,6 +41,9 @@ function errorCode(error: any) {
 }
 
 function protocolStatusForCode(code: string) {
+  if (code === "ADMIN_OPERATION_PERSISTENCE_FAILED") {
+    return 503;
+  }
   if (code === "ADMIN_OPERATION_PERMISSION_DENIED" || code === "ADMIN_OPERATION_SCOPE_DENIED" ||
       code === "ADMIN_BREAKGLASS_ACTIVATE_DENIED" || code === "ADMIN_BREAKGLASS_GRANT_REQUIRED") {
     return 403;
@@ -50,6 +54,11 @@ function protocolStatusForCode(code: string) {
     return 409;
   }
   return 400;
+}
+
+function protocolCode(error: any) {
+  const code = errorCode(error);
+  return code === "ADMIN_OPERATION_FAILED" ? "ADMIN_OPERATION_PERSISTENCE_FAILED" : code;
 }
 
 function optionalText(value: unknown) {
@@ -89,12 +98,36 @@ function operationView(operation: any) {
   };
 }
 
+function persistenceFailure() {
+  return protocolError("ADMIN_OPERATION_PERSISTENCE_FAILED", 503);
+}
+
 @Injectable()
 export class AdminHighRiskOperationService {
   constructor(
     @Inject(ADMIN_OPERATIONS) private readonly operations: any,
     @Inject(ADMIN_BREAKGLASS) private readonly breakglass: any
   ) {}
+
+  private async recordExecutionUncertain(operationId: string, code: string, phase: string) {
+    try {
+      const errorSummary = { code };
+      const details = { phase, recovery: "reconciliation_required" };
+      if (typeof this.operations.markExecutionUncertain === "function") {
+        await this.operations.markExecutionUncertain({ operationId, errorSummary });
+        return true;
+      }
+      await this.operations.completeExecution({
+        operationId,
+        status: "execution_uncertain",
+        errorSummary,
+        details
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   async run<T>(input: HighRiskOperationInput<T>): Promise<ProtocolResult<T>> {
     const actor = actorFromRequest(input.request);
@@ -104,6 +137,9 @@ export class AdminHighRiskOperationService {
     }
     if (typeof input.reason !== "string" || !input.reason.trim()) {
       throw protocolError("ADMIN_OPERATION_REASON_REQUIRED");
+    }
+    if (containsSensitiveAuditReason(input.reason)) {
+      throw protocolError("ADMIN_OPERATION_SENSITIVE_REASON");
     }
 
     const base = {
@@ -133,7 +169,8 @@ export class AdminHighRiskOperationService {
           }
         };
       } catch (error: any) {
-        throw protocolError(errorCode(error), protocolStatusForCode(errorCode(error)));
+        const code = protocolCode(error);
+        throw protocolError(code, protocolStatusForCode(code));
       }
     }
     if (!hasNonce || !hasSummary) {
@@ -161,7 +198,8 @@ export class AdminHighRiskOperationService {
         preflightSummarySha256: fields.summarySha256
       });
     } catch (error: any) {
-      throw protocolError(errorCode(error), protocolStatusForCode(errorCode(error)));
+      const code = protocolCode(error);
+      throw protocolError(code, protocolStatusForCode(code));
     }
     if (claim.state === "terminal" || claim.state === "in_progress") {
       return {
@@ -189,7 +227,12 @@ export class AdminHighRiskOperationService {
           details: { phase: "handler" }
         });
       } catch {
-        throw protocolError("ADMIN_OPERATION_PERSISTENCE_FAILED", 503);
+        await this.recordExecutionUncertain(
+          claim.operation.operationId,
+          "ADMIN_OPERATION_HANDLER_PERSISTENCE_FAILED",
+          "handler_completion"
+        );
+        throw persistenceFailure();
       }
       throw error;
     }
@@ -204,7 +247,12 @@ export class AdminHighRiskOperationService {
         details: { phase: "handler" }
       });
     } catch {
-      throw protocolError("ADMIN_OPERATION_PERSISTENCE_FAILED", 503);
+      await this.recordExecutionUncertain(
+        claim.operation.operationId,
+        "ADMIN_OPERATION_RESULT_PERSISTENCE_FAILED",
+        "result_completion"
+      );
+      throw persistenceFailure();
     }
     return { state: "executed", result };
   }

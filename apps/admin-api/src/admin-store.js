@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 
 import { createGlobalIdGeneratorFromEnv } from "../../../packages/global-id/node/index.js";
+import { redactAuditReason } from "./operations/audit-reason.js";
 
 const SALT_ROUNDS = 10;
 const MAINTENANCE_STATE_KEY = "maintenance:global";
@@ -112,7 +113,7 @@ function toAdminOperation(row) {
     targetSha256: row.target_sha256,
     payloadSha256: row.payload_sha256,
     semanticSha256: row.semantic_sha256,
-    reason: row.reason,
+    reason: redactAuditReason(row.reason),
     traceId: row.trace_id,
     status: row.status,
     approvalStatus: row.approval_status,
@@ -128,6 +129,57 @@ function toAdminOperation(row) {
       expiresAt: toIsoString(row.preview_expires_at),
       consumedAt: toIsoString(row.preview_consumed_at)
     } : null
+  };
+}
+
+const OPERATION_AUDIT_SENSITIVE_KEY = /password|token|secret|private.?key|authorization|cookie|ticket|nonce|payload/i;
+const OPERATION_AUDIT_UNBOUNDED_TEXT_KEY = /content|message|prompt|broadcast|body/i;
+
+function redactOperationAuditValue(value, key = "", depth = 0) {
+  if (OPERATION_AUDIT_SENSITIVE_KEY.test(key) || OPERATION_AUDIT_UNBOUNDED_TEXT_KEY.test(key)) {
+    return "[REDACTED]";
+  }
+  if (depth > 6) {
+    return "[TRUNCATED]";
+  }
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") {
+    return value ?? null;
+  }
+  if (typeof value === "string") {
+    return Buffer.byteLength(value, "utf8") <= 1024 ? value : "[TRUNCATED]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 100).map((entry) => redactOperationAuditValue(entry, "", depth + 1));
+  }
+  if (typeof value !== "object") {
+    return "[REDACTED]";
+  }
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 100).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactOperationAuditValue(entryValue, entryKey, depth + 1)
+    ])
+  );
+}
+
+function toAdminOperationAuditEvent(row) {
+  return {
+    id: toNumericId(row.id),
+    operationId: row.operation_id || null,
+    breakglassGrantId: row.breakglass_grant_id || null,
+    eventType: row.event_type,
+    actorAdminId: toNumericId(row.actor_admin_id),
+    actorSubject: row.actor_subject,
+    requestId: row.request_id || null,
+    permissionKey: row.permission_key || null,
+    riskLevel: row.risk_level || null,
+    traceId: row.trace_id || null,
+    reason: redactAuditReason(row.reason),
+    targetSummary: redactOperationAuditValue(normalizeJson(row.target_summary_json)),
+    resultSummary: redactOperationAuditValue(normalizeJson(row.result_summary_json)),
+    details: redactOperationAuditValue(normalizeJson(row.details_json) || {}),
+    result: row.operation_status || null,
+    createdAt: toIsoString(row.created_at)
   };
 }
 
@@ -1552,6 +1604,30 @@ export class AdminStore {
     }
   }
 
+  async markAdminOperationExecutionUncertain({ operationId, errorSummary, now = new Date() }) {
+    const { rows } = await this.pool.query(
+      `UPDATE admin_operation_requests
+       SET status = 'execution_uncertain',
+           error_summary_json = $2::jsonb,
+           completed_at = $3::timestamptz,
+           updated_at = $3::timestamptz
+       WHERE operation_id = $1::uuid AND status = 'executing'
+       RETURNING *`,
+      [operationId, toRequiredJsonb(errorSummary), now]
+    );
+    if (rows.length > 0) {
+      return { kind: "marked_uncertain", operation: toAdminOperation(rows[0]) };
+    }
+    const existing = await this.pool.query(
+      `SELECT * FROM admin_operation_requests WHERE operation_id = $1::uuid LIMIT 1`,
+      [operationId]
+    );
+    if (existing.rows.length === 0) {
+      throw operationStoreError("ADMIN_OPERATION_NOT_FOUND", "Operation does not exist", { operationId });
+    }
+    return { kind: "terminal_or_conflict", operation: toAdminOperation(existing.rows[0]) };
+  }
+
   async decideAdminOperationApproval({
     requestId,
     status,
@@ -1834,6 +1910,65 @@ export class AdminStore {
         toJsonb(details)
       ]
     );
+  }
+
+  async listAdminOperationAuditEvents({
+    limit = 100,
+    from,
+    to,
+    cursor = null,
+    actorAdminId,
+    permissionKey,
+    eventType,
+    target,
+    requestId,
+    traceId,
+    riskLevel,
+    result
+  } = {}) {
+    const params = [from, to];
+    let query = `SELECT e.*, r.status AS operation_status
+                 FROM admin_operation_audit_events e
+                 LEFT JOIN admin_operation_requests r ON r.operation_id = e.operation_id
+                 WHERE e.created_at >= $1::timestamptz AND e.created_at < $2::timestamptz`;
+    const add = (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+
+    if (actorAdminId !== undefined && actorAdminId !== null) {
+      query += ` AND e.actor_admin_id = ${add(actorAdminId)}`;
+    }
+    if (permissionKey) {
+      query += ` AND e.permission_key = ${add(permissionKey)}`;
+    }
+    if (eventType) {
+      query += ` AND e.event_type = ${add(eventType)}`;
+    }
+    if (target) {
+      const targetParam = add(target);
+      query += ` AND (e.target_summary_json -> 'targetIds' ? ${targetParam} OR e.target_summary_json ->> 'targetId' = ${targetParam})`;
+    }
+    if (requestId) {
+      query += ` AND e.request_id = ${add(requestId)}`;
+    }
+    if (traceId) {
+      query += ` AND e.trace_id = ${add(traceId)}`;
+    }
+    if (riskLevel) {
+      query += ` AND e.risk_level = ${add(riskLevel)}`;
+    }
+    if (result) {
+      query += ` AND r.status = ${add(result)}`;
+    }
+    if (cursor) {
+      const createdAt = add(cursor.createdAt);
+      const id = add(cursor.id);
+      query += ` AND (e.created_at, e.id) < (${createdAt}::timestamptz, ${id}::bigint)`;
+    }
+    query += ` ORDER BY e.created_at DESC, e.id DESC LIMIT ${add(Math.max(1, Math.min(Number(limit) || 1, 5001)))}`;
+    const { rows } = await this.pool.query(query, params);
+    return rows.map(toAdminOperationAuditEvent);
   }
 
   async getSecurityLogs({ limit = 50, offset = 0, eventType, targetType, severity, clientIp } = {}) {

@@ -166,6 +166,11 @@ test("AdminStore atomically reserves a request and stores only hashed preflight 
   assert.equal(pool.calls.filter((call) => call.sql === "BEGIN").length, 1);
   assert.equal(pool.calls.filter((call) => call.sql === "COMMIT").length, 1);
   assert.ok(pool.calls.some((call) => call.sql.includes("INSERT INTO admin_operation_audit_events")));
+  assert.equal(
+    pool.calls.some((call) => /(?:UPDATE|DELETE)\s+admin_operation_audit_events/i.test(call.sql)),
+    false,
+    "operation writes append audit events and never mutate them"
+  );
 });
 test("AdminStore execution claim locks request, preview and approval, consumes nonce once, and preserves idempotent in-progress state", async () => {
   const pool = new OperationTransactionPool();
@@ -194,4 +199,56 @@ test("AdminStore execution claim locks request, preview and approval, consumes n
 
   const conflict = await store.reserveAdminOperationPreflight(preflightInput({ semanticSha256: NEXT_HASH }));
   assert.equal(conflict.kind, "conflict");
+});
+
+test("AdminStore operation audit queries are parameterized, keyset ordered, and redact sensitive summaries", async () => {
+  const calls = [];
+  const pool = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      return {
+        rows: [{
+          id: 9,
+          operation_id: OPERATION_ID,
+          breakglass_grant_id: null,
+          event_type: "execution_succeeded",
+          actor_admin_id: 7,
+          actor_subject: "admin:operator-7",
+          request_id: "request-transaction-1",
+          permission_key: "gm.send_item",
+          risk_level: "high",
+          trace_id: "trace-transaction-1",
+          reason: "Authorization: Bearer never-return-this-value",
+          target_summary_json: { targetIds: ["player-1"], token: "must-not-leak" },
+          result_summary_json: { itemDelta: 1, payload: { content: "must-not-leak" } },
+          details_json: { nonce: "must-not-leak", businessRecord: "ledger-unavailable" },
+          operation_status: "succeeded",
+          created_at: new Date("2026-07-19T10:10:00.000Z")
+        }]
+      };
+    }
+  };
+  const events = await new AdminStore(pool).listAdminOperationAuditEvents({
+    from: "2026-07-19T10:00:00.000Z",
+    to: "2026-07-19T11:00:00.000Z",
+    actorAdminId: 7,
+    permissionKey: "gm.send_item",
+    eventType: "execution_succeeded",
+    target: "player-1",
+    requestId: "request-transaction-1",
+    traceId: "trace-transaction-1",
+    riskLevel: "high",
+    result: "succeeded",
+    cursor: { createdAt: "2026-07-19T10:11:00.000Z", id: 10 },
+    limit: 10
+  });
+
+  assert.equal(events[0].targetSummary.token, "[REDACTED]");
+  assert.equal(events[0].resultSummary.payload, "[REDACTED]");
+  assert.equal(events[0].details.nonce, "[REDACTED]");
+  assert.equal(events[0].reason, "[REDACTED: potential credential]");
+  assert.match(calls[0].sql, /ORDER BY e\.created_at DESC, e\.id DESC/);
+  assert.match(calls[0].sql, /LEFT JOIN admin_operation_requests/);
+  assert.equal(calls[0].params.includes("player-1"), true);
+  assert.equal(calls[0].params.includes("trace-transaction-1"), true);
 });

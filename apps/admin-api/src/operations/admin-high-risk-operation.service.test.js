@@ -56,6 +56,35 @@ test("high-risk protocol preflight never calls the handler and returns only the 
   assert.deepEqual(calls[0].scope.targetIds, ["chr_1"]);
 });
 
+test("a preflight persistence failure rejects before the handler can cause a side effect", async () => {
+  let sideEffects = 0;
+  const service = new AdminHighRiskOperationService({
+    async preflight() {
+      throw new Error("audit database unavailable");
+    }
+  }, {});
+  await assert.rejects(
+    () => service.run(input({ execute: async () => { sideEffects += 1; return { ok: true }; } })),
+    (error) => error.getStatus() === 503 && error.getResponse().error === "ADMIN_OPERATION_PERSISTENCE_FAILED"
+  );
+  assert.equal(sideEffects, 0);
+});
+
+test("credential-like reasons are rejected before a high-risk preflight is persisted", async () => {
+  let preflightCalls = 0;
+  const service = new AdminHighRiskOperationService({
+    async preflight() {
+      preflightCalls += 1;
+      return {};
+    }
+  }, {});
+  await assert.rejects(
+    () => service.run(input({ reason: "token=super-secret-value" })),
+    (error) => error.getStatus() === 400 && error.getResponse().error === "ADMIN_OPERATION_SENSITIVE_REASON"
+  );
+  assert.equal(preflightCalls, 0);
+});
+
 test("claimed execution runs exactly once and duplicate execution returns its stored terminal state", async () => {
   let sideEffects = 0;
   const completions = [];
@@ -140,6 +169,40 @@ test("a handler-reported partial failure is persisted as execution_uncertain", a
   assert.equal(outcome.state, "executed");
   assert.equal(completions[0].status, "execution_uncertain");
   assert.deepEqual(completions[0].errorSummary, { code: "SESSION_KICK_PUBLISH_FAILED" });
+});
+
+test("a completion persistence failure records execution_uncertain before returning a stable error", async () => {
+  let sideEffects = 0;
+  const completions = [];
+  const service = new AdminHighRiskOperationService({
+    async claimExecution() {
+      return { state: "claimed", operation: { operationId: "op-persistence", requestId: "operation-request-1", status: "executing" } };
+    },
+    async completeExecution(value) {
+      completions.push(value);
+      if (completions.length === 1) {
+        throw new Error("audit insert failed");
+      }
+      return { kind: "completed" };
+    }
+  }, {});
+  await assert.rejects(
+    () => service.run(input({
+      request: request({
+        requestId: "operation-request-1",
+        reason: "incident response",
+        preflightNonce: "a".repeat(32),
+        preflightSummarySha256: "b".repeat(64)
+      }),
+      execute: async () => { sideEffects += 1; return { ok: true }; }
+    })),
+    (error) => error.getStatus() === 503 && error.getResponse().error === "ADMIN_OPERATION_PERSISTENCE_FAILED"
+  );
+  assert.equal(sideEffects, 1);
+  assert.equal(completions.length, 2);
+  assert.equal(completions[1].status, "execution_uncertain");
+  assert.equal(completions[1].errorSummary.code, "ADMIN_OPERATION_RESULT_PERSISTENCE_FAILED");
+  assert.equal(completions[1].details.recovery, "reconciliation_required");
 });
 
 test("emergency execution requires a matching active break-glass grant before claim", async () => {

@@ -405,14 +405,40 @@ test("broadcast legacy fallback audit records all called game-server endpoints",
 
   assert.equal(audits[0].details.requestedTargetInstanceId, undefined);
   assert.deepEqual(
-    audits[0].details.legacyBroadcast.instances.map((instance) => instance.endpoint),
-    endpoints
-  );
-  assert.deepEqual(
-    audits[0].details.legacyBroadcast.instances.map((instance) => instance.instanceId),
+    audits[0].details.delivery.legacy.instances.map((instance) => instance.instanceId),
     ["game-server-a", "game-server-b"]
   );
-  assert.equal(audits[0].details.legacyBroadcast.fallback, true);
+  assert.equal(audits[0].details.delivery.legacy.fallback, true);
+  assert.match(audits[0].details.broadcast.payloadSha256, /^[0-9a-f]{64}$/);
+  assert.equal("title" in audits[0].details, false);
+  assert.equal("content" in audits[0].details, false);
+  assert.equal(JSON.stringify(audits[0].details).includes("Notice"), false);
+  assert.equal(JSON.stringify(audits[0].details).includes("Server restart"), false);
+});
+
+test("broadcast operation evidence stores only a payload digest, never title or content", async () => {
+  let resultSummary = null;
+  const { controller, audits } = makeController(
+    {},
+    {
+      highRiskOperations: {
+        async run(input) {
+          const result = await input.execute();
+          resultSummary = input.resultSummary(result);
+          return { state: "executed", result };
+        }
+      }
+    }
+  );
+  await controller.broadcast(
+    { title: "Private incident", content: "Do not copy this broadcast body", sender: "Ops", reason: "broadcast notice" },
+    makeReq()
+  );
+  assert.match(resultSummary.broadcast.payloadSha256, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(resultSummary).includes("Private incident"), false);
+  assert.equal(JSON.stringify(resultSummary).includes("Do not copy this broadcast body"), false);
+  assert.equal(JSON.stringify(audits[0].details).includes("Private incident"), false);
+  assert.equal(JSON.stringify(audits[0].details).includes("Do not copy this broadcast body"), false);
 });
 
 test("GM character element set validates, writes admin audit, and returns deltas", async () => {
