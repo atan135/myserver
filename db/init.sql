@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS myforge_task_runs (
   completed_at timestamptz NULL,
   updated_at timestamptz NOT NULL DEFAULT current_timestamp,
   CONSTRAINT ck_myforge_tasks_type CHECK (task_type = 'fangyuan.blueprint.generate'),
-  CONSTRAINT ck_myforge_tasks_status CHECK (status IN ('queued', 'dispatched', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
+  CONSTRAINT ck_myforge_tasks_status CHECK (status IN ('queued', 'paused', 'dispatched', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
   CONSTRAINT ck_myforge_tasks_queue_reason CHECK (queue_reason IS NULL OR queue_reason IN ('agent_offline', 'agent_busy')),
   CONSTRAINT ck_myforge_tasks_queue_reason_status CHECK (queue_reason IS NULL OR status = 'queued'),
   CONSTRAINT ck_myforge_tasks_execution_mode CHECK (execution_mode IS NULL OR execution_mode IN ('codex_exec', 'dry_run')),

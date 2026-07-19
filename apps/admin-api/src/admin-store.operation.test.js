@@ -15,6 +15,7 @@ const SCOPE = {
 
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";
 const PREVIEW_ID = "22222222-2222-4222-8222-222222222222";
+const BREAKGLASS_GRANT_ID = "33333333-3333-4333-8333-333333333333";
 const HASH = "a".repeat(64);
 const NEXT_HASH = "b".repeat(64);
 
@@ -122,6 +123,92 @@ class OperationTransactionPool {
     }
     throw new Error(`unexpected query: ${sql}`);
   }
+}
+
+class BreakglassTransactionPool {
+  constructor({ failSecurityAudit = false } = {}) {
+    this.failSecurityAudit = failSecurityAudit;
+    this.calls = [];
+    this.committed = false;
+    this.rolledBack = false;
+    this.client = {
+      query: async (sql, params = []) => this.query(sql, params),
+      release: () => this.calls.push({ sql: "RELEASE", params: [] })
+    };
+  }
+
+  async connect() {
+    return this.client;
+  }
+
+  async query(sql, params = []) {
+    this.calls.push({ sql, params });
+    if (sql === "BEGIN") return { rows: [], rowCount: 0 };
+    if (sql === "COMMIT") {
+      this.committed = true;
+      return { rows: [], rowCount: 0 };
+    }
+    if (sql === "ROLLBACK") {
+      this.rolledBack = true;
+      return { rows: [], rowCount: 0 };
+    }
+    if (sql.includes("FROM admin_breakglass_grants WHERE activation_request_id")) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (sql.includes("FROM admin_permissions") && sql.includes("FOR KEY SHARE")) {
+      return { rows: [{ permission_key: "gm.asset_correction.emergency", risk_level: "emergency", active: true }], rowCount: 1 };
+    }
+    if (sql.includes("INSERT INTO admin_breakglass_grants")) {
+      return {
+        rows: [{
+          grant_id: params[0],
+          activation_request_id: params[1],
+          actor_admin_id: params[2],
+          actor_subject: params[3],
+          permission_key: params[4],
+          scope_json: JSON.parse(params[5]),
+          scope_sha256: params[6],
+          target_summary_json: JSON.parse(params[7]),
+          target_sha256: params[8],
+          semantic_sha256: params[9],
+          reason: params[10],
+          activated_at: new Date("2026-07-19T11:00:00.000Z"),
+          expires_at: new Date(params[11]),
+          revoked_at: null,
+          revoked_by_admin_id: null,
+          revoked_by_subject: null,
+          revocation_reason: null
+        }],
+        rowCount: 1
+      };
+    }
+    if (sql.includes("INSERT INTO admin_operation_audit_events")) {
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("INSERT INTO security_audit_logs")) {
+      if (this.failSecurityAudit) throw new Error("security audit storage unavailable");
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  }
+}
+
+function breakglassInput(overrides = {}) {
+  return {
+    grantId: BREAKGLASS_GRANT_ID,
+    activationRequestId: "breakglass-request-1",
+    actorAdminId: 7,
+    actorSubject: "admin:operator-7",
+    permissionKey: "gm.asset_correction.emergency",
+    scope: SCOPE,
+    scopeSha256: HASH,
+    targetSummary: { targetType: "player", targetIds: ["player-1"] },
+    targetSha256: HASH,
+    semanticSha256: NEXT_HASH,
+    reason: "production asset incident",
+    expiresAt: "2026-07-19T11:05:00.000Z",
+    ...overrides
+  };
 }
 
 function preflightInput(overrides = {}) {
@@ -251,4 +338,47 @@ test("AdminStore operation audit queries are parameterized, keyset ordered, and 
   assert.match(calls[0].sql, /LEFT JOIN admin_operation_requests/);
   assert.equal(calls[0].params.includes("player-1"), true);
   assert.equal(calls[0].params.includes("trace-transaction-1"), true);
+});
+
+test("AdminStore commits break-glass grant, append-only operation audit, and critical security alert atomically", async () => {
+  const pool = new BreakglassTransactionPool();
+  const result = await new AdminStore(pool).createAdminBreakglassGrant(breakglassInput());
+  assert.equal(result.kind, "created");
+  assert.equal(pool.committed, true);
+  assert.equal(pool.rolledBack, false);
+
+  const grantIndex = pool.calls.findIndex((call) => call.sql.includes("INSERT INTO admin_breakglass_grants"));
+  const operationAuditIndex = pool.calls.findIndex((call) => call.sql.includes("INSERT INTO admin_operation_audit_events"));
+  const securityAuditIndex = pool.calls.findIndex((call) => call.sql.includes("INSERT INTO security_audit_logs"));
+  const commitIndex = pool.calls.findIndex((call) => call.sql === "COMMIT");
+  assert.ok(grantIndex > 0);
+  assert.ok(operationAuditIndex > grantIndex);
+  assert.ok(securityAuditIndex > operationAuditIndex);
+  assert.ok(commitIndex > securityAuditIndex);
+
+  const securityAudit = pool.calls[securityAuditIndex];
+  assert.deepEqual(securityAudit.params.slice(0, 4), [
+    "admin_breakglass_activated",
+    "breakglass_grant",
+    BREAKGLASS_GRANT_ID,
+    "critical"
+  ]);
+  const details = JSON.parse(securityAudit.params[4]);
+  assert.equal(details.actorAdminId, "7");
+  assert.equal(details.permission, "gm.asset_correction.emergency");
+  assert.equal(details.requestId, "breakglass-request-1");
+});
+
+test("AdminStore rolls back a break-glass grant when its critical security alert cannot be persisted", async () => {
+  const pool = new BreakglassTransactionPool({ failSecurityAudit: true });
+  await assert.rejects(
+    () => new AdminStore(pool).createAdminBreakglassGrant(breakglassInput()),
+    /security audit storage unavailable/
+  );
+  const securityAuditIndex = pool.calls.findIndex((call) => call.sql.includes("INSERT INTO security_audit_logs"));
+  const rollbackIndex = pool.calls.findIndex((call) => call.sql === "ROLLBACK");
+  assert.ok(securityAuditIndex >= 0);
+  assert.ok(rollbackIndex > securityAuditIndex);
+  assert.equal(pool.committed, false);
+  assert.equal(pool.rolledBack, true);
 });

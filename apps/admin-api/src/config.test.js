@@ -15,6 +15,8 @@ const CONFIG_ENV_KEYS = [
   "GAME_ADMIN_TOKEN",
   "ADMIN_ASSERTION_PRIVATE_KEY",
   "ADMIN_OPERATION_PREFLIGHT_TTL_MS",
+  "ADMIN_OPERATION_RATE_LIMIT_WINDOW_MS",
+  "ADMIN_OPERATION_RATE_LIMIT_MAX",
   "ADMIN_PASSWORD",
   "ADMIN_API_REQUIRE_TLS",
   "ADMIN_API_REQUIRE_IP_ALLOWLIST",
@@ -189,6 +191,21 @@ test("admin-api bounds the high-risk preflight nonce lifetime", async () => {
       /ADMIN_OPERATION_PREFLIGHT_TTL_MS must be an integer between 10000 and 900000/
     );
   }
+});
+
+test("admin-api bounds high-risk operation rate limits", async () => {
+  await withEnv({}, (config) => {
+    assert.equal(config.adminOperationRateLimitWindowMs, 60000);
+    assert.equal(config.adminOperationRateLimitMax, 20);
+  });
+  await withEnv({ ADMIN_OPERATION_RATE_LIMIT_WINDOW_MS: "1000", ADMIN_OPERATION_RATE_LIMIT_MAX: "1" }, (config) => {
+    assert.equal(config.adminOperationRateLimitWindowMs, 1000);
+    assert.equal(config.adminOperationRateLimitMax, 1);
+  });
+  await assert.rejects(
+    withEnv({ ADMIN_OPERATION_RATE_LIMIT_MAX: "0" }, () => {}),
+    /ADMIN_OPERATION_RATE_LIMIT_MAX must be an integer between 1 and 10000/
+  );
 });
 
 test("admin-api myforge strict boolean accepts only the four documented values", async () => {

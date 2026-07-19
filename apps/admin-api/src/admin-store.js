@@ -1787,6 +1787,25 @@ export class AdminStore {
         targetSummary,
         details: { expiresAt: grant.expiresAt, scopeSha256 }
       });
+      // A break-glass grant is not committed unless its security alert is durable too.
+      await client.query(
+        `INSERT INTO security_audit_logs (event_type, target_type, target_value, severity, details_json)
+         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [
+          "admin_breakglass_activated",
+          "breakglass_grant",
+          grant.grantId,
+          "critical",
+          toRequiredJsonb({
+            actorAdminId: String(actorAdminId),
+            permission: permissionKey,
+            requestId: activationRequestId,
+            expiresAt: grant.expiresAt,
+            scopeSha256,
+            targetSha256
+          })
+        ]
+      );
       await client.query("COMMIT");
       return { kind: "created", grant };
     } catch (error) {

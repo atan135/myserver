@@ -19,6 +19,7 @@ import { AdminOperationAssertionService } from "./auth/admin-operation-assertion
 import { AdminOperationService } from "./operations/admin-operation.service.js";
 import { AdminBreakglassService } from "./operations/admin-breakglass.service.js";
 import { AdminHighRiskOperationService } from "./operations/admin-high-risk-operation.service.js";
+import { AdminOperationSafetyService } from "./operations/admin-operation-safety.service.js";
 import { AdminOperationController } from "./operations/admin-operation.controller.js";
 import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
@@ -45,6 +46,7 @@ import {
   ADMIN_OPERATIONS,
   ADMIN_BREAKGLASS,
   ADMIN_HIGH_RISK_OPERATIONS,
+  ADMIN_OPERATION_SAFETY,
   ADMIN_METRICS,
   ADMIN_NATS,
   ADMIN_POLICY,
@@ -90,6 +92,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     AdminOperationService,
     AdminBreakglassService,
     AdminHighRiskOperationService,
+    AdminOperationSafetyService,
     JwtAuthGuard,
     AdminPolicyGuard,
     RolesGuard,
@@ -147,6 +150,10 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     {
       provide: ADMIN_HIGH_RISK_OPERATIONS,
       useExisting: AdminHighRiskOperationService
+    },
+    {
+      provide: ADMIN_OPERATION_SAFETY,
+      useExisting: AdminOperationSafetyService
     },
     {
       provide: MYFORGE_STORE,

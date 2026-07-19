@@ -13,9 +13,17 @@ const { GmController } = await import("../gm/gm.controller.ts");
 function request(body = {}) {
   return {
     admin: { sub: 7, username: "operator" },
-    body,
+    body: { backupReference: "backup-incident-001", ...body },
     headers: {},
     socket: { remoteAddress: "127.0.0.1" }
+  };
+}
+
+function safety(overrides = {}) {
+  return {
+    async enforceExecutionRateLimit() {},
+    async recordSecurityEvent() {},
+    ...overrides
   };
 }
 
@@ -54,6 +62,8 @@ test("high-risk protocol preflight never calls the handler and returns only the 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].permission, "gm.send_item");
   assert.deepEqual(calls[0].scope.targetIds, ["chr_1"]);
+  assert.equal(calls[0].impactSummary.recovery.classification, "irreversible");
+  assert.equal(calls[0].impactSummary.recovery.backup.reference, "backup-incident-001");
 });
 
 test("a preflight persistence failure rejects before the handler can cause a side effect", async () => {
@@ -85,6 +95,18 @@ test("credential-like reasons are rejected before a high-risk preflight is persi
   assert.equal(preflightCalls, 0);
 });
 
+test("irreversible preflight rejects a missing backup reference before persistence", async () => {
+  let preflightCalls = 0;
+  const service = new AdminHighRiskOperationService({
+    async preflight() { preflightCalls += 1; return {}; }
+  }, {});
+  await assert.rejects(
+    () => service.run(input({ request: request({ requestId: "operation-request-1", reason: "incident response", backupReference: "" }) })),
+    (error) => error.getStatus() === 400 && error.getResponse().error === "ADMIN_OPERATION_BACKUP_REFERENCE_REQUIRED"
+  );
+  assert.equal(preflightCalls, 0);
+});
+
 test("claimed execution runs exactly once and duplicate execution returns its stored terminal state", async () => {
   let sideEffects = 0;
   const completions = [];
@@ -101,7 +123,7 @@ test("claimed execution runs exactly once and duplicate execution returns its st
       return { kind: "completed" };
     }
   };
-  const service = new AdminHighRiskOperationService(operations, {});
+  const service = new AdminHighRiskOperationService(operations, {}, safety());
   const executeRequest = request({
     requestId: "operation-request-1",
     reason: "incident response",
@@ -133,7 +155,10 @@ test("tamper, expiry, replay and pending approval are stable protocol rejections
         throw error;
       }
     };
-    const service = new AdminHighRiskOperationService(operations, {});
+    const securityEvents = [];
+    const service = new AdminHighRiskOperationService(operations, {}, safety({
+      async recordSecurityEvent(event) { securityEvents.push(event); }
+    }));
     await assert.rejects(
       () => service.run(input({ request: request({
         requestId: "operation-request-1",
@@ -143,6 +168,9 @@ test("tamper, expiry, replay and pending approval are stable protocol rejections
       }) })),
       (error) => error.getStatus() === status && error.getResponse().error === code
     );
+    if (code === "ADMIN_OPERATION_NONCE_REPLAYED") {
+      assert.equal(securityEvents[0].eventType, "admin_operation_nonce_replayed");
+    }
   }
 });
 
@@ -156,7 +184,7 @@ test("a handler-reported partial failure is persisted as execution_uncertain", a
       completions.push(value);
       return { kind: "completed" };
     }
-  }, {});
+  }, {}, safety());
   const outcome = await service.run(input({
     request: request({
       requestId: "operation-request-1",
@@ -185,7 +213,7 @@ test("a completion persistence failure records execution_uncertain before return
       }
       return { kind: "completed" };
     }
-  }, {});
+  }, {}, safety());
   await assert.rejects(
     () => service.run(input({
       request: request({
@@ -215,7 +243,7 @@ test("emergency execution requires a matching active break-glass grant before cl
       error.code = "ADMIN_BREAKGLASS_GRANT_REQUIRED";
       throw error;
     }
-  });
+  }, safety());
   await assert.rejects(
     () => service.run(input({
       permission: "gm.asset_correction.emergency",
@@ -230,6 +258,59 @@ test("emergency execution requires a matching active break-glass grant before cl
     (error) => error.getStatus() === 403 && error.getResponse().error === "ADMIN_BREAKGLASS_GRANT_REQUIRED"
   );
   assert.equal(claims, 0);
+});
+
+test("rate limiting is fail-closed before claiming or executing an operation", async () => {
+  let claims = 0;
+  let sideEffects = 0;
+  const service = new AdminHighRiskOperationService({
+    async claimExecution() { claims += 1; return { state: "claimed", operation: { operationId: "op-rate" } }; }
+  }, {}, safety({
+    async enforceExecutionRateLimit() {
+      const error = new Error("redis unavailable");
+      error.code = "ADMIN_RATE_LIMIT_DEPENDENCY_UNAVAILABLE";
+      throw error;
+    }
+  }));
+  await assert.rejects(
+    () => service.run(input({
+      request: request({
+        requestId: "operation-request-1",
+        reason: "incident response",
+        preflightNonce: "a".repeat(32),
+        preflightSummarySha256: "b".repeat(64)
+      }),
+      execute: async () => { sideEffects += 1; return { ok: true }; }
+    })),
+    (error) => error.getStatus() === 503 && error.getResponse().error === "ADMIN_RATE_LIMIT_DEPENDENCY_UNAVAILABLE"
+  );
+  assert.equal(claims, 0);
+  assert.equal(sideEffects, 0);
+});
+
+test("downstream assertion failures remain failed and emit a security alert", async () => {
+  const alerts = [];
+  const service = new AdminHighRiskOperationService({
+    async claimExecution() { return { state: "claimed", operation: { operationId: "op-assertion" } }; },
+    async completeExecution() { return { kind: "completed" }; }
+  }, {}, safety({
+    async recordSecurityEvent(event) { alerts.push(event); }
+  }));
+  const failure = new Error("assertion rejected");
+  failure.code = "ADMIN_ASSERTION_TARGET_DENIED";
+  await assert.rejects(
+    () => service.run(input({
+      request: request({
+        requestId: "operation-request-1",
+        reason: "incident response",
+        preflightNonce: "a".repeat(32),
+        preflightSummarySha256: "b".repeat(64)
+      }),
+      execute: async () => { throw failure; }
+    })),
+    (error) => error.code === "ADMIN_ASSERTION_TARGET_DENIED"
+  );
+  assert.equal(alerts[0].eventType, "admin_operation_downstream_assertion_failed");
 });
 
 test("GM send-item protocol scope and target come from the resolved character, not client world fields", async () => {

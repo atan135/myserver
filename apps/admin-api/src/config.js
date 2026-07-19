@@ -583,6 +583,20 @@ export function getConfig() {
       10000,
       900000
     ),
+    adminOperationRateLimitWindowMs: parseBoundedPositiveInteger(
+      "ADMIN_OPERATION_RATE_LIMIT_WINDOW_MS",
+      process.env.ADMIN_OPERATION_RATE_LIMIT_WINDOW_MS,
+      60000,
+      1000,
+      3600000
+    ),
+    adminOperationRateLimitMax: parseBoundedPositiveInteger(
+      "ADMIN_OPERATION_RATE_LIMIT_MAX",
+      process.env.ADMIN_OPERATION_RATE_LIMIT_MAX,
+      20,
+      1,
+      10000
+    ),
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),

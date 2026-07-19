@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-const ACTIVE_TASK_STATUSES = new Set(["queued", "dispatched", "running"]);
+const ACTIVE_TASK_STATUSES = new Set(["queued", "paused", "dispatched", "running"]);
 const TERMINAL_TASK_STATUSES = new Set([
   "completed",
   "completed_with_errors",
@@ -618,6 +618,48 @@ export class MyforgeStore {
     return toTask(rows[0]);
   }
 
+  async pauseTask({ requestId, adminId = null, adminUsername = null, ip = null, pausedAt = new Date() }) {
+    return this.withTransaction(async (client) => {
+      const existing = await this.lockTask(client, requestId);
+      const actor = { adminId, adminUsername };
+      if (existing.status === "paused") return { outcome: "duplicate", task: existing };
+      if (existing.status !== "queued") {
+        throw createMyforgeStoreError("MYFORGE_TASK_NOT_PAUSABLE", "Only queued tasks can be paused");
+      }
+      const { rows } = await client.query(
+        `UPDATE myforge_task_runs
+         SET status = 'paused', queue_reason = NULL, updated_at = $2
+         WHERE request_id = $1 AND status = 'queued'
+         RETURNING *`,
+        [requestId, pausedAt]
+      );
+      const task = toTask(rows[0]);
+      await this.appendLifecycleAudit(client, "myforge_task_paused", task, { actor, ip });
+      return { outcome: "paused", task };
+    });
+  }
+
+  async resumeTask({ requestId, adminId = null, adminUsername = null, ip = null, resumedAt = new Date() }) {
+    return this.withTransaction(async (client) => {
+      const existing = await this.lockTask(client, requestId);
+      const actor = { adminId, adminUsername };
+      if (existing.status === "queued") return { outcome: "duplicate", task: existing };
+      if (existing.status !== "paused") {
+        throw createMyforgeStoreError("MYFORGE_TASK_NOT_RESUMABLE", "Only paused tasks can be resumed");
+      }
+      const { rows } = await client.query(
+        `UPDATE myforge_task_runs
+         SET status = 'queued', queue_reason = NULL, updated_at = $2
+         WHERE request_id = $1 AND status = 'paused'
+         RETURNING *`,
+        [requestId, resumedAt]
+      );
+      const task = toTask(rows[0]);
+      await this.appendLifecycleAudit(client, "myforge_task_resumed", task, { actor, ip });
+      return { outcome: "resumed", task };
+    });
+  }
+
   async listQueuedAgentIdentities(now = new Date()) {
     const { rows } = await this.pool.query(
       `SELECT DISTINCT task.agent_id, task.project_id
@@ -1076,7 +1118,7 @@ export class MyforgeStore {
       if (["completed", "completed_with_errors", "failed"].includes(existing.status)) {
         throw createMyforgeStoreError("MYFORGE_TASK_NOT_CANCELLABLE", "Task is already complete");
       }
-      if (existing.status === "queued") {
+      if (["queued", "paused"].includes(existing.status)) {
         const { rows } = await client.query(
           `UPDATE myforge_task_runs
            SET status = 'cancelled',
@@ -1085,7 +1127,7 @@ export class MyforgeStore {
                error_message = 'Task was cancelled before dispatch',
                completed_at = $2,
                updated_at = current_timestamp
-           WHERE request_id = $1 AND status = 'queued'
+           WHERE request_id = $1 AND status IN ('queued', 'paused')
            RETURNING *`,
           [requestId, requestedAt]
         );

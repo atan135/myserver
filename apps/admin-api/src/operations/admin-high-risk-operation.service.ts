@@ -1,9 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
 
 import { ApiHttpException } from "../common/http-exception.js";
-import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS } from "../tokens.js";
+import { ADMIN_BREAKGLASS, ADMIN_OPERATIONS, ADMIN_OPERATION_SAFETY } from "../tokens.js";
 import { AdminPolicyScopeRequest } from "../auth/admin-policy.service.js";
 import { containsSensitiveAuditReason } from "./audit-reason.js";
+import { highRiskRecoveryPlan } from "./admin-operation-recovery.js";
 
 type ProtocolActor = {
   adminId: number | string;
@@ -41,9 +42,10 @@ function errorCode(error: any) {
 }
 
 function protocolStatusForCode(code: string) {
-  if (code === "ADMIN_OPERATION_PERSISTENCE_FAILED") {
+  if (["ADMIN_OPERATION_PERSISTENCE_FAILED", "ADMIN_RATE_LIMIT_DEPENDENCY_UNAVAILABLE", "ADMIN_SECURITY_AUDIT_UNAVAILABLE"].includes(code)) {
     return 503;
   }
+  if (code === "ADMIN_OPERATION_RATE_LIMITED") return 429;
   if (code === "ADMIN_OPERATION_PERMISSION_DENIED" || code === "ADMIN_OPERATION_SCOPE_DENIED" ||
       code === "ADMIN_BREAKGLASS_ACTIVATE_DENIED" || code === "ADMIN_BREAKGLASS_GRANT_REQUIRED") {
     return 403;
@@ -102,12 +104,51 @@ function persistenceFailure() {
   return protocolError("ADMIN_OPERATION_PERSISTENCE_FAILED", 503);
 }
 
+function isAssertionFailure(code: string) {
+  return code.startsWith("ADMIN_ASSERTION_") || code === "ADMIN_REQUEST_REPLAY" || code === "ADMIN_REQUEST_CONFLICT";
+}
+
 @Injectable()
 export class AdminHighRiskOperationService {
   constructor(
     @Inject(ADMIN_OPERATIONS) private readonly operations: any,
-    @Inject(ADMIN_BREAKGLASS) private readonly breakglass: any
+    @Inject(ADMIN_BREAKGLASS) private readonly breakglass: any,
+    @Inject(ADMIN_OPERATION_SAFETY) private readonly safety: any
   ) {}
+
+  private async recordSecurityEvent(input: {
+    eventType: string;
+    actorAdminId: number | string;
+    permission: string;
+    scope: AdminPolicyScopeRequest;
+    requestId: string;
+    details?: Record<string, unknown>;
+  }) {
+    if (typeof this.safety?.recordSecurityEvent !== "function") {
+      throw protocolError("ADMIN_SECURITY_AUDIT_UNAVAILABLE", 503);
+    }
+    try {
+      await this.safety.recordSecurityEvent(input);
+    } catch (error: any) {
+      throw protocolError(errorCode(error), protocolStatusForCode(errorCode(error)));
+    }
+  }
+
+  private async enforceExecutionRateLimit(
+    actor: ProtocolActor,
+    permission: string,
+    scope: AdminPolicyScopeRequest,
+    requestId: string
+  ) {
+    if (typeof this.safety?.enforceExecutionRateLimit !== "function") {
+      throw protocolError("ADMIN_RATE_LIMIT_DEPENDENCY_UNAVAILABLE", 503);
+    }
+    try {
+      await this.safety.enforceExecutionRateLimit({ actorAdminId: actor.adminId, permission, scope, requestId });
+    } catch (error: any) {
+      throw protocolError(errorCode(error), protocolStatusForCode(errorCode(error)));
+    }
+  }
 
   private async recordExecutionUncertain(operationId: string, code: string, phase: string) {
     try {
@@ -151,13 +192,17 @@ export class AdminHighRiskOperationService {
       targetSummary: input.targetSummary,
       payload: input.payload
     };
+    const impactSummary = {
+      ...input.impactSummary,
+      recovery: highRiskRecoveryPlan(input.permission, input.request)
+    };
     const hasNonce = fields.nonce !== null;
     const hasSummary = fields.summarySha256 !== null;
     if (!hasNonce && !hasSummary) {
       try {
         const preflight = await this.operations.preflight({
           ...base,
-          impactSummary: input.impactSummary
+          impactSummary
         });
         return {
           state: "preflight",
@@ -176,6 +221,8 @@ export class AdminHighRiskOperationService {
     if (!hasNonce || !hasSummary) {
       throw protocolError("ADMIN_OPERATION_PREVIEW_REQUIRED");
     }
+
+    await this.enforceExecutionRateLimit(actor, input.permission, input.scope, fields.requestId);
 
     if (input.emergency === true) {
       try {
@@ -199,6 +246,22 @@ export class AdminHighRiskOperationService {
       });
     } catch (error: any) {
       const code = protocolCode(error);
+      if ([
+        "ADMIN_OPERATION_NONCE_REPLAYED",
+        "ADMIN_OPERATION_PERMISSION_DENIED",
+        "ADMIN_OPERATION_SCOPE_DENIED"
+      ].includes(code)) {
+        await this.recordSecurityEvent({
+          eventType: code === "ADMIN_OPERATION_NONCE_REPLAYED"
+            ? "admin_operation_nonce_replayed"
+            : "admin_operation_execution_denied",
+          actorAdminId: actor.adminId,
+          permission: input.permission,
+          scope: input.scope,
+          requestId: fields.requestId,
+          details: { errorCode: code }
+        });
+      }
       throw protocolError(code, protocolStatusForCode(code));
     }
     if (claim.state === "terminal" || claim.state === "in_progress") {
@@ -232,7 +295,25 @@ export class AdminHighRiskOperationService {
           "ADMIN_OPERATION_HANDLER_PERSISTENCE_FAILED",
           "handler_completion"
         );
+        await this.recordSecurityEvent({
+          eventType: "admin_operation_persistence_failed",
+          actorAdminId: actor.adminId,
+          permission: input.permission,
+          scope: input.scope,
+          requestId: fields.requestId,
+          details: { operationId: claim.operation.operationId, phase: "handler_completion" }
+        });
         throw persistenceFailure();
+      }
+      if (isAssertionFailure(errorCode(error))) {
+        await this.recordSecurityEvent({
+          eventType: "admin_operation_downstream_assertion_failed",
+          actorAdminId: actor.adminId,
+          permission: input.permission,
+          scope: input.scope,
+          requestId: fields.requestId,
+          details: { errorCode: errorCode(error), operationId: claim.operation.operationId }
+        });
       }
       throw error;
     }
@@ -252,6 +333,14 @@ export class AdminHighRiskOperationService {
         "ADMIN_OPERATION_RESULT_PERSISTENCE_FAILED",
         "result_completion"
       );
+      await this.recordSecurityEvent({
+        eventType: "admin_operation_persistence_failed",
+        actorAdminId: actor.adminId,
+        permission: input.permission,
+        scope: input.scope,
+        requestId: fields.requestId,
+        details: { operationId: claim.operation.operationId, phase: "result_completion" }
+      });
       throw persistenceFailure();
     }
     return { state: "executed", result };

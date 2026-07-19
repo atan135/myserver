@@ -29,6 +29,8 @@ const HTTP_STATUS_BY_ERROR: Record<string, number> = {
   MYFORGE_TASK_NOT_FOUND: 404,
   MYFORGE_AGENT_PROJECT_MISMATCH: 409,
   MYFORGE_TASK_NOT_CANCELLABLE: 409,
+  MYFORGE_TASK_NOT_PAUSABLE: 409,
+  MYFORGE_TASK_NOT_RESUMABLE: 409,
   MYFORGE_DISABLED: 503
 };
 
@@ -92,6 +94,8 @@ export class MyforgeController {
       preflightSummarySha256,
       preflight_summary_sha256,
       reason,
+      backupReference,
+      backup_reference,
       ...taskBody
     } = source;
     // Keep protocol fields on req.body for the operation service but never forward
@@ -101,7 +105,8 @@ export class MyforgeController {
       requestId: requestId ?? request_id,
       preflightNonce: preflightNonce ?? preflight_nonce,
       preflightSummarySha256: preflightSummarySha256 ?? preflight_summary_sha256,
-      reason
+      reason,
+      backupReference: backupReference ?? backup_reference
     };
     const outcome = await this.highRiskOperations.run({
       request: req,
@@ -122,6 +127,20 @@ export class MyforgeController {
   @Permissions("myforge.task.cancel")
   async cancelTask(@Param("requestId") requestId: string, @Body() body: any, @Req() req: any) {
     return this.call(() => this.orchestrator.cancelTask(requestId, body, this.actor(req)));
+  }
+
+  @Post("tasks/:requestId/pause")
+  @HttpCode(200)
+  @Permissions("myforge.task.cancel")
+  async pauseTask(@Param("requestId") requestId: string, @Body() body: any, @Req() req: any) {
+    return this.call(() => this.orchestrator.pauseTask(requestId, body, this.actor(req)));
+  }
+
+  @Post("tasks/:requestId/resume")
+  @HttpCode(200)
+  @Permissions("myforge.task.cancel")
+  async resumeTask(@Param("requestId") requestId: string, @Body() body: any, @Req() req: any) {
+    return this.call(() => this.orchestrator.resumeTask(requestId, body, this.actor(req)));
   }
 
   private actor(req: any) {

@@ -116,7 +116,7 @@ test("version-controlled drift targets bind all five reviewed migration baseline
     return [database.key, target.migration.version, target.objects.length];
   });
   assert.deepEqual(targets, [
-    ["auth", "20260719170000", 530],
+    ["auth", "20260719190000", 530],
     ["game", "20260718161350", 316],
     ["chat", "20260718161350", 38],
     ["announce", "20260718161350", 24],

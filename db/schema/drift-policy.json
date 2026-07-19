@@ -4,9 +4,9 @@
   "targets": {
     "auth": {
       "file": "db/schema/targets/auth.json",
-      "version": "20260719170000",
-      "description": "add admin operation protocol",
-      "checksum": "a33c6919de4df1b1decbf68460026abc4916d93ab16cdbc61f30eb4c71fe32e63a5b2c2a4f344fffe67db9fb082887be"
+      "version": "20260719190000",
+      "description": "add myforge batch pause",
+      "checksum": "48e032ec98af6e8d6aa6d84655fb7448b6c50890066c856ad88266cb5c6f624f1302f87914d6f13763c860c9dfac910a"
     },
     "game": {
       "file": "db/schema/targets/game.json",

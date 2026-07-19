@@ -329,6 +329,38 @@ export class MyforgeOrchestrator {
     }
   }
 
+  async pauseTask(requestId, body, actor = {}) {
+    this.assertEnabled();
+    this.assertRequestId(requestId);
+    assertEmptyCancelBody(body);
+    const paused = await this.store.pauseTask({
+      requestId,
+      adminId: actor.adminId ?? null,
+      adminUsername: actor.adminUsername ?? null,
+      ip: actor.ip ?? null,
+      pausedAt: this.now()
+    });
+    return { ok: true, requestId, status: paused.task.status, paused: paused.task.status === "paused" };
+  }
+
+  async resumeTask(requestId, body, actor = {}) {
+    this.assertEnabled();
+    this.assertRequestId(requestId);
+    assertEmptyCancelBody(body);
+    const resumed = await this.store.resumeTask({
+      requestId,
+      adminId: actor.adminId ?? null,
+      adminUsername: actor.adminUsername ?? null,
+      ip: actor.ip ?? null,
+      resumedAt: this.now()
+    });
+    // dispatchNext handles an offline agent as a queued state, but propagates a
+    // control-plane/store failure instead of reporting a successful resume.
+    await this.dispatchNext({ agentId: resumed.task.agentId, projectId: resumed.task.projectId });
+    const current = await this.store.getTask(requestId);
+    return { ok: true, requestId, status: current?.status ?? resumed.task.status, paused: false };
+  }
+
   async dispatchBestEffort(task, trigger) {
     try {
       return await this.dispatchNext({ agentId: task.agentId, projectId: task.projectId });
