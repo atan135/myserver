@@ -292,6 +292,18 @@ function parsePositiveIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseBoundedPositiveInteger(name, value, fallback, min, max) {
+  const raw = value ?? String(fallback);
+  if (!/^\d+$/.test(String(raw))) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
 function parseNonNegativeIntegerWithFallback(value, fallback) {
   const parsed = Number.parseInt(value ?? String(fallback), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
@@ -564,6 +576,13 @@ export function getConfig() {
     adminAssertionKeyId: process.env.ADMIN_ASSERTION_KEY_ID || "admin-api-v1",
     adminAssertionPrivateKey: process.env.ADMIN_ASSERTION_PRIVATE_KEY || "",
     adminAssertionTtlMs: parsePositiveIntegerWithFallback(process.env.ADMIN_ASSERTION_TTL_MS, 60000),
+    adminOperationPreflightTtlMs: parseBoundedPositiveInteger(
+      "ADMIN_OPERATION_PREFLIGHT_TTL_MS",
+      process.env.ADMIN_OPERATION_PREFLIGHT_TTL_MS,
+      120000,
+      10000,
+      900000
+    ),
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),

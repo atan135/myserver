@@ -16,6 +16,10 @@ import { AuthService } from "./auth/auth.service.js";
 import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
 import { AdminPolicyGuard } from "./auth/admin-policy.guard.js";
 import { AdminOperationAssertionService } from "./auth/admin-operation-assertion.service.js";
+import { AdminOperationService } from "./operations/admin-operation.service.js";
+import { AdminBreakglassService } from "./operations/admin-breakglass.service.js";
+import { AdminHighRiskOperationService } from "./operations/admin-high-risk-operation.service.js";
+import { AdminOperationController } from "./operations/admin-operation.controller.js";
 import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
@@ -38,6 +42,9 @@ import {
   ADMIN_GAME_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
   ADMIN_OPERATION_ASSERTIONS,
+  ADMIN_OPERATIONS,
+  ADMIN_BREAKGLASS,
+  ADMIN_HIGH_RISK_OPERATIONS,
   ADMIN_METRICS,
   ADMIN_NATS,
   ADMIN_POLICY,
@@ -72,6 +79,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GmController,
     GlobalIdController,
     MonitoringController,
+    AdminOperationController,
     MyforgeController,
     HealthController
   ],
@@ -79,6 +87,9 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     AuthService,
     AdminPolicyService,
     AdminOperationAssertionService,
+    AdminOperationService,
+    AdminBreakglassService,
+    AdminHighRiskOperationService,
     JwtAuthGuard,
     AdminPolicyGuard,
     RolesGuard,
@@ -124,6 +135,18 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     {
       provide: ADMIN_OPERATION_ASSERTIONS,
       useExisting: AdminOperationAssertionService
+    },
+    {
+      provide: ADMIN_OPERATIONS,
+      useExisting: AdminOperationService
+    },
+    {
+      provide: ADMIN_BREAKGLASS,
+      useExisting: AdminBreakglassService
+    },
+    {
+      provide: ADMIN_HIGH_RISK_OPERATIONS,
+      useExisting: AdminHighRiskOperationService
     },
     {
       provide: MYFORGE_STORE,

@@ -9,7 +9,7 @@ import { getClientIp } from "../common/client-ip.js";
 import { appendSecurityAuditLog, getSecurityAuditClientIp } from "../common/security-audit.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
 import { encodeSubjectToken } from "../nats-client.js";
-import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_CONFIG, ADMIN_GAME_ADMIN_CLIENT, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_NATS, ADMIN_STORE } from "../tokens.js";
 import { computeBanExpiresAt } from "../ban-utils.js";
 import { randomUUID } from "node:crypto";
 import { getTitleDefinitions } from "../players/title-table.js";
@@ -332,8 +332,43 @@ export class GmController {
     @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_STORE) private readonly adminStore: any,
     @Inject(ADMIN_NATS) private readonly nats: any,
-    @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any
+    @Inject(ADMIN_GAME_ADMIN_CLIENT) private readonly gameAdminClient: any,
+    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any
   ) {}
+
+  private async runHighRiskOperation(input: any) {
+    if (typeof this.highRiskOperations?.run !== "function") {
+      throw new ApiHttpException(503, {
+        ok: false,
+        error: "ADMIN_OPERATION_SERVICE_UNAVAILABLE",
+        message: "High-risk operation service is unavailable"
+      });
+    }
+    const outcome = await this.highRiskOperations.run(input);
+    return outcome.state === "executed" ? outcome.result : outcome.response;
+  }
+
+  private async characterOperationScope(characterId: string) {
+    if (typeof this.adminStore?.findCharacterById !== "function") {
+      throw new ApiHttpException(503, {
+        ok: false,
+        error: "ADMIN_OPERATION_TARGET_RESOLUTION_UNAVAILABLE",
+        message: "High-risk target resolution is unavailable"
+      });
+    }
+    const character = await this.adminStore.findCharacterById(characterId, { includeDeleted: true });
+    const worldId = character?.worldId ?? character?.world_id;
+    if (worldId === undefined || worldId === null || String(worldId).trim() === "") {
+      throw notFound("CHARACTER_NOT_FOUND", "Character not found");
+    }
+    return {
+      worldId: String(worldId),
+      serviceName: "game-server",
+      targetType: "character",
+      targetIds: [characterId],
+      targetCount: 1
+    };
+  }
 
   private async publishGlobalSessionKick(playerId: string, reason: string) {
     const subject = `myserver.session.kick.${encodeSubjectToken(playerId)}`;
@@ -380,7 +415,7 @@ export class GmController {
   @Permissions("gm.broadcast")
   @HttpCode(HttpStatus.OK)
   async broadcast(@Body() body: any, @Req() req: any) {
-    const { title, content, sender } = body || {};
+    const { title, content, sender, reason } = body || {};
 
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       throw badRequest("INVALID_TITLE", "title is required");
@@ -393,68 +428,86 @@ export class GmController {
     const normalizedTitle = title.trim();
     const normalizedContent = content.trim();
     const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
-    const gameAdminOptions = createGameAdminOptions(req, body);
-    gameAdminOptions.assertionContext = await createGameAssertionContext(
-      req,
-      body,
-      "gm.broadcast",
-      this.adminStore,
-      "world",
-      ["all"]
-    );
-    const globalBroadcast = await this.publishGlobalBroadcast(
-      normalizedTitle,
-      normalizedContent,
-      normalizedSender
-    );
-
-    let legacyBroadcast: any = {
-      ok: true,
-      skipped: true,
-      reason: "global_broadcast_published"
-    };
-    if (!globalBroadcast.ok) {
-      try {
-        const result = await this.gameAdminClient.broadcast(
+    const normalizedReason = normalizeReason(reason);
+    return this.runHighRiskOperation({
+      request: req,
+      permission: "gm.broadcast",
+      scope: {
+        worldId: "*",
+        serviceName: "game-server",
+        targetType: "world",
+        targetIds: ["all"],
+        targetCount: 1
+      },
+      targetSummary: { targetType: "world", targetIds: ["all"] },
+      payload: { title: normalizedTitle, content: normalizedContent, sender: normalizedSender },
+      impactSummary: { targetType: "world", targetCount: 1, delivery: "global_broadcast" },
+      reason: normalizedReason,
+      execute: async () => {
+        const gameAdminOptions = createGameAdminOptions(req, body);
+        gameAdminOptions.assertionContext = await createGameAssertionContext(
+          req,
+          body,
+          "gm.broadcast",
+          this.adminStore,
+          "world",
+          ["all"]
+        );
+        const globalBroadcast = await this.publishGlobalBroadcast(
           normalizedTitle,
           normalizedContent,
           normalizedSender,
-          gameAdminOptions
         );
-        legacyBroadcast = { ok: true, ...(result ?? {}), fallback: true };
-      } catch (error: any) {
-        legacyBroadcast = gameServerFailure(error);
-        legacyBroadcast.fallback = true;
-      }
-    }
+        let legacyBroadcast: any = {
+          ok: true,
+          skipped: true,
+          reason: "global_broadcast_published"
+        };
+        if (!globalBroadcast.ok) {
+          try {
+            const result = await this.gameAdminClient.broadcast(
+              normalizedTitle,
+              normalizedContent,
+              normalizedSender,
+              gameAdminOptions
+            );
+            legacyBroadcast = { ok: true, ...(result ?? {}), fallback: true };
+          } catch (error: any) {
+            legacyBroadcast = gameServerFailure(error);
+            legacyBroadcast.fallback = true;
+          }
+        }
 
-    await this.adminStore.appendAuditLog({
-      adminId: req.admin.sub,
-      adminUsername: req.admin.username,
-      action: "gm_broadcast",
-      targetType: "system",
-      targetValue: "all",
-      details: {
-        title: normalizedTitle,
-        content: normalizedContent,
-        sender: normalizedSender,
-        requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
-        globalBroadcast,
-        legacyBroadcast
+        await this.adminStore.appendAuditLog({
+          adminId: req.admin.sub,
+          adminUsername: req.admin.username,
+          action: "gm_broadcast",
+          targetType: "system",
+          targetValue: "all",
+          details: {
+            title: normalizedTitle,
+            content: normalizedContent,
+            sender: normalizedSender,
+            requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
+            globalBroadcast,
+            legacyBroadcast
+          },
+          ip: getClientIp(req, this.config)
+        });
+
+        if (!globalBroadcast.ok) {
+          throw globalBroadcastPublishError(globalBroadcast, legacyBroadcast);
+        }
+
+        return {
+          ok: true,
+          message: "Broadcast sent",
+          globalBroadcast,
+          legacyBroadcast
+        };
       },
-      ip: getClientIp(req, this.config)
+      resultSummary: () => ({ action: "gm.broadcast", outcome: "succeeded" })
     });
-
-    if (!globalBroadcast.ok) {
-      throw globalBroadcastPublishError(globalBroadcast, legacyBroadcast);
-    }
-
-    return {
-      ok: true,
-      message: "Broadcast sent",
-      globalBroadcast,
-      legacyBroadcast
-    };
   }
 
   @Post("send-item")
@@ -471,56 +524,70 @@ export class GmController {
     if (!itemCount || typeof itemCount !== "number" || !Number.isSafeInteger(itemCount) || itemCount <= 0) {
       throw badRequest("INVALID_ITEM_COUNT", "itemCount must be a positive number");
     }
+    const normalizedReason = normalizeReason(reason);
+    const scope = await this.characterOperationScope(normalizedCharacterId);
 
-    try {
-      const gameAdminOptions = createGameAdminOptions(req, body);
-      gameAdminOptions.assertionContext = await createGameAssertionContext(
-        req,
-        body,
-        "gm.send_item",
-        this.adminStore,
-        "character",
-        [normalizedCharacterId]
-      );
-      const gameAdminResult = await this.gameAdminClient.sendItem(
-        normalizedCharacterId,
-        itemId,
-        itemCount,
-        reason || "",
-        gameAdminOptions
-      );
+    return this.runHighRiskOperation({
+      request: req,
+      permission: "gm.send_item",
+      scope,
+      targetSummary: { targetType: "character", targetIds: [normalizedCharacterId] },
+      payload: { characterId: normalizedCharacterId, itemId, itemCount },
+      impactSummary: { targetType: "character", targetCount: 1, assetChange: "item_grant" },
+      reason: normalizedReason,
+      execute: async () => {
+        try {
+          const gameAdminOptions = createGameAdminOptions(req, body);
+          gameAdminOptions.assertionContext = await createGameAssertionContext(
+            req,
+            body,
+            "gm.send_item",
+            this.adminStore,
+            "character",
+            [normalizedCharacterId]
+          );
+          const gameAdminResult = await this.gameAdminClient.sendItem(
+            normalizedCharacterId,
+            itemId,
+            itemCount,
+            normalizedReason,
+            gameAdminOptions
+          );
 
-      await this.adminStore.appendAuditLog({
-        adminId: req.admin.sub,
-        adminUsername: req.admin.username,
-        action: "gm_send_item",
-        targetType: "character",
-        targetValue: normalizedCharacterId,
-        details: {
-          itemId,
-          itemCount,
-          reason,
-          requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
-          gameAdmin: {
-            ok: gameAdminResult?.ok === true,
-            instanceId: gameAdminResult?.instanceId,
-            endpoint: gameAdminResult?.endpoint
-          }
-        },
-        ip: getClientIp(req, this.config)
-      });
-      await this.appendAssetGrantSecurityAudit(req, {
-        action: "gm_send_item",
-        characterId: normalizedCharacterId,
-        itemId,
-        itemCount,
-        emergency: false
-      });
+          await this.adminStore.appendAuditLog({
+            adminId: req.admin.sub,
+            adminUsername: req.admin.username,
+            action: "gm_send_item",
+            targetType: "character",
+            targetValue: normalizedCharacterId,
+            details: {
+              itemId,
+              itemCount,
+              reason: normalizedReason,
+              requestedTargetInstanceId: gameAdminOptions.targetInstanceId,
+              gameAdmin: {
+                ok: gameAdminResult?.ok === true,
+                instanceId: gameAdminResult?.instanceId,
+                endpoint: gameAdminResult?.endpoint
+              }
+            },
+            ip: getClientIp(req, this.config)
+          });
+          await this.appendAssetGrantSecurityAudit(req, {
+            action: "gm_send_item",
+            characterId: normalizedCharacterId,
+            itemId,
+            itemCount,
+            emergency: false
+          });
 
-      return { ok: true, message: "Item sent" };
-    } catch (error: any) {
-      throw gameServerError(error);
-    }
+          return { ok: true, message: "Item sent" };
+        } catch (error: any) {
+          throw gameServerError(error);
+        }
+      },
+      resultSummary: () => ({ action: "gm.send_item", targetCount: 1, outcome: "succeeded" })
+    });
   }
 
   @Post("emergency-compensate-item")
@@ -534,60 +601,74 @@ export class GmController {
     if (!Number.isSafeInteger(itemCount) || itemCount <= 0) {
       throw badRequest("INVALID_ITEM_COUNT", "itemCount must be a positive integer");
     }
+    const scope = await this.characterOperationScope(characterId);
 
-    const gameAdminOptions = {
-      ...createGameAdminOptions(req, body),
-      requestId: `gm-emergency-correction:${randomUUID()}`,
-      source: "gm-emergency-correction"
-    };
-    gameAdminOptions.assertionContext = await createGameAssertionContext(
-      req,
-      body,
-      "gm.asset_correction.emergency",
-      this.adminStore,
-      "character",
-      [characterId]
-    );
-    gameAdminOptions.assertionContext.requestId = gameAdminOptions.requestId;
-    try {
-      const gameAdminResult = await this.gameAdminClient.sendItem(
-        characterId,
-        itemId,
-        itemCount,
-        reason,
-        gameAdminOptions
-      );
-      await this.adminStore.appendAuditLog({
-        adminId: req.admin.sub,
-        adminUsername: req.admin.username,
-        action: "gm_emergency_asset_correction",
-        targetType: "character",
-        targetValue: characterId,
-        details: {
-          itemId,
-          itemCount,
-          reason,
-          requestId: gameAdminOptions.requestId,
-          permission: "gm.asset_correction.emergency",
-          gameAdmin: {
-            ok: gameAdminResult?.ok === true,
-            instanceId: gameAdminResult?.instanceId,
-            endpoint: gameAdminResult?.endpoint
-          }
-        },
-        ip: getClientIp(req, this.config)
-      });
-      await this.appendAssetGrantSecurityAudit(req, {
-        action: "gm_emergency_asset_correction",
-        characterId,
-        itemId,
-        itemCount,
-        emergency: true
-      });
-      return { ok: true, message: "Emergency compensation submitted", requestId: gameAdminOptions.requestId };
-    } catch (error: any) {
-      throw gameServerError(error);
-    }
+    return this.runHighRiskOperation({
+      request: req,
+      permission: "gm.asset_correction.emergency",
+      scope,
+      targetSummary: { targetType: "character", targetIds: [characterId] },
+      payload: { characterId, itemId, itemCount },
+      impactSummary: { targetType: "character", targetCount: 1, assetChange: "emergency_item_correction" },
+      reason,
+      emergency: true,
+      execute: async () => {
+        const gameAdminOptions = {
+          ...createGameAdminOptions(req, body),
+          requestId: body?.requestId ?? body?.request_id,
+          source: "gm-emergency-correction"
+        };
+        gameAdminOptions.assertionContext = await createGameAssertionContext(
+          req,
+          body,
+          "gm.asset_correction.emergency",
+          this.adminStore,
+          "character",
+          [characterId]
+        );
+        gameAdminOptions.assertionContext.requestId = gameAdminOptions.requestId;
+        try {
+          const gameAdminResult = await this.gameAdminClient.sendItem(
+            characterId,
+            itemId,
+            itemCount,
+            reason,
+            gameAdminOptions
+          );
+          await this.adminStore.appendAuditLog({
+            adminId: req.admin.sub,
+            adminUsername: req.admin.username,
+            action: "gm_emergency_asset_correction",
+            targetType: "character",
+            targetValue: characterId,
+            details: {
+              itemId,
+              itemCount,
+              reason,
+              requestId: gameAdminOptions.requestId,
+              permission: "gm.asset_correction.emergency",
+              gameAdmin: {
+                ok: gameAdminResult?.ok === true,
+                instanceId: gameAdminResult?.instanceId,
+                endpoint: gameAdminResult?.endpoint
+              }
+            },
+            ip: getClientIp(req, this.config)
+          });
+          await this.appendAssetGrantSecurityAudit(req, {
+            action: "gm_emergency_asset_correction",
+            characterId,
+            itemId,
+            itemCount,
+            emergency: true
+          });
+          return { ok: true, message: "Emergency compensation submitted", requestId: gameAdminOptions.requestId };
+        } catch (error: any) {
+          throw gameServerError(error);
+        }
+      },
+      resultSummary: () => ({ action: "gm.asset_correction.emergency", targetCount: 1, outcome: "succeeded" })
+    });
   }
 
   @Post("kick-player")
@@ -596,54 +677,67 @@ export class GmController {
   async kickPlayer(@Body() body: any, @Req() req: any) {
     const { playerId, reason } = body || {};
     const normalizedPlayerId = normalizePlayerId(playerId);
-    const normalizedReason = normalizeGmReason(reason, "gm_kick");
-    const gameAdminOptions = createGameAdminOptions(req, body);
-    gameAdminOptions.assertionContext = await createGameAssertionContext(
-      req,
-      body,
-      "gm.kick_player",
-      this.adminStore,
-      "player",
-      [normalizedPlayerId]
-    );
-    const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
+    const normalizedReason = normalizeGmReason(normalizeReason(reason), "gm_kick");
+    const scope = { targetType: "player", targetIds: [normalizedPlayerId], targetCount: 1 };
+    return this.runHighRiskOperation({
+      request: req,
+      permission: "gm.kick_player",
+      scope,
+      targetSummary: { targetType: "player", targetIds: [normalizedPlayerId] },
+      payload: { playerId: normalizedPlayerId },
+      impactSummary: { targetType: "player", targetCount: 1, action: "session_kick" },
+      reason: normalizedReason,
+      execute: async () => {
+        const gameAdminOptions = createGameAdminOptions(req, body);
+        gameAdminOptions.assertionContext = await createGameAssertionContext(
+          req,
+          body,
+          "gm.kick_player",
+          this.adminStore,
+          "player",
+          [normalizedPlayerId]
+        );
+        const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
 
-    const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
+        const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
 
-    let legacyKick: any = { ok: true };
-    try {
-      const result = await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
-        ...gameAdminOptions,
-        endpoint: targetEndpoint
-      });
-      legacyKick = { ok: true, ...(result ?? {}) };
-    } catch (error: any) {
-      if (isGameAdminTargetSelectionError(error)) {
-        throw gameServerError(error);
-      }
-      legacyKick = gameServerFailure(error);
-    }
+        let legacyKick: any = { ok: true };
+        try {
+          const result = await this.gameAdminClient.kickPlayer(normalizedPlayerId, normalizedReason, {
+            ...gameAdminOptions,
+            endpoint: targetEndpoint
+          });
+          legacyKick = { ok: true, ...(result ?? {}) };
+        } catch (error: any) {
+          if (isGameAdminTargetSelectionError(error)) {
+            throw gameServerError(error);
+          }
+          legacyKick = gameServerFailure(error);
+        }
 
-    await this.adminStore.appendAuditLog({
-      adminId: req.admin.sub,
-      adminUsername: req.admin.username,
-      action: "gm_kick_player",
-      targetType: "player",
-      targetValue: normalizedPlayerId,
-      details: {
-        reason: normalizedReason,
-        globalKick,
-        legacyKick,
-        requestedTargetInstanceId: gameAdminOptions.targetInstanceId
+        await this.adminStore.appendAuditLog({
+          adminId: req.admin.sub,
+          adminUsername: req.admin.username,
+          action: "gm_kick_player",
+          targetType: "player",
+          targetValue: normalizedPlayerId,
+          details: {
+            reason: normalizedReason,
+            globalKick,
+            legacyKick,
+            requestedTargetInstanceId: gameAdminOptions.targetInstanceId
+          },
+          ip: getClientIp(req, this.config)
+        });
+
+        if (!globalKick.ok) {
+          throw sessionKickPublishError(globalKick, legacyKick);
+        }
+
+        return { ok: true, message: "Player kicked", globalKick, legacyKick };
       },
-      ip: getClientIp(req, this.config)
+      resultSummary: () => ({ action: "gm.kick_player", targetCount: 1, outcome: "succeeded" })
     });
-
-    if (!globalKick.ok) {
-      throw sessionKickPublishError(globalKick, legacyKick);
-    }
-
-    return { ok: true, message: "Player kicked", globalKick, legacyKick };
   }
 
   @Post("ban-player")
@@ -663,81 +757,94 @@ export class GmController {
     }
 
     const normalizedPlayerId = normalizePlayerId(playerId);
-    const normalizedReason = normalizeGmReason(reason, "gm_ban");
-    const gameAdminOptions = createGameAdminOptions(req, body);
-    gameAdminOptions.assertionContext = await createGameAssertionContext(
-      req,
-      body,
-      "gm.ban_player",
-      this.adminStore,
-      "player",
-      [normalizedPlayerId]
-    );
-    const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
-    const player = await this.adminStore.findPlayerById(normalizedPlayerId);
-    if (!player) {
-      throw notFound("PLAYER_NOT_FOUND", "Player not found");
-    }
-
-    const banExpiresAt = computeBanExpiresAt(durationSeconds);
-    const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned", { banExpiresAt });
-    if (!updated) {
-      throw notFound("PLAYER_NOT_FOUND", "Player not found");
-    }
-
-    const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
-
-    let legacyBan: any = { ok: true };
-    try {
-      const result = await this.gameAdminClient.banPlayer(
-        normalizedPlayerId,
-        durationSeconds,
-        normalizedReason,
-        {
-          ...gameAdminOptions,
-          endpoint: targetEndpoint
+    const normalizedReason = normalizeGmReason(normalizeReason(reason), "gm_ban");
+    const scope = { targetType: "player", targetIds: [normalizedPlayerId], targetCount: 1 };
+    return this.runHighRiskOperation({
+      request: req,
+      permission: "gm.ban_player",
+      scope,
+      targetSummary: { targetType: "player", targetIds: [normalizedPlayerId] },
+      payload: { playerId: normalizedPlayerId, durationSeconds },
+      impactSummary: { targetType: "player", targetCount: 1, action: "player_ban" },
+      reason: normalizedReason,
+      execute: async () => {
+        const gameAdminOptions = createGameAdminOptions(req, body);
+        gameAdminOptions.assertionContext = await createGameAssertionContext(
+          req,
+          body,
+          "gm.ban_player",
+          this.adminStore,
+          "player",
+          [normalizedPlayerId]
+        );
+        const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
+        const player = await this.adminStore.findPlayerById(normalizedPlayerId);
+        if (!player) {
+          throw notFound("PLAYER_NOT_FOUND", "Player not found");
         }
-      );
-      legacyBan = { ok: true, ...(result ?? {}) };
-    } catch (error: any) {
-      if (isGameAdminTargetSelectionError(error)) {
-        throw gameServerError(error);
-      }
-      legacyBan = gameServerFailure(error);
-    }
 
-    await this.adminStore.appendAuditLog({
-      adminId: req.admin.sub,
-      adminUsername: req.admin.username,
-      action: "gm_ban_player",
-      targetType: "player",
-      targetValue: normalizedPlayerId,
-      details: {
-        from: player.status,
-        to: "banned",
-        durationSeconds,
-        banExpiresAt,
-        reason: normalizedReason,
-        globalKick,
-        legacyBan,
-        requestedTargetInstanceId: gameAdminOptions.targetInstanceId
+        const banExpiresAt = computeBanExpiresAt(durationSeconds);
+        const updated = await this.adminStore.updatePlayerStatus(normalizedPlayerId, "banned", { banExpiresAt });
+        if (!updated) {
+          throw notFound("PLAYER_NOT_FOUND", "Player not found");
+        }
+
+        const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
+
+        let legacyBan: any = { ok: true };
+        try {
+          const result = await this.gameAdminClient.banPlayer(
+            normalizedPlayerId,
+            durationSeconds,
+            normalizedReason,
+            {
+              ...gameAdminOptions,
+              endpoint: targetEndpoint
+            }
+          );
+          legacyBan = { ok: true, ...(result ?? {}) };
+        } catch (error: any) {
+          if (isGameAdminTargetSelectionError(error)) {
+            throw gameServerError(error);
+          }
+          legacyBan = gameServerFailure(error);
+        }
+
+        await this.adminStore.appendAuditLog({
+          adminId: req.admin.sub,
+          adminUsername: req.admin.username,
+          action: "gm_ban_player",
+          targetType: "player",
+          targetValue: normalizedPlayerId,
+          details: {
+            from: player.status,
+            to: "banned",
+            durationSeconds,
+            banExpiresAt,
+            reason: normalizedReason,
+            globalKick,
+            legacyBan,
+            requestedTargetInstanceId: gameAdminOptions.targetInstanceId
+          },
+          ip: getClientIp(req, this.config)
+        });
+
+        if (!globalKick.ok) {
+          return {
+            ok: false,
+            error: "SESSION_KICK_PUBLISH_FAILED",
+            message: globalKick.message || "Player banned, but global session kick failed",
+            banStatus: "banned",
+            banExpiresAt,
+            globalKick,
+            legacyBan
+          };
+        }
+
+        return { ok: true, message: "Player banned", banExpiresAt, globalKick, legacyBan };
       },
-      ip: getClientIp(req, this.config)
+      resultSummary: () => ({ action: "gm.ban_player", targetCount: 1, outcome: "succeeded" })
     });
-
-    if (!globalKick.ok) {
-      return {
-        ok: false,
-        error: "SESSION_KICK_PUBLISH_FAILED",
-        message: globalKick.message || "Player banned, but global session kick failed",
-        banStatus: "banned",
-        banExpiresAt,
-        globalKick,
-        legacyBan
-      };
-    }
-
-    return { ok: true, message: "Player banned", banExpiresAt, globalKick, legacyBan };
   }
 
   @Post("characters/:characterId/elements")

@@ -30,7 +30,9 @@ export type AdminPermission =
   | "myforge.task.create"
   | "myforge.task.cancel"
   | "admins.revoke_tokens"
-  | "admins.reset_password";
+  | "admins.reset_password"
+  | "admin.permissions.manage"
+  | "breakglass.activate";
 
 export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*"> = {
   viewer: [

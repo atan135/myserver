@@ -26,6 +26,12 @@ function codedError(code, message, statusCode) {
   return error;
 }
 
+const highRiskOperations = {
+  async run(input) {
+    return { state: "executed", result: await input.execute() };
+  }
+};
+
 test("myforge controller declares one exact permission per HTTP operation", () => {
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.listAgents), ["myforge.agent.read"]);
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.listTasks), ["myforge.task.read"]);
@@ -48,14 +54,14 @@ test("myforge controller passes typed create actor context and cancel body to th
       return { ok: true, requestId, status: "cancelled" };
     }
   };
-  const controller = new MyforgeController({}, orchestrator);
-  const body = { agentId: "dev-pc-001" };
+  const controller = new MyforgeController({}, orchestrator, highRiskOperations);
+  const body = { agentId: "dev-pc-001", reason: "operator requested blueprint" };
   await controller.createFangyuanBlueprint(body, request());
   await controller.cancelTask("11111111-1111-4111-8111-111111111111", {}, request());
 
   assert.deepEqual(calls[0], {
     method: "create",
-    body,
+    body: { agentId: "dev-pc-001" },
     actor: { adminId: 7, adminUsername: "admin", ip: "127.0.0.1" }
   });
   assert.equal(calls[1].method, "cancel");
@@ -80,7 +86,7 @@ test("myforge controller supports list and repeated detail polling without respo
       };
     }
   };
-  const controller = new MyforgeController({}, orchestrator);
+  const controller = new MyforgeController({}, orchestrator, highRiskOperations);
   assert.equal((await controller.listAgents({})).total, 0);
   assert.equal((await controller.listTasks({ status: "running" })).limit, 20);
   const first = await controller.getTask("11111111-1111-4111-8111-111111111111");

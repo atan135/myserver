@@ -50,6 +50,9 @@ function makeController(gameAdminClient, options = {}) {
     async findPlayerById(playerId) {
       return { id: playerId, status: "active" };
     },
+    async findCharacterById(characterId) {
+      return { characterId, worldId: "world-1" };
+    },
     async updatePlayerStatus() {
       return true;
     },
@@ -66,8 +69,14 @@ function makeController(gameAdminClient, options = {}) {
     }
   };
 
+  const highRiskOperations = options.highRiskOperations || {
+    async run(input) {
+      return { state: "executed", result: await input.execute() };
+    }
+  };
+
   return {
-    controller: new GmController({}, adminStore, nats, gameAdminClient),
+    controller: new GmController({}, adminStore, nats, gameAdminClient, highRiskOperations),
     audits,
     nats
   };
@@ -84,7 +93,7 @@ test("send-item returns explicit target required error from GameAdminClient", as
 
   await assert.rejects(
     controller.sendItem(
-      { characterId: "chr_1", itemId: "item_1", itemCount: 1 },
+      { characterId: "chr_1", itemId: "item_1", itemCount: 1, reason: "test request" },
       makeReq()
     ),
     (caught) => {
@@ -112,6 +121,7 @@ test("send-item passes explicit targetInstanceId to GameAdminClient", async () =
       characterId: " chr_1 ",
       itemId: "item_1",
       itemCount: 2,
+      reason: "test request",
       targetInstanceId: "game-server-b"
     },
     makeReq()
@@ -201,13 +211,19 @@ test("emergency compensation uses its dedicated source, request ID, permission a
   });
 
   const result = await controller.emergencyCompensateItem(
-    { characterId: "chr_1", itemId: "1001", itemCount: 2, reason: "incident-42" },
+    {
+      characterId: "chr_1",
+      itemId: "1001",
+      itemCount: 2,
+      reason: "incident-42",
+      requestId: "emergency-correction-test-1"
+    },
     makeReq()
   );
 
   assert.equal(result.ok, true);
   assert.equal(captured.options.source, "gm-emergency-correction");
-  assert.match(captured.options.requestId, /^gm-emergency-correction:/);
+  assert.equal(captured.options.requestId, "emergency-correction-test-1");
   assert.equal(captured.options.actor, "ops");
   assert.equal(audits[0].action, "gm_emergency_asset_correction");
   assert.equal(audits[0].details.permission, "gm.asset_correction.emergency");
@@ -229,7 +245,7 @@ test("kick-player returns explicit target required error from GameAdminClient", 
 
   await assert.rejects(
     controller.kickPlayer(
-      { playerId: "plr_1" },
+      { playerId: "plr_1", reason: "test request" },
       makeReq()
     ),
     (caught) => {
@@ -255,7 +271,7 @@ test("ban-player returns explicit target required error from GameAdminClient", a
 
   await assert.rejects(
     controller.banPlayer(
-      { playerId: "plr_1", durationSeconds: 3600 },
+      { playerId: "plr_1", durationSeconds: 3600, reason: "test request" },
       makeReq()
     ),
     (caught) => {
@@ -281,7 +297,7 @@ test("kick-player returns target not found error from GameAdminClient", async ()
 
   await assert.rejects(
     controller.kickPlayer(
-      { playerId: "plr_1", targetInstanceId: "game-server-missing" },
+      { playerId: "plr_1", targetInstanceId: "game-server-missing", reason: "test request" },
       makeReq()
     ),
     (caught) => {
@@ -377,7 +393,7 @@ test("broadcast legacy fallback audit records all called game-server endpoints",
 
   await assert.rejects(
     controller.broadcast(
-      { title: "Notice", content: "Server restart", sender: "Ops" },
+      { title: "Notice", content: "Server restart", sender: "Ops", reason: "test request" },
       makeReq()
     ),
     (caught) => {

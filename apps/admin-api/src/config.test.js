@@ -13,6 +13,8 @@ const CONFIG_ENV_KEYS = [
   "DB_POOL_SIZE",
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
+  "ADMIN_ASSERTION_PRIVATE_KEY",
+  "ADMIN_OPERATION_PREFLIGHT_TTL_MS",
   "ADMIN_PASSWORD",
   "ADMIN_API_REQUIRE_TLS",
   "ADMIN_API_REQUIRE_IP_ALLOWLIST",
@@ -169,6 +171,24 @@ test("admin-api myforge config is disabled by default without requiring key file
   }, (config) => {
     assert.equal(config.myforge.enabled, false);
   });
+});
+
+test("admin-api bounds the high-risk preflight nonce lifetime", async () => {
+  await withEnv({}, (config) => {
+    assert.equal(config.adminOperationPreflightTtlMs, 120000);
+  });
+  await withEnv({ ADMIN_OPERATION_PREFLIGHT_TTL_MS: "10000" }, (config) => {
+    assert.equal(config.adminOperationPreflightTtlMs, 10000);
+  });
+  await withEnv({ ADMIN_OPERATION_PREFLIGHT_TTL_MS: "900000" }, (config) => {
+    assert.equal(config.adminOperationPreflightTtlMs, 900000);
+  });
+  for (const value of ["9999", "900001", "1e5", " 120000", ""]) {
+    await assert.rejects(
+      withEnv({ ADMIN_OPERATION_PREFLIGHT_TTL_MS: value }, () => {}),
+      /ADMIN_OPERATION_PREFLIGHT_TTL_MS must be an integer between 10000 and 900000/
+    );
+  }
 });
 
 test("admin-api myforge strict boolean accepts only the four documented values", async () => {
@@ -342,6 +362,7 @@ test("admin-api requires TLS by default in production", async () => {
     REGISTRY_ENABLED: "true",
     JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
     GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
     ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
   }, (config) => {
@@ -652,6 +673,7 @@ test("admin-api strict discovery requires registry in production", async () => {
       REGISTRY_ENABLED: "false",
       JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
       GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
       GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
       ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
     }, () => {}),
@@ -699,6 +721,7 @@ test("admin-api production environment ignores DISCOVERY_REQUIRED=false override
       REGISTRY_ENABLED: "false",
       JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
       GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
       GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
       ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
     }, () => {}),
