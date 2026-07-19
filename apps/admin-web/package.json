@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:myforge": "node --test src/myforge/task-utils.test.js src/myforge/myforge-errors.test.js"
+    "test:myforge": "node --test src/myforge/task-utils.test.js src/myforge/myforge-errors.test.js",
+    "test:operations": "node --test src/operations/high-risk.test.js src/auth/permissions.test.js"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

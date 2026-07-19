@@ -2,16 +2,17 @@ import { defineStore } from "pinia";
 import { authApi } from "../api";
 import {
   ADMIN_PERMISSIONS as P,
+  effectivePermissions,
   hasAnyPermission,
-  hasPermission,
-  permissionsForRole
+  hasPermission
 } from "../auth/permissions";
 
 export const useAuthStore = defineStore("auth", {
   state: () => ({
     token: localStorage.getItem("admin_token") || null,
     user: JSON.parse(localStorage.getItem("admin_user") || "null"),
-    loading: false
+    loading: false,
+    capabilitiesLoaded: false
   }),
 
   getters: {
@@ -19,8 +20,8 @@ export const useAuthStore = defineStore("auth", {
     role: (state) => state.user?.role || null,
     username: (state) => state.user?.username || null,
     displayName: (state) => state.user?.displayName || null,
-    permissions: (state) => permissionsForRole(state.user?.role),
-    isAdmin: (state) => ["admin", "super_admin"].includes(state.user?.role),
+    permissions: (state) => effectivePermissions(state.user),
+    isAdmin: (state) => effectivePermissions(state.user).length > 0,
     isOperator: (state) => hasAnyPermission(state.user, [
       P.PLAYERS_STATUS_UPDATE,
       P.GM_BROADCAST,
@@ -41,12 +42,22 @@ export const useAuthStore = defineStore("auth", {
         const { data } = await authApi.login(username, password);
         this.token = data.accessToken;
         this.user = data.admin;
+        this.capabilitiesLoaded = true;
         localStorage.setItem("admin_token", data.accessToken);
         localStorage.setItem("admin_user", JSON.stringify(data.admin));
         return data;
       } finally {
         this.loading = false;
       }
+    },
+
+    async refreshCapabilities() {
+      if (!this.token) return null;
+      const { data } = await authApi.me();
+      this.user = data.admin;
+      this.capabilitiesLoaded = true;
+      localStorage.setItem("admin_user", JSON.stringify(data.admin));
+      return data.admin;
     },
 
     async logout() {
@@ -57,6 +68,7 @@ export const useAuthStore = defineStore("auth", {
       } finally {
         this.token = null;
         this.user = null;
+        this.capabilitiesLoaded = false;
         localStorage.removeItem("admin_token");
         localStorage.removeItem("admin_user");
       }

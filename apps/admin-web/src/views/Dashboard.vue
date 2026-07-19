@@ -34,6 +34,14 @@
           <template #header>
             <span>维护模式</span>
           </template>
+          <el-alert
+            v-if="maintenance.operationMessage"
+            :title="maintenance.operationMessage"
+            :type="maintenance.operationState === 'failed' ? 'error' : maintenance.operationState === 'preflight' || maintenance.operationState === 'in_progress' ? 'warning' : 'success'"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 12px"
+          />
           <el-descriptions :column="1" border>
             <el-descriptions-item label="当前状态">
               <el-tag :type="maintenance.enabled ? 'danger' : 'success'">
@@ -54,8 +62,8 @@
             label-width="80px"
             style="margin-top: 16px"
           >
-            <el-form-item label="原因">
-              <el-input v-model="maintenanceForm.reason" placeholder="维护原因（可选）" />
+          <el-form-item label="原因">
+              <el-input v-model="maintenanceForm.reason" maxlength="255" show-word-limit placeholder="维护原因" />
             </el-form-item>
             <el-form-item>
               <el-button
@@ -80,6 +88,7 @@ import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
 import { maintenanceApi } from "../api";
 import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
+import { formatHighRiskPreview, runHighRiskOperation } from "../operations/high-risk";
 
 const authStore = useAuthStore();
 const maintenance = reactive({
@@ -88,7 +97,9 @@ const maintenance = reactive({
   enabled: false,
   reason: "",
   updatedBy: "",
-  updatedAt: ""
+  updatedAt: "",
+  operationState: "idle",
+  operationMessage: ""
 });
 const maintenanceForm = reactive({
   reason: ""
@@ -132,24 +143,59 @@ async function fetchMaintenance() {
 async function handleMaintenanceToggle() {
   const enabled = !maintenance.enabled;
   const title = enabled ? "开启维护模式" : "关闭维护模式";
-  try {
-    await ElMessageBox.confirm(
-      `确定${enabled ? "开启" : "关闭"}维护模式吗？`,
-      title,
-      { type: enabled ? "warning" : "info" }
-    );
-  } catch {
+  if (!maintenanceForm.reason.trim()) {
+    ElMessage.warning("请填写维护操作原因");
     return;
   }
-
-  maintenance.updating = true;
   try {
-    const { data } = await maintenanceApi.setStatus(enabled, maintenanceForm.reason);
-    applyMaintenanceStatus(data);
+    maintenance.updating = true;
+    maintenance.operationState = "preflight";
+    maintenance.operationMessage = "正在生成服务端影响预览。";
+    const outcome = await runHighRiskOperation({
+      invoke: maintenanceApi.setStatus,
+      payload: { enabled, reason: maintenanceForm.reason.trim() },
+      confirm: async (preflight) => {
+        maintenance.operationMessage = "已生成影响预览，等待明确确认。";
+        try {
+          await ElMessageBox.confirm(formatHighRiskPreview(preflight), `${title}确认`, {
+            type: enabled ? "warning" : "info",
+            confirmButtonText: "确认执行",
+            cancelButtonText: "取消"
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    });
+    if (outcome.phase === "cancelled") {
+      maintenance.operationState = "cancelled";
+      maintenance.operationMessage = "操作已取消，未执行维护状态变更。";
+      ElMessage.info("操作已取消，未执行维护状态变更");
+      return;
+    }
+    if (outcome.phase === "in_progress") {
+      maintenance.operationState = "in_progress";
+      maintenance.operationMessage = `请求 ${outcome.requestId} 正在执行，请勿重复提交。`;
+      ElMessage.warning(`请求 ${outcome.requestId} 正在执行，请勿重复提交`);
+      return;
+    }
+    if (outcome.phase === "terminal") {
+      maintenance.operationState = "terminal";
+      maintenance.operationMessage = `请求 ${outcome.requestId} 已返回首次终态。`;
+      ElMessage.info(`请求 ${outcome.requestId} 已返回首次终态`);
+      await fetchMaintenance();
+      return;
+    }
+    applyMaintenanceStatus(outcome.response);
+    maintenance.operationState = "succeeded";
+    maintenance.operationMessage = "维护状态已完成并记录审计。";
     maintenanceForm.reason = "";
     ElMessage.success(enabled ? "维护模式已开启" : "维护模式已关闭");
   } catch (error) {
-    ElMessage.error(error.response?.data?.message || "维护模式更新失败");
+    maintenance.operationState = "failed";
+    maintenance.operationMessage = error.response?.data?.message || "维护模式更新失败";
+    ElMessage.error(maintenance.operationMessage);
   } finally {
     maintenance.updating = false;
   }

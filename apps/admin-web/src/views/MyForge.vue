@@ -499,6 +499,15 @@
               @input="clearCreateError('consumerTargetFile')"
             />
           </el-form-item>
+          <el-form-item label="操作原因" required :error="createErrors.reason">
+            <el-input
+              v-model="createForm.reason"
+              maxlength="255"
+              show-word-limit
+              placeholder="说明创建该任务的业务原因"
+              @input="clearCreateError('reason')"
+            />
+          </el-form-item>
           <el-form-item
             label="规则文件"
             :required="createForm.useRulesFile"
@@ -529,7 +538,7 @@
           <el-button
             type="primary"
             :loading="createSubmitting"
-            :disabled="!canReadAgents || agents.items.length === 0"
+            :disabled="!canCreateTasks || !canReadAgents || agents.items.length === 0"
             @click="submitCreateTask"
           >
             创建任务
@@ -543,7 +552,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus, Refresh, Search, View } from "@element-plus/icons-vue";
 import AdminLayout from "../components/AdminLayout.vue";
 import { myforgeApi } from "../api";
@@ -564,6 +573,7 @@ import {
   validateFangyuanTaskForm
 } from "../myforge/task-utils";
 import { useAuthStore } from "../stores/auth";
+import { formatHighRiskPreview, runHighRiskOperation } from "../operations/high-risk";
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -612,6 +622,7 @@ const createForm = reactive({
   requirements: [""],
   artifactFile: "",
   consumerTargetFile: "",
+  reason: "",
   useRulesFile: true,
   rulesFile: "rules/fangyuan/方圆灵构蓝图规则.md"
 });
@@ -824,6 +835,7 @@ function resetCreateForm() {
   createForm.requirements = [""];
   createForm.artifactFile = "";
   createForm.consumerTargetFile = "";
+  createForm.reason = "";
   createForm.useRulesFile = true;
   createForm.rulesFile = "rules/fangyuan/方圆灵构蓝图规则.md";
   createError.value = null;
@@ -870,9 +882,41 @@ async function submitCreateTask() {
   createError.value = null;
   const attempt = ++createAttemptSequence;
   try {
+    if (!createForm.reason.trim()) {
+      createErrors.reason = "请填写操作原因";
+      return;
+    }
     const body = buildFangyuanTaskRequest(createForm, selectedAgent);
-    const { data } = await myforgeApi.createFangyuanTask(body);
+    const outcome = await runHighRiskOperation({
+      invoke: myforgeApi.createFangyuanTask,
+      payload: { ...body, reason: createForm.reason.trim() },
+      confirm: async (preflight) => {
+        try {
+          await ElMessageBox.confirm(formatHighRiskPreview(preflight), "创建任务确认", {
+            type: "warning",
+            confirmButtonText: "确认创建",
+            cancelButtonText: "取消"
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    });
     if (!createAttemptIsCurrent(attempt)) return;
+    if (outcome.phase === "cancelled") {
+      ElMessage.info("任务创建已取消，未执行。");
+      return;
+    }
+    if (outcome.phase === "in_progress") {
+      createError.value = { title: "任务正在创建", description: `请求 ${outcome.requestId} 正在执行，请勿重复提交。` };
+      return;
+    }
+    if (outcome.phase === "terminal") {
+      createError.value = { title: "请求已处理", description: `请求 ${outcome.requestId} 已返回首次终态，请在任务列表查询结果。` };
+      return;
+    }
+    const data = outcome.response;
     const statusText = taskStatusLabel(data?.status);
     if (data?.status === "queued") {
       ElMessage.warning(`任务已创建：${statusText}（${queueReasonLabel(data.queueReason)}）`);

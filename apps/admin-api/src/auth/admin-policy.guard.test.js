@@ -164,3 +164,32 @@ test("AdminPolicyGuard supports server-defined conditional permissions", async (
   assert.equal(await guard.canActivate(fixture.context), true);
   assert.deepEqual(calls.map((call) => call.permission), ["players.status.update", "players.ban"]);
 });
+
+test("AdminPolicyGuard blocks horizontal target escalation even when the route permission exists", async () => {
+  const fixture = makeContext({
+    permissions: ["gm.kick_player"],
+    request: { body: { playerId: "player-outside-grant" } }
+  });
+  const { guard, calls } = makeGuard(fixture, {
+    decision: (_adminId, _permission, scope) => ({
+      allowed: scope.targetIds[0] === "player-in-grant",
+      code: "SCOPE_DENIED"
+    })
+  });
+
+  await assert.rejects(() => guard.canActivate(fixture.context), assertHttpError(403, "ADMIN_SCOPE_DENIED"));
+  assert.deepEqual(calls[0].scope.targetIds, ["player-outside-grant"]);
+});
+
+test("AdminPolicyGuard blocks vertical escalation from a legacy super_admin label without a policy grant", async () => {
+  const fixture = makeContext({
+    permissions: ["gm.send_item"],
+    request: {
+      admin: { sub: 7, username: "viewer", role: "super_admin" },
+      body: { characterId: "chr_123" }
+    }
+  });
+  const { guard } = makeGuard(fixture, { decision: { allowed: false, code: "PERMISSION_DENIED" } });
+
+  await assert.rejects(() => guard.canActivate(fixture.context), assertHttpError(403, "ADMIN_PERMISSION_DENIED"));
+});

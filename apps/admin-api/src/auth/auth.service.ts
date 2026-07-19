@@ -1,18 +1,24 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 
-import { ADMIN_CONFIG, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_CONFIG, ADMIN_POLICY, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
 import { badRequest, forbidden, notFound, unauthorized } from "../common/http-exception.js";
 import { getClientIp } from "../common/client-ip.js";
 import { appendSecurityAuditLog } from "../common/security-audit.js";
 import type { LoginDto } from "./dto/login.dto.js";
 
-function toAdminDto(admin: any) {
+function toAdminDto(admin: any, capabilities: Map<string, Array<{ scope: unknown }>>) {
+  const entries = [...capabilities.entries()];
   return {
     id: admin.id,
     username: admin.username,
     displayName: admin.displayName,
-    role: admin.role
+    role: admin.role,
+    permissions: entries.map(([permissionKey]) => permissionKey),
+    permissionScopes: Object.fromEntries(entries.map(([permissionKey, grants]) => [
+      permissionKey,
+      grants.map((grant) => grant.scope)
+    ]))
   };
 }
 
@@ -39,8 +45,14 @@ export class AuthService {
     private readonly jwtService: JwtService,
     @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_STORE) private readonly adminStore: any,
-    @Inject(ADMIN_SESSION_STORE) private readonly sessionStore: any
+    @Inject(ADMIN_SESSION_STORE) private readonly sessionStore: any,
+    @Inject(ADMIN_POLICY) private readonly policy: any
   ) {}
+
+  private async effectiveAdminDto(admin: any) {
+    const capabilities = await this.policy.effectiveCapabilities(admin.id);
+    return toAdminDto(admin, capabilities);
+  }
 
   async login(dto: LoginDto, req: any) {
     const { username, password } = dto || {};
@@ -108,6 +120,7 @@ export class AuthService {
       throw unauthorized("INVALID_CREDENTIALS", "Invalid username or password");
     }
 
+    const adminDto = await this.effectiveAdminDto(admin);
     const jti = this.sessionStore.createJti();
     const tokenVersion = await this.sessionStore.getTokenVersion(admin.id);
     const tokenPayload = {
@@ -144,7 +157,7 @@ export class AuthService {
       ok: true,
       accessToken,
       expiresIn: this.config.jwtExpiresIn,
-      admin: toAdminDto(admin)
+      admin: adminDto
     };
   }
 
@@ -156,7 +169,7 @@ export class AuthService {
 
     return {
       ok: true,
-      admin: toAdminDto(admin)
+      admin: await this.effectiveAdminDto(admin)
     };
   }
 

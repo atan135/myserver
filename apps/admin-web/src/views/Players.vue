@@ -429,6 +429,7 @@ import AdminLayout from "../components/AdminLayout.vue";
 import { useAuthStore } from "../stores/auth";
 import { gmApi, playerApi } from "../api";
 import { ADMIN_PERMISSIONS as P } from "../auth/permissions";
+import { formatHighRiskPreview, runHighRiskOperation } from "../operations/high-risk";
 
 const elementKeys = [
   { key: "earth", label: "地" },
@@ -773,7 +774,6 @@ async function submitGmDialog() {
     } else if (gmDialog.type === "unlock") {
       await gmApi.runCharacterUnlockCheck(characterId, { reason });
     }
-
     ElMessage.success("操作已提交");
     gmDialog.visible = false;
     await refreshProfile();
@@ -792,7 +792,7 @@ async function handleDisable(row) {
       { type: "warning" }
     );
 
-    await playerApi.updatePlayerStatus(row.player_id, "disabled");
+    await playerApi.updatePlayerStatus(row.player_id, { status: "disabled" });
     ElMessage.success("已禁用");
     fetchPlayers();
   } catch (err) {
@@ -810,7 +810,7 @@ async function handleApprove(row) {
       { type: "info" }
     );
 
-    await playerApi.updatePlayerStatus(row.player_id, "active");
+    await playerApi.updatePlayerStatus(row.player_id, { status: "active" });
     ElMessage.success("已通过审核");
     fetchPlayers();
   } catch (err) {
@@ -828,7 +828,7 @@ async function handleReject(row) {
       { type: "warning" }
     );
 
-    await playerApi.updatePlayerStatus(row.player_id, "disabled");
+    await playerApi.updatePlayerStatus(row.player_id, { status: "disabled" });
     ElMessage.success("已拒绝");
     fetchPlayers();
   } catch (err) {
@@ -846,7 +846,7 @@ async function handleEnable(row) {
       { type: "info" }
     );
 
-    await playerApi.updatePlayerStatus(row.player_id, "active");
+    await playerApi.updatePlayerStatus(row.player_id, { status: "active" });
     ElMessage.success("已解禁");
     fetchPlayers();
   } catch (err) {
@@ -858,13 +858,45 @@ async function handleEnable(row) {
 
 async function handleBan(row) {
   try {
-    await ElMessageBox.confirm(
-      `确定封禁玩家 ${row.login_name || row.guest_id || row.player_id} 吗？`,
+    const { value: reason } = await ElMessageBox.prompt(
+      `封禁玩家 ${row.login_name || row.guest_id || row.player_id} 前请填写原因。`,
       "封禁玩家",
-      { type: "warning" }
+      {
+        inputPattern: /\S/,
+        inputErrorMessage: "封禁原因不能为空",
+        confirmButtonText: "生成影响预览",
+        cancelButtonText: "取消"
+      }
     );
-
-    await playerApi.updatePlayerStatus(row.player_id, "banned");
+    const outcome = await runHighRiskOperation({
+      invoke: (body) => playerApi.updatePlayerStatus(row.player_id, body),
+      payload: { status: "banned", reason: reason.trim() },
+      confirm: async (preflight) => {
+        try {
+          await ElMessageBox.confirm(formatHighRiskPreview(preflight), "封禁玩家确认", {
+            type: "warning",
+            confirmButtonText: "确认封禁",
+            cancelButtonText: "取消"
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    });
+    if (outcome.phase === "cancelled") {
+      ElMessage.info("封禁操作已取消，未执行写入。");
+      return;
+    }
+    if (outcome.phase === "in_progress") {
+      ElMessage.warning(`请求 ${outcome.requestId} 正在执行，请勿重复提交。`);
+      return;
+    }
+    if (outcome.phase === "terminal") {
+      ElMessage.info(`请求 ${outcome.requestId} 已返回首次终态。`);
+      await fetchPlayers();
+      return;
+    }
     ElMessage.success("已封禁");
     fetchPlayers();
   } catch (err) {

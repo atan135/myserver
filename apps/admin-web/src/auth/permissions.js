@@ -34,51 +34,23 @@ export const MYFORGE_ENTRY_PERMISSIONS = Object.freeze([
   ADMIN_PERMISSIONS.MYFORGE_TASK_READ
 ]);
 
-export const ROLE_PERMISSIONS = Object.freeze({
-  viewer: Object.freeze([
-    ADMIN_PERMISSIONS.AUDIT_READ,
-    ADMIN_PERMISSIONS.SECURITY_READ,
-    ADMIN_PERMISSIONS.PLAYERS_READ,
-    ADMIN_PERMISSIONS.MAINTENANCE_READ,
-    ADMIN_PERMISSIONS.MONITORING_READ,
-    ADMIN_PERMISSIONS.ID_READ
-  ]),
-  operator: Object.freeze([
-    ADMIN_PERMISSIONS.AUDIT_READ,
-    ADMIN_PERMISSIONS.SECURITY_READ,
-    ADMIN_PERMISSIONS.PLAYERS_READ,
-    ADMIN_PERMISSIONS.PLAYERS_STATUS_UPDATE,
-    ADMIN_PERMISSIONS.GM_BROADCAST,
-    ADMIN_PERMISSIONS.GM_SEND_ITEM,
-    ADMIN_PERMISSIONS.GM_KICK_PLAYER,
-    ADMIN_PERMISSIONS.GM_CHARACTER_ELEMENTS_WRITE,
-    ADMIN_PERMISSIONS.GM_CHARACTER_TITLES_WRITE,
-    ADMIN_PERMISSIONS.GM_CHARACTER_DISCIPLINES_WRITE,
-    ADMIN_PERMISSIONS.MAINTENANCE_READ,
-    ADMIN_PERMISSIONS.MONITORING_READ,
-    ADMIN_PERMISSIONS.ID_READ
-  ]),
-  admin: ALL_ADMIN_PERMISSIONS,
-  super_admin: ALL_ADMIN_PERMISSIONS
-});
-
-export function permissionsForRole(role) {
-  return ROLE_PERMISSIONS[role] || Object.freeze([]);
+export function effectivePermissions(user) {
+  if (!Array.isArray(user?.permissions)) return Object.freeze([]);
+  return Object.freeze([...new Set(user.permissions.filter((permission) =>
+    typeof permission === "string" && ALL_ADMIN_PERMISSIONS.includes(permission)
+  ))]);
 }
 
-export function hasPermission(userOrRole, permission) {
+export function hasPermission(user, permission) {
   if (!permission) {
     return true;
   }
-
-  const role = typeof userOrRole === "string" ? userOrRole : userOrRole?.role;
-  return permissionsForRole(role).includes(permission);
+  return effectivePermissions(user).includes(permission);
 }
 
-export function hasAnyPermission(userOrRole, permissions = []) {
+export function hasAnyPermission(user, permissions = []) {
   if (!permissions.length) {
     return true;
   }
-
-  return permissions.some((permission) => hasPermission(userOrRole, permission));
+  return permissions.some((permission) => hasPermission(user, permission));
 }

@@ -199,6 +199,33 @@ test("a handler-reported partial failure is persisted as execution_uncertain", a
   assert.deepEqual(completions[0].errorSummary, { code: "SESSION_KICK_PUBLISH_FAILED" });
 });
 
+test("a downstream timeout is retained as execution_uncertain instead of becoming retry-safe", async () => {
+  const completions = [];
+  const service = new AdminHighRiskOperationService({
+    async claimExecution() {
+      return { state: "claimed", operation: { operationId: "op-timeout", requestId: "operation-request-1", status: "executing" } };
+    },
+    async completeExecution(value) {
+      completions.push(value);
+      return { kind: "completed" };
+    }
+  }, {}, safety());
+  const timeout = new Error("game-server timed out");
+  timeout.code = "DOWNSTREAM_TIMEOUT";
+
+  await assert.rejects(() => service.run(input({
+    request: request({
+      requestId: "operation-request-1",
+      reason: "incident response",
+      preflightNonce: "a".repeat(32),
+      preflightSummarySha256: "b".repeat(64)
+    }),
+    execute: async () => { throw timeout; }
+  })), (error) => error === timeout);
+  assert.equal(completions[0].status, "execution_uncertain");
+  assert.deepEqual(completions[0].errorSummary, { code: "DOWNSTREAM_TIMEOUT" });
+});
+
 test("a completion persistence failure records execution_uncertain before returning a stable error", async () => {
   let sideEffects = 0;
   const completions = [];
