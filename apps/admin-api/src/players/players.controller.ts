@@ -2,10 +2,10 @@ import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, UseGuards 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Permissions, roleHasPermission } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
+import { PermissionResolver, Permissions } from "../auth/roles.decorator.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { getClientIp } from "../common/client-ip.js";
-import { badRequest, forbidden, notFound } from "../common/http-exception.js";
+import { badRequest, notFound } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
 import { getTitleDefinitions } from "./title-table.js";
 
@@ -142,7 +142,7 @@ function enrichTitle(title: any, titleDefinitions: Record<string, any>) {
 
 @ApiTags("players")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/players")
 export class PlayersController {
   constructor(
@@ -450,16 +450,14 @@ export class PlayersController {
   }
 
   @Put(":playerId/status")
-  @Permissions("players.status.update")
+  @PermissionResolver((request) => request?.body?.status === "banned"
+    ? ["players.status.update", "players.ban"]
+    : ["players.status.update"])
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
     const { status } = body || {};
 
     if (!status || !PLAYER_STATUSES.includes(status)) {
       throw badRequest("INVALID_STATUS", "status must be active, disabled, banned, or pending_review");
-    }
-
-    if (status === "banned" && !roleHasPermission(req.admin.role, "players.ban")) {
-      throw forbidden("INSUFFICIENT_PERMISSION", "Insufficient permission");
     }
 
     const player = await this.adminStore.findPlayerById(playerId);

@@ -2,8 +2,9 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGu
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
+import { extractAdminPolicyScope } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { appendSecurityAuditLog, getSecurityAuditClientIp } from "../common/security-audit.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
@@ -283,10 +284,28 @@ function normalizeTargetInstanceId(value: any) {
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function createGameAdminOptions(req: any, body: any = {}) {
+function createGameAdminOptions(req: any, body: any = {}): any {
   return {
     actor: normalizeGameAdminActor(req),
     targetInstanceId: normalizeTargetInstanceId(body?.targetInstanceId ?? body?.target_instance_id)
+  };
+}
+
+async function createGameAssertionContext(
+  req: any,
+  body: any,
+  permission: string,
+  adminStore: any,
+  targetType: string,
+  targetIds: string[]
+) {
+  return {
+    actorId: req?.admin?.sub,
+    permission,
+    scope: await extractAdminPolicyScope(req, permission, adminStore),
+    target: { targetType, targetIds },
+    requestId: body?.requestId ?? body?.request_id,
+    traceId: req?.headers?.["x-request-id"] ?? req?.headers?.["x-trace-id"]
   };
 }
 
@@ -306,7 +325,7 @@ async function preflightSingleTarget(gameAdminClient: any, gameAdminOptions: any
 
 @ApiTags("gm")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/gm")
 export class GmController {
   constructor(
@@ -375,6 +394,14 @@ export class GmController {
     const normalizedContent = content.trim();
     const normalizedSender = typeof sender === "string" && sender.trim().length > 0 ? sender.trim() : "System";
     const gameAdminOptions = createGameAdminOptions(req, body);
+    gameAdminOptions.assertionContext = await createGameAssertionContext(
+      req,
+      body,
+      "gm.broadcast",
+      this.adminStore,
+      "world",
+      ["all"]
+    );
     const globalBroadcast = await this.publishGlobalBroadcast(
       normalizedTitle,
       normalizedContent,
@@ -447,6 +474,14 @@ export class GmController {
 
     try {
       const gameAdminOptions = createGameAdminOptions(req, body);
+      gameAdminOptions.assertionContext = await createGameAssertionContext(
+        req,
+        body,
+        "gm.send_item",
+        this.adminStore,
+        "character",
+        [normalizedCharacterId]
+      );
       const gameAdminResult = await this.gameAdminClient.sendItem(
         normalizedCharacterId,
         itemId,
@@ -505,6 +540,15 @@ export class GmController {
       requestId: `gm-emergency-correction:${randomUUID()}`,
       source: "gm-emergency-correction"
     };
+    gameAdminOptions.assertionContext = await createGameAssertionContext(
+      req,
+      body,
+      "gm.asset_correction.emergency",
+      this.adminStore,
+      "character",
+      [characterId]
+    );
+    gameAdminOptions.assertionContext.requestId = gameAdminOptions.requestId;
     try {
       const gameAdminResult = await this.gameAdminClient.sendItem(
         characterId,
@@ -554,6 +598,14 @@ export class GmController {
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_kick");
     const gameAdminOptions = createGameAdminOptions(req, body);
+    gameAdminOptions.assertionContext = await createGameAssertionContext(
+      req,
+      body,
+      "gm.kick_player",
+      this.adminStore,
+      "player",
+      [normalizedPlayerId]
+    );
     const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
 
     const globalKick = await this.publishGlobalSessionKick(normalizedPlayerId, normalizedReason);
@@ -613,6 +665,14 @@ export class GmController {
     const normalizedPlayerId = normalizePlayerId(playerId);
     const normalizedReason = normalizeGmReason(reason, "gm_ban");
     const gameAdminOptions = createGameAdminOptions(req, body);
+    gameAdminOptions.assertionContext = await createGameAssertionContext(
+      req,
+      body,
+      "gm.ban_player",
+      this.adminStore,
+      "player",
+      [normalizedPlayerId]
+    );
     const targetEndpoint = await preflightSingleTarget(this.gameAdminClient, gameAdminOptions);
     const player = await this.adminStore.findPlayerById(normalizedPlayerId);
     if (!player) {

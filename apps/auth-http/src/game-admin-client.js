@@ -8,9 +8,7 @@ import { log } from "./logger.js";
 const require = createRequire(import.meta.url);
 const {
   ServerStatusReq,
-  ServerStatusRes,
-  UpdateConfigReq,
-  UpdateConfigRes
+  ServerStatusRes
 } = require("./generated/admin_pb.cjs");
 
 const MAGIC = 0xcafe;
@@ -19,13 +17,9 @@ const HEADER_LEN = 14;
 const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_REQ: 2001,
   ADMIN_SERVER_STATUS_RES: 2002,
-  ADMIN_UPDATE_CONFIG_REQ: 2003,
-  ADMIN_UPDATE_CONFIG_RES: 2004,
   ADMIN_AUTH_REQ: 2099,
   GET_ROLLOUT_DRAIN_STATUS_REQ: 1609,
   GET_ROLLOUT_DRAIN_STATUS_RES: 1610,
-  REQUEST_SERVER_SHUTDOWN_REQ: 1617,
-  REQUEST_SERVER_SHUTDOWN_RES: 1618,
   ERROR_RES: 9000
 };
 
@@ -51,14 +45,7 @@ function encodePacket(messageType, seq, body) {
 }
 
 function encodeAdminAuthBody(config) {
-  const token = config.gameAdminToken || "";
-  const actor = String(config.gameAdminActor || "").trim();
-
-  if (!actor) {
-    return Buffer.from(token, "utf8");
-  }
-
-  return Buffer.from(JSON.stringify({ token, actor }), "utf8");
+  return Buffer.from(config.gameAdminToken || "", "utf8");
 }
 
 function decodePacket(buffer) {
@@ -219,33 +206,6 @@ function readRepeatedMessages(fields, fieldNumber, decoder) {
   return (Array.isArray(value) ? value : [value]).map(decoder);
 }
 
-function encodeVarint(value) {
-  let current = BigInt(value);
-  const bytes = [];
-  while (current >= 0x80n) {
-    bytes.push(Number((current & 0x7fn) | 0x80n));
-    current >>= 7n;
-  }
-  bytes.push(Number(current));
-  return Buffer.from(bytes);
-}
-
-function encodeStringField(fieldNumber, value) {
-  if (!value) {
-    return Buffer.alloc(0);
-  }
-  const data = Buffer.from(value, "utf8");
-  return Buffer.concat([
-    encodeVarint((fieldNumber << 3) | 2),
-    encodeVarint(data.length),
-    data
-  ]);
-}
-
-function encodeRequestServerShutdownReq(reason = "") {
-  return encodeStringField(1, reason);
-}
-
 function decodeRoomRouteStatus(body) {
   const fields = decodeFieldsWithRepeated(body);
   const migrationStateValue = readUInt64(fields, 3);
@@ -283,21 +243,7 @@ export function decodeRolloutDrainStatusRes(body) {
   };
 }
 
-export function decodeRequestServerShutdownRes(body) {
-  const fields = decodeFieldsWithRepeated(body);
-
-  return {
-    ok: readBool(fields, 1),
-    errorCode: readString(fields, 2),
-    connectionCount: readUInt64(fields, 3),
-    ownedRoomCount: readUInt64(fields, 4),
-    migratingRoomCount: readUInt64(fields, 5),
-    drainModeEnabled: readBool(fields, 6),
-    retiredRoomCount: readUInt64(fields, 7)
-  };
-}
-
-async function sendAdminRequest(config, messageType, payload, expectedType, decodeMessage, endpoint = null) {
+async function sendAdminReadRequest(config, messageType, payload, expectedType, decodeMessage, endpoint = null) {
   const target = endpoint || {
     host: config.gameServerAdminHost,
     port: config.gameServerAdminPort
@@ -312,12 +258,12 @@ async function sendAdminRequest(config, messageType, payload, expectedType, deco
     await onceWritten(
       socket,
       encodePacket(MESSAGE_TYPE.ADMIN_AUTH_REQ, 0, encodeAdminAuthBody(config)),
-      config.gameAdminWriteTimeoutMs
+      config.gameAdminReadTimeoutMs
     );
     await onceWritten(
       socket,
       encodePacket(messageType, 1, Buffer.from(payload.serializeBinary())),
-      config.gameAdminWriteTimeoutMs
+      config.gameAdminReadTimeoutMs
     );
     const responseBuffer = await readSinglePacket(
       socket,
@@ -545,7 +491,7 @@ export class GameAdminClient {
 
   async getServerStatus() {
     const endpoint = await this.resolveAdminEndpoint();
-    return sendAdminRequest(
+    return sendAdminReadRequest(
       this.config,
       MESSAGE_TYPE.ADMIN_SERVER_STATUS_REQ,
       new ServerStatusReq(),
@@ -564,30 +510,9 @@ export class GameAdminClient {
     );
   }
 
-  async updateConfig(key, value) {
-    const request = new UpdateConfigReq();
-    request.setKey(key);
-    request.setValue(value);
-
-    return sendAdminRequest(
-      this.config,
-      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
-      request,
-      MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
-      (body) => {
-        const message = UpdateConfigRes.deserializeBinary(body);
-        return {
-          ok: message.getOk(),
-          errorCode: message.getErrorCode()
-        };
-      },
-      await this.resolveAdminEndpoint()
-    );
-  }
-
   async getRolloutDrainStatus() {
     const endpoint = await this.resolveAdminEndpoint();
-    return sendAdminRequest(
+    return sendAdminReadRequest(
       this.config,
       MESSAGE_TYPE.GET_ROLLOUT_DRAIN_STATUS_REQ,
       { serializeBinary: () => Buffer.alloc(0) },
@@ -597,17 +522,6 @@ export class GameAdminClient {
     );
   }
 
-  async requestServerShutdown(reason = "") {
-    const endpoint = await this.resolveAdminEndpoint();
-    return sendAdminRequest(
-      this.config,
-      MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_REQ,
-      { serializeBinary: () => encodeRequestServerShutdownReq(reason) },
-      MESSAGE_TYPE.REQUEST_SERVER_SHUTDOWN_RES,
-      decodeRequestServerShutdownRes,
-      endpoint
-    );
-  }
 }
 
 function logDiscovery(level, event, context = {}) {

@@ -7,6 +7,7 @@ export const ADMIN_STORE = Symbol("ADMIN_STORE");
 export const ADMIN_POLICY = Symbol("ADMIN_POLICY");
 export const ADMIN_SESSION_STORE = Symbol("ADMIN_SESSION_STORE");
 export const ADMIN_GAME_ADMIN_CLIENT = Symbol("ADMIN_GAME_ADMIN_CLIENT");
+export const ADMIN_OPERATION_ASSERTIONS = Symbol("ADMIN_OPERATION_ASSERTIONS");
 export const ADMIN_METRICS = Symbol("ADMIN_METRICS");
 export const ADMIN_REGISTRY = Symbol("ADMIN_REGISTRY");
 export const MYFORGE_STORE = Symbol("MYFORGE_STORE");

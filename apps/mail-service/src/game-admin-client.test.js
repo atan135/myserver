@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import net from "node:net";
 import test from "node:test";
 
 import { DbMailStore } from "./db-store.js";
 import {
   MESSAGE_TYPE,
-  buildAdminAuthBody,
+  buildMailGrantAssertion,
+  canonicalMailGrantAssertion,
   buildGrantMailAttachmentsPayload,
   computeGrantRequestFingerprint,
   gameOnlineRouteKey,
   GameAdminClient,
-  getDefaultGameAdminActor,
-  normalizeGameAdminActor,
-  normalizeServiceActorCandidate,
   sendRequest
 } from "./game-admin-client.js";
 import { configureLogger } from "./logger.js";
@@ -25,13 +24,19 @@ configureLogger({
   logLevel: "fatal"
 });
 
+const { privateKey: testMailGrantPrivateKey } = crypto.generateKeyPairSync("ed25519");
+const TEST_MAIL_GRANT_PRIVATE_KEY = testMailGrantPrivateKey.export({ type: "pkcs8", format: "pem" });
 const config = {
-  gameAdminToken: "secret-admin-token",
   serviceInstanceId: "mail-001",
   serviceName: "mail-service",
+  mailGrantAssertionIssuer: "mail-service",
+  mailGrantAssertionKeyId: "mail-service-v1",
+  mailGrantAssertionPrivateKey: TEST_MAIL_GRANT_PRIVATE_KEY,
+  mailGrantAssertionTtlMs: 60_000,
   gameServerAdminHost: "127.0.0.1",
   gameServerAdminPort: 7500
 };
+const TRANSPORT_ASSERTION = { testOnly: true };
 
 function createRedisWithGameServers(instances, routes = new Map()) {
   const instanceById = new Map(instances.map((instance) => [instance.id, instance]));
@@ -232,6 +237,7 @@ function encodeGrantQueryResponse(request, overrides = {}) {
 async function createGrantCaptureServer(label, onGrant = null, onQuery = null) {
   const requests = [];
   const queryRequests = [];
+  const assertions = [];
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
 
@@ -250,14 +256,16 @@ async function createGrantCaptureServer(label, onGrant = null, onQuery = null) {
         const body = buffer.subarray(14, packetLen);
         buffer = buffer.subarray(packetLen);
 
-        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+        if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ) {
+          assertions.push({ label, body: JSON.parse(body.toString("utf8")) });
+        } else if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ) {
           const request = JSON.parse(body.toString("utf8"));
           requests.push({ label, body: request });
           const response = onGrant ? onGrant(request) : encodeGrantResponse(request);
           if (response !== null && response !== undefined) {
             socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq, response));
           }
-        } else if (messageType === MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_REQ) {
+        } else if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ) {
           const request = decodeGrantQueryRequest(body);
           queryRequests.push({ label, body: request });
           const response = onQuery ? onQuery(request) : encodeGrantQueryResponse(request);
@@ -275,6 +283,7 @@ async function createGrantCaptureServer(label, onGrant = null, onQuery = null) {
     port: server.address().port,
     requests,
     queryRequests,
+    assertions,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
@@ -340,39 +349,41 @@ function createCrossLayerClaimService(serverPort, characterId, mailId) {
   };
 }
 
-test("admin auth body keeps legacy plain token when actor is missing", () => {
-  const body = buildAdminAuthBody(config);
-
-  assert.equal(body.toString("utf8"), "secret-admin-token");
-});
-
-test("admin auth body uses JSON envelope when actor is valid", () => {
-  const body = buildAdminAuthBody(config, " mail-service ");
-
-  assert.deepEqual(JSON.parse(body.toString("utf8")), {
-    token: "secret-admin-token",
-    actor: "mail-service"
+test("mail attachment assertion is Ed25519 signed and bound to its target and payload", () => {
+  const payload = Buffer.from('{"requestId":"mail_claim:mail-1"}', "utf8");
+  const assertion = buildMailGrantAssertion(config, payload, {
+    requestId: "mail_claim:mail-1",
+    mailId: "mail-1",
+    characterId: "chr_1",
+    attachmentFingerprint: `sha256:${"a".repeat(64)}`,
+    targetInstanceId: "game-server-a"
   });
+
+  assert.equal(assertion.service, "mail-service");
+  assert.equal(assertion.targetService, "game-server");
+  assert.equal(assertion.targetInstanceId, "game-server-a");
+  assert.equal(assertion.payloadSha256, crypto.createHash("sha256").update(payload).digest("base64url"));
+  assert.equal(
+    crypto.verify(
+      null,
+      canonicalMailGrantAssertion(assertion),
+      crypto.createPublicKey(TEST_MAIL_GRANT_PRIVATE_KEY),
+      Buffer.from(assertion.signature, "base64url")
+    ),
+    true
+  );
 });
 
-test("admin auth body falls back to plain token for invalid actor", () => {
-  const body = buildAdminAuthBody(config, "mail/service");
-
-  assert.equal(normalizeGameAdminActor("mail/service"), null);
-  assert.equal(body.toString("utf8"), "secret-admin-token");
-});
-
-test("default service actor uses normalized service identity", () => {
-  assert.equal(getDefaultGameAdminActor(config), "mail-001");
-  assert.equal(
-    getDefaultGameAdminActor({ ...config, serviceInstanceId: "mail/service 01" }),
-    "mail-service-01"
+test("mail attachment transport rejects requests without a signed assertion", async () => {
+  await assert.rejects(
+    () => sendRequest(
+      config,
+      MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
+      Buffer.from("{}"),
+      MESSAGE_TYPE.GM_SEND_ITEM_RES
+    ),
+    { code: "MAIL_GRANT_ASSERTION_REQUIRED" }
   );
-  assert.equal(
-    getDefaultGameAdminActor({ ...config, serviceInstanceId: "mail/service", serviceName: "mail service" }),
-    "mail-service"
-  );
-  assert.equal(normalizeServiceActorCandidate("mail/service 01"), "mail-service-01");
 });
 
 test("grant mail attachments payload keeps stable idempotency fields", () => {
@@ -423,15 +434,15 @@ test("mail admin client rejects response larger than configured limit", async ()
         {
           gameServerAdminHost: "127.0.0.1",
           gameServerAdminPort: port,
-          gameAdminToken: "secret-admin-token",
           gameAdminConnectTimeoutMs: 1000,
           gameAdminWriteTimeoutMs: 1000,
           gameAdminReadTimeoutMs: 1000,
           gameAdminMaxResponseBytes: 32
         },
-        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
         Buffer.from("{}"),
-        MESSAGE_TYPE.GM_SEND_ITEM_RES
+        MESSAGE_TYPE.GM_SEND_ITEM_RES,
+        { mailGrantAssertion: TRANSPORT_ASSERTION }
       ),
       { code: "GAME_ADMIN_RESPONSE_TOO_LARGE" }
     );
@@ -456,15 +467,15 @@ test("mail admin client enforces bounded response read timeout", async () => {
         {
           gameServerAdminHost: "127.0.0.1",
           gameServerAdminPort: port,
-          gameAdminToken: "secret-admin-token",
           gameAdminConnectTimeoutMs: 1000,
           gameAdminWriteTimeoutMs: 1000,
           gameAdminReadTimeoutMs: 30,
           gameAdminMaxResponseBytes: 1024
         },
-        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
         Buffer.from("{}"),
-        MESSAGE_TYPE.GM_SEND_ITEM_RES
+        MESSAGE_TYPE.GM_SEND_ITEM_RES,
+        { mailGrantAssertion: TRANSPORT_ASSERTION }
       ),
       (error) => {
         assert.equal(error.code, "GAME_ADMIN_READ_TIMEOUT");
@@ -492,7 +503,7 @@ test("mail admin client rejects mismatched response sequence", async () => {
         const messageType = buffer.readUInt16BE(4);
         const seq = buffer.readUInt32BE(6);
         buffer = buffer.subarray(packetLen);
-        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+        if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ) {
           socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq + 1, Buffer.alloc(0)));
         }
       }
@@ -507,15 +518,15 @@ test("mail admin client rejects mismatched response sequence", async () => {
         {
           gameServerAdminHost: "127.0.0.1",
           gameServerAdminPort: port,
-          gameAdminToken: "secret-admin-token",
           gameAdminConnectTimeoutMs: 1000,
           gameAdminWriteTimeoutMs: 1000,
           gameAdminReadTimeoutMs: 1000,
           gameAdminMaxResponseBytes: 1024
         },
-        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
         Buffer.from("{}"),
-        MESSAGE_TYPE.GM_SEND_ITEM_RES
+        MESSAGE_TYPE.GM_SEND_ITEM_RES,
+        { mailGrantAssertion: TRANSPORT_ASSERTION }
       ),
       { code: "UNEXPECTED_RESPONSE_SEQUENCE" }
     );
@@ -535,7 +546,7 @@ test("mail admin client rejects nonzero response flags", async () => {
         const messageType = buffer.readUInt16BE(4);
         const seq = buffer.readUInt32BE(6);
         buffer = buffer.subarray(packetLen);
-        if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
+        if (messageType === MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ) {
           socket.write(encodeTestPacket(
             MESSAGE_TYPE.GM_SEND_ITEM_RES,
             seq,
@@ -554,15 +565,15 @@ test("mail admin client rejects nonzero response flags", async () => {
         {
           gameServerAdminHost: "127.0.0.1",
           gameServerAdminPort: server.address().port,
-          gameAdminToken: "secret-admin-token",
           gameAdminConnectTimeoutMs: 1000,
           gameAdminWriteTimeoutMs: 1000,
           gameAdminReadTimeoutMs: 1000,
           gameAdminMaxResponseBytes: 1024
         },
-        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
         Buffer.from("{}"),
-        MESSAGE_TYPE.GM_SEND_ITEM_RES
+        MESSAGE_TYPE.GM_SEND_ITEM_RES,
+        { mailGrantAssertion: TRANSPORT_ASSERTION }
       ),
       { code: "INVALID_FLAGS" }
     );
@@ -582,15 +593,15 @@ test("mail admin client classifies connect refusal as route unavailable before r
       {
         gameServerAdminHost: "127.0.0.1",
         gameServerAdminPort: port,
-        gameAdminToken: "secret-admin-token",
         gameAdminConnectTimeoutMs: 1000,
         gameAdminWriteTimeoutMs: 1000,
         gameAdminReadTimeoutMs: 1000,
         gameAdminMaxResponseBytes: 1024
       },
-      MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+      MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
       Buffer.from("{}"),
-      MESSAGE_TYPE.GM_SEND_ITEM_RES
+      MESSAGE_TYPE.GM_SEND_ITEM_RES,
+      { mailGrantAssertion: TRANSPORT_ASSERTION }
     ),
     (error) => {
       assert.equal(error.code, "ECONNREFUSED");
@@ -687,6 +698,15 @@ test("GameAdminClient grantMailAttachments allows explicit target only for local
     assert.equal(serverB.requests[0].body.routeGeneration, "2");
     assert.equal(serverB.requests[0].body.routeToken, "b".repeat(64));
     assert.equal("playerId" in serverB.requests[0].body, false);
+    assert.equal(serverB.assertions.length, 1);
+    assert.equal(serverB.assertions[0].body.targetInstanceId, "game-server-b");
+    assert.equal(serverB.assertions[0].body.characterId, "chr_1");
+    assert.equal(serverB.assertions[0].body.attachmentFingerprint, serverB.requests[0].body.requestFingerprint);
+    assert.equal(
+      serverB.assertions[0].body.payloadSha256,
+      crypto.createHash("sha256").update(JSON.stringify(serverB.requests[0].body)).digest("base64url")
+    );
+    assert.equal(JSON.stringify(serverB.assertions[0].body).includes("secret-admin-token"), false);
   } finally {
     await Promise.all([serverA.close(), serverB.close()]);
   }
@@ -1218,9 +1238,31 @@ test("GameAdminClient decodes and validates grant result query protobuf over TCP
     assert.equal(server.queryRequests.length, 1);
     assert.equal(server.queryRequests[0].body.requestId, "mail_claim:mail-1");
     assert.equal(server.requests.length, 0);
+    assert.equal(server.assertions.length, 1);
+    assert.equal(server.assertions[0].body.targetInstanceId, "game-a");
+    assert.equal(server.assertions[0].body.characterId, "chr_1");
+    assert.equal(server.assertions[0].body.attachmentFingerprint, requestFingerprint);
   } finally {
     await server.close();
   }
+});
+
+test("GameAdminClient fails closed before querying when mail claim bindings are incomplete", async () => {
+  const client = new GameAdminClient(config, {
+    async scan() {
+      throw new Error("network discovery must not run");
+    }
+  });
+
+  const result = await client.queryMailAttachmentGrant(
+    "not-a-mail-claim",
+    `sha256:${"9".repeat(64)}`,
+    { traceId: "9".repeat(32) }
+  );
+
+  assert.equal(result.queryStatus, "result_unavailable");
+  assert.equal(result.errorCode, "MAIL_GRANT_QUERY_BINDING_REQUIRED");
+  assert.deepEqual(result.instanceIds, []);
 });
 
 test("GameAdminClient fails closed when game instances disagree on query result", async () => {

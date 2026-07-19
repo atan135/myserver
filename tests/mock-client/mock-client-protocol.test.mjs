@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-import { parseArgs } from "../../tools/mock-client/src/args.js";
+import { parseArgs, resolveCharacterDebugTokenDefaults } from "../../tools/mock-client/src/args.js";
 import { MESSAGE_TYPE } from "../../tools/mock-client/src/constants.js";
 import {
   parseMockClientFieldUsages
@@ -12,13 +12,17 @@ import {
   encodeAddCharacterDisciplinePointsReq,
   encodeApplyCharacterProgressReq,
   encodeCreateMatchedRoomReq,
+  encodeAdminOperationAssertion,
   encodeDebugCharacterTitleReq,
   encodeDebugApplyCharacterElementChangeReq,
   encodeEquipCharacterTitleReq,
   encodeGetCharacterDisciplinesReq,
   encodeGetCharacterTitlesReq,
   encodeGetCharacterElementsReq,
+  encodeGrantItemsReq,
+  encodeGrantItemsResultQueryReq,
   encodeLearnCharacterDisciplineReq,
+  encodeMailAttachmentGrantAssertion,
   encodeSetCharacterDisciplineActiveReq,
   encodeSwitchCharacterDisciplineReq,
   encodeRoomReconnectReq
@@ -171,6 +175,21 @@ test("mock-client defaults to public player entrypoints only", () => {
   assert.equal(options.announceBaseUrl, "");
   assert.deepEqual(options.characterIds, []);
   assert.equal(Object.prototype.hasOwnProperty.call(options, "playerIds"), false);
+});
+
+test("mock-client never reuses GAME_ADMIN_TOKEN for player debug requests", () => {
+  assert.deepEqual(
+    resolveCharacterDebugTokenDefaults({ GAME_ADMIN_TOKEN: "global-admin-token" }),
+    { elementDebugToken: "", titleDebugToken: "" }
+  );
+  assert.deepEqual(
+    resolveCharacterDebugTokenDefaults({
+      GAME_ADMIN_TOKEN: "global-admin-token",
+      MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN: "element-debug-token",
+      MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN: "title-debug-token"
+    }),
+    { elementDebugToken: "element-debug-token", titleDebugToken: "title-debug-token" }
+  );
 });
 
 test("mock-client parses matched room participants as character ids", () => {
@@ -360,6 +379,50 @@ test("mock-client defines contiguous character title and discipline message type
       1431, 1432, 1433, 1434
     ]
   );
+});
+
+test("mock-client encodes and rejects assertion-only admin control packets", () => {
+  assert.deepEqual(
+    [
+      MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ,
+      MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ,
+      MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
+      MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ
+    ],
+    [2097, 2098, 3011, 3013]
+  );
+
+  const adminAssertion = { operationId: "admin-op-1", signature: "sig" };
+  const mailAssertion = { operationId: "mail-op-1", signature: "sig" };
+  const grant = {
+    requestId: "mail_claim:mail-1",
+    characterId: "chr_1",
+    items: [{ itemId: 1001, count: 2, binded: true }]
+  };
+  assert.deepEqual(JSON.parse(encodeAdminOperationAssertion(adminAssertion).toString("utf8")), adminAssertion);
+  assert.deepEqual(JSON.parse(encodeMailAttachmentGrantAssertion(mailAssertion).toString("utf8")), mailAssertion);
+  assert.deepEqual(JSON.parse(encodeGrantItemsReq(grant).toString("utf8")), grant);
+
+  const queryFields = decodeFieldsWithRepeated(encodeGrantItemsResultQueryReq({
+    requestId: "mail_claim:mail-1",
+    requestFingerprint: "sha256:abc",
+    traceId: "trace-1"
+  }));
+  assert.equal(readString(queryFields, 1), "mail_claim:mail-1");
+  assert.equal(readString(queryFields, 2), "sha256:abc");
+  assert.equal(readString(queryFields, 3), "trace-1");
+
+  for (const messageType of [
+    MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ,
+    MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ,
+    MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
+    MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ
+  ]) {
+    assert.throws(
+      () => decodeByMessageType(messageType, Buffer.alloc(0)),
+      new RegExp(`UNEXPECTED_INBOUND_ADMIN_CONTROL_PACKET:${messageType}`)
+    );
+  }
 });
 
 test("mock-client defines and decodes character push messages", () => {

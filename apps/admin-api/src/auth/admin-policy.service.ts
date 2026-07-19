@@ -44,6 +44,7 @@ export type AdminPolicyDecision = {
     | "PERMISSION_INACTIVE"
     | "INVALID_PERMISSION_CATALOG"
     | "SCOPE_REQUIRED"
+    | "PERMISSION_DENIED"
     | "SCOPE_DENIED";
   permissionKey: string;
   matchedGrant?: {
@@ -230,14 +231,24 @@ function normalizeRequest(scope: AdminPolicyScopeRequest = {}) {
   };
 }
 
-function scopeMatches(granted: AdminPolicyScope, request: ReturnType<typeof normalizeRequest>): boolean {
-  return request.targetCount <= granted.maxTargets &&
-    listMatches(granted.worldIds, request.worldIds) &&
-    listMatches(granted.serviceNames, request.serviceNames) &&
-    listMatches(granted.instanceIds, request.instanceIds) &&
-    listMatches(granted.fieldAllowlist, request.fields) &&
-    listMatches(granted.targetTypes, request.targetTypes) &&
-    listMatches(granted.targetIds, request.targetIds);
+function scopeMatches(
+  granted: AdminPolicyScope,
+  request: ReturnType<typeof normalizeRequest>,
+  dimensions: readonly string[]
+): boolean {
+  if (request.targetCount > granted.maxTargets) {
+    return false;
+  }
+
+  const matches = {
+    world_ids: () => listMatches(granted.worldIds, request.worldIds),
+    service_names: () => listMatches(granted.serviceNames, request.serviceNames),
+    instance_ids: () => listMatches(granted.instanceIds, request.instanceIds),
+    field_allowlist: () => listMatches(granted.fieldAllowlist, request.fields),
+    target_types: () => listMatches(granted.targetTypes, request.targetTypes),
+    target_ids: () => listMatches(granted.targetIds, request.targetIds)
+  };
+  return dimensions.every((dimension) => matches[dimension as keyof typeof matches]?.() === true);
 }
 
 @Injectable()
@@ -277,10 +288,13 @@ export class AdminPolicyService {
     }
 
     const grants = await this.adminStore.listEffectiveAdminPolicyGrants(adminId, permissionKey) as PolicyGrant[];
+    if (grants.length === 0) {
+      return { allowed: false, code: "PERMISSION_DENIED", permissionKey };
+    }
     for (const grant of grants) {
       try {
         const scope = normalizeAdminPolicyScope(grant.scope_json);
-        if (scopeMatches(scope, request)) {
+        if (scopeMatches(scope, request, dimensions)) {
           return {
             allowed: true,
             code: "ALLOWED",

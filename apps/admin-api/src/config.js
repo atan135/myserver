@@ -434,6 +434,10 @@ function validateProductionConfig(config) {
     errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
   }
 
+  if (!String(config.adminAssertionPrivateKey || "").trim()) {
+    errors.push("ADMIN_ASSERTION_PRIVATE_KEY must be configured in production");
+  }
+
   const gameProxyAdminToken = String(config.gameProxyAdminToken || "").trim();
   const gameProxyAdminReadToken = String(config.gameProxyAdminReadToken || "").trim();
   if (gameProxyAdminReadToken && DEFAULT_GAME_PROXY_ADMIN_TOKENS.has(gameProxyAdminReadToken)) {
@@ -556,6 +560,10 @@ export function getConfig() {
     disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
+    adminAssertionIssuer: process.env.ADMIN_ASSERTION_ISSUER || "admin-api",
+    adminAssertionKeyId: process.env.ADMIN_ASSERTION_KEY_ID || "admin-api-v1",
+    adminAssertionPrivateKey: process.env.ADMIN_ASSERTION_PRIVATE_KEY || "",
+    adminAssertionTtlMs: parsePositiveIntegerWithFallback(process.env.ADMIN_ASSERTION_TTL_MS, 60000),
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),

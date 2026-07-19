@@ -2,13 +2,13 @@ import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { MonitoringService } from "./monitoring.service.js";
 
 @ApiTags("monitoring")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/admin/monitoring")
 export class MonitoringController {
   constructor(private readonly monitoringService: MonitoringService) {}

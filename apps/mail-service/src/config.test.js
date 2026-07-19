@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
+
+const { privateKey: testMailGrantPrivateKey } = crypto.generateKeyPairSync("ed25519");
+const TEST_MAIL_GRANT_PRIVATE_KEY = testMailGrantPrivateKey.export({ type: "pkcs8", format: "pem" });
 
 const CONFIG_ENV_NAMES = [
   "NODE_ENV",
   "APP_ENV",
-  "GAME_ADMIN_ACTOR",
-  "GAME_ADMIN_TOKEN",
+  "MAIL_GRANT_ASSERTION_ISSUER",
+  "MAIL_GRANT_ASSERTION_KEY_ID",
+  "MAIL_GRANT_ASSERTION_PRIVATE_KEY",
+  "MAIL_GRANT_ASSERTION_TTL_MS",
   "GAME_ADMIN_CONNECT_TIMEOUT_MS",
   "GAME_ADMIN_WRITE_TIMEOUT_MS",
   "GAME_ADMIN_READ_TIMEOUT_MS",
@@ -216,12 +222,24 @@ test("mail-service rejects invalid notification outbox settings", async () => {
   );
 });
 
-test("mail-service config reads optional game admin actor", async () => {
-  await withEnv({ GAME_ADMIN_ACTOR: "mail-ops" }, (getConfig) => {
+test("mail-service config reads bounded mail attachment assertion settings", async () => {
+  await withEnv({
+    MAIL_GRANT_ASSERTION_ISSUER: "mail-service-test",
+    MAIL_GRANT_ASSERTION_KEY_ID: "mail-service-test-v2",
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY,
+    MAIL_GRANT_ASSERTION_TTL_MS: "45000"
+  }, (getConfig) => {
     const config = getConfig();
 
-    assert.equal(config.gameAdminActor, "mail-ops");
+    assert.equal(config.mailGrantAssertionIssuer, "mail-service-test");
+    assert.equal(config.mailGrantAssertionKeyId, "mail-service-test-v2");
+    assert.equal(config.mailGrantAssertionPrivateKey, TEST_MAIL_GRANT_PRIVATE_KEY);
+    assert.equal(config.mailGrantAssertionTtlMs, 45000);
   });
+  await assert.rejects(
+    () => withEnv({ MAIL_GRANT_ASSERTION_TTL_MS: "500" }, (getConfig) => getConfig()),
+    /MAIL_GRANT_ASSERTION_TTL_MS must be an integer between 1000 and 300000/
+  );
 });
 
 test("mail-service game admin network limits fall back on invalid values", async () => {
@@ -491,7 +509,8 @@ test("mail-service production environment ignores DISCOVERY_REQUIRED=false overr
       TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
       MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
       MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
-      MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy"
+      MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
+      MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY
     }, (getConfig) => getConfig()),
     /DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true/
   );
@@ -526,7 +545,7 @@ test("mail-service production requires distinct operations and high-risk credent
     MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
     MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
     MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
-    GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy"
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: TEST_MAIL_GRANT_PRIVATE_KEY
   };
   await withEnv(base, (getConfig) => assert.equal(getConfig().mailOperationsToken, base.MAIL_OPERATIONS_TOKEN));
   await assert.rejects(
@@ -536,6 +555,10 @@ test("mail-service production requires distinct operations and high-risk credent
   await assert.rejects(
     () => withEnv({ ...base, MAIL_OPERATIONS_TOKEN: base.MAIL_SERVICE_TOKEN }, (getConfig) => getConfig()),
     /MAIL_OPERATIONS_TOKEN must not reuse/
+  );
+  await assert.rejects(
+    () => withEnv({ ...base, MAIL_GRANT_ASSERTION_PRIVATE_KEY: "not-an-ed25519-private-key" }, (getConfig) => getConfig()),
+    /MAIL_GRANT_ASSERTION_PRIVATE_KEY must contain a valid Ed25519 private key/
   );
 });
 

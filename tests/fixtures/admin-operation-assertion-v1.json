@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "description": "Cross-language AdminOperationAssertion Ed25519 fixture. It contains only a public key and signatures generated from the RFC 8032 test-vector seed; no private key is stored.",
+  "key": {
+    "issuer": "admin-api",
+    "keyId": "admin-api-fixture-v1",
+    "publicKeyBase64url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+  },
+  "verificationNowMs": 1700000001000,
+  "cases": {
+    "gameServerPacket": {
+      "packet": {
+        "messageType": 3003,
+        "bodyUtf8": "{\"characterId\":\"chr_fixture_001\",\"itemId\":\"1001\",\"itemCount\":2,\"reason\":\"fixture\"}"
+      },
+      "assertion": {
+        "version": 1,
+        "operationId": "op-fixture-gs-001",
+        "requestId": "req-fixture-gs-001",
+        "traceId": "trace-fixture-gs-001",
+        "issuer": "admin-api",
+        "keyId": "admin-api-fixture-v1",
+        "actorId": "admin-7",
+        "permission": "gm.send_item",
+        "scope": {
+          "worldIds": ["world-fixture"],
+          "serviceNames": ["game-server"],
+          "instanceIds": ["game-server-fixture"],
+          "fieldAllowlist": ["*"],
+          "targetTypes": ["character"],
+          "targetIds": ["chr_fixture_001"],
+          "maxTargets": 1
+        },
+        "target": {
+          "service": "game-server",
+          "instanceId": "game-server-fixture",
+          "worldId": "world-fixture",
+          "targetType": "character",
+          "targetIds": ["chr_fixture_001"]
+        },
+        "service": "game-server",
+        "instanceId": "game-server-fixture",
+        "issuedAtMs": 1700000000000,
+        "expiresAtMs": 1700000060000,
+        "payloadSha256": "i1EeaLtcevpWzbS28i7x5WL--Z-vg5nzeV6SAGz8sYs",
+        "signature": "CQ92lzsJ1DLtahjN4i24ZoINiKdSDVLK1iSZNQ_elzylCyhwJGD1ze0eH_vkdqwtq1Fa94ODD2cDVzmbkBnJBg"
+      },
+      "expectedCanonicalPayloadUtf8": "[1,\"op-fixture-gs-001\",\"req-fixture-gs-001\",\"trace-fixture-gs-001\",\"admin-api\",\"admin-api-fixture-v1\",\"admin-7\",\"gm.send_item\",{\"fieldAllowlist\":[\"*\"],\"instanceIds\":[\"game-server-fixture\"],\"maxTargets\":1,\"serviceNames\":[\"game-server\"],\"targetIds\":[\"chr_fixture_001\"],\"targetTypes\":[\"character\"],\"worldIds\":[\"world-fixture\"]},{\"instanceId\":\"game-server-fixture\",\"service\":\"game-server\",\"targetIds\":[\"chr_fixture_001\"],\"targetType\":\"character\",\"worldId\":\"world-fixture\"},\"game-server\",\"game-server-fixture\",1700000000000,1700000060000,\"i1EeaLtcevpWzbS28i7x5WL--Z-vg5nzeV6SAGz8sYs\"]",
+      "assertionHeaderValue": "eyJ2ZXJzaW9uIjoxLCJvcGVyYXRpb25JZCI6Im9wLWZpeHR1cmUtZ3MtMDAxIiwicmVxdWVzdElkIjoicmVxLWZpeHR1cmUtZ3MtMDAxIiwidHJhY2VJZCI6InRyYWNlLWZpeHR1cmUtZ3MtMDAxIiwiaXNzdWVyIjoiYWRtaW4tYXBpIiwia2V5SWQiOiJhZG1pbi1hcGktZml4dHVyZS12MSIsImFjdG9ySWQiOiJhZG1pbi03IiwicGVybWlzc2lvbiI6ImdtLnNlbmRfaXRlbSIsInNjb3BlIjp7IndvcmxkSWRzIjpbIndvcmxkLWZpeHR1cmUiXSwic2VydmljZU5hbWVzIjpbImdhbWUtc2VydmVyIl0sImluc3RhbmNlSWRzIjpbImdhbWUtc2VydmVyLWZpeHR1cmUiXSwiZmllbGRBbGxvd2xpc3QiOlsiKiJdLCJ0YXJnZXRUeXBlcyI6WyJjaGFyYWN0ZXIiXSwidGFyZ2V0SWRzIjpbImNocl9maXh0dXJlXzAwMSJdLCJtYXhUYXJnZXRzIjoxfSwidGFyZ2V0Ijp7InNlcnZpY2UiOiJnYW1lLXNlcnZlciIsImluc3RhbmNlSWQiOiJnYW1lLXNlcnZlci1maXh0dXJlIiwid29ybGRJZCI6IndvcmxkLWZpeHR1cmUiLCJ0YXJnZXRUeXBlIjoiY2hhcmFjdGVyIiwidGFyZ2V0SWRzIjpbImNocl9maXh0dXJlXzAwMSJdfSwic2VydmljZSI6ImdhbWUtc2VydmVyIiwiaW5zdGFuY2VJZCI6ImdhbWUtc2VydmVyLWZpeHR1cmUiLCJpc3N1ZWRBdE1zIjoxNzAwMDAwMDAwMDAwLCJleHBpcmVzQXRNcyI6MTcwMDAwMDA2MDAwMCwicGF5bG9hZFNoYTI1NiI6ImkxRWVhTHRjZXZwV3piUzI4aTd4NVdMLS1aLXZnNW56ZVY2U0FHejhzWXMiLCJzaWduYXR1cmUiOiJDUTkybHpzSjFETHRhaGpONGkyNFpvSU5pS2RTRFZMSzFpU1pOUV9lbHp5bEN5aHdKR0QxemUwZUhfdmtkcXd0cTFGYTk0T0REMmNEVnptYmtCbkpCZyJ9"
+    },
+    "gameProxyHttp": {
+      "http": {
+        "method": "POST",
+        "requestTarget": "/maintenance/on",
+        "bodyUtf8": ""
+      },
+      "assertion": {
+        "version": 1,
+        "operationId": "op-fixture-proxy-001",
+        "requestId": "req-fixture-proxy-001",
+        "traceId": "trace-fixture-proxy-001",
+        "issuer": "admin-api",
+        "keyId": "admin-api-fixture-v1",
+        "actorId": "admin-7",
+        "permission": "proxy.maintenance.write",
+        "scope": {
+          "worldIds": ["world-fixture"],
+          "serviceNames": ["game-proxy"],
+          "instanceIds": ["game-proxy-fixture"],
+          "fieldAllowlist": ["*"],
+          "targetTypes": ["service"],
+          "targetIds": ["game-proxy-fixture"],
+          "maxTargets": 1
+        },
+        "target": {
+          "service": "game-proxy",
+          "instanceId": "game-proxy-fixture",
+          "worldId": "world-fixture",
+          "targetType": "service",
+          "targetIds": ["game-proxy-fixture"]
+        },
+        "service": "game-proxy",
+        "instanceId": "game-proxy-fixture",
+        "issuedAtMs": 1700000000000,
+        "expiresAtMs": 1700000060000,
+        "payloadSha256": "VRUfWMdlwmxMVLT83mftaXlwkeVQs-I0dm7pZx3jE0g",
+        "signature": "dP0urm_41m8LAN6k9Cah9-2Fm9u9dWsrXANJtWsFtC6gYC4jPsK2DPp4XylxN_Grvner5GFrjcwASEZBl0mzAQ"
+      },
+      "expectedCanonicalPayloadUtf8": "[1,\"op-fixture-proxy-001\",\"req-fixture-proxy-001\",\"trace-fixture-proxy-001\",\"admin-api\",\"admin-api-fixture-v1\",\"admin-7\",\"proxy.maintenance.write\",{\"fieldAllowlist\":[\"*\"],\"instanceIds\":[\"game-proxy-fixture\"],\"maxTargets\":1,\"serviceNames\":[\"game-proxy\"],\"targetIds\":[\"game-proxy-fixture\"],\"targetTypes\":[\"service\"],\"worldIds\":[\"world-fixture\"]},{\"instanceId\":\"game-proxy-fixture\",\"service\":\"game-proxy\",\"targetIds\":[\"game-proxy-fixture\"],\"targetType\":\"service\",\"worldId\":\"world-fixture\"},\"game-proxy\",\"game-proxy-fixture\",1700000000000,1700000060000,\"VRUfWMdlwmxMVLT83mftaXlwkeVQs-I0dm7pZx3jE0g\"]",
+      "assertionHeaderValue": "eyJ2ZXJzaW9uIjoxLCJvcGVyYXRpb25JZCI6Im9wLWZpeHR1cmUtcHJveHktMDAxIiwicmVxdWVzdElkIjoicmVxLWZpeHR1cmUtcHJveHktMDAxIiwidHJhY2VJZCI6InRyYWNlLWZpeHR1cmUtcHJveHktMDAxIiwiaXNzdWVyIjoiYWRtaW4tYXBpIiwia2V5SWQiOiJhZG1pbi1hcGktZml4dHVyZS12MSIsImFjdG9ySWQiOiJhZG1pbi03IiwicGVybWlzc2lvbiI6InByb3h5Lm1haW50ZW5hbmNlLndyaXRlIiwic2NvcGUiOnsid29ybGRJZHMiOlsid29ybGQtZml4dHVyZSJdLCJzZXJ2aWNlTmFtZXMiOlsiZ2FtZS1wcm94eSJdLCJpbnN0YW5jZUlkcyI6WyJnYW1lLXByb3h5LWZpeHR1cmUiXSwiZmllbGRBbGxvd2xpc3QiOlsiKiJdLCJ0YXJnZXRUeXBlcyI6WyJzZXJ2aWNlIl0sInRhcmdldElkcyI6WyJnYW1lLXByb3h5LWZpeHR1cmUiXSwibWF4VGFyZ2V0cyI6MX0sInRhcmdldCI6eyJzZXJ2aWNlIjoiZ2FtZS1wcm94eSIsImluc3RhbmNlSWQiOiJnYW1lLXByb3h5LWZpeHR1cmUiLCJ3b3JsZElkIjoid29ybGQtZml4dHVyZSIsInRhcmdldFR5cGUiOiJzZXJ2aWNlIiwidGFyZ2V0SWRzIjpbImdhbWUtcHJveHktZml4dHVyZSJdfSwic2VydmljZSI6ImdhbWUtcHJveHkiLCJpbnN0YW5jZUlkIjoiZ2FtZS1wcm94eS1maXh0dXJlIiwiaXNzdWVkQXRNcyI6MTcwMDAwMDAwMDAwMCwiZXhwaXJlc0F0TXMiOjE3MDAwMDAwNjAwMDAsInBheWxvYWRTaGEyNTYiOiJWUlVmV01kbHdteE1WTFQ4M21mdGFYbHdrZVZRcy1JMGRtN3BaeDNqRTBnIiwic2lnbmF0dXJlIjoiZFAwdXJtXzQxbThMQU42azlDYWg5LTJGbTl1OWRXc3JYQU5KdFdzRnRDNmdZQzRqUHNLMkRQcDRYeWx4Tl9HcnZuZXI1R0ZyamN3QVNFWkJsMG16QVEifQ"
+    }
+  }
+}

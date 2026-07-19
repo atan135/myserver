@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 
 pub const DEFAULT_TICKET_SECRET: &str = "dev-only-change-this-ticket-secret";
@@ -21,6 +22,12 @@ pub struct Config {
     pub admin_advertised_host: String,
     pub admin_port: u16,
     pub admin_token: String,
+    pub admin_assertion_issuer: String,
+    pub admin_assertion_public_keys: HashMap<String, String>,
+    pub admin_assertion_max_ttl_ms: u64,
+    pub mail_grant_assertion_issuer: String,
+    pub mail_grant_assertion_public_keys: HashMap<String, String>,
+    pub mail_grant_assertion_max_ttl_ms: u64,
     pub admin_audit_enabled: bool,
     pub admin_audit_path: String,
     pub admin_audit_require_actor: bool,
@@ -116,6 +123,30 @@ fn parse_non_empty_string(name: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+fn parse_admin_assertion_public_keys(raw: Option<&str>) -> Result<HashMap<String, String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(HashMap::new());
+    };
+    let parsed: HashMap<String, String> = serde_json::from_str(raw).map_err(|_| {
+        "ADMIN_ASSERTION_PUBLIC_KEYS_JSON must be a JSON object mapping key ids to Ed25519 public keys"
+            .to_string()
+    })?;
+    if parsed.iter().any(|(key_id, key)| {
+        key_id.trim().is_empty()
+            || key_id.len() > 128
+            || key.trim().is_empty()
+            || key.trim().len() > 512
+    }) {
+        return Err(
+            "ADMIN_ASSERTION_PUBLIC_KEYS_JSON contains an invalid key id or public key".to_string(),
+        );
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(key_id, key)| (key_id.trim().to_string(), key.trim().to_string()))
+        .collect())
+}
+
 fn parse_first_non_empty_string(names: &[&str], default: &str) -> String {
     names
         .iter()
@@ -182,6 +213,21 @@ impl Config {
             .unwrap_or(7500);
         let admin_token =
             env::var("GAME_ADMIN_TOKEN").unwrap_or_else(|_| DEFAULT_ADMIN_TOKEN.to_string());
+        let admin_assertion_issuer = parse_non_empty_string("ADMIN_ASSERTION_ISSUER", "admin-api");
+        let admin_assertion_public_keys = parse_admin_assertion_public_keys(
+            env::var("ADMIN_ASSERTION_PUBLIC_KEYS_JSON").ok().as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("invalid game-server assertion config: {error}"));
+        let admin_assertion_max_ttl_ms = parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000)
+            .clamp(1_000, 300_000);
+        let mail_grant_assertion_issuer =
+            parse_non_empty_string("MAIL_GRANT_ASSERTION_ISSUER", "mail-service");
+        let mail_grant_assertion_public_keys = parse_admin_assertion_public_keys(
+            env::var("MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON").ok().as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("invalid game-server mail grant assertion config: {error}"));
+        let mail_grant_assertion_max_ttl_ms = parse_u64("MAIL_GRANT_ASSERTION_MAX_TTL_MS", 60_000)
+            .clamp(1_000, 300_000);
         let admin_audit_enabled = parse_bool("GAME_ADMIN_AUDIT_ENABLED", true);
         let admin_audit_path = env::var("GAME_ADMIN_AUDIT_PATH")
             .unwrap_or_else(|_| "logs/game-server/admin-audit.jsonl".to_string());
@@ -268,6 +314,12 @@ impl Config {
             admin_advertised_host,
             admin_port,
             admin_token,
+            admin_assertion_issuer,
+            admin_assertion_public_keys,
+            admin_assertion_max_ttl_ms,
+            mail_grant_assertion_issuer,
+            mail_grant_assertion_public_keys,
+            mail_grant_assertion_max_ttl_ms,
             admin_audit_enabled,
             admin_audit_path,
             admin_audit_require_actor,
@@ -467,6 +519,24 @@ fn validate_production_config(config: &Config) {
         errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
     }
 
+    for name in [
+        "MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN",
+        "MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN",
+    ] {
+        if env::var(name).ok().is_some_and(|value| !value.trim().is_empty()) {
+            errors.push("character debug tokens must not be configured in production");
+            break;
+        }
+    }
+
+    if config.admin_assertion_public_keys.is_empty() {
+        errors.push("ADMIN_ASSERTION_PUBLIC_KEYS_JSON must contain at least one Ed25519 key in production");
+    }
+
+    if config.mail_grant_assertion_public_keys.is_empty() {
+        errors.push("MAIL_GRANT_ASSERTION_PUBLIC_KEYS_JSON must contain at least one Ed25519 key in production");
+    }
+
     if !config.admin_audit_enabled {
         errors.push("GAME_ADMIN_AUDIT_ENABLED=false is not allowed in production");
     }
@@ -559,6 +629,8 @@ mod tests {
         "REDIS_KEY_PREFIX",
         "TICKET_SECRET",
         "GAME_ADMIN_TOKEN",
+        "MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN",
+        "MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN",
         "GAME_ADMIN_AUDIT_ENABLED",
         "GAME_ADMIN_AUDIT_PATH",
         "GAME_ADMIN_AUDIT_REQUIRE_ACTOR",
@@ -1206,6 +1278,26 @@ mod tests {
         assert_eq!(config.ticket_secret, "prod-ticket-secret-123");
         assert_eq!(config.admin_token, "prod-game-admin-token-123");
         assert_eq!(config.internal_token, "prod-game-internal-token-123");
+    }
+
+    #[test]
+    fn rejects_character_debug_tokens_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(SECURITY_ENV_NAMES);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN", "development-only-debug-token");
+            env::remove_var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN");
+            env::set_var("GAME_ADMIN_AUDIT_ENABLED", "true");
+        }
+        set_custom_production_tokens();
+        set_valid_production_infra();
+
+        let error = panic_message(catch_config_from_env());
+
+        assert!(error.contains("character debug tokens must not be configured in production"));
     }
 
     #[test]

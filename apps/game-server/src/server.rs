@@ -572,6 +572,16 @@ pub async fn run(
         config.redis_key_prefix.clone(),
         config.service_instance_id.clone(),
         config.admin_token.clone(),
+        crate::admin_server::AdminAssertionVerifier::new(
+            config.admin_assertion_issuer.clone(),
+            &config.admin_assertion_public_keys,
+            config.admin_assertion_max_ttl_ms,
+        ),
+        crate::admin_server::MailGrantAssertionVerifier::new(
+            config.mail_grant_assertion_issuer.clone(),
+            &config.mail_grant_assertion_public_keys,
+            config.mail_grant_assertion_max_ttl_ms,
+        ),
         crate::admin_server::AdminAuditLogger::new(crate::admin_server::AdminAuditConfig::new(
             config.admin_audit_enabled,
             config.admin_audit_path.clone(),

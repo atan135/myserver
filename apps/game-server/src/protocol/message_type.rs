@@ -100,6 +100,8 @@ pub enum MessageType {
     AdminServerStatusRes = 2002,
     AdminUpdateConfigReq = 2003,
     AdminUpdateConfigRes = 2004,
+    MailAttachmentGrantAssertionReq = 2097,
+    AdminOperationAssertionReq = 2098,
     AdminAuthReq = 2099,
     InternalAuthReq = 2199,
     GmBroadcastReq = 3001,
@@ -112,6 +114,8 @@ pub enum MessageType {
     GmBanPlayerRes = 3008,
     GrantItemsResultQueryReq = 3009,
     GrantItemsResultQueryRes = 3010,
+    MailAttachmentGrantReq = 3011,
+    MailAttachmentGrantResultQueryReq = 3013,
     ErrorRes = 9000,
 }
 
@@ -218,6 +222,8 @@ impl MessageType {
             2002 => Some(Self::AdminServerStatusRes),
             2003 => Some(Self::AdminUpdateConfigReq),
             2004 => Some(Self::AdminUpdateConfigRes),
+            2097 => Some(Self::MailAttachmentGrantAssertionReq),
+            2098 => Some(Self::AdminOperationAssertionReq),
             2099 => Some(Self::AdminAuthReq),
             2199 => Some(Self::InternalAuthReq),
             3001 => Some(Self::GmBroadcastReq),
@@ -230,6 +236,8 @@ impl MessageType {
             3008 => Some(Self::GmBanPlayerRes),
             3009 => Some(Self::GrantItemsResultQueryReq),
             3010 => Some(Self::GrantItemsResultQueryRes),
+            3011 => Some(Self::MailAttachmentGrantReq),
+            3013 => Some(Self::MailAttachmentGrantResultQueryReq),
             9000 => Some(Self::ErrorRes),
             _ => None,
         }

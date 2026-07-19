@@ -2,8 +2,8 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Param, Post, Req, UseGu
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest, notFound } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_SESSION_STORE, ADMIN_STORE } from "../tokens.js";
@@ -84,7 +84,7 @@ function toAdminSummary(admin: any) {
 
 @ApiTags("admins")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/admins")
 export class AdminsController {
   constructor(

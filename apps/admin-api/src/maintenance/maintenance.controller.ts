@@ -2,8 +2,8 @@ import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Post, Req, UseGuar
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { badRequest } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
@@ -28,7 +28,7 @@ function normalizeReason(value: unknown): string | null {
 
 @ApiTags("maintenance")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/maintenance")
 export class MaintenanceController {
   constructor(

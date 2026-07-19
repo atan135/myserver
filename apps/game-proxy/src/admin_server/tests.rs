@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 use super::{
     AdminAuditConfig, AdminAuditLogger, AdminAuthConfig, AdminPermission, AdminRequestContext,
+    AdminAssertionVerifier,
     admin_request_context, admin_route_requirement, audit_ok, audit_write_failed, authorize,
     authorize_method, authorize_route, handle_character_route_upsert, handle_connection,
     handle_rollout_complete_if_drained, handle_rollout_start, handle_rollout_state,
@@ -80,6 +81,14 @@ fn scoped_auth_config(token: &str, permissions: Vec<AdminPermissionScope>) -> Ad
             permissions,
         }],
     )
+}
+
+fn assertion_verifier() -> Arc<AdminAssertionVerifier> {
+    Arc::new(AdminAssertionVerifier::new(
+        "admin-api".to_string(),
+        &HashMap::new(),
+        60_000,
+    ))
 }
 
 #[derive(Default)]
@@ -286,6 +295,8 @@ async fn rollout_end_reports_conflict_when_routes_are_not_drained() {
             connection_count,
             maintenance,
             auth_config,
+            assertion_verifier(),
+            "game-proxy-test".to_string(),
             audit_logger,
             None,
         )
@@ -310,8 +321,8 @@ async fn rollout_end_reports_conflict_when_routes_are_not_drained() {
 
     let (_, response) = tokio::join!(server, client);
 
-    assert_eq!(status_code(&response), 409);
-    assert!(response.ends_with("ROLLOUT_NOT_DRAINED"));
+    assert_eq!(status_code(&response), 401);
+    assert!(response.ends_with("ADMIN_ASSERTION_UNAUTHENTICATED"));
     assert!(store_for_assert.get_rollout_session().await.is_some());
 }
 
@@ -800,7 +811,7 @@ async fn writes_admin_audit_jsonl_fields() {
 }
 
 #[tokio::test]
-async fn required_actor_rejects_write_before_state_change() {
+async fn legacy_token_only_write_is_rejected_before_state_change() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let route_store = route_store().await;
@@ -826,6 +837,8 @@ async fn required_actor_rejects_write_before_state_change() {
             connection_count,
             maintenance.clone(),
             auth_config,
+            assertion_verifier(),
+            "game-proxy-test".to_string(),
             audit_logger,
             None,
         )
@@ -849,23 +862,14 @@ async fn required_actor_rejects_write_before_state_change() {
 
     let (_, response) = tokio::join!(server, client);
 
-    assert_eq!(status_code(&response), 400);
-    assert!(response.ends_with("missing X-Admin-Actor"));
-
-    let content = tokio::fs::read_to_string(&audit_path).await.unwrap();
-    let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
-    assert_eq!(event["actor"], "unknown");
-    assert_eq!(event["actor_missing"], true);
-    assert_eq!(event["path"], "/maintenance/on");
-    assert_eq!(event["action"], "admin_actor_required");
-    assert_eq!(event["result"], "error");
-    assert_eq!(event["error"], "missing X-Admin-Actor");
+    assert_eq!(status_code(&response), 401);
+    assert!(response.ends_with("ADMIN_ASSERTION_UNAUTHENTICATED"));
 
     let _ = tokio::fs::remove_file(&audit_path).await;
 }
 
 #[tokio::test]
-async fn scoped_permission_denial_is_audited_without_token() {
+async fn scoped_token_cannot_authorize_proxy_write() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let route_store = route_store().await;
@@ -895,6 +899,8 @@ async fn scoped_permission_denial_is_audited_without_token() {
             connection_count,
             maintenance,
             auth_config,
+            assertion_verifier(),
+            "game-proxy-test".to_string(),
             audit_logger,
             None,
         )
@@ -919,18 +925,8 @@ async fn scoped_permission_denial_is_audited_without_token() {
 
     let (_, response) = tokio::join!(server, client);
 
-    assert_eq!(status_code(&response), 403);
-    assert!(response.ends_with("insufficient admin permission"));
-
-    let content = tokio::fs::read_to_string(&audit_path).await.unwrap();
-    assert!(!content.contains(scoped_token));
-    let event: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
-    assert_eq!(event["actor"], "ops@example.com");
-    assert_eq!(event["method"], "POST");
-    assert_eq!(event["path"], "/rollout/start");
-    assert_eq!(event["action"], "rollout_start");
-    assert_eq!(event["result"], "error");
-    assert_eq!(event["error"], "insufficient_permission");
+    assert_eq!(status_code(&response), 401);
+    assert!(response.ends_with("ADMIN_ASSERTION_UNAUTHENTICATED"));
 
     let _ = tokio::fs::remove_file(&audit_path).await;
 }

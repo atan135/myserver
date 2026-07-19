@@ -2,8 +2,8 @@ import { Controller, Get, Inject, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException, badRequest } from "../common/http-exception.js";
 import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
@@ -78,7 +78,7 @@ function normalizeFilters(query: any) {
 
 @ApiTags("assets")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/assets")
 export class AssetLedgerController {
   constructor(

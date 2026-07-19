@@ -15,7 +15,7 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { Permissions } from "../auth/roles.decorator.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { RolesGuard } from "../auth/roles.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException } from "../common/http-exception.js";
 import { ADMIN_CONFIG, MYFORGE_ORCHESTRATOR } from "../tokens.js";
@@ -45,7 +45,7 @@ function toHttpException(error: any): Error {
 
 @ApiTags("myforge")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/myforge")
 export class MyforgeController {
   constructor(

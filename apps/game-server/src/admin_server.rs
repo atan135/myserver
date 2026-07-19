@@ -25,22 +25,27 @@ use crate::protocol::MessageType;
 use crate::server::RuntimeConfig;
 
 mod audit;
+mod assertion;
 mod auth;
 mod gm;
+mod mail_assertion;
 mod protocol_io;
 mod rollout_status;
 mod runtime_config;
 
 pub use audit::{AdminAuditConfig, AdminAuditLogger};
+pub(crate) use assertion::AdminAssertionVerifier;
+pub(crate) use mail_assertion::MailGrantAssertionVerifier;
 
 use audit::{
     AdminAuditTarget, audit_then_write_error, audit_then_write_message, ensure_admin_write_allowed,
 };
-use auth::authenticate_admin_packet;
+use auth::{AdminAuthContext, AdminConnectionAuth, authenticate_admin_connection};
 use gm::{
     handle_gm_ban_player, handle_gm_broadcast, handle_gm_kick_player, handle_gm_send_item,
     handle_grant_items_result_query,
 };
+use mail_assertion::{MailGrantAssertion, MailGrantAssertionError};
 use protocol_io::{read_packet, write_error, write_message};
 use rollout_status::{build_rollout_drain_status_response, build_server_shutdown_response};
 use runtime_config::apply_runtime_config;
@@ -58,6 +63,8 @@ pub async fn run_listener(
     redis_key_prefix: String,
     owner_server_id: String,
     admin_token: String,
+    assertion_verifier: AdminAssertionVerifier,
+    mail_assertion_verifier: MailGrantAssertionVerifier,
     audit_logger: AdminAuditLogger,
     shutdown_signal: ShutdownSignal,
 ) -> Result<(), std::io::Error> {
@@ -74,6 +81,8 @@ pub async fn run_listener(
         let redis_key_prefix = redis_key_prefix.clone();
         let owner_server_id = owner_server_id.clone();
         let admin_token = admin_token.clone();
+        let assertion_verifier = assertion_verifier.clone();
+        let mail_assertion_verifier = mail_assertion_verifier.clone();
         let audit_logger = audit_logger.clone();
         let shutdown_signal = shutdown_signal.clone();
 
@@ -91,6 +100,8 @@ pub async fn run_listener(
                 redis_key_prefix,
                 owner_server_id,
                 admin_token,
+                assertion_verifier,
+                mail_assertion_verifier,
                 audit_logger,
                 shutdown_signal,
             )
@@ -115,6 +126,8 @@ async fn handle_admin_connection(
     redis_key_prefix: String,
     owner_server_id: String,
     admin_token: String,
+    assertion_verifier: AdminAssertionVerifier,
+    mail_assertion_verifier: MailGrantAssertionVerifier,
     audit_logger: AdminAuditLogger,
     shutdown_signal: ShutdownSignal,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -123,7 +136,18 @@ async fn handle_admin_connection(
     let Some(auth_packet) = read_packet(&mut reader).await? else {
         return Ok(());
     };
-    let Some(auth_context) = authenticate_admin_packet(&auth_packet, &admin_token) else {
+    enum ConnectionAuth {
+        Admin(AdminConnectionAuth),
+        Mail(MailGrantAssertion),
+    }
+    let connection_auth = if auth_packet.message_type() == Some(MessageType::MailAttachmentGrantAssertionReq) {
+        mail_assertion_verifier.parse(&auth_packet.body).map(ConnectionAuth::Mail)
+    } else {
+        authenticate_admin_connection(&auth_packet, &admin_token)
+            .map(ConnectionAuth::Admin)
+            .ok_or(MailGrantAssertionError::Unauthenticated)
+    };
+    let Ok(connection_auth) = connection_auth else {
         write_error(
             &mut writer,
             auth_packet.header.seq,
@@ -133,13 +157,124 @@ async fn handle_admin_connection(
         .await?;
         return Ok(());
     };
+    let is_mail_connection = matches!(connection_auth, ConnectionAuth::Mail(_));
+    let assertion_connection = matches!(&connection_auth, ConnectionAuth::Admin(AdminConnectionAuth::Assertion));
+    let mut auth_context = match &connection_auth {
+        ConnectionAuth::Admin(AdminConnectionAuth::ReadOnly(context)) => context.clone(),
+        ConnectionAuth::Admin(AdminConnectionAuth::Assertion) | ConnectionAuth::Mail(_) => AdminAuthContext {
+            actor: "unknown".to_string(),
+            actor_missing: true,
+        },
+    };
+    let mut pending_assertion = None;
 
     loop {
         let Some(packet) = read_packet(&mut reader).await? else {
             break;
         };
 
+        if is_mail_connection {
+            let ConnectionAuth::Mail(assertion) = &connection_auth else { unreachable!() };
+            match packet.message_type() {
+                Some(MessageType::MailAttachmentGrantReq) => {
+                    match mail_assertion_verifier.verify_grant(assertion, &packet, &owner_server_id) {
+                        Ok(context) => {
+                            handle_gm_send_item(
+                                &mut writer,
+                                &audit_logger,
+                                &context,
+                                &packet,
+                                &player_registry,
+                                &player_manager,
+                                &config_tables,
+                                &item_uid_generator,
+                                &redis_client,
+                                &redis_key_prefix,
+                                &owner_server_id,
+                            ).await?;
+                        }
+                        Err(error) => write_error(&mut writer, packet.header.seq, error.code(), "mail attachment grant assertion rejected").await?,
+                    }
+                }
+                Some(MessageType::MailAttachmentGrantResultQueryReq) => {
+                    match mail_assertion_verifier.verify_query(assertion, &packet, &owner_server_id) {
+                        Ok(_) => handle_grant_items_result_query(&mut writer, &packet, &player_manager).await?,
+                        Err(error) => write_error(&mut writer, packet.header.seq, error.code(), "mail attachment grant query assertion rejected").await?,
+                    }
+                }
+                _ => write_error(&mut writer, packet.header.seq, "MAIL_GRANT_MESSAGE_FORBIDDEN", "mail assertion sessions only allow mail attachment grant messages").await?,
+            }
+            continue;
+        }
+
+        if packet.message_type() == Some(MessageType::AdminOperationAssertionReq) {
+            if !assertion_connection {
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    "ADMIN_ASSERTION_UNAUTHENTICATED",
+                    "read-only admin authentication cannot submit write assertions",
+                )
+                .await?;
+                continue;
+            }
+            match assertion_verifier.parse(&packet.body) {
+                Ok(assertion) => pending_assertion = Some(assertion),
+                Err(error) => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        error.error_code(),
+                        error.message(),
+                    )
+                    .await?;
+                }
+            }
+            continue;
+        }
+
         if let Some(action) = packet.message_type().and_then(admin_write_action) {
+            if !assertion_connection {
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    "ADMIN_ASSERTION_REQUIRED",
+                    "a signed admin operation assertion is required for writes",
+                )
+                .await?;
+                continue;
+            }
+            let Some(assertion) = pending_assertion.take() else {
+                write_error(
+                    &mut writer,
+                    packet.header.seq,
+                    "ADMIN_ASSERTION_REQUIRED",
+                    "a signed admin operation assertion is required for writes",
+                )
+                .await?;
+                continue;
+            };
+            let (permission, target_type) = admin_write_requirement(&packet);
+            match assertion_verifier.verify_for_packet(
+                &assertion,
+                &packet,
+                permission,
+                target_type,
+                "game-server",
+                &owner_server_id,
+            ) {
+                Ok(context) => auth_context = context,
+                Err(error) => {
+                    write_error(
+                        &mut writer,
+                        packet.header.seq,
+                        error.error_code(),
+                        error.message(),
+                    )
+                    .await?;
+                    continue;
+                }
+            }
             if let Err(error) =
                 ensure_admin_write_allowed(&audit_logger, &auth_context, &packet, action).await
             {
@@ -862,6 +997,42 @@ fn admin_write_action(message_type: MessageType) -> Option<&'static str> {
         MessageType::RequestServerShutdownReq => Some("request_server_shutdown"),
         _ => None,
     }
+}
+
+fn admin_write_requirement(packet: &crate::protocol::Packet) -> (&'static str, &'static str) {
+    match packet.message_type() {
+        Some(MessageType::GmSendItemReq) if is_emergency_asset_correction(packet) => {
+            ("gm.asset_correction.emergency", "character")
+        }
+        Some(message_type) => match message_type {
+        MessageType::AdminUpdateConfigReq => ("game.config.write", "config"),
+        MessageType::GmSendItemReq => ("gm.send_item", "character"),
+        MessageType::GmBroadcastReq => ("gm.broadcast", "world"),
+        MessageType::GmKickPlayerReq => ("gm.kick_player", "player"),
+        MessageType::GmBanPlayerReq => ("gm.ban_player", "player"),
+        MessageType::FreezeRoomForTransferReq
+        | MessageType::ExportRoomTransferReq
+        | MessageType::ImportRoomTransferReq
+        | MessageType::ConfirmRoomOwnershipReq
+        | MessageType::RetireTransferredRoomReq => ("game.room.transfer", "room"),
+        MessageType::TriggerServerRedirectReq
+        | MessageType::TriggerRolloutDrainNoticeReq
+        | MessageType::RequestServerShutdownReq => ("game.config.write", "service"),
+        _ => ("", ""),
+        },
+        None => ("", ""),
+    }
+}
+
+fn is_emergency_asset_correction(packet: &crate::protocol::Packet) -> bool {
+    serde_json::from_slice::<serde_json::Value>(&packet.body)
+        .ok()
+        .is_some_and(|payload| {
+            payload
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source| source.trim() == "gm-emergency-correction")
+        })
 }
 
 fn update_config_target(request: &UpdateConfigReq) -> AdminAuditTarget {

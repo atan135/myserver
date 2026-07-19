@@ -14,6 +14,8 @@ import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "./auth/admin-policy.guard.js";
+import { AdminOperationAssertionService } from "./auth/admin-operation-assertion.service.js";
 import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
@@ -35,6 +37,7 @@ import {
   ADMIN_DB_POOL,
   ADMIN_GAME_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
+  ADMIN_OPERATION_ASSERTIONS,
   ADMIN_METRICS,
   ADMIN_NATS,
   ADMIN_POLICY,
@@ -75,7 +78,9 @@ class GameDbPoolShutdown implements OnModuleDestroy {
   providers: [
     AuthService,
     AdminPolicyService,
+    AdminOperationAssertionService,
     JwtAuthGuard,
+    AdminPolicyGuard,
     RolesGuard,
     GameDbPoolShutdown,
     MonitoringService,
@@ -117,6 +122,10 @@ class GameDbPoolShutdown implements OnModuleDestroy {
       useExisting: AdminPolicyService
     },
     {
+      provide: ADMIN_OPERATION_ASSERTIONS,
+      useExisting: AdminOperationAssertionService
+    },
+    {
       provide: MYFORGE_STORE,
       inject: [ADMIN_DB_POOL, ADMIN_CONFIG],
       useFactory: async (pool: any, config: any) => {
@@ -155,8 +164,8 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     },
     {
       provide: ADMIN_GAME_ADMIN_CLIENT,
-      inject: [ADMIN_CONFIG, ADMIN_REDIS],
-      useFactory: (config: any, redis: any) => new GameAdminClient(config, redis)
+      inject: [ADMIN_CONFIG, ADMIN_REDIS, ADMIN_OPERATION_ASSERTIONS],
+      useFactory: (config: any, redis: any, assertions: any) => new GameAdminClient(config, redis, assertions)
     },
     {
       provide: ADMIN_REGISTRY,

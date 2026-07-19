@@ -2,6 +2,7 @@ import { SetMetadata } from "@nestjs/common";
 
 export const ROLES_KEY = "roles";
 export const PERMISSIONS_KEY = "permissions";
+export const POLICY_PERMISSION_RESOLVER_KEY = "admin-policy-permission-resolver";
 export type AdminRole = "viewer" | "operator" | "admin" | "super_admin";
 export type AdminPermission =
   | "audit.read"
@@ -61,6 +62,8 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*
 
 export const Roles = (...roles: AdminRole[]) => SetMetadata(ROLES_KEY, roles);
 export const Permissions = (...permissions: AdminPermission[]) => SetMetadata(PERMISSIONS_KEY, permissions);
+export type AdminPermissionResolver = (request: any) => readonly AdminPermission[];
+export const PermissionResolver = (resolver: AdminPermissionResolver) => SetMetadata(POLICY_PERMISSION_RESOLVER_KEY, resolver);
 
 export function roleHasPermission(role: unknown, permission: AdminPermission): boolean {
   if (typeof role !== "string" || !(role in ROLE_PERMISSIONS)) {

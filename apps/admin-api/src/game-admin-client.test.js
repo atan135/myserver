@@ -6,6 +6,7 @@ import {
   GameAdminClient,
   MESSAGE_TYPE,
   buildAdminAuthBody,
+  buildAssertionAuthBody,
   describeAdminEndpoint,
   normalizeGameAdminActor,
   sendRequest
@@ -45,6 +46,10 @@ test("admin auth body falls back to plain token for invalid actor", () => {
 
   assert.equal(normalizeGameAdminActor("ops+admin@example.com"), null);
   assert.equal(body.toString("utf8"), "secret-admin-token");
+});
+
+test("assertion auth mode does not carry a reusable admin token", () => {
+  assert.deepEqual(JSON.parse(buildAssertionAuthBody().toString("utf8")), { mode: "assertion" });
 });
 
 test("admin actor rejects values longer than game-server limit", () => {
@@ -91,8 +96,10 @@ test("admin client rejects response larger than configured limit", async () => {
   }
 });
 
-test("GameAdminClient sendItem sends characterId payload", async () => {
+test("GameAdminClient sendItem sends a signed assertion before the characterId payload", async () => {
   let grantPayload = null;
+  let assertionPayload = null;
+  let authPayload = null;
   const server = net.createServer((socket) => {
     let buffer = Buffer.alloc(0);
 
@@ -110,6 +117,12 @@ test("GameAdminClient sendItem sends characterId payload", async () => {
         const body = buffer.subarray(HEADER_LEN, packetLen);
         buffer = buffer.subarray(packetLen);
 
+        if (messageType === MESSAGE_TYPE.ADMIN_AUTH_REQ) {
+          authPayload = JSON.parse(body.toString("utf8"));
+        }
+        if (messageType === MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ) {
+          assertionPayload = JSON.parse(body.toString("utf8"));
+        }
         if (messageType === MESSAGE_TYPE.GM_SEND_ITEM_REQ) {
           grantPayload = JSON.parse(body.toString("utf8"));
           socket.write(encodeTestPacket(MESSAGE_TYPE.GM_SEND_ITEM_RES, seq));
@@ -120,6 +133,7 @@ test("GameAdminClient sendItem sends characterId payload", async () => {
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
+  const assertions = [];
   const client = new GameAdminClient({
     registryDiscoveryEnabled: false,
     registryDiscoveryRequired: false,
@@ -131,10 +145,34 @@ test("GameAdminClient sendItem sends characterId payload", async () => {
     gameAdminWriteTimeoutMs: 1000,
     gameAdminReadTimeoutMs: 1000,
     gameAdminMaxResponseBytes: 1024
+  }, null, {
+    async issue(context, service, instanceId, payload) {
+      assertions.push({ context, service, instanceId, payload: payload.toString("utf8") });
+      return {
+        version: 1,
+        operationId: "op-test-1",
+        requestId: "req-test-1",
+        traceId: "trace-test-1",
+        issuer: "admin-api",
+        keyId: "test-v1",
+        actorId: "admin-7",
+        permission: "gm.send_item",
+        scope: {},
+        target: {},
+        service,
+        instanceId,
+        issuedAtMs: 1,
+        expiresAtMs: 2,
+        payloadSha256: "fixture",
+        signature: "fixture"
+      };
+    }
   });
 
   try {
-    await client.sendItem("chr_1", "1001", 2, "gift");
+    await client.sendItem("chr_1", "1001", 2, "gift", {
+      assertionContext: { actorId: "admin-7", permission: "gm.send_item", scope: {}, target: { targetType: "character", targetIds: ["chr_1"] } }
+    });
 
     assert.deepEqual(grantPayload, {
       characterId: "chr_1",
@@ -143,9 +181,27 @@ test("GameAdminClient sendItem sends characterId payload", async () => {
       reason: "gift"
     });
     assert.equal("playerId" in grantPayload, false);
+    assert.deepEqual(authPayload, { mode: "assertion" });
+    assert.equal(assertionPayload.permission, "gm.send_item");
+    assert.deepEqual(assertions.map(({ service, instanceId }) => [service, instanceId]), [["game-server", "local-fallback"]]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("GameAdminClient rejects a token-only game-server write", async () => {
+  const client = new GameAdminClient({
+    registryDiscoveryEnabled: false,
+    registryDiscoveryRequired: false,
+    localDiscoveryFallbackEnabled: true,
+    gameServerAdminHost: "127.0.0.1",
+    gameServerAdminPort: 7500
+  });
+
+  await assert.rejects(
+    client.sendItem("chr_1", "1001", 1, "gift"),
+    { code: "ADMIN_ASSERTION_REQUIRED" }
+  );
 });
 
 function createDiscoveryRedis(instances) {

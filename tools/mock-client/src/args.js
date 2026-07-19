@@ -4,6 +4,13 @@ import {
   createDefaultRolloutTargetOptions
 } from "../../rollout/rollout-targets.js";
 
+export function resolveCharacterDebugTokenDefaults(env = process.env) {
+  return {
+    elementDebugToken: env.MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN || "",
+    titleDebugToken: env.MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN || ""
+  };
+}
+
 function collectOptionValue(argv, startIndex) {
   const valueIndex = startIndex + 1;
   return {
@@ -69,7 +76,7 @@ const DEFAULT_OPTIONS = {
   elementMasteryWaterDelta: 0,
   elementMasteryWindDelta: 0,
   elementChangeReason: "mock-client character element debug",
-  elementDebugToken: process.env.MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
+  ...resolveCharacterDebugTokenDefaults(),
   titleId: "9001",
   disciplineId: "forging",
   disciplineTier: "novice",
@@ -78,7 +85,6 @@ const DEFAULT_OPTIONS = {
   roleSystemSkipDebug: false,
   roleSystemSkipDeleteRestore: false,
   titleChangeReason: "mock-client character title debug",
-  titleDebugToken: process.env.MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN || process.env.GAME_ADMIN_TOKEN || "",
   timeoutMs: 5000,
   scenario: SCENARIO.HAPPY,
   maxBodyLen: 4096,

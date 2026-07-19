@@ -98,6 +98,40 @@ test("policy service requires a catalog-declared scope and accepts only a matchi
   assert.equal(allowed.matchedGrant.sourceId, 22);
 });
 
+test("policy matching ignores grant dimensions that are not declared by the permission catalog", async () => {
+  const playerRead = {
+    permission_key: "players.read",
+    active: true,
+    scope_dimensions: ["target_ids"]
+  };
+  const policy = new AdminPolicyService(store({
+    permission: playerRead,
+    grants: [{
+      ...playerRead,
+      grant_source: "role",
+      source_id: "viewer",
+      scope_json: {
+        ...ROOT_SCOPE,
+        world_ids: ["world-1"],
+        service_names: ["game-server"],
+        field_allowlist: ["profile"],
+        target_ids: ["player-1"]
+      }
+    }]
+  }));
+
+  const decision = await policy.authorize(7, "players.read", { targetIds: ["player-1"] });
+  assert.equal(decision.allowed, true);
+});
+
+test("policy distinguishes no effective grant from a scope mismatch", async () => {
+  const policy = new AdminPolicyService(store({ permission: SEND_ITEM }));
+  assert.equal(
+    (await policy.authorize(7, "gm.send_item", { worldId: "world-1", targetIds: ["player-1"] })).code,
+    "PERMISSION_DENIED"
+  );
+});
+
 test("malformed persisted scopes do not become capabilities", async () => {
   const policy = new AdminPolicyService(store({
     permission: SEND_ITEM,
