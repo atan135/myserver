@@ -12,6 +12,10 @@ use crate::core::room::OutboundChannel;
 use crate::metrics::METRICS;
 use crate::pb::{AuthReq, AuthRes, PingRes};
 use crate::protocol::{MessageType, Packet};
+use crate::protocol_version_policy::{
+    CURRENT_CLIENT_PROTOCOL_VERSION, MINIMUM_CLIENT_PROTOCOL_VERSION,
+    negotiate_client_protocol_version,
+};
 use crate::session::SessionState;
 use crate::ticket::{validate_ticket_owner, validate_ticket_version, verify_ticket};
 
@@ -38,6 +42,25 @@ pub async fn handle_auth(
         }
     };
 
+    let protocol_decision = negotiate_client_protocol_version(request.client_protocol_version);
+    METRICS.record_client_protocol_version(protocol_decision.metric());
+    if let Some(rejection) = protocol_decision.rejection() {
+        tracing::info!(
+            session_id = connection.session.id,
+            declared_protocol_version = request.client_protocol_version,
+            effective_protocol_version = protocol_decision.effective_version(),
+            protocol_version_source = ?protocol_decision.source(),
+            error_code = rejection.error_code,
+            "game auth rejected by client protocol version policy"
+        );
+        connection.queue_message(
+            MessageType::AuthRes,
+            packet.header.seq,
+            protocol_rejection_auth_response(rejection),
+        )?;
+        return Ok(());
+    }
+
     match verify_ticket(&services.config.ticket_secret, &request.ticket) {
         Ok(ticket_payload) => {
             let account_player_id = ticket_payload.account_player_id;
@@ -60,11 +83,7 @@ pub async fn handle_auth(
                 connection.queue_message(
                     MessageType::AuthRes,
                     packet.header.seq,
-                    AuthRes {
-                        ok: false,
-                        player_id: String::new(),
-                        error_code: error_code.to_string(),
-                    },
+                    auth_response(false, String::new(), error_code.to_string()),
                 )?;
                 services
                     .db_store
@@ -93,11 +112,7 @@ pub async fn handle_auth(
                 connection.queue_message(
                     MessageType::AuthRes,
                     packet.header.seq,
-                    AuthRes {
-                        ok: false,
-                        player_id: String::new(),
-                        error_code: error_code.to_string(),
-                    },
+                    auth_response(false, String::new(), error_code.to_string()),
                 )?;
                 services
                     .db_store
@@ -142,11 +157,7 @@ pub async fn handle_auth(
                 connection.queue_message(
                     MessageType::AuthRes,
                     packet.header.seq,
-                    AuthRes {
-                        ok: false,
-                        player_id: String::new(),
-                        error_code: "AUTHORITY_SUPERSEDED".to_string(),
-                    },
+                    auth_response(false, String::new(), "AUTHORITY_SUPERSEDED".to_string()),
                 )?;
                 *connection.kick_reason.write().await = "new_login".to_string();
                 connection.kick_notify.notify_one();
@@ -175,11 +186,11 @@ pub async fn handle_auth(
                     connection.queue_message(
                         MessageType::AuthRes,
                         packet.header.seq,
-                        AuthRes {
-                            ok: false,
-                            player_id: String::new(),
-                            error_code: "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
-                        },
+                        auth_response(
+                            false,
+                            String::new(),
+                            "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
+                        ),
                     )?;
                     return Ok(());
                 }
@@ -206,11 +217,7 @@ pub async fn handle_auth(
                     connection.queue_message(
                         MessageType::AuthRes,
                         packet.header.seq,
-                        AuthRes {
-                            ok: false,
-                            player_id: String::new(),
-                            error_code: "AUTHORITY_SUPERSEDED".to_string(),
-                        },
+                        auth_response(false, String::new(), "AUTHORITY_SUPERSEDED".to_string()),
                     )?;
                     *connection.kick_reason.write().await = "authority_changed".to_string();
                     connection.kick_notify.notify_one();
@@ -226,11 +233,11 @@ pub async fn handle_auth(
                     connection.queue_message(
                         MessageType::AuthRes,
                         packet.header.seq,
-                        AuthRes {
-                            ok: false,
-                            player_id: String::new(),
-                            error_code: "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
-                        },
+                        auth_response(
+                            false,
+                            String::new(),
+                            "AUTHORITY_BACKEND_UNAVAILABLE".to_string(),
+                        ),
                     )?;
                     return Ok(());
                 }
@@ -331,11 +338,7 @@ pub async fn handle_auth(
             connection.queue_message(
                 MessageType::AuthRes,
                 packet.header.seq,
-                AuthRes {
-                    ok: true,
-                    player_id: account_player_id.clone(),
-                    error_code: String::new(),
-                },
+                auth_response(true, account_player_id.clone(), String::new()),
             )?;
             services
                 .db_store
@@ -374,11 +377,7 @@ pub async fn handle_auth(
             connection.queue_message(
                 MessageType::AuthRes,
                 packet.header.seq,
-                AuthRes {
-                    ok: false,
-                    player_id: String::new(),
-                    error_code: error_code.to_string(),
-                },
+                auth_response(false, String::new(), error_code.to_string()),
             )?;
             services
                 .db_store
@@ -397,6 +396,28 @@ pub async fn handle_auth(
     }
 
     Ok(())
+}
+
+fn auth_response(ok: bool, player_id: String, error_code: String) -> AuthRes {
+    AuthRes {
+        ok,
+        player_id,
+        error_code,
+        server_protocol_version: CURRENT_CLIENT_PROTOCOL_VERSION,
+        minimum_client_protocol_version: MINIMUM_CLIENT_PROTOCOL_VERSION,
+        upgrade_message: String::new(),
+        upgrade_url: String::new(),
+    }
+}
+
+fn protocol_rejection_auth_response(
+    rejection: crate::protocol_version_policy::ClientProtocolVersionRejection,
+) -> AuthRes {
+    AuthRes {
+        upgrade_message: rejection.upgrade_message.to_string(),
+        upgrade_url: rejection.upgrade_url.to_string(),
+        ..auth_response(false, String::new(), rejection.error_code.to_string())
+    }
 }
 
 pub fn handle_ping(connection: &ConnectionContext, packet: &Packet) -> Result<(), std::io::Error> {

@@ -28,6 +28,81 @@ pub struct UpdateConfigRes {
     #[prost(string, tag = "2")]
     pub error_code: ::prost::alloc::string::String,
 }
+/// Signed envelope carried immediately before an internal admin write request.
+/// The current TCP/HTTP transports use the JSON representation of these fields
+/// while the protobuf definition is the stable cross-service contract.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AdminOperationAssertion {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(string, tag = "2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub trace_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub issuer: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub key_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub actor_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub permission: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub scope_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub target_json: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub service: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub instance_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "13")]
+    pub issued_at_ms: i64,
+    #[prost(int64, tag = "14")]
+    pub expires_at_ms: i64,
+    #[prost(bytes = "vec", tag = "15")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "16")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+}
+/// Dedicated mail-service assertion. It is intentionally not an admin assertion:
+/// it can authorize only a persisted mail attachment grant or its result query.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MailAttachmentGrantAssertion {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(string, tag = "2")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub mail_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub character_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub attachment_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub issuer: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub key_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub service: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub service_instance_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub target_service: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub target_instance_id: ::prost::alloc::string::String,
+    #[prost(int64, tag = "13")]
+    pub issued_at_ms: i64,
+    #[prost(int64, tag = "14")]
+    pub expires_at_ms: i64,
+    #[prost(bytes = "vec", tag = "15")]
+    pub payload_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "16")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct GrantItem {
     #[prost(int32, tag = "1")]

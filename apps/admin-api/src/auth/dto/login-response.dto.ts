@@ -12,6 +12,12 @@ export class AdminDto {
 
   @ApiProperty({ example: "admin" })
   role: string;
+
+  @ApiProperty({ example: ["audit.read", "gm.send_item"] })
+  permissions: string[];
+
+  @ApiProperty({ example: { "gm.send_item": [{ worldId: "*", targetType: "character" }] } })
+  permissionScopes: Record<string, unknown[]>;
 }
 
 export class LoginResponseDto {

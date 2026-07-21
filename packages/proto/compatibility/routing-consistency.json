@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "packetRoutes": {
+    "canonical": "apps/game-server/src/protocol/message_type.rs",
+    "dispatches": [
+      {
+        "name": "player",
+        "path": "apps/game-server/src/server.rs",
+        "function": "dispatch_packet",
+        "transport": "game-proxy player packets"
+      },
+      {
+        "name": "internal",
+        "path": "apps/game-server/src/internal_server.rs",
+        "function": "handle_internal_connection",
+        "transport": "game-server internal local socket"
+      },
+      {
+        "name": "admin",
+        "path": "apps/game-server/src/admin_server.rs",
+        "function": "handle_admin_connection",
+        "transport": "game-server admin TCP"
+      }
+    ],
+    "preDispatchControls": [
+      {
+        "messageType": "AdminAuthReq",
+        "route": "admin",
+        "source": "apps/game-server/src/admin_server.rs",
+        "reason": "Consumed by the authenticated admin connection setup before the command dispatch loop."
+      },
+      {
+        "messageType": "InternalAuthReq",
+        "route": "internal",
+        "source": "apps/game-server/src/internal_server.rs",
+        "reason": "Consumed by the internal local-socket authentication gate before the command dispatch loop."
+      }
+    ],
+    "deferredOutboundMessages": [
+      {
+        "messageType": "DeprecatedItemAddRes",
+        "owner": "game-server",
+        "reason": "Message id 1408 is permanently retained for the retired ItemAdd response and is intentionally never produced; retired requests receive ErrorRes instead."
+      },
+      {
+        "messageType": "RoomMemberOfflinePush",
+        "owner": "game-server",
+        "reason": "The packet id and protobuf shape are retained for the room offline lifecycle, but current disconnect handling has no client delivery producer."
+      },
+      {
+        "messageType": "AuthorityMigrationStartPush",
+        "owner": "game-server",
+        "reason": "The packet shape is reserved for the planned authority-migration lifecycle; no runtime producer is implemented yet."
+      },
+      {
+        "messageType": "AuthorityMigrationCompletePush",
+        "owner": "game-server",
+        "reason": "The packet shape is reserved for the planned authority-migration lifecycle; no runtime producer is implemented yet."
+      }
+    ]
+  },
+  "mockClient": {
+    "sourceDirectory": "tools/mock-client/src",
+    "nonGameMessageIdFloor": 20000,
+    "reason": "Chat packet ids are owned by chat-server and intentionally have no game-server MessageType or game-server route."
+  },
+  "errorCodes": {
+    "definitionMode": "implementation_literals",
+    "staticCodes": [
+      "ACCOUNT_PLAYER_ID_MISMATCH",
+      "ADMIN_AUDIT_WRITE_FAILED",
+      "ALREADY_IN_OTHER_ROOM",
+      "ALREADY_IN_ROOM",
+      "AUTHORITY_BACKEND_UNAVAILABLE",
+      "AUTHORITY_SUPERSEDED",
+      "AUTH_CONTEXT_INCOMPLETE",
+      "BODY_TOO_LARGE",
+      "CAPACITY_BLOCKED",
+      "CHARACTER_ID_REQUIRED",
+      "COMBAT_CHARACTER_ALREADY_SPAWNED",
+      "COMBAT_CHARACTER_ENTITY_NOT_FOUND",
+      "COMBAT_ENTITY_LIMIT_REACHED",
+      "COMBAT_TARGET_AMBIGUOUS",
+      "COMBAT_TARGET_CHARACTER_NOT_FOUND",
+      "COMBAT_TARGET_REQUIRED",
+      "CONFIG_NOT_FOUND",
+      "EMPTY_CHARACTER_IDS",
+      "EMPTY_ITEMS",
+      "GRANT_RESULT_QUERY_FAILED",
+      "GRANT_RESULT_UNAVAILABLE",
+      "HEARTBEAT_TIMEOUT",
+      "INPUT_FRAME_EXPIRED",
+      "INPUT_FRAME_TOO_FAR",
+      "INPUT_TIMESTAMP_REQUIRED",
+      "INPUT_TIMESTAMP_SKEW",
+      "INVALID_AUTH_BODY",
+      "INVALID_BROADCAST_ID",
+      "INVALID_CHARACTER_ID",
+      "INVALID_COMBAT_APPLY_BUFF_PAYLOAD",
+      "INVALID_COMBAT_CAST_SKILL_PAYLOAD",
+      "INVALID_COMBAT_TARGET_POINT",
+      "INVALID_CONFIG_VALUE",
+      "INVALID_DRAIN_NOTICE_MESSAGE",
+      "INVALID_DURATION",
+      "INVALID_FACE_TO_PAYLOAD",
+      "INVALID_FACE_TO_PAYLOAD_JSON",
+      "INVALID_ID_RANGE",
+      "INVALID_ITEM_COUNT",
+      "INVALID_ITEM_ID",
+      "INVALID_MAGIC",
+      "INVALID_MOVE_DIR_PAYLOAD",
+      "INVALID_MOVE_PAYLOAD_JSON",
+      "INVALID_MOVE_STOP_PAYLOAD",
+      "INVALID_MOVE_STOP_PAYLOAD_JSON",
+      "INVALID_PLAYER_ID",
+      "INVALID_REDIRECT_TARGET",
+      "INVALID_ROBOT_MOVE_ACTION",
+      "INVALID_ROBOT_MOVE_JSON",
+      "INVALID_ROLLOUT_EPOCH",
+      "INVALID_ROOM_ID",
+      "INVALID_ROOM_ROUTE_VERSION",
+      "INVALID_SENDER",
+      "INVALID_SIM_INPUT_ACTION",
+      "INVALID_SIM_INPUT_JSON",
+      "INVALID_SLOT",
+      "INVALID_TICKET_PAYLOAD",
+      "INVALID_TITLE",
+      "INVALID_UI_TOUCH_ACTION",
+      "INVALID_UI_TOUCH_PAYLOAD",
+      "INVALID_VERSION",
+      "INVENTORY_COMMIT_RESULT_UNKNOWN",
+      "INVENTORY_TRANSACTION_FAILED",
+      "ITEM_COUNT_OVERFLOW",
+      "MATCH_TIMEOUT",
+      "MESSAGE_NOT_SUPPORTED",
+      "MESSAGE_TYPE_DEPRECATED",
+      "MISSING_CHARACTER_ID",
+      "MISSING_TRANSFER_CHECKSUM",
+      "MOVEMENT_BLOCKED",
+      "MOVE_DIRECTION_ZERO",
+      "MOVE_INPUT_TYPE_UNKNOWN",
+      "MSG_RATE_EXCEEDED",
+      "NOT_AUTHENTICATED",
+      "OBSERVER_CANNOT_SEND_INPUT",
+      "ONLY_OWNER_CAN_END_GAME",
+      "ONLY_OWNER_CAN_START",
+      "PLAYER_ALREADY_ONLINE",
+      "PLAYER_CONNECTION_UNAVAILABLE",
+      "PLAYER_NOT_IN_MATCH",
+      "PLAYER_NOT_IN_ROOM",
+      "PLAYER_NOT_OFFLINE",
+      "PLAYER_OFFLINE",
+      "PREAUTH_MESSAGE_NOT_ALLOWED",
+      "REQUEST_FINGERPRINT_CONFLICT",
+      "ROBOT_MOVE_DIR_OUT_OF_RANGE",
+      "ROBOT_MOVE_FIELDS_MISMATCH",
+      "ROBOT_MOVE_FIELD_NOT_INTEGER",
+      "ROBOT_MOVE_PAYLOAD_TOO_LARGE",
+      "ROBOT_MOVE_SEQ_OUT_OF_RANGE",
+      "ROBOT_MOVE_SPEED_OUT_OF_RANGE",
+      "ROLLOUT_EPOCH_MISMATCH",
+      "ROOM_ALREADY_IN_GAME",
+      "ROOM_FULL",
+      "ROOM_MEMBER_NOT_FOUND",
+      "ROOM_MEMBER_OFFLINE",
+      "ROOM_NOT_ENOUGH_PLAYERS",
+      "ROOM_NOT_FOUND",
+      "ROOM_NOT_IN_GAME",
+      "ROOM_NOT_JOINED",
+      "ROOM_NOT_READY",
+      "ROOM_ROUTE_CHECKSUM_MISMATCH",
+      "ROOM_ROUTE_VERSION_MISMATCH",
+      "ROOM_TRANSFER_CHECKSUM_MISMATCH",
+      "ROOM_TRANSFER_EPOCH_MISMATCH",
+      "ROOM_TRANSFER_FROZEN",
+      "ROOM_TRANSFER_HAS_ONLINE_MEMBERS",
+      "ROOM_TRANSFER_IMPORTING",
+      "ROOM_TRANSFER_INVALID_COMBAT_STATE",
+      "ROOM_TRANSFER_INVALID_LOGIC_STATE",
+      "ROOM_TRANSFER_INVALID_MOVEMENT_STATE",
+      "ROOM_TRANSFER_INVALID_NPC_STATE",
+      "ROOM_TRANSFER_INVALID_OWNER",
+      "ROOM_TRANSFER_INVALID_PHASE",
+      "ROOM_TRANSFER_INVALID_POLICY",
+      "ROOM_TRANSFER_INVALID_ROOM_ID",
+      "ROOM_TRANSFER_INVALID_TIMER_STATE",
+      "ROOM_TRANSFER_MISSING_PAYLOAD",
+      "ROOM_TRANSFER_MISSING_SNAPSHOT",
+      "ROOM_TRANSFER_NOT_EXPORTED",
+      "ROOM_TRANSFER_NOT_FROZEN",
+      "ROOM_TRANSFER_NOT_OWNED_BY_NEW",
+      "ROOM_TRANSFER_OWNED_BY_NEW",
+      "ROOM_TRANSFER_RETIRED",
+      "ROOM_TRANSFER_ROOM_CONFLICT",
+      "ROOM_TRANSFER_UNSUPPORTED_SCHEMA",
+      "ROOM_TRANSFER_VERSION_MISMATCH",
+      "SIM_INPUT_COMMAND_COUNT_TOO_LARGE",
+      "SIM_INPUT_DIR_OUT_OF_RANGE",
+      "SIM_INPUT_MOVE_DIR_ZERO",
+      "SIM_INPUT_PAYLOAD_TOO_LARGE",
+      "SIM_INPUT_SKILL_ID_OUT_OF_RANGE",
+      "SIM_INPUT_SPEED_OUT_OF_RANGE",
+      "SIM_INPUT_TARGET_ENTITY_ID_OUT_OF_RANGE",
+      "TICKET_EXPIRED",
+      "TICKET_NOT_FOUND",
+      "TICKET_REVOKED",
+      "TITLE_TOO_LONG",
+      "UI_TOUCH_PAYLOAD_TOO_LARGE",
+      "UI_TOUCH_SAMPLE_COUNT_TOO_LARGE",
+      "UI_TOUCH_SAMPLE_NOT_FINITE",
+      "UNAUTHORIZED_ADMIN",
+      "UNAUTHORIZED_INTERNAL_CHANNEL",
+      "UNKNOWN_ERROR",
+      "UNKNOWN_MESSAGE_TYPE",
+      "UNSUPPORTED_CONFIG_KEY",
+      "UNSUPPORTED_FLAGS",
+      "UNSUPPORTED_ROBOT_MOVE_VERSION",
+      "UNSUPPORTED_ROOM_TRANSFER",
+      "UNSUPPORTED_SIM_INPUT_VERSION"
+    ],
+    "dynamicSources": [
+      {
+        "path": "apps/game-server/src/**/*.rs",
+        "reason": "Room and service layers propagate Result error values into protocol responses; these values are data-flow dependent rather than direct literals at the packet boundary."
+      },
+      {
+        "path": "apps/match-service/src/**/*.rs",
+        "reason": "MatchError::error_code() derives response values from matcher state and is intentionally checked as a dynamic source."
+      }
+    ]
+  },
+  "rpcConsumers": {
+    "MatchService": {
+      "implementation": {
+        "path": "apps/match-service/src/service/match_service.rs",
+        "trait": "MatchService"
+      }
+    },
+    "MatchInternal": {
+      "implementation": {
+        "path": "apps/match-service/src/service/match_service.rs",
+        "trait": "MatchInternal"
+      },
+      "client": {
+        "path": "apps/game-server/src/match_client.rs",
+        "receiver": "inner"
+      }
+    }
+  }
+}

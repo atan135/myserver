@@ -7,6 +7,7 @@ summary/
 keys/
 *.local.json
 local_help.txt
+local_postgres_password.txt
 *.log
 logs/
 coverage/

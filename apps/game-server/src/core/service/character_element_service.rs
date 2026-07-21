@@ -91,7 +91,7 @@ pub async fn handle_debug_apply_character_element_change(
         }
     };
 
-    if !debug_token_matches(&services.config.admin_token, &request.debug_token) {
+    if !debug_token_matches(&request.debug_token) {
         queue_debug_apply_response(
             connection,
             packet.header.seq,
@@ -183,10 +183,12 @@ fn normalize_debug_reason(raw: &str) -> String {
     trimmed.chars().take(255).collect()
 }
 
-fn debug_token_matches(expected: &str, actual: &str) -> bool {
-    let expected = expected.trim();
+fn debug_token_matches(actual: &str) -> bool {
     let actual = actual.trim();
-    !expected.is_empty() && expected == actual
+    !actual.is_empty()
+        && std::env::var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN")
+            .ok()
+            .is_some_and(|expected| !expected.trim().is_empty() && expected.trim() == actual)
 }
 
 fn queue_debug_apply_error(
@@ -277,11 +279,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn debug_token_requires_exact_non_empty_match_after_trimming() {
-        assert!(debug_token_matches(" token ", "token"));
-        assert!(!debug_token_matches("", ""));
-        assert!(!debug_token_matches("token", ""));
-        assert!(!debug_token_matches("token", "other"));
+    fn debug_token_requires_dedicated_non_empty_match_after_trimming() {
+        unsafe {
+            std::env::set_var("GAME_ADMIN_TOKEN", "global-admin-token");
+            std::env::set_var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN", " element-debug-token ");
+        }
+        assert!(debug_token_matches("element-debug-token"));
+        assert!(!debug_token_matches("global-admin-token"));
+        assert!(!debug_token_matches(""));
+        assert!(!debug_token_matches("other"));
+        unsafe {
+            std::env::remove_var("GAME_ADMIN_TOKEN");
+            std::env::remove_var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN");
+        }
     }
 
     #[test]

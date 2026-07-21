@@ -1,7 +1,7 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Post, Req } from "@nestjs/common";
+import { Controller, Get, HttpStatus, Inject, Post, Req } from "@nestjs/common";
 import { ApiOperation, ApiTags } from "@nestjs/swagger";
 
-import { badRequest, ApiHttpException } from "../common/http-exception.js";
+import { ApiHttpException } from "../common/http-exception.js";
 import { AUTH_CONFIG, AUTH_GAME_ADMIN_CLIENT } from "../tokens.js";
 
 function verifyInternalToken(req: any, config: any) {
@@ -32,6 +32,14 @@ function gameServerError(error: any) {
     ok: false,
     error: error.code || "GAME_SERVER_UNAVAILABLE",
     message: error.message
+  });
+}
+
+function controlPlaneOnly() {
+  throw new ApiHttpException(HttpStatus.GONE, {
+    ok: false,
+    error: "CONTROL_PLANE_ONLY",
+    message: "Game-server write operations are available only through admin-api"
   });
 }
 
@@ -72,45 +80,16 @@ export class InternalController {
   }
 
   @Post("shutdown-if-drained")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Request game-server graceful shutdown after drain safety checks" })
-  async shutdownIfDrained(@Req() req: any, @Body() body: any) {
+  @ApiOperation({ summary: "Retired: use admin-api for game-server shutdown" })
+  async shutdownIfDrained(@Req() req: any) {
     verifyInternalToken(req, this.config);
-
-    const reason = typeof body?.reason === "string" ? body.reason : "";
-
-    try {
-      return await this.gameAdminClient.requestServerShutdown(reason);
-    } catch (error: any) {
-      throw gameServerError(error);
-    }
+    controlPlaneOnly();
   }
 
   @Post("config")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Update game-server runtime config" })
-  async updateConfig(@Req() req: any, @Body() body: any) {
+  @ApiOperation({ summary: "Retired: use admin-api for game-server configuration" })
+  async updateConfig(@Req() req: any) {
     verifyInternalToken(req, this.config);
-
-    const key = body?.key;
-    const value = body?.value;
-
-    if (typeof key !== "string" || key.length === 0) {
-      throw badRequest("INVALID_CONFIG_KEY", "key must be a non-empty string");
-    }
-
-    if (typeof value !== "string" || value.length === 0) {
-      throw badRequest("INVALID_CONFIG_VALUE", "value must be a non-empty string");
-    }
-
-    try {
-      const result = await this.gameAdminClient.updateConfig(key, value);
-      return {
-        ok: result.ok,
-        errorCode: result.errorCode
-      };
-    } catch (error: any) {
-      throw gameServerError(error);
-    }
+    controlPlaneOnly();
   }
 }

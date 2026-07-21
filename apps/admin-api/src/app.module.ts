@@ -3,6 +3,7 @@ import { JwtModule } from "@nestjs/jwt";
 
 import { AdminStore } from "./admin-store.js";
 import { AdminSessionStore } from "./auth/admin-session-store.js";
+import { AdminPolicyService } from "./auth/admin-policy.service.js";
 import { createMetricsCollector } from "./metrics.js";
 import { getConfig } from "./config.js";
 import { GameAdminClient } from "./game-admin-client.js";
@@ -13,6 +14,13 @@ import { createRedisClient } from "./redis-client.js";
 import { AuthController } from "./auth/auth.controller.js";
 import { AuthService } from "./auth/auth.service.js";
 import { JwtAuthGuard } from "./auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "./auth/admin-policy.guard.js";
+import { AdminOperationAssertionService } from "./auth/admin-operation-assertion.service.js";
+import { AdminOperationService } from "./operations/admin-operation.service.js";
+import { AdminBreakglassService } from "./operations/admin-breakglass.service.js";
+import { AdminHighRiskOperationService } from "./operations/admin-high-risk-operation.service.js";
+import { AdminOperationSafetyService } from "./operations/admin-operation-safety.service.js";
+import { AdminOperationController } from "./operations/admin-operation.controller.js";
 import { RolesGuard } from "./auth/roles.guard.js";
 import { AdminsController } from "./admins/admins.controller.js";
 import { AuditController } from "./audit/audit.controller.js";
@@ -34,8 +42,14 @@ import {
   ADMIN_DB_POOL,
   ADMIN_GAME_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
+  ADMIN_OPERATION_ASSERTIONS,
+  ADMIN_OPERATIONS,
+  ADMIN_BREAKGLASS,
+  ADMIN_HIGH_RISK_OPERATIONS,
+  ADMIN_OPERATION_SAFETY,
   ADMIN_METRICS,
   ADMIN_NATS,
+  ADMIN_POLICY,
   ADMIN_REDIS,
   ADMIN_REGISTRY,
   ADMIN_SESSION_STORE,
@@ -67,12 +81,20 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GmController,
     GlobalIdController,
     MonitoringController,
+    AdminOperationController,
     MyforgeController,
     HealthController
   ],
   providers: [
     AuthService,
+    AdminPolicyService,
+    AdminOperationAssertionService,
+    AdminOperationService,
+    AdminBreakglassService,
+    AdminHighRiskOperationService,
+    AdminOperationSafetyService,
     JwtAuthGuard,
+    AdminPolicyGuard,
     RolesGuard,
     GameDbPoolShutdown,
     MonitoringService,
@@ -108,6 +130,30 @@ class GameDbPoolShutdown implements OnModuleDestroy {
         await adminStore.ensureInitialAdmin(config);
         return adminStore;
       }
+    },
+    {
+      provide: ADMIN_POLICY,
+      useExisting: AdminPolicyService
+    },
+    {
+      provide: ADMIN_OPERATION_ASSERTIONS,
+      useExisting: AdminOperationAssertionService
+    },
+    {
+      provide: ADMIN_OPERATIONS,
+      useExisting: AdminOperationService
+    },
+    {
+      provide: ADMIN_BREAKGLASS,
+      useExisting: AdminBreakglassService
+    },
+    {
+      provide: ADMIN_HIGH_RISK_OPERATIONS,
+      useExisting: AdminHighRiskOperationService
+    },
+    {
+      provide: ADMIN_OPERATION_SAFETY,
+      useExisting: AdminOperationSafetyService
     },
     {
       provide: MYFORGE_STORE,
@@ -148,8 +194,8 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     },
     {
       provide: ADMIN_GAME_ADMIN_CLIENT,
-      inject: [ADMIN_CONFIG, ADMIN_REDIS],
-      useFactory: (config: any, redis: any) => new GameAdminClient(config, redis)
+      inject: [ADMIN_CONFIG, ADMIN_REDIS, ADMIN_OPERATION_ASSERTIONS],
+      useFactory: (config: any, redis: any, assertions: any) => new GameAdminClient(config, redis, assertions)
     },
     {
       provide: ADMIN_REGISTRY,

@@ -14,12 +14,14 @@ use crate::route_store::{
 };
 
 mod audit;
+mod assertion;
 mod auth;
 mod http;
 mod query;
 mod route_handlers;
 
 pub use audit::{AdminAuditConfig, AdminAuditLogger};
+pub(crate) use assertion::AdminAssertionVerifier;
 pub use auth::AdminAuthConfig;
 
 #[cfg(test)]
@@ -30,7 +32,7 @@ use audit::{
 };
 #[cfg(test)]
 use auth::{AdminPermission, authorize, authorize_method, is_authorized};
-use auth::{admin_route_requirement, authorize_route, fallback_route_requirement};
+use auth::{admin_route_requirement, assertion_route_requirement, authorize_route, fallback_route_requirement};
 use http::{http_response, split_path_and_query, write_json, write_json_status, write_plain};
 use query::{required, required_identifier};
 use route_handlers::{handle_character_route_upsert, handle_room_route_upsert, handle_switch};
@@ -88,11 +90,14 @@ pub async fn run(
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: AdminAuthConfig,
+    assertion_verifier: AdminAssertionVerifier,
+    service_instance_id: String,
     audit_logger: AdminAuditLogger,
     old_server_drain_status_checker: Option<Arc<dyn OldServerDrainStatusChecker>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     let auth_config = Arc::new(auth_config);
+    let assertion_verifier = Arc::new(assertion_verifier);
     let audit_logger = Arc::new(audit_logger);
     loop {
         let (socket, peer_addr) = listener.accept().await?;
@@ -100,6 +105,8 @@ pub async fn run(
         let connection_count = connection_count.clone();
         let maintenance = maintenance.clone();
         let auth_config = auth_config.clone();
+        let assertion_verifier = assertion_verifier.clone();
+        let service_instance_id = service_instance_id.clone();
         let audit_logger = audit_logger.clone();
         let old_server_drain_status_checker = old_server_drain_status_checker.clone();
         tokio::spawn(async move {
@@ -109,6 +116,8 @@ pub async fn run(
                 connection_count,
                 maintenance,
                 auth_config,
+                assertion_verifier,
+                service_instance_id,
                 audit_logger,
                 old_server_drain_status_checker,
             )
@@ -126,6 +135,8 @@ async fn handle_connection(
     connection_count: Arc<AtomicU64>,
     maintenance: Arc<tokio::sync::RwLock<bool>>,
     auth_config: Arc<AdminAuthConfig>,
+    assertion_verifier: Arc<AdminAssertionVerifier>,
+    service_instance_id: String,
     audit_logger: Arc<AdminAuditLogger>,
     old_server_drain_status_checker: Option<Arc<dyn OldServerDrainStatusChecker>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -141,32 +152,43 @@ async fn handle_connection(
     let path = first_line.split_whitespace().nth(1).unwrap_or_default();
     let (route_path, query) = split_path_and_query(path);
 
-    let context = admin_request_context(&request, method, route_path);
+    let mut context = admin_request_context(&request, method, route_path);
     let route_requirement = admin_route_requirement(method, route_path)
         .unwrap_or_else(|| fallback_route_requirement(method));
-    if let Err((status, body)) = authorize_route(&request, route_requirement, auth_config.as_ref())
-    {
-        let response = if status == 403 && route_requirement.is_write {
-            audited_forbidden(
-                &audit_logger,
-                &context,
-                route_requirement.action,
-                "insufficient_permission",
-            )
-            .await
-        } else {
-            if status == 403 {
-                warn!(
-                    method,
-                    path = route_path,
-                    action = route_requirement.action,
-                    result = "error",
-                    error = "insufficient_permission",
-                    "proxy admin operation rejected"
-                );
+    if route_requirement.is_write {
+        let (permission, target_type) = assertion_route_requirement(route_requirement);
+        match assertion_verifier.verify_http_request(
+            &request,
+            method,
+            path,
+            permission,
+            target_type,
+            "game-proxy",
+            &service_instance_id,
+        ) {
+            Ok(assertion_context) => context = assertion_context,
+            Err(error) => {
+                let response = if error.status() == 403 {
+                    audited_forbidden(
+                        &audit_logger,
+                        &context,
+                        route_requirement.action,
+                        error.error_code(),
+                    )
+                    .await
+                } else {
+                    http_response(
+                        error.status(),
+                        "text/plain; charset=utf-8",
+                        error.error_code().to_string(),
+                    )
+                };
+                socket.write_all(response.as_bytes()).await?;
+                return Ok(());
             }
-            http_response(status, "text/plain; charset=utf-8", body.to_string())
-        };
+        }
+    } else if let Err((status, body)) = authorize_route(&request, route_requirement, auth_config.as_ref()) {
+        let response = http_response(status, "text/plain; charset=utf-8", body.to_string());
         socket.write_all(response.as_bytes()).await?;
         return Ok(());
     }

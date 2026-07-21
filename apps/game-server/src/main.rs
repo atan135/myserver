@@ -19,6 +19,12 @@ pub use proto::myserver::game as pb;
 mod csv_code;
 mod db_store;
 mod protocol;
+mod protocol_version_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/proto/compatibility/version-policy.rs"
+    ));
+}
 mod server;
 mod session;
 mod ticket;
@@ -344,6 +350,12 @@ mod tests {
             admin_advertised_host: "10.0.0.21".to_string(),
             admin_port: 7500,
             admin_token: config::DEFAULT_ADMIN_TOKEN.to_string(),
+            admin_assertion_issuer: "admin-api".to_string(),
+            admin_assertion_public_keys: std::collections::HashMap::new(),
+            admin_assertion_max_ttl_ms: 60_000,
+            mail_grant_assertion_issuer: "mail-service".to_string(),
+            mail_grant_assertion_public_keys: std::collections::HashMap::new(),
+            mail_grant_assertion_max_ttl_ms: 60_000,
             admin_audit_enabled: true,
             admin_audit_path: "logs/game-server/admin-audit.jsonl".to_string(),
             admin_audit_require_actor: false,

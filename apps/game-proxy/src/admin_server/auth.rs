@@ -208,6 +208,18 @@ pub(super) fn fallback_route_requirement(method: &str) -> AdminRouteRequirement 
     }
 }
 
+pub(super) fn assertion_route_requirement(
+    requirement: AdminRouteRequirement,
+) -> (&'static str, &'static str) {
+    match requirement.permission {
+        AdminPermissionScope::MaintenanceWrite => ("proxy.maintenance.write", "service"),
+        AdminPermissionScope::RolloutWrite => ("proxy.rollout.write", "rollout"),
+        AdminPermissionScope::RouteWrite => ("proxy.route.write", "route"),
+        AdminPermissionScope::Write | AdminPermissionScope::All => ("proxy.write", "service"),
+        AdminPermissionScope::Read => ("proxy.read", "service"),
+    }
+}
+
 fn permission_grants(granted: AdminPermissionScope, required: AdminPermissionScope) -> bool {
     match granted {
         AdminPermissionScope::All => true,

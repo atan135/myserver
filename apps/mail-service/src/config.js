@@ -1,3 +1,4 @@
+import { createPrivateKey } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -193,11 +194,14 @@ function validateProductionConfig(config) {
   if (!mailHighRiskToken || DEFAULT_MAIL_HIGH_RISK_TOKENS.has(mailHighRiskToken) || isWeakSecret(mailHighRiskToken)) {
     errors.push("MAIL_HIGH_RISK_TOKEN must be a non-default secret with at least 16 characters");
   }
-  if (mailOperationsToken && [mailServiceToken, config.gameAdminToken].includes(mailOperationsToken)) {
-    errors.push("MAIL_OPERATIONS_TOKEN must not reuse MAIL_SERVICE_TOKEN or GAME_ADMIN_TOKEN");
+  if (mailOperationsToken && mailOperationsToken === mailServiceToken) {
+    errors.push("MAIL_OPERATIONS_TOKEN must not reuse MAIL_SERVICE_TOKEN");
   }
-  if (mailHighRiskToken && [mailServiceToken, mailOperationsToken, config.gameAdminToken].includes(mailHighRiskToken)) {
+  if (mailHighRiskToken && [mailServiceToken, mailOperationsToken].includes(mailHighRiskToken)) {
     errors.push("MAIL_HIGH_RISK_TOKEN must be independent from service and downstream tokens");
+  }
+  if (!isEd25519PrivateKey(config.mailGrantAssertionPrivateKey)) {
+    errors.push("MAIL_GRANT_ASSERTION_PRIVATE_KEY must contain a valid Ed25519 private key in production");
   }
 
   if (errors.length > 0) {
@@ -214,6 +218,14 @@ function isWeakSecret(value) {
     return true;
   }
   return normalized.length > 0 && normalized.split("").every((ch) => ch === normalized[0]);
+}
+
+function isEd25519PrivateKey(value) {
+  try {
+    return createPrivateKey(String(value || "")).asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
 }
 
 function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
@@ -303,8 +315,16 @@ export function getConfig() {
     localDiscoveryFallbackEnabled,
     disallowLegacyDirectConfig,
     legacyDirectConfigWarnings,
-    gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
-    gameAdminActor: process.env.GAME_ADMIN_ACTOR || "",
+    mailGrantAssertionIssuer: process.env.MAIL_GRANT_ASSERTION_ISSUER || "mail-service",
+    mailGrantAssertionKeyId: process.env.MAIL_GRANT_ASSERTION_KEY_ID || "mail-service-v1",
+    mailGrantAssertionPrivateKey: process.env.MAIL_GRANT_ASSERTION_PRIVATE_KEY || "",
+    mailGrantAssertionTtlMs: parseIntegerInRange(
+      "MAIL_GRANT_ASSERTION_TTL_MS",
+      process.env.MAIL_GRANT_ASSERTION_TTL_MS,
+      60_000,
+      1_000,
+      300_000
+    ),
     gameAdminConnectTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_CONNECT_TIMEOUT_MS, 3000),
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),

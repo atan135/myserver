@@ -218,7 +218,7 @@ class MemoryStore {
     if (["completed", "completed_with_errors", "failed"].includes(current.status)) {
       throw createError("MYFORGE_TASK_NOT_CANCELLABLE");
     }
-    if (current.status === "queued") {
+    if (["queued", "paused"].includes(current.status)) {
       Object.assign(current, {
         status: "cancelled",
         queueReason: null,
@@ -233,6 +233,23 @@ class MemoryStore {
     current.cancelRequestedAt = value.requestedAt.toISOString();
     current.cancelDeadlineAt = new Date(value.requestedAt.getTime() + value.cancelTimeoutMs).toISOString();
     return { outcome: "requested", task: current, sendCancel: true };
+  }
+
+  async pauseTask({ requestId }) {
+    const current = await this.getTask(requestId);
+    if (current.status === "paused") return { outcome: "duplicate", task: current };
+    if (current.status !== "queued") throw createError("MYFORGE_TASK_NOT_PAUSABLE");
+    current.status = "paused";
+    current.queueReason = null;
+    return { outcome: "paused", task: current };
+  }
+
+  async resumeTask({ requestId }) {
+    const current = await this.getTask(requestId);
+    if (current.status === "queued") return { outcome: "duplicate", task: current };
+    if (current.status !== "paused") throw createError("MYFORGE_TASK_NOT_RESUMABLE");
+    current.status = "queued";
+    return { outcome: "resumed", task: current };
   }
 
   async failExpiredCancellationTasks() {
@@ -528,6 +545,30 @@ test("queued cancellation sends no frame while active cancellation is idempotent
   const atDeadline = await online.orchestrator.cancelTask(created.requestId, {}, { adminId: 7 });
   assert.equal(atDeadline.cancelDeadlineAt, first.cancelDeadlineAt);
   assert.equal(online.gateway.preparedCancels.length, 2);
+});
+
+test("paused queued tasks are never dispatched until a separately audited resume", async () => {
+  const value = harness({ online: false });
+  const created = await value.store.createTask({
+    ...requestBody(),
+    consumerTargetFile: null,
+    renderedPrompt: "queued pause",
+    commandPreview: "queued pause",
+    now: new Date(NOW)
+  });
+  const paused = await value.orchestrator.pauseTask(created.requestId, {}, { adminId: 7 });
+  assert.deepEqual(paused, { ok: true, requestId: created.requestId, status: "paused", paused: true });
+  value.gateway.online = true;
+  value.store.online = true;
+  value.store.agents[0].status = "online";
+  await value.orchestrator.dispatchNext({ agentId: AGENT_ID, projectId: PROJECT_ID });
+  assert.equal(created.status, "paused");
+  assert.equal(value.gateway.sent.length, 0);
+
+  const resumed = await value.orchestrator.resumeTask(created.requestId, {}, { adminId: 7 });
+  assert.equal(resumed.paused, false);
+  assert.equal(created.status, "dispatched");
+  assert.equal(value.gateway.sent.length, 1);
 });
 
 test("cancel writer failure becomes MYFORGE_CANCEL_DELIVERY_FAILED", async () => {

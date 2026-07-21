@@ -11,6 +11,11 @@ pub(super) struct AdminAuthContext {
     pub(super) actor_missing: bool,
 }
 
+pub(super) enum AdminConnectionAuth {
+    ReadOnly(AdminAuthContext),
+    Assertion,
+}
+
 #[derive(Deserialize)]
 struct AdminAuthEnvelope {
     token: String,
@@ -39,6 +44,19 @@ pub(super) fn authenticate_admin_packet(
     }
 
     Some(normalize_admin_auth_context(envelope.actor))
+}
+
+pub(super) fn authenticate_admin_connection(
+    packet: &Packet,
+    admin_token: &str,
+) -> Option<AdminConnectionAuth> {
+    if packet.message_type() != Some(MessageType::AdminAuthReq) {
+        return None;
+    }
+    if packet.body.as_slice() == br#"{"mode":"assertion"}"# {
+        return Some(AdminConnectionAuth::Assertion);
+    }
+    authenticate_admin_packet(packet, admin_token).map(AdminConnectionAuth::ReadOnly)
 }
 
 fn normalize_admin_auth_context(actor: Option<String>) -> AdminAuthContext {

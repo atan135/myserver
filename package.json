@@ -32,6 +32,12 @@
     "rollout:transfer": "npm run rollout-transfer --workspace mock-client --",
     "rollout:fault-drill": "npm run rollout-fault-drill --workspace mock-client --",
     "check:mock-client-protocol": "node tools/check-mock-client-protocol.js",
+    "generate:proto": "node tools/proto-generate.js --write",
+    "check:generated-proto": "node tools/proto-generate.js --check",
+    "check:proto-breaking": "node tools/check-proto-breaking-changes.js --check",
+    "check:proto-routing": "node tools/check-protocol-routing-consistency.js",
+    "check:proto-fixtures": "node tools/check-proto-compatibility-fixtures.js",
+    "check:client-protocol-version": "node tools/client-protocol-version-policy.js",
     "check:asset-write-boundaries": "node tools/check-asset-write-boundaries.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",
@@ -42,9 +48,20 @@
     "check:registry-fallback-observability": "node tools/check-registry-fallback-observability.js",
     "check:discovery-config": "node tools/check-discovery-config.js",
     "check:deployment-discovery": "node tools/check-deployment-discovery-dry-run.js",
-    "check:proto": "npm run check:mock-client-protocol",
+    "check:proto": "node tools/check-proto.js",
     "fmt:rust": "powershell -ExecutionPolicy Bypass -File scripts/rustfmt-non-generated.ps1",
     "global-id:decode": "node tools/global-id-decode.js",
+    "db": "node tools/db.js",
+    "db:status": "node tools/db.js status",
+    "db:up": "node tools/db.js up",
+    "db:validate": "node tools/db.js validate",
+    "db:baseline": "node tools/db.js baseline",
+    "db:drift": "node tools/db.js drift",
+    "db:deploy": "node tools/db-deploy.js",
+    "db:deploy:validate": "node tools/db-deploy.js validate --environment ci",
+    "db:ci": "npm run db:deploy:validate && node --test tests/db/db-cli.test.mjs tests/db/stage4-rollout.test.mjs tests/db/stage5-drift-backfill.test.mjs tests/db/stage6-deploy.test.mjs tests/db/stage7-verification.test.mjs",
+    "db:ci:rebuild": "node tools/db-deploy.js rebuild-check --environment ci --confirm-temporary-rebuild stage6-temporary-rebuild",
+    "db:stage7:drill": "node tools/db-stage7-drill.js",
     "test": "node tools/run-node-tests.js tests/**/*.test.mjs",
     "test:auth-http": "node tools/run-node-tests.js tests/auth/auth-http.test.mjs",
     "test:integration": "node tools/run-node-tests.js tests/integration/integration-flow.test.mjs",
@@ -53,6 +70,8 @@
     "count:lines": "node tools/checkfile/count-lines.js"
   },
   "dependencies": {
-    "node-kcp-x": "^1.2.3"
+    "node-kcp-x": "^1.2.3",
+    "nats": "^2.29.3",
+    "pg": "^8.16.3"
   }
 }

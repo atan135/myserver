@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   GameAdminClient,
-  decodeRequestServerShutdownRes,
   decodeRolloutDrainStatusRes
 } from "./game-admin-client.js";
 
@@ -86,28 +85,6 @@ test("decodeRolloutDrainStatusRes exposes drain mode and transferable fields", (
   });
 });
 
-test("decodeRequestServerShutdownRes exposes shutdown safety gate fields", () => {
-  const body = Buffer.concat([
-    fieldVarint(1, 0),
-    fieldString(2, "SHUTDOWN_CONNECTIONS_REMAIN"),
-    fieldVarint(3, 2),
-    fieldVarint(4, 0),
-    fieldVarint(5, 0),
-    fieldVarint(6, 1),
-    fieldVarint(7, 3)
-  ]);
-
-  assert.deepEqual(decodeRequestServerShutdownRes(body), {
-    ok: false,
-    errorCode: "SHUTDOWN_CONNECTIONS_REMAIN",
-    connectionCount: 2,
-    ownedRoomCount: 0,
-    migratingRoomCount: 0,
-    drainModeEnabled: true,
-    retiredRoomCount: 3
-  });
-});
-
 function createDiscoveryRedis(instances) {
   const hashes = new Map();
   const keys = new Set();
@@ -186,6 +163,15 @@ test("auth GameAdminClient lists discovered game-server admin endpoints", async 
       ["game-server-b", "10.0.0.2", 7501]
     ]
   );
+});
+
+test("auth GameAdminClient exposes only read-only game-server operations", () => {
+  const client = new GameAdminClient({});
+
+  assert.equal(typeof client.getServerStatus, "function");
+  assert.equal(typeof client.getRolloutDrainStatus, "function");
+  assert.equal(typeof client.updateConfig, "undefined");
+  assert.equal(typeof client.requestServerShutdown, "undefined");
 });
 
 test("auth GameAdminClient rejects direct fallback when local fallback is disabled", async () => {

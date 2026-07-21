@@ -3,6 +3,9 @@
 pub struct AuthReq {
     #[prost(string, tag = "1")]
     pub ticket: ::prost::alloc::string::String,
+    /// Zero means an older client omitted this field and is evaluated as the legacy protocol version.
+    #[prost(uint32, tag = "2")]
+    pub client_protocol_version: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuthRes {
@@ -13,6 +16,15 @@ pub struct AuthRes {
     pub player_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub error_code: ::prost::alloc::string::String,
+    /// Application protocol policy. This is separate from the fixed packet-header VERSION.
+    #[prost(uint32, tag = "4")]
+    pub server_protocol_version: u32,
+    #[prost(uint32, tag = "5")]
+    pub minimum_client_protocol_version: u32,
+    #[prost(string, tag = "6")]
+    pub upgrade_message: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub upgrade_url: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct PingReq {

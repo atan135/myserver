@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 
 import { createGlobalIdGeneratorFromEnv } from "../../../packages/global-id/node/index.js";
+import { redactAuditReason } from "./operations/audit-reason.js";
 
 const SALT_ROUNDS = 10;
 const MAINTENANCE_STATE_KEY = "maintenance:global";
@@ -17,6 +18,15 @@ const DISCIPLINE_TIER_ORDER = [
   "master",
   "grandmaster"
 ];
+const BOOTSTRAP_POLICY_SCOPE = Object.freeze({
+  world_ids: ["*"],
+  service_names: ["*"],
+  instance_ids: ["*"],
+  field_allowlist: ["*"],
+  target_types: ["*"],
+  target_ids: ["*"],
+  max_targets: 10000
+});
 
 function maintenanceStateKey(prefix = "") {
   return `${prefix || ""}${MAINTENANCE_STATE_KEY}`;
@@ -82,6 +92,129 @@ function toJsonb(value) {
 
 function toRequiredJsonb(value) {
   return JSON.stringify(value ?? {});
+}
+
+function toAdminOperation(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    operationId: row.operation_id,
+    requestId: row.request_id,
+    actorAdminId: toNumericId(row.actor_admin_id),
+    actorSubject: row.actor_subject,
+    permissionKey: row.permission_key,
+    riskLevel: row.risk_level,
+    authorizationScope: normalizeJson(row.authorization_scope_json),
+    requestedScope: normalizeJson(row.requested_scope_json),
+    scopeSha256: row.scope_sha256,
+    targetSummary: normalizeJson(row.target_summary_json),
+    targetSha256: row.target_sha256,
+    payloadSha256: row.payload_sha256,
+    semanticSha256: row.semantic_sha256,
+    reason: redactAuditReason(row.reason),
+    traceId: row.trace_id,
+    status: row.status,
+    approvalStatus: row.approval_status,
+    executionClaimedAt: toIsoString(row.execution_claimed_at),
+    completedAt: toIsoString(row.completed_at),
+    resultSummary: normalizeJson(row.result_summary_json),
+    errorSummary: normalizeJson(row.error_summary_json),
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+    preview: row.preview_id ? {
+      previewId: row.preview_id,
+      summarySha256: row.summary_sha256,
+      expiresAt: toIsoString(row.preview_expires_at),
+      consumedAt: toIsoString(row.preview_consumed_at)
+    } : null
+  };
+}
+
+const OPERATION_AUDIT_SENSITIVE_KEY = /password|token|secret|private.?key|authorization|cookie|ticket|nonce|payload/i;
+const OPERATION_AUDIT_UNBOUNDED_TEXT_KEY = /content|message|prompt|broadcast|body/i;
+
+function redactOperationAuditValue(value, key = "", depth = 0) {
+  if (OPERATION_AUDIT_SENSITIVE_KEY.test(key) || OPERATION_AUDIT_UNBOUNDED_TEXT_KEY.test(key)) {
+    return "[REDACTED]";
+  }
+  if (depth > 6) {
+    return "[TRUNCATED]";
+  }
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") {
+    return value ?? null;
+  }
+  if (typeof value === "string") {
+    return Buffer.byteLength(value, "utf8") <= 1024 ? value : "[TRUNCATED]";
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 100).map((entry) => redactOperationAuditValue(entry, "", depth + 1));
+  }
+  if (typeof value !== "object") {
+    return "[REDACTED]";
+  }
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 100).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactOperationAuditValue(entryValue, entryKey, depth + 1)
+    ])
+  );
+}
+
+function toAdminOperationAuditEvent(row) {
+  return {
+    id: toNumericId(row.id),
+    operationId: row.operation_id || null,
+    breakglassGrantId: row.breakglass_grant_id || null,
+    eventType: row.event_type,
+    actorAdminId: toNumericId(row.actor_admin_id),
+    actorSubject: row.actor_subject,
+    requestId: row.request_id || null,
+    permissionKey: row.permission_key || null,
+    riskLevel: row.risk_level || null,
+    traceId: row.trace_id || null,
+    reason: redactAuditReason(row.reason),
+    targetSummary: redactOperationAuditValue(normalizeJson(row.target_summary_json)),
+    resultSummary: redactOperationAuditValue(normalizeJson(row.result_summary_json)),
+    details: redactOperationAuditValue(normalizeJson(row.details_json) || {}),
+    result: row.operation_status || null,
+    createdAt: toIsoString(row.created_at)
+  };
+}
+
+function toBreakglassGrant(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    grantId: row.grant_id,
+    activationRequestId: row.activation_request_id,
+    actorAdminId: toNumericId(row.actor_admin_id),
+    actorSubject: row.actor_subject,
+    permissionKey: row.permission_key,
+    scope: normalizeJson(row.scope_json),
+    scopeSha256: row.scope_sha256,
+    targetSummary: normalizeJson(row.target_summary_json),
+    targetSha256: row.target_sha256,
+    semanticSha256: row.semantic_sha256,
+    reason: row.reason,
+    activatedAt: toIsoString(row.activated_at),
+    expiresAt: toIsoString(row.expires_at),
+    revokedAt: toIsoString(row.revoked_at),
+    revokedByAdminId: toNumericId(row.revoked_by_admin_id),
+    revokedBySubject: row.revoked_by_subject || null,
+    revocationReason: row.revocation_reason || null
+  };
+}
+
+function operationIsTerminal(status) {
+  return new Set(["succeeded", "failed", "execution_uncertain", "cancelled"]).has(status);
+}
+
+function operationStoreError(code, message = code, details = {}) {
+  return createAdminStoreError(code, message, details);
 }
 
 function nextParam(params) {
@@ -754,23 +887,8 @@ export class AdminStore {
   }
 
   async createAdmin({ username, displayName, password, role = "viewer" }) {
-    const passwordSalt = crypto.randomBytes(16).toString("hex");
-    const passwordHash = hashPassword(password);
-
     try {
-      const { rows } = await this.pool.query(
-        `INSERT INTO admin_accounts (username, display_name, password_algo, password_salt, password_hash, role, status)
-         VALUES ($1, $2, 'bcrypt', $3, $4, $5, 'active')
-         RETURNING id`,
-        [username, displayName || username, passwordSalt, passwordHash, role]
-      );
-
-      return {
-        id: toNumericId(rows[0].id),
-        username,
-        displayName: displayName || username,
-        role
-      };
+      return await this.createAdminWithClient(this.pool, { username, displayName, password, role });
     } catch (error) {
       if (error.code === UNIQUE_VIOLATION) {
         throw new Error("ADMIN_ALREADY_EXISTS");
@@ -779,18 +897,978 @@ export class AdminStore {
     }
   }
 
+  async createAdminWithClient(client, { username, displayName, password, role = "viewer" }) {
+    const passwordSalt = crypto.randomBytes(16).toString("hex");
+    const passwordHash = hashPassword(password);
+    const { rows } = await client.query(
+      `INSERT INTO admin_accounts (username, display_name, password_algo, password_salt, password_hash, role, status)
+       VALUES ($1, $2, 'bcrypt', $3, $4, $5, 'active')
+       RETURNING id`,
+      [username, displayName || username, passwordSalt, passwordHash, role]
+    );
+
+    return {
+      id: toNumericId(rows[0].id),
+      username,
+      displayName: displayName || username,
+      role
+    };
+  }
+
   async ensureInitialAdmin(config) {
     const existing = await this.findAdminByUsername(config.initialAdminUsername);
     if (existing) {
       return existing;
     }
 
-    return this.createAdmin({
-      username: config.initialAdminUsername,
-      displayName: config.initialAdminDisplayName,
-      password: config.initialAdminPassword,
-      role: "admin"
-    });
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const admin = await this.createAdminWithClient(client, {
+        username: config.initialAdminUsername,
+        displayName: config.initialAdminDisplayName,
+        password: config.initialAdminPassword,
+        role: "admin"
+      });
+      await this.grantBootstrapAdminRoleInTransaction(client, admin, config);
+      await client.query("COMMIT");
+      return admin;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (error.code === UNIQUE_VIOLATION) {
+        const concurrentAdmin = await this.findAdminByUsername(config.initialAdminUsername);
+        if (concurrentAdmin) {
+          return concurrentAdmin;
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantBootstrapAdminRole(admin, config = {}) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.grantBootstrapAdminRoleInTransaction(client, admin, config);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantBootstrapAdminRoleInTransaction(client, admin, config = {}) {
+    const roleKey = String(config.bootstrapAdminRole || "super_admin").trim();
+    if (!roleKey) {
+      throw createAdminStoreError("BOOTSTRAP_ADMIN_ROLE_REQUIRED", "Bootstrap admin role is required");
+    }
+
+    const scope = config.bootstrapAdminScope || BOOTSTRAP_POLICY_SCOPE;
+    const subject = `bootstrap:${String(config.env || "development").trim() || "development"}:${admin.username}`;
+    const reason = "initial admin bootstrap";
+    const role = await client.query(
+      `SELECT role_key FROM admin_roles WHERE role_key = $1 AND active = true LIMIT 1`,
+      [roleKey]
+    );
+    if (role.rows.length === 0) {
+      throw createAdminStoreError("BOOTSTRAP_ADMIN_ROLE_UNKNOWN", "Bootstrap admin role is not available", { roleKey });
+    }
+
+    const assignment = await client.query(
+      `INSERT INTO admin_account_roles (
+         admin_id, role_key, scope_json, granted_by_subject, reason, effective_at
+       ) VALUES ($1, $2, $3::jsonb, $4, $5, current_timestamp)
+       RETURNING id, effective_at`,
+      [admin.id, roleKey, toRequiredJsonb(scope), subject, reason]
+    );
+    await client.query(
+      `INSERT INTO admin_authorization_audit_events (
+         event_type, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+       ) VALUES ('account_role_granted', $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
+      [
+        subject,
+        admin.id,
+        roleKey,
+        assignment.rows[0].id,
+        reason,
+        toRequiredJsonb(scope),
+        toRequiredJsonb({ bootstrap: true, effectiveAt: toIsoString(assignment.rows[0].effective_at) })
+      ]
+    );
+  }
+
+  async findAdminPolicyPermission(permissionKey) {
+    const { rows } = await this.pool.query(
+      `SELECT permission_key, resource, action, risk_level, scope_dimensions, active
+       FROM admin_permissions
+       WHERE permission_key = $1
+       LIMIT 1`,
+      [permissionKey]
+    );
+    return rows[0] || null;
+  }
+
+  async listEffectiveAdminPolicyGrants(adminId, permissionKey = null, at = new Date()) {
+    const params = [adminId, at];
+    const permissionFilter = permissionKey
+      ? ` AND p.permission_key = $${params.push(permissionKey)}`
+      : "";
+    const { rows } = await this.pool.query(
+      `SELECT p.permission_key, p.resource, p.action, p.risk_level, p.scope_dimensions,
+              ar.scope_json, 'role'::text AS grant_source, ar.id AS source_id
+       FROM admin_account_roles ar
+       JOIN admin_roles r ON r.role_key = ar.role_key AND r.active = true
+       JOIN admin_role_permissions rp ON rp.role_key = ar.role_key
+       JOIN admin_permissions p ON p.permission_key = rp.permission_key AND p.active = true
+       WHERE ar.admin_id = $1
+         AND ar.effective_at <= $2
+         AND (ar.expires_at IS NULL OR ar.expires_at > $2)
+         AND ar.revoked_at IS NULL${permissionFilter}
+       UNION ALL
+       SELECT p.permission_key, p.resource, p.action, p.risk_level, p.scope_dimensions,
+              pg.scope_json, 'direct'::text AS grant_source, pg.id AS source_id
+       FROM admin_permission_grants pg
+       JOIN admin_permissions p ON p.permission_key = pg.permission_key AND p.active = true
+       WHERE pg.admin_id = $1
+         AND pg.effective_at <= $2
+         AND (pg.expires_at IS NULL OR pg.expires_at > $2)
+         AND pg.revoked_at IS NULL${permissionFilter}
+       ORDER BY permission_key, grant_source, source_id`,
+      params
+    );
+    return rows;
+  }
+
+  async grantAdminPermission({
+    adminId,
+    permissionKey,
+    scope,
+    grantedByAdminId = null,
+    grantedBySubject,
+    reason,
+    effectiveAt = null,
+    expiresAt = null
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const permission = await client.query(
+        `SELECT permission_key FROM admin_permissions WHERE permission_key = $1 AND active = true LIMIT 1`,
+        [permissionKey]
+      );
+      if (permission.rows.length === 0) {
+        throw createAdminStoreError("UNKNOWN_PERMISSION", "Permission is not available", { permissionKey });
+      }
+      const { rows } = await client.query(
+        `INSERT INTO admin_permission_grants (
+           admin_id, permission_key, scope_json, granted_by_admin_id, granted_by_subject, reason, effective_at, expires_at
+         ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, COALESCE($7::timestamptz, current_timestamp), $8::timestamptz)
+         RETURNING id, effective_at, expires_at`,
+        [adminId, permissionKey, toRequiredJsonb(scope), grantedByAdminId, grantedBySubject, reason, effectiveAt, expiresAt]
+      );
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, permission_key, grant_id, reason, scope_json, details_json
+         ) VALUES ('permission_granted', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          grantedByAdminId,
+          grantedBySubject,
+          adminId,
+          permissionKey,
+          rows[0].id,
+          reason,
+          toRequiredJsonb(scope),
+          toRequiredJsonb({ effectiveAt: toIsoString(rows[0].effective_at), expiresAt: toIsoString(rows[0].expires_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async grantAdminRole({
+    adminId,
+    roleKey,
+    scope,
+    grantedByAdminId = null,
+    grantedBySubject,
+    reason,
+    effectiveAt = null,
+    expiresAt = null
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const role = await client.query(
+        `SELECT role_key FROM admin_roles WHERE role_key = $1 AND active = true LIMIT 1`,
+        [roleKey]
+      );
+      if (role.rows.length === 0) {
+        throw createAdminStoreError("UNKNOWN_ADMIN_ROLE", "Admin role is not available", { roleKey });
+      }
+      const { rows } = await client.query(
+        `INSERT INTO admin_account_roles (
+           admin_id, role_key, scope_json, granted_by_admin_id, granted_by_subject, reason, effective_at, expires_at
+         ) VALUES ($1, $2, $3::jsonb, $4, $5, $6, COALESCE($7::timestamptz, current_timestamp), $8::timestamptz)
+         RETURNING id, effective_at, expires_at`,
+        [adminId, roleKey, toRequiredJsonb(scope), grantedByAdminId, grantedBySubject, reason, effectiveAt, expiresAt]
+      );
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+         ) VALUES ('account_role_granted', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          grantedByAdminId,
+          grantedBySubject,
+          adminId,
+          roleKey,
+          rows[0].id,
+          reason,
+          toRequiredJsonb(scope),
+          toRequiredJsonb({ effectiveAt: toIsoString(rows[0].effective_at), expiresAt: toIsoString(rows[0].expires_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAdminPermission({ grantId, revokedByAdminId = null, revokedBySubject, reason }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `UPDATE admin_permission_grants
+         SET revoked_at = current_timestamp,
+             revoked_by_admin_id = $2,
+             revoked_by_subject = $3,
+             revocation_reason = $4
+         WHERE id = $1 AND revoked_at IS NULL
+         RETURNING id, admin_id, permission_key, scope_json, revoked_at`,
+        [grantId, revokedByAdminId, revokedBySubject, reason]
+      );
+      if (rows.length === 0) {
+        throw createAdminStoreError("ADMIN_PERMISSION_GRANT_NOT_ACTIVE", "Permission grant is not active", { grantId });
+      }
+      const grant = rows[0];
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, permission_key, grant_id, reason, scope_json, details_json
+         ) VALUES ('permission_revoked', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          revokedByAdminId,
+          revokedBySubject,
+          grant.admin_id,
+          grant.permission_key,
+          grant.id,
+          reason,
+          toRequiredJsonb(grant.scope_json),
+          toRequiredJsonb({ revokedAt: toIsoString(grant.revoked_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return grant;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAdminRole({ assignmentId, revokedByAdminId = null, revokedBySubject, reason }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query(
+        `UPDATE admin_account_roles
+         SET revoked_at = current_timestamp,
+             revoked_by_admin_id = $2,
+             revoked_by_subject = $3,
+             revocation_reason = $4
+         WHERE id = $1 AND revoked_at IS NULL
+         RETURNING id, admin_id, role_key, scope_json, revoked_at`,
+        [assignmentId, revokedByAdminId, revokedBySubject, reason]
+      );
+      if (rows.length === 0) {
+        throw createAdminStoreError("ADMIN_ROLE_ASSIGNMENT_NOT_ACTIVE", "Admin role assignment is not active", { assignmentId });
+      }
+      const assignment = rows[0];
+      await client.query(
+        `INSERT INTO admin_authorization_audit_events (
+           event_type, actor_admin_id, actor_subject, subject_admin_id, role_key, assignment_id, reason, scope_json, details_json
+         ) VALUES ('account_role_revoked', $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+        [
+          revokedByAdminId,
+          revokedBySubject,
+          assignment.admin_id,
+          assignment.role_key,
+          assignment.id,
+          reason,
+          toRequiredJsonb(assignment.scope_json),
+          toRequiredJsonb({ revokedAt: toIsoString(assignment.revoked_at) })
+        ]
+      );
+      await client.query("COMMIT");
+      return assignment;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async insertAdminOperationAuditEvent(client, {
+    operation = null,
+    breakglassGrantId = null,
+    eventType,
+    actorAdminId = null,
+    actorSubject,
+    requestId = null,
+    permissionKey = null,
+    riskLevel = null,
+    traceId = null,
+    reason,
+    targetSummary = null,
+    resultSummary = null,
+    details = {}
+  }) {
+    await client.query(
+      `INSERT INTO admin_operation_audit_events (
+         operation_id, breakglass_grant_id, event_type, actor_admin_id, actor_subject,
+         request_id, permission_key, risk_level, trace_id, reason,
+         target_summary_json, result_summary_json, details_json
+       ) VALUES (
+         $1, $2, $3, $4, $5,
+         $6, $7, $8, $9, $10,
+         $11::jsonb, $12::jsonb, $13::jsonb
+       )`,
+      [
+        operation?.operationId || operation?.operation_id || null,
+        breakglassGrantId,
+        eventType,
+        actorAdminId,
+        actorSubject,
+        requestId || operation?.requestId || operation?.request_id || null,
+        permissionKey || operation?.permissionKey || operation?.permission_key || null,
+        riskLevel || operation?.riskLevel || operation?.risk_level || null,
+        traceId || operation?.traceId || operation?.trace_id || null,
+        reason,
+        targetSummary === null ? null : toRequiredJsonb(targetSummary),
+        resultSummary === null ? null : toRequiredJsonb(resultSummary),
+        toRequiredJsonb(details)
+      ]
+    );
+  }
+
+  async reserveAdminOperationPreflight({
+    operationId,
+    requestId,
+    actorAdminId,
+    actorSubject,
+    permissionKey,
+    riskLevel,
+    authorizationScope,
+    requestedScope,
+    scopeSha256,
+    targetSummary,
+    targetSha256,
+    payloadSha256,
+    semanticSha256,
+    reason,
+    traceId,
+    approvalStatus,
+    preview
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        `SELECT r.*,
+                p.preview_id, p.summary_sha256, p.expires_at AS preview_expires_at,
+                p.consumed_at AS preview_consumed_at
+         FROM admin_operation_requests r
+         LEFT JOIN admin_operation_previews p ON p.operation_id = r.operation_id
+         WHERE r.request_id = $1
+         FOR UPDATE OF r`,
+        [requestId]
+      );
+      if (existing.rows.length > 0) {
+        const operation = toAdminOperation(existing.rows[0]);
+        await client.query("COMMIT");
+        return {
+          kind: operation.semanticSha256 === semanticSha256 ? "existing" : "conflict",
+          operation
+        };
+      }
+
+      const inserted = await client.query(
+        `INSERT INTO admin_operation_requests (
+           operation_id, request_id, actor_admin_id, actor_subject, permission_key, risk_level,
+           authorization_scope_json, requested_scope_json, scope_sha256,
+           target_summary_json, target_sha256, payload_sha256, semantic_sha256,
+           reason, trace_id, status, approval_status
+         ) VALUES (
+           $1::uuid, $2, $3, $4, $5, $6,
+           $7::jsonb, $8::jsonb, $9,
+           $10::jsonb, $11, $12, $13,
+           $14, $15, 'preflighted', $16
+         )
+         RETURNING *`,
+        [
+          operationId,
+          requestId,
+          actorAdminId,
+          actorSubject,
+          permissionKey,
+          riskLevel,
+          toRequiredJsonb(authorizationScope),
+          toRequiredJsonb(requestedScope),
+          scopeSha256,
+          toRequiredJsonb(targetSummary),
+          targetSha256,
+          payloadSha256,
+          semanticSha256,
+          reason,
+          traceId,
+          approvalStatus
+        ]
+      );
+      const operation = toAdminOperation(inserted.rows[0]);
+      await client.query(
+        `INSERT INTO admin_operation_previews (
+           preview_id, operation_id, nonce_sha256, impact_summary_json, summary_sha256,
+           target_sha256, payload_sha256, expires_at
+         ) VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, $7, $8::timestamptz)`,
+        [
+          preview.previewId,
+          operationId,
+          preview.nonceSha256,
+          toRequiredJsonb(preview.impactSummary),
+          preview.summarySha256,
+          targetSha256,
+          payloadSha256,
+          preview.expiresAt
+        ]
+      );
+      await client.query(
+        `INSERT INTO admin_operation_approvals (operation_id, status, evidence_summary_json)
+         VALUES ($1::uuid, $2, $3::jsonb)`,
+        [operationId, approvalStatus, toRequiredJsonb({ requirement: approvalStatus })]
+      );
+      await this.insertAdminOperationAuditEvent(client, {
+        operation,
+        eventType: "preflight_created",
+        actorAdminId,
+        actorSubject,
+        reason,
+        targetSummary,
+        details: {
+          previewId: preview.previewId,
+          previewExpiresAt: preview.expiresAt,
+          approvalStatus,
+          payloadSha256
+        }
+      });
+      await client.query("COMMIT");
+      return {
+        kind: "created",
+        operation: {
+          ...operation,
+          preview: {
+            previewId: preview.previewId,
+            summarySha256: preview.summarySha256,
+            expiresAt: preview.expiresAt,
+            consumedAt: null
+          }
+        }
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (error.code === UNIQUE_VIOLATION) {
+        const { rows } = await this.pool.query(
+          `SELECT * FROM admin_operation_requests WHERE request_id = $1 LIMIT 1`,
+          [requestId]
+        );
+        if (rows.length > 0) {
+          const operation = toAdminOperation(rows[0]);
+          return { kind: operation.semanticSha256 === semanticSha256 ? "existing" : "conflict", operation };
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAdminOperationByRequestId(requestId) {
+    const { rows } = await this.pool.query(
+      `SELECT r.*,
+              p.preview_id, p.summary_sha256, p.expires_at AS preview_expires_at,
+              p.consumed_at AS preview_consumed_at
+       FROM admin_operation_requests r
+       LEFT JOIN admin_operation_previews p ON p.operation_id = r.operation_id
+       WHERE r.request_id = $1
+       LIMIT 1`,
+      [requestId]
+    );
+    return rows.length > 0 ? toAdminOperation(rows[0]) : null;
+  }
+
+  async claimAdminOperationExecution({ requestId, semanticSha256, nonceSha256, summarySha256, now = new Date() }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query(
+        `SELECT r.*,
+                p.preview_id, p.nonce_sha256, p.summary_sha256, p.expires_at AS preview_expires_at,
+                p.consumed_at AS preview_consumed_at,
+                a.status AS approval_record_status
+         FROM admin_operation_requests r
+         JOIN admin_operation_previews p ON p.operation_id = r.operation_id
+         JOIN admin_operation_approvals a ON a.operation_id = r.operation_id
+         WHERE r.request_id = $1
+         FOR UPDATE OF r, p, a`,
+        [requestId]
+      );
+      if (selected.rows.length === 0) {
+        await client.query("COMMIT");
+        return { kind: "not_found" };
+      }
+
+      const row = selected.rows[0];
+      const operation = toAdminOperation(row);
+      if (operation.semanticSha256 !== semanticSha256) {
+        await client.query("COMMIT");
+        return { kind: "conflict", operation };
+      }
+      if (operationIsTerminal(operation.status)) {
+        await client.query("COMMIT");
+        return { kind: "terminal", operation };
+      }
+      if (operation.status === "executing") {
+        await client.query("COMMIT");
+        return { kind: "in_progress", operation };
+      }
+      if (!(["preflighted", "approved"].includes(operation.status)) ||
+          operation.approvalStatus !== row.approval_record_status) {
+        await client.query("COMMIT");
+        return { kind: "state_conflict", operation };
+      }
+      if (operation.approvalStatus === "pending") {
+        await client.query("COMMIT");
+        return { kind: "approval_pending", operation };
+      }
+      if (operation.approvalStatus === "rejected") {
+        await client.query("COMMIT");
+        return { kind: "approval_rejected", operation };
+      }
+      if (new Date(row.preview_expires_at).getTime() <= new Date(now).getTime()) {
+        await client.query("COMMIT");
+        return { kind: "preview_expired", operation };
+      }
+      if (row.preview_consumed_at) {
+        await client.query("COMMIT");
+        return { kind: "nonce_replayed", operation };
+      }
+      if (row.nonce_sha256 !== nonceSha256 || row.summary_sha256 !== summarySha256) {
+        await client.query("COMMIT");
+        return { kind: "preview_mismatch", operation };
+      }
+
+      const previewUpdate = await client.query(
+        `UPDATE admin_operation_previews
+         SET consumed_at = $2::timestamptz
+         WHERE preview_id = $1::uuid AND consumed_at IS NULL`,
+        [row.preview_id, now]
+      );
+      if (previewUpdate.rowCount !== 1) {
+        await client.query("COMMIT");
+        return { kind: "nonce_replayed", operation };
+      }
+      const claimed = await client.query(
+        `UPDATE admin_operation_requests
+         SET status = 'executing', execution_claimed_at = $2::timestamptz, updated_at = $2::timestamptz
+         WHERE operation_id = $1::uuid AND status IN ('preflighted', 'approved')
+         RETURNING *`,
+        [operation.operationId, now]
+      );
+      if (claimed.rows.length === 0) {
+        await client.query("COMMIT");
+        return { kind: "state_conflict", operation };
+      }
+      const claimedOperation = toAdminOperation({
+        ...claimed.rows[0],
+        preview_id: row.preview_id,
+        summary_sha256: row.summary_sha256,
+        preview_expires_at: row.preview_expires_at,
+        preview_consumed_at: now
+      });
+      await this.insertAdminOperationAuditEvent(client, {
+        operation: claimedOperation,
+        eventType: "execution_claimed",
+        actorAdminId: claimedOperation.actorAdminId,
+        actorSubject: claimedOperation.actorSubject,
+        reason: claimedOperation.reason,
+        targetSummary: claimedOperation.targetSummary,
+        details: { previewId: row.preview_id }
+      });
+      await client.query("COMMIT");
+      return { kind: "claimed", operation: claimedOperation };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeAdminOperation({ operationId, status, resultSummary = null, errorSummary = null, details = {}, now = new Date() }) {
+    const eventTypes = {
+      succeeded: "execution_succeeded",
+      failed: "execution_failed",
+      execution_uncertain: "execution_uncertain",
+      cancelled: "execution_cancelled"
+    };
+    if (!Object.prototype.hasOwnProperty.call(eventTypes, status)) {
+      throw operationStoreError("ADMIN_OPERATION_RESULT_STATUS_INVALID", "Operation result status is invalid", { status });
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        `SELECT * FROM admin_operation_requests WHERE operation_id = $1::uuid FOR UPDATE`,
+        [operationId]
+      );
+      if (existing.rows.length === 0) {
+        throw operationStoreError("ADMIN_OPERATION_NOT_FOUND", "Operation does not exist", { operationId });
+      }
+      const prior = toAdminOperation(existing.rows[0]);
+      if (operationIsTerminal(prior.status)) {
+        await client.query("COMMIT");
+        return { kind: "terminal", operation: prior };
+      }
+      if (prior.status !== "executing") {
+        await client.query("COMMIT");
+        return { kind: "state_conflict", operation: prior };
+      }
+      const updated = await client.query(
+        `UPDATE admin_operation_requests
+         SET status = $2,
+             result_summary_json = $3::jsonb,
+             error_summary_json = $4::jsonb,
+             completed_at = $5::timestamptz,
+             updated_at = $5::timestamptz
+         WHERE operation_id = $1::uuid AND status = 'executing'
+         RETURNING *`,
+        [operationId, status, resultSummary === null ? null : toRequiredJsonb(resultSummary), errorSummary === null ? null : toRequiredJsonb(errorSummary), now]
+      );
+      if (updated.rows.length === 0) {
+        await client.query("COMMIT");
+        return { kind: "state_conflict", operation: prior };
+      }
+      const operation = toAdminOperation(updated.rows[0]);
+      await this.insertAdminOperationAuditEvent(client, {
+        operation,
+        eventType: eventTypes[status],
+        actorAdminId: operation.actorAdminId,
+        actorSubject: operation.actorSubject,
+        reason: operation.reason,
+        targetSummary: operation.targetSummary,
+        resultSummary: status === "succeeded" ? resultSummary : errorSummary,
+        details
+      });
+      await client.query("COMMIT");
+      return { kind: "completed", operation };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markAdminOperationExecutionUncertain({ operationId, errorSummary, now = new Date() }) {
+    const { rows } = await this.pool.query(
+      `UPDATE admin_operation_requests
+       SET status = 'execution_uncertain',
+           error_summary_json = $2::jsonb,
+           completed_at = $3::timestamptz,
+           updated_at = $3::timestamptz
+       WHERE operation_id = $1::uuid AND status = 'executing'
+       RETURNING *`,
+      [operationId, toRequiredJsonb(errorSummary), now]
+    );
+    if (rows.length > 0) {
+      return { kind: "marked_uncertain", operation: toAdminOperation(rows[0]) };
+    }
+    const existing = await this.pool.query(
+      `SELECT * FROM admin_operation_requests WHERE operation_id = $1::uuid LIMIT 1`,
+      [operationId]
+    );
+    if (existing.rows.length === 0) {
+      throw operationStoreError("ADMIN_OPERATION_NOT_FOUND", "Operation does not exist", { operationId });
+    }
+    return { kind: "terminal_or_conflict", operation: toAdminOperation(existing.rows[0]) };
+  }
+
+  async decideAdminOperationApproval({
+    requestId,
+    status,
+    decidedByAdminId = null,
+    decidedBySubject,
+    evidenceSummary = {},
+    rejectionReason = null,
+    now = new Date()
+  }) {
+    if (!["approved", "rejected"].includes(status)) {
+      throw operationStoreError("ADMIN_OPERATION_APPROVAL_STATUS_INVALID", "Approval status is invalid", { status });
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query(
+        `SELECT r.*,
+                a.status AS approval_record_status
+         FROM admin_operation_requests r
+         JOIN admin_operation_approvals a ON a.operation_id = r.operation_id
+         WHERE r.request_id = $1
+         FOR UPDATE OF r, a`,
+        [requestId]
+      );
+      if (selected.rows.length === 0) {
+        throw operationStoreError("ADMIN_OPERATION_NOT_FOUND", "Operation does not exist", { requestId });
+      }
+      const prior = toAdminOperation(selected.rows[0]);
+      if (prior.approvalStatus !== "pending" || selected.rows[0].approval_record_status !== "pending" || prior.status !== "preflighted") {
+        await client.query("COMMIT");
+        return { kind: "state_conflict", operation: prior };
+      }
+      const nextOperationStatus = status === "approved" ? "approved" : "cancelled";
+      const next = await client.query(
+        `UPDATE admin_operation_requests
+         SET approval_status = $2,
+             status = $3,
+             completed_at = CASE WHEN $3 = 'cancelled' THEN $4::timestamptz ELSE NULL END,
+             error_summary_json = CASE WHEN $3 = 'cancelled' THEN $5::jsonb ELSE NULL END,
+             updated_at = $4::timestamptz
+         WHERE operation_id = $1::uuid
+         RETURNING *`,
+        [
+          prior.operationId,
+          status,
+          nextOperationStatus,
+          now,
+          status === "rejected" ? toRequiredJsonb({ code: "ADMIN_OPERATION_APPROVAL_REJECTED", reason: rejectionReason }) : null
+        ]
+      );
+      await client.query(
+        `UPDATE admin_operation_approvals
+         SET status = $2,
+             decided_at = $3::timestamptz,
+             decided_by_admin_id = $4,
+             decided_by_subject = $5,
+             evidence_summary_json = $6::jsonb,
+             rejection_reason = $7,
+             updated_at = $3::timestamptz
+         WHERE operation_id = $1::uuid AND status = 'pending'`,
+        [prior.operationId, status, now, decidedByAdminId, decidedBySubject, toRequiredJsonb(evidenceSummary), rejectionReason]
+      );
+      const operation = toAdminOperation(next.rows[0]);
+      await this.insertAdminOperationAuditEvent(client, {
+        operation,
+        eventType: status === "approved" ? "approval_approved" : "approval_rejected",
+        actorAdminId: decidedByAdminId,
+        actorSubject: decidedBySubject,
+        reason: status === "approved" ? operation.reason : rejectionReason,
+        targetSummary: operation.targetSummary,
+        resultSummary: status === "approved" ? evidenceSummary : { code: "ADMIN_OPERATION_APPROVAL_REJECTED" },
+        details: { approvalStatus: status }
+      });
+      await client.query("COMMIT");
+      return { kind: status, operation };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createAdminBreakglassGrant({
+    grantId,
+    activationRequestId,
+    actorAdminId,
+    actorSubject,
+    permissionKey,
+    scope,
+    scopeSha256,
+    targetSummary,
+    targetSha256,
+    semanticSha256,
+    reason,
+    expiresAt
+  }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        `SELECT * FROM admin_breakglass_grants WHERE activation_request_id = $1 FOR UPDATE`,
+        [activationRequestId]
+      );
+      if (existing.rows.length > 0) {
+        const grant = toBreakglassGrant(existing.rows[0]);
+        const same = String(grant.actorAdminId) === String(actorAdminId) &&
+          grant.permissionKey === permissionKey &&
+          grant.semanticSha256 === semanticSha256;
+        await client.query("COMMIT");
+        return { kind: same ? "existing" : "conflict", grant };
+      }
+      const permission = await client.query(
+        `SELECT permission_key, risk_level, active
+         FROM admin_permissions
+         WHERE permission_key = $1
+         FOR KEY SHARE`,
+        [permissionKey]
+      );
+      if (permission.rows.length === 0 || permission.rows[0].active !== true || permission.rows[0].risk_level !== "emergency") {
+        throw operationStoreError("ADMIN_BREAKGLASS_PERMISSION_INVALID", "Break-glass requires an active emergency permission", { permissionKey });
+      }
+      const inserted = await client.query(
+        `INSERT INTO admin_breakglass_grants (
+           grant_id, activation_request_id, actor_admin_id, actor_subject, permission_key,
+           scope_json, scope_sha256, target_summary_json, target_sha256, semantic_sha256, reason, expires_at
+         ) VALUES (
+           $1::uuid, $2, $3, $4, $5,
+           $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12::timestamptz
+         ) RETURNING *`,
+        [
+          grantId,
+          activationRequestId,
+          actorAdminId,
+          actorSubject,
+          permissionKey,
+          toRequiredJsonb(scope),
+          scopeSha256,
+          toRequiredJsonb(targetSummary),
+          targetSha256,
+          semanticSha256,
+          reason,
+          expiresAt
+        ]
+      );
+      const grant = toBreakglassGrant(inserted.rows[0]);
+      await this.insertAdminOperationAuditEvent(client, {
+        breakglassGrantId: grant.grantId,
+        eventType: "breakglass_activated",
+        actorAdminId,
+        actorSubject,
+        requestId: activationRequestId,
+        permissionKey,
+        riskLevel: "emergency",
+        reason,
+        targetSummary,
+        details: { expiresAt: grant.expiresAt, scopeSha256 }
+      });
+      // A break-glass grant is not committed unless its security alert is durable too.
+      await client.query(
+        `INSERT INTO security_audit_logs (event_type, target_type, target_value, severity, details_json)
+         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [
+          "admin_breakglass_activated",
+          "breakglass_grant",
+          grant.grantId,
+          "critical",
+          toRequiredJsonb({
+            actorAdminId: String(actorAdminId),
+            permission: permissionKey,
+            requestId: activationRequestId,
+            expiresAt: grant.expiresAt,
+            scopeSha256,
+            targetSha256
+          })
+        ]
+      );
+      await client.query("COMMIT");
+      return { kind: "created", grant };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAdminBreakglassGrant({ grantId, revokedByAdminId = null, revokedBySubject, reason }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query(
+        `UPDATE admin_breakglass_grants
+         SET revoked_at = current_timestamp,
+             revoked_by_admin_id = $2,
+             revoked_by_subject = $3,
+             revocation_reason = $4
+         WHERE grant_id = $1::uuid AND revoked_at IS NULL
+         RETURNING *`,
+        [grantId, revokedByAdminId, revokedBySubject, reason]
+      );
+      if (updated.rows.length === 0) {
+        throw operationStoreError("ADMIN_BREAKGLASS_GRANT_NOT_ACTIVE", "Break-glass grant is not active", { grantId });
+      }
+      const grant = toBreakglassGrant(updated.rows[0]);
+      await this.insertAdminOperationAuditEvent(client, {
+        breakglassGrantId: grant.grantId,
+        eventType: "breakglass_revoked",
+        actorAdminId: revokedByAdminId,
+        actorSubject: revokedBySubject,
+        requestId: grant.activationRequestId,
+        permissionKey: grant.permissionKey,
+        riskLevel: "emergency",
+        reason,
+        targetSummary: grant.targetSummary,
+        details: { revokedAt: grant.revokedAt }
+      });
+      await client.query("COMMIT");
+      return grant;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listActiveAdminBreakglassGrants(adminId, permissionKey = null, at = new Date()) {
+    const params = [adminId, at];
+    const permissionFilter = permissionKey ? ` AND permission_key = $${params.push(permissionKey)}` : "";
+    const { rows } = await this.pool.query(
+      `SELECT * FROM admin_breakglass_grants
+       WHERE actor_admin_id = $1
+         AND activated_at <= $2
+         AND expires_at > $2
+         AND revoked_at IS NULL${permissionFilter}
+       ORDER BY expires_at ASC, grant_id ASC`,
+      params
+    );
+    return rows.map(toBreakglassGrant);
   }
 
   async updateLastLogin(adminId) {
@@ -851,6 +1929,65 @@ export class AdminStore {
         toJsonb(details)
       ]
     );
+  }
+
+  async listAdminOperationAuditEvents({
+    limit = 100,
+    from,
+    to,
+    cursor = null,
+    actorAdminId,
+    permissionKey,
+    eventType,
+    target,
+    requestId,
+    traceId,
+    riskLevel,
+    result
+  } = {}) {
+    const params = [from, to];
+    let query = `SELECT e.*, r.status AS operation_status
+                 FROM admin_operation_audit_events e
+                 LEFT JOIN admin_operation_requests r ON r.operation_id = e.operation_id
+                 WHERE e.created_at >= $1::timestamptz AND e.created_at < $2::timestamptz`;
+    const add = (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+
+    if (actorAdminId !== undefined && actorAdminId !== null) {
+      query += ` AND e.actor_admin_id = ${add(actorAdminId)}`;
+    }
+    if (permissionKey) {
+      query += ` AND e.permission_key = ${add(permissionKey)}`;
+    }
+    if (eventType) {
+      query += ` AND e.event_type = ${add(eventType)}`;
+    }
+    if (target) {
+      const targetParam = add(target);
+      query += ` AND (e.target_summary_json -> 'targetIds' ? ${targetParam} OR e.target_summary_json ->> 'targetId' = ${targetParam})`;
+    }
+    if (requestId) {
+      query += ` AND e.request_id = ${add(requestId)}`;
+    }
+    if (traceId) {
+      query += ` AND e.trace_id = ${add(traceId)}`;
+    }
+    if (riskLevel) {
+      query += ` AND e.risk_level = ${add(riskLevel)}`;
+    }
+    if (result) {
+      query += ` AND r.status = ${add(result)}`;
+    }
+    if (cursor) {
+      const createdAt = add(cursor.createdAt);
+      const id = add(cursor.id);
+      query += ` AND (e.created_at, e.id) < (${createdAt}::timestamptz, ${id}::bigint)`;
+    }
+    query += ` ORDER BY e.created_at DESC, e.id DESC LIMIT ${add(Math.max(1, Math.min(Number(limit) || 1, 5001)))}`;
+    const { rows } = await this.pool.query(query, params);
+    return rows.map(toAdminOperationAuditEvent);
   }
 
   async getSecurityLogs({ limit = 50, offset = 0, eventType, targetType, severity, clientIp } = {}) {

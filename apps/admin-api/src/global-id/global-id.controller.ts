@@ -2,8 +2,8 @@ import { Controller, Get, Inject, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { Permissions } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
 import { badRequest } from "../common/http-exception.js";
 import { ADMIN_STORE } from "../tokens.js";
 import { decodeGlobalId } from "./global-id-decoder.js";
@@ -152,7 +152,7 @@ function enrichDecodeResult(decoded: any, origin: any, worldAtCreate: any, curre
 
 @ApiTags("global-id")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/global-id")
 export class GlobalIdController {
   decodeGlobalIdInput = decodeGlobalId;

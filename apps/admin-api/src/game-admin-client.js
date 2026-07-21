@@ -14,6 +14,7 @@ const MESSAGE_TYPE = {
   ADMIN_SERVER_STATUS_RES: 2002,
   ADMIN_UPDATE_CONFIG_REQ: 2003,
   ADMIN_UPDATE_CONFIG_RES: 2004,
+  ADMIN_OPERATION_ASSERTION_REQ: 2098,
   ADMIN_AUTH_REQ: 2099,
   // GM Commands
   GM_BROADCAST_REQ: 3001,
@@ -107,6 +108,10 @@ function buildAdminAuthBody(config, actor) {
   return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
 }
 
+function buildAssertionAuthBody() {
+  return Buffer.from('{"mode":"assertion"}', "utf8");
+}
+
 function createAdminError(code, message = code) {
   const error = new Error(message);
   error.code = code;
@@ -170,9 +175,24 @@ async function sendRequest(config, messageType, payload, expectedType, options =
     await onceConnected(socket, config.gameAdminConnectTimeoutMs);
     await onceWritten(
       socket,
-      encodePacket(MESSAGE_TYPE.ADMIN_AUTH_REQ, 0, buildAdminAuthBody(config, options.actor)),
+      encodePacket(
+        MESSAGE_TYPE.ADMIN_AUTH_REQ,
+        0,
+        options.assertion ? buildAssertionAuthBody() : buildAdminAuthBody(config, options.actor)
+      ),
       config.gameAdminWriteTimeoutMs
     );
+    if (options.assertion) {
+      await onceWritten(
+        socket,
+        encodePacket(
+          MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ,
+          0,
+          Buffer.from(JSON.stringify(options.assertion), "utf8")
+        ),
+        config.gameAdminWriteTimeoutMs
+      );
+    }
     await onceWritten(socket, encodePacket(messageType, nextSeq(), payload), config.gameAdminWriteTimeoutMs);
 
     const responseBuffer = await readSinglePacket(
@@ -332,9 +352,10 @@ function readSinglePacket(socket, timeoutMs = 3000, maxResponseBytes = 1024 * 10
 }
 
 export class GameAdminClient {
-  constructor(config, redis = null) {
+  constructor(config, redis = null, assertionService = null) {
     this.config = config;
     this.redis = redis;
+    this.assertionService = assertionService;
   }
 
   async listAdminEndpoints() {
@@ -421,12 +442,13 @@ export class GameAdminClient {
 
   async sendToEndpoint(endpoint, messageType, payload, expectedType, options = {}) {
     try {
+      const requestOptions = await this.writeRequestOptions(endpoint, messageType, payload, options);
       return await sendRequest(
         this.config,
         messageType,
         payload,
         expectedType,
-        { ...options, endpoint }
+        requestOptions
       );
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
@@ -452,12 +474,18 @@ export class GameAdminClient {
     const payload = Buffer.from(JSON.stringify({ key, value }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
+        payload,
+        options
+      );
       await sendRequest(
         this.config,
         MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_REQ,
         payload,
         MESSAGE_TYPE.ADMIN_UPDATE_CONFIG_RES,
-        { ...options, endpoint }
+        requestOptions
       );
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
@@ -502,12 +530,18 @@ export class GameAdminClient {
     const payload = Buffer.from(JSON.stringify(payloadBody));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+        payload,
+        options
+      );
       await sendRequest(
         this.config,
         MESSAGE_TYPE.GM_SEND_ITEM_REQ,
         payload,
         MESSAGE_TYPE.GM_SEND_ITEM_RES,
-        { ...options, endpoint }
+        requestOptions
       );
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
@@ -520,12 +554,18 @@ export class GameAdminClient {
     const payload = Buffer.from(JSON.stringify({ playerId, reason }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
+        payload,
+        options
+      );
       await sendRequest(
         this.config,
         MESSAGE_TYPE.GM_KICK_PLAYER_REQ,
         payload,
         MESSAGE_TYPE.GM_KICK_PLAYER_RES,
-        { ...options, endpoint }
+        requestOptions
       );
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
@@ -538,18 +578,44 @@ export class GameAdminClient {
     const payload = Buffer.from(JSON.stringify({ playerId, durationSeconds, reason }));
     const endpoint = await this.resolveAdminEndpoint({ ...options, requireExplicitTarget: true });
     try {
+      const requestOptions = await this.writeRequestOptions(
+        endpoint,
+        MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
+        payload,
+        options
+      );
       await sendRequest(
         this.config,
         MESSAGE_TYPE.GM_BAN_PLAYER_REQ,
         payload,
         MESSAGE_TYPE.GM_BAN_PLAYER_RES,
-        { ...options, endpoint }
+        requestOptions
       );
     } catch (error) {
       throw attachEndpointToError(error, endpoint);
     }
     const endpointSummary = describeAdminEndpoint(endpoint);
     return { ok: true, instanceId: endpointSummary?.instanceId || "", endpoint: endpointSummary };
+  }
+
+  async writeRequestOptions(endpoint, messageType, payload, options) {
+    if (!options?.assertionContext || !this.assertionService) {
+      throw createAdminError(
+        "ADMIN_ASSERTION_REQUIRED",
+        "A signed admin operation assertion is required for game-server writes"
+      );
+    }
+    const instanceId = normalizeTargetInstanceId(endpoint?.instanceId || endpoint?.instance_id);
+    if (!instanceId) {
+      throw createAdminError("GAME_SERVER_ADMIN_TARGET_REQUIRED", "game-server write target instance is required");
+    }
+    const assertion = await this.assertionService.issue(
+      options.assertionContext,
+      "game-server",
+      instanceId,
+      payload
+    );
+    return { ...options, endpoint, assertion, messageType };
   }
 }
 
@@ -579,6 +645,7 @@ function logDiscovery(level, event, context = {}) {
 export {
   MESSAGE_TYPE,
   buildAdminAuthBody,
+  buildAssertionAuthBody,
   createAdminError,
   describeAdminEndpoint,
   normalizeGameAdminActor,

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "canonicalCatalogFormat": "myserver-postgresql-catalog-v1",
+  "targets": {
+    "auth": {
+      "file": "db/schema/targets/auth.json",
+      "version": "20260719190000",
+      "description": "add myforge batch pause",
+      "checksum": "48e032ec98af6e8d6aa6d84655fb7448b6c50890066c856ad88266cb5c6f624f1302f87914d6f13763c860c9dfac910a"
+    },
+    "game": {
+      "file": "db/schema/targets/game.json",
+      "version": "20260718161350",
+      "description": "initial schema",
+      "checksum": "5c9f8dd9d795d39b22217e2cf7196d4a6bebb732c0408201135fb116d8774c95e64bc344ab01f6b791d874e755989565"
+    },
+    "chat": {
+      "file": "db/schema/targets/chat.json",
+      "version": "20260718161350",
+      "description": "initial schema",
+      "checksum": "1b17a65df95a929bbd79c69eafe1e4f9a42797f7c8bc44da3338d221a91aeda06fe93d063134900c4b37117a488dd946"
+    },
+    "announce": {
+      "file": "db/schema/targets/announce.json",
+      "version": "20260718161350",
+      "description": "initial schema",
+      "checksum": "5a93d41a465799d901e715551aa38040e30c9c2954876fc77b833d1e54fd307c5c3b38d369e3a631d4a011b48ba65096"
+    },
+    "mail": {
+      "file": "db/schema/targets/mail.json",
+      "version": "20260718161350",
+      "description": "initial schema",
+      "checksum": "a0601e1052c897ddbb878ef83e2198457845815f6d2c1dc71b5da4c3ae879621e063cfd9d6501488a24298e5d1ad6ffc"
+    }
+  },
+  "allowances": []
+}

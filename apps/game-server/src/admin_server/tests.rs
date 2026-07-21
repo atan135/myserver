@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,7 +41,7 @@ use crate::gm_broadcast::{
     GM_BROADCAST_TITLE_MAX_LEN, GmBroadcastCommand, broadcast_gm_message_to_online_players,
 };
 use crate::pb::{
-    GameMessagePush, RequestServerShutdownReq, RequestServerShutdownRes,
+    GameMessagePush, RequestServerShutdownReq,
     TriggerRolloutDrainNoticeReq, TriggerServerRedirectReq,
 };
 use crate::protocol::{
@@ -153,6 +154,63 @@ async fn read_tcp_test_packet(stream: &mut TokioTcpStream) -> Packet {
     let mut body = vec![0u8; header.body_len as usize];
     stream.read_exact(&mut body).await.unwrap();
     Packet::new(header, body)
+}
+
+fn signed_mail_assertion_body(payload: &[u8]) -> (Vec<u8>, HashMap<String, String>) {
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use sha2::Digest as _;
+
+    let signing_key = SigningKey::from_bytes(&[29u8; 32]);
+    let payload_sha256 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(payload));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut assertion = json!({
+        "version": 1,
+        "operationId": "mail-op-1",
+        "requestId": "mail_claim:mail-1",
+        "mailId": "mail-1",
+        "characterId": "chr-1",
+        "attachmentFingerprint": format!("sha256:{}", "a".repeat(64)),
+        "issuer": "mail-service",
+        "keyId": "mail-v1",
+        "service": "mail-service",
+        "serviceInstanceId": "mail-service-1",
+        "targetService": "game-server",
+        "targetInstanceId": "game-server-test",
+        "issuedAtMs": now - 1,
+        "expiresAtMs": now + 30_000,
+        "payloadSha256": payload_sha256,
+    });
+    let canonical = json!([
+        assertion["version"],
+        assertion["operationId"],
+        assertion["requestId"],
+        assertion["mailId"],
+        assertion["characterId"],
+        assertion["attachmentFingerprint"],
+        assertion["issuer"],
+        assertion["keyId"],
+        assertion["service"],
+        assertion["serviceInstanceId"],
+        assertion["targetService"],
+        assertion["targetInstanceId"],
+        assertion["issuedAtMs"],
+        assertion["expiresAtMs"],
+        assertion["payloadSha256"],
+    ]);
+    assertion["signature"] = json!(base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(signing_key.sign(canonical.to_string().as_bytes()).to_bytes()));
+    let mut keys = HashMap::new();
+    keys.insert(
+        "mail-v1".to_string(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing_key.verifying_key().as_bytes()),
+    );
+    (serde_json::to_vec(&assertion).unwrap(), keys)
 }
 
 #[test]
@@ -473,8 +531,20 @@ fn admin_shutdown_request_is_write_action() {
     );
 }
 
+#[test]
+fn emergency_asset_correction_keeps_its_distinct_downstream_permission() {
+    let packet = json_packet(
+        MessageType::GmSendItemReq,
+        r#"{"characterId":"chr-1","itemId":"1001","itemCount":1,"source":"gm-emergency-correction"}"#,
+    );
+    assert_eq!(
+        admin_write_requirement(&packet),
+        ("gm.asset_correction.emergency", "character")
+    );
+}
+
 #[tokio::test]
-async fn admin_shutdown_request_writes_success_then_triggers_signal() {
+async fn admin_shutdown_request_rejects_legacy_token_only_write() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let room_manager = Arc::new(RoomManager::with_match_client(
@@ -507,6 +577,8 @@ async fn admin_shutdown_request_writes_success_then_triggers_signal() {
                 String::new(),
                 "game-server-test".to_string(),
                 "secret-admin-token".to_string(),
+                AdminAssertionVerifier::new("admin-api".to_string(), &HashMap::new(), 60_000),
+                MailGrantAssertionVerifier::new("mail-service".to_string(), &HashMap::new(), 60_000),
                 AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),
                 handler_shutdown_signal,
             )
@@ -536,17 +608,75 @@ async fn admin_shutdown_request_writes_success_then_triggers_signal() {
         .unwrap();
 
     let packet = read_tcp_test_packet(&mut client).await;
-    assert_eq!(
-        packet.header.msg_type,
-        MessageType::RequestServerShutdownRes as u16
-    );
+    assert_eq!(packet.header.msg_type, MessageType::ErrorRes as u16);
     assert_eq!(packet.header.seq, 2);
-    let response = RequestServerShutdownRes::decode(packet.body.as_slice()).unwrap();
-    assert!(response.ok);
-    assert!(response.error_code.is_empty());
+    let response = crate::pb::ErrorRes::decode(packet.body.as_slice()).unwrap();
+    assert_eq!(response.error_code, "ADMIN_ASSERTION_REQUIRED");
     tokio::time::timeout(Duration::from_millis(50), shutdown_signal.notified())
         .await
-        .expect("shutdown signal should be triggered after success response");
+        .expect_err("legacy token write must not trigger shutdown");
+
+    drop(client);
+    handler.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn mail_assertion_connection_rejects_generic_gm_send_item() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let room_manager = Arc::new(RoomManager::with_match_client(
+        crate::match_client::create_match_client_shared(),
+        Arc::new(NoopRoomLogicFactory),
+    ));
+    let runtime_config = runtime_config_fixture();
+    let connection_count = Arc::new(AtomicU64::new(0));
+    let config_tables = ConfigTableRuntime::load(std::path::Path::new("csv"))
+        .expect("test config tables should load");
+    let shutdown_signal = Arc::new(Notify::new());
+    let (assertion_body, keys) = signed_mail_assertion_body(b"{}");
+    let handler = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        handle_admin_connection(
+            socket,
+            room_manager,
+            runtime_config,
+            connection_count,
+            PlayerRegistry::default(),
+            PlayerManager::new(PgPlayerStore::new_disabled()),
+            config_tables,
+            ItemUidGenerator::new_for_test(1),
+            redis::Client::open("redis://127.0.0.1:6379/").unwrap(),
+            String::new(),
+            "game-server-test".to_string(),
+            "secret-admin-token".to_string(),
+            AdminAssertionVerifier::new("admin-api".to_string(), &HashMap::new(), 60_000),
+            MailGrantAssertionVerifier::new("mail-service".to_string(), &keys, 60_000),
+            AdminAuditLogger::new(AdminAuditConfig::new(false, "", false)),
+            shutdown_signal,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    });
+
+    let mut client = TokioTcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(&encode_packet(
+            MessageType::MailAttachmentGrantAssertionReq,
+            1,
+            &assertion_body,
+        ))
+        .await
+        .unwrap();
+    client
+        .write_all(&encode_packet(MessageType::GmSendItemReq, 2, b"{}"))
+        .await
+        .unwrap();
+
+    let packet = read_tcp_test_packet(&mut client).await;
+    assert_eq!(packet.header.msg_type, MessageType::ErrorRes as u16);
+    assert_eq!(packet.header.seq, 2);
+    let response = crate::pb::ErrorRes::decode(packet.body.as_slice()).unwrap();
+    assert_eq!(response.error_code, "MAIL_GRANT_MESSAGE_FORBIDDEN");
 
     drop(client);
     handler.await.unwrap().unwrap();

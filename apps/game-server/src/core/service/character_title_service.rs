@@ -874,7 +874,7 @@ pub async fn handle_debug_character_title(
     };
 
     let action = normalize_action(&request.action);
-    if !debug_token_matches(&services.config.admin_token, &request.debug_token) {
+    if !debug_token_matches(&request.debug_token) {
         queue_debug_title_response(
             connection,
             packet.header.seq,
@@ -1428,22 +1428,15 @@ fn normalize_debug_reason(raw: &str) -> String {
     trimmed.chars().take(255).collect()
 }
 
-fn debug_token_matches(config_admin_token: &str, actual: &str) -> bool {
+fn debug_token_matches(actual: &str) -> bool {
     let actual = actual.trim();
     if actual.is_empty() {
         return false;
     }
 
-    let config_admin_token = config_admin_token.trim();
-    if !config_admin_token.is_empty() && config_admin_token == actual {
-        return true;
-    }
-
-    ["GAME_ADMIN_TOKEN", "MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .any(|expected| !expected.is_empty() && expected == actual)
+    std::env::var("MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN")
+        .ok()
+        .is_some_and(|expected| !expected.trim().is_empty() && expected.trim() == actual)
 }
 
 fn to_title_summaries(
@@ -2006,16 +1999,19 @@ mod tests {
     }
 
     #[test]
-    fn debug_token_accepts_config_or_game_admin_token() {
+    fn debug_token_accepts_only_the_dedicated_debug_token() {
         unsafe {
             std::env::set_var("GAME_ADMIN_TOKEN", "env-token");
             std::env::set_var("MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN", "title-env-token");
         }
-        assert!(debug_token_matches("config-token", "config-token"));
-        assert!(debug_token_matches("config-token", "env-token"));
-        assert!(debug_token_matches("config-token", "title-env-token"));
-        assert!(!debug_token_matches("", ""));
-        assert!(!debug_token_matches("config-token", "other"));
+        assert!(debug_token_matches("title-env-token"));
+        assert!(!debug_token_matches("env-token"));
+        assert!(!debug_token_matches(""));
+        assert!(!debug_token_matches("other"));
+        unsafe {
+            std::env::remove_var("GAME_ADMIN_TOKEN");
+            std::env::remove_var("MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN");
+        }
     }
 
     #[test]

@@ -19,11 +19,22 @@ import {
 } from "./protocol.js";
 import { MESSAGE_TYPE } from "./constants.js";
 
+const INBOUND_ADMIN_CONTROL_REQUEST_TYPES = new Set([
+  MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ,
+  MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ,
+  MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
+  MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ
+]);
+
 // ============ Message Encoders ============
 
-// Auth
-export function encodeAuthReq(ticket) {
-  return encodeStringField(1, ticket);
+// Auth. Pass 0 to exercise the pre-version-field legacy encoding.
+export function encodeAuthReq(ticket, clientProtocolVersion = 1) {
+  const fields = [encodeStringField(1, ticket)];
+  if (clientProtocolVersion !== 0) {
+    fields.push(encodeUInt32Field(2, clientProtocolVersion));
+  }
+  return Buffer.concat(fields);
 }
 
 export function encodeChatAuthReq(ticket) {
@@ -168,6 +179,36 @@ export function encodeChatHistoryReq(chatType, targetId, beforeTime, limit) {
     encodeStringField(2, targetId),
     encodeInt64Field(3, beforeTime),
     encodeInt32Field(4, limit)
+  ]);
+}
+
+// ============ Internal Admin Control Encoders ============
+
+function encodeJsonControlPayload(value) {
+  return Buffer.from(JSON.stringify(value), "utf8");
+}
+
+// The admin control listener currently accepts assertion envelopes as JSON.
+// Keep the mock-client payload aligned with that transport rather than silently
+// encoding an incompatible protobuf body.
+export function encodeAdminOperationAssertion(assertion) {
+  return encodeJsonControlPayload(assertion);
+}
+
+export function encodeMailAttachmentGrantAssertion(assertion) {
+  return encodeJsonControlPayload(assertion);
+}
+
+// The mail attachment grant reuses the legacy JSON GrantItemsReq transport.
+export function encodeGrantItemsReq(grant) {
+  return encodeJsonControlPayload(grant);
+}
+
+export function encodeGrantItemsResultQueryReq({ requestId, requestFingerprint, traceId }) {
+  return Buffer.concat([
+    encodeStringField(1, requestId),
+    encodeStringField(2, requestFingerprint),
+    encodeStringField(3, traceId)
   ]);
 }
 
@@ -538,6 +579,10 @@ function decodeCharacterProgressRewardSummary(buffer) {
  * @returns {Object}
  */
 export function decodeByMessageType(messageType, body) {
+  if (INBOUND_ADMIN_CONTROL_REQUEST_TYPES.has(messageType)) {
+    throw new Error(`UNEXPECTED_INBOUND_ADMIN_CONTROL_PACKET:${messageType}`);
+  }
+
   const fields = decodeFieldsWithRepeated(body);
 
   switch (messageType) {
@@ -545,7 +590,11 @@ export function decodeByMessageType(messageType, body) {
       return {
         ok: readBool(fields, 1),
         accountPlayerId: readString(fields, 2),
-        errorCode: readString(fields, 3)
+        errorCode: readString(fields, 3),
+        serverProtocolVersion: readUInt32(fields, 4),
+        minimumClientProtocolVersion: readUInt32(fields, 5),
+        upgradeMessage: readString(fields, 6),
+        upgradeUrl: readString(fields, 7)
       };
     case MESSAGE_TYPE.PING_RES:
       return {

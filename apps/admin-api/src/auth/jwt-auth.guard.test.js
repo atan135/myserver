@@ -100,6 +100,32 @@ test("JwtAuthGuard writes security audit for invalid token without leaking token
   assert.equal(JSON.stringify(audits[0]).includes("secret"), false);
 });
 
+test("JwtAuthGuard rejects an expired token with a stable code and security audit", async () => {
+  const audits = [];
+  const guard = new JwtAuthGuard(
+    {
+      async verifyAsync() {
+        const error = new Error("jwt expired");
+        error.name = "TokenExpiredError";
+        throw error;
+      }
+    },
+    { jwtSecret: "secret" },
+    {
+      async appendSecurityAuditLog(entry) {
+        audits.push(entry);
+      }
+    },
+    {}
+  );
+
+  await assert.rejects(
+    () => guard.canActivate(makeContext(makeRequest({ authorization: "Bearer expired.jwt.value" }))),
+    assertUnauthorized("TOKEN_EXPIRED")
+  );
+  assert.equal(audits[0].details.errorCode, "TOKEN_EXPIRED");
+});
+
 test("JwtAuthGuard audit details strip query parameters", async () => {
   const audits = [];
   const guard = new JwtAuthGuard(

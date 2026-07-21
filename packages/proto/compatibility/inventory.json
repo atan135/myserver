@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "sourceOfTruth": "packages/proto",
+  "baseline": {
+    "file": "packages/proto/compatibility/baseline.json",
+    "format": "myserver.protobuf.compatibility-baseline/v1",
+    "generator": "tools/proto-compatibility-baseline.js",
+    "canonicalization": "The baseline records protobuf declarations, field numbers/types/labels/oneofs, reserved names/numbers/ranges, enum values, and RPC request/response streaming shapes. Comments, formatting, declaration order, and source paths outside the inventory do not affect it.",
+    "descriptorSetStatus": "deferred",
+    "descriptorSetRationale": "The Rust protoc/plugins are pinned through protoc-bin-vendored, prost-build, and tonic-build. This checked-in normalized semantic baseline remains the chosen deterministic audit format for declaration-level review on Windows and CI; a descriptor set may be added later without replacing this audit baseline."
+  },
+  "publishedReference": {
+    "baselineFile": "packages/proto/compatibility/release-baseline.json",
+    "manifestFile": "packages/proto/compatibility/release-reference.json",
+    "promotionPolicy": "Only node tools/check-proto-breaking-changes.js --promote-release with a reviewed release id, reason, owner approval, and approval date may move this reference. The committed release-reference.json is the audit record."
+  },
+  "breakingExemptions": {
+    "file": "packages/proto/compatibility/breaking-exemptions.json",
+    "schema": "Every exemption has one exact breaking rule and declaration target plus reason, owner, and expiresAt. Expired, invalid, ambiguous, or unused entries fail the check."
+  },
+  "protocols": [
+    {
+      "file": "packages/proto/game.proto",
+      "package": "myserver.game",
+      "classification": [
+        "client_gameplay",
+        "internal_game_control"
+      ],
+      "transports": [
+        "game-proxy KCP/TCP player packets",
+        "game-server internal admin/socket control"
+      ],
+      "owners": [
+        "game-server",
+        "game-proxy"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/game-server/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        },
+        {
+          "path": "apps/game-proxy/build.rs",
+          "language": "Rust",
+          "generator": "prost-build"
+        },
+        {
+          "path": "apps/match-service/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        }
+      ],
+      "handwrittenConsumers": [
+        {
+          "path": "tools/mock-client/src/messages.js",
+          "language": "Node.js",
+          "role": "manual protobuf encoding and decoding"
+        },
+        {
+          "path": "tools/mock-client/src/constants.js",
+          "language": "Node.js",
+          "role": "player and control packet message ids"
+        },
+        {
+          "path": "apps/game-server/src/protocol/message_type.rs",
+          "language": "Rust",
+          "role": "canonical packet message-id mapping"
+        },
+        {
+          "path": "apps/game-proxy/src/protocol.rs",
+          "language": "Rust",
+          "role": "proxy packet message-id subset"
+        }
+      ],
+      "externalConsumers": [
+        {
+          "repository": "mybevy",
+          "location": "resolved from MYSERVER_CLIENT_ROOT",
+          "language": "Rust",
+          "access": "read-only unless the user explicitly authorizes an external repository change"
+        }
+      ]
+    },
+    {
+      "file": "packages/proto/admin.proto",
+      "package": "myserver.admin",
+      "classification": [
+        "internal_control"
+      ],
+      "transports": [
+        "game-server admin TCP packets"
+      ],
+      "owners": [
+        "game-server"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/game-server/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        }
+      ],
+      "handwrittenConsumers": [
+        {
+          "path": "apps/game-server/src/protocol/message_type.rs",
+          "language": "Rust",
+          "role": "admin packet message-id mapping"
+        }
+      ],
+      "externalConsumers": []
+    },
+    {
+      "file": "packages/proto/match.proto",
+      "package": "myserver.matchservice",
+      "classification": [
+        "service_to_service"
+      ],
+      "transports": [
+        "gRPC between match-service and game-server"
+      ],
+      "owners": [
+        "match-service",
+        "game-server"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/game-server/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        },
+        {
+          "path": "apps/match-service/build.rs",
+          "language": "Rust",
+          "generator": "tonic-build"
+        }
+      ],
+      "handwrittenConsumers": [],
+      "externalConsumers": []
+    },
+    {
+      "file": "packages/proto/chat.proto",
+      "package": "myserver.chat",
+      "classification": [
+        "internal_service"
+      ],
+      "transports": [
+        "chat-server TCP packets"
+      ],
+      "owners": [
+        "chat-server"
+      ],
+      "generatedConsumers": [
+        {
+          "path": "apps/chat-server/build.rs",
+          "language": "Rust",
+          "generator": "prost-build"
+        }
+      ],
+      "handwrittenConsumers": [
+        {
+          "path": "tools/mock-client/src/messages.js",
+          "language": "Node.js",
+          "role": "manual protobuf encoding and decoding"
+        },
+        {
+          "path": "tools/mock-client/src/constants.js",
+          "language": "Node.js",
+          "role": "chat packet message ids"
+        }
+      ],
+      "externalConsumers": []
+    }
+  ],
+  "unconsolidatedDefinitions": [
+    {
+      "kind": "packet_message_id_mapping",
+      "canonical": "apps/game-server/src/protocol/message_type.rs",
+      "duplicates": [
+        "apps/game-proxy/src/protocol.rs",
+        "tools/mock-client/src/constants.js",
+        "external mybevy protocol module when MYSERVER_CLIENT_ROOT is configured"
+      ],
+      "status": "intentionally handwritten because message ids are packet-header routing metadata rather than protobuf declarations",
+      "driftCheck": "tools/check-mock-client-protocol.js"
+    },
+    {
+      "kind": "manual_node_protobuf_codec",
+      "canonical": "packages/proto/game.proto and packages/proto/chat.proto",
+      "duplicates": [
+        "tools/mock-client/src/messages.js"
+      ],
+      "status": "not yet generated",
+      "driftCheck": "tools/check-mock-client-protocol.js"
+    },
+    {
+      "kind": "local_proto_source",
+      "status": "none found outside packages/proto (excluding historical documentation)",
+      "driftCheck": "tools/proto-compatibility-baseline.js --check"
+    }
+  ]
+}

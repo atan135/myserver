@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "defaults": {
+    "lockTimeoutMs": 5000,
+    "statementTimeoutMs": 60000
+  },
+  "maximums": {
+    "lockTimeoutMs": 15000,
+    "statementTimeoutMs": 300000
+  },
+  "nonTransactionReasons": [
+    "create-index-concurrently",
+    "drop-index-concurrently",
+    "reindex-concurrently"
+  ]
+}

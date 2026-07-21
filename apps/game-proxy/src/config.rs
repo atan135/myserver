@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 use crate::connection_limits::{ConnectionLimitConfig, IpDenyList};
@@ -129,6 +129,9 @@ pub struct Config {
     pub admin_token: String,
     pub admin_read_token: Option<String>,
     pub admin_scoped_tokens: Vec<AdminScopedTokenConfig>,
+    pub admin_assertion_issuer: String,
+    pub admin_assertion_public_keys: HashMap<String, String>,
+    pub admin_assertion_max_ttl_ms: u64,
     pub admin_audit_enabled: bool,
     pub admin_audit_path: String,
     pub admin_audit_require_actor: bool,
@@ -223,6 +226,18 @@ impl Config {
             &admin_token,
             admin_read_token.as_deref(),
         )?;
+        let admin_assertion_issuer = parse_non_empty_string("ADMIN_ASSERTION_ISSUER", "admin-api");
+        let admin_assertion_public_keys = parse_admin_assertion_public_keys(
+            env::var("ADMIN_ASSERTION_PUBLIC_KEYS_JSON").ok().as_deref(),
+        )?;
+        if is_production_env() && admin_assertion_public_keys.is_empty() {
+            return Err(
+                "ADMIN_ASSERTION_PUBLIC_KEYS_JSON must contain at least one Ed25519 key in production"
+                    .to_string(),
+            );
+        }
+        let admin_assertion_max_ttl_ms = parse_u64("ADMIN_ASSERTION_MAX_TTL_MS", 60_000)
+            .clamp(1_000, 300_000);
         let admin_audit_enabled = parse_bool("PROXY_ADMIN_AUDIT_ENABLED", true);
         let admin_audit_path = env::var("PROXY_ADMIN_AUDIT_PATH")
             .map(|value| value.trim().to_string())
@@ -373,6 +388,9 @@ impl Config {
             admin_token,
             admin_read_token,
             admin_scoped_tokens,
+            admin_assertion_issuer,
+            admin_assertion_public_keys,
+            admin_assertion_max_ttl_ms,
             admin_audit_enabled,
             admin_audit_path,
             admin_audit_require_actor,
@@ -686,6 +704,30 @@ fn parse_admin_scoped_tokens(
     Ok(scoped_tokens)
 }
 
+fn parse_admin_assertion_public_keys(raw: Option<&str>) -> Result<HashMap<String, String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(HashMap::new());
+    };
+    let parsed: HashMap<String, String> = serde_json::from_str(raw).map_err(|_| {
+        "ADMIN_ASSERTION_PUBLIC_KEYS_JSON must be a JSON object mapping key ids to Ed25519 public keys"
+            .to_string()
+    })?;
+    if parsed.iter().any(|(key_id, key)| {
+        key_id.trim().is_empty()
+            || key_id.len() > 128
+            || key.trim().is_empty()
+            || key.trim().len() > 512
+    }) {
+        return Err(
+            "ADMIN_ASSERTION_PUBLIC_KEYS_JSON contains an invalid key id or public key".to_string(),
+        );
+    }
+    Ok(parsed
+        .into_iter()
+        .map(|(key_id, key)| (key_id.trim().to_string(), key.trim().to_string()))
+        .collect())
+}
+
 fn is_default_admin_token(admin_token: &str) -> bool {
     let normalized = admin_token.trim().to_ascii_lowercase();
     admin_token == DEFAULT_ADMIN_TOKEN
@@ -719,9 +761,17 @@ mod tests {
         RouteStoreBackend,
     };
 
+    // RFC 8032 test-vector public key. It is public test data, never a signing secret.
+    const TEST_ADMIN_ASSERTION_PUBLIC_KEYS_JSON: &str =
+        r#"{"admin-api-test":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}"#;
+
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        let lock = LOCK.get_or_init(|| Mutex::new(()));
+        // EnvGuard restores process environment during unwinding. Avoid turning an
+        // unexpected test failure into a cascade of unrelated PoisonError failures.
+        lock.clear_poison();
+        lock
     }
 
     struct EnvGuard {
@@ -733,6 +783,15 @@ mod tests {
             let mut names = names.to_vec();
             if !names.contains(&"PROXY_ADMIN_SCOPED_TOKENS") {
                 names.push("PROXY_ADMIN_SCOPED_TOKENS");
+            }
+            for name in [
+                "ADMIN_ASSERTION_ISSUER",
+                "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
+                "ADMIN_ASSERTION_MAX_TTL_MS",
+            ] {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
             }
             for name in [
                 "PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED",
@@ -759,6 +818,12 @@ mod tests {
         fn without_ambient_scoped_tokens(self) -> Self {
             unsafe {
                 env::remove_var("PROXY_ADMIN_SCOPED_TOKENS");
+                env::remove_var("ADMIN_ASSERTION_ISSUER");
+                env::set_var(
+                    "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
+                    TEST_ADMIN_ASSERTION_PUBLIC_KEYS_JSON,
+                );
+                env::remove_var("ADMIN_ASSERTION_MAX_TTL_MS");
                 env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_CHECK_ENABLED");
                 env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_URL");
                 env::remove_var("PROXY_ROLLOUT_DRAIN_STATUS_TOKEN");
@@ -1199,6 +1264,36 @@ mod tests {
             config.admin_read_token.as_deref(),
             Some("prod-proxy-admin-read-token-123")
         );
+    }
+
+    #[test]
+    fn rejects_missing_admin_assertion_public_keys_in_production() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "NODE_ENV",
+            "APP_ENV",
+            "REGISTRY_ENABLED",
+            "PROXY_ADMIN_TOKEN",
+            "PROXY_ADMIN_READ_TOKEN",
+            "ADMIN_ASSERTION_PUBLIC_KEYS_JSON",
+        ]);
+
+        unsafe {
+            env::set_var("NODE_ENV", "production");
+            env::remove_var("APP_ENV");
+            env::set_var("REGISTRY_ENABLED", "true");
+            env::set_var("PROXY_ADMIN_TOKEN", "prod-proxy-admin-token-123");
+            env::remove_var("PROXY_ADMIN_READ_TOKEN");
+            env::remove_var("ADMIN_ASSERTION_PUBLIC_KEYS_JSON");
+        }
+
+        let error = match Config::try_from_env() {
+            Ok(_) => panic!("production config without assertion public keys should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("ADMIN_ASSERTION_PUBLIC_KEYS_JSON"));
+        assert!(error.contains("Ed25519 key"));
     }
 
     #[test]

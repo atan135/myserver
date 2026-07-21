@@ -8,6 +8,12 @@ mod maintenance;
 mod metrics;
 mod proto;
 mod protocol;
+mod protocol_version_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/proto/compatibility/version-policy.rs"
+    ));
+}
 mod proxy_server;
 mod rollout_drain_status;
 mod route_store;
@@ -248,6 +254,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.admin_read_token.clone(),
         config.admin_scoped_tokens.clone(),
     );
+    let admin_assertion_verifier = admin_server::AdminAssertionVerifier::new(
+        config.admin_assertion_issuer.clone(),
+        &config.admin_assertion_public_keys,
+        config.admin_assertion_max_ttl_ms,
+    );
     let admin_audit_logger =
         admin_server::AdminAuditLogger::new(admin_server::AdminAuditConfig::new(
             config.admin_audit_enabled,
@@ -265,6 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_route_store = route_store.clone();
     let admin_connection_count = connection_count.clone();
     let admin_maintenance = maintenance.clone();
+    let admin_service_instance_id = config.service_instance_id.clone();
     let admin_task = tokio::spawn(async move {
         if let Err(error) = admin_server::run(
             &admin_bind_addr,
@@ -272,6 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             admin_connection_count,
             admin_maintenance,
             admin_auth_config,
+            admin_assertion_verifier,
+            admin_service_instance_id,
             admin_audit_logger,
             rollout_drain_status_checker,
         )
@@ -411,6 +425,9 @@ mod tests {
             admin_token: "admin-token".to_string(),
             admin_read_token: None,
             admin_scoped_tokens: Vec::new(),
+            admin_assertion_issuer: "admin-api".to_string(),
+            admin_assertion_public_keys: std::collections::HashMap::new(),
+            admin_assertion_max_ttl_ms: 60_000,
             admin_audit_enabled: true,
             admin_audit_path: "logs/game-proxy/admin-audit.jsonl".to_string(),
             admin_audit_require_actor: false,

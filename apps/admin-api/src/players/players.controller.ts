@@ -2,11 +2,11 @@ import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, UseGuards 
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
-import { Permissions, roleHasPermission } from "../auth/roles.decorator.js";
-import { RolesGuard } from "../auth/roles.guard.js";
+import { PermissionResolver, Permissions } from "../auth/roles.decorator.js";
+import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { getClientIp } from "../common/client-ip.js";
-import { badRequest, forbidden, notFound } from "../common/http-exception.js";
-import { ADMIN_CONFIG, ADMIN_STORE } from "../tokens.js";
+import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
+import { ADMIN_CONFIG, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_STORE } from "../tokens.js";
 import { getTitleDefinitions } from "./title-table.js";
 
 const PLAYER_STATUSES = ["active", "disabled", "banned", "pending_review"];
@@ -142,12 +142,13 @@ function enrichTitle(title: any, titleDefinitions: Record<string, any>) {
 
 @ApiTags("players")
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, AdminPolicyGuard)
 @Controller("/api/v1/players")
 export class PlayersController {
   constructor(
     @Inject(ADMIN_CONFIG) private readonly config: any,
-    @Inject(ADMIN_STORE) private readonly adminStore: any
+    @Inject(ADMIN_STORE) private readonly adminStore: any,
+    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any
   ) {}
 
   @Get()
@@ -450,7 +451,9 @@ export class PlayersController {
   }
 
   @Put(":playerId/status")
-  @Permissions("players.status.update")
+  @PermissionResolver((request) => request?.body?.status === "banned"
+    ? ["players.status.update", "players.ban"]
+    : ["players.status.update"])
   async updateStatus(@Param("playerId") playerId: string, @Body() body: any, @Req() req: any) {
     const { status } = body || {};
 
@@ -458,33 +461,70 @@ export class PlayersController {
       throw badRequest("INVALID_STATUS", "status must be active, disabled, banned, or pending_review");
     }
 
-    if (status === "banned" && !roleHasPermission(req.admin.role, "players.ban")) {
-      throw forbidden("INSUFFICIENT_PERMISSION", "Insufficient permission");
+    let banEvidence: Record<string, unknown> | null = null;
+    const applyStatus = async () => {
+      const player = await this.adminStore.findPlayerById(playerId);
+      if (!player) {
+        throw notFound("PLAYER_NOT_FOUND", "Player not found");
+      }
+
+      await this.adminStore.updatePlayerStatus(playerId, status);
+
+      await this.adminStore.appendAuditLog({
+        adminId: req.admin.sub,
+        adminUsername: req.admin.username,
+        action: "player_status_change",
+        targetType: "player",
+        targetValue: playerId,
+        details: {
+          from: player.status,
+          to: status,
+          previousBanExpiresAt: player.banExpiresAt || null,
+          banExpiresAt: null
+        },
+        ip: getClientIp(req, this.config)
+      });
+
+      if (status === "banned") {
+        banEvidence = {
+          beforeStatus: player.status,
+          afterStatus: "banned",
+          beforeBanExpiresAt: player.banExpiresAt || null,
+          afterBanExpiresAt: null,
+          businessRecord: "admin_audit_logs:player_status_change"
+        };
+      }
+
+      return { ok: true, message: "Player status updated", banExpiresAt: null };
+    };
+
+    if (status !== "banned") {
+      return applyStatus();
     }
-
-    const player = await this.adminStore.findPlayerById(playerId);
-    if (!player) {
-      throw notFound("PLAYER_NOT_FOUND", "Player not found");
+    if (typeof this.highRiskOperations?.run !== "function") {
+      throw new ApiHttpException(503, {
+        ok: false,
+        error: "ADMIN_OPERATION_SERVICE_UNAVAILABLE",
+        message: "High-risk operation service is unavailable"
+      });
     }
-
-    await this.adminStore.updatePlayerStatus(playerId, status);
-
-    await this.adminStore.appendAuditLog({
-      adminId: req.admin.sub,
-      adminUsername: req.admin.username,
-      action: "player_status_change",
-      targetType: "player",
-      targetValue: playerId,
-      details: {
-        from: player.status,
-        to: status,
-        previousBanExpiresAt: player.banExpiresAt || null,
-        banExpiresAt: null
-      },
-      ip: getClientIp(req, this.config)
+    const outcome = await this.highRiskOperations.run({
+      request: req,
+      permission: "players.ban",
+      scope: { targetType: "player", targetIds: [playerId], targetCount: 1 },
+      targetSummary: { targetType: "player", targetIds: [playerId] },
+      payload: { playerId, status: "banned" },
+      impactSummary: { targetType: "player", targetCount: 1, action: "player_ban" },
+      reason: body?.reason,
+      execute: applyStatus,
+      resultSummary: () => ({
+        action: "players.ban",
+        targetCount: 1,
+        outcome: "succeeded",
+        ban: banEvidence || { evidenceUnavailable: "ban result was not returned" }
+      })
     });
-
-    return { ok: true, message: "Player status updated", banExpiresAt: null };
+    return outcome.state === "executed" ? outcome.result : outcome.response;
   }
 
   private async appendCharacterTitleQueryAudit(

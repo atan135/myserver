@@ -320,10 +320,10 @@ node tools/mock-client/src/index.js --scenario character-elements-debug \
   --element-affinity-earth-delta -100 \
   --element-affinity-fire-delta 100 \
   --element-mastery-fire-delta 10 \
-  --element-debug-token "$GAME_ADMIN_TOKEN" \
+  --element-debug-token "$MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN" \
   --json-output
 
-`character-elements-debug` 依次发送 `GetCharacterElementsReq(1413)`、`DebugApplyCharacterElementChangeReq(1415)` 和 `GetCharacterElementsReq(1413)`，输出 `before`、`change`、`after`。debug 变更需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--element-debug-token`，仅用于测试或 GM 调试；真实客户端应把四属性查询结果或后续变化推送作为异步状态更新处理。
+`character-elements-debug` 依次发送 `GetCharacterElementsReq(1413)`、`DebugApplyCharacterElementChangeReq(1415)` 和 `GetCharacterElementsReq(1413)`，输出 `before`、`change`、`after`。debug 变更需要玩家 ticket 加 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` / `--element-debug-token`，仅用于非生产测试或 GM 调试；真实客户端应把四属性查询结果或后续变化推送作为异步状态更新处理。
 
 # 查询、授予并装备角色称号
 node tools/mock-client/src/index.js --scenario character-titles-debug \
@@ -332,7 +332,7 @@ node tools/mock-client/src/index.js --scenario character-titles-debug \
   --login-name test001 --password Passw0rd! \
   --character-id chr_0000000000001 \
   --title-id 9001 \
-  --title-debug-token "$GAME_ADMIN_TOKEN" \
+  --title-debug-token "$MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN" \
   --json-output
 
 # 设置职业阶位并触发称号解锁检查
@@ -344,7 +344,7 @@ node tools/mock-client/src/index.js --scenario character-disciplines-debug \
   --discipline-id forging \
   --discipline-tier novice \
   --discipline-points 1 \
-  --title-debug-token "$GAME_ADMIN_TOKEN" \
+  --title-debug-token "$MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN" \
   --json-output
 
 # 正式学习职业 / 流派
@@ -411,7 +411,7 @@ node tools/mock-client/src/index.js --scenario admin-character-readonly-check \
   --admin-log-limit 20 \
   --json-output
 
-`character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。激活、停用、切换和 points 推进分别使用正式玩家协议，不需要 debug token，响应包含 `activeSkillPool` 和本次 `unlockedTitles` 摘要。`character-progress-apply` 只发送 `ApplyCharacterProgressReq(1433)` 的 `progress_id`，由服务端按 CSV 解析任务、成就、活动、排行榜或世界事件来源并返回 `ApplyCharacterProgressRes(1434)`，响应包含 `applied`、`sourceType/sourceId` 和奖励摘要。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `GAME_ADMIN_TOKEN` / `--title-debug-token`。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
+`character-discipline-learn` 只发送 `LearnCharacterDisciplineReq(1425)` 的 `discipline_id`，角色身份来自 ticket 绑定的当前连接，不传 `character_id` 或 debug token。激活、停用、切换和 points 推进分别使用正式玩家协议，不需要 debug token，响应包含 `activeSkillPool` 和本次 `unlockedTitles` 摘要。`character-progress-apply` 只发送 `ApplyCharacterProgressReq(1433)` 的 `progress_id`，由服务端按 CSV 解析任务、成就、活动、排行榜或世界事件来源并返回 `ApplyCharacterProgressRes(1434)`，响应包含 `applied`、`sourceType/sourceId` 和奖励摘要。`character-titles-debug` 和 `character-disciplines-debug` 输出包含 `before`、`action`、`after`、`unlockedTitles`、`equippedTitle`、`discipline` 和 `request`，便于测试脚本断言。debug 入口需要玩家 ticket 加 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` / `--title-debug-token`，并且生产配置拒绝启用。手动验收依赖和步骤见 `docs/游戏服与接入层/角色体系与四属性设计.md`；启动 PostgreSQL、Redis、Core NATS、auth-http、game-proxy、game-server 或执行真实联调命令前，必须先由用户确认。
 
 `character-role-system-check` 默认创建临时角色并执行软删除 / 恢复，用于覆盖生命周期和 profile 闭环；如果传入 `--character-id`，场景只使用指定角色并跳过破坏性生命周期步骤。该场景会正式学习并激活 `--discipline-id`，随后触发 `--progress-id`，按 `messageType + seq` 匹配响应，并监听 `CharacterDisciplineChangePush` 和进度奖励产生的角色状态 push。提供 `--admin-token` 时，它会额外调用 `admin-character-readonly-check` 的只读后台接口；token 仅来自参数或 `MYSERVER_ADMIN_TOKEN` / `ADMIN_API_TOKEN` 环境变量，不写死在工具中。
 
@@ -530,7 +530,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--element-mastery-water-delta` | `character-elements-debug` 的水掌握 delta | `0` |
 | `--element-mastery-wind-delta` | `character-elements-debug` 的风掌握 delta | `0` |
 | `--element-change-reason` | `character-elements-debug` 写入日志的原因 | `mock-client character element debug` |
-| `--element-debug-token` | 四属性 debug 变更 token，默认读取 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
+| `--element-debug-token` | 四属性 debug 变更 token，默认读取 `MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN` | 空 |
 | `--title-id` | `character-titles-debug` 授予/装备的称号 ID | `9001` |
 | `--discipline-id` | 职业学习、激活、停用、切换、points 推进或 `character-disciplines-debug` 设置的职业 ID | `forging` |
 | `--discipline-tier` | `character-disciplines-debug` 设置的职业阶位 | `novice` |
@@ -539,7 +539,7 @@ node tools/mock-client/src/index.js --scenario password-ticket-revoke \
 | `--role-system-skip-debug` | `character-role-system-check` 跳过 debug 授称号 / 装备称号步骤 | `false` |
 | `--role-system-skip-delete-restore` | `character-role-system-check` 创建临时角色时跳过软删除 / 恢复生命周期步骤 | `false` |
 | `--title-change-reason` | 称号/职业 debug 写入日志的原因 | `mock-client character title debug` |
-| `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` 或 `GAME_ADMIN_TOKEN` | 空 |
+| `--title-debug-token` | 称号/职业 debug token，默认读取 `MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN` | 空 |
 | `--json-output` | 输出机器可读 JSON，便于测试脚本断言 | `false` |
 | `--login-name-a` | 客户端A登录用户名 | - |
 | `--password-a` | 客户端A登录密码 | - |

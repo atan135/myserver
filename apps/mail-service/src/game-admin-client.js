@@ -10,14 +10,13 @@ const VERSION = 1;
 const HEADER_LEN = 14;
 
 const MESSAGE_TYPE = {
-  ADMIN_AUTH_REQ: 2099,
-  GM_SEND_ITEM_REQ: 3003,
+  MAIL_ATTACHMENT_GRANT_ASSERTION_REQ: 2097,
   GM_SEND_ITEM_RES: 3004,
-  GRANT_ITEMS_RESULT_QUERY_REQ: 3009,
   GRANT_ITEMS_RESULT_QUERY_RES: 3010,
+  MAIL_ATTACHMENT_GRANT_REQ: 3011,
+  MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ: 3013,
   ERROR_RES: 9000
 };
-const ACTOR_PATTERN = /^[A-Za-z0-9._@-]{1,128}$/;
 let nextSeqValue = 1;
 
 function encodePacket(messageType, seq, body) {
@@ -167,45 +166,61 @@ function nextSeq() {
   return seq;
 }
 
-function normalizeGameAdminActor(actor) {
-  if (actor === undefined || actor === null) {
-    return null;
-  }
-
-  const normalized = String(actor).trim();
-  return ACTOR_PATTERN.test(normalized) ? normalized : null;
+function canonicalMailGrantAssertion(assertion) {
+  return Buffer.from(JSON.stringify([
+    assertion.version,
+    assertion.operationId,
+    assertion.requestId,
+    assertion.mailId,
+    assertion.characterId,
+    assertion.attachmentFingerprint,
+    assertion.issuer,
+    assertion.keyId,
+    assertion.service,
+    assertion.serviceInstanceId,
+    assertion.targetService,
+    assertion.targetInstanceId,
+    assertion.issuedAtMs,
+    assertion.expiresAtMs,
+    assertion.payloadSha256
+  ]), "utf8");
 }
 
-function normalizeServiceActorCandidate(actor) {
-  if (actor === undefined || actor === null) {
-    return null;
+function buildMailGrantAssertion(config, payload, details) {
+  const privateKey = String(config.mailGrantAssertionPrivateKey || "").trim();
+  if (!privateKey) {
+    throw createAdminError("MAIL_GRANT_ASSERTION_SIGNING_KEY_REQUIRED", "MAIL_GRANT_ASSERTION_PRIVATE_KEY is required");
   }
-
-  const normalized = String(actor)
-    .trim()
-    .replace(/[^A-Za-z0-9._@-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 128);
-  return ACTOR_PATTERN.test(normalized) ? normalized : null;
-}
-
-function getDefaultGameAdminActor(config = {}) {
-  return (
-    normalizeGameAdminActor(config.gameAdminActor) ||
-    normalizeServiceActorCandidate(config.serviceInstanceId) ||
-    normalizeServiceActorCandidate(config.serviceName) ||
-    "mail-service"
-  );
-}
-
-function buildAdminAuthBody(config, actor) {
-  const token = config.gameAdminToken || "";
-  const normalizedActor = normalizeGameAdminActor(actor);
-  if (!normalizedActor) {
-    return Buffer.from(token, "utf8");
+  const issuedAtMs = Date.now();
+  const configuredTtlMs = Number(config.mailGrantAssertionTtlMs || 60_000);
+  const ttlMs = Number.isSafeInteger(configuredTtlMs)
+    ? Math.min(Math.max(configuredTtlMs, 1_000), 300_000)
+    : 60_000;
+  const serviceInstanceId = String(config.serviceInstanceId || "").trim();
+  if (!serviceInstanceId) {
+    throw createAdminError("MAIL_GRANT_SERVICE_INSTANCE_REQUIRED", "SERVICE_INSTANCE_ID is required for mail attachment grants");
   }
-
-  return Buffer.from(JSON.stringify({ token, actor: normalizedActor }), "utf8");
+  const assertion = {
+    version: 1,
+    operationId: `mail-op-${crypto.randomUUID()}`,
+    requestId: details.requestId,
+    mailId: details.mailId,
+    characterId: details.characterId,
+    attachmentFingerprint: details.attachmentFingerprint,
+    issuer: config.mailGrantAssertionIssuer || "mail-service",
+    keyId: config.mailGrantAssertionKeyId || "mail-service-v1",
+    service: "mail-service",
+    serviceInstanceId,
+    targetService: "game-server",
+    targetInstanceId: details.targetInstanceId,
+    issuedAtMs,
+    expiresAtMs: issuedAtMs + ttlMs,
+    payloadSha256: crypto.createHash("sha256").update(payload).digest("base64url")
+  };
+  return {
+    ...assertion,
+    signature: crypto.sign(null, canonicalMailGrantAssertion(assertion), crypto.createPrivateKey(privateKey)).toString("base64url")
+  };
 }
 
 function normalizeGrantItems(attachments) {
@@ -296,6 +311,12 @@ function createAdminError(code, message = code) {
 }
 
 async function sendRequest(config, messageType, payload, expectedType, options = {}) {
+  if (!options.mailGrantAssertion) {
+    throw createAdminError(
+      "MAIL_GRANT_ASSERTION_REQUIRED",
+      "mail attachment requests require a signed mail grant assertion"
+    );
+  }
   const endpoint = options.endpoint || {
     host: config.gameServerAdminHost,
     port: config.gameServerAdminPort
@@ -312,7 +333,11 @@ async function sendRequest(config, messageType, payload, expectedType, options =
     requestPhase = "auth_write";
     await onceWritten(
       socket,
-      encodePacket(MESSAGE_TYPE.ADMIN_AUTH_REQ, 0, buildAdminAuthBody(config, options.actor)),
+      encodePacket(
+        MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_ASSERTION_REQ,
+        0,
+        Buffer.from(JSON.stringify(options.mailGrantAssertion), "utf8")
+      ),
       config.gameAdminWriteTimeoutMs
     );
     requestPhase = "request_write";
@@ -747,6 +772,12 @@ export class GameAdminClient {
   async grantMailAttachments(characterId, mailId, attachments, reason = "", options = {}) {
     const requestId = mailId;
     const actualMailId = mailIdFromRequestId(requestId);
+    if (!actualMailId || !String(characterId || "").trim()) {
+      throw createAdminError(
+        "MAIL_GRANT_BINDING_REQUIRED",
+        "mail attachment grants require a mail_claim request id and character id"
+      );
+    }
     const normalizedItems = normalizeGrantItems(attachments);
     const requestFingerprint = computeGrantRequestFingerprint(
       actualMailId,
@@ -785,12 +816,18 @@ export class GameAdminClient {
         );
         const responseBody = await sendRequest(
           this.config,
-          MESSAGE_TYPE.GM_SEND_ITEM_REQ,
+          MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_REQ,
           payload,
           MESSAGE_TYPE.GM_SEND_ITEM_RES,
           {
             endpoint: resolved.endpoint,
-            actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
+            mailGrantAssertion: buildMailGrantAssertion(this.config, payload, {
+              requestId,
+              mailId: actualMailId,
+              characterId,
+              attachmentFingerprint: requestFingerprint,
+              targetInstanceId: resolved.endpoint.instanceId
+            })
           }
         );
         let result;
@@ -848,6 +885,17 @@ export class GameAdminClient {
 
   async queryMailAttachmentGrant(requestId, requestFingerprint, options = {}) {
     const traceId = options.traceId || crypto.randomBytes(16).toString("hex");
+    const mailId = mailIdFromRequestId(requestId);
+    const characterId = String(options.characterId || "").trim();
+    if (!mailId || !characterId) {
+      return queryUnavailableResult(requestId, requestFingerprint, traceId, [], [
+        createAdminError(
+          "MAIL_GRANT_QUERY_BINDING_REQUIRED",
+          "mail attachment result queries require a mail_claim request id and character id"
+        )
+      ]);
+    }
+    const queryPayload = buildGrantResultQueryPayload(requestId, requestFingerprint, traceId);
     let endpoints;
     try {
       endpoints = await this.listAdminEndpoints();
@@ -867,12 +915,22 @@ export class GameAdminClient {
       try {
         const body = await sendRequest(
           this.config,
-          MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_REQ,
-          buildGrantResultQueryPayload(requestId, requestFingerprint, traceId),
+          MESSAGE_TYPE.MAIL_ATTACHMENT_GRANT_RESULT_QUERY_REQ,
+          queryPayload,
           MESSAGE_TYPE.GRANT_ITEMS_RESULT_QUERY_RES,
           {
             endpoint,
-            actor: normalizeGameAdminActor(options.actor) || getDefaultGameAdminActor(this.config)
+            mailGrantAssertion: buildMailGrantAssertion(
+              this.config,
+              queryPayload,
+              {
+                requestId,
+                mailId,
+                characterId,
+                attachmentFingerprint: requestFingerprint,
+                targetInstanceId: endpoint.instanceId
+              }
+            )
           }
         );
         const result = decodeGrantResultQueryResponse(body);
@@ -880,7 +938,7 @@ export class GameAdminClient {
           requestId,
           requestFingerprint,
           traceId,
-          characterId: options.characterId,
+          characterId,
           items: options.items
         });
         return { ok: true, instanceId: endpoint.instanceId, result };
@@ -1240,7 +1298,8 @@ function logDiscovery(level, event, context = {}) {
 
 export {
   MESSAGE_TYPE,
-  buildAdminAuthBody,
+  buildMailGrantAssertion,
+  canonicalMailGrantAssertion,
   buildGrantMailAttachmentsPayload,
   buildGrantResultQueryPayload,
   computeGrantRequestFingerprint,
@@ -1248,10 +1307,7 @@ export {
   decodeGrantItemsResponse,
   decodeGrantResultQueryResponse,
   gameOnlineRouteKey,
-  getDefaultGameAdminActor,
   normalizeGrantItems,
-  normalizeGameAdminActor,
-  normalizeServiceActorCandidate,
   sendRequest,
   validateGrantItemsResponse,
   validateGrantResultQueryResponse

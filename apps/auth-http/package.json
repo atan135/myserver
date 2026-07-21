@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 --loader ts-node/esm src/config.test.js src/registry-client.test.js src/service-discovery.test.js src/game-admin-client.test.js src/auth-store.register.test.js src/auth-store.ban-expiry.test.js src/common/client-ip.test.js",
+    "test": "node --test --experimental-test-isolation=none --test-concurrency=1 --loader ts-node/esm src/config.test.js src/registry-client.test.js src/service-discovery.test.js src/game-admin-client.test.js src/internal/internal.controller.test.js src/auth-store.register.test.js src/auth-store.ban-expiry.test.js src/common/client-ip.test.js",
     "proto": "npm run proto:admin",
     "proto:admin": "node scripts/generate-admin-proto.js",
     "seed:test-accounts": "node scripts/seed-test-accounts.js"

@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "databases": {
+    "auth": {
+      "keyTables": [
+        "public.player_accounts",
+        "public.admin_accounts"
+      ],
+      "services": [
+        {
+          "name": "auth-http",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260719190000"
+        },
+        {
+          "name": "admin-api",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260719190000"
+        }
+      ],
+      "readiness": [
+        {
+          "service": "auth-http",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL"
+        },
+        {
+          "service": "admin-api",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_ADMIN_API_READINESS_URL"
+        }
+      ]
+    },
+    "game": {
+      "keyTables": [
+        "public.characters",
+        "public.room_event_logs",
+        "public.character_inventory_grants"
+      ],
+      "services": [
+        {
+          "name": "game-server",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260718161350"
+        },
+        {
+          "name": "game-proxy",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260718161350"
+        }
+      ],
+      "readiness": [
+        {
+          "service": "game-server",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_GAME_SERVER_READINESS_URL"
+        },
+        {
+          "service": "game-proxy",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_GAME_PROXY_READINESS_URL"
+        }
+      ]
+    },
+    "chat": {
+      "keyTables": [
+        "public.chat_messages",
+        "public.chat_groups"
+      ],
+      "services": [
+        {
+          "name": "chat-server",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260718161350"
+        }
+      ],
+      "readiness": [
+        {
+          "service": "chat-server",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_CHAT_SERVER_READINESS_URL"
+        }
+      ]
+    },
+    "announce": {
+      "keyTables": [
+        "public.announcements"
+      ],
+      "services": [
+        {
+          "name": "announce-service",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260718161350"
+        }
+      ],
+      "readiness": [
+        {
+          "service": "announce-service",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_ANNOUNCE_SERVICE_READINESS_URL"
+        }
+      ]
+    },
+    "mail": {
+      "keyTables": [
+        "public.mails",
+        "public.mail_notification_outbox",
+        "public.mail_claim_workflows"
+      ],
+      "services": [
+        {
+          "name": "mail-service",
+          "minimumMigrationVersion": "20260718161350",
+          "maximumMigrationVersion": "20260718161350"
+        }
+      ],
+      "readiness": [
+        {
+          "service": "mail-service",
+          "urlEnvironment": "MYSERVER_DB_DEPLOY_MAIL_SERVICE_READINESS_URL"
+        }
+      ]
+    }
+  }
+}

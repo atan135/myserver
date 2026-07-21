@@ -94,6 +94,8 @@ mod tests {
     fn auth_req_round_trip_through_packet() {
         let message = AuthReq {
             ticket: "ticket-123".to_string(),
+            client_protocol_version:
+                crate::protocol_version_policy::CURRENT_CLIENT_PROTOCOL_VERSION,
         };
         let body = encode_body(&message);
         let packet_bytes = encode_packet(MessageType::AuthReq, 42, &body);

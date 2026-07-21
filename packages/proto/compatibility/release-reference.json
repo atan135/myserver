@@ -1,0 +1,11 @@
+{
+  "baselineDigest": "sha256:2c20a25476bb20588cd698b131ef6af5d1ebe2080fd5dd93a1a6e60833bdc3ce",
+  "baselineFile": "packages/proto/compatibility/release-baseline.json",
+  "release": {
+    "approvedAt": "2026-07-16",
+    "approvedBy": "protocol-owners",
+    "reason": "Establish the first audited published compatibility reference from the phase 1 semantic baseline.",
+    "releaseId": "protocol-baseline-bootstrap-2026-07-16"
+  },
+  "schemaVersion": 1
+}

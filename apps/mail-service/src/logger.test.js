@@ -34,6 +34,7 @@ test("log formatting bounds nested data and removes credentials, mail bodies, at
   const secrets = {
     ticket: "test-only-ticket-value.DO_NOT_LOG",
     adminToken: "test-only-game-admin-token-DO_NOT_LOG",
+    mailGrantPrivateKey: "ed25519-private-material-DO_NOT_LOG",
     content: "complete private mail body DO_NOT_LOG",
     endpoint: "redis://fixture-user:fixture-password@10.0.0.8:6379/0"
   };
@@ -46,6 +47,7 @@ test("log formatting bounds nested data and removes credentials, mail bodies, at
   const error = new Error(JSON.stringify({
     ticket: secrets.ticket,
     GAME_ADMIN_TOKEN: secrets.adminToken,
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY: secrets.mailGrantPrivateKey,
     content: secrets.content,
     attachments,
     redisEndpoint: secrets.endpoint
@@ -57,6 +59,7 @@ test("log formatting bounds nested data and removes credentials, mail bodies, at
     error: error.message,
     ticket: secrets.ticket,
     gameAdminToken: secrets.adminToken,
+    mailGrantAssertionPrivateKey: secrets.mailGrantPrivateKey,
     content: secrets.content,
     attachments,
     redisEndpoint: secrets.endpoint
@@ -69,6 +72,7 @@ test("log formatting bounds nested data and removes credentials, mail bodies, at
   for (const forbidden of [
     secrets.ticket,
     secrets.adminToken,
+    secrets.mailGrantPrivateKey,
     secrets.content,
     secrets.endpoint,
     "attachment-private-199-DO_NOT_LOG",

@@ -598,6 +598,7 @@ function main() {
   const errors = [];
   const protoSource = readRepoFile("packages/proto/game.proto");
   const chatProtoSource = readRepoFile("packages/proto/chat.proto");
+  const adminProtoSource = readRepoFile("packages/proto/admin.proto");
   const gameServerRustSource = readRepoFile("apps/game-server/src/protocol/message_type.rs");
   const gameProxyRustSource = readRepoFile("apps/game-proxy/src/protocol.rs");
 
@@ -629,11 +630,13 @@ function main() {
 
   const protoMessages = mergeProtoMessages(
     parseProtoMessages(protoSource),
-    parseProtoMessages(chatProtoSource)
+    parseProtoMessages(chatProtoSource),
+    parseProtoMessages(adminProtoSource)
   );
   const protoEnumNames = new Set([
     ...parseProtoEnumNames(protoSource),
-    ...parseProtoEnumNames(chatProtoSource)
+    ...parseProtoEnumNames(chatProtoSource),
+    ...parseProtoEnumNames(adminProtoSource)
   ]);
   errors.push(...checkMockClientMessageFields(protoMessages, protoEnumNames));
 

@@ -1,5 +1,5 @@
 pub mod myserver {
     pub mod game {
-        include!(concat!(env!("OUT_DIR"), "/myserver.game.rs"));
+        include!("proto/myserver.game.rs");
     }
 }

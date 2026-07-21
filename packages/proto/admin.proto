@@ -22,6 +22,49 @@ message UpdateConfigRes {
   string error_code = 2;
 }
 
+// Signed envelope carried immediately before an internal admin write request.
+// The current TCP/HTTP transports use the JSON representation of these fields
+// while the protobuf definition is the stable cross-service contract.
+message AdminOperationAssertion {
+  uint32 version = 1;
+  string operation_id = 2;
+  string request_id = 3;
+  string trace_id = 4;
+  string issuer = 5;
+  string key_id = 6;
+  string actor_id = 7;
+  string permission = 8;
+  string scope_json = 9;
+  string target_json = 10;
+  string service = 11;
+  string instance_id = 12;
+  int64 issued_at_ms = 13;
+  int64 expires_at_ms = 14;
+  bytes payload_sha256 = 15;
+  bytes signature = 16;
+}
+
+// Dedicated mail-service assertion. It is intentionally not an admin assertion:
+// it can authorize only a persisted mail attachment grant or its result query.
+message MailAttachmentGrantAssertion {
+  uint32 version = 1;
+  string operation_id = 2;
+  string request_id = 3;
+  string mail_id = 4;
+  string character_id = 5;
+  string attachment_fingerprint = 6;
+  string issuer = 7;
+  string key_id = 8;
+  string service = 9;
+  string service_instance_id = 10;
+  string target_service = 11;
+  string target_instance_id = 12;
+  int64 issued_at_ms = 13;
+  int64 expires_at_ms = 14;
+  bytes payload_sha256 = 15;
+  bytes signature = 16;
+}
+
 message GrantItem {
   int32 item_id = 1;
   uint32 count = 2;

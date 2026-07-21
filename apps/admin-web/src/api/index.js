@@ -82,15 +82,15 @@ export const playerApi = {
     api.get(`/players/characters/${characterId}/profile`, { params }),
   getCharacterTitles: (characterId, params) =>
     api.get(`/players/characters/${characterId}/titles`, { params }),
-  updatePlayerStatus: (playerId, status) =>
-    api.put(`/players/${playerId}/status`, { status })
+  updatePlayerStatus: (playerId, data) =>
+    api.put(`/players/${playerId}/status`, data)
 };
 
 export const maintenanceApi = {
   getStatus: () =>
     api.get("/maintenance"),
-  setStatus: (enabled, reason) =>
-    api.post("/maintenance", { enabled, reason })
+  setStatus: (data) =>
+    api.post("/maintenance", data)
 };
 
 export const monitoringApi = {

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "stage5-copy-marker",
+  "database": "auth",
+  "owner": "stage5-test",
+  "target_version": "20260718161350",
+  "cursor": {
+    "format": "integer",
+    "initial": "0"
+  },
+  "batch_size": 2,
+  "max_batch_size": 4,
+  "max_batches_per_run": 4,
+  "min_delay_ms": 1,
+  "statement_timeout_ms": 60000,
+  "batch_sql": "batch.sql"
+}

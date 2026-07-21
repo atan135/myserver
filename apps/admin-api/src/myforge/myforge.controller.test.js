@@ -26,12 +26,20 @@ function codedError(code, message, statusCode) {
   return error;
 }
 
+const highRiskOperations = {
+  async run(input) {
+    return { state: "executed", result: await input.execute() };
+  }
+};
+
 test("myforge controller declares one exact permission per HTTP operation", () => {
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.listAgents), ["myforge.agent.read"]);
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.listTasks), ["myforge.task.read"]);
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.getTask), ["myforge.task.read"]);
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.createFangyuanBlueprint), ["myforge.task.create"]);
   assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.cancelTask), ["myforge.task.cancel"]);
+  assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.pauseTask), ["myforge.task.cancel"]);
+  assert.deepEqual(Reflect.getMetadata(PERMISSIONS_KEY, MyforgeController.prototype.resumeTask), ["myforge.task.cancel"]);
   assert.equal(Reflect.getMetadata(HTTP_CODE_METADATA, MyforgeController.prototype.createFangyuanBlueprint), 202);
   assert.equal(Reflect.getMetadata(HTTP_CODE_METADATA, MyforgeController.prototype.cancelTask), 200);
 });
@@ -46,21 +54,33 @@ test("myforge controller passes typed create actor context and cancel body to th
     async cancelTask(requestId, body, actor) {
       calls.push({ method: "cancel", requestId, body, actor });
       return { ok: true, requestId, status: "cancelled" };
+    },
+    async pauseTask(requestId, body, actor) {
+      calls.push({ method: "pause", requestId, body, actor });
+      return { ok: true, requestId, status: "paused", paused: true };
+    },
+    async resumeTask(requestId, body, actor) {
+      calls.push({ method: "resume", requestId, body, actor });
+      return { ok: true, requestId, status: "queued", paused: false };
     }
   };
-  const controller = new MyforgeController({}, orchestrator);
-  const body = { agentId: "dev-pc-001" };
+  const controller = new MyforgeController({}, orchestrator, highRiskOperations);
+  const body = { agentId: "dev-pc-001", reason: "operator requested blueprint" };
   await controller.createFangyuanBlueprint(body, request());
   await controller.cancelTask("11111111-1111-4111-8111-111111111111", {}, request());
+  await controller.pauseTask("11111111-1111-4111-8111-111111111111", {}, request());
+  await controller.resumeTask("11111111-1111-4111-8111-111111111111", {}, request());
 
   assert.deepEqual(calls[0], {
     method: "create",
-    body,
+    body: { agentId: "dev-pc-001" },
     actor: { adminId: 7, adminUsername: "admin", ip: "127.0.0.1" }
   });
   assert.equal(calls[1].method, "cancel");
   assert.deepEqual(calls[1].body, {});
   assert.equal(calls[1].actor.adminUsername, "admin");
+  assert.equal(calls[2].method, "pause");
+  assert.equal(calls[3].method, "resume");
 });
 
 test("myforge controller supports list and repeated detail polling without response rewriting", async () => {
@@ -80,7 +100,7 @@ test("myforge controller supports list and repeated detail polling without respo
       };
     }
   };
-  const controller = new MyforgeController({}, orchestrator);
+  const controller = new MyforgeController({}, orchestrator, highRiskOperations);
   assert.equal((await controller.listAgents({})).total, 0);
   assert.equal((await controller.listTasks({ status: "running" })).limit, 20);
   const first = await controller.getTask("11111111-1111-4111-8111-111111111111");

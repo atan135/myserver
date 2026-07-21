@@ -128,6 +128,10 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_target
 CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at
   ON admin_audit_logs (created_at);
 
+-- Keep the compatibility initializer aligned with the latest reviewed auth
+-- migration. This file is executed by psql, so \ir is resolved relative to db/.
+\ir migrations/auth/20260719100000_add_admin_authorization_policy.sql
+
 CREATE TABLE IF NOT EXISTS myforge_agents (
   agent_id varchar(128) PRIMARY KEY,
   project_id varchar(128) NOT NULL,
@@ -214,7 +218,7 @@ CREATE TABLE IF NOT EXISTS myforge_task_runs (
   completed_at timestamptz NULL,
   updated_at timestamptz NOT NULL DEFAULT current_timestamp,
   CONSTRAINT ck_myforge_tasks_type CHECK (task_type = 'fangyuan.blueprint.generate'),
-  CONSTRAINT ck_myforge_tasks_status CHECK (status IN ('queued', 'dispatched', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
+  CONSTRAINT ck_myforge_tasks_status CHECK (status IN ('queued', 'paused', 'dispatched', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
   CONSTRAINT ck_myforge_tasks_queue_reason CHECK (queue_reason IS NULL OR queue_reason IN ('agent_offline', 'agent_busy')),
   CONSTRAINT ck_myforge_tasks_queue_reason_status CHECK (queue_reason IS NULL OR status = 'queued'),
   CONSTRAINT ck_myforge_tasks_execution_mode CHECK (execution_mode IS NULL OR execution_mode IN ('codex_exec', 'dry_run')),

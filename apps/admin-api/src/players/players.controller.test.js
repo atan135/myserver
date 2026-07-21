@@ -9,6 +9,7 @@ register("ts-node/esm", pathToFileURL("./"));
 
 const { PlayersController } = await import("./players.controller.ts");
 const { AdminStore } = await import("../admin-store.js");
+const { POLICY_PERMISSION_RESOLVER_KEY } = await import("../auth/roles.decorator.ts");
 
 function storeFixture() {
   return {
@@ -786,24 +787,11 @@ test("operator can reject pending review player", async () => {
   assert.equal(store.audits[0].details.to, "disabled");
 });
 
-test("operator cannot ban player through status update", async () => {
-  const store = storeFixture();
-  const controller = new PlayersController({}, store);
-
-  await assert.rejects(
-    () => controller.updateStatus("player-1", { status: "banned" }, request("operator")),
-    (error) => {
-      assert.equal(error.getStatus(), 403);
-      assert.deepEqual(error.getResponse(), {
-        ok: false,
-        error: "INSUFFICIENT_PERMISSION",
-        message: "Insufficient permission"
-      });
-      return true;
-    }
-  );
-  assert.equal(store.status, null);
-  assert.equal(store.audits.length, 0);
+test("player ban route declares the additional policy permission without reading the legacy role", () => {
+  const resolver = Reflect.getMetadata(POLICY_PERMISSION_RESOLVER_KEY, PlayersController.prototype.updateStatus);
+  assert.equal(typeof resolver, "function");
+  assert.deepEqual(resolver({ body: { status: "banned" } }), ["players.status.update", "players.ban"]);
+  assert.deepEqual(resolver({ body: { status: "disabled" } }), ["players.status.update"]);
 });
 
 test("invalid player status is rejected", async () => {

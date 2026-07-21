@@ -30,7 +30,7 @@
 # --element-mastery-water-delta <n> character-elements-debug 水掌握 delta (默认 0)
 # --element-mastery-wind-delta <n> character-elements-debug 风掌握 delta (默认 0)
 # --element-change-reason <text> 四属性 debug 变更日志原因
-# --element-debug-token <token> 四属性 debug 变更 token；默认读取 MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN 或 GAME_ADMIN_TOKEN
+# --element-debug-token <token> 四属性 debug 变更 token；默认读取 MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN
 # --title-id <id>            character-titles-debug 授予/装备的称号 ID (默认 9001)
 # --discipline-id <id>       职业学习、激活、停用、切换、points 推进或 debug 设置的职业 ID (默认 forging)
 # --discipline-tier <tier>   character-disciplines-debug 设置的职业阶位 (默认 novice)
@@ -39,7 +39,7 @@
 # --role-system-skip-debug   character-role-system-check 跳过 debug 授称号/装备称号步骤
 # --role-system-skip-delete-restore 跳过临时角色软删除/恢复步骤
 # --title-change-reason <text> 称号/职业 debug 写入日志的原因
-# --title-debug-token <token> 称号/职业 debug token；默认读取 MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN 或 GAME_ADMIN_TOKEN
+# --title-debug-token <token> 称号/职业 debug token；默认读取 MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN
 # --json-output              输出机器可读 JSON，便于测试脚本断言
 # --timeout-ms <ms>          超时毫秒 (默认 5000)
 # --policy-id <id>           房间策略，例如 movement_demo / combat_demo
@@ -114,16 +114,16 @@ node tools/mock-client/src/index.js --scenario character-login-auth --http-base-
 node tools/mock-client/src/index.js --scenario character-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --room-id room-character-debug
 
 # 0.9 查询并调试修改角色四属性 (CHARACTER_ELEMENTS_DEBUG)
-# 需要玩家 ticket + GAME_ADMIN_TOKEN / --element-debug-token，仅用于测试或 GM 调试。
-node tools/mock-client/src/index.js --scenario character-elements-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --element-affinity-earth-delta -100 --element-affinity-fire-delta 100 --element-mastery-fire-delta 10 --element-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+# 需要玩家 ticket + MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN / --element-debug-token，仅用于非生产测试或 GM 调试。
+node tools/mock-client/src/index.js --scenario character-elements-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --element-affinity-earth-delta -100 --element-affinity-fire-delta 100 --element-mastery-fire-delta 10 --element-debug-token "%MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN%" --json-output
 
 # 0.10 查询、debug 授予并装备角色称号 (CHARACTER_TITLES_DEBUG)
-# 需要玩家 ticket + GAME_ADMIN_TOKEN / --title-debug-token，仅用于测试或 GM 调试。
-node tools/mock-client/src/index.js --scenario character-titles-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --title-id 9001 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+# 需要玩家 ticket + MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN / --title-debug-token，仅用于非生产测试或 GM 调试。
+node tools/mock-client/src/index.js --scenario character-titles-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --title-id 9001 --title-debug-token "%MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN%" --json-output
 
 # 0.11 设置职业阶位并触发称号解锁检查 (CHARACTER_DISCIPLINES_DEBUG)
 # --discipline-points 默认 1；输出包含 before/action/after/unlockedTitles/equippedTitle/discipline/request。
-node tools/mock-client/src/index.js --scenario character-disciplines-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --discipline-id forging --discipline-tier novice --discipline-points 1 --title-debug-token "%GAME_ADMIN_TOKEN%" --json-output
+node tools/mock-client/src/index.js --scenario character-disciplines-debug --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --login-name test001 --password Passw0rd! --character-id chr_0000000000001 --discipline-id forging --discipline-tier novice --discipline-points 1 --title-debug-token "%MYSERVER_CHARACTER_TITLE_DEBUG_TOKEN%" --json-output
 
 # 0.12 正式学习职业 / 流派 (CHARACTER_DISCIPLINE_LEARN)
 # 只使用当前 ticket 绑定角色，不接受客户端传 character_id 或 debug token。

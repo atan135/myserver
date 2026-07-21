@@ -97,6 +97,13 @@ const router = createRouter({
 router.beforeEach((to, from, next) => {
   const authStore = useAuthStore();
 
+  if (to.meta.requiresAuth && authStore.isAuthenticated && !authStore.capabilitiesLoaded) {
+    authStore.refreshCapabilities()
+      .catch(() => authStore.logout())
+      .finally(() => next(to.fullPath));
+    return;
+  }
+
   if (to.meta.requiresAuth && !authStore.isAuthenticated) {
     next({ name: "Login", query: { redirect: to.fullPath } });
     return;

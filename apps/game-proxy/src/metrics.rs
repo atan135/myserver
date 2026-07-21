@@ -13,6 +13,8 @@ use service_registry::collect_discovery_metric_fields;
 use tokio::time::interval;
 use tracing::{error, info};
 
+use crate::protocol_version_policy::ClientProtocolVersionMetric;
+
 /// 计算当前 bucket 时间戳（5秒对齐）
 fn current_bucket() -> u64 {
     std::time::SystemTime::now()
@@ -80,6 +82,11 @@ pub struct MetricsCollector {
     latency_count: AtomicU64,
     /// 活跃前端连接数，包含鉴权前连接
     connections: AtomicU64,
+    client_protocol_auth_accepted_legacy: AtomicU64,
+    client_protocol_auth_accepted_current: AtomicU64,
+    client_protocol_auth_accepted_supported_older: AtomicU64,
+    client_protocol_auth_rejected_too_old: AtomicU64,
+    client_protocol_auth_rejected_too_new: AtomicU64,
     /// 扩展字段
     extra: Mutex<HashMap<String, String>>,
 }
@@ -92,6 +99,11 @@ impl MetricsCollector {
             latency_sum: AtomicU64::new(0),
             latency_count: AtomicU64::new(0),
             connections: AtomicU64::new(0),
+            client_protocol_auth_accepted_legacy: AtomicU64::new(0),
+            client_protocol_auth_accepted_current: AtomicU64::new(0),
+            client_protocol_auth_accepted_supported_older: AtomicU64::new(0),
+            client_protocol_auth_rejected_too_old: AtomicU64::new(0),
+            client_protocol_auth_rejected_too_new: AtomicU64::new(0),
             extra: Mutex::new(HashMap::new()),
         }
     }
@@ -110,6 +122,27 @@ impl MetricsCollector {
     /// 设置活跃前端连接数
     pub fn set_connections(&self, val: u64) {
         self.connections.store(val, Ordering::Relaxed);
+    }
+
+    pub fn record_client_protocol_version(&self, metric: ClientProtocolVersionMetric) {
+        let counter = match metric {
+            ClientProtocolVersionMetric::AcceptedLegacy => {
+                &self.client_protocol_auth_accepted_legacy
+            }
+            ClientProtocolVersionMetric::AcceptedCurrent => {
+                &self.client_protocol_auth_accepted_current
+            }
+            ClientProtocolVersionMetric::AcceptedSupportedOlder => {
+                &self.client_protocol_auth_accepted_supported_older
+            }
+            ClientProtocolVersionMetric::RejectedTooOld => {
+                &self.client_protocol_auth_rejected_too_old
+            }
+            ClientProtocolVersionMetric::RejectedTooNew => {
+                &self.client_protocol_auth_rejected_too_new
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 设置扩展字段
@@ -151,6 +184,21 @@ impl MetricsCollector {
                 let latency_sum = self.latency_sum.swap(0, Ordering::Relaxed);
                 let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
                 let connections = self.connections.load(Ordering::Relaxed);
+                let client_protocol_auth_accepted_legacy = self
+                    .client_protocol_auth_accepted_legacy
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_accepted_current = self
+                    .client_protocol_auth_accepted_current
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_accepted_supported_older = self
+                    .client_protocol_auth_accepted_supported_older
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_rejected_too_old = self
+                    .client_protocol_auth_rejected_too_old
+                    .swap(0, Ordering::Relaxed);
+                let client_protocol_auth_rejected_too_new = self
+                    .client_protocol_auth_rejected_too_new
+                    .swap(0, Ordering::Relaxed);
 
                 // 计算聚合延迟
                 let latency_ms = if latency_count > 0 {
@@ -170,6 +218,26 @@ impl MetricsCollector {
                     ("qps".to_string(), qps.to_string()),
                     ("latency_ms".to_string(), latency_ms.to_string()),
                     ("connections".to_string(), connections.to_string()),
+                    (
+                        "client_protocol_auth_accepted_legacy_total".to_string(),
+                        client_protocol_auth_accepted_legacy.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_accepted_current_total".to_string(),
+                        client_protocol_auth_accepted_current.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_accepted_supported_older_total".to_string(),
+                        client_protocol_auth_accepted_supported_older.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_rejected_too_old_total".to_string(),
+                        client_protocol_auth_rejected_too_old.to_string(),
+                    ),
+                    (
+                        "client_protocol_auth_rejected_too_new_total".to_string(),
+                        client_protocol_auth_rejected_too_new.to_string(),
+                    ),
                 ];
 
                 fields.extend(collect_discovery_metric_fields(true));
@@ -225,11 +293,33 @@ mod tests {
         collector.record_request();
         collector.record_latency(100);
         collector.set_connections(20);
+        collector.record_client_protocol_version(ClientProtocolVersionMetric::AcceptedLegacy);
+        collector
+            .record_client_protocol_version(ClientProtocolVersionMetric::AcceptedSupportedOlder);
+        collector.record_client_protocol_version(ClientProtocolVersionMetric::RejectedTooOld);
 
         // 验证计数器工作正常
         assert_eq!(collector.qps_counter.load(Ordering::Relaxed), 1);
         assert_eq!(collector.latency_sum.load(Ordering::Relaxed), 100);
         assert_eq!(collector.latency_count.load(Ordering::Relaxed), 1);
         assert_eq!(collector.connections.load(Ordering::Relaxed), 20);
+        assert_eq!(
+            collector
+                .client_protocol_auth_accepted_legacy
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .client_protocol_auth_rejected_too_old
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            collector
+                .client_protocol_auth_accepted_supported_older
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 }

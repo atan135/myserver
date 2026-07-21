@@ -52,6 +52,8 @@ const CONFIG_ENV_KEYS = [
   "TICKET_ALLOW_LEGACY_MISSING_CHARACTER_ID",
   "TICKET_SECRET",
   "GAME_ADMIN_TOKEN",
+  "GAME_ADMIN_ACTOR",
+  "GAME_ADMIN_WRITE_TIMEOUT_MS",
   "INTERNAL_API_TOKEN"
 ];
 
@@ -99,6 +101,16 @@ async function withCapturedWarnings(env, fn) {
 test("auth-http keeps TLS enforcement disabled by default in development", async () => {
   await withEnv({ NODE_ENV: "development" }, (config) => {
     assert.equal(config.authRequireTls, false);
+  });
+});
+
+test("auth-http ignores retired game-server write credential settings", async () => {
+  await withEnv({
+    GAME_ADMIN_ACTOR: "auth-http",
+    GAME_ADMIN_WRITE_TIMEOUT_MS: "10"
+  }, (config) => {
+    assert.equal(Object.hasOwn(config, "gameAdminActor"), false);
+    assert.equal(Object.hasOwn(config, "gameAdminWriteTimeoutMs"), false);
   });
 });
 

@@ -9,6 +9,8 @@ enum MemberRole {
 
 message AuthReq {
   string ticket = 1;
+  // Zero means an older client omitted this field and is evaluated as the legacy protocol version.
+  uint32 client_protocol_version = 2;
 }
 
 message AuthRes {
@@ -16,6 +18,11 @@ message AuthRes {
   // Account-level player id for login/session ownership.
   string player_id = 2;
   string error_code = 3;
+  // Application protocol policy. This is separate from the fixed packet-header VERSION.
+  uint32 server_protocol_version = 4;
+  uint32 minimum_client_protocol_version = 5;
+  string upgrade_message = 6;
+  string upgrade_url = 7;
 }
 
 message PingReq {

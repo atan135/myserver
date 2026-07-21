@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { register } from "node:module";
 import path from "node:path";
 import { test } from "node:test";
@@ -132,11 +133,24 @@ const baseConfig = {
   trustedProxies: []
 };
 
+const effectivePolicy = {
+  async effectiveCapabilities() {
+    return new Map([
+      ["audit.read", [{ scope: { targetIds: ["*"] } }]],
+      ["players.read", [{ scope: { targetIds: ["*"] } }]]
+    ]);
+  }
+};
+
+function testAssertionPrivateKey() {
+  return generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" });
+}
+
 test("admin login failures lock username and IP and write security audit", async () => {
   const redis = new MemoryRedis();
   const sessionStore = new AdminSessionStore(redis, baseConfig);
   const adminStore = createAdminStore();
-  const service = new AuthService(new JwtService(), baseConfig, adminStore, sessionStore);
+  const service = new AuthService(new JwtService(), baseConfig, adminStore, sessionStore, effectivePolicy);
   const req = { ip: "10.0.0.5", headers: {}, socket: { remoteAddress: "10.0.0.5" } };
 
   await assert.rejects(
@@ -161,7 +175,7 @@ test("admin logout revokes current JWT session", async () => {
   const sessionStore = new AdminSessionStore(redis, baseConfig);
   const adminStore = createAdminStore();
   const jwtService = new JwtService();
-  const service = new AuthService(jwtService, baseConfig, adminStore, sessionStore);
+  const service = new AuthService(jwtService, baseConfig, adminStore, sessionStore, effectivePolicy);
   const guard = new JwtAuthGuard(jwtService, baseConfig, adminStore, sessionStore);
   const req = { ip: "10.0.0.5", headers: {}, socket: { remoteAddress: "10.0.0.5" } };
 
@@ -199,6 +213,7 @@ test("admin-api production config rejects default secrets", () => {
     process.env.NODE_ENV = "production";
     delete process.env.JWT_SECRET;
     delete process.env.GAME_ADMIN_TOKEN;
+    process.env.ADMIN_ASSERTION_PRIVATE_KEY = testAssertionPrivateKey();
 
     assert.throws(
       () => getConfig(),

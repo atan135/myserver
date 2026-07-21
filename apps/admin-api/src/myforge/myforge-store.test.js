@@ -879,6 +879,66 @@ test("myforge active cancellation persists one deadline and reserves later failu
   validFailure.client.assertDone();
 });
 
+test("myforge pause and resume persist queue state and append lifecycle audit records", async () => {
+  const paused = taskRow({ status: "paused", queue_reason: null, updated_at: new Date(NOW.getTime() + 1) });
+  const pauseTx = transactionClient([
+    { pattern: /^SELECT \* FROM myforge_task_runs/, result: { rows: [taskRow({ queue_reason: null })] } },
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'paused'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /WHERE request_id = \$1 AND status = 'queued'/);
+        assert.deepEqual(params, [REQUEST_ID, NOW]);
+        return { rows: [paused], rowCount: 1 };
+      }
+    },
+    {
+      pattern: /^INSERT INTO admin_audit_logs/,
+      result: ({ params }) => {
+        assert.equal(params[2], "myforge_task_paused");
+        return { rows: [], rowCount: 1 };
+      }
+    }
+  ]);
+  const pauseResult = await new MyforgeStore(pauseTx.pool).pauseTask({
+    requestId: REQUEST_ID,
+    adminId: 8,
+    adminUsername: "operator",
+    pausedAt: NOW
+  });
+  assert.equal(pauseResult.outcome, "paused");
+  assert.equal(pauseResult.task.status, "paused");
+  pauseTx.client.assertDone();
+
+  const queued = taskRow({ queue_reason: null, updated_at: new Date(NOW.getTime() + 2) });
+  const resumeTx = transactionClient([
+    { pattern: /^SELECT \* FROM myforge_task_runs/, result: { rows: [paused] } },
+    {
+      pattern: /^UPDATE myforge_task_runs SET status = 'queued'/,
+      result: ({ sql, params }) => {
+        assert.match(sql, /WHERE request_id = \$1 AND status = 'paused'/);
+        assert.deepEqual(params, [REQUEST_ID, NOW]);
+        return { rows: [queued], rowCount: 1 };
+      }
+    },
+    {
+      pattern: /^INSERT INTO admin_audit_logs/,
+      result: ({ params }) => {
+        assert.equal(params[2], "myforge_task_resumed");
+        return { rows: [], rowCount: 1 };
+      }
+    }
+  ]);
+  const resumeResult = await new MyforgeStore(resumeTx.pool).resumeTask({
+    requestId: REQUEST_ID,
+    adminId: 8,
+    adminUsername: "operator",
+    resumedAt: NOW
+  });
+  assert.equal(resumeResult.outcome, "resumed");
+  assert.equal(resumeResult.task.status, "queued");
+  resumeTx.client.assertDone();
+});
+
 test("myforge agent offline transition fails only the selected connection and audits each task", async () => {
   const failed = taskRow({
     status: "failed",
