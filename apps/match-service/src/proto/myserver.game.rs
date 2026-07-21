@@ -910,24 +910,8 @@ pub struct ItemDiscardRes {
     #[prost(string, tag = "2")]
     pub error_code: ::prost::alloc::string::String,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct ItemAddReq {
-    #[prost(int32, tag = "1")]
-    pub item_id: i32,
-    #[prost(uint32, tag = "2")]
-    pub count: u32,
-    #[prost(bool, tag = "3")]
-    pub binded: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ItemAddRes {
-    #[prost(bool, tag = "1")]
-    pub ok: bool,
-    #[prost(string, tag = "2")]
-    pub error_code: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "3")]
-    pub item: ::core::option::Option<Item>,
-}
+/// Message ids 1407 and 1408 are permanently reserved for the retired player-side ItemAdd
+/// request/response. They intentionally have no protobuf payload and must never be reused.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WarehouseAccessReq {
     #[prost(string, tag = "1")]
