@@ -1,294 +1,74 @@
 # Mock Client Rollout / Drain 测试帮助
 
-# 这份文档只覆盖当前已经落地、可直接执行的第一批 rollout/drain/redirect 验证。
-# mock-client 已提供 redirect push 监听和收到 push 后主动断线重连目标入口的工具场景。
-# 该工具场景不等于真实 old/new/proxy 多进程联调自动化，也不代表 mybevy 已适配。
+# mock-client 只用于验证客户端侧的 drain、ServerRedirectPush 和重连行为。
+# 所有管理写操作，包括 room transfer、route 切换和服务控制，必须经过 admin-api。
+# 不使用 game-server 或 game-proxy 的直连管理 token。
 
-# ========== 前置说明 ==========
+# ========== 客户端场景 ==========
 
-# 当前可验证能力:
-# 1. drain 模式可通过 auth-http 内部接口开关
-# 2. drain 下拒绝创建新默认房
-# 3. drain 下允许进入已存在房间
-# 4. drain 下允许 RoomReconnectReq 重回已存在房间
-# 5. drain 下允许 observer 进入已存在房间
-# 6. drain 下拒绝 CreateMatchedRoomReq 创建新房
-# 7. old_server 可通过已鉴权 admin/internal 通道触发 ServerRedirectPush
-# 8. mock-client 可认证/进房后监听 ServerRedirectPush 并输出结构化结果
-# 9. mock-client 可在收到 ServerRedirectPush 后主动关闭旧连接，连接 push 中的目标入口，
-#    重新 AuthReq，并优先发送 RoomReconnectReq
-
-# 当前还不能直接用 mock-client 验证的能力:
-# 1. 真实 old/new/proxy 多进程联调下的完整灰度接管自动化
-# 2. 外部 mybevy 客户端适配
-# 3. 同连接迁移 / L7 relay
-#
-# 当前新增的控制流工具:
-# - tools/rollout/rollout-transfer-cli.js 可显式编排
-#   old freeze/export -> new import -> proxy room route upsert -> old retire。
-# - 该工具只调用已鉴权 game-server admin TCP 包协议和 game-proxy admin HTTP，
-#   不实现同连接迁移、L7 relay，也不会替代客户端 redirect/reconnect。
-# - scripts/ops/rollout-three-process-drill.ps1 是 old/new/proxy 三进程演练外层入口，
-#   默认 dry-run，通过 registry discovery 解析控制面 endpoint，再做 preflight、
-#   端口探测和步骤命令输出；显式 -ExecuteSteps
-#   才调用已运行服务的控制面接口，request-server-shutdown 还需要额外
-#   -AllowShutdownRequest。详见 docs/后台与运维/三进程灰度演练手册.md。
-# - tools/rollout/rollout-fault-drill-cli.js 是故障演练入口，
-#   默认 dry-run 只输出 JSON 计划；--simulate 使用纯 mock client 验证停止点；
-#   --execute 才调用控制面。详见 docs/后台与运维/灰度故障演练手册.md。
-
-# ========== 测试 GM / 控制面 ==========
-
-# 这里的“测试 GM”采用现有 auth-http 内部接口模拟运维/控制面开关。
-# 默认 auth-http 地址: http://127.0.0.1:3000
-
-# 1. 查询 game-server 当前状态
-curl http://127.0.0.1:3000/api/v1/internal/game-server/status
-
-# 期望返回:
-# - status = ok        表示未开启 drain
-# - status = draining  表示 drain 已开启
-
-# 2. 开启 drain mode
-curl -X POST http://127.0.0.1:3000/api/v1/internal/game-server/config ^
-  -H "content-type: application/json" ^
-  -d "{\"key\":\"drain_mode\",\"value\":\"on\"}"
-
-# 3. 关闭 drain mode
-curl -X POST http://127.0.0.1:3000/api/v1/internal/game-server/config ^
-  -H "content-type: application/json" ^
-  -d "{\"key\":\"drain_mode\",\"value\":\"off\"}"
-
-# PowerShell 写法:
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3000/api/v1/internal/game-server/config" `
-  -ContentType "application/json" `
-  -Body '{"key":"drain_mode","value":"on"}'
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:3000/api/v1/internal/game-server/config" `
-  -ContentType "application/json" `
-  -Body '{"key":"drain_mode","value":"off"}'
-
-# ========== mock-client 场景 ==========
-
-# 下面这些场景会在执行过程中自行开启/关闭 drain，不要求手工先切换 GM。
-# 如果场景失败，中间可能留下 draining 状态，建议再手工执行一次“关闭 drain mode”。
-
-# 1. drain-new-room-rejected
-# 说明:
-# - 开启 drain
-# - 登录一个新玩家
-# - 用 RoomJoinReq 请求一个本地不存在的新 room
-# 期望:
-# - ROOM_JOIN_RES.ok = false
-# - errorCode = SERVER_DRAINING_REJECT_NEW_ROOM
+# drain-new-room-rejected
 node tools/mock-client/src/index.js --scenario drain-new-room-rejected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-drain-new-room
 
-# 2. drain-existing-room-join
-# 说明:
-# - clientA 先创建并进入 room
-# - 开启 drain
-# - clientB 再通过 RoomJoinReq 进入同一个已存在 room
-# 期望:
-# - clientB 仍然 join 成功
-# - 双方都能看到 members=2
+# drain-existing-room-join
 node tools/mock-client/src/index.js --scenario drain-existing-room-join --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-drain-existing-join
 
-# 3. drain-existing-room-reconnect
-# 说明:
-# - clientA/clientB 先进入同一 room
-# - clientA 断线，不发 ROOM_LEAVE
-# - 开启 drain
-# - clientA 重新发 RoomReconnectReq
-# 期望:
-# - reconnect 成功
-# - clientB 能收到 member_reconnected
+# drain-existing-room-reconnect
 node tools/mock-client/src/index.js --scenario drain-existing-room-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-drain-reconnect --timeout-ms 10000
 
-# 4. drain-existing-room-observer
-# 说明:
-# - host 先创建并进入 room
-# - 开启 drain
-# - observer 再通过 RoomJoinAsObserverReq 进入同一个已存在 room
-# 期望:
-# - observer join 成功
-# - snapshot 中 observer role = 1
+# drain-existing-room-observer
 node tools/mock-client/src/index.js --scenario drain-existing-room-observer --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-drain-observer
 
-# 5. drain-create-matched-room-rejected
-# 说明:
-# - 开启 drain
-# - 发 CreateMatchedRoomReq 创建一个本地不存在的新 matched room
-# 期望:
-# - CREATE_MATCHED_ROOM_RES.ok = false
-# - errorCode = SERVER_DRAINING_REJECT_NEW_ROOM
+# drain-create-matched-room-rejected
 node tools/mock-client/src/index.js --scenario drain-create-matched-room-rejected --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-drain-match
 
-# 6. server-redirect-listen
-# 说明:
-# - mock-client 登录并进入指定 room
-# - 保持连接，等待旧服控制面触发 ServerRedirectPush
-# - 收到后输出 reason、roomId、rolloutEpoch、targetHost、targetPort、targetServerId、transport
-# 期望:
-# - messageType = 1208
-# - reconnectRequired = true
-# - targetHost/targetPort 指向客户端后续应重连的 proxy
+# server-redirect-listen
 node tools/mock-client/src/index.js --scenario server-redirect-listen --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-redirect-room --timeout-ms 30000
 
-# 7. server-redirect-reconnect
-# 说明:
-# - mock-client 登录并进入指定 room
-# - 等待旧服控制面触发 ServerRedirectPush
-# - 收到后主动关闭旧连接
-# - 使用 push.target_host / push.target_port 连接目标入口
-# - 重新发送 AuthReq
-# - 默认优先发送 RoomReconnectReq
-# 期望:
-# - reconnect 成功并输出 serverRedirectReconnectResult
-# - 输出包含 redirect 字段、reconnect 响应、join 响应(null 或 fallback 结果)、finalRoomId
-# 可选:
-# - 只有显式传 --allow-redirect-join-fallback 时，RoomReconnectReq 返回
-#   ROOM_NOT_FOUND / PLAYER_NOT_IN_ROOM / PLAYER_NOT_FOUND / PLAYER_NOT_OFFLINE
-#   才会 fallback 到 RoomJoinReq。
+# server-redirect-reconnect
 node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-redirect-room --timeout-ms 30000
 
-# 允许 reconnect 找不到离线成员/房间时 fallback 到 join:
-node tools/mock-client/src/index.js --scenario server-redirect-reconnect --http-base-url http://127.0.0.1:3000 --host 127.0.0.1 --port 14000 --room-id rollout-redirect-room --timeout-ms 30000 --allow-redirect-join-fallback
+# ========== Room Transfer 控制面 ==========
 
-# ========== room transfer 编排入口 ==========
-
-# 该命令用于显式执行第一阶段 room transfer 的控制面顺序:
-# 1. old game-server admin: FreezeRoomForTransferReq(1601)
-# 2. old game-server admin: ExportRoomTransferReq(1603)
-# 3. new game-server admin: ImportRoomTransferReq(1605)
-# 4. game-proxy admin HTTP: /room-route/upsert，migration_state=OwnedByNew，带 checksum 和 version CAS
-# 5. old game-server admin: RetireTransferredRoomReq(1607)
-#
-# 任一步失败都会停在当前阶段并输出 stage/errorCode，不会继续执行后续破坏性步骤。
-# proxy route 已存在时，工具会读取现有 room route，并默认使用 expected_room_version
-# 与 expected_last_transfer_checksum 做 CAS 后递增 route version；无旧 route 时按 proxy
-# 当前创建规则使用 expected_room_version=0、room_version=1。
-#
-# 本地 manual drill 示例；测试/线上演练应优先通过 scripts/ops/rollout-three-process-drill.ps1
-# 从 registry discovery 解析 auth/proxy/game-server admin endpoint。
-node tools/rollout/rollout-transfer-cli.js ^
-  --local-debug-targets ^
-  --rollout-epoch rollout-20260611-a ^
+# 预览只校验输入，不调用服务：
+node tools/rollout/rollout-control-plane-cli.js ^
+  --dry-run ^
+  --world-id local ^
+  --rollout-epoch rollout-20260722-a ^
   --room-id room-empty-001 ^
-  --old-server-id game-server-old ^
-  --new-server-id game-server-new ^
-  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
-  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
-  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>"
+  --old-server-id game-server-001 ^
+  --new-server-id game-server-002 ^
+  --proxy-instance-id game-proxy-001 ^
+  --backup-reference backup-room-empty-001 ^
+  --reason "controlled empty-room transfer"
 
-# 单独触发 ServerRedirectPush，本地 manual drill 示例:
-# 这个命令只调用 old game-server admin TriggerServerRedirectReq(1611)，不会执行 freeze/export/import/retire，
-# 也不会自动断开旧服连接。可配合 server-redirect-listen 验证 push，或配合
-# server-redirect-reconnect 验证 mock-client 主动断线、重连 proxy、AuthReq + RoomReconnectReq/RoomJoinReq。
-node tools/rollout/rollout-transfer-cli.js ^
-  --local-debug-targets ^
-  --trigger-redirect-only ^
-  --rollout-epoch rollout-20260611-a ^
-  --room-id rollout-redirect-room ^
-  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
-  --redirect-target-host 127.0.0.1 ^
-  --redirect-target-port 4000 ^
-  --redirect-target-server-id game-server-new ^
-  --redirect-transport kcp ^
-  --redirect-reason rollout_redirect ^
-  --redirect-retry-after-ms 300
+# 预检和执行只能通过 admin-api JWT。执行会先取得预检 nonce，再提交 nonce 绑定的请求；
+# admin-api 从 registry 解析 old/new/proxy endpoint，并为每个写步骤签发短时断言。
+node tools/rollout/rollout-control-plane-cli.js ^
+  --admin-api-url http://127.0.0.1:3001 ^
+  --admin-api-token "%ADMIN_API_TOKEN%" ^
+  --execute ^
+  --world-id local ^
+  --rollout-epoch rollout-20260722-a ^
+  --room-id room-empty-001 ^
+  --old-server-id game-server-001 ^
+  --new-server-id game-server-002 ^
+  --proxy-instance-id game-proxy-001 ^
+  --backup-reference backup-room-empty-001 ^
+  --reason "controlled empty-room transfer"
 
-# ========== old/new/proxy 三进程演练入口 ==========
-
-# 默认 dry-run，不启动服务、不调用写接口、不请求旧服停服:
+# PowerShell 包装入口只会调用同一控制面 CLI：
 powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 ^
-  -RolloutEpoch rollout-20260612-a ^
+  -WorldId local ^
+  -RolloutEpoch rollout-20260722-a ^
   -RoomId room-empty-001 ^
-  -OldServerId game-server-old ^
-  -NewServerId game-server-new
+  -OldServerId game-server-001 ^
+  -NewServerId game-server-002 ^
+  -ProxyInstanceId game-proxy-001
 
-# 确认 old/new/proxy/auth-http 已经由人工或主 agent 启动并注册到 registry 后，才使用 -ExecuteSteps:
-powershell -ExecutionPolicy Bypass -File scripts/ops/rollout-three-process-drill.ps1 ^
-  -ExecuteSteps ^
-  -RolloutEpoch rollout-20260612-a ^
-  -RoomId room-empty-001 ^
-  -OldServerId game-server-old ^
-  -NewServerId game-server-new
+# ========== 故障演练 ==========
 
-# 旧服 graceful shutdown 安全闸默认仍跳过；只有额外传 -AllowShutdownRequest
-# 才会调用 request-server-shutdown 场景。
-
-# ========== rollout 故障演练入口 ==========
-
-# 默认 dry-run，不访问服务、不调用写接口、不请求停服:
+# 默认只输出演练计划；--simulate 只使用内存模拟客户端。
 node tools/rollout/rollout-fault-drill-cli.js
+node tools/rollout/rollout-fault-drill-cli.js --simulate --rollout-epoch rollout-test --room-id room-test
 
-# 纯内存模拟验证，不依赖 old/new/proxy/auth-http:
-node tools/rollout/rollout-fault-drill-cli.js --simulate
-
-# 指定单个故障:
-node tools/rollout/rollout-fault-drill-cli.js --drill import-failure
-node tools/rollout/rollout-fault-drill-cli.js --drill route-upsert-failure
-node tools/rollout/rollout-fault-drill-cli.js --drill redirect-no-reconnect
-
-# 当前覆盖:
-# - import-failure: old freeze/export 后篡改 payload，预期停在 new_import，
-#   不继续 confirm/upsert/retire。
-# - route-upsert-failure: import + confirm 成功后使用错误 expected_room_version，
-#   预期停在 proxy_route_upsert，不 retire old room。
-# - redirect-no-reconnect: 只触发或计划 ServerRedirectPush，不运行 mock-client reconnect，
-#   只验证 push/操作步骤，不代表 mybevy 已适配。
-
-# 显式执行模式只作为本地 manual drill 使用；测试/线上故障演练应先从 registry discovery
-# 解析 endpoint，再把解析结果传入 CLI，或优先使用外层 rollout-three-process 脚本:
-node tools/rollout/rollout-fault-drill-cli.js ^
-  --execute ^
-  --local-debug-targets ^
-  --drill import-failure ^
-  --rollout-epoch rollout-20260612-fault ^
-  --room-id room-empty-001 ^
-  --old-server-id game-server-old ^
-  --new-server-id game-server-new ^
-  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
-  --new-admin-host 127.0.0.1 --new-admin-port 7501 --new-admin-token "<new-admin-token>" ^
-  --proxy-admin-url http://127.0.0.1:7101 --proxy-admin-token "<proxy-admin-token>"
-
-# redirect-no-reconnect 执行模式只触发 push，不自动重连；下面是本地 manual drill 示例:
-node tools/rollout/rollout-fault-drill-cli.js ^
-  --execute ^
-  --local-debug-targets ^
-  --drill redirect-no-reconnect ^
-  --rollout-epoch rollout-20260612-fault ^
-  --room-id rollout-redirect-room ^
-  --old-admin-host 127.0.0.1 --old-admin-port 7500 --old-admin-token "<old-admin-token>" ^
-  --redirect-target-host 127.0.0.1 ^
-  --redirect-target-port 4000 ^
-  --redirect-target-server-id game-server-new
-
-# ========== 集成测试 ==========
-
-# Node 集成测试已经补充了 drain 场景组:
-# - drain-new-room-rejected
-# - drain-existing-room-join
-# - drain-existing-room-reconnect
-# - drain-existing-room-observer
-# - drain-create-matched-room-rejected
-
-# 直接执行:
-npm run test:integration
-
-# 如果只想看 mock-client 相关日志，建议本地单独跑上面的 node 命令。
-
-# ========== 当前结论 ==========
-
-# 现在 mock-client 能验证的是:
-# - drain 是 server 级开关
-# - new room create 会被挡住
-# - existing room join / reconnect / observer 不受影响
-# - ServerRedirectPush 可被 old_server 控制面触发并被在线 room 成员收到
-# - ServerRedirectPush 收到后，mock-client 可主动断开并连接 push 中的目标入口，重新 AuthReq，
-#   再优先 RoomReconnectReq，必要时按显式参数 fallback 到 RoomJoinReq
-
-# 还没有覆盖的 rollout 链路:
-# - old/new/proxy 多进程完整自动化联调
-# - mybevy 客户端 redirect/reconnect 适配
-# - 完整灰度收尾
+# --execute 被拒绝。真实写操作只使用上面的 Room Transfer 控制面入口。
