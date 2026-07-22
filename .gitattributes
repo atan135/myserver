@@ -1,2 +1,6 @@
 # Golden protobuf bodies must retain exact bytes across Windows and CI checkouts.
 tests/proto/fixtures/compatibility/*.bin binary
+
+# Rust generators write LF. Keep generated and hand-written Rust sources stable on Windows.
+.gitattributes text eol=lf
+*.rs text eol=lf
