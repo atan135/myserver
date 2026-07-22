@@ -14,18 +14,16 @@ import {
   orchestrateRoomTransfer
 } from "../../tools/rollout/rollout-transfer.js";
 
-test("rollout fault drill cli help uses registry targets before direct endpoints", () => {
+test("rollout fault drill cli exposes only dry-run and in-memory simulation", () => {
   const result = spawnSync(process.execPath, ["tools/rollout/rollout-fault-drill-cli.js", "--help"], {
     cwd: process.cwd(),
     encoding: "utf8"
   });
 
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /registry discovery/);
-  assert.match(result.stdout, /game-server\.admin/);
-  assert.match(result.stdout, /game-proxy\.admin/);
-  assert.match(result.stdout, /pre-resolved or local debug fallback/);
-  assert.doesNotMatch(result.stdout, /127\.0\.0\.1:7101/);
+  assert.match(result.stdout, /CONTROL_PLANE_ONLY/);
+  assert.match(result.stdout, /--simulate/);
+  assert.doesNotMatch(result.stdout, /admin-token/);
 });
 
 test("rollout fault drill dry-run prints a safe plan without service calls", async () => {
