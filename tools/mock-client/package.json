@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "mock-client",
   "version": "0.1.0",
   "private": true,
@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node src/index.js",
     "flow": "node src/index.js",
-    "rollout-transfer": "node ../rollout/rollout-transfer-cli.js",
+    "rollout-transfer": "node ../rollout/rollout-control-plane-cli.js",
     "rollout-fault-drill": "node ../rollout/rollout-fault-drill-cli.js"
   }
 }

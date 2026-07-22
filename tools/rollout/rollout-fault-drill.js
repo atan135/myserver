@@ -2,8 +2,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  GameServerTransferClient,
-  ProxyAdminClient,
   ROOM_TRANSFER_FAILURE_INJECTION,
   ROOM_TRANSFER_STAGE,
   encodeRoomTransferPayloadForTest,
@@ -11,8 +9,7 @@ import {
 } from "./rollout-transfer.js";
 import {
   controlTargetPlan,
-  createDefaultRolloutTargetOptions,
-  resolveAndApplyRolloutControlTargets
+  createDefaultRolloutTargetOptions
 } from "./rollout-targets.js";
 
 export const ROLLOUT_FAULT_DRILL = {
@@ -120,8 +117,6 @@ export const ROLLOUT_FAULT_DRILL_DEFINITIONS = [
     ]
   }
 ];
-
-const DEFAULT_TIMEOUT_MS = 5000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -262,29 +257,6 @@ function buildDryRunReport(options, definitions) {
   };
 }
 
-function createRealTransferClients(options) {
-  return {
-    oldServer: new GameServerTransferClient({
-      host: options.oldAdminHost,
-      port: options.oldAdminPort,
-      token: options.oldAdminToken || "",
-      timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
-    }),
-    newServer: new GameServerTransferClient({
-      host: options.newAdminHost,
-      port: options.newAdminPort,
-      token: options.newAdminToken || "",
-      timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
-    }),
-    proxy: new ProxyAdminClient({
-      baseUrl: options.proxyAdminUrl,
-      token: options.proxyAdminToken || "",
-      actor: options.proxyAdminActor || "rollout-fault-drill",
-      timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
-    })
-  };
-}
-
 export function createSimulatedTransferClients(options = {}) {
   const calls = [];
   const rolloutEpoch = options.rolloutEpoch || "rollout-fault-drill-sim";
@@ -388,54 +360,28 @@ function buildTransferRequest(definition, options) {
   };
 }
 
-async function runTransferDrill(definition, options, mode) {
-  const mock = mode === "simulate"
-    ? createSimulatedTransferClients({
-      ...options,
-      ...(Object.hasOwn(definition, "simulateExistingRoute")
-        ? { existingRoute: definition.simulateExistingRoute }
-        : {})
-    })
-    : null;
-  const clients = mock?.clients || createRealTransferClients(options);
-  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), clients);
-  if (!mock) {
-    return result;
-  }
+async function runTransferDrill(definition, options) {
+  const mock = createSimulatedTransferClients({
+    ...options,
+    ...(Object.hasOwn(definition, "simulateExistingRoute")
+      ? { existingRoute: definition.simulateExistingRoute }
+      : {})
+  });
+  const result = await orchestrateRoomTransfer(buildTransferRequest(definition, options), mock.clients);
   return {
     ...result,
     mockCalls: [...mock.calls]
   };
 }
 
-function createOldServerClient(options) {
-  return new GameServerTransferClient({
-    host: options.oldAdminHost,
-    port: options.oldAdminPort,
-    token: options.oldAdminToken || "",
-    timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS
-  });
-}
-
-async function runRedirectDrill(options, mode) {
-  const trigger = mode === "simulate"
-    ? {
-      ok: true,
-      roomId: options.roomId || "room-fault-drill",
-      deliveredCount: 1,
-      failedCount: 0,
-      onlineMemberCount: 1
-    }
-    : await createOldServerClient(options).triggerServerRedirect({
-      rolloutEpoch: options.rolloutEpoch,
-      roomId: options.roomId,
-      reason: options.redirectReason || "rollout_fault_drill_redirect_no_reconnect",
-      targetHost: options.redirectTargetHost,
-      targetPort: options.redirectTargetPort,
-      targetServerId: options.redirectTargetServerId || options.newServerId || "",
-      transport: options.redirectTransport || "kcp",
-      retryAfterMs: options.redirectRetryAfterMs || 0
-    });
+async function runRedirectDrill(options) {
+  const trigger = {
+    ok: true,
+    roomId: options.roomId || "room-fault-drill",
+    deliveredCount: 1,
+    failedCount: 0,
+    onlineMemberCount: 1
+  };
 
   if (!trigger.ok) {
     return {
@@ -504,11 +450,11 @@ function validateDrillResult(definition, result) {
   };
 }
 
-async function runOneDrill(definition, options, mode) {
+async function runOneDrill(definition, options) {
   try {
     const result = definition.type === "redirect"
-      ? await runRedirectDrill(options, mode)
-      : await runTransferDrill(definition, options, mode);
+      ? await runRedirectDrill(options)
+      : await runTransferDrill(definition, options);
     const validation = validateDrillResult(definition, result);
     return {
       name: definition.name,
@@ -569,35 +515,34 @@ export async function runRolloutFaultDrills(options = {}) {
     newServerId: "game-server-new",
     ...options
   };
+  if (options.execute) {
+    throw Object.assign(new Error("Fault drill execution must use an admin-api control-plane operation"), {
+      code: "CONTROL_PLANE_ONLY"
+    });
+  }
+
   const definitions = selectRolloutFaultDrills(options.drills || []);
-  const mode = options.execute ? "execute" : options.simulate ? "simulate" : "dry-run";
+  const mode = options.simulate ? "simulate" : "dry-run";
 
   if (mode === "dry-run") {
     return maybeArchive(buildDryRunReport(options, definitions), options);
   }
 
-  if (mode === "execute" && !options.resolvedControlTargets) {
-    await resolveAndApplyRolloutControlTargets(options, {
-      requireNew: definitions.some((definition) => definition.type !== "redirect"),
-      requireProxy: definitions.some((definition) => definition.type !== "redirect")
-    });
-  }
-
   const results = [];
   for (const definition of definitions) {
-    results.push(await runOneDrill(definition, options, mode));
+    results.push(await runOneDrill(definition, options));
   }
 
   const report = {
     ok: results.every((item) => item.validation.ok),
     generatedAt: nowIso(),
     mode,
-    execute: mode === "execute",
+    execute: false,
     simulate: mode === "simulate",
     archive: { written: false },
     safety: {
       startsServices: false,
-      callsControlPlane: mode === "execute",
+      callsControlPlane: false,
       requestsShutdown: false,
       runsReconnectClient: false
     },

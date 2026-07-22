@@ -32,7 +32,13 @@ export type AdminPermission =
   | "admins.revoke_tokens"
   | "admins.reset_password"
   | "admin.permissions.manage"
-  | "breakglass.activate";
+  | "breakglass.activate"
+  | "game.config.write"
+  | "game.room.transfer"
+  | "proxy.maintenance.write"
+  | "proxy.rollout.write"
+  | "proxy.route.write"
+  | "service.shutdown";
 
 export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[] | "*"> = {
   viewer: [

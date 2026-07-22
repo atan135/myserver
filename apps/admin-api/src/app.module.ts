@@ -31,6 +31,8 @@ import { GmController } from "./gm/gm.controller.js";
 import { GlobalIdController } from "./global-id/global-id.controller.js";
 import { MonitoringController } from "./monitoring/monitoring.controller.js";
 import { MonitoringService } from "./monitoring/monitoring.service.js";
+import { RolloutController } from "./rollout/rollout.controller.js";
+import { RoomTransferService } from "./rollout/room-transfer.service.js";
 import { MyforgeStore } from "./myforge/myforge-store.js";
 import { MyforgeWebsocketGateway } from "./myforge/myforge-websocket.js";
 import { MyforgeOrchestrator } from "./myforge/myforge-orchestrator.js";
@@ -81,6 +83,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     GmController,
     GlobalIdController,
     MonitoringController,
+    RolloutController,
     AdminOperationController,
     MyforgeController,
     HealthController
@@ -98,6 +101,7 @@ class GameDbPoolShutdown implements OnModuleDestroy {
     RolesGuard,
     GameDbPoolShutdown,
     MonitoringService,
+    RoomTransferService,
     {
       provide: ADMIN_CONFIG,
       useFactory: () => getConfig()

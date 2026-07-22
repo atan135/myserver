@@ -1,8 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
-export * from "../../rollout/rollout-transfer-cli.js";
-import { main } from "../../rollout/rollout-transfer-cli.js";
+export * from "../../rollout/rollout-control-plane-cli.js";
+import { main } from "../../rollout/rollout-control-plane-cli.js";
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   main().catch((error) => {

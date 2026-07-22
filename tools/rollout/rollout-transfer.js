@@ -664,6 +664,9 @@ export class GameServerTransferClient {
     this.host = options.host;
     this.port = options.port;
     this.token = options.token || "";
+    this.assertionProvider = typeof options.assertionProvider === "function"
+      ? options.assertionProvider
+      : null;
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
     this.maxBodyLen = options.maxBodyLen || DEFAULT_MAX_BODY_LEN;
     this.authMessageType = options.authMessageType || MESSAGE_TYPE.ADMIN_AUTH_REQ;
@@ -731,6 +734,9 @@ export class GameServerTransferClient {
   }
 
   async sendRequest(messageType, body, expectedMessageType) {
+    const assertion = this.assertionProvider
+      ? await this.assertionProvider({ messageType, payload: body })
+      : null;
     return await new Promise((resolve, reject) => {
       const socket = net.createConnection({ host: this.host, port: this.port });
       let buffer = Buffer.alloc(0);
@@ -752,9 +758,16 @@ export class GameServerTransferClient {
       };
 
       socket.on("connect", () => {
-        const authPacket = encodePacket(this.authMessageType, 0, Buffer.from(this.token, "utf8"));
+        const authPacket = encodePacket(
+          this.authMessageType,
+          0,
+          assertion ? Buffer.from('{"mode":"assertion"}', "utf8") : Buffer.from(this.token, "utf8")
+        );
+        const assertionPacket = assertion
+          ? encodePacket(MESSAGE_TYPE.ADMIN_OPERATION_ASSERTION_REQ, 0, Buffer.from(JSON.stringify(assertion), "utf8"))
+          : null;
         const packet = encodePacket(messageType, this.nextSeq(), body);
-        socket.write(Buffer.concat([authPacket, packet]), (error) => {
+        socket.write(Buffer.concat(assertionPacket ? [authPacket, assertionPacket, packet] : [authPacket, packet]), (error) => {
           if (error) {
             finish(error);
           }
@@ -809,6 +822,9 @@ export class ProxyAdminClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token || "";
     this.actor = options.actor || "";
+    this.assertionProvider = typeof options.assertionProvider === "function"
+      ? options.assertionProvider
+      : null;
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
   }
 
@@ -861,12 +877,17 @@ export class ProxyAdminClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      const method = String(init.method || "GET").toUpperCase();
+      const assertion = method === "GET" || !this.assertionProvider
+        ? null
+        : await this.assertionProvider({ method, path });
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${this.token}`,
+          ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
           ...(this.actor ? { "x-admin-actor": this.actor } : {}),
+          ...(assertion ? { "x-admin-operation-assertion": Buffer.from(JSON.stringify(assertion), "utf8").toString("base64url") } : {}),
           ...(init.headers || {})
         }
       });
