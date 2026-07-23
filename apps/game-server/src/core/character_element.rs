@@ -688,6 +688,37 @@ mod tests {
         }
     }
 
+    fn identity(character_id: &str) -> AuthenticatedSessionIdentity {
+        AuthenticatedSessionIdentity {
+            account_player_id: "plr_0000000000001".to_string(),
+            character_id: character_id.to_string(),
+            world_id: Some(0),
+        }
+    }
+
+    #[test]
+    fn character_element_row_preserves_persisted_default_values() {
+        let elements = CharacterElementsRow {
+            character_id: "chr_0000000000001".to_string(),
+            affinity_earth: 2500,
+            affinity_fire: 2500,
+            affinity_water: 2500,
+            affinity_wind: 2500,
+            mastery_earth: 0,
+            mastery_fire: 0,
+            mastery_water: 0,
+            mastery_wind: 0,
+        }
+        .into_elements();
+
+        assert_eq!(elements.character_id, "chr_0000000000001");
+        assert_eq!(
+            elements.affinity,
+            ElementValues::new(2500, 2500, 2500, 2500)
+        );
+        assert_eq!(elements.mastery, ElementValues::zero());
+    }
+
     #[test]
     fn apply_change_accepts_balanced_affinity_and_non_negative_mastery() {
         let before = base_elements();
@@ -770,6 +801,165 @@ mod tests {
         let error = before.apply_change(change).unwrap_err();
 
         assert_eq!(error.error_code(), "CHARACTER_ELEMENTS_VALUE_OUT_OF_RANGE");
+    }
+
+    #[test]
+    fn character_element_error_codes_are_stable() {
+        let cases = [
+            (
+                CharacterElementError::CharacterNotFound,
+                "CHARACTER_NOT_FOUND",
+            ),
+            (
+                CharacterElementError::InvalidAffinityTotal { total: 9999 },
+                "INVALID_AFFINITY_TOTAL",
+            ),
+            (
+                CharacterElementError::NegativeAffinity {
+                    element: "earth",
+                    value: -1,
+                },
+                "NEGATIVE_AFFINITY",
+            ),
+            (
+                CharacterElementError::NegativeMastery {
+                    element: "fire",
+                    value: -1,
+                },
+                "NEGATIVE_MASTERY",
+            ),
+            (
+                CharacterElementError::ValueOutOfRange {
+                    field: "mastery_fire",
+                    value: i64::from(i32::MAX) + 1,
+                },
+                "CHARACTER_ELEMENTS_VALUE_OUT_OF_RANGE",
+            ),
+            (
+                CharacterElementError::DbUnavailable,
+                "CHARACTER_ELEMENTS_DB_UNAVAILABLE",
+            ),
+            (
+                CharacterElementError::DbError {
+                    message: "connection reset".to_string(),
+                },
+                "CHARACTER_ELEMENTS_DB_ERROR",
+            ),
+        ];
+
+        for (error, expected_code) in cases {
+            assert_eq!(error.error_code(), expected_code);
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_query_reads_only_the_authenticated_characters_elements() {
+        let service = CharacterElementService::new_in_memory();
+        service.set_elements(base_elements()).await;
+        service
+            .set_elements(CharacterElements {
+                character_id: "chr_0000000000002".to_string(),
+                affinity: ElementValues::new(1000, 2000, 3000, 4000),
+                mastery: ElementValues::new(1, 2, 3, 4),
+            })
+            .await;
+
+        let selected = service
+            .get_elements_for_identity(&identity("chr_0000000000002"))
+            .await
+            .expect("current authenticated character should be queried");
+        assert_eq!(selected.character_id, "chr_0000000000002");
+        assert_eq!(
+            selected.affinity,
+            ElementValues::new(1000, 2000, 3000, 4000)
+        );
+
+        let error = service
+            .get_elements_for_identity(&identity("chr_0000000000003"))
+            .await
+            .expect_err(
+                "unknown authenticated character should not read another characters values",
+            );
+        assert_eq!(error, CharacterElementError::CharacterNotFound);
+    }
+
+    #[tokio::test]
+    async fn apply_change_returns_snapshots_and_records_complete_audit_context() {
+        let service = CharacterElementService::new_in_memory();
+        let before = base_elements();
+        service.set_elements(before.clone()).await;
+        let change = CharacterElementChange::new(
+            ElementDeltas::new(-100, 100, 0, 0),
+            ElementDeltas::new(0, 5, -10, 0),
+        );
+        let source = CharacterElementChangeSource::new("quest")
+            .with_source_id("quest_0001")
+            .with_operator("player", "plr_0000000000001");
+
+        let result = service
+            .apply_change(
+                &before.character_id,
+                change,
+                source.clone(),
+                Some("quest reward"),
+            )
+            .await
+            .expect("valid change should be persisted");
+
+        let expected_after = CharacterElements {
+            character_id: before.character_id.clone(),
+            affinity: ElementValues::new(2400, 2600, 2500, 2500),
+            mastery: ElementValues::new(10, 25, 20, 40),
+        };
+        assert_eq!(result.character_id, before.character_id);
+        assert_eq!(result.before, before);
+        assert_eq!(result.after, expected_after);
+
+        let logs = service.applied_change_logs().await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].character_id, result.character_id);
+        assert_eq!(logs[0].change, change);
+        assert_eq!(logs[0].source, source);
+        assert_eq!(logs[0].reason.as_deref(), Some("quest reward"));
+        assert_eq!(logs[0].before, result.before);
+        assert_eq!(logs[0].after, result.after);
+    }
+
+    #[tokio::test]
+    async fn rejected_or_missing_character_change_leaves_memory_state_and_logs_unchanged() {
+        let service = CharacterElementService::new_in_memory();
+        let before = base_elements();
+        service.set_elements(before.clone()).await;
+
+        let invalid_error = service
+            .apply_change(
+                &before.character_id,
+                CharacterElementChange::new(ElementDeltas::new(1, 0, 0, 0), ElementDeltas::zero()),
+                CharacterElementChangeSource::new("quest"),
+                Some("invalid affinity total"),
+            )
+            .await
+            .expect_err("unbalanced affinity change should fail");
+        assert_eq!(invalid_error.error_code(), "INVALID_AFFINITY_TOTAL");
+        assert_eq!(
+            service
+                .get_elements_for_identity(&identity(&before.character_id))
+                .await
+                .expect("rejected change must not mutate current values"),
+            before
+        );
+
+        let missing_error = service
+            .apply_change(
+                "chr_missing",
+                CharacterElementChange::zero(),
+                CharacterElementChangeSource::new("quest"),
+                None,
+            )
+            .await
+            .expect_err("missing character should fail before a log is written");
+        assert_eq!(missing_error, CharacterElementError::CharacterNotFound);
+        assert!(service.applied_change_logs().await.is_empty());
     }
 
     #[tokio::test]

@@ -277,12 +277,18 @@ pub(crate) async fn queue_character_element_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::character_element::{CharacterElements, ElementValues};
+    use crate::core::character_push::CharacterPushService;
+    use prost::Message;
 
     #[test]
     fn debug_token_requires_dedicated_non_empty_match_after_trimming() {
         unsafe {
             std::env::set_var("GAME_ADMIN_TOKEN", "global-admin-token");
-            std::env::set_var("MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN", " element-debug-token ");
+            std::env::set_var(
+                "MYSERVER_CHARACTER_ELEMENT_DEBUG_TOKEN",
+                " element-debug-token ",
+            );
         }
         assert!(debug_token_matches("element-debug-token"));
         assert!(!debug_token_matches("global-admin-token"));
@@ -297,5 +303,86 @@ mod tests {
     #[test]
     fn empty_debug_reason_uses_controlled_default() {
         assert_eq!(normalize_debug_reason("   "), DEFAULT_DEBUG_REASON);
+    }
+
+    #[test]
+    fn debug_change_source_and_protocol_value_mappers_preserve_server_owned_context() {
+        let identity = AuthenticatedSessionIdentity {
+            account_player_id: "plr_0000000000001".to_string(),
+            character_id: "chr_0000000000001".to_string(),
+            world_id: Some(0),
+        };
+
+        let source = debug_change_source(&identity);
+        assert_eq!(source.source_type, DEBUG_SOURCE_TYPE);
+        assert_eq!(source.source_id.as_deref(), Some(DEBUG_SOURCE_ID));
+        assert_eq!(source.operator_type.as_deref(), Some(DEBUG_OPERATOR_TYPE));
+        assert_eq!(source.operator_id.as_deref(), Some("plr_0000000000001"));
+
+        let deltas = to_deltas(Some(&PbElementValues {
+            earth: -10,
+            fire: 10,
+            water: 0,
+            wind: 0,
+        }));
+        assert_eq!(deltas, ElementDeltas::new(-10, 10, 0, 0));
+        assert_eq!(to_deltas(None), ElementDeltas::zero());
+
+        let elements = CharacterElements {
+            character_id: identity.character_id,
+            affinity: ElementValues::new(2400, 2600, 2500, 2500),
+            mastery: ElementValues::new(10, 25, 20, 40),
+        };
+        let protobuf = to_pb_elements(&elements);
+        assert_eq!(protobuf.affinity.expect("affinity").fire, 2600);
+        assert_eq!(protobuf.mastery.expect("mastery").water, 20);
+    }
+
+    #[tokio::test]
+    async fn successful_change_snapshot_is_retained_in_character_element_push() {
+        let before = CharacterElements {
+            character_id: "chr_0000000000001".to_string(),
+            affinity: ElementValues::new(2500, 2500, 2500, 2500),
+            mastery: ElementValues::zero(),
+        };
+        let after = CharacterElements {
+            affinity: ElementValues::new(2400, 2600, 2500, 2500),
+            mastery: ElementValues::new(0, 5, 0, 0),
+            ..before.clone()
+        };
+        let push_service = CharacterPushService::new();
+        let record = push_service
+            .record_elements_change(
+                &before.character_id,
+                CharacterPushSource::new(
+                    DEBUG_SOURCE_TYPE,
+                    DEBUG_SOURCE_ID,
+                    "element_change",
+                    "quest reward",
+                ),
+                CharacterElementsChangePush {
+                    meta: None,
+                    before: Some(to_pb_elements(&before)),
+                    after: Some(to_pb_elements(&after)),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            record.message_type,
+            MessageType::CharacterElementsChangePush
+        );
+        let push = CharacterElementsChangePush::decode(record.body.as_slice())
+            .expect("recorded character element push should decode");
+        assert_eq!(
+            push.before
+                .expect("before")
+                .affinity
+                .expect("affinity")
+                .earth,
+            2500
+        );
+        assert_eq!(push.after.expect("after").mastery.expect("mastery").fire, 5);
+        assert_eq!(record.character_id, before.character_id);
     }
 }
