@@ -1,8 +1,13 @@
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::sync::Arc;
 
-use crate::config::Config;
+use crate::business::character_element::application::ports::{
+    ApplyCharacterElementChangeInTransaction, CharacterElementRepository,
+    CharacterElementRepositoryApplyError, CharacterElementRepositoryReadError,
+    CharacterElementsRead,
+};
 use crate::session::AuthenticatedSessionIdentity;
 
+pub use crate::adapters::persistence::character_element_repository::PgCharacterElementStore;
 /// Temporary compatibility exports for callers that have not yet migrated to
 /// `business::character_element`. Remove this forwarding layer in stage 8.
 pub use crate::business::character_element::{
@@ -10,15 +15,24 @@ pub use crate::business::character_element::{
     CharacterElementError, CharacterElements, ElementDeltas, ElementValues,
 };
 
+/// Transitional compatibility service for callers that have not moved to the
+/// public business facade. Remove this service in stage 8.
 #[derive(Clone)]
 pub struct CharacterElementService {
-    store: CharacterElementStore,
+    repository: Arc<dyn CharacterElementRepository>,
+    closeable_store: Option<PgCharacterElementStore>,
+    #[cfg(test)]
+    in_memory_repository:
+        Option<crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository>,
 }
 
 impl CharacterElementService {
     pub fn new(store: PgCharacterElementStore) -> Self {
         Self {
-            store: CharacterElementStore::Pg(store),
+            repository: Arc::new(store.clone()),
+            closeable_store: Some(store),
+            #[cfg(test)]
+            in_memory_repository: None,
         }
     }
 
@@ -26,10 +40,17 @@ impl CharacterElementService {
         &self,
         identity: &AuthenticatedSessionIdentity,
     ) -> Result<CharacterElements, CharacterElementError> {
-        match &self.store {
-            CharacterElementStore::Pg(store) => store.get(&identity.character_id).await,
-            #[cfg(test)]
-            CharacterElementStore::Memory(store) => store.lock().await.get(&identity.character_id),
+        match self.repository.get(&identity.character_id).await {
+            Ok(CharacterElementsRead::Found(elements)) => Ok(elements),
+            Ok(CharacterElementsRead::Missing) => Err(CharacterElementError::CharacterNotFound),
+            Err(CharacterElementRepositoryReadError::Unavailable) => {
+                Err(CharacterElementError::DbUnavailable)
+            }
+            Err(CharacterElementRepositoryReadError::Failure) => {
+                Err(CharacterElementError::DbError {
+                    message: "character element repository read failed".to_string(),
+                })
+            }
         }
     }
 
@@ -40,361 +61,64 @@ impl CharacterElementService {
         source: CharacterElementChangeSource,
         reason: Option<&str>,
     ) -> Result<CharacterElementApplyResult, CharacterElementError> {
-        match &self.store {
-            CharacterElementStore::Pg(store) => {
-                store
-                    .apply_change(character_id, change, source, reason)
-                    .await
+        let request = ApplyCharacterElementChangeInTransaction::new(
+            character_id.to_string(),
+            change,
+            source,
+            reason.map(str::to_string),
+        );
+
+        match self.repository.apply_change(request).await {
+            Ok(result) => Ok(result),
+            Err(CharacterElementRepositoryApplyError::Rejected(error)) => Err(error),
+            Err(CharacterElementRepositoryApplyError::Unavailable) => {
+                Err(CharacterElementError::DbUnavailable)
             }
-            #[cfg(test)]
-            CharacterElementStore::Memory(store) => {
-                store
-                    .lock()
-                    .await
-                    .apply_change(character_id, change, source, reason)
+            Err(CharacterElementRepositoryApplyError::OutcomeUnknown) => {
+                Err(CharacterElementError::DbError {
+                    message: "character element transaction commit outcome is unknown".to_string(),
+                })
+            }
+            Err(CharacterElementRepositoryApplyError::Failure) => {
+                Err(CharacterElementError::DbError {
+                    message: "character element repository write failed".to_string(),
+                })
             }
         }
     }
 
     pub async fn close(&self) {
-        match &self.store {
-            CharacterElementStore::Pg(store) => store.close().await,
-            #[cfg(test)]
-            CharacterElementStore::Memory(_) => {}
+        if let Some(store) = &self.closeable_store {
+            store.close().await;
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_in_memory() -> Self {
+        let repository = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
         Self {
-            store: CharacterElementStore::Memory(std::sync::Arc::new(tokio::sync::Mutex::new(
-                MemoryCharacterElementStore::default(),
-            ))),
+            repository: Arc::new(repository.clone()),
+            closeable_store: None,
+            in_memory_repository: Some(repository),
         }
     }
 
     #[cfg(test)]
     pub(crate) async fn set_elements(&self, elements: CharacterElements) {
-        if let CharacterElementStore::Memory(store) = &self.store {
-            store.lock().await.set(elements);
+        if let Some(repository) = &self.in_memory_repository {
+            repository.set_elements(elements).await;
         }
     }
 
     #[cfg(test)]
-    pub(crate) async fn applied_change_logs(&self) -> Vec<MemoryCharacterElementLog> {
-        match &self.store {
-            CharacterElementStore::Memory(store) => store.lock().await.logs.clone(),
-            CharacterElementStore::Pg(_) => Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-enum CharacterElementStore {
-    Pg(PgCharacterElementStore),
-    #[cfg(test)]
-    Memory(std::sync::Arc<tokio::sync::Mutex<MemoryCharacterElementStore>>),
-}
-
-#[derive(Clone)]
-pub struct PgCharacterElementStore {
-    pool: Option<PgPool>,
-}
-
-impl PgCharacterElementStore {
-    pub fn new_disabled() -> Self {
-        Self { pool: None }
-    }
-
-    pub async fn new(config: &Config) -> Result<Self, Box<dyn std::error::Error>> {
-        if !config.db_enabled {
-            return Ok(Self::new_disabled());
-        }
-
-        let pool = PgPoolOptions::new()
-            .max_connections(config.db_pool_size.max(1))
-            .connect(&config.database_url)
-            .await?;
-
-        if let Err(error) = sqlx::query("SELECT 1").execute(&pool).await {
-            pool.close().await;
-            return Err(Box::new(error));
-        }
-
-        Ok(Self { pool: Some(pool) })
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.pool.is_some()
-    }
-
-    pub async fn close(&self) {
-        if let Some(pool) = &self.pool {
-            pool.close().await;
-        }
-    }
-
-    pub async fn get(
+    pub(crate) async fn applied_change_logs(
         &self,
-        character_id: &str,
-    ) -> Result<CharacterElements, CharacterElementError> {
-        let Some(pool) = &self.pool else {
-            return Err(CharacterElementError::DbUnavailable);
-        };
-
-        let row = sqlx::query_as::<_, CharacterElementsRow>(SELECT_CHARACTER_ELEMENTS_SQL)
-            .bind(character_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(map_db_error)?;
-
-        row.map(CharacterElementsRow::into_elements)
-            .ok_or(CharacterElementError::CharacterNotFound)
-    }
-
-    pub async fn apply_change(
-        &self,
-        character_id: &str,
-        change: CharacterElementChange,
-        source: CharacterElementChangeSource,
-        reason: Option<&str>,
-    ) -> Result<CharacterElementApplyResult, CharacterElementError> {
-        let Some(pool) = &self.pool else {
-            return Err(CharacterElementError::DbUnavailable);
-        };
-
-        let mut tx = pool.begin().await.map_err(map_db_error)?;
-
-        let row = sqlx::query_as::<_, CharacterElementsRow>(LOCK_CHARACTER_ELEMENTS_SQL)
-            .bind(character_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_db_error)?;
-
-        let Some(row) = row else {
-            tx.rollback().await.map_err(map_db_error)?;
-            return Err(CharacterElementError::CharacterNotFound);
-        };
-
-        let before = row.into_elements();
-        let after = match before.apply_change(change) {
-            Ok(after) => after,
-            Err(error) => {
-                tx.rollback().await.map_err(map_db_error)?;
-                return Err(error);
-            }
-        };
-
-        sqlx::query(UPDATE_CHARACTER_ELEMENTS_SQL)
-            .bind(after.affinity.earth)
-            .bind(after.affinity.fire)
-            .bind(after.affinity.water)
-            .bind(after.affinity.wind)
-            .bind(after.mastery.earth)
-            .bind(after.mastery.fire)
-            .bind(after.mastery.water)
-            .bind(after.mastery.wind)
-            .bind(character_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_error)?;
-
-        sqlx::query(INSERT_CHARACTER_ELEMENT_LOG_SQL)
-            .bind(character_id)
-            .bind(&source.source_type)
-            .bind(source.source_id.as_deref())
-            .bind(source.operator_type.as_deref())
-            .bind(source.operator_id.as_deref())
-            .bind(change.affinity.earth)
-            .bind(change.affinity.fire)
-            .bind(change.affinity.water)
-            .bind(change.affinity.wind)
-            .bind(change.mastery.earth)
-            .bind(change.mastery.fire)
-            .bind(change.mastery.water)
-            .bind(change.mastery.wind)
-            .bind(snapshot_json(&before))
-            .bind(snapshot_json(&after))
-            .bind(reason)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_error)?;
-
-        tx.commit().await.map_err(map_db_error)?;
-
-        Ok(CharacterElementApplyResult {
-            character_id: character_id.to_string(),
-            before,
-            after,
-        })
-    }
-}
-
-const SELECT_CHARACTER_ELEMENTS_SQL: &str = r#"SELECT
-    character_id,
-    affinity_earth,
-    affinity_fire,
-    affinity_water,
-    affinity_wind,
-    mastery_earth,
-    mastery_fire,
-    mastery_water,
-    mastery_wind
-FROM characters
-WHERE character_id = $1 AND deleted_at IS NULL"#;
-
-const LOCK_CHARACTER_ELEMENTS_SQL: &str = r#"SELECT
-    character_id,
-    affinity_earth,
-    affinity_fire,
-    affinity_water,
-    affinity_wind,
-    mastery_earth,
-    mastery_fire,
-    mastery_water,
-    mastery_wind
-FROM characters
-WHERE character_id = $1 AND deleted_at IS NULL
-FOR UPDATE"#;
-
-const UPDATE_CHARACTER_ELEMENTS_SQL: &str = r#"UPDATE characters
-SET
-    affinity_earth = $1,
-    affinity_fire = $2,
-    affinity_water = $3,
-    affinity_wind = $4,
-    mastery_earth = $5,
-    mastery_fire = $6,
-    mastery_water = $7,
-    mastery_wind = $8
-WHERE character_id = $9"#;
-
-const INSERT_CHARACTER_ELEMENT_LOG_SQL: &str = r#"INSERT INTO character_element_logs (
-    character_id,
-    source_type,
-    source_id,
-    operator_type,
-    operator_id,
-    affinity_earth_delta,
-    affinity_fire_delta,
-    affinity_water_delta,
-    affinity_wind_delta,
-    mastery_earth_delta,
-    mastery_fire_delta,
-    mastery_water_delta,
-    mastery_wind_delta,
-    before_json,
-    after_json,
-    reason,
-    created_at
-) VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, $8, $9,
-    $10, $11, $12, $13,
-    $14, $15, $16,
-    current_timestamp
-)"#;
-
-#[derive(sqlx::FromRow)]
-struct CharacterElementsRow {
-    character_id: String,
-    affinity_earth: i32,
-    affinity_fire: i32,
-    affinity_water: i32,
-    affinity_wind: i32,
-    mastery_earth: i32,
-    mastery_fire: i32,
-    mastery_water: i32,
-    mastery_wind: i32,
-}
-
-impl CharacterElementsRow {
-    fn into_elements(self) -> CharacterElements {
-        CharacterElements {
-            character_id: self.character_id,
-            affinity: ElementValues::new(
-                self.affinity_earth,
-                self.affinity_fire,
-                self.affinity_water,
-                self.affinity_wind,
-            ),
-            mastery: ElementValues::new(
-                self.mastery_earth,
-                self.mastery_fire,
-                self.mastery_water,
-                self.mastery_wind,
-            ),
+    ) -> Vec<crate::adapters::persistence::character_element_repository::MemoryCharacterElementLog>
+    {
+        match &self.in_memory_repository {
+            Some(repository) => repository.applied_change_logs().await,
+            None => Vec::new(),
         }
-    }
-}
-
-fn snapshot_json(elements: &CharacterElements) -> serde_json::Value {
-    serde_json::json!({
-        "affinity": elements.affinity,
-        "mastery": elements.mastery
-    })
-}
-
-fn map_db_error(error: sqlx::Error) -> CharacterElementError {
-    CharacterElementError::DbError {
-        message: error.to_string(),
-    }
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct MemoryCharacterElementStore {
-    values: std::collections::BTreeMap<String, CharacterElements>,
-    logs: Vec<MemoryCharacterElementLog>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MemoryCharacterElementLog {
-    pub character_id: String,
-    pub change: CharacterElementChange,
-    pub source: CharacterElementChangeSource,
-    pub reason: Option<String>,
-    pub before: CharacterElements,
-    pub after: CharacterElements,
-}
-
-#[cfg(test)]
-impl MemoryCharacterElementStore {
-    fn set(&mut self, elements: CharacterElements) {
-        self.values.insert(elements.character_id.clone(), elements);
-    }
-
-    fn get(&self, character_id: &str) -> Result<CharacterElements, CharacterElementError> {
-        self.values
-            .get(character_id)
-            .cloned()
-            .ok_or(CharacterElementError::CharacterNotFound)
-    }
-
-    fn apply_change(
-        &mut self,
-        character_id: &str,
-        change: CharacterElementChange,
-        source: CharacterElementChangeSource,
-        reason: Option<&str>,
-    ) -> Result<CharacterElementApplyResult, CharacterElementError> {
-        let before = self.get(character_id)?;
-        let after = before.apply_change(change)?;
-        self.values.insert(character_id.to_string(), after.clone());
-        self.logs.push(MemoryCharacterElementLog {
-            character_id: character_id.to_string(),
-            change,
-            source,
-            reason: reason.map(str::to_string),
-            before: before.clone(),
-            after: after.clone(),
-        });
-        Ok(CharacterElementApplyResult {
-            character_id: character_id.to_string(),
-            before,
-            after,
-        })
     }
 }
 
@@ -416,29 +140,6 @@ mod tests {
             character_id: character_id.to_string(),
             world_id: Some(0),
         }
-    }
-
-    #[test]
-    fn character_element_row_preserves_persisted_default_values() {
-        let elements = CharacterElementsRow {
-            character_id: "chr_0000000000001".to_string(),
-            affinity_earth: 2500,
-            affinity_fire: 2500,
-            affinity_water: 2500,
-            affinity_wind: 2500,
-            mastery_earth: 0,
-            mastery_fire: 0,
-            mastery_water: 0,
-            mastery_wind: 0,
-        }
-        .into_elements();
-
-        assert_eq!(elements.character_id, "chr_0000000000001");
-        assert_eq!(
-            elements.affinity,
-            ElementValues::new(2500, 2500, 2500, 2500)
-        );
-        assert_eq!(elements.mastery, ElementValues::zero());
     }
 
     #[tokio::test]

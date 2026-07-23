@@ -1,3 +1,4 @@
+mod adapters;
 mod admin_server;
 mod authority_bridge;
 mod business;
