@@ -1007,10 +1007,14 @@ mod tests {
         ));
         let title_config_tables = config_tables.clone();
         let title_unlock_config_tables = config_tables.clone();
+        let character_element_store =
+            crate::core::character_element::PgCharacterElementStore::new_disabled();
+        let character_element_facade =
+            crate::business::character_element::CharacterElementFacade::new(Arc::new(
+                character_element_store.clone(),
+            ));
         let character_element_service =
-            crate::core::character_element::CharacterElementService::new(
-                crate::core::character_element::PgCharacterElementStore::new_disabled(),
-            );
+            crate::core::character_element::CharacterElementService::new(character_element_store);
         let discipline_service = crate::core::character_discipline::DisciplineService::new(
             crate::core::character_discipline::PgDisciplineStore::new_disabled(),
         );
@@ -1043,7 +1047,8 @@ mod tests {
             config_tables,
             item_uid_generator: crate::core::global_id::ItemUidGenerator::new_for_test(1),
             player_manager: PlayerManager::new(PgPlayerStore::new_disabled()),
-            character_element_service,
+            character_element_facade,
+            character_element_compatibility_service: character_element_service,
             discipline_service,
             title_service,
             character_progress_service,

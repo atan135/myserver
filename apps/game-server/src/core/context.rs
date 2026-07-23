@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+use crate::business::character_element::CharacterElementFacade;
 use crate::config::Config;
 use crate::core::character_discipline::DisciplineService;
 use crate::core::character_element::CharacterElementService;
@@ -144,7 +145,11 @@ pub struct ServiceContext {
     pub config_tables: ConfigTableRuntime,
     pub item_uid_generator: ItemUidGenerator,
     pub player_manager: PlayerManager,
-    pub character_element_service: CharacterElementService,
+    /// Public entry point for permanent character element use cases.
+    pub character_element_facade: CharacterElementFacade,
+    /// Temporary core-only dependency for callers migrated in stage 7.
+    /// Remove together with `CharacterElementService` in stage 8.
+    pub(crate) character_element_compatibility_service: CharacterElementService,
     pub discipline_service: DisciplineService,
     pub title_service: TitleService,
     pub character_progress_service: CharacterProgressService,

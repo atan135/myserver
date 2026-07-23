@@ -12,6 +12,7 @@ use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
+use crate::business::character_element::CharacterElementFacade;
 use crate::config::Config;
 use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
 use crate::core::character_element::{CharacterElementService, PgCharacterElementStore};
@@ -32,12 +33,12 @@ use crate::core::room::{
 };
 use crate::core::runtime::RoomManager;
 use crate::core::service::{
-    character_element_service, character_progress_service, character_title_service, core_service,
-    inventory_service, room_service,
+    character_progress_service, character_title_service, core_service, inventory_service,
+    room_service,
 };
 use crate::db_store::PgAuditStore;
 use crate::gameroom::GameRoomLogicFactory;
-use crate::gameservice::room_query;
+use crate::gameservice::{character_element, room_query};
 use crate::match_client::{MatchClientConfig, init_match_client, spawn_match_client_rediscovery};
 use crate::metrics::METRICS;
 use crate::pb::SessionKickPush;
@@ -505,6 +506,8 @@ pub async fn run(
     // Initialize PostgreSQL-backed gameplay stores.
     let db_player_store = PgPlayerStore::new(config).await?;
     let character_element_store = PgCharacterElementStore::new(config).await?;
+    let character_element_facade =
+        CharacterElementFacade::new(Arc::new(character_element_store.clone()));
     let discipline_store = PgDisciplineStore::new(config).await?;
     let title_store = PgTitleStore::new(config).await?;
     let title_config_tables = config_tables.clone();
@@ -536,7 +539,8 @@ pub async fn run(
         config_tables,
         item_uid_generator,
         player_manager: PlayerManager::new(db_player_store),
-        character_element_service,
+        character_element_facade,
+        character_element_compatibility_service: character_element_service.clone(),
         discipline_service,
         title_service,
         character_progress_service,
@@ -679,7 +683,7 @@ pub async fn run(
     }
 
     services.player_manager.close().await;
-    services.character_element_service.close().await;
+    character_element_service.close().await;
     services.discipline_service.close().await;
     services.title_service.close().await;
 
@@ -1396,11 +1400,10 @@ async fn dispatch_packet(
             inventory_service::handle_get_inventory(services, connection, packet).await
         }
         Some(MessageType::GetCharacterElementsReq) => {
-            character_element_service::handle_get_character_elements(services, connection, packet)
-                .await
+            character_element::handle_get_character_elements(services, connection, packet).await
         }
         Some(MessageType::DebugApplyCharacterElementChangeReq) => {
-            character_element_service::handle_debug_apply_character_element_change(
+            character_element::handle_debug_apply_character_element_change(
                 services, connection, packet,
             )
             .await

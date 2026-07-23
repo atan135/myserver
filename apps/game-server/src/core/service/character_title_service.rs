@@ -357,7 +357,7 @@ pub async fn handle_learn_character_discipline(
             LearnDisciplineRequest::new(discipline_id.to_string()),
             &config_tables.disciplinetable,
             &config_tables.item_table,
-            &services.character_element_service,
+            &services.character_element_compatibility_service,
             &services.title_service,
             &mut player_data,
             services.config.max_learned_disciplines,
