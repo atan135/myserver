@@ -33,8 +33,7 @@ pub struct TitleUnlockService {
     character_element_facade: CharacterElementFacade,
     config_source: TitleUnlockConfigSource,
     #[cfg(test)]
-    character_element_service:
-        crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+    character_element_service: crate::adapters::persistence::InMemoryCharacterElementRepository,
 }
 
 impl TitleUnlockService {
@@ -164,8 +163,7 @@ impl TitleUnlockService {
         title_service: TitleService,
         discipline_service: DisciplineService,
         character_element_facade: CharacterElementFacade,
-        character_element_service:
-            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+        character_element_service: crate::adapters::persistence::InMemoryCharacterElementRepository,
         title_table: Arc<TitleTable>,
     ) -> Self {
         Self {
@@ -761,7 +759,8 @@ mod tests {
         let table = title_table(rows);
         let title_service = TitleService::new_in_memory(table.clone());
         let discipline_service = DisciplineService::new_in_memory();
-        let character_element_service = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+        let character_element_service =
+            crate::adapters::persistence::InMemoryCharacterElementRepository::default();
         let character_element_facade =
             CharacterElementFacade::new(Arc::new(character_element_service.clone()));
         TitleUnlockService::new_for_test(

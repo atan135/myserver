@@ -155,8 +155,7 @@ pub struct CharacterProgressService {
     discipline_service: DisciplineService,
     title_service: TitleService,
     #[cfg(test)]
-    character_element_service:
-        crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+    character_element_service: crate::adapters::persistence::InMemoryCharacterElementRepository,
 }
 
 impl CharacterProgressService {
@@ -177,8 +176,7 @@ impl CharacterProgressService {
     #[cfg(test)]
     pub(crate) fn new_for_test(
         character_element_facade: CharacterElementFacade,
-        character_element_service:
-            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+        character_element_service: crate::adapters::persistence::InMemoryCharacterElementRepository,
         discipline_service: DisciplineService,
         title_service: TitleService,
     ) -> Self {
@@ -198,8 +196,7 @@ impl CharacterProgressService {
     #[cfg(test)]
     async fn character_element_change_logs_for_test(
         &self,
-    ) -> Vec<crate::adapters::persistence::character_element_repository::MemoryCharacterElementLog>
-    {
+    ) -> Vec<crate::adapters::persistence::MemoryCharacterElementLog> {
         self.character_element_service.applied_change_logs().await
     }
 
@@ -1346,7 +1343,8 @@ mod tests {
     }
 
     async fn service_fixture() -> CharacterProgressService {
-        let character_element_service = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+        let character_element_service =
+            crate::adapters::persistence::InMemoryCharacterElementRepository::default();
         let character_element_facade =
             CharacterElementFacade::new(Arc::new(character_element_service.clone()));
         CharacterProgressService::new_for_test(

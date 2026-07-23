@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::business::character_element::CharacterElementRepository;
 use crate::business::character_element::api::contracts::{
     ApplyCharacterElementChange, ApplyCharacterElementChangeResult, CharacterElementChangeFailure,
     GetCharacterElements, GetCharacterElementsResult,
 };
-use crate::business::character_element::application::ports::CharacterElementRepository;
 use crate::business::character_element::application::{
     CharacterElementApplicationError, CharacterElementApplicationService,
 };

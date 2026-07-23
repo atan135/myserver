@@ -3,13 +3,17 @@
 //! Callers use this module's API and facade. Domain and application details
 //! remain module implementation details.
 
-// The server switches to this API in stage 6; keep the contract warning-free
-// while it is intentionally not yet wired into runtime assembly.
-#[allow(dead_code)]
 mod api;
-#[allow(dead_code)]
-pub(crate) mod application;
+pub(super) mod application;
 mod domain;
+
+// Persistence adapters are the sole crate-level consumers of these ports.
+// Other modules must use the facade and contracts re-exported below.
+pub(crate) use application::ports::{
+    ApplyCharacterElementChangeInTransaction, CharacterElementRepository,
+    CharacterElementRepositoryApplyError, CharacterElementRepositoryReadError,
+    CharacterElementsRead, RepositoryFuture,
+};
 
 #[allow(unused_imports)]
 pub use api::{
@@ -19,6 +23,7 @@ pub use api::{
     ElementSnapshot, GetCharacterElements, GetCharacterElementsResult,
     TrustedCharacterElementChangeContext,
 };
+#[allow(unused_imports)]
 pub use domain::{
     CharacterElementApplyResult, CharacterElementChange, CharacterElementChangeSource,
     CharacterElementError, CharacterElements, ElementDeltas, ElementValues,

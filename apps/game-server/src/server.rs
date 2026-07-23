@@ -12,10 +12,10 @@ use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
+use crate::adapters::persistence::PgCharacterElementStore;
 use crate::business::character_element::CharacterElementFacade;
 use crate::config::Config;
 use crate::core::character_discipline::{DisciplineService, PgDisciplineStore};
-use crate::core::character_element::{CharacterElementService, PgCharacterElementStore};
 use crate::core::character_progress::CharacterProgressService;
 use crate::core::character_title::{PgTitleStore, TitleService};
 use crate::core::character_title_unlock::TitleUnlockService;
@@ -512,7 +512,6 @@ pub async fn run(
     let title_store = PgTitleStore::new(config).await?;
     let title_config_tables = config_tables.clone();
     let title_unlock_config_tables = config_tables.clone();
-    let character_element_service = CharacterElementService::new(character_element_store);
     let discipline_service = DisciplineService::new(discipline_store);
     let title_service = TitleService::new(title_store, title_config_tables);
     let title_unlock_service = TitleUnlockService::new(
@@ -540,7 +539,6 @@ pub async fn run(
         item_uid_generator,
         player_manager: PlayerManager::new(db_player_store),
         character_element_facade,
-        character_element_compatibility_service: character_element_service.clone(),
         discipline_service,
         title_service,
         character_progress_service,
@@ -683,7 +681,7 @@ pub async fn run(
     }
 
     services.player_manager.close().await;
-    character_element_service.close().await;
+    character_element_store.close().await;
     services.discipline_service.close().await;
     services.title_service.close().await;
 

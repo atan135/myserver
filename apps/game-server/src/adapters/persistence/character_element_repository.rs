@@ -1,6 +1,6 @@
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
-use crate::business::character_element::application::ports::{
+use crate::business::character_element::{
     ApplyCharacterElementChangeInTransaction, CharacterElementRepository,
     CharacterElementRepositoryApplyError, CharacterElementRepositoryReadError,
     CharacterElementsRead, RepositoryFuture,

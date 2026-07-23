@@ -1760,13 +1760,13 @@ mod tests {
 
     struct TestCharacterElements {
         facade: CharacterElementFacade,
-        repository:
-            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+        repository: crate::adapters::persistence::InMemoryCharacterElementRepository,
     }
 
     impl TestCharacterElements {
         fn new() -> Self {
-            let repository = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+            let repository =
+                crate::adapters::persistence::InMemoryCharacterElementRepository::default();
             let facade = CharacterElementFacade::new(Arc::new(repository.clone()));
             Self { facade, repository }
         }

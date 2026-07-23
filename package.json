@@ -39,6 +39,7 @@
     "check:proto-fixtures": "node tools/check-proto-compatibility-fixtures.js",
     "check:client-protocol-version": "node tools/client-protocol-version-policy.js",
     "check:asset-write-boundaries": "node tools/check-asset-write-boundaries.js",
+    "check:character-element-boundaries": "node tools/check-character-element-boundaries.js",
     "check:registry-schema": "node tools/check-registry-schema.js",
     "check:registry-canary-lifecycle": "node tools/check-registry-canary-lifecycle.js",
     "check:registry-outage-drill": "node tools/check-registry-outage-drill.js",

@@ -1,9 +1,9 @@
 use tracing::info;
 
 use crate::business::character_element::{
-    ApplyCharacterElementChange, CharacterElementApplyResult, CharacterElementChangeFailure,
-    CharacterElementDelta, CharacterElementSnapshot, CharacterElementsChanged, ElementDelta,
-    GetCharacterElements, TrustedCharacterElementChangeContext,
+    ApplyCharacterElementChange, CharacterElementChangeFailure, CharacterElementDelta,
+    CharacterElementSnapshot, CharacterElementsChanged, ElementDelta, GetCharacterElements,
+    TrustedCharacterElementChangeContext,
 };
 use crate::core::character_push::{CharacterPushSource, queue_character_push};
 use crate::core::context::{ConnectionContext, ServiceContext};
@@ -300,25 +300,6 @@ fn to_pb_snapshot(elements: &CharacterElementSnapshot) -> PbCharacterElements {
     }
 }
 
-fn to_pb_legacy_elements(
-    elements: &crate::business::character_element::CharacterElements,
-) -> PbCharacterElements {
-    PbCharacterElements {
-        affinity: Some(to_pb_values(
-            elements.affinity.earth,
-            elements.affinity.fire,
-            elements.affinity.water,
-            elements.affinity.wind,
-        )),
-        mastery: Some(to_pb_values(
-            elements.mastery.earth,
-            elements.mastery.fire,
-            elements.mastery.water,
-            elements.mastery.wind,
-        )),
-    }
-}
-
 pub(crate) async fn queue_character_element_push(
     services: &ServiceContext,
     connection: &ConnectionContext,
@@ -341,41 +322,15 @@ pub(crate) async fn queue_character_element_push(
     queue_character_push(connection, &identity.character_id, &record)
 }
 
-/// Temporary bridge for the stage 7 progress caller. Both legacy and new
-/// paths keep protocol mapping in this adapter until the caller is migrated.
-pub(crate) async fn queue_legacy_character_element_push(
-    services: &ServiceContext,
-    connection: &ConnectionContext,
-    identity: &AuthenticatedSessionIdentity,
-    result: &CharacterElementApplyResult,
-    source: CharacterPushSource,
-) -> Result<(), std::io::Error> {
-    let record = services
-        .character_push_service
-        .record_elements_change(
-            &result.character_id,
-            source,
-            CharacterElementsChangePush {
-                meta: None,
-                before: Some(to_pb_legacy_elements(&result.before)),
-                after: Some(to_pb_legacy_elements(&result.after)),
-            },
-        )
-        .await;
-    queue_character_push(connection, &identity.character_id, &record)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository;
+    use crate::adapters::persistence::InMemoryCharacterElementRepository;
     use crate::business::character_element::{
         CharacterElementFacade, CharacterElements, ElementValues,
     };
-    use crate::core::character_push::CharacterPushService;
-    use prost::Message;
 
     fn identity() -> AuthenticatedSessionIdentity {
         AuthenticatedSessionIdentity {
@@ -482,53 +437,5 @@ mod tests {
         assert_eq!(before.affinity.expect("affinity").earth, 2500);
         assert_eq!(after.affinity.expect("affinity").fire, 2600);
         assert_eq!(after.mastery.expect("mastery").fire, 5);
-    }
-
-    #[tokio::test]
-    async fn legacy_element_push_retains_committed_snapshots() {
-        let before = CharacterElements {
-            character_id: "chr_0000000000001".to_string(),
-            affinity: ElementValues::new(2500, 2500, 2500, 2500),
-            mastery: ElementValues::zero(),
-        };
-        let after = CharacterElements {
-            affinity: ElementValues::new(2400, 2600, 2500, 2500),
-            mastery: ElementValues::new(0, 5, 0, 0),
-            ..before.clone()
-        };
-        let push_service = CharacterPushService::new();
-        let record = push_service
-            .record_elements_change(
-                &before.character_id,
-                CharacterPushSource::new(
-                    DEBUG_SOURCE_TYPE,
-                    DEBUG_SOURCE_ID,
-                    "element_change",
-                    "quest reward",
-                ),
-                CharacterElementsChangePush {
-                    meta: None,
-                    before: Some(to_pb_legacy_elements(&before)),
-                    after: Some(to_pb_legacy_elements(&after)),
-                },
-            )
-            .await;
-
-        assert_eq!(
-            record.message_type,
-            MessageType::CharacterElementsChangePush
-        );
-        let push = CharacterElementsChangePush::decode(record.body.as_slice())
-            .expect("recorded character element push should decode");
-        assert_eq!(
-            push.before
-                .expect("before")
-                .affinity
-                .expect("affinity")
-                .earth,
-            2500
-        );
-        assert_eq!(push.after.expect("after").mastery.expect("mastery").fire, 5);
-        assert_eq!(record.character_id, before.character_id);
     }
 }
