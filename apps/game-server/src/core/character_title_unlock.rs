@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::core::character_discipline::{CharacterDiscipline, DisciplineError, DisciplineService};
-use crate::core::character_element::{
-    CharacterElementError, CharacterElementService, CharacterElements, ElementValues,
+use crate::business::character_element::{
+    CharacterElementChangeFailure, CharacterElementFacade, CharacterElementSnapshot,
+    ElementSnapshot, GetCharacterElements,
 };
+use crate::core::character_discipline::{CharacterDiscipline, DisciplineError, DisciplineService};
 use crate::core::character_title::{
     CharacterTitle, GrantTitleRequest, GrantTitleStatus, TitleError, TitleOperationContext,
     TitleService,
@@ -29,22 +30,27 @@ const DISCIPLINE_TIER_ORDER: &[&str] = &[
 pub struct TitleUnlockService {
     title_service: TitleService,
     discipline_service: DisciplineService,
-    character_element_service: CharacterElementService,
+    character_element_facade: CharacterElementFacade,
     config_source: TitleUnlockConfigSource,
+    #[cfg(test)]
+    character_element_service:
+        crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
 }
 
 impl TitleUnlockService {
     pub fn new(
         title_service: TitleService,
         discipline_service: DisciplineService,
-        character_element_service: CharacterElementService,
+        character_element_facade: CharacterElementFacade,
         config_tables: ConfigTableRuntime,
     ) -> Self {
         Self {
             title_service,
             discipline_service,
-            character_element_service,
+            character_element_facade,
             config_source: TitleUnlockConfigSource::Runtime(config_tables),
+            #[cfg(test)]
+            character_element_service: Default::default(),
         }
     }
 
@@ -56,7 +62,7 @@ impl TitleUnlockService {
         let table = self.config_source.title_table().await;
         let mut result = TitleUnlockCheckResult::default();
         let mut disciplines: Option<Vec<CharacterDiscipline>> = None;
-        let mut elements: Option<CharacterElements> = None;
+        let mut elements: Option<CharacterElementSnapshot> = None;
 
         for row in table.all() {
             let title_id = row.titleid.to_string();
@@ -93,10 +99,14 @@ impl TitleUnlockService {
             }
             if rule.requires_element() && elements.is_none() {
                 elements = Some(
-                    self.character_element_service
-                        .get_elements_for_identity(identity)
+                    self.character_element_facade
+                        .get_character_elements(GetCharacterElements::new(
+                            identity.character_id.clone(),
+                        ))
                         .await
-                        .map_err(TitleUnlockError::Element)?,
+                        .map_err(TitleUnlockError::Element)?
+                        .elements()
+                        .clone(),
                 );
             }
 
@@ -153,14 +163,17 @@ impl TitleUnlockService {
     pub(crate) fn new_for_test(
         title_service: TitleService,
         discipline_service: DisciplineService,
-        character_element_service: CharacterElementService,
+        character_element_facade: CharacterElementFacade,
+        character_element_service:
+            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
         title_table: Arc<TitleTable>,
     ) -> Self {
         Self {
             title_service,
             discipline_service,
-            character_element_service,
+            character_element_facade,
             config_source: TitleUnlockConfigSource::Static(title_table),
+            character_element_service,
         }
     }
 }
@@ -240,7 +253,7 @@ impl TitleUnlockSkipReason {
 pub enum TitleUnlockError {
     Title(TitleError),
     Discipline(DisciplineError),
-    Element(CharacterElementError),
+    Element(CharacterElementChangeFailure),
 }
 
 impl TitleUnlockError {
@@ -260,7 +273,11 @@ impl std::fmt::Display for TitleUnlockError {
             Self::Discipline(error) => {
                 write!(formatter, "title unlock discipline check failed: {error}")
             }
-            Self::Element(error) => write!(formatter, "title unlock element check failed: {error}"),
+            Self::Element(error) => write!(
+                formatter,
+                "title unlock element check failed: {}",
+                error.error_code()
+            ),
         }
     }
 }
@@ -317,12 +334,12 @@ impl ElementKind {
         }
     }
 
-    fn value_from(self, values: ElementValues) -> i32 {
+    fn value_from(self, values: ElementSnapshot) -> i32 {
         match self {
-            Self::Earth => values.earth,
-            Self::Fire => values.fire,
-            Self::Water => values.water,
-            Self::Wind => values.wind,
+            Self::Earth => values.earth(),
+            Self::Fire => values.fire(),
+            Self::Water => values.water(),
+            Self::Wind => values.wind(),
         }
     }
 }
@@ -451,7 +468,7 @@ fn infer_compat_rule_type(value: &Value) -> Option<String> {
 fn evaluate_rule(
     rule: &UnlockRule,
     disciplines: Option<&[CharacterDiscipline]>,
-    elements: Option<&CharacterElements>,
+    elements: Option<&CharacterElementSnapshot>,
 ) -> RuleEvaluation {
     match rule {
         UnlockRule::Manual => RuleEvaluation::Skipped(TitleUnlockSkipReason::ManualRule),
@@ -479,7 +496,7 @@ fn evaluate_rule(
         }
         UnlockRule::ElementMastery { element, min } => {
             let matched = elements
-                .map(|elements| element.value_from(elements.mastery) >= *min)
+                .map(|elements| element.value_from(elements.mastery()) >= *min)
                 .unwrap_or(false);
             if matched {
                 RuleEvaluation::Matched {
@@ -491,7 +508,7 @@ fn evaluate_rule(
         }
         UnlockRule::ElementAffinity { element, min } => {
             let matched = elements
-                .map(|elements| element.value_from(elements.affinity) >= *min)
+                .map(|elements| element.value_from(elements.affinity()) >= *min)
                 .unwrap_or(false);
             if matched {
                 RuleEvaluation::Matched {
@@ -645,6 +662,9 @@ fn resolve_string(table: &TitleTable, key: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::business::character_element::{
+        CharacterElementFacade, CharacterElements, ElementValues,
+    };
     use crate::core::character_discipline::DisciplineUpsert;
     use crate::csv_code::titletable::{StringKey, TitleTableRow};
     use std::collections::HashMap;
@@ -741,8 +761,16 @@ mod tests {
         let table = title_table(rows);
         let title_service = TitleService::new_in_memory(table.clone());
         let discipline_service = DisciplineService::new_in_memory();
-        let element_service = CharacterElementService::new_in_memory();
-        TitleUnlockService::new_for_test(title_service, discipline_service, element_service, table)
+        let character_element_service = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+        let character_element_facade =
+            CharacterElementFacade::new(Arc::new(character_element_service.clone()));
+        TitleUnlockService::new_for_test(
+            title_service,
+            discipline_service,
+            character_element_facade,
+            character_element_service,
+            table,
+        )
     }
 
     fn skip_reason(result: &TitleUnlockCheckResult, title_id: &str) -> TitleUnlockSkipReason {

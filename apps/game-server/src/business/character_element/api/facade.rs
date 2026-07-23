@@ -53,6 +53,24 @@ impl CharacterElementFacade {
             committed, &command,
         ))
     }
+
+    /// Validates and projects a change without writing it or creating a
+    /// committed event. Callers use this when they must validate a group of
+    /// independent rewards before applying any of them.
+    pub fn preview_character_element_change(
+        &self,
+        before: &crate::business::character_element::CharacterElementSnapshot,
+        delta: crate::business::character_element::CharacterElementDelta,
+    ) -> Result<
+        crate::business::character_element::CharacterElementSnapshot,
+        CharacterElementChangeFailure,
+    > {
+        before
+            .to_domain()
+            .apply_change(delta.into())
+            .map(Into::into)
+            .map_err(CharacterElementChangeFailure::from)
+    }
 }
 
 impl From<CharacterElementApplicationError> for CharacterElementChangeFailure {

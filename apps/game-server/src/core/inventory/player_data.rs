@@ -4,7 +4,7 @@ use super::container::ItemContainer;
 use super::equipment::{EquipSlot, EquipmentSlots};
 use super::item::{Item, ItemElementValues, ItemError};
 use super::visual::PlayerVisual;
-use crate::core::character_element::{CharacterElementChange, ElementDeltas};
+use crate::business::character_element::{CharacterElementDelta, ElementDelta};
 use crate::csv_code::itemtable::{ItemTable, ItemTableRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -358,14 +358,14 @@ impl PlayerData {
                 duration_ms: row.cooldownms as u64,
             },
             "CharacterElementChange" => {
-                let change = CharacterElementChange::new(
-                    ElementDeltas::new(
+                let delta = CharacterElementDelta::new(
+                    ElementDelta::new(
                         row.useaffinityearthdelta,
                         row.useaffinityfiredelta,
                         row.useaffinitywaterdelta,
                         row.useaffinitywinddelta,
                     ),
-                    ElementDeltas::new(
+                    ElementDelta::new(
                         row.usemasteryearthdelta,
                         row.usemasteryfiredelta,
                         row.usemasterywaterdelta,
@@ -373,11 +373,15 @@ impl PlayerData {
                     ),
                 );
 
-                if change == CharacterElementChange::zero() {
+                if delta == CharacterElementDelta::zero() {
                     return Err(ItemError::InvalidElementDelta);
                 }
 
-                PreparedItemUseEffect::CharacterElementChange { change }
+                // This synchronous asset planner only carries a public command
+                // input. The player manager currently rejects this effect until
+                // cross-store atomicity is available, so it never passes
+                // PlayerData into the permanent-element module.
+                PreparedItemUseEffect::CharacterElementChange { delta }
             }
             _ => return Err(ItemError::CannotUse),
         };
@@ -627,7 +631,7 @@ pub enum PreparedItemUseEffect {
         duration_ms: u64,
     },
     CharacterElementChange {
-        change: CharacterElementChange,
+        delta: CharacterElementDelta,
     },
 }
 
@@ -806,9 +810,9 @@ mod tests {
         assert_eq!(
             plan.effect,
             PreparedItemUseEffect::CharacterElementChange {
-                change: CharacterElementChange::new(
-                    ElementDeltas::zero(),
-                    ElementDeltas::new(0, 10, 0, 0)
+                delta: CharacterElementDelta::new(
+                    ElementDelta::zero(),
+                    ElementDelta::new(0, 10, 0, 0)
                 )
             }
         );

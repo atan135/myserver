@@ -10,6 +10,7 @@ use crate::session::AuthenticatedSessionIdentity;
 pub use crate::adapters::persistence::character_element_repository::PgCharacterElementStore;
 /// Temporary compatibility exports for callers that have not yet migrated to
 /// `business::character_element`. Remove this forwarding layer in stage 8.
+#[allow(unused_imports)]
 pub use crate::business::character_element::{
     CharacterElementApplyResult, CharacterElementChange, CharacterElementChangeSource,
     CharacterElementError, CharacterElements, ElementDeltas, ElementValues,

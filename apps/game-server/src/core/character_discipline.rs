@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
-use crate::config::Config;
-use crate::core::character_element::{
-    CharacterElementError, CharacterElementService, CharacterElements, ElementValues,
+use crate::business::character_element::{
+    CharacterElementChangeFailure, CharacterElementFacade, CharacterElementSnapshot,
+    ElementSnapshot, GetCharacterElements,
 };
+use crate::config::Config;
 use crate::core::character_title::{
     CharacterTitle, TitleError, TitleOperationContext, TitleService,
 };
@@ -211,7 +212,7 @@ pub enum DisciplineError {
     InvalidDisciplineAction,
     InvalidDisciplineConfig { message: String },
     CrossStoreAssetTransactionUnavailable,
-    CharacterElement(CharacterElementError),
+    CharacterElement(CharacterElementChangeFailure),
     Title(TitleError),
     Item(ItemError),
     DbUnavailable,
@@ -281,7 +282,9 @@ impl std::fmt::Display for DisciplineError {
                 formatter,
                 "discipline learning with item costs requires a shared asset transaction"
             ),
-            Self::CharacterElement(error) => write!(formatter, "character element error: {error}"),
+            Self::CharacterElement(error) => {
+                write!(formatter, "character element error: {}", error.error_code())
+            }
             Self::Title(error) => write!(formatter, "title error: {error}"),
             Self::Item(error) => write!(formatter, "item error: {}", error.as_str()),
             Self::DbUnavailable => write!(formatter, "discipline database is unavailable"),
@@ -351,7 +354,7 @@ impl DisciplineService {
         request: LearnDisciplineRequest,
         discipline_table: &DisciplineTable,
         item_table: &ItemTable,
-        character_element_service: &CharacterElementService,
+        character_element_facade: &CharacterElementFacade,
         title_service: &TitleService,
         player_data: &mut PlayerData,
         max_learned_disciplines: usize,
@@ -382,10 +385,14 @@ impl DisciplineService {
 
         let elements = if condition.requires_elements() {
             Some(
-                character_element_service
-                    .get_elements_for_identity(identity)
+                character_element_facade
+                    .get_character_elements(GetCharacterElements::new(
+                        identity.character_id.clone(),
+                    ))
                     .await
-                    .map_err(DisciplineError::CharacterElement)?,
+                    .map_err(DisciplineError::CharacterElement)?
+                    .elements()
+                    .clone(),
             )
         } else {
             None
@@ -1153,12 +1160,12 @@ impl ElementKind {
         }
     }
 
-    fn value_from(self, values: ElementValues) -> i32 {
+    fn value_from(self, values: ElementSnapshot) -> i32 {
         match self {
-            Self::Earth => values.earth,
-            Self::Fire => values.fire,
-            Self::Water => values.water,
-            Self::Wind => values.wind,
+            Self::Earth => values.earth(),
+            Self::Fire => values.fire(),
+            Self::Water => values.water(),
+            Self::Wind => values.wind(),
         }
     }
 }
@@ -1383,7 +1390,7 @@ fn parse_element_threshold(
 fn evaluate_learn_condition(
     condition: &LearnCondition,
     disciplines: &[CharacterDiscipline],
-    elements: Option<&CharacterElements>,
+    elements: Option<&CharacterElementSnapshot>,
     titles: Option<&[CharacterTitle]>,
     player_data: &PlayerData,
 ) -> Result<Vec<DisciplineItemCost>, DisciplineError> {
@@ -1413,7 +1420,7 @@ fn evaluate_learn_condition(
         }
         LearnCondition::Affinity { element, min } => {
             let current = elements
-                .map(|elements| element.value_from(elements.affinity))
+                .map(|elements| element.value_from(elements.affinity()))
                 .unwrap_or_default();
             if current >= *min {
                 Ok(Vec::new())
@@ -1423,7 +1430,7 @@ fn evaluate_learn_condition(
         }
         LearnCondition::Mastery { element, min } => {
             let current = elements
-                .map(|elements| element.value_from(elements.mastery))
+                .map(|elements| element.value_from(elements.mastery()))
                 .unwrap_or_default();
             if current >= *min {
                 Ok(Vec::new())
@@ -1739,7 +1746,9 @@ impl MemoryDisciplineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::character_element::{CharacterElementService, CharacterElements};
+    use crate::business::character_element::{
+        CharacterElementFacade, CharacterElements, ElementValues,
+    };
     use crate::core::character_title::TitleService;
     use crate::core::inventory::Item;
     use crate::core::system::combat::BuiltinCombatCatalog;
@@ -1747,6 +1756,33 @@ mod tests {
     use crate::csv_code::itemtable::ItemTableRow;
     use crate::csv_code::titletable::{TitleTable, TitleTableRow};
     use std::collections::HashMap;
+    use std::ops::Deref;
+
+    struct TestCharacterElements {
+        facade: CharacterElementFacade,
+        repository:
+            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+    }
+
+    impl TestCharacterElements {
+        fn new() -> Self {
+            let repository = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+            let facade = CharacterElementFacade::new(Arc::new(repository.clone()));
+            Self { facade, repository }
+        }
+
+        async fn set_elements(&self, elements: CharacterElements) {
+            self.repository.set_elements(elements).await;
+        }
+    }
+
+    impl Deref for TestCharacterElements {
+        type Target = CharacterElementFacade;
+
+        fn deref(&self) -> &Self::Target {
+            &self.facade
+        }
+    }
 
     fn identity() -> AuthenticatedSessionIdentity {
         AuthenticatedSessionIdentity {
@@ -1848,11 +1884,15 @@ mod tests {
         let unsupported = evaluate_learn_condition(
             &rule,
             &[],
-            Some(&CharacterElements {
-                character_id: "chr_0000000000001".to_string(),
-                affinity: ElementValues::new(2500, 2500, 2500, 2500),
-                mastery: ElementValues::new(0, 10, 0, 0),
-            }),
+            Some(
+                &crate::business::character_element::CharacterElementSnapshot::new(
+                    "chr_0000000000001",
+                    crate::business::character_element::ElementSnapshot::new(
+                        2500, 2500, 2500, 2500,
+                    ),
+                    crate::business::character_element::ElementSnapshot::new(0, 10, 0, 0),
+                ),
+            ),
             None,
             &player_data,
         )
@@ -1867,7 +1907,7 @@ mod tests {
     async fn item_cost_learning_is_rejected_before_discipline_or_inventory_write() {
         let identity = identity();
         let service = DisciplineService::new_in_memory();
-        let element_service = CharacterElementService::new_in_memory();
+        let element_service = TestCharacterElements::new();
         element_service
             .set_elements(CharacterElements {
                 character_id: identity.character_id.clone(),
@@ -1922,7 +1962,7 @@ mod tests {
     async fn failed_learn_does_not_consume_items() {
         let identity = identity();
         let service = DisciplineService::new_in_memory();
-        let element_service = CharacterElementService::new_in_memory();
+        let element_service = TestCharacterElements::new();
         element_service
             .set_elements(CharacterElements {
                 character_id: identity.character_id.clone(),
@@ -1961,7 +2001,7 @@ mod tests {
     async fn formal_learn_consumes_progress_discipline_eligibility() {
         let identity = identity();
         let service = DisciplineService::new_in_memory();
-        let element_service = CharacterElementService::new_in_memory();
+        let element_service = TestCharacterElements::new();
         let title_service = TitleService::new_in_memory(title_table());
         let table = discipline_table_with_eligibility();
         let mut player_data = PlayerData::new(identity.character_id.clone());
@@ -2031,7 +2071,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let element_service = CharacterElementService::new_in_memory();
+        let element_service = TestCharacterElements::new();
         element_service
             .set_elements(CharacterElements {
                 character_id: identity.character_id.clone(),
@@ -2071,7 +2111,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let element_service = CharacterElementService::new_in_memory();
+        let element_service = TestCharacterElements::new();
         element_service
             .set_elements(CharacterElements {
                 character_id: identity.character_id.clone(),

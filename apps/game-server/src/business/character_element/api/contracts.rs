@@ -28,7 +28,7 @@ impl GetCharacterElements {
 }
 
 /// A stable, immutable-by-API snapshot of the four permanent element values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ElementSnapshot {
     earth: i32,
     fire: i32,
@@ -37,6 +37,15 @@ pub struct ElementSnapshot {
 }
 
 impl ElementSnapshot {
+    pub const fn new(earth: i32, fire: i32, water: i32, wind: i32) -> Self {
+        Self {
+            earth,
+            fire,
+            water,
+            wind,
+        }
+    }
+
     pub fn earth(&self) -> i32 {
         self.earth
     }
@@ -66,7 +75,7 @@ impl From<ElementValues> for ElementSnapshot {
 }
 
 /// A stable, immutable-by-API permanent element snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CharacterElementSnapshot {
     character_id: String,
     affinity: ElementSnapshot,
@@ -74,6 +83,18 @@ pub struct CharacterElementSnapshot {
 }
 
 impl CharacterElementSnapshot {
+    pub fn new(
+        character_id: impl Into<String>,
+        affinity: ElementSnapshot,
+        mastery: ElementSnapshot,
+    ) -> Self {
+        Self {
+            character_id: character_id.into(),
+            affinity,
+            mastery,
+        }
+    }
+
     pub fn character_id(&self) -> &str {
         &self.character_id
     }
@@ -84,6 +105,24 @@ impl CharacterElementSnapshot {
 
     pub fn mastery(&self) -> ElementSnapshot {
         self.mastery
+    }
+
+    pub(crate) fn to_domain(&self) -> CharacterElements {
+        CharacterElements {
+            character_id: self.character_id.clone(),
+            affinity: ElementValues::new(
+                self.affinity.earth,
+                self.affinity.fire,
+                self.affinity.water,
+                self.affinity.wind,
+            ),
+            mastery: ElementValues::new(
+                self.mastery.earth,
+                self.mastery.fire,
+                self.mastery.water,
+                self.mastery.wind,
+            ),
+        }
     }
 }
 

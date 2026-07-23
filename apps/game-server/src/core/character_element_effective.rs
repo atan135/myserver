@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::business::character_element::{
+    CharacterElementSnapshot, CharacterElements, ElementDeltas, ElementValues,
+};
 use crate::core::character_discipline::CharacterDiscipline;
-use crate::core::character_element::{CharacterElements, ElementDeltas, ElementValues};
 use crate::core::inventory::item::ItemElementValues;
 use crate::core::inventory::player_data::PlayerData;
 use crate::core::system::combat::components::{Health, Stats};
@@ -85,7 +87,8 @@ impl DisciplineElementModifier {
 
 #[derive(Debug, Clone)]
 pub struct EffectiveElementsRequest {
-    pub base_elements: CharacterElements,
+    /// Permanent state is supplied as the business module's read-only snapshot.
+    pub base_elements: CharacterElementSnapshot,
     pub disciplines: Vec<CharacterDiscipline>,
     pub discipline_modifiers: Vec<DisciplineElementModifier>,
     pub equipped_item_elements: ItemElementValues,
@@ -95,7 +98,7 @@ pub struct EffectiveElementsRequest {
 }
 
 impl EffectiveElementsRequest {
-    pub fn new(base_elements: CharacterElements) -> Self {
+    pub fn new(base_elements: CharacterElementSnapshot) -> Self {
         Self {
             base_elements,
             disciplines: Vec::new(),
@@ -145,7 +148,7 @@ impl EffectiveElementsRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveElementSources {
-    pub base_elements: CharacterElements,
+    pub base_elements: CharacterElementSnapshot,
     pub active_discipline_ids: Vec<String>,
     pub discipline_modifier: ElementModifier,
     pub equipped_item_elements: ItemElementValues,
@@ -202,11 +205,11 @@ pub fn calculate_effective_elements(request: EffectiveElementsRequest) -> Effect
         .saturating_add(request.scene_context_modifier)
         .saturating_add(request.temporary_system_modifier);
 
-    let mut elements = request.base_elements.clone();
+    let mut elements = effective_elements_from_snapshot(&request.base_elements);
     apply_modifier(&mut elements, total_modifier);
 
     EffectiveElementsResult {
-        character_id: elements.character_id.clone(),
+        character_id: request.base_elements.character_id().to_string(),
         elements,
         sources: EffectiveElementSources {
             base_elements: request.base_elements,
@@ -219,6 +222,26 @@ pub fn calculate_effective_elements(request: EffectiveElementsRequest) -> Effect
             temporary_system_modifier: request.temporary_system_modifier,
             total_modifier,
         },
+    }
+}
+
+fn effective_elements_from_snapshot(snapshot: &CharacterElementSnapshot) -> CharacterElements {
+    let affinity = snapshot.affinity();
+    let mastery = snapshot.mastery();
+    CharacterElements {
+        character_id: snapshot.character_id().to_string(),
+        affinity: ElementValues::new(
+            affinity.earth(),
+            affinity.fire(),
+            affinity.water(),
+            affinity.wind(),
+        ),
+        mastery: ElementValues::new(
+            mastery.earth(),
+            mastery.fire(),
+            mastery.water(),
+            mastery.wind(),
+        ),
     }
 }
 
@@ -330,12 +353,12 @@ mod tests {
     use crate::csv_code::itemtable::{ItemTable, ItemTableRow};
     use std::collections::HashMap;
 
-    fn base_elements() -> CharacterElements {
-        CharacterElements {
-            character_id: "chr_0000000000001".to_string(),
-            affinity: ElementValues::new(2500, 2500, 2500, 2500),
-            mastery: ElementValues::new(10, 20, 30, 40),
-        }
+    fn base_elements() -> CharacterElementSnapshot {
+        CharacterElementSnapshot::new(
+            "chr_0000000000001",
+            crate::business::character_element::ElementSnapshot::new(2500, 2500, 2500, 2500),
+            crate::business::character_element::ElementSnapshot::new(10, 20, 30, 40),
+        )
     }
 
     fn discipline(discipline_id: &str, active: bool) -> CharacterDiscipline {
@@ -371,7 +394,7 @@ mod tests {
     #[test]
     fn effective_elements_combine_active_discipline_equipment_buff_scene_and_system_sources() {
         let base = base_elements();
-        let mut player_data = PlayerData::new(base.character_id.clone());
+        let mut player_data = PlayerData::new(base.character_id().to_string());
         let mut item = Item::new(7, 1002, 1, false);
         item.growth_elements = ItemElementValues::new(1, 2, 3, 4);
         item.runtime_elements = ItemElementValues::new(0, 5, 0, 0);
@@ -402,7 +425,7 @@ mod tests {
                 .with_temporary_system_modifier(ElementModifier::mastery(1, 1, 1, 1)),
         );
 
-        assert_eq!(base.mastery.fire, 20);
+        assert_eq!(base.mastery().fire(), 20);
         assert_eq!(result.sources.active_discipline_ids, vec!["forging"]);
         assert_eq!(result.sources.equipped_item_elements.fire, 87);
         assert_eq!(result.elements.affinity.fire, 2620);
@@ -447,12 +470,15 @@ mod tests {
     fn scene_effective_elements_can_be_converted_to_temporary_modifier() {
         let base = base_elements();
         let scene_effective = CharacterElements {
+            character_id: base.character_id().to_string(),
             affinity: ElementValues::new(2500, 2620, 2500, 2500),
             mastery: ElementValues::new(10, 18, 30, 43),
-            ..base.clone()
         };
 
-        let modifier = ElementModifier::from_elements_delta(&base, &scene_effective);
+        let modifier = ElementModifier::from_elements_delta(
+            &effective_elements_from_snapshot(&base),
+            &scene_effective,
+        );
         let result = calculate_effective_elements(
             EffectiveElementsRequest::new(base).with_scene_context_modifier(modifier),
         );

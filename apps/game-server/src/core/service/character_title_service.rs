@@ -357,7 +357,7 @@ pub async fn handle_learn_character_discipline(
             LearnDisciplineRequest::new(discipline_id.to_string()),
             &config_tables.disciplinetable,
             &config_tables.item_table,
-            &services.character_element_compatibility_service,
+            &services.character_element_facade,
             &services.title_service,
             &mut player_data,
             services.config.max_learned_disciplines,
@@ -1953,8 +1953,8 @@ fn queue_debug_title_response(
 mod tests {
     use super::*;
 
+    use crate::business::character_element::CharacterElementFacade;
     use crate::core::character_discipline::DisciplineService;
-    use crate::core::character_element::CharacterElementService;
     use crate::core::character_push::CharacterPushService;
     use crate::core::character_title::TitleService;
     use crate::core::character_title_unlock::TitleUnlockService;
@@ -2036,10 +2036,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let character_element_service = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+        let character_element_facade =
+            CharacterElementFacade::new(Arc::new(character_element_service.clone()));
         let title_unlock_service = TitleUnlockService::new_for_test(
             TitleService::new_in_memory(title_table),
             discipline_service,
-            CharacterElementService::new_in_memory(),
+            character_element_facade,
+            character_element_service,
             tables.titletable.clone(),
         );
 

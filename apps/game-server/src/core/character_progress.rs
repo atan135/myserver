@@ -2,12 +2,13 @@
 
 use serde_json::Value;
 
+use crate::business::character_element::{
+    ApplyCharacterElementChange, CharacterElementChangeFailure, CharacterElementDelta,
+    CharacterElementFacade, CharacterElementSnapshot, CharacterElementsChanged, ElementDelta,
+    GetCharacterElements, TrustedCharacterElementChangeContext,
+};
 use crate::core::character_discipline::{
     CharacterDiscipline, DisciplineError, DisciplineOperationContext, DisciplineService,
-};
-use crate::core::character_element::{
-    CharacterElementChange, CharacterElementChangeSource, CharacterElementError, ElementDeltas,
-    ElementValues,
 };
 use crate::core::character_title::{
     CharacterTitle, GrantTitleRequest, GrantTitleStatus, TitleError, TitleOperationContext,
@@ -66,8 +67,9 @@ pub struct CharacterProgressRewardOutcome {
     pub reward_type: String,
     pub reward_id: String,
     pub status: String,
-    pub element_before: Option<crate::core::character_element::CharacterElements>,
-    pub element_after: Option<crate::core::character_element::CharacterElements>,
+    pub element_before: Option<CharacterElementSnapshot>,
+    pub element_after: Option<CharacterElementSnapshot>,
+    pub element_changed: Option<CharacterElementsChanged>,
     pub title: Option<CharacterTitle>,
     pub discipline: Option<CharacterDiscipline>,
     pub eligibility: Option<String>,
@@ -83,7 +85,7 @@ pub enum CharacterProgressError {
     UnsupportedCondition { condition_type: String },
     UnsupportedReward { reward_type: String },
     LimitedTitleRequiresExpiry { title_id: String },
-    CharacterElement(CharacterElementError),
+    CharacterElement(CharacterElementChangeFailure),
     Discipline(DisciplineError),
     Title(TitleError),
 }
@@ -136,7 +138,9 @@ impl std::fmt::Display for CharacterProgressError {
                     "limited title reward {title_id} requires explicit expires_at"
                 )
             }
-            Self::CharacterElement(error) => write!(formatter, "character element error: {error}"),
+            Self::CharacterElement(error) => {
+                write!(formatter, "character element error: {}", error.error_code())
+            }
             Self::Discipline(error) => write!(formatter, "discipline error: {error}"),
             Self::Title(error) => write!(formatter, "title error: {error}"),
         }
@@ -147,22 +151,56 @@ impl std::error::Error for CharacterProgressError {}
 
 #[derive(Clone)]
 pub struct CharacterProgressService {
-    character_element_service: crate::core::character_element::CharacterElementService,
+    character_element_facade: CharacterElementFacade,
     discipline_service: DisciplineService,
     title_service: TitleService,
+    #[cfg(test)]
+    character_element_service:
+        crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
 }
 
 impl CharacterProgressService {
     pub fn new(
-        character_element_service: crate::core::character_element::CharacterElementService,
+        character_element_facade: CharacterElementFacade,
         discipline_service: DisciplineService,
         title_service: TitleService,
     ) -> Self {
         Self {
-            character_element_service,
+            character_element_facade,
             discipline_service,
             title_service,
+            #[cfg(test)]
+            character_element_service: Default::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        character_element_facade: CharacterElementFacade,
+        character_element_service:
+            crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository,
+        discipline_service: DisciplineService,
+        title_service: TitleService,
+    ) -> Self {
+        let mut service = Self::new(character_element_facade, discipline_service, title_service);
+        service.character_element_service = character_element_service;
+        service
+    }
+
+    #[cfg(test)]
+    async fn set_character_elements_for_test(
+        &self,
+        elements: crate::business::character_element::CharacterElements,
+    ) {
+        self.character_element_service.set_elements(elements).await;
+    }
+
+    #[cfg(test)]
+    async fn character_element_change_logs_for_test(
+        &self,
+    ) -> Vec<crate::adapters::persistence::character_element_repository::MemoryCharacterElementLog>
+    {
+        self.character_element_service.applied_change_logs().await
     }
 
     pub async fn apply_for_identity(
@@ -278,30 +316,30 @@ impl CharacterProgressService {
                 ProgressReward::Affinity(delta) => {
                     let before = projected_elements.as_ref().ok_or(
                         CharacterProgressError::CharacterElement(
-                            CharacterElementError::CharacterNotFound,
+                            CharacterElementChangeFailure::CharacterNotFound,
                         ),
                     )?;
                     projected_elements = Some(
-                        before
-                            .apply_change(CharacterElementChange::new(
-                                *delta,
-                                ElementDeltas::zero(),
-                            ))
+                        self.character_element_facade
+                            .preview_character_element_change(
+                                before,
+                                CharacterElementDelta::new(*delta, ElementDelta::zero()),
+                            )
                             .map_err(CharacterProgressError::CharacterElement)?,
                     );
                 }
                 ProgressReward::Mastery(delta) => {
                     let before = projected_elements.as_ref().ok_or(
                         CharacterProgressError::CharacterElement(
-                            CharacterElementError::CharacterNotFound,
+                            CharacterElementChangeFailure::CharacterNotFound,
                         ),
                     )?;
                     projected_elements = Some(
-                        before
-                            .apply_change(CharacterElementChange::new(
-                                ElementDeltas::zero(),
-                                *delta,
-                            ))
+                        self.character_element_facade
+                            .preview_character_element_change(
+                                before,
+                                CharacterElementDelta::new(ElementDelta::zero(), *delta),
+                            )
                             .map_err(CharacterProgressError::CharacterElement)?,
                     );
                 }
@@ -371,21 +409,21 @@ impl CharacterProgressService {
             ProgressReward::Affinity(delta) => {
                 let reason = format!("character progress {progress_id} affinity reward");
                 let applied = self
-                    .character_element_service
-                    .apply_change(
-                        &identity.character_id,
-                        CharacterElementChange::new(*delta, ElementDeltas::zero()),
-                        element_source(identity, source_type, source_id),
-                        Some(reason.as_str()),
-                    )
+                    .character_element_facade
+                    .apply_character_element_change(ApplyCharacterElementChange::new(
+                        identity.character_id.clone(),
+                        CharacterElementDelta::new(*delta, ElementDelta::zero()),
+                        element_context(identity, source_type, source_id, reason)?,
+                    ))
                     .await
                     .map_err(CharacterProgressError::CharacterElement)?;
                 Ok(CharacterProgressRewardOutcome {
                     reward_type: "affinity".to_string(),
                     reward_id: "element_affinity".to_string(),
                     status: "applied".to_string(),
-                    element_before: Some(applied.before),
-                    element_after: Some(applied.after),
+                    element_before: Some(applied.before().clone()),
+                    element_after: Some(applied.after().clone()),
+                    element_changed: Some(applied.committed_event().clone()),
                     title: None,
                     discipline: None,
                     eligibility: None,
@@ -394,21 +432,21 @@ impl CharacterProgressService {
             ProgressReward::Mastery(delta) => {
                 let reason = format!("character progress {progress_id} mastery reward");
                 let applied = self
-                    .character_element_service
-                    .apply_change(
-                        &identity.character_id,
-                        CharacterElementChange::new(ElementDeltas::zero(), *delta),
-                        element_source(identity, source_type, source_id),
-                        Some(reason.as_str()),
-                    )
+                    .character_element_facade
+                    .apply_character_element_change(ApplyCharacterElementChange::new(
+                        identity.character_id.clone(),
+                        CharacterElementDelta::new(ElementDelta::zero(), *delta),
+                        element_context(identity, source_type, source_id, reason)?,
+                    ))
                     .await
                     .map_err(CharacterProgressError::CharacterElement)?;
                 Ok(CharacterProgressRewardOutcome {
                     reward_type: "mastery".to_string(),
                     reward_id: "element_mastery".to_string(),
                     status: "applied".to_string(),
-                    element_before: Some(applied.before),
-                    element_after: Some(applied.after),
+                    element_before: Some(applied.before().clone()),
+                    element_after: Some(applied.after().clone()),
+                    element_changed: Some(applied.committed_event().clone()),
                     title: None,
                     discipline: None,
                     eligibility: None,
@@ -435,6 +473,7 @@ impl CharacterProgressService {
                     status: "applied".to_string(),
                     element_before: None,
                     element_after: None,
+                    element_changed: None,
                     title: None,
                     discipline: Some(result.discipline),
                     eligibility: None,
@@ -476,6 +515,7 @@ impl CharacterProgressService {
                     status: status.to_string(),
                     element_before: None,
                     element_after: None,
+                    element_changed: None,
                     title: Some(grant.title),
                     discipline: None,
                     eligibility: None,
@@ -492,6 +532,7 @@ impl CharacterProgressService {
                     status: "granted".to_string(),
                     element_before: None,
                     element_after: None,
+                    element_changed: None,
                     title: None,
                     discipline: None,
                     eligibility: Some(discipline_id.clone()),
@@ -514,7 +555,7 @@ impl CharacterProgressService {
 
 struct ProgressSnapshot {
     disciplines: Option<Vec<CharacterDiscipline>>,
-    elements: Option<crate::core::character_element::CharacterElements>,
+    elements: Option<CharacterElementSnapshot>,
     titles: Option<Vec<CharacterTitle>>,
     item_growth: Option<Vec<ItemGrowthSnapshot>>,
 }
@@ -549,10 +590,14 @@ impl ProgressSnapshot {
         {
             Some(
                 service
-                    .character_element_service
-                    .get_elements_for_identity(identity)
+                    .character_element_facade
+                    .get_character_elements(GetCharacterElements::new(
+                        identity.character_id.clone(),
+                    ))
                     .await
-                    .map_err(CharacterProgressError::CharacterElement)?,
+                    .map_err(CharacterProgressError::CharacterElement)?
+                    .elements()
+                    .clone(),
             )
         } else {
             None
@@ -685,8 +730,8 @@ impl ProgressCondition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProgressReward {
-    Affinity(ElementDeltas),
-    Mastery(ElementDeltas),
+    Affinity(ElementDelta),
+    Mastery(ElementDelta),
     DisciplinePoints {
         discipline_id: String,
         points: i64,
@@ -728,12 +773,15 @@ impl ElementKind {
         }
     }
 
-    fn value_from_elements(self, values: ElementValues) -> i32 {
+    fn value_from_elements(
+        self,
+        values: crate::business::character_element::ElementSnapshot,
+    ) -> i32 {
         match self {
-            Self::Earth => values.earth,
-            Self::Fire => values.fire,
-            Self::Water => values.water,
-            Self::Wind => values.wind,
+            Self::Earth => values.earth(),
+            Self::Fire => values.fire(),
+            Self::Water => values.water(),
+            Self::Wind => values.wind(),
         }
     }
 
@@ -923,7 +971,7 @@ fn evaluate_condition(
             let matched = snapshot
                 .elements
                 .as_ref()
-                .map(|elements| element.value_from_elements(elements.affinity) >= *min)
+                .map(|elements| element.value_from_elements(elements.affinity()) >= *min)
                 .unwrap_or(false);
             condition_result(matched, "affinity")
         }
@@ -931,7 +979,7 @@ fn evaluate_condition(
             let matched = snapshot
                 .elements
                 .as_ref()
-                .map(|elements| element.value_from_elements(elements.mastery) >= *min)
+                .map(|elements| element.value_from_elements(elements.mastery()) >= *min)
                 .unwrap_or(false);
             condition_result(matched, "mastery")
         }
@@ -1118,8 +1166,8 @@ fn string_field_preserve(value: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn delta_from_value(value: &Value) -> ElementDeltas {
-    ElementDeltas::new(
+fn delta_from_value(value: &Value) -> ElementDelta {
+    ElementDelta::new(
         number_field(value, &["earth"]).unwrap_or_default(),
         number_field(value, &["fire"]).unwrap_or_default(),
         number_field(value, &["water"]).unwrap_or_default(),
@@ -1143,14 +1191,22 @@ fn discipline_tier_satisfies(current: &str, required: &str) -> bool {
     }
 }
 
-fn element_source(
+fn element_context(
     identity: &AuthenticatedSessionIdentity,
     source_type: &str,
     source_id: &str,
-) -> CharacterElementChangeSource {
-    CharacterElementChangeSource::new(source_type.to_string())
-        .with_source_id(source_id.to_string())
-        .with_operator("player", identity.account_player_id.clone())
+    reason: String,
+) -> Result<TrustedCharacterElementChangeContext, CharacterProgressError> {
+    TrustedCharacterElementChangeContext::try_new(
+        source_type,
+        Some(source_id.to_string()),
+        Some("player".to_string()),
+        Some(identity.account_player_id.clone()),
+        Some(reason),
+    )
+    .map_err(|_| {
+        CharacterProgressError::CharacterElement(CharacterElementChangeFailure::RepositoryFailure)
+    })
 }
 
 fn discipline_context(
@@ -1192,10 +1248,10 @@ fn now_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::character_discipline::{DisciplineService, DisciplineUpsert};
-    use crate::core::character_element::{
-        CharacterElementService, CharacterElements, ElementValues,
+    use crate::business::character_element::{
+        CharacterElementFacade, CharacterElements, ElementValues,
     };
+    use crate::core::character_discipline::{DisciplineService, DisciplineUpsert};
     use crate::core::character_title::{GrantTitleRequest, TitleService};
     use crate::core::inventory::Item;
     use crate::csv_code::characterprogresstable::{
@@ -1290,8 +1346,12 @@ mod tests {
     }
 
     async fn service_fixture() -> CharacterProgressService {
-        CharacterProgressService::new(
-            CharacterElementService::new_in_memory(),
+        let character_element_service = crate::adapters::persistence::character_element_repository::InMemoryCharacterElementRepository::default();
+        let character_element_facade =
+            CharacterElementFacade::new(Arc::new(character_element_service.clone()));
+        CharacterProgressService::new_for_test(
+            character_element_facade,
+            character_element_service,
             DisciplineService::new_in_memory(),
             TitleService::new_in_memory(title_table()),
         )

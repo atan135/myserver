@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 
-use crate::core::character_element::{CharacterElements, ElementValues};
+use crate::business::character_element::{CharacterElements, ElementValues};
 use crate::gameconfig::ConfigTables;
 
 use super::condition::{
@@ -923,8 +923,8 @@ fn to_camel_case(value: &str) -> String {
 mod tests {
     use std::path::Path;
 
+    use crate::business::character_element::{CharacterElements, ElementValues};
     use crate::core::character_discipline::CharacterDiscipline;
-    use crate::core::character_element::{CharacterElements, ElementValues};
     use crate::core::character_title::CharacterTitle;
     use crate::core::inventory::PlayerData;
     use crate::core::inventory::item::{Item, ItemElementValues};

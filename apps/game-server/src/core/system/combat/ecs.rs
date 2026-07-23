@@ -1969,7 +1969,7 @@ impl RoomCombatEcs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::character_element::{CharacterElements, ElementValues};
+    use crate::business::character_element::{CharacterElementSnapshot, ElementSnapshot};
     use crate::core::character_element_effective::{
         EffectiveElementsRequest, ElementModifier, calculate_effective_elements,
     };
@@ -2105,11 +2105,11 @@ mod tests {
 
     #[test]
     fn player_blueprint_reads_effective_elements_for_level_free_combat_stats() {
-        let base = CharacterElements {
-            character_id: "player-a".to_string(),
-            affinity: ElementValues::new(2500, 2500, 2500, 2500),
-            mastery: ElementValues::new(0, 0, 0, 0),
-        };
+        let base = CharacterElementSnapshot::new(
+            "player-a",
+            ElementSnapshot::new(2500, 2500, 2500, 2500),
+            ElementSnapshot::new(0, 0, 0, 0),
+        );
         let effective = calculate_effective_elements(
             EffectiveElementsRequest::new(base)
                 .with_equipped_item_elements(crate::core::inventory::item::ItemElementValues::new(
@@ -2137,16 +2137,16 @@ mod tests {
     fn effective_elements_stats_feed_damage_formula_and_defense_reduction() {
         let catalog = BuiltinCombatCatalog::default();
         let mut ecs = RoomCombatEcs::new();
-        let attacker_elements = CharacterElements {
-            character_id: "attacker".to_string(),
-            affinity: ElementValues::new(2500, 3000, 2500, 2500),
-            mastery: ElementValues::new(0, 250, 0, 0),
-        };
-        let defender_elements = CharacterElements {
-            character_id: "defender".to_string(),
-            affinity: ElementValues::new(3000, 2500, 2700, 2500),
-            mastery: ElementValues::new(250, 0, 100, 0),
-        };
+        let attacker_elements = CharacterElementSnapshot::new(
+            "attacker",
+            ElementSnapshot::new(2500, 3000, 2500, 2500),
+            ElementSnapshot::new(0, 250, 0, 0),
+        );
+        let defender_elements = CharacterElementSnapshot::new(
+            "defender",
+            ElementSnapshot::new(3000, 2500, 2700, 2500),
+            ElementSnapshot::new(250, 0, 100, 0),
+        );
         let attacker_effective =
             calculate_effective_elements(EffectiveElementsRequest::new(attacker_elements));
         let defender_effective =

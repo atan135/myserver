@@ -518,11 +518,11 @@ pub async fn run(
     let title_unlock_service = TitleUnlockService::new(
         title_service.clone(),
         discipline_service.clone(),
-        character_element_service.clone(),
+        character_element_facade.clone(),
         title_unlock_config_tables,
     );
     let character_progress_service = CharacterProgressService::new(
-        character_element_service.clone(),
+        character_element_facade.clone(),
         discipline_service.clone(),
         title_service.clone(),
     );

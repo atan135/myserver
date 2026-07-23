@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use crate::business::character_element::{CharacterElements, ElementValues};
 use crate::core::character_discipline::CharacterDiscipline;
-use crate::core::character_element::{CharacterElements, ElementValues};
 use crate::core::character_title::CharacterTitle;
 use crate::core::inventory::item::ItemElementValues;
 use crate::core::inventory::player_data::PlayerData;
@@ -697,8 +697,8 @@ fn invalid_config(message: impl Into<String>) -> SceneConditionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::business::character_element::ElementValues;
     use crate::core::character_discipline::CharacterDiscipline;
-    use crate::core::character_element::ElementValues;
     use crate::core::inventory::item::Item;
 
     fn state() -> SceneCharacterState {

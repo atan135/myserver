@@ -5,7 +5,6 @@ use crate::core::character_progress::{
 };
 use crate::core::character_push::CharacterPushSource;
 use crate::core::context::{ConnectionContext, ServiceContext};
-use crate::core::service::character_element_service::queue_character_element_push;
 use crate::core::service::character_title_service::{to_discipline_summary, to_title_summary};
 use crate::pb::{
     ApplyCharacterProgressReq, ApplyCharacterProgressRes, CharacterProgressRewardSummary,
@@ -141,19 +140,12 @@ async fn queue_progress_pushes(
     for reward in &outcome.rewards {
         match reward.reward_type.as_str() {
             "affinity" | "mastery" => {
-                if let (Some(before), Some(after)) = (
-                    reward.element_before.as_ref(),
-                    reward.element_after.as_ref(),
-                ) {
-                    queue_character_element_push(
+                if let Some(changed) = reward.element_changed.as_ref() {
+                    crate::gameservice::character_element::queue_character_element_push(
                         services,
                         connection,
                         identity,
-                        &crate::core::character_element::CharacterElementApplyResult {
-                            character_id: identity.character_id.clone(),
-                            before: before.clone(),
-                            after: after.clone(),
-                        },
+                        changed,
                         CharacterPushSource::new(
                             outcome.source_type.as_str(),
                             outcome.source_id.as_str(),

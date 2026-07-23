@@ -2106,14 +2106,14 @@ mod tests {
         );
         let character_progress_service =
             crate::core::character_progress::CharacterProgressService::new(
-                character_element_service.clone(),
+                character_element_facade.clone(),
                 discipline_service.clone(),
                 title_service.clone(),
             );
         let title_unlock_service = crate::core::character_title_unlock::TitleUnlockService::new(
             title_service.clone(),
             discipline_service.clone(),
-            character_element_service.clone(),
+            character_element_facade.clone(),
             title_unlock_config_tables,
         );
         let character_push_service = crate::core::character_push::CharacterPushService::new();
