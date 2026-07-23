@@ -2,31 +2,29 @@
 
 ## 状态
 
-本档案在迁移阶段 1 建立，用于冻结现有行为和目标边界。本文中“目标”描述后续阶段将落地的公开契约；除非明确标记为“当前”，不得将目标设计视为已实现能力。
+本模块已完成从旧 `core` 入口的迁移，是 `game-server` 当前业务模块分层的首个样板。本文只描述已落地代码；与真实服务联调、持久离线 push 补偿和跨进程事件发布有关的事项在“非目标与后续项”中单独标记。
 
 ## 职责
 
 模块唯一拥有角色永久四属性：
 
-- `affinity`：地、火、水、风四项倾向比例；
+- `affinity`：地、火、水、风四项长期倾向比例；
 - `mastery`：地、火、水、风四项长期掌握值；
-- 永久四属性的读取、合法变更、变更来源、操作者、原因、提交前后快照和审计日志语义。
+- 永久四属性的读取、合法变更、可信来源/操作者/原因、提交前后快照和审计日志语义。
 
-模块以 `character_id` 为状态主体。当前实现位于 `core::character_element`，后续迁入本模块后，永久四属性只能由本模块的公开变更能力写入。
+状态主体是服务端确认的 `character_id`。其他模块通过模块根导出的 Query、Command 和 `CharacterElementFacade` 读取或请求变更，不能直接更新 `characters` 的八个四属性字段。
 
 ## 明确不负责
 
 本模块不拥有、计算或写入以下状态和规则：
 
-- `character_element_effective.rs` 的有效属性聚合及由其派生的战斗属性；
-- 职业/流派状态、职业学习条件和职业修正；
-- 称号状态、称号解锁策略和称号效果；
-- 背包、仓库、装备、道具实例、Buff、场景上下文和系统临时修正；
-- 任务、成就、活动、排行、世界事件等产生四属性变更的业务决策；
-- 玩家协议、Protobuf 映射、连接响应、角色 push 传输和 revision 记录；
-- PostgreSQL、SQLx、连接池、配置运行时与服务装配。
+- `core/character_element_effective.rs` 的有效属性聚合及其派生战斗属性；
+- 职业/流派、称号、背包、仓库、装备、道具实例、Buff、场景上下文和系统临时修正；
+- 任务、成就、活动、排行、世界事件为何产生四属性变更的业务决策；
+- Protobuf、消息号、会话鉴权、连接响应和角色 push 的传输细节；
+- SQLx、`PgPool`、PostgreSQL 连接池、运行时配置和服务装配。
 
-其中职业条件、称号解锁、物品使用和有效属性计算是读取方或命令发起方；角色 push 是已经提交结果的协议适配，不是本模块的状态所有者。
+职业条件、称号解锁、道具使用和有效属性计算是读取方或命令发起方；它们不得成为第二个永久四属性状态所有者。角色 push 只消费已提交的业务事实，不拥有状态。
 
 ## 核心状态与所有者
 
@@ -34,99 +32,86 @@
 | --- | --- | --- |
 | `characters.affinity_{earth,fire,water,wind}` | 角色永久四属性模块 | 固定总和的角色长期倾向。 |
 | `characters.mastery_{earth,fire,water,wind}` | 角色永久四属性模块 | 非负的角色长期掌握值。 |
-| `character_element_logs` 中的变更审计记录 | 角色永久四属性模块 | 与对应永久状态变更在同一事务提交。 |
-| 有效属性、装备/职业/Buff/场景修正 | 非本模块 | 只可把永久四属性快照作为输入，不得写回上述八个字段。 |
+| `character_element_logs` 中的变更审计记录 | 角色永久四属性模块 | 与对应永久状态写入在同一 PostgreSQL 事务提交。 |
+| 有效属性、装备/职业/Buff/场景修正 | 非本模块 | 只能把永久快照作为输入，不得写回八个永久字段。 |
 
 ## 业务不变量
 
 - `affinity` 四项之和始终为 `10000`。
-- 每一项 `affinity` 均不得为负。
-- 每一项 `mastery` 均不得为负。
-- 变更计算必须在写入前检查 `i32` 溢出；不得依赖数据库截断或溢出行为。
-- 成功结果中的 `before` 和 `after` 必须是同一次已提交事务的快照。
-- 每次成功永久变更都必须记录 delta、来源、操作者、原因和前后快照；拒绝的变更不得留下成功日志或成功事件。
+- 每一项 `affinity` 与 `mastery` 均不得为负。
+- 变更计算在写入前检查 `i32` 溢出；不得依赖数据库截断或溢出行为。
+- 成功结果中的 `before` 和 `after` 来自同一次已提交事务。
+- 每次成功永久变更记录 delta、来源、操作者、原因和前后快照；拒绝的变更不留下成功日志、成功结果或成功事件。
 
-## 目标公开 API
+## 公开 API
 
-以下是迁移完成后的目标公开能力，名称可以随 Rust 代码规范调整，但语义不得扩大或缩小：
+模块根 `business::character_element` 是唯一的外部 Rust 入口，当前导出：
 
-| 类型 | 目标能力 | 语义 |
+| 类型 | 已落地能力 | 语义 |
 | --- | --- | --- |
-| Query | `GetCharacterElements` | 按服务端已确认的 `character_id` 查询永久四属性快照，不产生副作用。 |
-| Command | `ApplyCharacterElementChange` | 提交永久四属性 delta、可信来源/操作者上下文和可选原因；返回已经提交的 `before`、`after` 与 `character_id`。 |
-| Event | `CharacterElementsChanged` | 过去式业务事实，仅在上述变更事务提交成功后表达；携带不可变的提交前后快照和变更上下文。 |
+| Query | `GetCharacterElements` + `CharacterElementFacade::get_character_elements` | 读取服务端已确认角色的永久四属性快照，不产生副作用。 |
+| Command | `ApplyCharacterElementChange` + `CharacterElementFacade::apply_character_element_change` | 使用可信上下文提交 delta，返回已提交的 `before`、`after` 与 `character_id`。 |
+| Event | `CharacterElementsChanged` | 过去式的已提交业务事实，位于成功 Command 结果中，带不可变的前后快照和变更上下文。 |
+| Preview | `CharacterElementFacade::preview_character_element_change` | 仅校验并投影变更，不写入状态、不创建成功事件。 |
 
-`CharacterElementsChanged` 不是同步写入请求，也不等同于玩家 push。阶段 1 尚未实现事件发布器；后续 application 只能在 repository 明确报告提交成功后构造该事实。事务失败、提交结果未知或查询失败时，均不得产生该事件或成功 push。
+`TrustedCharacterElementChangeContext` 由服务端调用方构造：它要求非空 `source_type`、配对的操作者类型/ID，并在进入 repository 前校验审计字段长度、规范化原因。API 不接收 `AuthenticatedSessionIdentity`、Protobuf、连接对象、SQLx row/transaction 或可变 `PlayerData`。
 
-### 公开 API 输入边界
-
-公开 API 只接收业务值：服务端确定的 `character_id`、不可变四属性值/变更、可信变更上下文和可选原因。它不得接收或暴露：
-
-- `AuthenticatedSessionIdentity`；
-- Protobuf 请求/响应或消息号；
-- SQLx row、`PgPool`、连接/事务或数据库错误对象；
-- 可变 `PlayerData`、背包集合或其他模块的内部领域对象；
-- 网络连接、`ConnectionContext` 或角色 push 记录。
-
-`gameservice` 等接入层从可信会话提取 `character_id` 和操作者上下文，负责协议映射、鉴权和 push 适配。客户端提交的角色标识不得覆盖接入层确定的目标角色。
-
-## 目标目录与允许依赖
-
-目标结构遵循《游戏业务模块开发规范》：
+## 目录、可见性与依赖
 
 ```text
 business/character_element/
   MODULE.md
-  api/             # 对外 Command、Query、Event、Facade
-  application/     # 用例和 repository port
-  domain/          # 永久状态、转换和不变量
+  api/{contracts.rs, facade.rs}
+  application/{mod.rs, ports.rs}
+  domain/mod.rs
+adapters/persistence/character_element_repository.rs
+gameservice/character_element/mod.rs
 ```
 
-- `api` 依赖本模块 `application` 的受控入口，不执行领域计算或存储操作。
-- `application` 依赖本模块 `domain` 与自身 `ports`；负责用例、提交顺序和失败语义。
-- `domain` 不依赖 SQLx、Tokio、Protobuf、会话、配置运行时、网络或其他业务模块；后续若需要共享标识，只依赖稳定的 `business::shared` 值对象。
-- PostgreSQL repository 实现在模块外的 adapter，通过 application port 接入；`server.rs` 和 `internal_server.rs` 负责装配。
-- 外部业务模块、协议层和运行时只能使用从 `business::character_element` 模块根导出的 API，不得导入 `domain`、`application` 或 adapter 内部类型。
+- `api` 和 `domain` 是模块私有目录；模块根再导出外部需要的契约和值类型。
+- `application` 使用 `pub(super)`，只向模块根开放；它组织 Query/Command 和 repository 失败语义。
+- repository port 由模块根以 `pub(crate)` 重新导出，只允许 crate 内的 persistence adapter 装配；业务调用方不得导入 port、`application`、`domain` 或 adapter 内部路径。
+- `domain` 不依赖 SQLx、Tokio、Protobuf、会话、配置运行时、网络或其他业务模块。
+- `adapters/persistence/character_element_repository.rs` 是唯一的 PostgreSQL/SQLx 实现；`server.rs` 创建 `PgCharacterElementStore`，注入 facade，并在关闭时释放它。
+- `gameservice/character_element` 从已鉴权会话提取角色与操作者，完成协议映射和已提交事实的 push 适配。
 
-## 当前核心文件与调用方
+`game-server` 是二进制 crate，因此此处 `pub(crate)` 是当前跨模块可见边界，不表示外部 Rust crate 可直接调用的 SDK。
 
-| 路径 | 当前角色 | 迁移中的定位 |
-| --- | --- | --- |
-| `apps/game-server/src/core/character_element.rs` | 同时包含四属性领域模型、`CharacterElementService`、`PgCharacterElementStore`、SQL 和测试替身。 | 分离为 domain、application/port 和外部 PostgreSQL adapter 的主要来源。 |
-| `apps/game-server/src/core/service/character_element_service.rs` | 四属性查询与 debug 变更协议处理、可信会话读取、Protobuf 映射及成功后 push。 | 迁为 `gameservice` 协议适配；不进入 domain。 |
-| `apps/game-server/src/core/character_progress.rs` | 进度条件读取永久四属性，并将进度奖励变更委托给当前服务。 | 迁后作为公开 Query/Command 调用方。 |
-| `apps/game-server/src/core/character_discipline.rs` | 职业学习/条件逻辑读取永久四属性。 | 迁后作为公开 Query 调用方；职业规则不迁入。 |
-| `apps/game-server/src/core/character_title_unlock.rs` | 称号解锁规则按需读取永久四属性。 | 迁后作为公开 Query 调用方；解锁策略不迁入。 |
-| `apps/game-server/src/core/inventory/player_data.rs` | 解析道具 `CharacterElementChange` 使用效果，并拥有装备相关状态。 | 保留为物品流程输入；不得把可变 `PlayerData` 传入模块 API。 |
-| `apps/game-server/src/core/character_element_effective.rs` | 组合永久快照、职业、装备、Buff、场景和系统修正，生成临时有效属性。 | 不迁移；后续按跨模块只读投影单独评估。 |
-| `apps/game-server/src/core/context.rs` | `ServiceContext` 持有并向调用方提供当前四属性服务。 | 后续改为持有 facade，不暴露具体 store。 |
-| `apps/game-server/src/server.rs` | 生产 PostgreSQL store 和服务装配、协议分发、关闭资源。 | 保留为运行时装配和协议分发位置。 |
-| `apps/game-server/src/internal_server.rs` | 内部服务/测试场景使用 disabled PostgreSQL store 装配上下文。 | 保留为测试装配位置；后续通过 facade 与可替换 port 装配。 |
+## 当前调用方
 
-## 当前事务、提交与审计语义
+- `gameservice/character_element` 提供 `GetCharacterElementsReq/Res(1413/1414)` 和受控 debug 变更 `1415/1416` 的协议适配。
+- `core/character_progress`、`core/character_discipline` 和 `core/character_title_unlock` 使用 facade 读取或请求永久变更。
+- 背包道具流程构造四属性 delta；它不持有永久状态。
+- `core/character_element_effective`、场景和战斗仅消费永久快照，计算临时有效属性。
+- `server.rs` 进行 PostgreSQL adapter、facade 和 `ServiceContext` 的运行时装配；它不包含四属性领域规则。
 
-当前 `PgCharacterElementStore::apply_change` 的原子写入顺序是：
+## 事务、事件与失败语义
 
-1. 开启 PostgreSQL 事务；
-2. 对未软删除角色执行 `SELECT ... FOR UPDATE`，锁定角色行；
-3. 将行映射为永久状态并执行领域变更与不变量校验；
-4. 在同一事务更新 `characters` 的八个 `affinity_*`/`mastery_*` 字段；
-5. 在同一事务插入 `character_element_logs`，记录来源、操作者、八项 delta、`before_json`、`after_json` 和原因；
-6. 提交事务后返回 `CharacterElementApplyResult` 的 `before`/`after` 快照。
+生产 PostgreSQL adapter 的 `apply_change` 在一个事务内执行：
 
-角色不存在或领域校验失败时，当前实现回滚事务并返回稳定业务错误。任何失败路径均不应被下游解释为已提交。后续 adapter 必须保持该锁、校验、八字段更新、日志插入和提交的单一原子边界，不修改现有 schema 或日志字段。
+1. 开启 PostgreSQL 事务并以 `SELECT ... FOR UPDATE` 锁定未软删除角色行；
+2. 映射永久状态，执行领域变更和不变量校验；
+3. 更新八个 `affinity_*` / `mastery_*` 字段；
+4. 插入包含来源、操作者、delta、`before_json`、`after_json` 与原因的 `character_element_logs`；
+5. 明确提交成功后返回 `before`/`after`，facade 才构造 `CharacterElementsChanged`。
 
-## 失败与回滚策略
+`CharacterElementsChanged` 不是写入请求、不是 NATS 消息，也不等同于已经送达的玩家 push。`gameservice` 只在收到这个已提交事实后记录并发送 `CharacterElementsChangePush(1505)`。角色不存在、领域校验失败、repository 不可用、repository 失败或 `OutcomeUnknown` 都不能返回成功事件或发送成功 push。提交后的 push 失败不回滚数据库；重试/补偿属于传输层后续职责。
 
-- 每个切换阶段只保留一个实际写入口：要么旧 facade，要么新 facade；禁止为“回滚”同时调用两套写入路径或双写数据库和日志。
-- 阶段切换失败时，恢复上一版本或让兼容 facade 委托回旧实现；恢复后重新验证请求仍只经过一个写入口。
-- 没有明确提交成功的结果不得触发 `CharacterElementsChanged`、成功响应或成功 push。
-- 已经提交的数据库变更不因后续 push 失败而回滚；push 的重试/补偿属于协议或传输层后续职责。
-- 删除旧路径前必须完成调用方切换和回归验证；兼容导出仅可转发，不能复制规则或建立第二个状态所有者。
+## 非目标与后续项
+
+以下不是当前已落地能力：
+
+- durable outbox、NATS 发布器或跨进程四属性事件订阅；当前 `CharacterElementsChanged` 只是成功结果中的进程内业务事实。
+- 跨实例持久离线 push 补偿、push 重试和送达确认。
+- 对 PostgreSQL、Redis、Core NATS、`auth-http`、`game-proxy`、`game-server` 的本次真实联调；启动依赖或执行联调必须先获得用户确认。
+- 将有效属性计算、职业、称号、背包或奖励来源迁入本模块。
+
+后续扩展必须继续通过模块根公开 API 访问永久四属性，不得恢复旧 `core::character_element` 或 `core::service::character_element_service` 写入口，也不得建立双写兼容路径。
 
 ## 相关协议和专题文档
 
 - `docs/游戏服与接入层/游戏业务模块开发规范.md`
+- `docs/游戏服与接入层/Rust游戏服开发指南.md`
 - `docs/游戏服与接入层/角色体系与四属性设计.md`
 - `docs/游戏服与接入层/checklists/角色体系P1四属性基础_checklist.md`
 - `summary/角色永久四属性模块迁移_checklist.md`

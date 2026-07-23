@@ -67,6 +67,8 @@
 - `PlayerRegistry`
 - `ServiceContext`
 
+永久四属性在这里按“业务模块 + 外置 adapter”装配：`server.rs` 创建 `PgCharacterElementStore`，将其作为 repository 注入 `CharacterElementFacade`，再把 facade 放入 `ServiceContext`。关闭时由 `server.rs` 关闭该 PostgreSQL adapter；协议 handler 和其他业务调用方只能取得 facade，不能取得 store 或 application port。
+
 连接处理仍是典型 Tokio 模式：
 
 1. accept 到连接
@@ -91,6 +93,12 @@
 - `metrics.rs`：Core NATS metrics 上报
 - `kick_subscriber.rs`：订阅 `myserver.session.kick.*`，处理并发登录、改密等踢旧连接通知
 
+已迁移业务样板：
+
+- `business/character_element/`：角色永久 `affinity` / `mastery` 的唯一业务所有者。`api/` 定义 Command、Query、不可变快照、提交后事实和 `CharacterElementFacade`；`application/` 组织 repository port 与提交语义；`domain/` 保存四属性不变量和纯状态转换。
+- `adapters/persistence/character_element_repository.rs`：`CharacterElementRepository` 的 PostgreSQL 实现，持有 SQLx / 事务细节；它在业务模块目录外。
+- `core/character_element_effective.rs`：跨模块只读有效属性计算。它读取永久四属性快照、职业、装备、Buff、场景和系统修正，但不拥有也不写入永久四属性。
+
 服务入口：
 
 - `server.rs`：玩家 TCP / local socket 接入与消息分发
@@ -114,7 +122,7 @@
 游戏侧装配：
 
 - `gameroom/`：具体房间逻辑实现，如 `movement_demo`、`combat_demo`、`persistent_world`
-- `gameservice/`：游戏业务消息入口，例如配置查询和调试能力
+- `gameservice/`：游戏业务消息入口，例如配置查询和调试能力；`gameservice/character_element/` 负责 `1413`--`1416` 的协议映射、可信 ticket 身份提取和已提交四属性变更后的 `1505` push。
 - `gameconfig/`：具体 CSV 表注册与装配
 - `csv_code/`：由 CSV codegen 生成的表结构代码
 
@@ -201,14 +209,23 @@ PLAYER_MSG_RATE_MAX=0
 3. `apps/game-server/src/session.rs`
 4. `apps/game-server/src/ticket.rs`
 5. `apps/game-server/src/core/context.rs`
-6. `apps/game-server/src/core/runtime/room_policy.rs`
-7. `apps/game-server/src/core/room/mod.rs`
-8. `apps/game-server/src/core/runtime/room_manager.rs`
-9. `apps/game-server/src/core/service/room_service.rs`
-10. `apps/game-server/src/server.rs`
-11. `apps/game-server/src/admin_server.rs`
-12. `apps/game-server/src/internal_server.rs`
-13. `apps/game-server/src/main.rs`
+6. `apps/game-server/src/business/character_element/MODULE.md`
+7. `apps/game-server/src/business/character_element/mod.rs`
+8. `apps/game-server/src/business/character_element/api/contracts.rs` 与 `api/facade.rs`
+9. `apps/game-server/src/business/character_element/application/mod.rs`、`application/ports.rs` 与 `domain/mod.rs`
+10. `apps/game-server/src/adapters/persistence/character_element_repository.rs`
+11. `apps/game-server/src/gameservice/character_element/mod.rs`
+12. `apps/game-server/src/server.rs`（repository、facade 和 `ServiceContext` 的运行时装配）
+13. `apps/game-server/src/core/character_element_effective.rs`（跨模块只读投影）
+14. `apps/game-server/src/core/runtime/room_policy.rs`
+15. `apps/game-server/src/core/room/mod.rs`
+16. `apps/game-server/src/core/runtime/room_manager.rs`
+17. `apps/game-server/src/core/service/room_service.rs`
+18. `apps/game-server/src/admin_server.rs`
+19. `apps/game-server/src/internal_server.rs`
+20. `apps/game-server/src/main.rs`
+
+阅读永久四属性时先记住提交边界：`CharacterElementFacade` 只有在 repository 明确确认事务已提交后才返回 `CharacterElementsChanged`。`gameservice/character_element` 才把这个事实映射为响应和 `1505` push；`OutcomeUnknown` 不产生成功结果或 push。该事实目前不是 NATS 消息，也不表示网络 push 已送达。
 
 需要看协议字段时，再回到：
 
