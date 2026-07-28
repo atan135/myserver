@@ -40,10 +40,14 @@ deploy/docker/
   images.lock.json
 scripts/docker/
   build-and-push.ps1
+  build-and-push.sh
   verify-release.ps1
+  verify-release.sh
 ```
 
 `images.lock.json` 是发布交付物的一部分。它至少包含 release ID、Git commit、每个服务的 repository、tag、digest、构建时间和目标平台。服务器部署与更新都以该文件中的 digest 为准。
+
+`build-and-push.sh` 与 `verify-release.sh` 是 WSL/Linux 开发机的等价入口；它们与 PowerShell 版本必须共享同一 release manifest 格式、镜像标签规则、digest 校验和失败语义。当前两个 Shell 脚本尚未实现，不能提前假定其存在。
 
 生产镜像清单如下：
 
@@ -66,6 +70,80 @@ scripts/docker/
 4. 本机已通过受控方式登录私有镜像仓库。登录凭据只保留在 Docker credential store 或 CI secret，不写入项目 `.env`、发布清单或控制台日志。
 
 真实 Redis、PostgreSQL、NATS 或多服务联调不属于镜像构建的默认步骤。需要执行时，应先明确依赖、端口、测试数据和清理范围，再按项目协作约定取得确认。
+
+### 4.1 WSL 原生构建工作区
+
+本机 Docker 构建统一在 WSL Linux 文件系统中的 `/home/dev/src/MyServer`，即 `~/src/MyServer` 执行。不要从 `/mnt/h/project/MyServer` 运行依赖安装、Rust 编译或 Docker build；该路径是 Windows 文件系统挂载，频繁小文件访问会显著降低 Node、Cargo 与 Docker build 性能。
+
+当前已验证的 WSL 构建工具链为 Node.js 22、Rust stable、`protoc`、Docker Engine 和 Buildx。构建前检查：
+
+```bash
+cd ~/src/MyServer
+source ~/.cargo/env
+
+node --version
+npm --version
+rustc --version
+cargo --version
+protoc --version
+docker buildx version
+```
+
+根 workspace 使用锁文件安装 Node 依赖：
+
+```bash
+npm ci
+```
+
+若某个 native module 的预编译二进制下载受网络限制，可显式让它在本机编译：
+
+```bash
+npm_config_build_from_source=true npm ci
+```
+
+`node_modules/`、`apps/admin-web/dist/` 和 Cargo target 仅是本地构建产物，不得提交 Git，也不得通过复制本机目录进入 Docker build context。
+
+### 4.2 本地编译与协议准入
+
+Node workspace 构建：
+
+```bash
+npm run build --workspaces --if-present
+```
+
+其中 `admin-web` 的 Vite 产物位于 `apps/admin-web/dist/`。Vite 的 chunk-size warning 需要在前端性能优化任务中处理，但不代表构建失败。
+
+Rust 服务以锁定依赖的 release 模式逐个编译，并共享 WSL 用户缓存目录以避免重复下载和重复编译：
+
+```bash
+CARGO_HTTP_TIMEOUT=30 \
+CARGO_NET_RETRY=2 \
+CARGO_HTTP_MULTIPLEXING=false \
+cargo fetch -vv --locked --manifest-path apps/chat-server/Cargo.toml
+
+for manifest in \
+  apps/chat-server/Cargo.toml \
+  apps/game-proxy/Cargo.toml \
+  apps/game-server/Cargo.toml \
+  apps/match-service/Cargo.toml \
+  apps/myforge-agent/Cargo.toml
+do
+  cargo build --locked --release \
+    --manifest-path "$manifest" \
+    --target-dir "$HOME/.cache/myserver-target" || exit $?
+done
+```
+
+当前 WSL 在受限网络下使用用户级 `~/.cargo/config.toml` 配置 crates.io 的 approved sparse mirror。该配置属于开发机环境，不进入仓库、镜像或 release bundle。若 Rustup 工具链出现 `Missing manifest`，先在用户目录重装 stable toolchain 并验证 `rustc -vV`，不要修改任何项目 `Cargo.lock`。
+
+发布前仍必须执行：
+
+```bash
+npm run check:proto
+npm run db:deploy -- validate --environment ci
+```
+
+当前 `check:proto` 会在候选协议兼容性 baseline 过期时失败。必须先审阅真实协议差异，再按工具要求使用 `--write --reason ... --approved-by ...` 更新；不得为让构建通过而跳过或自动重写 baseline。
 
 ## 5. 镜像构建规范
 
@@ -92,7 +170,17 @@ org.opencontainers.image.source=<repository-url>
 
 ### 5.3 推荐构建入口
 
-后续实现统一提供 PowerShell 包装命令，避免手工为十个业务镜像复制 `docker buildx` 参数：
+后续实现提供 WSL/Linux Shell 入口和 PowerShell 兼容入口，避免手工为十个业务镜像复制 `docker buildx` 参数。WSL 是本机的主构建环境：
+
+```bash
+release_tag="v0.4.0-a1b2c3d"
+bash scripts/docker/build-and-push.sh \
+  --registry registry.example.com \
+  --release-tag "$release_tag" \
+  --platform linux/amd64
+```
+
+Windows 使用 PowerShell 包装入口：
 
 ```powershell
 $releaseTag = "v0.4.0-a1b2c3d"
@@ -102,7 +190,7 @@ powershell -ExecutionPolicy Bypass -File scripts/docker/build-and-push.ps1 `
   -Platform linux/amd64
 ```
 
-该脚本的职责是构建、生成 SBOM/provenance、推送、获取各镜像 digest、生成 `images.lock.json`，最后运行 `verify-release.ps1`。脚本失败时不得生成可被视为完整发布的 lock 文件。
+两个入口的职责均为构建、生成 SBOM/provenance、推送、获取各镜像 digest、生成 `images.lock.json`，最后运行对应的 `verify-release`。脚本失败时不得生成可被视为完整发布的 lock 文件。
 
 脚本未实现前，可使用 `docker buildx build --platform linux/amd64 --push` 验证单个 Dockerfile 设计，但不得以手工标签集合进入生产。
 
