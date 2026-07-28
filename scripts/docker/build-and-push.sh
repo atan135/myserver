@@ -187,6 +187,7 @@ if [ "$push" = true ]; then
     --platform linux/amd64 \
     --records "$records_file" \
     --dirty "$dirty"
+  scripts/docker/verify-release.sh "$lock_file"
   echo "Published release lock: ${lock_file}"
 else
   echo "Built local images with tag ${release_tag}. Run again with --push after docker login and a clean worktree."
