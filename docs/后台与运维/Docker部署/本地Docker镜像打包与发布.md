@@ -28,26 +28,24 @@ Docker 化实现完成后，仓库应提供以下受版本控制但不含私密�
 deploy/docker/
   Dockerfile.rust
   Dockerfile.node
-  Dockerfile.admin-web
+  Dockerfile.caddy
   compose.production.yml
   compose.production.env.example
   config/
     postgres.conf
     redis.conf
     nats.conf
-  nginx/
-    admin-web.conf
+  caddy/
+    Caddyfile
   images.lock.json
 scripts/docker/
-  build-and-push.ps1
   build-and-push.sh
-  verify-release.ps1
   verify-release.sh
 ```
 
 `images.lock.json` 是发布交付物的一部分。它至少包含 release ID、Git commit、每个服务的 repository、tag、digest、构建时间和目标平台。服务器部署与更新都以该文件中的 digest 为准。
 
-`build-and-push.sh` 与 `verify-release.sh` 是 WSL/Linux 开发机的等价入口；它们与 PowerShell 版本必须共享同一 release manifest 格式、镜像标签规则、digest 校验和失败语义。当前两个 Shell 脚本尚未实现，不能提前假定其存在。
+`build-and-push.sh` 与 `verify-release.sh` 是 WSL/Linux 开发机的发布入口。它们共享 release manifest 格式、镜像标签规则、digest 校验和失败语义；构建脚本会在 `--push` 后生成并校验 `images.lock.json`。
 
 生产镜像清单如下：
 
@@ -55,10 +53,10 @@ scripts/docker/
 |---|---|
 | Rust | `game-proxy`、`game-server`、`chat-server`、`match-service` |
 | Node.js | `auth-http`、`admin-api`、`announce-service`、`mail-service`、`metrics-collector` |
-| Web | `admin-web` 静态站点镜像 |
-| 基础设施 | 已锁定 digest 的 PostgreSQL、Redis、NATS 和反向代理镜像 |
+| Web / HTTP(S) 入口 | `caddy`，托管 `admin-web` 静态文件并反向代理 HTTP 服务 |
+| 基础设施 | 已锁定 digest 的 PostgreSQL、Redis、NATS 和 Caddy 镜像 |
 
-`admin-web` 只能构建为静态文件并由反向代理镜像提供；线上不运行 Vite 开发服务器。
+`admin-web` 只能构建为静态文件，并在 `Dockerfile.caddy` 的构建阶段复制到最终 Caddy 镜像；线上不运行 Vite 开发服务器。Caddy 是唯一发布 `80/TCP`、`443/TCP` 的 HTTP(S) 入口，负责 TLS、静态文件托管以及到 `auth-http`、`admin-api` 的反向代理；其他 HTTP 服务不发布宿主机端口。
 
 ## 4. 本地构建前置条件
 
@@ -170,29 +168,20 @@ org.opencontainers.image.source=<repository-url>
 
 ### 5.3 推荐构建入口
 
-后续实现提供 WSL/Linux Shell 入口和 PowerShell 兼容入口，避免手工为十个业务镜像复制 `docker buildx` 参数。WSL 是本机的主构建环境：
+统一使用 Bash 包装命令，避免手工为十个业务镜像复制 `docker buildx` 参数。脚本固定构建 `linux/amd64` 镜像，并默认输出 plain BuildKit 进度：
 
 ```bash
 release_tag="v0.4.0-a1b2c3d"
-bash scripts/docker/build-and-push.sh \
+./scripts/docker/build-and-push.sh \
   --registry registry.example.com \
+  --namespace myserver \
   --release-tag "$release_tag" \
-  --platform linux/amd64
+  --push
 ```
 
-Windows 使用 PowerShell 包装入口：
+该脚本的职责是构建、生成 SBOM/provenance、推送、获取各镜像 digest、生成 `images.lock.json`，最后运行 `verify-release.sh`。脚本失败时不得生成可被视为完整发布的 lock 文件。
 
-```powershell
-$releaseTag = "v0.4.0-a1b2c3d"
-powershell -ExecutionPolicy Bypass -File scripts/docker/build-and-push.ps1 `
-  -Registry registry.example.com `
-  -ReleaseTag $releaseTag `
-  -Platform linux/amd64
-```
-
-两个入口的职责均为构建、生成 SBOM/provenance、推送、获取各镜像 digest、生成 `images.lock.json`，最后运行对应的 `verify-release`。脚本失败时不得生成可被视为完整发布的 lock 文件。
-
-脚本未实现前，可使用 `docker buildx build --platform linux/amd64 --push` 验证单个 Dockerfile 设计，但不得以手工标签集合进入生产。
+仅验证本地镜像时省略 `--push`；脚本会将镜像加载到本地 Docker daemon，不生成发布 lock 文件。不得以手工标签集合进入生产。
 
 ## 6. 单机 4C8G 资源契约
 
@@ -208,7 +197,7 @@ powershell -ExecutionPolicy Bypass -File scripts/docker/build-and-push.ps1 `
 | auth-http / mail-service | 各 256 MB |
 | admin-api | 384 MB |
 | announce-service / metrics-collector | 各 128 MB |
-| admin-web 反向代理 | 64 MB |
+| Caddy（含 admin-web 静态文件） | 64 MB |
 
 容器上限合计约 5.1 GB，至少为宿主机、Docker、内核和突发保留 1.5 GB。CPU 限制需要以压测为准，首版不做 CPU pinning；`game-server`、PostgreSQL 和 Redis 的 CPU 不应被低优先级后台服务长期抢占。
 
@@ -221,8 +210,9 @@ PostgreSQL 初始建议为 `shared_buffers=512MB`、`effective_cache_size=1536MB
 ## 7. 网络、发现和 local socket
 
 - 生产 Compose 分为 internal network 与入口网络。Redis、NATS、PostgreSQL、game-server、chat-server、match-service、mail-service、announce-service 和两个 admin 端口不发布宿主机端口。
-- 玩家公网只经 HTTPS 反向代理访问 `auth-http`，并通过宿主机或四层入口访问 `game-proxy` 的 KCP/UDP 端口。TCP fallback 仅在正式客户端确实需要时开放。
+- 玩家公网只经 Caddy 的 HTTPS 入口访问 `auth-http`，并通过宿主机或四层入口访问 `game-proxy` 的 KCP/UDP 端口。TCP fallback 仅在正式客户端确实需要时开放。
 - `admin-api` 和 `admin-web` 属于运营控制面，应走 VPN、零信任入口或 IP allowlist；不与玩家入口共用无保护公网路由。
+- Caddy 自动 HTTPS 依赖业务域名解析到该服务器，且云安全组与宿主机防火墙允许 `80/TCP`、`443/TCP` 入站；其证书和 ACME 状态必须使用明确的持久化 volume，不能随容器重建丢失。需要自行管理证书时，仅挂载只读证书和私钥文件，不将其写入镜像或 Git。
 - 严格环境必须设置 `REGISTRY_ENABLED=true`、`DISCOVERY_REQUIRED=true`、`DISALLOW_LEGACY_DIRECT_CONFIG=true`。容器 bind host 与 registry advertised host 分开配置，禁止把 `127.0.0.1`、`0.0.0.0` 或本地 fallback 写入生产发现数据。
 - 当前 `game-proxy -> game-server` 使用 `game-server.proxy-local`，`match-service -> game-server` 使用 `game-server.internal`，两者都是 local socket。单机 Compose 必须为相关容器挂载同一个临时 socket volume，并使用唯一 socket 名。该 volume 不保存业务数据，也不进入备份。
 - local socket 方案不能跨主机扩容。未来多机或高可用部署前，必须先将这两条链路演进为 service registry 可发现的 internal TCP endpoint。

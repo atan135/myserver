@@ -72,9 +72,10 @@ docker info
   backups/
   logs/
   sockets/        # 临时 local socket，不备份、不跨主机复制
+  caddy/          # Caddy 证书和 ACME 状态；明确持久化，按备份策略处理
 ```
 
-PostgreSQL、Redis 和 NATS 使用明确的 bind mount 或命名 volume，不能使用匿名 volume。若选择 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
+PostgreSQL、Redis、NATS 和 Caddy 的状态数据使用明确的 bind mount 或命名 volume，不能使用匿名 volume。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若选择 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
@@ -84,7 +85,7 @@ PostgreSQL、Redis 和 NATS 使用明确的 bind mount 或命名 volume，不能
 
 服务器只接收以下内容：
 
-- 经过校验的 `compose.production.yml`、基础设施配置、反向代理配置和 `images.lock.json`。
+- 经过校验的 `compose.production.yml`、基础设施配置、`caddy/Caddyfile` 和 `images.lock.json`。
 - 与 release ID 对应的非敏感环境变量模板。
 - 在服务器本地注入的 secret，不含在 release bundle 内。
 - 变更说明、数据库迁移说明、备份证据和回滚条件。
@@ -115,8 +116,8 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 1. 拉取并以 digest 校验全部镜像；先启动 PostgreSQL、Redis、NATS，确认其容器健康、数据目录可写且不暴露公网端口。
 2. 使用独立的 migration runner 执行受支持的五库入口，而不是直接运行 SQLx：`npm run db:deploy -- preflight --environment production`，审批完成后执行 `npm run db:deploy -- apply --environment production --actor <release-operator>`。
 3. 先启动内部服务：`game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service`、`metrics-collector`。每个注册实例都必须在 Redis registry 中具备正确 endpoint 和未过期 heartbeat。
-4. 启动入口和控制面：`game-proxy`、`auth-http`、`admin-api`、`admin-web`。`game-proxy` 必须发现 `game-server.proxy-local`；`auth-http` 必须发现 `game-proxy.client`；`admin-api` 必须发现两个 admin endpoint。
-5. 运行数据库 postflight，并在已配置的 staged readiness endpoint 上显式启用 `--check-readiness --require-readiness`。随后才将反向代理和游戏入口接入外部流量。
+4. 启动入口和控制面：`game-proxy`、`auth-http`、`admin-api`、`caddy`。`caddy` 托管已构建的 `admin-web` 静态文件，并仅在上游服务与入口检查通过后接收 `80/TCP`、`443/TCP` 流量。`game-proxy` 必须发现 `game-server.proxy-local`；`auth-http` 必须发现 `game-proxy.client`；`admin-api` 必须发现两个 admin endpoint。
+5. 运行数据库 postflight，并在已配置的 staged readiness endpoint 上显式启用 `--check-readiness --require-readiness`。随后才将 Caddy 和游戏入口接入外部流量。
 
 数据库命令的真实输入、备份证据、退出码和失败恢复以[数据库部署准入说明](../../数据库/数据库部署准入说明.md)为准。不可逆 migration 必须先准备每个受影响数据库的备份 artifact ID 和 checksum；失败后不得手工修改 `_sqlx_migrations`、跳过失败库或自动回滚 schema。
 
@@ -151,7 +152,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
   -> docker compose pull
   -> 受控 migration preflight/apply
   -> 分批更新内部服务并验证 registry/readiness
-  -> 更新 game-proxy、auth-http、admin-api/admin-web
+  -> 更新 game-proxy、auth-http、admin-api/Caddy（含 admin-web 静态文件）
   -> database postflight + 端到端入口检查
   -> 恢复接新流量并持续观察
 ```
