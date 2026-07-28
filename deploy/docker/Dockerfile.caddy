@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:22-bookworm AS web-builder
+
+WORKDIR /workspace
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY tools ./tools
+
+RUN --mount=type=cache,target=/root/.npm npm ci && \
+    npm run build --workspace admin-web
+
+FROM caddy:2.10-alpine
+
+COPY deploy/docker/caddy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web-builder /workspace/apps/admin-web/dist /srv/admin-web

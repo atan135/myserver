@@ -1,0 +1,33 @@
+{
+    email {$CADDY_EMAIL}
+}
+
+{$CADDY_AUTH_HOST} {
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy auth-http:3000
+}
+
+{$CADDY_ADMIN_HOST} {
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+
+    @admin_api path /api/*
+    handle @admin_api {
+        reverse_proxy admin-api:3001
+    }
+
+    handle {
+        root * /srv/admin-web
+        try_files {path} /index.html
+        file_server
+    }
+}

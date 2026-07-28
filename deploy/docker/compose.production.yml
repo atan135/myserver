@@ -1,0 +1,380 @@
+name: myserver
+
+x-runtime: &runtime
+  restart: unless-stopped
+  networks:
+    - internal
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?set POSTGRES_IMAGE to a pinned image reference}
+    restart: unless-stopped
+    env_file: ${INFRA_ENV_FILE:?set INFRA_ENV_FILE}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../db:/docker-entrypoint-initdb.d:ro
+      - ./config/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 60s
+    mem_limit: 1536m
+
+  redis:
+    image: ${REDIS_IMAGE:?set REDIS_IMAGE to a pinned image reference}
+    restart: unless-stopped
+    env_file: ${INFRA_ENV_FILE:?set INFRA_ENV_FILE}
+    command:
+      - sh
+      - -ec
+      - exec redis-server /usr/local/etc/redis/redis.conf --requirepass "$$REDIS_PASSWORD"
+    volumes:
+      - redis-data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -qx PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    mem_limit: 640m
+
+  nats:
+    image: ${NATS_IMAGE:?set NATS_IMAGE to a pinned image reference}
+    restart: unless-stopped
+    env_file: ${INFRA_ENV_FILE:?set INFRA_ENV_FILE}
+    command:
+      - sh
+      - -ec
+      - exec nats-server -c /etc/nats/nats.conf --auth "$$NATS_TOKEN"
+    volumes:
+      - nats-data:/data
+      - ./config/nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    mem_limit: 128m
+
+  game-server:
+    <<: *runtime
+    image: ${IMAGE_GAME_SERVER:?set IMAGE_GAME_SERVER from images.lock.json}
+    env_file: ${GAME_SERVER_ENV_FILE:?set GAME_SERVER_ENV_FILE}
+    environment:
+      APP_ENV: production
+      GAME_HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: game-server
+      SERVICE_ADMIN_BIND_HOST: 0.0.0.0
+      SERVICE_ADMIN_ADVERTISED_HOST: game-server
+      CSV_DIR: /app/csv
+      CSV_RELOAD_ENABLED: "true"
+      DB_ENABLED: "true"
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: game-server-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    volumes:
+      - ${GAME_CSV_DIR:?set GAME_CSV_DIR}:/app/csv:ro
+      - game-sockets:/run/myserver
+      - game-audit:/var/log/myserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    stop_grace_period: 60s
+    mem_limit: 768m
+
+  match-service:
+    <<: *runtime
+    image: ${IMAGE_MATCH_SERVICE:?set IMAGE_MATCH_SERVICE from images.lock.json}
+    env_file: ${MATCH_SERVICE_ENV_FILE:?set MATCH_SERVICE_ENV_FILE}
+    environment:
+      APP_ENV: production
+      MATCH_BIND_ADDR: 0.0.0.0:9002
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: match-service
+      MATCH_PUBLIC_HOST: match-service
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: match-service-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    volumes:
+      - game-sockets:/run/myserver
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      game-server:
+        condition: service_started
+    stop_grace_period: 45s
+    mem_limit: 256m
+
+  chat-server:
+    <<: *runtime
+    image: ${IMAGE_CHAT_SERVER:?set IMAGE_CHAT_SERVER from images.lock.json}
+    env_file: ${CHAT_SERVER_ENV_FILE:?set CHAT_SERVER_ENV_FILE}
+    environment:
+      APP_ENV: production
+      CHAT_BIND_ADDR: 0.0.0.0:9001
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: chat-server
+      CHAT_PUBLIC_HOST: chat-server
+      DB_ENABLED: "true"
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: chat-server-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    stop_grace_period: 45s
+    mem_limit: 256m
+
+  mail-service:
+    <<: *runtime
+    image: ${IMAGE_MAIL_SERVICE:?set IMAGE_MAIL_SERVICE from images.lock.json}
+    env_file: ${MAIL_SERVICE_ENV_FILE:?set MAIL_SERVICE_ENV_FILE}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: mail-service
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: mail-service-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      game-server:
+        condition: service_started
+    stop_grace_period: 60s
+    mem_limit: 256m
+
+  announce-service:
+    <<: *runtime
+    image: ${IMAGE_ANNOUNCE_SERVICE:?set IMAGE_ANNOUNCE_SERVICE from images.lock.json}
+    env_file: ${ANNOUNCE_SERVICE_ENV_FILE:?set ANNOUNCE_SERVICE_ENV_FILE}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: announce-service
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: announce-service-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    stop_grace_period: 30s
+    mem_limit: 128m
+
+  metrics-collector:
+    <<: *runtime
+    image: ${IMAGE_METRICS_COLLECTOR:?set IMAGE_METRICS_COLLECTOR from images.lock.json}
+    env_file: ${METRICS_COLLECTOR_ENV_FILE:?set METRICS_COLLECTOR_ENV_FILE}
+    environment:
+      NODE_ENV: production
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    stop_grace_period: 30s
+    mem_limit: 128m
+
+  game-proxy:
+    <<: *runtime
+    image: ${IMAGE_GAME_PROXY:?set IMAGE_GAME_PROXY from images.lock.json}
+    env_file: ${GAME_PROXY_ENV_FILE:?set GAME_PROXY_ENV_FILE}
+    environment:
+      APP_ENV: production
+      PROXY_HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: ${GAME_PROXY_ADVERTISED_HOST:?set GAME_PROXY_ADVERTISED_HOST}
+      PROXY_ADMIN_HOST: 0.0.0.0
+      SERVICE_ADMIN_BIND_HOST: 0.0.0.0
+      SERVICE_ADMIN_ADVERTISED_HOST: game-proxy
+      SERVICE_TCP_FALLBACK_ADVERTISED_HOST: ${GAME_PROXY_ADVERTISED_HOST:?set GAME_PROXY_ADVERTISED_HOST}
+      PROXY_ROUTE_STORE_BACKEND: redis
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: game-proxy-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    ports:
+      - "${GAME_PROXY_UDP_PORT:-4000}:4000/udp"
+    volumes:
+      - game-sockets:/run/myserver
+      - game-audit:/var/log/myserver
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      game-server:
+        condition: service_started
+    stop_grace_period: 45s
+    mem_limit: 256m
+
+  auth-http:
+    <<: *runtime
+    image: ${IMAGE_AUTH_HTTP:?set IMAGE_AUTH_HTTP from images.lock.json}
+    env_file: ${AUTH_HTTP_ENV_FILE:?set AUTH_HTTP_ENV_FILE}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: auth-http
+      DB_ENABLED: "true"
+      AUTH_REQUIRE_TLS: "true"
+      AUTH_STRICT_SECURITY: "true"
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: 172.30.0.0/24
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: auth-http-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      game-proxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 45s
+    mem_limit: 256m
+
+  admin-api:
+    <<: *runtime
+    image: ${IMAGE_ADMIN_API:?set IMAGE_ADMIN_API from images.lock.json}
+    env_file: ${ADMIN_API_ENV_FILE:?set ADMIN_API_ENV_FILE}
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      SERVICE_BIND_HOST: 0.0.0.0
+      SERVICE_PUBLIC_HOST: admin-api
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: 172.30.0.0/24
+      ADMIN_API_REQUIRE_TLS: "true"
+      ADMIN_API_REQUIRE_IP_ALLOWLIST: "true"
+      LOG_ENABLE_FILE: "false"
+      REGISTRY_ENABLED: "true"
+      DISCOVERY_REQUIRED: "true"
+      DISALLOW_LEGACY_DIRECT_CONFIG: "true"
+      SERVICE_INSTANCE_ID: admin-api-1
+      SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      game-server:
+        condition: service_started
+      game-proxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    stop_grace_period: 45s
+    mem_limit: 384m
+
+  caddy:
+    image: ${IMAGE_CADDY:?set IMAGE_CADDY from images.lock.json}
+    restart: unless-stopped
+    environment:
+      CADDY_AUTH_HOST: ${CADDY_AUTH_HOST:?set CADDY_AUTH_HOST}
+      CADDY_ADMIN_HOST: ${CADDY_ADMIN_HOST:?set CADDY_ADMIN_HOST}
+      CADDY_EMAIL: ${CADDY_EMAIL:?set CADDY_EMAIL}
+    networks:
+      - edge
+      - internal
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      auth-http:
+        condition: service_healthy
+      admin-api:
+        condition: service_healthy
+    stop_grace_period: 30s
+    mem_limit: 64m
+
+volumes:
+  postgres-data:
+  redis-data:
+  nats-data:
+  game-sockets:
+  game-audit:
+  caddy-data:
+  caddy-config:
+
+networks:
+  edge:
+  internal:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

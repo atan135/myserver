@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_IMAGE=node:22-bookworm
+FROM ${NODE_IMAGE} AS dependencies
+
+WORKDIR /workspace
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY tools ./tools
+COPY db ./db
+
+# bcrypt and future native production dependencies need a build toolchain.
+RUN --mount=type=cache,target=/root/.npm \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
+    rm -rf /var/lib/apt/lists/* && \
+    npm ci --omit=dev
+
+FROM node:22-bookworm-slim AS runtime
+
+ARG SERVICE
+ENV NODE_ENV=production \
+    SERVICE=${SERVICE}
+
+WORKDIR /app
+COPY --chown=node:node --from=dependencies /workspace/package.json /workspace/package-lock.json ./
+COPY --chown=node:node --from=dependencies /workspace/node_modules ./node_modules
+COPY --chown=node:node --from=dependencies /workspace/apps/${SERVICE} /app/apps/${SERVICE}
+COPY --chown=node:node --from=dependencies /workspace/apps/game-server/csv /app/apps/game-server/csv
+COPY --chown=node:node --from=dependencies /workspace/packages /app/packages
+COPY --chown=node:node --from=dependencies /workspace/tools/db /app/tools/db
+COPY --chown=node:node --from=dependencies /workspace/tools/db-deploy.js /app/tools/db-deploy.js
+COPY --chown=node:node --from=dependencies /workspace/tools/rollout /app/tools/rollout
+COPY --chown=node:node --from=dependencies /workspace/db /app/db
+COPY --chown=node:node deploy/docker/node-entrypoint.sh /usr/local/bin/node-entrypoint
+
+RUN chmod 0555 /usr/local/bin/node-entrypoint
+
+USER node
+ENTRYPOINT ["/usr/local/bin/node-entrypoint"]
