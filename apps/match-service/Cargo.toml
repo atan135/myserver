@@ -32,3 +32,4 @@ service-registry = { path = "../../packages/service-registry" }
 global-id = { path = "../../packages/global-id", features = ["redis"] }
 redis = { version = "0.32", features = ["tokio-comp"] }
 async-nats = { version = "0.48.0", default-features = false }
+nats-client = { path = "../../packages/nats-client" }

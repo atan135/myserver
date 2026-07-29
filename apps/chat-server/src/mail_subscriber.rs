@@ -268,7 +268,7 @@ async fn run_subscriber(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<RunOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let client = tokio::select! {
-        result = async_nats::connect(nats_url) => result?,
+        result = nats_client::connect(nats_url) => result?,
         _ = wait_for_shutdown_signal(shutdown) => return Ok(RunOutcome::Shutdown),
     };
     let legacy_subject = "myserver.mail.notify.*";

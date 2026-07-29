@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { getConfig } from "./config.js";
 import { maybeRegisterService } from "./registry-client.js";
+import { natsConnectOptions } from "../../../packages/nats-client/node.js";
 
 const codec = StringCodec();
 const DEFAULT_INSTANCE_ID = "default";
@@ -86,10 +87,7 @@ async function main() {
   });
   await redis.connect();
 
-  const nats = await connect({
-    servers: config.natsUrl,
-    name: "metrics-collector"
-  });
+  const nats = await connect(natsConnectOptions(config.natsUrl, "metrics-collector"));
 
   nats.closed().then((error) => {
     if (error) {

@@ -1,0 +1,9 @@
+[package]
+name = "nats-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-nats = { version = "0.48.0", default-features = false }
+percent-encoding = "2"
+url = "2"

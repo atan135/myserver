@@ -130,7 +130,7 @@ impl MetricsCollector {
         service_instance_id: String,
         interval_secs: u64,
     ) {
-        let client = match async_nats::connect(nats_url).await {
+        let client = match nats_client::connect(nats_url).await {
             Ok(client) => client,
             Err(e) => {
                 error!(error = %e, "failed to connect nats for metrics");

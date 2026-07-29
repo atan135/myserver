@@ -35,7 +35,7 @@ async fn run_subscriber(
     nats_url: &str,
     player_registry: &PlayerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = async_nats::connect(nats_url).await?;
+    let client = nats_client::connect(nats_url).await?;
     let mut subscriber = client.subscribe("myserver.session.kick.*").await?;
     info!("subscribed to myserver.session.kick.* subject");
 

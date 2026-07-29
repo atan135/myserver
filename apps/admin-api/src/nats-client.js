@@ -1,4 +1,5 @@
 import { connect, StringCodec } from "nats";
+import { natsConnectOptions } from "../../../packages/nats-client/node.js";
 
 const codec = StringCodec();
 
@@ -7,10 +8,7 @@ export function encodeSubjectToken(value) {
 }
 
 export async function createNatsClient(config) {
-  const connection = await connect({
-    servers: config.natsUrl,
-    name: config.appName
-  });
+  const connection = await connect(natsConnectOptions(config.natsUrl, config.appName));
 
   connection.closed().then((error) => {
     if (error) {
