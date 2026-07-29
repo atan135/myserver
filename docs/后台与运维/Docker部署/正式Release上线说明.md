@@ -63,16 +63,14 @@ RELEASE
 SHA256SUMS
 ```
 
-将目录传输到服务器 `/data/myserver/release/<release-id>/`。服务器解压后先校验：
+将目录传输到服务器 `/data/myserver/release/<release-id>/`。服务器解压后先校验 bundle 完整性：
 
 ```bash
 cd /data/myserver/release/<release-id>
 sha256sum --check SHA256SUMS
-docker compose --env-file compose.production.env -f compose.production.yml config --quiet
-docker compose --env-file compose.production.env -f compose.production.yml pull
-docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
-  pull migration-runner
 ```
+
+Compose 会读取 `compose.production.env` 中指定的服务器本地 secret 文件，因此必须在下一节创建 secret 后才能执行 Compose 配置校验和镜像拉取。
 
 ## 4. 服务器本地密钥
 
@@ -85,6 +83,15 @@ docker compose --profile ops --env-file compose.production.env -f compose.produc
 ```
 
 `origin-id` 是该正式初始服不可复用的编号，范围为 `1..1023`；为同一服的所有服务共用。脚本会生成 `admin-api.env` 中的初始管理员密码，必须立即纳入获批的 secret manager，不要通过聊天、工单或 shell history 传播。
+
+secret 创建成功后，验证 Compose 完整插值并拉取所有已锁定镜像，仍不启动容器：
+
+```bash
+docker compose --env-file compose.production.env -f compose.production.yml config --quiet
+docker compose --env-file compose.production.env -f compose.production.yml pull
+docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
+  pull migration-runner
+```
 
 除已有服务 env 文件外，首次正式 release 至少需要：
 
