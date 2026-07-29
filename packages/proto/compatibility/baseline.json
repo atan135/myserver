@@ -1,9 +1,131 @@
 {
-  "digest": "sha256:e09afcc2207770c10345312a6dee4426b8d34cd0620b725a4d5beef6320e0fa5",
+  "digest": "sha256:97203daa8b3c2edf08c9aea797aeeede90f8141967ef8d0266bed9a12b23d7f6",
   "files": [
     {
       "enums": [],
       "messages": [
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "operation_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "trace_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "issuer",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "key_id",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "actor_id",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "permission",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "scope_json",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_json",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "service",
+              "number": 11,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "instance_id",
+              "number": 12,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "issued_at_ms",
+              "number": 13,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "expires_at_ms",
+              "number": 14,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "payload_sha256",
+              "number": 15,
+              "oneof": "",
+              "type": "bytes"
+            },
+            {
+              "label": "singular",
+              "name": "signature",
+              "number": 16,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "AdminOperationAssertion",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
         {
           "fields": [
             {
@@ -359,6 +481,128 @@
             }
           ],
           "name": "GrantItemsResultSummary",
+          "reserved": {
+            "names": [],
+            "numbers": [],
+            "ranges": []
+          }
+        },
+        {
+          "fields": [
+            {
+              "label": "singular",
+              "name": "version",
+              "number": 1,
+              "oneof": "",
+              "type": "uint32"
+            },
+            {
+              "label": "singular",
+              "name": "operation_id",
+              "number": 2,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "request_id",
+              "number": 3,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "mail_id",
+              "number": 4,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "character_id",
+              "number": 5,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "attachment_fingerprint",
+              "number": 6,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "issuer",
+              "number": 7,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "key_id",
+              "number": 8,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "service",
+              "number": 9,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "service_instance_id",
+              "number": 10,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_service",
+              "number": 11,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "target_instance_id",
+              "number": 12,
+              "oneof": "",
+              "type": "string"
+            },
+            {
+              "label": "singular",
+              "name": "issued_at_ms",
+              "number": 13,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "expires_at_ms",
+              "number": 14,
+              "oneof": "",
+              "type": "int64"
+            },
+            {
+              "label": "singular",
+              "name": "payload_sha256",
+              "number": 15,
+              "oneof": "",
+              "type": "bytes"
+            },
+            {
+              "label": "singular",
+              "name": "signature",
+              "number": 16,
+              "oneof": "",
+              "type": "bytes"
+            }
+          ],
+          "name": "MailAttachmentGrantAssertion",
           "reserved": {
             "names": [],
             "numbers": [],

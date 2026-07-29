@@ -24,6 +24,30 @@
     ],
     "preDispatchControls": [
       {
+        "messageType": "MailAttachmentGrantAssertionReq",
+        "route": "admin",
+        "source": "apps/game-server/src/admin_server.rs",
+        "reason": "Consumed as the first packet to establish a mail attachment grant assertion session before the command dispatch loop."
+      },
+      {
+        "messageType": "AdminOperationAssertionReq",
+        "route": "admin",
+        "source": "apps/game-server/src/admin_server.rs",
+        "reason": "Consumed as a session-scoped admin write assertion before the command dispatch match."
+      },
+      {
+        "messageType": "MailAttachmentGrantReq",
+        "route": "admin",
+        "source": "apps/game-server/src/admin_server.rs",
+        "reason": "Consumed only by the established mail assertion session before the general admin command dispatch match."
+      },
+      {
+        "messageType": "MailAttachmentGrantResultQueryReq",
+        "route": "admin",
+        "source": "apps/game-server/src/admin_server.rs",
+        "reason": "Consumed only by the established mail assertion session before the general admin command dispatch match."
+      },
+      {
         "messageType": "AdminAuthReq",
         "route": "admin",
         "source": "apps/game-server/src/admin_server.rs",
@@ -68,6 +92,8 @@
     "definitionMode": "implementation_literals",
     "staticCodes": [
       "ACCOUNT_PLAYER_ID_MISMATCH",
+      "ADMIN_ASSERTION_REQUIRED",
+      "ADMIN_ASSERTION_UNAUTHENTICATED",
       "ADMIN_AUDIT_WRITE_FAILED",
       "ALREADY_IN_OTHER_ROOM",
       "ALREADY_IN_ROOM",
@@ -131,6 +157,7 @@
       "INVENTORY_COMMIT_RESULT_UNKNOWN",
       "INVENTORY_TRANSACTION_FAILED",
       "ITEM_COUNT_OVERFLOW",
+      "MAIL_GRANT_MESSAGE_FORBIDDEN",
       "MATCH_TIMEOUT",
       "MESSAGE_NOT_SUPPORTED",
       "MESSAGE_TYPE_DEPRECATED",

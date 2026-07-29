@@ -92,12 +92,20 @@ function findFunctionBody(source, functionName) {
 }
 
 function findPacketMessageTypeMatchBody(source) {
-  const match = /match\s+packet\.message_type\(\)\s*\{/.exec(source);
-  if (!match) {
+  const matches = source.matchAll(/match\s+packet\.message_type\(\)\s*\{/g);
+  let selected = null;
+  for (const match of matches) {
+    const openingIndex = match.index + match[0].lastIndexOf("{");
+    const body = findBalancedBlock(source, openingIndex);
+    const branchCount = [...body.matchAll(/\bMessageType::[A-Za-z][A-Za-z0-9_]*\b/g)].length;
+    if (!selected || branchCount > selected.branchCount) {
+      selected = { body, branchCount };
+    }
+  }
+  if (!selected) {
     throw new Error("packet.message_type() match not found");
   }
-  const openingIndex = match.index + match[0].lastIndexOf("{");
-  return findBalancedBlock(source, openingIndex);
+  return selected.body;
 }
 
 function toConstantName(name) {

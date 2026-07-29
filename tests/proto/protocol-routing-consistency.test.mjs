@@ -56,6 +56,37 @@ test("packet route analysis catches duplicate ids, missing dispatches, unknown b
   assert.ok(rules.has("PACKET_OUTBOUND_ORPHAN"));
 });
 
+test("packet route analysis selects the main dispatch after a smaller authentication match", () => {
+  const canonical = `
+    pub enum MessageType { AuthReq = 1001, CommandReq = 1002, OtherCommandReq = 1003, }
+    impl MessageType {
+      pub fn from_u16(value: u16) -> Option<Self> {
+        match value { 1001 => Some(Self::AuthReq), 1002 => Some(Self::CommandReq), 1003 => Some(Self::OtherCommandReq), _ => None, }
+      }
+    }
+  `;
+  const dispatch = `
+    async fn dispatch_packet() {
+      match packet.message_type() {
+        Some(MessageType::AuthReq) => authenticate(),
+        _ => reject(),
+      }
+      match packet.message_type() {
+        Some(MessageType::CommandReq) => command(),
+        Some(MessageType::OtherCommandReq) => other_command(),
+        _ => reject(),
+      }
+    }
+  `;
+  const result = analyzePacketRouting({
+    canonicalSource: canonical,
+    config: { ...routingConfig, packetRoutes: { ...routingConfig.packetRoutes, preDispatchControls: [{ messageType: "AuthReq", reason: "authentication gate" }] } },
+    dispatchSources: new Map([["player", dispatch]]),
+    producerSources: []
+  });
+  assert.equal(result.diagnostics.some((diagnostic) => diagnostic.rule === "PACKET_REQUEST_WITHOUT_CONSUMER"), false);
+});
+
 test("mock-client analysis ties sent constants to encoders and outgoing decoders without requiring internal codecs", () => {
   const result = analyzeMockClient({
     canonicalEntries: [
