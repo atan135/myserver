@@ -29,7 +29,6 @@ COPY --chown=node:node --from=dependencies /workspace/node_modules ./node_module
 COPY --chown=node:node --from=dependencies /workspace/apps/${SERVICE} /app/apps/${SERVICE}
 COPY --chown=node:node --from=dependencies /workspace/apps/game-server/csv /app/apps/game-server/csv
 COPY --chown=node:node --from=dependencies /workspace/packages /app/packages
-COPY --chown=node:node --from=dependencies /workspace/tools/db /app/tools/db
 COPY --chown=node:node --from=dependencies /workspace/tools/db-deploy.js /app/tools/db-deploy.js
 COPY --chown=node:node --from=dependencies /workspace/tools/rollout /app/tools/rollout
 COPY --chown=node:node --from=dependencies /workspace/db /app/db
