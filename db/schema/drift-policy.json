@@ -4,9 +4,9 @@
   "targets": {
     "auth": {
       "file": "db/schema/targets/auth.json",
-      "version": "20260719190000",
-      "description": "add myforge batch pause",
-      "checksum": "48e032ec98af6e8d6aa6d84655fb7448b6c50890066c856ad88266cb5c6f624f1302f87914d6f13763c860c9dfac910a"
+      "version": "20260729173000",
+      "description": "add admin metrics archive",
+      "checksum": "36afc484ad351b0878ea964fc60b3b31921fef335db4058d26d1361a277bfa0b5297ba3e81c5d0f1acc46c3b06a857db"
     },
     "game": {
       "file": "db/schema/targets/game.json",

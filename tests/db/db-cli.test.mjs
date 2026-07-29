@@ -239,7 +239,8 @@ test("baseline schema is split from bootstrap and development seed", () => {
         "20260718161350_initial_schema.sql",
         "20260719100000_add_admin_authorization_policy.sql",
         "20260719170000_add_admin_operation_protocol.sql",
-        "20260719190000_add_myforge_batch_pause.sql"
+        "20260719190000_add_myforge_batch_pause.sql",
+        "20260729173000_add_admin_metrics_archive.sql"
       ]
       : ["20260718161350_initial_schema.sql"];
     assert.deepEqual(files, expectedFiles);
