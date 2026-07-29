@@ -472,6 +472,10 @@ test("migration files require monotonic UTC timestamp names", () => {
 test("migration safety metadata enforces transaction, rollback and irreversible change rules", () => {
   const legacyInitial = readFileSync(join(process.cwd(), "db/migrations/auth/20260718161350_initial_schema.sql"), "utf8");
   assert.equal(migrationSafetyForFile("20260718161350_initial_schema.sql", legacyInitial, { expectedOwner: "auth-http" }).legacy, true);
+  assert.equal(
+    migrationSafetyForFile("20260718161350_initial_schema.sql", legacyInitial.replace(/\r\n/g, "\n"), { expectedOwner: "auth-http" }).legacy,
+    true
+  );
   assert.throws(
     () => migrationSafetyForFile("20260718161350_initial_schema.sql", `${legacyInitial}\n-- altered`, { expectedOwner: "auth-http" }),
     /Transaction metadata is required/

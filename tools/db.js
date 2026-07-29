@@ -42,11 +42,11 @@ const DRIFT_DIRECTIONS = new Set(["target-missing", "actual-extra", "definition-
 const BACKFILL_ACTIONS = new Set(["backfill-status", "backfill-run", "backfill-pause", "backfill-resume"]);
 const LEGACY_INITIAL_SCHEMA_FILENAME = "20260718161350_initial_schema.sql";
 const LEGACY_INITIAL_SCHEMA_CHECKSUMS = new Map([
-  ["announce-service", "5a93d41a465799d901e715551aa38040e30c9c2954876fc77b833d1e54fd307c5c3b38d369e3a631d4a011b48ba65096"],
-  ["auth-http", "880b0807f925b0dcefe3610d323e26dad3ce2043f680338aeb3e7eaa3699afd519f3352217aaf86563cb73d8991e8e08"],
-  ["chat-server", "1b17a65df95a929bbd79c69eafe1e4f9a42797f7c8bc44da3338d221a91aeda06fe93d063134900c4b37117a488dd946"],
-  ["game-server", "5c9f8dd9d795d39b22217e2cf7196d4a6bebb732c0408201135fb116d8774c95e64bc344ab01f6b791d874e755989565"],
-  ["mail-service", "a0601e1052c897ddbb878ef83e2198457845815f6d2c1dc71b5da4c3ae879621e063cfd9d6501488a24298e5d1ad6ffc"]
+  ["announce-service", "81777bd2c1699d13c8e7f348eeb47d963e8bdcc9b4fcee9a07ccc948423691b9b7b9e6af54b187f8c800e8b8a2854f83"],
+  ["auth-http", "7dea7f310e675140e3eca6aaf8500955b1a37acea0b5fb991613a4b6cdb4b1d1bae057e6bf557c40221d74ce8e1e132e"],
+  ["chat-server", "135b3d1c111b217030fc145b1f95a2d8950415772ddc2f73ab4861b484f9e79491e4f14a2f7725be9da08e4b923deb6f"],
+  ["game-server", "b3d0b1e4c189201fa05bde1ccc65e994395ee56cb9bc45f6616b3fe1c1bb84b910803938989d814cd902e3b896985c53"],
+  ["mail-service", "d54f42939fc0f44d4c36795113a97d3e8ae02184c88327de41b8a769eebe4881a83699482f653ba8083f116bfe0269f9"]
 ]);
 
 export const EXIT = Object.freeze({
@@ -1165,7 +1165,7 @@ function isLegacyInitialSchema(filename, source, metadata, hasNoTransactionDirec
     metadata.get("Compatibility phase") === "expand" &&
     metadata.has("Irreversible risk") &&
     !metadata.has("Transaction") &&
-    expectedChecksum === createHash("sha384").update(source).digest("hex");
+    expectedChecksum === createHash("sha384").update(source.replace(/\r\n/g, "\n")).digest("hex");
 }
 
 export function migrationSafetyForFile(filename, source, options = {}) {
