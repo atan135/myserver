@@ -106,6 +106,7 @@ cp -a deploy/docker/config/. "$output/config/"
 cp -a deploy/docker/postgres-bootstrap/. "$output/postgres-bootstrap/"
 cp -a db/. "$output/db/"
 cp -a apps/game-server/csv "$output/apps/game-server/csv"
+cp -a apps/game-server/scene "$output/apps/game-server/scene"
 install -m 0755 scripts/docker/initialize-production-secrets.sh "$output/scripts/initialize-production-secrets.sh"
 
 node scripts/docker/render-release-env.mjs \

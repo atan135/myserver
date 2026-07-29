@@ -104,12 +104,13 @@ release bundle 由开发机或 CI 制作并传到服务器，不以仓库检出�
   postgres-bootstrap/          # 只创建五个空库
   db/                          # migration runner 的 SQLx migration 与 drift policy
   apps/game-server/csv/        # 运行期只读 CSV 数据
+  apps/game-server/scene/      # 运行期只读场景资产
   scripts/initialize-production-secrets.sh
   RELEASE
   SHA256SUMS
 ~~~
 
-compose.production.env 由 bundle 生成，必须包含 RELEASE_ID、11 个 IMAGE_* digest reference、已审计的 PostgreSQL/Redis/NATS digest、secret 文件绝对路径、Caddy 域名和 GAME_CSV_DIR。应用镜像只能使用 images.lock.json 的 reference 字段，不能改写成 tag。CSV 路径为当前 release 的 /data/myserver/release/<release-id>/apps/game-server/csv。
+compose.production.env 由 bundle 生成，必须包含 RELEASE_ID、11 个 IMAGE_* digest reference、已审计的 PostgreSQL/Redis/NATS digest、secret 文件绝对路径、Caddy 域名、GAME_CSV_DIR 和 GAME_SCENE_DIR。应用镜像只能使用 images.lock.json 的 reference 字段，不能改写成 tag。CSV 和场景路径分别为当前 release 的 `/data/myserver/release/<release-id>/apps/game-server/csv` 和 `/data/myserver/release/<release-id>/apps/game-server/scene`，并以只读方式挂载到 `game-server` 的 `/app/csv`、`/app/scene`。
 
 服务器上的 registry 登录使用只读拉取凭据。首次验证先拉取 lock 中的一个完整 digest reference，例如：
 

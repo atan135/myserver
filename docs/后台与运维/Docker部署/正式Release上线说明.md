@@ -58,12 +58,13 @@ config/
 postgres-bootstrap/
 db/
 apps/game-server/csv/
+apps/game-server/scene/
 scripts/initialize-production-secrets.sh
 RELEASE
 SHA256SUMS
 ```
 
-将目录传输到服务器 `/data/myserver/release/<release-id>/`。服务器解压后先校验 bundle 完整性：
+`apps/game-server/csv/` 和 `apps/game-server/scene/` 是同一 release 的运行期只读资产；二者必须一起交付。将目录传输到服务器 `/data/myserver/release/<release-id>/`。服务器解压后先校验 bundle 完整性：
 
 ```bash
 cd /data/myserver/release/<release-id>

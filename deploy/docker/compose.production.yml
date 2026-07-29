@@ -93,6 +93,7 @@ services:
       MYSERVER_READINESS_BIND_ADDR: 0.0.0.0:7600
     volumes:
       - ${GAME_CSV_DIR:?set GAME_CSV_DIR}:/app/csv:ro
+      - ${GAME_SCENE_DIR:?set GAME_SCENE_DIR}:/app/scene:ro
       - game-sockets:/run/myserver
       - game-audit:/var/log/myserver
     depends_on:
