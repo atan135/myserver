@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker.m.daocloud.io/docker/dockerfile:1.7
 
 ARG RUST_IMAGE=rust:1.97-bookworm
 FROM ${RUST_IMAGE} AS builder
