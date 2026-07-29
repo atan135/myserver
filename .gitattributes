@@ -4,3 +4,6 @@ tests/proto/fixtures/compatibility/*.bin binary
 # Rust generators write LF. Keep generated and hand-written Rust sources stable on Windows.
 .gitattributes text eol=lf
 *.rs text eol=lf
+
+# Deployment entrypoints execute in Linux through WSL and on production hosts.
+*.sh text eol=lf
