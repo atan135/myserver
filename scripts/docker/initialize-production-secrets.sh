@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/initialize-production-secrets.sh --release-dir /data/myserver/release/<release-id> \\
+  scripts/initialize-production-secrets.sh --release-dir /data/myserver/release/<release-id> \
     --origin-id <1-1023> --admin-ip-allowlist <ip-or-cidr[,ip-or-cidr...]>
 
 Creates the first-release env files in /data/myserver/secrets. It refuses to
