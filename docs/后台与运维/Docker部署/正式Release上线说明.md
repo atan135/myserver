@@ -8,7 +8,7 @@
 
 上线前必须满足：
 
-- `/data` 已扩容至至少 `80 GB` SSD；当前 `60 GB` 数据盘不足以同时容纳 Docker data-root、数据库、镜像缓存、日志和可恢复备份。
+- `/data` 为至少 `50 GB` 的 SSD 专用数据盘；Docker data-root、数据库、镜像缓存和日志不得落入系统根分区，备份应使用异机或对象存储并持续监控剩余空间。
 - ACR 只读拉取登录可用，Docker daemon 数据根为 `/data/myserver/docker`。
 - DNS 已将 API、后台和游戏公网地址指向该服务器；Caddy 所需 `80/TCP`、`443/TCP` 已在云安全组和主机防火墙受控放行。游戏入口 `4000/UDP` 的放行只在 postflight 通过后执行。
 - 已审阅本次 migration；不可逆 migration 已具备数据库文档要求的备份 artifact ID 与 checksum。

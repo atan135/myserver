@@ -14,7 +14,7 @@
 
 ### 2.1 必要条件
 
-- 4 vCPU、8 GB RAM、至少 80 GB SSD；数据库、Redis AOF、镜像缓存、日志和备份不与系统根分区争抢不可控空间。
+- 4 vCPU、8 GB RAM、至少 50 GB SSD；数据库、Redis AOF、镜像缓存和日志不与系统根分区争抢不可控空间，恢复备份使用独立磁盘、对象存储或异机存储。
 - Linux 内核支持 cgroup v2，系统时间同步正常，DNS 可以解析私有镜像仓库与业务域名。
 - Docker Engine、Buildx 和 Docker Compose v2 已安装并由 systemd 托管。生产服务器不安装 Node、Rust、SQLx 或项目构建依赖。
 - SSH 仅允许密钥认证并限制管理来源；Docker socket 不对非受信用户暴露。加入 `docker` 组等价于较高宿主机权限，应只授予经审计的运维账号。
