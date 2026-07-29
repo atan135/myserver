@@ -39,12 +39,12 @@
         {
           "name": "game-server",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260718161350"
+          "maximumMigrationVersion": "20260729190000"
         },
         {
           "name": "game-proxy",
           "minimumMigrationVersion": "20260718161350",
-          "maximumMigrationVersion": "20260718161350"
+          "maximumMigrationVersion": "20260729190000"
         }
       ],
       "readiness": [

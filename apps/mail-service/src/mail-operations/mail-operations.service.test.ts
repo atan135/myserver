@@ -405,7 +405,7 @@ test("terminal outbox replay preserves event payload and does not change mail or
   assert.equal(store.memoryAdminAudit.length, 1);
 });
 
-test("database schema enforces append-only operation audit", () => {
+test("migration schema enforces append-only operation audit", () => {
   for (const path of [
     new URL("../../db/init.sql", import.meta.url),
     new URL("../../../../db/init.sql", import.meta.url)
@@ -417,11 +417,14 @@ test("database schema enforces append-only operation audit", () => {
     assert.match(sql, /REVOKE UPDATE, DELETE, TRUNCATE ON mail_admin_operation_audit FROM PUBLIC/);
     assert.match(sql, /UNIQUE \(operation_request_id\)/);
   }
-  const runtimeSchema = fs.readFileSync(new URL("../db-client.js", import.meta.url), "utf8");
-  assert.match(runtimeSchema, /CREATE TABLE IF NOT EXISTS mail_admin_operation_audit/);
-  assert.match(runtimeSchema, /CREATE TRIGGER trg_mail_admin_operation_audit_immutable/);
-  assert.match(runtimeSchema, /BEFORE TRUNCATE ON mail_admin_operation_audit/);
-  assert.match(runtimeSchema, /REVOKE UPDATE, DELETE, TRUNCATE ON mail_admin_operation_audit FROM PUBLIC/);
+  const migrationSchema = fs.readFileSync(
+    new URL("../../../../db/migrations/mail/20260718161350_initial_schema.sql", import.meta.url),
+    "utf8"
+  );
+  assert.match(migrationSchema, /CREATE TABLE IF NOT EXISTS mail_admin_operation_audit/);
+  assert.match(migrationSchema, /CREATE TRIGGER trg_mail_admin_operation_audit_immutable/);
+  assert.match(migrationSchema, /BEFORE TRUNCATE ON mail_admin_operation_audit/);
+  assert.match(migrationSchema, /REVOKE UPDATE, DELETE, TRUNCATE ON mail_admin_operation_audit FROM PUBLIC/);
 });
 
 test("claim operational snapshots and rate counters are emitted without high-cardinality labels", async () => {

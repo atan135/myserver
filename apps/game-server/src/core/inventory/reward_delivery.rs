@@ -22,40 +22,6 @@ use super::{
     RewardDeliveryResult, RewardOrder,
 };
 
-/// Runtime schema for the reward-delivery control plane. `character_asset_requests` remains the
-/// authoritative inventory request record; these tables retain the delivery decision and the
-/// durable mail-create intent around it.
-pub const REWARD_DELIVERY_SCHEMA_STATEMENTS: &[&str] = &[
-    r#"CREATE TABLE IF NOT EXISTS reward_delivery_records (
-        request_id varchar(128) PRIMARY KEY,
-        character_id varchar(128) NOT NULL,
-        request_fingerprint varchar(71) NOT NULL,
-        result_json jsonb NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT current_timestamp
-    )"#,
-    "CREATE INDEX IF NOT EXISTS idx_reward_delivery_records_character_id ON reward_delivery_records (character_id, created_at DESC)",
-    r#"CREATE TABLE IF NOT EXISTS reward_mail_outbox (
-        delivery_request_id varchar(128) PRIMARY KEY,
-        reward_request_id varchar(128) NOT NULL,
-        mail_id varchar(64) NOT NULL,
-        character_id varchar(128) NOT NULL,
-        request_fingerprint varchar(71) NOT NULL,
-        origin_type varchar(32) NOT NULL,
-        origin_id varchar(128) NOT NULL,
-        delivery_policy varchar(32) NOT NULL,
-        items_json jsonb NOT NULL,
-        reason varchar(512) NOT NULL,
-        operator_json jsonb NOT NULL,
-        status varchar(32) NOT NULL DEFAULT 'pending',
-        created_at timestamptz NOT NULL DEFAULT current_timestamp,
-        CONSTRAINT uk_reward_mail_outbox_reward_request UNIQUE (reward_request_id),
-        CONSTRAINT uk_reward_mail_outbox_mail_id UNIQUE (mail_id)
-    )"#,
-    "ALTER TABLE reward_mail_outbox ADD COLUMN IF NOT EXISTS delivery_policy varchar(32) NOT NULL DEFAULT 'MAIL_ONLY'",
-    "CREATE INDEX IF NOT EXISTS idx_reward_mail_outbox_pending ON reward_mail_outbox (status, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_reward_mail_outbox_character_id ON reward_mail_outbox (character_id, created_at DESC)",
-];
-
 /// The only input trusted reward sources may submit. They never choose item UIDs, JSONB
 /// snapshots, a direct inventory mutation, or a concrete mail id.
 pub trait RewardInventoryPort: Send + Sync {
@@ -844,12 +810,6 @@ pub struct PgRewardDeliveryStore {
 
 impl PgRewardDeliveryStore {
     pub async fn from_pool(pool: PgPool) -> Result<Self, String> {
-        for statement in REWARD_DELIVERY_SCHEMA_STATEMENTS {
-            sqlx::query(statement)
-                .execute(&pool)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
         Ok(Self { pool })
     }
 }

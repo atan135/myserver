@@ -2,9 +2,9 @@
   "schema": 1,
   "database": "game",
   "migration": {
-    "version": "20260718161350",
-    "description": "initial schema",
-    "checksum": "b3d0b1e4c189201fa05bde1ccc65e994395ee56cb9bc45f6616b3fe1c1bb84b910803938989d814cd902e3b896985c53"
+    "version": "20260729190000",
+    "description": "restore character asset ledger guard",
+    "checksum": "31abd00b60ad6b70234d112046ba27102260b0974970a1c6bd1da2c0031044f83436fd83b50600e8c86c4eb6acec9068"
   },
   "catalog_sha256": "44c8bd23cb565cf2e211042613ddeffa3f61ffa948214a8a46228366c9791cb5",
   "objects": [
