@@ -124,6 +124,20 @@ test("version-controlled drift targets bind all five reviewed migration baseline
   ]);
 });
 
+test("PostgreSQL 16 function canonicalization is recorded for initial game and announcement schemas", () => {
+  const databases = new Map(resolveDatabases("all").map((database) => [database.key, database]));
+  const expectedCatalogs = new Map([
+    ["game", "44c8bd23cb565cf2e211042613ddeffa3f61ffa948214a8a46228366c9791cb5"],
+    ["announce", "a0f0d3a49fd646efd5e102630e33d691655fd51c4619f09ceea2a20ce5df471b"]
+  ]);
+  for (const [databaseKey, catalogSha256] of expectedCatalogs) {
+    const target = loadDriftTarget(databases.get(databaseKey));
+    const timestampFunction = target.objects.find(({ object_kind, object_identity }) => object_kind === "function" && object_identity === "public.set_current_timestamp_updated_at()");
+    assert.equal(target.catalog_sha256, catalogSha256);
+    assert.equal(timestampFunction?.definition_sha256, "76da5f31ce1d9a1f8381724f1943fb7f5247dac411b4d1e99dedacf2ec0eab48");
+  }
+});
+
 test("drift report separates definition changes, missing targets and actual extras", () => {
   const expected = catalogRows();
   const actual = expected

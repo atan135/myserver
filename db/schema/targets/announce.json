@@ -6,7 +6,7 @@
     "description": "initial schema",
     "checksum": "81777bd2c1699d13c8e7f348eeb47d963e8bdcc9b4fcee9a07ccc948423691b9b7b9e6af54b187f8c800e8b8a2854f83"
   },
-  "catalog_sha256": "87400837b5b02b03468e363e6e91afd6da1528e067ebfe13767ac56f2c17b953",
+  "catalog_sha256": "a0f0d3a49fd646efd5e102630e33d691655fd51c4619f09ceea2a20ce5df471b",
   "objects": [
     ["column", "public.announcements.announce_id", "bb931352e3490ce333244fac8a3f2d87a49edc6e44e850f29928c829787ce5c0"],
     ["column", "public.announcements.announce_type", "a92d9229320cc9ebce557d3b1c4e16df2ce4d43caa3540203ce3f34e2b8bba38"],
@@ -23,7 +23,7 @@
     ["column", "public.announcements.world_id", "eba987c1854c20a81a267f07be739411f11d1529eb11d128280726a4cacb9d29"],
     ["constraint", "public.announcements.announcements_pkey", "8c8464f42472e42ee190fc91ca8db79b5351d3a4609040516578d229c56f6fa5"],
     ["constraint", "public.announcements.uk_announcements_announce_id", "2158afc18fe9808075aa1477bd057cbf9d102aaa61eaf1388ab8df234c7aec42"],
-    ["function", "public.set_current_timestamp_updated_at()", "ed8f75b168bbcbe5a8c1aaed796440d44124259272f374a14d9e8f10d5a3b0fa"],
+    ["function", "public.set_current_timestamp_updated_at()", "76da5f31ce1d9a1f8381724f1943fb7f5247dac411b4d1e99dedacf2ec0eab48"],
     ["index", "public.announcements_pkey", "b8e1e9fe9611ede80f99e5ab9216fcbf860f2fc6f78283e3705f041ee1d714a9"],
     ["index", "public.idx_announcements_locale", "9b259fa09fabf31b3bbcb25b8d1ee7433d09525485334e22bf02d5b163f71f88"],
     ["index", "public.idx_announcements_priority", "c89a131d167fb75fe9aad6c7040d9c4b22f8c52ebd48e26eb1b8163a2ab85ada"],

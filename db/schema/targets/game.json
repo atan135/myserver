@@ -6,7 +6,7 @@
     "description": "initial schema",
     "checksum": "b3d0b1e4c189201fa05bde1ccc65e994395ee56cb9bc45f6616b3fe1c1bb84b910803938989d814cd902e3b896985c53"
   },
-  "catalog_sha256": "6f7006158377e182b2e458be7d885d39245fdd86b86a99ef8ff64cc665a20cd7",
+  "catalog_sha256": "44c8bd23cb565cf2e211042613ddeffa3f61ffa948214a8a46228366c9791cb5",
   "objects": [
     [
       "column",
@@ -1126,7 +1126,7 @@
     [
       "function",
       "public.set_current_timestamp_updated_at()",
-      "ed8f75b168bbcbe5a8c1aaed796440d44124259272f374a14d9e8f10d5a3b0fa"
+      "76da5f31ce1d9a1f8381724f1943fb7f5247dac411b4d1e99dedacf2ec0eab48"
     ],
     [
       "index",
