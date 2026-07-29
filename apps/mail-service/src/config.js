@@ -228,6 +228,21 @@ function isEd25519PrivateKey(value) {
   }
 }
 
+function resolveEd25519PrivateKeySecret(pemName, base64Name, env = process.env) {
+  const pem = String(env[pemName] || "");
+  const encoded = String(env[base64Name] || "").trim();
+  if (!encoded) return pem;
+  if (pem.trim()) throw new Error(`${pemName} and ${base64Name} cannot both be set`);
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(encoded)) {
+    throw new Error(`${base64Name} must be a base64-encoded Ed25519 PKCS8 PEM`);
+  }
+  const decoded = Buffer.from(encoded, "base64").toString("utf8").trim();
+  if (!isEd25519PrivateKey(decoded)) {
+    throw new Error(`${base64Name} must be a base64-encoded Ed25519 PKCS8 PEM`);
+  }
+  return decoded;
+}
+
 function collectLegacyDirectConfigWarnings(envNames, strictDiscovery) {
   if (!strictDiscovery) {
     return [];
@@ -317,7 +332,10 @@ export function getConfig() {
     legacyDirectConfigWarnings,
     mailGrantAssertionIssuer: process.env.MAIL_GRANT_ASSERTION_ISSUER || "mail-service",
     mailGrantAssertionKeyId: process.env.MAIL_GRANT_ASSERTION_KEY_ID || "mail-service-v1",
-    mailGrantAssertionPrivateKey: process.env.MAIL_GRANT_ASSERTION_PRIVATE_KEY || "",
+    mailGrantAssertionPrivateKey: resolveEd25519PrivateKeySecret(
+      "MAIL_GRANT_ASSERTION_PRIVATE_KEY",
+      "MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64"
+    ),
     mailGrantAssertionTtlMs: parseIntegerInRange(
       "MAIL_GRANT_ASSERTION_TTL_MS",
       process.env.MAIL_GRANT_ASSERTION_TTL_MS,

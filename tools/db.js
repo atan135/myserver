@@ -1021,9 +1021,19 @@ function platformKey() {
   return `${process.platform}-${architecture}`;
 }
 
-export function resolveSqlxBinary(config = loadJson(sqlxConfigPath)) {
+export function resolveSqlxBinary(config = loadJson(sqlxConfigPath), environment = process.env) {
   const platform = config.platforms[platformKey()];
   if (!platform) throw new Error(`sqlx-cli ${config.version} has no approved artifact for ${platformKey()}`);
+  const containerBinary = environment.MYSERVER_SQLX_CLI_PATH;
+  if (containerBinary) {
+    if (environment.MYSERVER_SQLX_CLI_SOURCE !== "container-image" || platform.containerImage !== true || !/^container:\/\/myserver\/migration-runner\/sqlx-cli-\d+\.\d+\.\d+$/.test(platform.artifactUrl || "")) {
+      throw new Error(`sqlx-cli container artifact is not approved for ${platformKey()}`);
+    }
+    if (!isAbsolute(containerBinary) || containerBinary !== platform.binary || !existsSync(containerBinary)) {
+      throw new Error("approved sqlx-cli container binary is missing or has an unexpected path");
+    }
+    return { binary: containerBinary, version: config.version };
+  }
   const binary = isAbsolute(platform.binary) ? platform.binary : join(projectRoot, platform.binary);
   const approvedArtifact = typeof platform.artifactUrl === "string" && (
     /^https:\/\//.test(platform.artifactUrl) ||

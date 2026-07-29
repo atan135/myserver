@@ -14,6 +14,7 @@ const CONFIG_ENV_KEYS = [
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
   "ADMIN_ASSERTION_PRIVATE_KEY",
+  "ADMIN_ASSERTION_PRIVATE_KEY_BASE64",
   "ADMIN_OPERATION_PREFLIGHT_TTL_MS",
   "ADMIN_OPERATION_RATE_LIMIT_WINDOW_MS",
   "ADMIN_OPERATION_RATE_LIMIT_MAX",
@@ -80,7 +81,7 @@ async function withEnv(env, fn) {
 
   try {
     const mod = await import(`./config.js?test=${Date.now()}-${Math.random()}`);
-    await fn(mod.getConfig());
+    await fn(mod.getConfig(), mod);
   } finally {
     process.chdir(previousCwd);
     fs.rmSync(tempCwd, { recursive: true, force: true });
@@ -94,6 +95,22 @@ async function withEnv(env, fn) {
     }
   }
 }
+
+test("admin assertion key accepts a one-line base64 PKCS8 PEM", async () => {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString().trim();
+  const encoded = Buffer.from(pem).toString("base64");
+  await withEnv({}, (_config, mod) => {
+    assert.equal(
+      mod.resolveEd25519PrivateKeySecret(
+        "ADMIN_ASSERTION_PRIVATE_KEY",
+        "ADMIN_ASSERTION_PRIVATE_KEY_BASE64",
+        { ADMIN_ASSERTION_PRIVATE_KEY_BASE64: encoded }
+      ),
+      pem
+    );
+  });
+});
 
 async function withCapturedWarnings(env, fn) {
   const warnings = [];

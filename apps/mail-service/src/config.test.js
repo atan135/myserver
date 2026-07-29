@@ -12,6 +12,7 @@ const CONFIG_ENV_NAMES = [
   "MAIL_GRANT_ASSERTION_ISSUER",
   "MAIL_GRANT_ASSERTION_KEY_ID",
   "MAIL_GRANT_ASSERTION_PRIVATE_KEY",
+  "MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64",
   "MAIL_GRANT_ASSERTION_TTL_MS",
   "GAME_ADMIN_CONNECT_TIMEOUT_MS",
   "GAME_ADMIN_WRITE_TIMEOUT_MS",
@@ -560,6 +561,21 @@ test("mail-service production requires distinct operations and high-risk credent
     () => withEnv({ ...base, MAIL_GRANT_ASSERTION_PRIVATE_KEY: "not-an-ed25519-private-key" }, (getConfig) => getConfig()),
     /MAIL_GRANT_ASSERTION_PRIVATE_KEY must contain a valid Ed25519 private key/
   );
+});
+
+test("mail-service accepts a one-line base64 PKCS8 assertion key", async () => {
+  const encoded = Buffer.from(TEST_MAIL_GRANT_PRIVATE_KEY).toString("base64");
+  await withEnv({
+    NODE_ENV: "production",
+    REGISTRY_ENABLED: "true",
+    TICKET_SECRET: "prod-ticket-secret-with-enough-entropy",
+    MAIL_SERVICE_TOKEN: "prod-mail-service-token-with-enough-entropy",
+    MAIL_OPERATIONS_TOKEN: "prod-mail-operations-token-with-enough-entropy",
+    MAIL_HIGH_RISK_TOKEN: "prod-mail-high-risk-token-with-enough-entropy",
+    MAIL_GRANT_ASSERTION_PRIVATE_KEY_BASE64: encoded
+  }, (getConfig) => {
+    assert.equal(getConfig().mailGrantAssertionPrivateKey.trim(), TEST_MAIL_GRANT_PRIVATE_KEY.trim());
+  });
 });
 
 test("mail-service rejects retention windows that break claim reconciliation", async () => {

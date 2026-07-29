@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.97-bookworm AS sqlx-builder
+
+RUN cargo install --locked sqlx-cli --version 0.8.6 --no-default-features --features postgres,rustls
+
+FROM node:22-bookworm AS dependencies
+
+WORKDIR /workspace
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY tools ./tools
+COPY db ./db
+
+RUN --mount=type=cache,target=/root/.npm \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ && \
+    rm -rf /var/lib/apt/lists/* && \
+    npm ci --omit=dev
+
+FROM node:22-bookworm-slim AS runtime
+
+ENV NODE_ENV=production \
+    MYSERVER_SQLX_CLI_PATH=/usr/local/bin/sqlx \
+    MYSERVER_SQLX_CLI_SOURCE=container-image
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates postgresql-client && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 myserver && \
+    useradd --system --uid 10001 --gid myserver --home-dir /app --shell /usr/sbin/nologin myserver
+
+WORKDIR /app
+COPY --chown=myserver:myserver --from=dependencies /workspace/package.json /workspace/package-lock.json ./
+COPY --chown=myserver:myserver --from=dependencies /workspace/node_modules ./node_modules
+COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db.js /app/tools/db.js
+COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db-deploy.js /app/tools/db-deploy.js
+COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db-lock-runner.js /app/tools/db-lock-runner.js
+COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db-migration-metrics.js /app/tools/db-migration-metrics.js
+COPY --chown=myserver:myserver --from=dependencies /workspace/db /app/db
+COPY --from=sqlx-builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
+COPY deploy/docker/migration-entrypoint.sh /usr/local/bin/migration-entrypoint
+
+RUN chmod 0555 /usr/local/bin/migration-entrypoint /usr/local/bin/sqlx
+
+USER myserver
+ENTRYPOINT ["/usr/local/bin/migration-entrypoint"]

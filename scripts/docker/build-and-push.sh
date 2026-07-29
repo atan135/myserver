@@ -77,25 +77,18 @@ done
 docker buildx version >/dev/null
 
 cd "$root"
-if git diff --quiet; then
-  worktree_clean=0
-else
-  worktree_clean=1
-fi
-if git diff --cached --quiet; then
-  index_clean=0
-else
-  index_clean=1
-fi
 dirty=false
-if [ "$worktree_clean" -ne 0 ] || [ "$index_clean" -ne 0 ]; then
+if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
   dirty=true
 fi
 
+package_version="$(node --input-type=module -e "import pkg from './package.json' with { type: 'json' }; process.stdout.write(pkg.version)")"
 if [ -z "$release_tag" ]; then
-  package_version="$(node --input-type=module -e "import pkg from './package.json' with { type: 'json' }; process.stdout.write(pkg.version)")"
   release_tag="v${package_version}-$(git rev-parse --short=12 HEAD)"
 fi
+
+revision="$(git rev-parse HEAD)"
+short_revision="$(git rev-parse --short=12 HEAD)"
 
 case "$release_tag" in
   *[!A-Za-z0-9._-]*|'')
@@ -110,13 +103,16 @@ if [ "$push" = true ] && [ "$dirty" = true ] && [ "$allow_dirty" = false ]; then
 fi
 
 if [ "$push" = true ]; then
+  if [[ "$release_tag" != *-docker-test-* ]] && [ "$release_tag" != "v${package_version}-${short_revision}" ] && [ "$release_tag" != "v${package_version}-${revision}" ]; then
+    echo "A formal release tag must identify the current commit: v${package_version}-${short_revision} or v${package_version}-${revision}." >&2
+    exit 64
+  fi
   if ! docker info --format '{{json .RegistryConfig.IndexConfigs}}' >/dev/null; then
     echo "Docker daemon is unavailable." >&2
     exit 69
   fi
 fi
 
-revision="$(git rev-parse HEAD)"
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 source_url="$(git config --get remote.origin.url || true)"
 records_file="$(mktemp)"
@@ -176,6 +172,7 @@ build_image announce-service announce-service deploy/docker/Dockerfile.node SERV
 build_image mail-service mail-service deploy/docker/Dockerfile.node SERVICE=mail-service
 build_image metrics-collector metrics-collector deploy/docker/Dockerfile.node SERVICE=metrics-collector
 build_image caddy caddy deploy/docker/Dockerfile.caddy
+build_image migration-runner migration-runner deploy/docker/Dockerfile.migration
 
 if [ "$push" = true ]; then
   node scripts/docker/write-images-lock.mjs \
@@ -186,6 +183,7 @@ if [ "$push" = true ]; then
     --source "$source_url" \
     --platform linux/amd64 \
     --records "$records_file" \
+    --infrastructure deploy/docker/infrastructure-images.json \
     --dirty "$dirty"
   scripts/docker/verify-release.sh "$lock_file"
   echo "Published release lock: ${lock_file}"

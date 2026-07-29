@@ -613,6 +613,7 @@ pub async fn run(
         config.nats_url.clone(),
         player_registry,
     ));
+    let readiness_task = service_registry::readiness::spawn_from_env(&config.service_name).await?;
 
     let mut next_session_id: u64 = 1;
 
@@ -655,6 +656,10 @@ pub async fn run(
     gm_broadcast_task.abort();
     let _ = gm_broadcast_task.await;
     if let Some(task) = match_client_rediscovery_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = readiness_task {
         task.abort();
         let _ = task.await;
     }

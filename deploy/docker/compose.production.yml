@@ -13,7 +13,7 @@ services:
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ../../db:/docker-entrypoint-initdb.d:ro
+      - ./postgres-bootstrap:/docker-entrypoint-initdb.d:ro
       - ./config/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     networks:
       - internal
@@ -90,6 +90,7 @@ services:
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
       SERVICE_INSTANCE_ID: game-server-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+      MYSERVER_READINESS_BIND_ADDR: 0.0.0.0:7600
     volumes:
       - ${GAME_CSV_DIR:?set GAME_CSV_DIR}:/app/csv:ro
       - game-sockets:/run/myserver
@@ -149,6 +150,7 @@ services:
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
       SERVICE_INSTANCE_ID: chat-server-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+      MYSERVER_READINESS_BIND_ADDR: 0.0.0.0:7602
     depends_on:
       postgres:
         condition: service_healthy
@@ -246,6 +248,7 @@ services:
       DISALLOW_LEGACY_DIRECT_CONFIG: "true"
       SERVICE_INSTANCE_ID: game-proxy-1
       SERVICE_BUILD_VERSION: ${RELEASE_ID:?set RELEASE_ID}
+      MYSERVER_READINESS_BIND_ADDR: 0.0.0.0:7601
     ports:
       - "${GAME_PROXY_UDP_PORT:-4000}:4000/udp"
     volumes:
@@ -361,6 +364,27 @@ services:
         condition: service_healthy
     stop_grace_period: 30s
     mem_limit: 64m
+
+  migration-runner:
+    image: ${IMAGE_MIGRATION_RUNNER:?set IMAGE_MIGRATION_RUNNER from images.lock.json}
+    profiles: ["ops"]
+    restart: "no"
+    env_file: ${MIGRATION_ENV_FILE:?set MIGRATION_ENV_FILE}
+    environment:
+      MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL: http://auth-http:3000/healthz
+      MYSERVER_DB_DEPLOY_ADMIN_API_READINESS_URL: http://admin-api:3001/healthz
+      MYSERVER_DB_DEPLOY_GAME_SERVER_READINESS_URL: http://game-server:7600/readyz
+      MYSERVER_DB_DEPLOY_GAME_PROXY_READINESS_URL: http://game-proxy:7601/readyz
+      MYSERVER_DB_DEPLOY_CHAT_SERVER_READINESS_URL: http://chat-server:7602/readyz
+      MYSERVER_DB_DEPLOY_ANNOUNCE_SERVICE_READINESS_URL: http://announce-service:9004/healthz
+      MYSERVER_DB_DEPLOY_MAIL_SERVICE_READINESS_URL: http://mail-service:9003/healthz
+      MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    mem_limit: 256m
 
 volumes:
   postgres-data:

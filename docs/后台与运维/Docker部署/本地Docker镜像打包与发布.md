@@ -155,7 +155,7 @@ npm run db:deploy -- validate --environment ci
 
 ### 5.2 标签和构建参数
 
-release ID 使用 `v<语义版本>-<短GitSHA>`，例如 `v0.4.0-a1b2c3d`。每个业务镜像都使用同一 release ID，并额外写入 OCI labels：
+正式 release ID 使用当前提交的 `v<语义版本>-<12位GitSHA>`，例如 `v0.4.0-a1b2c3d4e5f6`。每个业务镜像和 migration runner 都使用同一 release ID，并额外写入 OCI labels：
 
 ```text
 org.opencontainers.image.revision=<full-git-sha>
@@ -171,7 +171,7 @@ org.opencontainers.image.source=<repository-url>
 统一使用 Bash 包装命令，避免手工为十个业务镜像复制 `docker buildx` 参数。脚本固定构建 `linux/amd64` 镜像，并默认输出 plain BuildKit 进度：
 
 ```bash
-release_tag="v0.4.0-a1b2c3d"
+release_tag="v$(node --input-type=module -e \"import pkg from './package.json' with { type: 'json' }; process.stdout.write(pkg.version)\")-$(git rev-parse --short=12 HEAD)"
 ./scripts/docker/build-and-push.sh \
   --registry registry.example.com \
   --namespace myserver \
@@ -179,7 +179,7 @@ release_tag="v0.4.0-a1b2c3d"
   --push
 ```
 
-该脚本的职责是构建、生成 SBOM/provenance、推送、获取各镜像 digest、生成 `images.lock.json`，最后运行 `verify-release.sh`。脚本失败时不得生成可被视为完整发布的 lock 文件。
+该脚本的职责是构建 11 个应用镜像、生成 SBOM/provenance、推送、获取各镜像 digest、生成 schema v2 `images.lock.json`，最后运行 `verify-release.sh`。正式 `--push` 会拒绝脏工作区、未跟踪发布文件和不对应当前提交的 release tag；脚本失败时不得生成可被视为完整发布的 lock 文件。
 
 仅验证本地镜像时省略 `--push`；脚本会将镜像加载到本地 Docker daemon，不生成发布 lock 文件。不得以手工标签集合进入生产。
 
@@ -227,4 +227,4 @@ PostgreSQL 初始建议为 `shared_buffers=512MB`、`effective_cache_size=1536MB
 4. 本次配置新增项、secret 新增项、默认值变化和受影响公网端口。
 5. 已执行检查及结果，以及未执行真实联调的明确说明。
 
-生产服务器只能接收上述 release bundle、已审阅的非敏感 Compose/config 文件和独立注入的 secret。服务器初始化、首次发布、拉取更新、drain 与回滚见[服务器 Docker 初始化与更新](./服务器Docker初始化与更新.md)。
+生产服务器只能接收上述 release bundle、已审阅的非敏感 Compose/config 文件和独立注入的 secret。正式 bundle、首次迁移、secret 初始化、接流量和回滚边界见[正式 Release 上线说明](./正式Release上线说明.md)；服务器初始化、拉取更新和 drain 见[服务器 Docker 初始化与更新](./服务器Docker初始化与更新.md)。

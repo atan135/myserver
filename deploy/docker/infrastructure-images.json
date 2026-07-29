@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux/amd64",
+  "images": {
+    "postgres": {
+      "repository": "docker.m.daocloud.io/library/postgres",
+      "tag": "16.6-alpine",
+      "digest": "sha256:589f3b24f30e60a2b33f79543ed51c8f897589bcde5c59f4dc0e814551eeeb0f",
+      "reference": "docker.m.daocloud.io/library/postgres@sha256:589f3b24f30e60a2b33f79543ed51c8f897589bcde5c59f4dc0e814551eeeb0f"
+    },
+    "redis": {
+      "repository": "docker.m.daocloud.io/library/redis",
+      "tag": "7.4.2-alpine",
+      "digest": "sha256:519f0189dfdee3bc0bad61fb265fe73d864b5c64020e6579ad48a45c49965635",
+      "reference": "docker.m.daocloud.io/library/redis@sha256:519f0189dfdee3bc0bad61fb265fe73d864b5c64020e6579ad48a45c49965635"
+    },
+    "nats": {
+      "repository": "docker.m.daocloud.io/library/nats",
+      "tag": "2.10.21-alpine",
+      "digest": "sha256:2b131a763e1c5e7899d4d4203b9a29d75ceb0c1519078856de3881c4a0eaf1d6",
+      "reference": "docker.m.daocloud.io/library/nats@sha256:2b131a763e1c5e7899d4d4203b9a29d75ceb0c1519078856de3881c4a0eaf1d6"
+    }
+  }
+}

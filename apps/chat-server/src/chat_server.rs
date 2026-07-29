@@ -334,6 +334,7 @@ pub async fn run(
         config.max_connections_per_player,
         config.max_connections_per_ip,
     ));
+    let readiness_task = service_registry::readiness::spawn_from_env("chat-server").await?;
 
     loop {
         let accept_result = tokio::select! {
@@ -367,6 +368,11 @@ pub async fn run(
                 warn!(peer = %peer_addr, error = %e, "connection handler error");
             }
         });
+    }
+
+    if let Some(task) = readiness_task {
+        task.abort();
+        let _ = task.await;
     }
 
     Ok(())

@@ -11,7 +11,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
   options.set(key.slice(2), value);
 }
 
-const required = ["output", "release-id", "revision", "created-at", "source", "platform", "records", "dirty"];
+const required = ["output", "release-id", "revision", "created-at", "source", "platform", "records", "infrastructure", "dirty"];
 for (const key of required) {
   if (!options.has(key)) throw new Error(`missing --${key}`);
 }
@@ -29,6 +29,18 @@ const rows = (await readFile(options.get("records"), "utf8"))
 
 if (rows.length === 0) throw new Error("no image records were supplied");
 
+const infrastructureSource = JSON.parse(await readFile(options.get("infrastructure"), "utf8"));
+if (infrastructureSource.schemaVersion !== 1 || infrastructureSource.platform !== options.get("platform") || !infrastructureSource.images || typeof infrastructureSource.images !== "object") {
+  throw new Error("infrastructure image lock is invalid or targets a different platform");
+}
+const requiredInfrastructure = ["postgres", "redis", "nats"];
+for (const name of requiredInfrastructure) {
+  const image = infrastructureSource.images[name];
+  if (!image?.repository || !image?.tag || !/^sha256:[0-9a-f]{64}$/.test(image.digest ?? "") || image.reference !== `${image.repository}@${image.digest}`) {
+    throw new Error(`invalid infrastructure image lock for ${name}`);
+  }
+}
+
 const releaseId = options.get("release-id");
 const images = Object.fromEntries(
   rows.map(([service, repository, digest]) => [service, {
@@ -42,12 +54,13 @@ const images = Object.fromEntries(
 const output = path.resolve(options.get("output"));
 await mkdir(path.dirname(output), { recursive: true });
 await writeFile(output, `${JSON.stringify({
-  schemaVersion: 1,
+  schemaVersion: 2,
   releaseId,
   revision: options.get("revision"),
   createdAt: options.get("created-at"),
   source: options.get("source"),
   platform: options.get("platform"),
   dirtyWorktree: options.get("dirty") === "true",
-  images
+  images,
+  infrastructure: infrastructureSource.images
 }, null, 2)}\n`, "utf8");

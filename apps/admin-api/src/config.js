@@ -486,6 +486,23 @@ function emitLegacyDirectConfigWarnings(appName, warnings) {
   }
 }
 
+export function resolveEd25519PrivateKeySecret(pemName, base64Name, env = process.env) {
+  const pem = String(env[pemName] || "");
+  const encoded = String(env[base64Name] || "").trim();
+  if (!encoded) return pem;
+  if (pem.trim()) throw new Error(`${pemName} and ${base64Name} cannot both be set`);
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(encoded)) {
+    throw new Error(`${base64Name} must be a base64-encoded Ed25519 PKCS8 PEM`);
+  }
+  const decoded = Buffer.from(encoded, "base64").toString("utf8").trim();
+  try {
+    if (crypto.createPrivateKey(decoded).asymmetricKeyType !== "ed25519") throw new Error("not Ed25519");
+  } catch {
+    throw new Error(`${base64Name} must be a base64-encoded Ed25519 PKCS8 PEM`);
+  }
+  return decoded;
+}
+
 export function getConfig() {
   const env = process.env.NODE_ENV || "development";
   const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "8h";
@@ -574,7 +591,10 @@ export function getConfig() {
     gameAdminToken: process.env.GAME_ADMIN_TOKEN || "dev-only-change-this-game-admin-token",
     adminAssertionIssuer: process.env.ADMIN_ASSERTION_ISSUER || "admin-api",
     adminAssertionKeyId: process.env.ADMIN_ASSERTION_KEY_ID || "admin-api-v1",
-    adminAssertionPrivateKey: process.env.ADMIN_ASSERTION_PRIVATE_KEY || "",
+    adminAssertionPrivateKey: resolveEd25519PrivateKeySecret(
+      "ADMIN_ASSERTION_PRIVATE_KEY",
+      "ADMIN_ASSERTION_PRIVATE_KEY_BASE64"
+    ),
     adminAssertionTtlMs: parsePositiveIntegerWithFallback(process.env.ADMIN_ASSERTION_TTL_MS, 60000),
     adminOperationPreflightTtlMs: parseBoundedPositiveInteger(
       "ADMIN_OPERATION_PREFLIGHT_TTL_MS",

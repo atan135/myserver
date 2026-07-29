@@ -6,7 +6,7 @@
 
 该方案是单机可控部署，不提供 PostgreSQL、Redis、NATS、宿主机或可用区故障的高可用能力。服务发现、room route 和 local socket 均只在该主机内闭环。多机部署前必须完成 internal TCP 传输演进。
 
-仓库已提供 `deploy/docker/` Compose、Dockerfile、配置模板、镜像构建脚本和 release lock。服务器只接收经过本地或 CI 发布流程验证的 release bundle 与已推送镜像，不执行 `git clone`、`git pull`、`docker build`、`npm install` 或 `cargo build`。
+仓库已提供生产 Compose、独立 migration runner、镜像构建脚本和 release bundle 生成脚本。服务器只接收经过本地或 CI 发布流程验证的 release bundle 与已推送镜像，不执行 `git clone`、`git pull`、`docker build`、`npm install`、`cargo install` 或 SQLx 安装。实际正式发布以[正式 Release 上线说明](./正式Release上线说明.md)为准；本文保留宿主机基线、更新和回滚边界。
 
 已完成的 Ubuntu 宿主机 Docker 基线和可复用命令见[服务器初始化实操](./服务器初始化实操.md)。该文记录当前初始化结果，不代表业务服务已具备上线条件。
 
@@ -81,7 +81,7 @@ docker info
 
 服务器只接收以下内容：
 
-- 经过校验的 `compose.production.yml`、基础设施配置、`caddy/Caddyfile` 和 `images.lock.json`。
+- 经过校验的 `compose.production.yml`、基础设施配置和 `images.lock.json`。
 - 与 release ID 对应的非敏感环境变量模板。
 - 在服务器本地注入的 secret，不含在 release bundle 内。
 - 变更说明、数据库迁移说明、备份证据和回滚条件。
@@ -94,17 +94,20 @@ release bundle 由开发机或 CI 制作并传到服务器，不以仓库检出�
 
 ~~~text
 /data/myserver/release/<release-id>/
-  db/                         # PostgreSQL 首次初始化脚本，Compose 相对路径依赖
+  compose.production.yml
+  compose.production.env       # 已审阅的非敏感 Compose 变量
+  images.lock.json
+  infrastructure-images.json
+  config/
+  postgres-bootstrap/          # 只创建五个空库
+  db/                          # migration runner 的 SQLx migration 与 drift policy
   apps/game-server/csv/        # 运行期只读 CSV 数据
-  deploy/docker/
-    compose.production.yml
-    compose.production.env     # 已审阅的非敏感 Compose 变量
-    config/
-    caddy/
-    images.lock.json
+  scripts/initialize-production-secrets.sh
+  RELEASE
+  SHA256SUMS
 ~~~
 
-compose.production.env 从 compose.production.env.example 生成，必须填入 RELEASE_ID、十个 IMAGE_* digest reference、已审计的 PostgreSQL/Redis/NATS digest、secret 文件绝对路径、Caddy 域名和 GAME_CSV_DIR。十个业务镜像只能复制 images.lock.json 的 reference 字段，不能改写成 tag。CSV 路径推荐为当前 release 的 /data/myserver/release/<release-id>/apps/game-server/csv。
+compose.production.env 由 bundle 生成，必须包含 RELEASE_ID、11 个 IMAGE_* digest reference、已审计的 PostgreSQL/Redis/NATS digest、secret 文件绝对路径、Caddy 域名和 GAME_CSV_DIR。应用镜像只能使用 images.lock.json 的 reference 字段，不能改写成 tag。CSV 路径为当前 release 的 /data/myserver/release/<release-id>/apps/game-server/csv。
 
 服务器上的 registry 登录使用只读拉取凭据。首次验证先拉取 lock 中的一个完整 digest reference，例如：
 
@@ -116,10 +119,11 @@ docker pull \
   crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server@sha256:<digest-from-images-lock>
 ~~~
 
-将 bundle 解压到 release 目录、secret 写入 /data/myserver/secrets/ 后，先进行 Compose 插值和镜像拉取验证，不启动业务容器：
+将 bundle 解压到 release 目录后，先通过 bundle 脚本创建服务器本地 secret，再进行 Compose 插值和镜像拉取验证，不启动业务容器：
 
 ~~~bash
-cd /data/myserver/release/<release-id>/deploy/docker
+cd /data/myserver/release/<release-id>
+./scripts/initialize-production-secrets.sh --release-dir "$PWD" --origin-id <1-1023>
 
 docker compose --env-file ./compose.production.env \
   -f ./compose.production.yml config --quiet
@@ -132,7 +136,7 @@ config --quiet 必须先通过；缺少 secret 文件、基础设施 image diges
 
 目标 Compose 清单必须具备以下能力：
 
-- 使用 `mem_limit` 和 `cpus` 等 Docker Compose v2 可执行约束；不得只依赖 Swarm 语义的 `deploy.resources`。
+- 使用 `mem_limit` 等 Docker Compose v2 可执行约束；不得只依赖 Swarm 语义的 `deploy.resources`。
 - 不设置 `container_name`，为服务 identity 注入稳定且唯一的 `SERVICE_INSTANCE_ID`。
 - 基础设施和业务服务分 profile 或明确启动阶段；`depends_on` 只能辅助启动顺序，不能替代 registry readiness。
 - 业务服务采用 `restart: unless-stopped` 或等价策略，并设置与正常关闭流程匹配的 `stop_grace_period`。
@@ -152,14 +156,14 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 首次发布和每次更新均按以下状态机执行：
 
 1. 拉取并以 digest 校验全部镜像；先启动 PostgreSQL、Redis、NATS，确认其容器健康、数据目录可写且不暴露公网端口。
-2. 使用独立的 migration runner 执行受支持的五库入口，而不是直接运行 SQLx：`npm run db:deploy -- preflight --environment production`，审批完成后执行 `npm run db:deploy -- apply --environment production --actor <release-operator>`。
+2. 使用独立的 migration runner 执行受支持的五库入口，而不是在服务器直接安装 Node 或 SQLx：`docker compose --profile ops ... run --rm migration-runner preflight --environment production`，审批完成后使用同一容器执行 `apply`。完整命令见[正式 Release 上线说明](./正式Release上线说明.md)。
 3. 先启动内部服务：`game-server`、`match-service`、`chat-server`、`mail-service`、`announce-service`、`metrics-collector`。每个注册实例都必须在 Redis registry 中具备正确 endpoint 和未过期 heartbeat。
-4. 启动入口和控制面：`game-proxy`、`auth-http`、`admin-api`、`caddy`。`caddy` 托管已构建的 `admin-web` 静态文件，并仅在上游服务与入口检查通过后接收 `80/TCP`、`443/TCP` 流量。`game-proxy` 必须发现 `game-server.proxy-local`；`auth-http` 必须发现 `game-proxy.client`；`admin-api` 必须发现两个 admin endpoint。
+4. 启动入口和控制面内部组件：`game-proxy`、`auth-http`、`admin-api`。`game-proxy` 必须发现 `game-server.proxy-local`；`auth-http` 必须发现 `game-proxy.client`；`admin-api` 必须发现两个 admin endpoint。Caddy 必须在 postflight 成功后才启动；它托管已构建的 `admin-web` 静态文件并接收 `80/TCP`、`443/TCP` 流量。
 5. 运行数据库 postflight，并在已配置的 staged readiness endpoint 上显式启用 `--check-readiness --require-readiness`。随后才将 Caddy 和游戏入口接入外部流量。
 
 数据库命令的真实输入、备份证据、退出码和失败恢复以[数据库部署准入说明](../../数据库/数据库部署准入说明.md)为准。不可逆 migration 必须先准备每个受影响数据库的备份 artifact ID 和 checksum；失败后不得手工修改 `_sqlx_migrations`、跳过失败库或自动回滚 schema。
 
-当前 `deploy-gate.json` 已为 `game-server`、`game-proxy` 和 `chat-server` 声明 HTTP readiness URL，但这三个服务尚未形成统一的专用 HTTP readiness endpoint。Docker 实现必须先补充受网络隔离保护的 readiness endpoint 或 adapter，才能在生产诚实地使用 `--require-readiness`。在此之前，不得将“容器存活”伪装成数据库 postflight 的服务健康。
+`game-server`、`game-proxy` 和 `chat-server` 已提供仅 Docker internal network 可访问的 `GET /readyz` endpoint，分别绑定 `7600`、`7601`、`7602`；它们与 Node 服务的 `/healthz` 一同由 migration runner 的 `--require-readiness` 检查。容器存活不能替代这些检查。
 
 ### 3.4 接流量前检查
 

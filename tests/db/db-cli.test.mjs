@@ -398,14 +398,15 @@ test("sqlx binary requires the configured SHA-256", () => {
   const binary = join(directory, "sqlx.exe");
   writeFileSync(binary, "approved binary");
   const hash = createHash("sha256").update("approved binary").digest("hex");
+  const platform = `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`;
   const config = {
     version: "0.8.6",
     platforms: {
-      "win32-x64": { binary, artifactUrl: "https://example.invalid/sqlx.exe", sha256: hash, provisioned: true }
+      [platform]: { binary, artifactUrl: "https://example.invalid/sqlx.exe", sha256: hash, provisioned: true }
     }
   };
-  assert.throws(() => resolveSqlxBinary({ ...config, platforms: { "win32-x64": { ...config.platforms["win32-x64"], provisioned: false } } }), /not provisioned/);
-  assert.throws(() => resolveSqlxBinary({ ...config, platforms: { "win32-x64": { ...config.platforms["win32-x64"], sha256: "0".repeat(64) } } }), /mismatch/);
+  assert.throws(() => resolveSqlxBinary({ ...config, platforms: { [platform]: { ...config.platforms[platform], provisioned: false } } }), /not provisioned/);
+  assert.throws(() => resolveSqlxBinary({ ...config, platforms: { [platform]: { ...config.platforms[platform], sha256: "0".repeat(64) } } }), /mismatch/);
   assert.equal(resolveSqlxBinary(config).binary, binary);
 });
 
@@ -414,10 +415,11 @@ test("sqlx binary accepts the pinned local cargo-install artifact", () => {
   const binary = join(directory, "sqlx.exe");
   writeFileSync(binary, "approved local sqlx fixture");
   const hash = createHash("sha256").update(readFileSync(binary)).digest("hex");
+  const platform = `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`;
   const config = {
     version: "0.8.6",
     platforms: {
-      "win32-x64": {
+      [platform]: {
         binary,
         artifactUrl: "local://cargo-install/sqlx-cli-0.8.6?locked=true&features=postgres%2Crustls",
         sha256: hash,
@@ -426,6 +428,32 @@ test("sqlx binary accepts the pinned local cargo-install artifact", () => {
     }
   };
   assert.equal(resolveSqlxBinary(config).binary, binary);
+});
+
+test("sqlx binary accepts only the approved migration runner container path", () => {
+  const directory = mkdtempSync(join(tmpdir(), "myserver-sqlx-container-"));
+  const binary = join(directory, "sqlx");
+  writeFileSync(binary, "container sqlx fixture");
+  const platform = `${process.platform}-${process.arch === "x64" ? "x64" : process.arch}`;
+  const config = {
+    version: "0.8.6",
+    platforms: {
+      [platform]: {
+        binary,
+        artifactUrl: "container://myserver/migration-runner/sqlx-cli-0.8.6",
+        containerImage: true,
+        provisioned: true
+      }
+    }
+  };
+  assert.throws(
+    () => resolveSqlxBinary(config, { MYSERVER_SQLX_CLI_PATH: binary, MYSERVER_SQLX_CLI_SOURCE: "untrusted" }),
+    /container artifact is not approved/
+  );
+  assert.equal(
+    resolveSqlxBinary(config, { MYSERVER_SQLX_CLI_PATH: binary, MYSERVER_SQLX_CLI_SOURCE: "container-image" }).binary,
+    binary
+  );
 });
 
 test("migration files require monotonic UTC timestamp names", () => {

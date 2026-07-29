@@ -311,6 +311,7 @@ pub async fn run(
     let tcp_addr = config.tcp_fallback_addr();
     let mut tcp_frontend = crate::transport::tcp_frontend::TcpFrontend::bind(&tcp_addr).await?;
     info!(addr = %tcp_addr, protocol = "tcp", "game-proxy tcp fallback frontend listening");
+    let _readiness_task = service_registry::readiness::spawn_from_env(&config.service_name).await?;
 
     let mut next_session_id = 1u64;
     let connection_limiter = ConnectionLimiter::new(config.connection_limits.clone());

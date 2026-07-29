@@ -1,5 +1,6 @@
 mod client;
 mod discovery_metrics;
+pub mod readiness;
 mod types;
 
 pub use client::{DiscoverySnapshot, DiscoveryWatch, DiscoveryWatchConfig, RegistryClient};
