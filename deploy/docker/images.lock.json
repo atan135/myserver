@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "v0.1.0-docker-test-e6c0922",
+  "revision": "e6c09222846a1ae810bebb176ec2815a025ae468",
+  "createdAt": "2026-07-29T03:28:15Z",
+  "source": "git@github.com:atan135/myserver.git",
+  "platform": "linux/amd64",
+  "dirtyWorktree": false,
+  "images": {
+    "game-server": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:6843e2ae3cd5c8433024b0edc0b7256470a71c3069c0aadd80f6a12723dfd458",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server@sha256:6843e2ae3cd5c8433024b0edc0b7256470a71c3069c0aadd80f6a12723dfd458"
+    },
+    "game-proxy": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-proxy",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:873a7841481575820060e081f0db482166824acdb8dcf0a49e7a877decb1f539",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-proxy@sha256:873a7841481575820060e081f0db482166824acdb8dcf0a49e7a877decb1f539"
+    },
+    "chat-server": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/chat-server",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:54aea574c1203e4e8273bfabfb421ebe18d8f7343e124fa8164c0c79bc9b23ca",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/chat-server@sha256:54aea574c1203e4e8273bfabfb421ebe18d8f7343e124fa8164c0c79bc9b23ca"
+    },
+    "match-service": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/match-service",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:45a0cc8a5afa95582463b6940ea9467177128684eab9f3118558c3b5bacf938f",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/match-service@sha256:45a0cc8a5afa95582463b6940ea9467177128684eab9f3118558c3b5bacf938f"
+    },
+    "auth-http": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/auth-http",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:ccca8ed4e793554a7a3098a3e0206bb7e0a935c68d159204055bd0acb68ba7bf",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/auth-http@sha256:ccca8ed4e793554a7a3098a3e0206bb7e0a935c68d159204055bd0acb68ba7bf"
+    },
+    "admin-api": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/admin-api",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:c3c9996aef4f8e787f3f4c63c13404ee319d5d418b72ac9e6c9caf38fa1938ed",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/admin-api@sha256:c3c9996aef4f8e787f3f4c63c13404ee319d5d418b72ac9e6c9caf38fa1938ed"
+    },
+    "announce-service": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/announce-service",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:d6e2c3de0b4c2ed683ac60000a5bd7749104ed87a5e411cd35786c08b32a5b49",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/announce-service@sha256:d6e2c3de0b4c2ed683ac60000a5bd7749104ed87a5e411cd35786c08b32a5b49"
+    },
+    "mail-service": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/mail-service",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:e8b704048cf5aebb4e4792483089a37f314b61b103b53b5973d53d66eb0ae297",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/mail-service@sha256:e8b704048cf5aebb4e4792483089a37f314b61b103b53b5973d53d66eb0ae297"
+    },
+    "metrics-collector": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/metrics-collector",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:56395e5669edf82c62041bf3605c8183975f45711b6a1c479d45166109218bd5",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/metrics-collector@sha256:56395e5669edf82c62041bf3605c8183975f45711b6a1c479d45166109218bd5"
+    },
+    "caddy": {
+      "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/caddy",
+      "tag": "v0.1.0-docker-test-e6c0922",
+      "digest": "sha256:99adac2410bd89eb7f60944d588d04e06d18cfa2feee74711cc0abf458cbde6c",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/caddy@sha256:99adac2410bd89eb7f60944d588d04e06d18cfa2feee74711cc0abf458cbde6c"
+    }
+  }
+}
