@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { natsConnectOptions } from "../packages/nats-client/node.js";
+
 export const MIGRATION_METRICS_SERVICE = "db-migration";
 export const MIGRATION_METRICS_SUBJECT_PREFIX = `myserver.metrics.${MIGRATION_METRICS_SERVICE}.`;
 
@@ -136,8 +138,7 @@ export async function publishMigrationMetric(event, config, options = {}) {
     const codec = options.codec || nats.StringCodec();
     connection = await withTimeout(
       nats.connect({
-        servers: config.natsUrl,
-        name: "db-migration-metrics",
+        ...natsConnectOptions(config.natsUrl, "db-migration-metrics"),
         timeout: config.timeoutMs,
         reconnect: false,
         maxReconnectAttempts: 0

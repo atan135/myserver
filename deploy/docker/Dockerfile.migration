@@ -34,6 +34,7 @@ RUN apt-get update && \
 WORKDIR /app
 COPY --chown=myserver:myserver --from=dependencies /workspace/package.json /workspace/package-lock.json ./
 COPY --chown=myserver:myserver --from=dependencies /workspace/node_modules ./node_modules
+COPY --chown=myserver:myserver --from=dependencies /workspace/packages /app/packages
 COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db.js /app/tools/db.js
 COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db-deploy.js /app/tools/db-deploy.js
 COPY --chown=myserver:myserver --from=dependencies /workspace/tools/db-lock-runner.js /app/tools/db-lock-runner.js

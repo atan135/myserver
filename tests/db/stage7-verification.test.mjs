@@ -128,6 +128,8 @@ test("migration metrics adapter publishes a collector-compatible, redacted versi
     async connect(options) {
       assert.equal(options.name, "db-migration-metrics");
       assert.equal(options.reconnect, false);
+      assert.equal(options.servers, "nats://metrics.example.test:4222");
+      assert.equal(options.token, "migration-token");
       return {
         publish(subject, data) { messages.push({ subject, data }); },
         async flush() {},
@@ -137,7 +139,7 @@ test("migration metrics adapter publishes a collector-compatible, redacted versi
   };
   const published = await publishMigrationMetric(event, {
     enabled: true,
-    natsUrl: "nats://metrics.example.test:4222",
+    natsUrl: "nats://migration-token@metrics.example.test:4222",
     timeoutMs: 100
   }, { nats });
   assert.deepEqual(published, { delivered: true, state: "delivered" });
