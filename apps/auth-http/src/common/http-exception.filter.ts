@@ -4,12 +4,25 @@ import { log } from "../logger.js";
 
 function sendJson(response: any, status: number, body: Record<string, unknown>) {
   if (typeof response.status === "function") {
-    response.status(status);
+    const reply = response.status(status);
+    if (typeof reply?.send === "function") {
+      return reply.send(body);
+    }
   } else if (typeof response.code === "function") {
-    response.code(status);
+    const reply = response.code(status);
+    if (typeof reply?.send === "function") {
+      return reply.send(body);
+    }
   }
 
-  return response.send(body);
+  if (typeof response.send === "function") {
+    return response.send(body);
+  }
+
+  response.statusCode = status;
+  response.setHeader?.("content-type", "application/json");
+  response.end?.(JSON.stringify(body));
+  return response;
 }
 
 @Catch()

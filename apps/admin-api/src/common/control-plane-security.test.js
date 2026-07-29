@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { HttpException } from "@nestjs/common";
 
 process.env.TS_NODE_PROJECT ??= fileURLToPath(new URL("../../tsconfig.json", import.meta.url));
 process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
@@ -15,6 +16,7 @@ const {
   isTrustedProxy
 } = await import("./client-ip.ts");
 const { evaluateControlPlaneSecurity } = await import("./control-plane-security.ts");
+const { HttpExceptionFilter } = await import("./http-exception.filter.ts");
 
 function req(remoteAddress, headers = {}, extra = {}) {
   return {
@@ -79,6 +81,20 @@ test("evaluateControlPlaneSecurity rejects non-TLS requests when required", () =
   assert.equal(result.error, "ADMIN_API_TLS_REQUIRED");
 });
 
+test("evaluateControlPlaneSecurity allows only the exact Docker healthcheck path", () => {
+  const config = {
+    adminApiRequireTls: true,
+    adminApiRequireIpAllowlist: true,
+    adminApiIpAllowlist: ["203.0.113.0/24"]
+  };
+
+  assert.equal(evaluateControlPlaneSecurity(req("198.51.100.8", {}, { url: "/healthz" }), config).ok, true);
+
+  const rejected = evaluateControlPlaneSecurity(req("198.51.100.8", {}, { url: "/healthz?verbose=1" }), config);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error, "ADMIN_API_TLS_REQUIRED");
+});
+
 test("evaluateControlPlaneSecurity allows and rejects by client IP allowlist", () => {
   const config = {
     adminApiRequireTls: false,
@@ -92,4 +108,30 @@ test("evaluateControlPlaneSecurity allows and rejects by client IP allowlist", (
   assert.equal(rejected.ok, false);
   assert.equal(rejected.statusCode, 403);
   assert.equal(rejected.error, "ADMIN_API_IP_NOT_ALLOWED");
+});
+
+test("HttpExceptionFilter writes JSON through a Fastify raw response", () => {
+  const response = {
+    headers: {},
+    setHeader(name, value) {
+      this.headers[name] = value;
+    },
+    end(payload) {
+      this.payload = payload;
+    }
+  };
+  const host = {
+    switchToHttp: () => ({
+      getResponse: () => response
+    })
+  };
+
+  new HttpExceptionFilter().catch(
+    new HttpException({ ok: false, error: "ADMIN_API_TLS_REQUIRED" }, 426),
+    host
+  );
+
+  assert.equal(response.statusCode, 426);
+  assert.equal(response.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(response.payload), { ok: false, error: "ADMIN_API_TLS_REQUIRED" });
 });

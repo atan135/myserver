@@ -5,8 +5,17 @@ function sendJson(reply: any, statusCode: number, body: Record<string, unknown>)
   return reply.code(statusCode).type("application/json").send(body);
 }
 
+function isDockerHealthCheck(req: any) {
+  const requestUrl = req?.raw?.url ?? req?.originalUrl ?? req?.url;
+  return requestUrl === "/healthz";
+}
+
 export function evaluateControlPlaneSecurity(req: any, config: any = {}) {
   const clientIp = getClientIp(req, config);
+
+  if (isDockerHealthCheck(req)) {
+    return { ok: true, clientIp };
+  }
 
   if (config.adminApiRequireTls && !isRequestSecure(req, config)) {
     return {
