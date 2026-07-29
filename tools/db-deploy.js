@@ -22,9 +22,10 @@ import {
 const { Client } = pg;
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const deployGatePath = join(projectRoot, "db", "config", "deploy-gate.json");
-const deploymentCommands = new Set(["validate", "preflight", "apply", "postflight", "rebuild-check"]);
+const deploymentCommands = new Set(["validate", "preflight", "initialize", "apply", "postflight", "rebuild-check"]);
 const readinessFlags = new Set(["check-readiness", "require-readiness"]);
 const temporaryConfirmation = "stage6-temporary-rebuild";
+const emptyDatabaseConfirmation = "initialize-empty-databases";
 const temporaryDatabasePrefix = "myserver_stage6_";
 const temporaryDatabasePattern = /^myserver_stage6_[a-z0-9_]+$/;
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -39,7 +40,7 @@ const backupChecksumPattern = /^(?:[a-f0-9]{64}|[a-f0-9]{128})$/i;
 export function parseDeploymentArguments(argv) {
   const [command, ...rest] = argv;
   if (!deploymentCommands.has(command)) {
-    throw new Error("usage: db-deploy <validate|preflight|apply|postflight|rebuild-check> --environment <name> [--actor <identity>] [--check-readiness] [--require-readiness] [--confirm-temporary-rebuild stage6-temporary-rebuild]");
+    throw new Error("usage: db-deploy <validate|preflight|initialize|apply|postflight|rebuild-check> --environment <name> [--actor <identity>] [--check-readiness] [--require-readiness] [--confirm-empty-databases initialize-empty-databases] [--confirm-temporary-rebuild stage6-temporary-rebuild]");
   }
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
@@ -56,9 +57,9 @@ export function parseDeploymentArguments(argv) {
     options[key] = value;
     index += 1;
   }
-  const supported = new Set(["environment", "actor", "confirm-temporary-rebuild", ...readinessFlags]);
+  const supported = new Set(["environment", "actor", "confirm-empty-databases", "confirm-temporary-rebuild", ...readinessFlags]);
   if (Object.keys(options).some((key) => !supported.has(key))) {
-    throw new Error("only --environment, --actor, --check-readiness, --require-readiness and --confirm-temporary-rebuild are supported");
+    throw new Error("only --environment, --actor, --check-readiness, --require-readiness, --confirm-empty-databases and --confirm-temporary-rebuild are supported");
   }
   if (!environmentPattern.test(options.environment || "")) {
     throw new Error("--environment requires a lower-case deployment environment name");
@@ -69,18 +70,30 @@ export function parseDeploymentArguments(argv) {
   if (options["require-readiness"] && !options["check-readiness"]) {
     throw new Error("--require-readiness requires --check-readiness");
   }
-  if (command === "apply" && !options.actor) {
-    throw new Error("apply requires --actor for migration audit events");
+  if ((command === "initialize" || command === "apply") && !options.actor) {
+    throw new Error(`${command} requires --actor for migration audit events`);
   }
-  if (command === "rebuild-check") {
+  if (command === "initialize") {
+    if (options["confirm-empty-databases"] !== emptyDatabaseConfirmation) {
+      throw new Error(`initialize requires --confirm-empty-databases ${emptyDatabaseConfirmation}`);
+    }
+    if (options["confirm-temporary-rebuild"] !== undefined) {
+      throw new Error("--confirm-temporary-rebuild is only supported by rebuild-check");
+    }
+  } else if (command === "rebuild-check") {
     if (options["confirm-temporary-rebuild"] !== temporaryConfirmation) {
       throw new Error(`rebuild-check requires --confirm-temporary-rebuild ${temporaryConfirmation}`);
     }
-    if (options.actor || options["check-readiness"] || options["require-readiness"]) {
+    if (options.actor || options["check-readiness"] || options["require-readiness"] || options["confirm-empty-databases"] !== undefined) {
       throw new Error("rebuild-check only supports --environment and --confirm-temporary-rebuild");
     }
-  } else if (options["confirm-temporary-rebuild"] !== undefined) {
-    throw new Error("--confirm-temporary-rebuild is only supported by rebuild-check");
+  } else {
+    if (options["confirm-empty-databases"] !== undefined) {
+      throw new Error("--confirm-empty-databases is only supported by initialize");
+    }
+    if (options["confirm-temporary-rebuild"] !== undefined) {
+      throw new Error("--confirm-temporary-rebuild is only supported by rebuild-check");
+    }
   }
   return {
     command,
@@ -88,6 +101,7 @@ export function parseDeploymentArguments(argv) {
     actor: options.actor,
     checkReadiness: options["check-readiness"] === true,
     requireReadiness: options["require-readiness"] === true,
+    confirmEmptyDatabases: options["confirm-empty-databases"],
     confirmTemporaryRebuild: options["confirm-temporary-rebuild"]
   };
 }
@@ -764,6 +778,65 @@ export async function runApply(options, overrides = {}) {
   };
 }
 
+export async function runInitialize(options, overrides = {}) {
+  if (options.confirmEmptyDatabases !== emptyDatabaseConfirmation) {
+    return {
+      command: "initialize",
+      environment: options.environment,
+      phase: "argument-validation",
+      ok: false,
+      code: EXIT.CONFIG,
+      stopped: true,
+      migrations: [],
+      postflight: { state: "not-run" },
+      recovery: [`Rerun only after confirming the target is empty with --confirm-empty-databases ${emptyDatabaseConfirmation}.`]
+    };
+  }
+  const runtime = deploymentRuntime(overrides);
+  const preflight = await runPreflight({ ...options, allowUninitialized: true }, runtime);
+  if (!preflight.ok) {
+    return {
+      command: "initialize",
+      environment: options.environment,
+      phase: "preflight",
+      ok: false,
+      code: preflight.code,
+      stopped: true,
+      preflight,
+      migrations: [],
+      postflight: { state: "not-run" },
+      recovery: preflight.recovery
+    };
+  }
+  const nonEmptyDatabases = preflight.reports.filter(({ migration }) => migration.history.exists || migration.history.managedTables);
+  if (nonEmptyDatabases.length > 0) {
+    return {
+      command: "initialize",
+      environment: options.environment,
+      phase: "empty-database-gate",
+      ok: false,
+      code: EXIT.VALIDATION,
+      stopped: true,
+      preflight,
+      migrations: [],
+      postflight: { state: "not-run" },
+      recovery: [
+        `Initialize only accepts five empty databases; existing state was found in: ${nonEmptyDatabases.map(({ database }) => database).join(", ")}.`,
+        "Use the normal preflight and apply workflow for an initialized environment."
+      ]
+    };
+  }
+  const report = await runApply({ ...options, allowUninitialized: true }, runtime);
+  return {
+    ...report,
+    command: "initialize",
+    initialization: {
+      confirmedEmptyDatabases: true,
+      databases: preflight.reports.map(({ database }) => database)
+    }
+  };
+}
+
 export function temporaryDatabaseName(token, databaseKey) {
   if (!/^[a-z0-9_]{4,40}$/.test(token) || !/^[a-z][a-z0-9_]{1,20}$/.test(databaseKey)) {
     throw new Error("temporary database token or database key is invalid");
@@ -981,6 +1054,7 @@ export async function main(argv = process.argv.slice(2)) {
   let report;
   if (options.command === "validate") report = runStaticValidation(options);
   else if (options.command === "preflight") report = await runPreflight(options);
+  else if (options.command === "initialize") report = await runInitialize(options);
   else if (options.command === "postflight") report = await runPostflight(options);
   else if (options.command === "apply") report = await runApply(options);
   else report = await runRebuildCheck(options);

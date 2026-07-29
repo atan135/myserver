@@ -114,9 +114,9 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 docker compose --env-file compose.production.env -f compose.production.yml ps
 
 docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
-  run --rm migration-runner preflight --environment production
-docker compose --profile ops --env-file compose.production.env -f compose.production.yml \
-  run --rm migration-runner apply --environment production --actor <release-operator>
+  run --rm migration-runner initialize --environment production \
+  --actor <release-operator> \
+  --confirm-empty-databases initialize-empty-databases
 
 docker compose --env-file compose.production.env -f compose.production.yml \
   up -d game-server match-service chat-server mail-service announce-service metrics-collector
@@ -132,6 +132,8 @@ docker compose --env-file compose.production.env -f compose.production.yml \
 ```
 
 `game-server`、`game-proxy` 和 `chat-server` 分别在 Docker internal network 的 `7600`、`7601`、`7602` 提供 `GET /readyz`。它们没有宿主机端口映射，只用于 postflight；Node HTTP 服务使用自身 `/healthz`。postflight 失败时，不要启动 Caddy 或开放 `4000/UDP`、`80/TCP`、`443/TCP`，也不要手工修改 `_sqlx_migrations`。
+
+`initialize` 只用于首次上线，且会先验证五个逻辑库均不存在 `_sqlx_migrations`、不存在业务表。它随后通过同一个受控 runner 写入 schema 与 SQLx history，并执行不要求服务 readiness 的数据库 postflight。任一库已有 history 或业务表时它都会拒绝；这类环境必须改用常规的 `preflight` 和 `apply`，不得以初始化命令绕过迁移审计。
 
 ## 6. 接流量与记录
 

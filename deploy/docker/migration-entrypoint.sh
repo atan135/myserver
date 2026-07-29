@@ -7,7 +7,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 case "$1" in
-  validate|preflight|apply|postflight|rebuild-check)
+  validate|preflight|initialize|apply|postflight|rebuild-check)
     set -- node tools/db-deploy.js "$@"
     ;;
 esac

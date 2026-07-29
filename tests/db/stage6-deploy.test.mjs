@@ -6,6 +6,7 @@ import { EXIT, sqlxMigrationMetadata } from "../../tools/db.js";
 import {
   parseDeploymentArguments,
   runApply,
+  runInitialize,
   runPostflight,
   runPreflight,
   runRebuildCheck,
@@ -81,9 +82,12 @@ test("deployment CLI requires explicit environment, actor and temporary rebuild 
     actor: undefined,
     checkReadiness: false,
     requireReadiness: false,
+    confirmEmptyDatabases: undefined,
     confirmTemporaryRebuild: undefined
   });
   assert.throws(() => parseDeploymentArguments(["apply", "--environment", "ci"]), /requires --actor/);
+  assert.throws(() => parseDeploymentArguments(["initialize", "--environment", "ci", "--actor", "stage6-test"]), /confirm-empty-databases/);
+  assert.equal(parseDeploymentArguments(["initialize", "--environment", "ci", "--actor", "stage6-test", "--confirm-empty-databases", "initialize-empty-databases"]).confirmEmptyDatabases, "initialize-empty-databases");
   assert.throws(() => parseDeploymentArguments(["postflight", "--environment", "ci", "--require-readiness"]), /requires --check-readiness/);
   assert.throws(() => parseDeploymentArguments(["rebuild-check", "--environment", "ci"]), /confirm-temporary-rebuild/);
   assert.equal(parseDeploymentArguments(["rebuild-check", "--environment", "ci", "--confirm-temporary-rebuild", "stage6-temporary-rebuild"]).confirmTemporaryRebuild, "stage6-temporary-rebuild");
@@ -121,6 +125,51 @@ test("apply stops before later databases when one migration fails", async () => 
   assert.deepEqual(calls.filter((call) => call.startsWith("up:")), ["up:auth"]);
   assert.equal(calls.includes("up:game"), false);
   assert.equal(report.postflight.state, "not-run");
+});
+
+test("initialize applies only when all five databases are empty", async () => {
+  const migrated = new Set();
+  const calls = [];
+  const report = await runInitialize({
+    environment: "ci",
+    actor: "stage6-test",
+    checkReadiness: false,
+    requireReadiness: false,
+    confirmEmptyDatabases: "initialize-empty-databases"
+  }, fakeRuntime({
+    async connect(_url, database) {
+      return healthyClient(database, { history: migrated.has(database.key) });
+    },
+    executeDatabase(command, database) {
+      calls.push(`${command}:${database.key}`);
+      if (command === "up") migrated.add(database.key);
+      return { ok: true, code: EXIT.OK };
+    }
+  }));
+  assert.equal(report.ok, true, JSON.stringify(report));
+  assert.equal(report.command, "initialize");
+  assert.deepEqual(calls.filter((call) => call.startsWith("up:")), ["up:auth", "up:game", "up:chat", "up:announce", "up:mail"]);
+  assert.deepEqual(report.initialization.databases, ["auth", "game", "chat", "announce", "mail"]);
+});
+
+test("initialize rejects any database with existing SQLx history", async () => {
+  const calls = [];
+  const report = await runInitialize({
+    environment: "ci",
+    actor: "stage6-test",
+    checkReadiness: false,
+    requireReadiness: false,
+    confirmEmptyDatabases: "initialize-empty-databases"
+  }, fakeRuntime({
+    executeDatabase(command, database) {
+      calls.push(`${command}:${database.key}`);
+      return { ok: true, code: EXIT.OK };
+    }
+  }));
+  assert.equal(report.ok, false);
+  assert.equal(report.phase, "empty-database-gate");
+  assert.equal(calls.some((call) => call.startsWith("up:")), false);
+  assert.match(report.recovery.join(" "), /normal preflight and apply/);
 });
 
 test("postflight keeps readiness explicitly unknown until an operator asks to probe it", async () => {
