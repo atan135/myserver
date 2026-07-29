@@ -6,7 +6,7 @@
 
 该方案是单机可控部署，不提供 PostgreSQL、Redis、NATS、宿主机或可用区故障的高可用能力。服务发现、room route 和 local socket 均只在该主机内闭环。多机部署前必须完成 internal TCP 传输演进。
 
-当前仓库尚未提供本文引用的 Docker Compose、迁移容器、镜像构建脚本或 release bundle。首次执行前必须先按[本地 Docker 镜像打包与发布](./本地Docker镜像打包与发布.md)实现并审阅这些资产。
+仓库已提供 `deploy/docker/` Compose、Dockerfile、配置模板、镜像构建脚本和 release lock。服务器只接收经过本地或 CI 发布流程验证的 release bundle 与已推送镜像，不执行 `git clone`、`git pull`、`docker build`、`npm install` 或 `cargo build`。
 
 已完成的 Ubuntu 宿主机 Docker 基线和可复用命令见[服务器初始化实操](./服务器初始化实操.md)。该文记录当前初始化结果，不代表业务服务已具备上线条件。
 
@@ -62,20 +62,16 @@ docker info
 建议使用独立数据根目录：
 
 ```text
-/srv/myserver/
-  release/        # 已审阅的 compose、images.lock.json、非私密配置
+/data/myserver/
+  docker/         # Docker daemon data-root，由 daemon 管理
+  release/        # 已审阅的 release bundle，按 release ID 分目录
   secrets/        # 仅服务器本地，0700 目录、0600 文件
-  data/
-    postgres/
-    redis/
-    nats/
   backups/
   logs/
   sockets/        # 临时 local socket，不备份、不跨主机复制
-  caddy/          # Caddy 证书和 ACME 状态；明确持久化，按备份策略处理
 ```
 
-PostgreSQL、Redis、NATS 和 Caddy 的状态数据使用明确的 bind mount 或命名 volume，不能使用匿名 volume。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若选择 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
+当前生产 Compose 使用命名 volume，实际数据位于 Docker `data-root` 下；不得使用匿名 volume，也不得手工修改 `/data/myserver/docker` 中的 volume 内容。Caddy 的状态数据保存自动 HTTPS 证书和 ACME 账户，必须跨容器重建保留。若后续改为 bind mount，先用已锁定镜像确认容器运行 UID/GID，再仅对对应目录授予最小权限；不要猜测 UID 后执行递归 `chown`。数据目录不放入 Git、不随 release 清理，也不作为镜像构建上下文。
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
@@ -92,6 +88,48 @@ PostgreSQL、Redis、NATS 和 Caddy 的状态数据使用明确的 bind mount �
 
 先检查 release manifest 的 release ID、Git commit、目标平台和所有 image digest。不得用 tag 名字代替 digest 验证，也不得通过 `git clone` 获得未经发布流程验证的运行文件。
 
+### 3.2 服务器交付与拉取验证
+
+release bundle 由开发机或 CI 制作并传到服务器，不以仓库检出目录替代。每个 release 使用独立目录，至少包含：
+
+~~~text
+/data/myserver/release/<release-id>/
+  db/                         # PostgreSQL 首次初始化脚本，Compose 相对路径依赖
+  apps/game-server/csv/        # 运行期只读 CSV 数据
+  deploy/docker/
+    compose.production.yml
+    compose.production.env     # 已审阅的非敏感 Compose 变量
+    config/
+    caddy/
+    images.lock.json
+~~~
+
+compose.production.env 从 compose.production.env.example 生成，必须填入 RELEASE_ID、十个 IMAGE_* digest reference、已审计的 PostgreSQL/Redis/NATS digest、secret 文件绝对路径、Caddy 域名和 GAME_CSV_DIR。十个业务镜像只能复制 images.lock.json 的 reference 字段，不能改写成 tag。CSV 路径推荐为当前 release 的 /data/myserver/release/<release-id>/apps/game-server/csv。
+
+服务器上的 registry 登录使用只读拉取凭据。首次验证先拉取 lock 中的一个完整 digest reference，例如：
+
+~~~bash
+docker login --username='<registry-pull-user>' \
+  crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com
+
+docker pull \
+  crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server@sha256:<digest-from-images-lock>
+~~~
+
+将 bundle 解压到 release 目录、secret 写入 /data/myserver/secrets/ 后，先进行 Compose 插值和镜像拉取验证，不启动业务容器：
+
+~~~bash
+cd /data/myserver/release/<release-id>/deploy/docker
+
+docker compose --env-file ./compose.production.env \
+  -f ./compose.production.yml config --quiet
+docker compose --env-file ./compose.production.env \
+  -f ./compose.production.yml pull
+~~~
+
+config --quiet 必须先通过；缺少 secret 文件、基础设施 image digest、域名或任一 IMAGE_* 变量时应停止并修正交付物。名称中含 -docker-test- 的 release 仅用于 registry 拉取和 Compose 配置验证，不得导入生产数据、启动全量服务或开放公网流量。
+
+
 目标 Compose 清单必须具备以下能力：
 
 - 使用 `mem_limit` 和 `cpus` 等 Docker Compose v2 可执行约束；不得只依赖 Swarm 语义的 `deploy.resources`。
@@ -101,7 +139,7 @@ PostgreSQL、Redis、NATS 和 Caddy 的状态数据使用明确的 bind mount �
 - 为 `game-proxy`、`game-server`、`match-service` 共享临时 socket volume；其余服务不能读取该 volume。
 - 不将中间件和内部服务端口映射到宿主机。
 
-### 3.2 迁移与启动顺序
+### 3.3 迁移与启动顺序
 
 严格环境固定使用：
 
@@ -123,7 +161,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 
 当前 `deploy-gate.json` 已为 `game-server`、`game-proxy` 和 `chat-server` 声明 HTTP readiness URL，但这三个服务尚未形成统一的专用 HTTP readiness endpoint。Docker 实现必须先补充受网络隔离保护的 readiness endpoint 或 adapter，才能在生产诚实地使用 `--require-readiness`。在此之前，不得将“容器存活”伪装成数据库 postflight 的服务健康。
 
-### 3.3 接流量前检查
+### 3.4 接流量前检查
 
 以下条件全部满足后，才允许开放玩家和运营流量：
 

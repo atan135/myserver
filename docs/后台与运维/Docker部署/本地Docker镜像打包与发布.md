@@ -4,7 +4,7 @@
 
 本文定义 MyServer 单机 Docker 发布的本地构建、镜像签名/推送和交付物规范。目标环境是 Linux `x86_64` 单机 `4C8G`，所有业务服务和 PostgreSQL、Redis、Core NATS 都运行在 Docker 中。
 
-本文只定义后续 Docker 化必须满足的契约。当前仓库尚未提供 `Dockerfile`、`docker compose` 清单、镜像构建脚本或镜像仓库配置，因此本文所列 `deploy/docker/` 文件和 `scripts/docker/` 命令在实现前不可直接执行。
+仓库已提供本文列出的 `deploy/docker/` 发布资产和 `scripts/docker/` 构建脚本。命令仅能在满足前置条件、工作区已审阅且 Docker 已登录目标镜像仓库时执行；服务器侧交付和拉取流程见[服务器 Docker 初始化与更新](./服务器Docker初始化与更新.md)。
 
 相关约束：
 
@@ -22,7 +22,7 @@
 
 ## 3. 目标交付物
 
-Docker 化实现完成后，仓库应提供以下受版本控制但不含私密值的发布资产：
+仓库提供以下受版本控制但不含私密值的发布资产：
 
 ```text
 deploy/docker/
