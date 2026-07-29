@@ -7,3 +7,7 @@ tests/proto/fixtures/compatibility/*.bin binary
 
 # Deployment entrypoints execute in Linux through WSL and on production hosts.
 *.sh text eol=lf
+
+# SQLx records migration checksums from exact file bytes. Keep migrations stable
+# between Windows development, WSL builds and Linux production containers.
+*.sql text eol=lf

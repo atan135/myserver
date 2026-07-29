@@ -12,25 +12,25 @@
       "file": "db/schema/targets/game.json",
       "version": "20260718161350",
       "description": "initial schema",
-      "checksum": "5c9f8dd9d795d39b22217e2cf7196d4a6bebb732c0408201135fb116d8774c95e64bc344ab01f6b791d874e755989565"
+      "checksum": "b3d0b1e4c189201fa05bde1ccc65e994395ee56cb9bc45f6616b3fe1c1bb84b910803938989d814cd902e3b896985c53"
     },
     "chat": {
       "file": "db/schema/targets/chat.json",
       "version": "20260718161350",
       "description": "initial schema",
-      "checksum": "1b17a65df95a929bbd79c69eafe1e4f9a42797f7c8bc44da3338d221a91aeda06fe93d063134900c4b37117a488dd946"
+      "checksum": "135b3d1c111b217030fc145b1f95a2d8950415772ddc2f73ab4861b484f9e79491e4f14a2f7725be9da08e4b923deb6f"
     },
     "announce": {
       "file": "db/schema/targets/announce.json",
       "version": "20260718161350",
       "description": "initial schema",
-      "checksum": "5a93d41a465799d901e715551aa38040e30c9c2954876fc77b833d1e54fd307c5c3b38d369e3a631d4a011b48ba65096"
+      "checksum": "81777bd2c1699d13c8e7f348eeb47d963e8bdcc9b4fcee9a07ccc948423691b9b7b9e6af54b187f8c800e8b8a2854f83"
     },
     "mail": {
       "file": "db/schema/targets/mail.json",
       "version": "20260718161350",
       "description": "initial schema",
-      "checksum": "a0601e1052c897ddbb878ef83e2198457845815f6d2c1dc71b5da4c3ae879621e063cfd9d6501488a24298e5d1ad6ffc"
+      "checksum": "d54f42939fc0f44d4c36795113a97d3e8ae02184c88327de41b8a769eebe4881a83699482f653ba8083f116bfe0269f9"
     }
   },
   "allowances": []

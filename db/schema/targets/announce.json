@@ -4,7 +4,7 @@
   "migration": {
     "version": "20260718161350",
     "description": "initial schema",
-    "checksum": "5a93d41a465799d901e715551aa38040e30c9c2954876fc77b833d1e54fd307c5c3b38d369e3a631d4a011b48ba65096"
+    "checksum": "81777bd2c1699d13c8e7f348eeb47d963e8bdcc9b4fcee9a07ccc948423691b9b7b9e6af54b187f8c800e8b8a2854f83"
   },
   "catalog_sha256": "87400837b5b02b03468e363e6e91afd6da1528e067ebfe13767ac56f2c17b953",
   "objects": [
