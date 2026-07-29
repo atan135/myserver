@@ -75,6 +75,8 @@ docker info
 
 `secrets/` 保存 production env 文件、Compose secret 文件、registry 拉取凭据引用和 TLS 私钥。它们不能同步回开发机、上传到镜像仓库、写入 `images.lock.json` 或通过 `docker inspect` 的环境变量明文暴露。优先使用 Compose secrets 或外部 secret manager；若暂时使用 env file，文件权限必须为 `0600`，且仅由受控运维账号读取。
 
+若受控运维账号为 `gameops`，`release/` 应使用 `root:gameops`、模式 `2770`，使其可创建按 release ID 分隔的目录并继承组；`secrets/` 应使用 `gameops:gameops`、模式 `0700`。不要以 `root` 生成只有 `gameops` 需要读取的 env 文件。`gameops` 使用 Docker 前需要重新登录以获得受审计的 `docker` 组成员资格。
+
 ## 3. 首次发布
 
 ### 3.1 准备 release bundle
