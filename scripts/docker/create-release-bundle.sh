@@ -118,12 +118,12 @@ node scripts/docker/render-release-env.mjs \
   --caddy-email "$caddy_email" \
   --game-proxy-advertised-host "$game_proxy_advertised_host"
 
-(
-  cd "$output"
-  find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-)
 printf 'release_id=%s\nrevision=%s\nplatform=linux/amd64\n' \
   "$release_id" \
   "$(node -e "const lock = require('./deploy/docker/images.lock.json'); process.stdout.write(lock.revision)")" \
   > "$output/RELEASE"
+(
+  cd "$output"
+  find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+)
 printf 'Created release bundle: %s\n' "$output"
