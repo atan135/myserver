@@ -247,6 +247,11 @@ test("baseline schema is split from bootstrap and development seed", () => {
           "20260718161350_initial_schema.sql",
           "20260729190000_restore_character_asset_ledger_guard.sql"
         ]
+      : database === "chat"
+        ? [
+          "20260718161350_initial_schema.sql",
+          "20260729193000_drop_legacy_runtime_indexes.sql"
+        ]
       : ["20260718161350_initial_schema.sql"];
     assert.deepEqual(files, expectedFiles);
     const schema = readFileSync(join(directory, "20260718161350_initial_schema.sql"), "utf8");

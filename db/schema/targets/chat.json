@@ -2,9 +2,9 @@
   "schema": 1,
   "database": "chat",
   "migration": {
-    "version": "20260718161350",
-    "description": "initial schema",
-    "checksum": "135b3d1c111b217030fc145b1f95a2d8950415772ddc2f73ab4861b484f9e79491e4f14a2f7725be9da08e4b923deb6f"
+    "version": "20260729193000",
+    "description": "drop legacy runtime indexes",
+    "checksum": "e55ee836d5b31e33e471a576f608881f407e8d0dff6d08376fa8779911c65091ae2b61f68ab7b848d24099c73b70225e"
   },
   "catalog_sha256": "b0672281efe72fd5e1a862f62bcdba1074cab11b3cb6ed7419a1773bb697d644",
   "objects": [
