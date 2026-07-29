@@ -4,7 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/initialize-production-secrets.sh --release-dir /data/myserver/release/<release-id> --origin-id <1-1023>
+  scripts/initialize-production-secrets.sh --release-dir /data/myserver/release/<release-id> \\
+    --origin-id <1-1023> --admin-ip-allowlist <ip-or-cidr[,ip-or-cidr...]>
 
 Creates the first-release env files in /data/myserver/secrets. It refuses to
 overwrite an existing managed file and never prints generated secret values.
@@ -13,6 +14,7 @@ EOF
 
 release_dir=""
 origin_id=""
+admin_ip_allowlist=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -22,6 +24,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --origin-id)
       origin_id="${2:?--origin-id requires a value}"
+      shift 2
+      ;;
+    --admin-ip-allowlist)
+      admin_ip_allowlist="${2:?--admin-ip-allowlist requires a value}"
       shift 2
       ;;
     --help|-h)
@@ -36,7 +42,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$release_dir" ] || [ -z "$origin_id" ]; then
+if [ -z "$release_dir" ] || [ -z "$origin_id" ] || [ -z "$admin_ip_allowlist" ]; then
   usage >&2
   exit 64
 fi
@@ -46,6 +52,10 @@ if [[ "$release_dir" != /data/myserver/release/* ]] || [ ! -f "$release_dir/comp
 fi
 if ! [[ "$origin_id" =~ ^[0-9]+$ ]] || [ "$origin_id" -lt 1 ] || [ "$origin_id" -gt 1023 ]; then
   echo "--origin-id must be an integer from 1 to 1023." >&2
+  exit 64
+fi
+if ! [[ "$admin_ip_allowlist" =~ ^[0-9A-Fa-f:.,/]+$ ]]; then
+  echo "--admin-ip-allowlist must be a comma-separated list of IP addresses or CIDRs." >&2
   exit 64
 fi
 
@@ -167,6 +177,7 @@ write_secret_file admin-api.env \
   "GAME_ADMIN_TOKEN=$game_admin_token" \
   "GAME_PROXY_ADMIN_READ_TOKEN=$proxy_admin_read_token" \
   "ADMIN_ASSERTION_PRIVATE_KEY_BASE64=$admin_assertion_private_key" \
+  "ADMIN_API_IP_ALLOWLIST=$admin_ip_allowlist" \
   'ADMIN_USERNAME=admin' \
   "ADMIN_PASSWORD=$admin_password"
 

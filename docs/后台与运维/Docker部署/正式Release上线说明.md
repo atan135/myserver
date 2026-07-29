@@ -79,10 +79,11 @@ Compose 会读取 `compose.production.env` 中指定的服务器本地 secret �
 ```bash
 ./scripts/initialize-production-secrets.sh \
   --release-dir "$PWD" \
-  --origin-id 1
+  --origin-id 1 \
+  --admin-ip-allowlist <运营固定公网IP/32>
 ```
 
-`origin-id` 是该正式初始服不可复用的编号，范围为 `1..1023`；为同一服的所有服务共用。脚本会生成 `admin-api.env` 中的初始管理员密码，必须立即纳入获批的 secret manager，不要通过聊天、工单或 shell history 传播。
+`origin-id` 是该正式初始服不可复用的编号，范围为 `1..1023`；为同一服的所有服务共用。`--admin-ip-allowlist` 是逗号分隔的精确 IP 或 IPv4 CIDR，例如 `203.0.113.8/32,198.51.100.0/24`，它会写入 `admin-api.env` 且是后台生产启动的必填安全边界。脚本会生成初始管理员密码，必须立即纳入获批的 secret manager，不要通过聊天、工单或 shell history 传播。
 
 secret 创建成功后，验证 Compose 完整插值并拉取所有已锁定镜像，仍不启动容器：
 

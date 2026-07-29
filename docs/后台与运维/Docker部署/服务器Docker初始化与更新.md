@@ -125,7 +125,10 @@ docker pull \
 
 ~~~bash
 cd /data/myserver/release/<release-id>
-./scripts/initialize-production-secrets.sh --release-dir "$PWD" --origin-id <1-1023>
+./scripts/initialize-production-secrets.sh \
+  --release-dir "$PWD" \
+  --origin-id <1-1023> \
+  --admin-ip-allowlist <运营固定公网IP/32>
 
 docker compose --env-file ./compose.production.env \
   -f ./compose.production.yml config --quiet
