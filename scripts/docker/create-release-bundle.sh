@@ -6,10 +6,12 @@ usage() {
 Usage:
   scripts/docker/create-release-bundle.sh --output <directory> \
     --caddy-auth-host <domain> --caddy-admin-host <domain> --caddy-email <email> \
-    --game-proxy-advertised-host <host> [--release-root <server-path>]
+    --game-proxy-advertised-host <host> [--release-root <server-release-directory>]
 
 Creates a server-ready, non-secret release bundle from the current schemaVersion 2
-images.lock.json. The output directory must not already contain files.
+images.lock.json. The output directory must not already contain files. When
+provided, --release-root must be the full deployed directory including the
+release ID; its default is /data/myserver/release/<release-id>.
 EOF
 }
 

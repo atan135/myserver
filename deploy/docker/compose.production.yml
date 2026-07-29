@@ -232,6 +232,11 @@ services:
   game-proxy:
     <<: *runtime
     image: ${IMAGE_GAME_PROXY:?set IMAGE_GAME_PROXY from images.lock.json}
+    # A published UDP port needs a non-internal network; retain internal for
+    # service discovery and Unix-socket access.
+    networks:
+      - edge
+      - internal
     env_file: ${GAME_PROXY_ENV_FILE:?set GAME_PROXY_ENV_FILE}
     environment:
       APP_ENV: production
