@@ -309,6 +309,26 @@ function parseNonNegativeIntegerWithFallback(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function parseBoundedNonNegativeInteger(name, value, fallback, min, max) {
+  const raw = value ?? String(fallback);
+  if (!/^\d+$/.test(String(raw))) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function parseRedisKeyPrefix(name, value) {
+  const prefix = String(value ?? "");
+  if (/[\s\u0000-\u001f\u007f]/.test(prefix)) {
+    throw new Error(`${name} must not contain whitespace or control characters`);
+  }
+  return prefix;
+}
+
 function firstNonEmptyEnv(names) {
   for (const name of names) {
     const value = process.env[name];
@@ -404,6 +424,12 @@ function isLocalDiscoveryFallbackEnv() {
 function validateDiscoveryConfig(config) {
   if (config.registryDiscoveryRequired && !config.registryDiscoveryEnabled) {
     throw new Error("Invalid admin-api discovery config: DISCOVERY_REQUIRED=true requires REGISTRY_ENABLED=true");
+  }
+
+  if (config.metricsArchiveAfterSeconds >= config.metricsHistoryRetentionSeconds) {
+    throw new Error(
+      "Invalid admin-api metrics config: METRICS_ARCHIVE_AFTER_SECONDS must be less than METRICS_HISTORY_RETENTION_SECONDS"
+    );
   }
 }
 
@@ -541,8 +567,71 @@ export function getConfig() {
     logEnableFile: parseBoolean(process.env.LOG_ENABLE_FILE, true),
     logDir: process.env.LOG_DIR || "logs/admin-api",
     redisUrl: process.env.REDIS_URL || "redis://127.0.0.1:6379",
-    redisKeyPrefix: process.env.REDIS_KEY_PREFIX || "",
-    registryKeyPrefix: process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? "",
+    redisKeyPrefix: parseRedisKeyPrefix("REDIS_KEY_PREFIX", process.env.REDIS_KEY_PREFIX || ""),
+    registryKeyPrefix: parseRedisKeyPrefix(
+      "REGISTRY_KEY_PREFIX",
+      process.env.REGISTRY_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? ""
+    ),
+    metricsKeyPrefix: parseRedisKeyPrefix(
+      "METRICS_KEY_PREFIX",
+      process.env.METRICS_KEY_PREFIX ?? process.env.REDIS_KEY_PREFIX ?? ""
+    ),
+    monitoringSnapshotCacheTtlMs: parseBoundedNonNegativeInteger(
+      "MONITORING_SNAPSHOT_CACHE_TTL_MS",
+      process.env.MONITORING_SNAPSHOT_CACHE_TTL_MS,
+      3000,
+      0,
+      30000
+    ),
+    monitoringServiceReadConcurrency: parseBoundedPositiveInteger(
+      "MONITORING_SERVICE_READ_CONCURRENCY",
+      process.env.MONITORING_SERVICE_READ_CONCURRENCY,
+      4,
+      1,
+      16
+    ),
+    monitoringRedisTimeoutMs: parseBoundedPositiveInteger(
+      "MONITORING_REDIS_TIMEOUT_MS",
+      process.env.MONITORING_REDIS_TIMEOUT_MS,
+      1000,
+      100,
+      10000
+    ),
+    metricsLatestTtlSeconds: parseBoundedPositiveInteger(
+      "METRICS_LATEST_TTL_SECONDS",
+      process.env.METRICS_LATEST_TTL_SECONDS,
+      180,
+      21,
+      86400
+    ),
+    metricsMaxInstancesPerService: parseBoundedPositiveInteger(
+      "METRICS_MAX_INSTANCES_PER_SERVICE",
+      process.env.METRICS_MAX_INSTANCES_PER_SERVICE,
+      64,
+      1,
+      64
+    ),
+    metricsHistoryRetentionSeconds: parseBoundedPositiveInteger(
+      "METRICS_HISTORY_RETENTION_SECONDS",
+      process.env.METRICS_HISTORY_RETENTION_SECONDS,
+      4500,
+      3600,
+      86400
+    ),
+    metricsArchiveAfterSeconds: parseBoundedPositiveInteger(
+      "METRICS_ARCHIVE_AFTER_SECONDS",
+      process.env.METRICS_ARCHIVE_AFTER_SECONDS,
+      3600,
+      60,
+      86399
+    ),
+    metricsArchiveBatchSize: parseBoundedPositiveInteger(
+      "METRICS_ARCHIVE_BATCH_SIZE",
+      process.env.METRICS_ARCHIVE_BATCH_SIZE,
+      128,
+      1,
+      720
+    ),
     natsUrl: process.env.NATS_URL || "nats://127.0.0.1:4222",
     serviceInstanceId:
       process.env.SERVICE_INSTANCE_ID || "admin-api-001",

@@ -8,7 +8,9 @@ import {
   normalizeServiceInstance,
   recordDiscoveryMetric,
   registryHeartbeatKey,
-  registryInstanceScanPattern
+  registryInstanceIndexKey,
+  REGISTRY_HEARTBEAT_TTL_SECONDS,
+  REGISTRY_MAX_INSTANCES_PER_SERVICE
 } from "../../../../packages/service-registry/node/registry-schema.js";
 import { badRequest } from "../common/http-exception.js";
 import { ApiHttpException } from "../common/http-exception.js";
@@ -17,17 +19,14 @@ import { runArchiveTask } from "../services/archive.js";
 import { ADMIN_CONFIG, ADMIN_DB_POOL, ADMIN_REDIS } from "../tokens.js";
 import {
   discoverGameProxyAdminEndpoints,
-  discoverGameServerAdminEndpoints,
-  discoverServiceInstances
+  discoverGameServerAdminEndpoints
 } from "../registry-client.js";
 import {
   aggregateMetricRecordsDetailed,
   buildMetricPoint,
   buildInstanceMetricPoint,
   getOnlineValue,
-  parseMetricInt,
-  parseMetricHeartbeatKey,
-  parseMetricKey
+  parseMetricInt
 } from "./metrics-aggregation.js";
 
 const SERVICE_CONFIGS: Record<string, { onlineField: string | null }> = {
@@ -42,7 +41,6 @@ const SERVICE_CONFIGS: Record<string, { onlineField: string | null }> = {
 };
 
 const SERVICE_NAMES = Object.keys(SERVICE_CONFIGS);
-const HEARTBEAT_TTL = 30;
 const DEFAULT_ROLLOUT_DRAIN_SAMPLES_LIMIT = 5;
 
 const EXPECTED_REGISTRY_ENDPOINTS: Record<string, Array<{ name: string; protocol: string; visibility: string }>> = {
@@ -87,8 +85,20 @@ const WINDOW_SECONDS: Record<string, number> = {
   "1h": 3600
 };
 
+const METRICS_BUCKET_SECONDS = 5;
+const MAX_METRICS_INSTANCES = 64;
+const MAX_HISTORY_BUCKETS_BY_WINDOW: Record<string, number> = {
+  "1m": 12,
+  "5m": 60,
+  "15m": 180,
+  "1h": 720
+};
+
 @Injectable()
 export class MonitoringService {
+  private readonly snapshotCache = new Map<string, { value: any; checkedAt: number; expiresAt: number }>();
+  private readonly snapshotFlights = new Map<string, Promise<{ value: any; checkedAt: number }>>();
+
   constructor(
     @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_REDIS) private readonly redis: any,
@@ -96,136 +106,11 @@ export class MonitoringService {
   ) {}
 
   async services() {
-    const services = [];
-
-    for (const serviceName of SERVICE_NAMES) {
-      const heartbeatKey = `metrics:heartbeat:${serviceName}`;
-      const lastHeartbeat = await this.redis.get(heartbeatKey);
-
-      let status = "offline";
-      let qps = 0;
-      let latencyMs = 0;
-      let onlineValue = 0;
-      let metricsData = {};
-      let instances = [];
-      let adminEndpoints: any[] = [];
-
-      if (lastHeartbeat) {
-        const heartbeatAge = Date.now() / 1000 - parseInt(lastHeartbeat, 10);
-        if (heartbeatAge <= HEARTBEAT_TTL) {
-          status = "online";
-        }
-      }
-
-      if (status === "online") {
-        const latestMetrics = await this.getLatestMetrics(serviceName);
-        if (latestMetrics) {
-          qps = parseMetricInt(latestMetrics.qps);
-          latencyMs = parseMetricInt(latestMetrics.latency_ms);
-          onlineValue = getOnlineValue(serviceName, latestMetrics, SERVICE_CONFIGS);
-          instances = await this.buildServiceInstances(serviceName, latestMetrics.instances || []);
-          const { instances: _rawInstances, ...latestMetricFields } = latestMetrics;
-          metricsData = latestMetricFields;
-        }
-      }
-
-      if (serviceName === "game-server") {
-        adminEndpoints = await this.getGameServerAdminEndpoints();
-        instances = mergeGameServerAdminEndpoints(instances, adminEndpoints);
-      } else if (serviceName === "game-proxy") {
-        adminEndpoints = await this.getGameProxyAdminEndpoints();
-        instances = mergeGameServerAdminEndpoints(instances, adminEndpoints);
-      }
-
-      services.push({
-        name: serviceName,
-        status,
-        ...metricsData,
-        qps,
-        latency_ms: latencyMs,
-        online_value: onlineValue,
-        last_heartbeat: lastHeartbeat ? parseInt(lastHeartbeat, 10) * 1000 : null,
-        instances,
-        endpoints: ["game-server", "game-proxy"].includes(serviceName) ? adminEndpoints : []
-      });
-    }
-
-    return { services };
+    return this.readSnapshot("services", async () => this.buildServicesSnapshot());
   }
 
   async registry() {
-    const checkedAt = Date.now();
-    const services = [];
-    const capacitySummaries = [];
-    const alerts = [];
-
-    for (const serviceName of SERVICE_NAMES) {
-      const instances = await discoverServiceInstances(this.redis, serviceName, this.config.registryKeyPrefix || "");
-      const schemaParseFailures = await this.findRegistrySchemaParseFailures(serviceName);
-      const latestMetrics = await this.getLatestMetrics(serviceName);
-      const capacity = buildRegistryCapacitySummary(latestMetrics || {});
-      capacitySummaries.push(capacity);
-      const normalizedInstances = [];
-
-      for (const instance of instances) {
-        const heartbeat = await this.getRegistryHeartbeatStatus(serviceName, instance.id);
-        normalizedInstances.push({
-          instance_id: instance.id,
-          service: instance.name,
-          healthy: instance.healthy !== false,
-          status: instance.healthy !== false && heartbeat.status === "alive" ? "healthy" : "missing",
-          registered_at: instance.registered_at || null,
-          last_registered_at: instance.registered_at || null,
-          heartbeat_ttl_seconds: heartbeat.ttl_seconds,
-          heartbeat_status: heartbeat.status,
-          tags: Array.isArray(instance.tags) ? instance.tags : [],
-          metadata: instance.metadata || {},
-          weight: instance.weight,
-          endpoints: Array.isArray(instance.endpoints)
-            ? instance.endpoints.map((endpoint: any) => ({
-                name: endpoint.name,
-                protocol: endpoint.protocol,
-                host: endpoint.host,
-                port: endpoint.port,
-                socket: endpoint.socket,
-                visibility: endpoint.visibility,
-                healthy: endpoint.healthy !== false,
-                metadata: endpoint.metadata || {}
-              }))
-            : []
-        });
-      }
-
-      const healthyInstances = normalizedInstances.filter((instance) => instance.healthy && instance.heartbeat_status === "alive");
-      const service: any = {
-        name: serviceName,
-        instance_count: normalizedInstances.length,
-        healthy_instance_count: healthyInstances.length,
-        status: normalizedInstances.length === 0 ? "missing" : healthyInstances.length > 0 ? "healthy" : "unhealthy",
-        capacity,
-        instances: normalizedInstances,
-        alerts: []
-      };
-      service.alerts = buildServiceDiscoveryAlerts(service, schemaParseFailures);
-      alerts.push(...service.alerts);
-      services.push(service);
-    }
-
-    alerts.push(...buildDiscoveryMetricAlerts());
-    alerts.push(...buildRegistryLifecycleMetricAlerts());
-    alerts.push(...(await this.buildRegistryLifecycleMetricAlertsFromRedis()));
-    const dedupedAlerts = dedupeDiscoveryAlerts(alerts);
-    const alertLevel = aggregateDiscoveryAlertLevel(dedupedAlerts);
-
-    return {
-      ok: true,
-      checked_at: checkedAt,
-      alert_level: alertLevel,
-      alert_message: discoveryAlertMessage(alertLevel, dedupedAlerts),
-      capacity: aggregateRegistryCapacitySummaries(capacitySummaries),
-      alerts: dedupedAlerts,
-      services
-    };
+    return this.readSnapshot("registry", async () => this.buildRegistrySnapshot());
   }
 
   async metrics(name: string, window = "5m") {
@@ -238,23 +123,31 @@ export class MonitoringService {
       throw badRequest("INVALID_WINDOW", `window must be one of: ${Object.keys(WINDOW_SECONDS).join(", ")}`);
     }
 
-    const now = Math.floor(Date.now() / 1000);
-    const fromBucket = now - windowSeconds;
-    const points = await this.getHistoricalMetrics(name, fromBucket, now);
-
-    return {
-      service: name,
-      window,
-      points
-    };
+    return this.readSnapshot(`metrics:${name}:${window}`, async () => {
+      const now = currentMetricsBucket();
+      const fromBucket = now - windowSeconds + METRICS_BUCKET_SECONDS;
+      const history = await this.getHistoricalMetrics(name, fromBucket, now, MAX_HISTORY_BUCKETS_BY_WINDOW[window]);
+      if (history.unavailable) {
+        throw monitoringDataUnavailable();
+      }
+      return {
+        service: name,
+        window,
+        points: history.points,
+        partial: history.errors.length > 0,
+        errors: history.errors,
+        sources: [sourceStatus("metrics-v2", history.errors)]
+      };
+    });
   }
 
   async archive() {
     try {
-      const result = await runArchiveTask(this.redis, this.dbPool);
+      const result = await runArchiveTask(this.redis, this.dbPool, this.monitoringOptions());
       return {
         ok: true,
         archived: result.archived,
+        failed: result.failed,
         duration_ms: result.duration_ms
       };
     } catch (error: any) {
@@ -353,186 +246,469 @@ export class MonitoringService {
     return results;
   }
 
-  private async getLatestMetrics(serviceName: string): Promise<any | null> {
-    let cursor = "0";
-    let latestBucket = 0;
-    const latestKeys = [];
-
-    do {
-      const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", `metrics:${serviceName}:*`, "COUNT", 100);
-      cursor = nextCursor;
-
-      for (const key of keys) {
-        const parsed = parseMetricKey(serviceName, key);
-        if (!parsed) {
-          continue;
-        }
-
-        if (parsed.bucket > latestBucket) {
-          latestKeys.length = 0;
-          latestBucket = parsed.bucket;
-          latestKeys.push({ key, ...parsed });
-        } else if (parsed.bucket === latestBucket) {
-          latestKeys.push({ key, ...parsed });
-        }
-      }
-    } while (cursor !== "0");
-
-    if (latestKeys.length === 0) return null;
-
-    const records = [];
-    for (const item of latestKeys) {
-      const data = await this.redis.hgetall(item.key);
-      if (data && Object.keys(data).length > 0) {
-        records.push({ ...item, data });
-      }
-    }
-
-    if (records.length === 0) return null;
-
-    const aggregated = aggregateMetricRecordsDetailed(records);
+  private monitoringOptions() {
     return {
-      ...aggregated.data,
-      instances: aggregated.instances
+      metricsKeyPrefix: String(this.config.metricsKeyPrefix ?? this.config.redisKeyPrefix ?? ""),
+      registryKeyPrefix: String(this.config.registryKeyPrefix ?? this.config.redisKeyPrefix ?? ""),
+      snapshotCacheTtlMs: boundedNumber(this.config.monitoringSnapshotCacheTtlMs, 3000, 0, 30000),
+      serviceReadConcurrency: boundedNumber(this.config.monitoringServiceReadConcurrency, 4, 1, 16),
+      redisTimeoutMs: boundedNumber(this.config.monitoringRedisTimeoutMs, 1000, 100, 10000),
+      metricsLatestTtlSeconds: boundedNumber(this.config.metricsLatestTtlSeconds, 180, 21, 86400),
+      metricsMaxInstancesPerService: Math.min(
+        MAX_METRICS_INSTANCES,
+        boundedNumber(this.config.metricsMaxInstancesPerService, MAX_METRICS_INSTANCES, 1, MAX_METRICS_INSTANCES)
+      ),
+      metricsHistoryRetentionSeconds: boundedNumber(this.config.metricsHistoryRetentionSeconds, 4500, 3600, 86400),
+      metricsArchiveAfterSeconds: boundedNumber(this.config.metricsArchiveAfterSeconds, 3600, 60, 86399),
+      metricsArchiveBatchSize: boundedNumber(this.config.metricsArchiveBatchSize, 128, 1, 720)
     };
   }
 
-  private async getLatestMetricRecords(serviceName: string): Promise<any[]> {
-    let cursor = "0";
-    let latestBucket = 0;
-    const latestKeys = [];
-
-    do {
-      const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", `metrics:${serviceName}:*`, "COUNT", 100);
-      cursor = nextCursor;
-
-      for (const key of keys) {
-        const parsed = parseMetricKey(serviceName, key);
-        if (!parsed) {
-          continue;
-        }
-
-        if (parsed.bucket > latestBucket) {
-          latestKeys.length = 0;
-          latestBucket = parsed.bucket;
-          latestKeys.push({ key, ...parsed });
-        } else if (parsed.bucket === latestBucket) {
-          latestKeys.push({ key, ...parsed });
-        }
-      }
-    } while (cursor !== "0");
-
-    const records = [];
-    for (const item of latestKeys) {
-      const data = await this.redis.hgetall(item.key);
-      if (data && Object.keys(data).length > 0) {
-        records.push({ ...item, data });
-      }
+  private async readSnapshot(key: string, loader: () => Promise<any>): Promise<any> {
+    const options = this.monitoringOptions();
+    const cacheKey = [key, options.metricsKeyPrefix, options.registryKeyPrefix].join("\u0000");
+    const now = Date.now();
+    const cached = this.snapshotCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return decorateSnapshot(cached.value, cached.checkedAt, true);
     }
 
-    return records;
+    let flight = this.snapshotFlights.get(cacheKey);
+    if (!flight) {
+      flight = Promise.resolve()
+        .then(loader)
+        .then((value) => {
+          const checkedAt = Date.now();
+          if (options.snapshotCacheTtlMs > 0) {
+            this.snapshotCache.set(cacheKey, {
+              value,
+              checkedAt,
+              expiresAt: checkedAt + options.snapshotCacheTtlMs
+            });
+          }
+          return { value, checkedAt };
+        })
+        .finally(() => this.snapshotFlights.delete(cacheKey));
+      this.snapshotFlights.set(cacheKey, flight);
+    }
+
+    const snapshot = await flight;
+    return decorateSnapshot(snapshot.value, snapshot.checkedAt, false);
   }
 
-  private async buildRegistryLifecycleMetricAlertsFromRedis(): Promise<any[]> {
+  private async buildServicesSnapshot(): Promise<any> {
+    const observations = await mapWithConcurrency(
+      SERVICE_NAMES,
+      this.monitoringOptions().serviceReadConcurrency,
+      (serviceName) => this.readServiceReadModel(serviceName)
+    );
+    if (observations.every((observation) => observation.unavailable)) {
+      throw monitoringDataUnavailable();
+    }
+
+    const errors = observations.flatMap((observation) => observation.errors);
+    return {
+      services: observations.map((observation) => {
+        const latest = observation.metrics.aggregation;
+        const metricInstances = this.buildServiceInstances(observation.name, observation.metrics.records);
+        const adminEndpoints = buildRegistryAdminEndpoints(observation.name, observation.registry.instances);
+        const instances = ["game-server", "game-proxy"].includes(observation.name)
+          ? mergeGameServerAdminEndpoints(metricInstances, adminEndpoints)
+          : metricInstances;
+        const registryActive = observation.registry.instances.some((item: any) => item.heartbeat.status === "alive");
+        const metricsAvailable = observation.metrics.records.length > 0;
+        const lastReportedAt = Math.max(
+          0,
+          ...observation.metrics.records.map((record: any) => parseMetricInt(record.data?._reported_at))
+        );
+
+        return {
+          name: observation.name,
+          status: metricsAvailable || registryActive ? "online" : observation.unavailable ? "unknown" : "offline",
+          ...latest,
+          qps: parseMetricInt(latest.qps),
+          latency_ms: parseMetricInt(latest.latency_ms),
+          online_value: getOnlineValue(observation.name, latest, SERVICE_CONFIGS),
+          last_heartbeat: lastReportedAt > 0 ? lastReportedAt * 1000 : null,
+          instances,
+          endpoints: adminEndpoints,
+          partial: observation.errors.length > 0,
+          errors: observation.errors,
+          sources: [
+            sourceStatus("registry-index-v1", observation.registry.errors),
+            sourceStatus("metrics-v2", observation.metrics.errors)
+          ]
+        };
+      }),
+      partial: errors.length > 0,
+      errors,
+      sources: buildSourcesFromObservations(observations)
+    };
+  }
+
+  private async buildRegistrySnapshot(): Promise<any> {
+    const checkedAt = Date.now();
+    const services = [];
+    const capacitySummaries = [];
     const alerts = [];
+    const observations = await mapWithConcurrency(
+      SERVICE_NAMES,
+      this.monitoringOptions().serviceReadConcurrency,
+      (serviceName) => this.readServiceReadModel(serviceName)
+    );
+    if (observations.every((observation) => observation.unavailable)) {
+      throw monitoringDataUnavailable();
+    }
 
-    for (const serviceName of SERVICE_NAMES) {
+    for (const observation of observations) {
+      const capacity = buildRegistryCapacitySummary(observation.metrics.aggregation);
+      capacitySummaries.push(capacity);
+      const normalizedInstances = observation.registry.instances.map((entry: any) => {
+        const { instance, heartbeat } = entry;
+        const metricRecord = observation.metrics.byInstance.get(instance.id);
+        const metricsState = metricRecord ? metricFreshnessState(metricRecord.data) : "missing";
+        const registryState = heartbeat.status === "alive"
+          ? "healthy"
+          : heartbeat.status === "unknown" ? "unknown" : "unhealthy";
+        return {
+          instance_id: instance.id,
+          service: instance.name,
+          healthy: instance.healthy !== false,
+          status: registryState === "healthy" && metricsState === "fresh" ? "healthy"
+            : registryState === "healthy" ? "degraded"
+            : registryState === "unhealthy" ? "unhealthy" : "unknown",
+          registry_state: registryState,
+          metrics_state: metricsState,
+          registered_at: instance.registered_at || null,
+          last_registered_at: instance.registered_at || null,
+          heartbeat_ttl_seconds: heartbeat.ttl_seconds,
+          heartbeat_status: heartbeat.status,
+          tags: Array.isArray(instance.tags) ? instance.tags : [],
+          metadata: instance.metadata || {},
+          weight: instance.weight,
+          endpoints: Array.isArray(instance.endpoints)
+            ? instance.endpoints.map((endpoint: any) => ({
+                name: endpoint.name,
+                protocol: endpoint.protocol,
+                host: endpoint.host,
+                port: endpoint.port,
+                socket: endpoint.socket,
+                visibility: endpoint.visibility,
+                healthy: endpoint.healthy !== false,
+                metadata: endpoint.metadata || {}
+              }))
+            : []
+        };
+      });
+
+      const healthyInstances = normalizedInstances.filter((instance) => instance.registry_state === "healthy");
+      const service: any = {
+        name: observation.name,
+        instance_count: normalizedInstances.length,
+        healthy_instance_count: healthyInstances.length,
+        status: normalizedInstances.length === 0 ? "missing" : healthyInstances.length > 0 ? "healthy" : "unhealthy",
+        capacity,
+        instances: normalizedInstances,
+        partial: observation.errors.length > 0,
+        errors: observation.errors,
+        sources: [
+          sourceStatus("registry-index-v1", observation.registry.errors),
+          sourceStatus("metrics-v2", observation.metrics.errors)
+        ],
+        alerts: []
+      };
+      service.alerts = buildServiceDiscoveryAlerts(service, observation.registry.schemaFailures);
+      alerts.push(...service.alerts);
+      services.push(service);
+    }
+
+    alerts.push(...buildDiscoveryMetricAlerts());
+    alerts.push(...buildRegistryLifecycleMetricAlerts());
+    alerts.push(...buildRegistryLifecycleMetricAlertsFromRecords(observations));
+    const dedupedAlerts = dedupeDiscoveryAlerts(alerts);
+    const alertLevel = aggregateDiscoveryAlertLevel(dedupedAlerts);
+    const errors = observations.flatMap((observation) => observation.errors);
+
+    return {
+      ok: true,
+      checked_at: checkedAt,
+      alert_level: alertLevel,
+      alert_message: discoveryAlertMessage(alertLevel, dedupedAlerts),
+      capacity: aggregateRegistryCapacitySummaries(capacitySummaries),
+      alerts: dedupedAlerts,
+      services,
+      partial: errors.length > 0,
+      errors,
+      sources: buildSourcesFromObservations(observations)
+    };
+  }
+
+  private async readServiceReadModel(serviceName: string): Promise<any> {
+    const [registry, metrics] = await Promise.all([
+      this.readRegistryInstances(serviceName),
+      this.readLatestMetricRecords(serviceName)
+    ]);
+    return {
+      name: serviceName,
+      registry,
+      metrics,
+      errors: [...registry.errors, ...metrics.errors],
+      unavailable: registry.unavailable && metrics.unavailable
+    };
+  }
+
+  private async readRegistryInstances(serviceName: string): Promise<any> {
+    const options = this.monitoringOptions();
+    const errors = [];
+    let instanceIds: string[];
+    try {
+      instanceIds = await this.redisCall(() => this.redis.zrangebyscore(
+        registryInstanceIndexKey(options.registryKeyPrefix, serviceName),
+        Math.floor(Date.now() / 1000) - REGISTRY_HEARTBEAT_TTL_SECONDS,
+        "+inf",
+        "LIMIT",
+        0,
+        Math.min(REGISTRY_MAX_INSTANCES_PER_SERVICE, options.metricsMaxInstancesPerService)
+      ));
+    } catch {
+      return {
+        instances: [],
+        schemaFailures: [],
+        errors: [monitoringError("registry-index-v1", serviceName, "REGISTRY_INDEX_READ_FAILED")],
+        unavailable: true
+      };
+    }
+
+    const ids = [...new Set(Array.isArray(instanceIds) ? instanceIds : [])]
+      .filter((instanceId) => typeof instanceId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId))
+      .slice(0, Math.min(REGISTRY_MAX_INSTANCES_PER_SERVICE, options.metricsMaxInstancesPerService));
+    if (ids.length === 0) {
+      return { instances: [], schemaFailures: [], errors, unavailable: false };
+    }
+
+    const pipeline = this.redis.pipeline();
+    for (const instanceId of ids) {
+      pipeline.hget(`${options.registryKeyPrefix}service:${serviceName}:instances:${instanceId}`, "data");
+      pipeline.exists(registryHeartbeatKey(options.registryKeyPrefix, serviceName, instanceId));
+      if (typeof this.redis.ttl === "function") {
+        pipeline.ttl(registryHeartbeatKey(options.registryKeyPrefix, serviceName, instanceId));
+      }
+    }
+
+    let values: any[];
+    try {
+      values = await this.redisCall(() => pipeline.exec());
+    } catch {
+      return {
+        instances: [],
+        schemaFailures: [],
+        errors: [monitoringError("registry-index-v1", serviceName, "REGISTRY_INSTANCE_BATCH_READ_FAILED")],
+        unavailable: true
+      };
+    }
+
+    const instances = [];
+    const schemaFailures = [];
+    const width = typeof this.redis.ttl === "function" ? 3 : 2;
+    for (let offset = 0; offset < ids.length; offset += 1) {
+      const instanceId = ids[offset];
+      const dataResult = pipelineValue(values[offset * width]);
+      const existsResult = pipelineValue(values[offset * width + 1]);
+      const ttlResult: { value: any; error: any } = width === 3
+        ? pipelineValue(values[offset * width + 2])
+        : { value: null, error: null };
+      if (dataResult.error || existsResult.error || ttlResult.error) {
+        errors.push(monitoringError("registry-index-v1", serviceName, "REGISTRY_INSTANCE_READ_FAILED", instanceId));
+        continue;
+      }
+      if (!dataResult.value) {
+        errors.push(monitoringError("registry-index-v1", serviceName, "REGISTRY_INDEX_PAYLOAD_MISSING", instanceId));
+        continue;
+      }
+
       try {
-        const records = await this.getLatestMetricRecords(serviceName);
-        for (const record of records) {
-          const instanceId = record.instanceId || record.data?.instance_id || "";
-          for (const spec of REGISTRY_LIFECYCLE_METRIC_ALERTS) {
-            const count = parseMetricInt(record.data?.[spec.field]);
-            if (count <= 0) {
-              continue;
-            }
-            alerts.push({
-              kind: spec.kind,
-              service: serviceName,
-              endpoint: "",
-              instance_id: instanceId,
-              severity: "critical",
-              message: registryLifecycleMetricMessage({
-                kind: spec.kind,
-                service: serviceName,
-                instance_id: instanceId
-              }),
-              source: "metrics",
-              reason: "reported_total",
-              count
-            });
-          }
+        const instance = normalizeServiceInstance(JSON.parse(dataResult.value));
+        if (!instance || instance.id !== instanceId || instance.name !== serviceName) {
+          throw new Error("registry instance identity mismatch");
         }
+        const ttl = Number(ttlResult.value);
+        const heartbeat = typeof this.redis.ttl !== "function"
+          ? { ttl_seconds: null, status: "unknown" }
+          : Number.isFinite(ttl) && ttl > 0
+            ? { ttl_seconds: ttl, status: "alive" }
+            : Number.isFinite(ttl) && ttl === -1
+              ? { ttl_seconds: ttl, status: "no_expire" }
+              : { ttl_seconds: Number.isFinite(ttl) ? ttl : null, status: existsResult.value ? "unknown" : "missing" };
+        instances.push({ instance, heartbeat });
       } catch {
-        // Registry dashboard should still render if latest metrics are unavailable.
+        const failure = { service: serviceName, instance_id: instanceId, reason: "parse_failed" };
+        schemaFailures.push(failure);
+        errors.push(monitoringError("registry-index-v1", serviceName, "REGISTRY_SCHEMA_PARSE_FAILED", instanceId));
       }
     }
-
-    return alerts;
+    return { instances, schemaFailures, errors, unavailable: false };
   }
 
-  private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number): Promise<any[]> {
-    const recordsByBucket = new Map<number, any[]>();
-    let cursor = "0";
+  private async readLatestMetricRecords(serviceName: string): Promise<any> {
+    const options = this.monitoringOptions();
+    let instanceIds: string[];
+    try {
+      instanceIds = await this.redisCall(() => this.redis.zrangebyscore(
+        `${options.metricsKeyPrefix}metrics:v2:latest-index:${serviceName}`,
+        Math.floor(Date.now() / 1000) - options.metricsLatestTtlSeconds,
+        "+inf",
+        "LIMIT",
+        0,
+        options.metricsMaxInstancesPerService
+      ));
+    } catch {
+      return emptyMetricRead(serviceName, "METRICS_LATEST_INDEX_READ_FAILED", true);
+    }
 
-    do {
-      const [nextCursor, keys] = await this.redis.scan(cursor, "MATCH", `metrics:${serviceName}:*`, "COUNT", 100);
-      cursor = nextCursor;
+    const ids = [...new Set(Array.isArray(instanceIds) ? instanceIds : [])]
+      .filter((instanceId) => typeof instanceId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(instanceId))
+      .slice(0, options.metricsMaxInstancesPerService);
+    if (ids.length === 0) {
+      return emptyMetricRead(serviceName);
+    }
 
-      for (const key of keys) {
-        const parsed = parseMetricKey(serviceName, key);
-        if (!parsed) {
-          continue;
-        }
-        const bucket = parsed.bucket;
+    const pipeline = this.redis.pipeline();
+    for (const instanceId of ids) {
+      pipeline.hgetall(`${options.metricsKeyPrefix}metrics:v2:latest:${serviceName}:${instanceId}`);
+    }
+    let values: any[];
+    try {
+      values = await this.redisCall(() => pipeline.exec());
+    } catch {
+      return emptyMetricRead(serviceName, "METRICS_LATEST_BATCH_READ_FAILED", true);
+    }
 
-        if (bucket >= fromBucket && bucket <= toBucket) {
-          const data = await this.redis.hgetall(key);
-          if (data && Object.keys(data).length > 0) {
-            const records = recordsByBucket.get(bucket) || [];
-            records.push({
-              key,
-              ...parsed,
-              data
-            });
-            recordsByBucket.set(bucket, records);
-          }
-        }
+    const errors = [];
+    const records = [];
+    const byInstance = new Map<string, any>();
+    for (let offset = 0; offset < ids.length; offset += 1) {
+      const instanceId = ids[offset];
+      const result = pipelineValue(values[offset]);
+      if (result.error) {
+        errors.push(monitoringError("metrics-v2", serviceName, "METRICS_LATEST_INSTANCE_READ_FAILED", instanceId));
+        continue;
       }
-    } while (cursor !== "0");
+      const data = result.value && typeof result.value === "object" ? result.value : {};
+      if (Object.keys(data).length === 0) {
+        errors.push(monitoringError("metrics-v2", serviceName, "METRICS_LATEST_INDEX_PAYLOAD_MISSING", instanceId));
+        continue;
+      }
+      if (data._schema !== "metrics-v2" || data._service !== serviceName || data._instance_id !== instanceId) {
+        errors.push(monitoringError("metrics-v2", serviceName, "METRICS_LATEST_SCHEMA_INVALID", instanceId));
+        continue;
+      }
+      const record = { instanceId, data, legacy: false };
+      records.push(record);
+      byInstance.set(instanceId, record);
+    }
 
+    const aggregation = aggregateMetricRecordsDetailed(records.map(metricRecordForAggregation));
+    return { records, byInstance, aggregation: aggregation.data, errors, unavailable: false };
+  }
+
+  private async getHistoricalMetrics(serviceName: string, fromBucket: number, toBucket: number, maxBuckets: number): Promise<any> {
+    const options = this.monitoringOptions();
+    const historyIndexKey = `${options.metricsKeyPrefix}metrics:v2:history-index:${serviceName}`;
+    let bucketMembers: string[];
+    try {
+      bucketMembers = await this.redisCall(() => this.redis.zrangebyscore(
+        historyIndexKey,
+        fromBucket,
+        toBucket,
+        "LIMIT",
+        0,
+        maxBuckets
+      ));
+    } catch {
+      return { points: [], errors: [monitoringError("metrics-v2", serviceName, "METRICS_HISTORY_INDEX_READ_FAILED")], unavailable: true };
+    }
+
+    const buckets = [...new Set((Array.isArray(bucketMembers) ? bucketMembers : []).map((value) => Number(value)))]
+      .filter((bucket) => Number.isSafeInteger(bucket) && bucket >= fromBucket && bucket <= toBucket)
+      .sort((left, right) => left - right)
+      .slice(0, maxBuckets);
+    if (buckets.length === 0) {
+      return { points: [], errors: [], unavailable: false };
+    }
+
+    const pipeline = this.redis.pipeline();
+    for (const bucket of buckets) {
+      pipeline.hgetall(`${options.metricsKeyPrefix}metrics:v2:history:${serviceName}:${bucket}`);
+    }
+    let values: any[];
+    try {
+      values = await this.redisCall(() => pipeline.exec());
+    } catch {
+      return { points: [], errors: [monitoringError("metrics-v2", serviceName, "METRICS_HISTORY_BATCH_READ_FAILED")], unavailable: true };
+    }
+
+    const errors = [];
     const points = [];
-    for (const [bucket, records] of recordsByBucket.entries()) {
-      const aggregated = aggregateMetricRecordsDetailed(records);
-      points.push(buildMetricPoint(serviceName, aggregated.data, SERVICE_CONFIGS, bucket, aggregated.instances));
-    }
-
-    points.sort((a, b) => a.timestamp - b.timestamp);
-
-    return points;
-  }
-
-  private async buildServiceInstances(serviceName: string, instances: any[]): Promise<any[]> {
-    const heartbeats = await this.getInstanceHeartbeats(serviceName);
-
-    return instances.map((instance) => {
-      const point = buildInstanceMetricPoint(serviceName, instance, SERVICE_CONFIGS);
-      const heartbeat = heartbeats.get(point.instance_id);
-      let status = heartbeat ? "offline" : "unknown";
-
-      if (heartbeat) {
-        const heartbeatAge = Date.now() / 1000 - heartbeat;
-        if (heartbeatAge <= HEARTBEAT_TTL) {
-          status = "online";
+    for (let offset = 0; offset < buckets.length; offset += 1) {
+      const bucket = buckets[offset];
+      const result = pipelineValue(values[offset]);
+      if (result.error) {
+        errors.push(monitoringError("metrics-v2", serviceName, "METRICS_HISTORY_BUCKET_READ_FAILED", String(bucket)));
+        continue;
+      }
+      const hash = result.value && typeof result.value === "object" ? result.value : {};
+      const records = [];
+      for (const [instanceId, encoded] of Object.entries(hash)) {
+        try {
+          const data = JSON.parse(String(encoded));
+          if (data._schema !== "metrics-v2" || data._service !== serviceName || data._instance_id !== instanceId || Number(data._bucket) !== bucket) {
+            throw new Error("invalid metrics v2 history record");
+          }
+          records.push({ instanceId, data, legacy: false });
+        } catch {
+          errors.push(monitoringError("metrics-v2", serviceName, "METRICS_HISTORY_RECORD_INVALID", String(instanceId)));
         }
       }
+      if (records.length > 0) {
+        const aggregation = aggregateMetricRecordsDetailed(records.map(metricRecordForAggregation));
+        points.push(buildMetricPoint(serviceName, aggregation.data, SERVICE_CONFIGS, bucket, aggregation.instances));
+      }
+    }
+    return { points: points.sort((left, right) => left.timestamp - right.timestamp), errors, unavailable: false };
+  }
 
+  private buildServiceInstances(serviceName: string, records: any[]): any[] {
+    return records.map((record) => {
+      const point = buildInstanceMetricPoint(serviceName, metricRecordForAggregation(record), SERVICE_CONFIGS);
+      const freshness = metricFreshnessState(record.data);
+      const reportedAt = parseMetricInt(record.data?._reported_at);
       return {
         ...point,
-        status,
-        last_heartbeat: heartbeat ? heartbeat * 1000 : null
+        status: freshness === "fresh" || freshness === "delayed" ? "online" : "offline",
+        metrics_state: freshness,
+        last_heartbeat: reportedAt > 0 ? reportedAt * 1000 : null
       };
     });
+  }
+
+  private async redisCall<T>(operation: () => Promise<T>): Promise<T> {
+    const timeoutMs = this.monitoringOptions().redisTimeoutMs;
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            const error: any = new Error("monitoring Redis request timed out");
+            error.code = "MONITORING_REDIS_TIMEOUT";
+            reject(error);
+          }, timeoutMs);
+          timer.unref?.();
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async getGameServerAdminEndpoints(): Promise<any[]> {
@@ -617,129 +793,175 @@ export class MonitoringService {
     return discoverGameProxyAdminEndpoints(this.redis, this.config);
   }
 
-  private async getInstanceHeartbeats(serviceName: string): Promise<Map<string, number>> {
-    const heartbeats = new Map<string, number>();
-    let cursor = "0";
+}
 
-    do {
-      const [nextCursor, keys] = await this.redis.scan(
-        cursor,
-        "MATCH",
-        `metrics:heartbeat:${serviceName}:*`,
-        "COUNT",
-        100
-      );
-      cursor = nextCursor;
+function boundedNumber(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
 
-      for (const key of keys) {
-        const parsed = parseMetricHeartbeatKey(serviceName, key);
-        if (!parsed) {
-          continue;
-        }
+function currentMetricsBucket(nowSeconds = Math.floor(Date.now() / 1000)): number {
+  return Math.floor(nowSeconds / METRICS_BUCKET_SECONDS) * METRICS_BUCKET_SECONDS;
+}
 
-        const value = await this.redis.get(key);
-        const timestamp = parseMetricInt(value);
-        if (timestamp > 0) {
-          heartbeats.set(parsed.instanceId, timestamp);
-        }
-      }
-    } while (cursor !== "0");
+function decorateSnapshot(value: any, checkedAt: number, cached: boolean): any {
+  return {
+    ...value,
+    checked_at: checkedAt,
+    data_age_ms: Math.max(0, Date.now() - checkedAt),
+    cached,
+    partial: value.partial === true,
+    errors: Array.isArray(value.errors) ? value.errors : [],
+    sources: Array.isArray(value.sources) ? value.sources : []
+  };
+}
 
-    return heartbeats;
-  }
+function monitoringDataUnavailable(): ApiHttpException {
+  return new ApiHttpException(503, {
+    ok: false,
+    error_code: "MONITORING_DATA_UNAVAILABLE",
+    message: "monitoring Redis read model is unavailable"
+  });
+}
 
-  private async getRegistryHeartbeatStatus(serviceName: string, instanceId: string): Promise<any> {
-    if (typeof this.redis.ttl !== "function") {
-      return {
-        ttl_seconds: null,
-        status: "unknown"
-      };
+function monitoringError(source: string, service: string, errorCode: string, instanceId = ""): any {
+  return {
+    source,
+    service,
+    ...(instanceId ? { instance_id: instanceId } : {}),
+    error_code: errorCode
+  };
+}
+
+function sourceStatus(name: string, errors: any[]): any {
+  return {
+    name,
+    status: errors.length > 0 ? "degraded" : "healthy",
+    error_count: errors.length
+  };
+}
+
+function buildSourcesFromObservations(observations: any[]): any[] {
+  const registryErrors = observations.flatMap((observation) => observation.registry.errors);
+  const metricsErrors = observations.flatMap((observation) => observation.metrics.errors);
+  return [
+    sourceStatus("registry-index-v1", registryErrors),
+    sourceStatus("metrics-v2", metricsErrors)
+  ];
+}
+
+async function mapWithConcurrency<T, R>(values: T[], limit: number, mapper: (value: T) => Promise<R>): Promise<R[]> {
+  const output = new Array<R>(values.length);
+  let next = 0;
+  const workerCount = Math.min(values.length, Math.max(1, limit));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= values.length) return;
+      output[index] = await mapper(values[index]);
     }
+  }));
+  return output;
+}
 
-    try {
-      const key = registryHeartbeatKey(this.config.registryKeyPrefix || "", serviceName, instanceId);
-      const ttl = await this.redis.ttl(key);
-      const ttlSeconds = Number.isFinite(Number(ttl)) ? Number(ttl) : null;
-      let status = "unknown";
-
-      if (ttlSeconds === null) {
-        status = "unknown";
-      } else if (ttlSeconds > 0) {
-        status = "alive";
-      } else if (ttlSeconds === -1) {
-        status = "no_expire";
-      } else {
-        status = "missing";
-      }
-
-      return {
-        ttl_seconds: ttlSeconds && ttlSeconds > 0 ? ttlSeconds : ttlSeconds,
-        status
-      };
-    } catch {
-      return {
-        ttl_seconds: null,
-        status: "unknown"
-      };
-    }
+function pipelineValue(result: any): { value: any; error: any } {
+  if (Array.isArray(result)) {
+    return { error: result[0] || null, value: result[1] };
   }
+  return { error: null, value: result };
+}
 
-  private async findRegistrySchemaParseFailures(serviceName: string): Promise<any[]> {
-    const failures = [];
+function emptyMetricRead(serviceName: string, errorCode = "", unavailable = false): any {
+  const errors = errorCode ? [monitoringError("metrics-v2", serviceName, errorCode)] : [];
+  return {
+    records: [],
+    byInstance: new Map(),
+    aggregation: {},
+    errors,
+    unavailable
+  };
+}
 
-    try {
-      const keys = await this.scanRedisKeys(registryInstanceScanPattern(this.config.registryKeyPrefix || "", serviceName));
-      for (const key of keys.sort()) {
-        const instanceId = key.split(":").at(-1) || "";
+function metricRecordForAggregation(record: any): any {
+  const data = Object.fromEntries(
+    Object.entries(record?.data || {}).filter(([key]) => !key.startsWith("_"))
+  );
+  return {
+    instanceId: record?.instanceId || record?.data?._instance_id || "",
+    legacy: false,
+    data
+  };
+}
 
-        try {
-          const data = await this.redis.hget(key, "data");
-          if (!data) {
-            continue;
-          }
-          const normalized = normalizeServiceInstance(JSON.parse(data));
-          if (!normalized) {
-            failures.push({
-              service: serviceName,
-              instance_id: instanceId,
-              key,
-              reason: "invalid_schema"
-            });
-          }
-        } catch (error: any) {
-          failures.push({
-            service: serviceName,
-            instance_id: instanceId,
-            key,
-            reason: "parse_failed",
-            error: error.message || String(error)
-          });
-        }
-      }
-    } catch (error: any) {
-      failures.push({
+function metricFreshnessState(data: any): "fresh" | "delayed" | "stale" | "missing" {
+  const now = Math.floor(Date.now() / 1000);
+  const reportedAt = parseMetricInt(data?._reported_at);
+  const receivedAt = parseMetricInt(data?._received_at);
+  if (reportedAt <= 0) return "missing";
+  const reportAge = Math.max(0, now - reportedAt);
+  const transportLag = receivedAt > 0 ? Math.max(0, receivedAt - reportedAt) : Number.POSITIVE_INFINITY;
+  if (reportAge <= 30 && transportLag <= 10) return "fresh";
+  if (reportAge <= 120) return "delayed";
+  if (reportAge <= 180) return "stale";
+  return "missing";
+}
+
+function buildRegistryAdminEndpoints(serviceName: string, entries: any[]): any[] {
+  if (serviceName !== "game-server" && serviceName !== "game-proxy") {
+    return [];
+  }
+  const protocol = serviceName === "game-server" ? "tcp" : "http";
+  return entries.flatMap(({ instance, heartbeat }) =>
+    (Array.isArray(instance.endpoints) ? instance.endpoints : [])
+      .filter((endpoint: any) =>
+        endpoint.name === "admin" &&
+        endpoint.visibility === "admin" &&
+        endpoint.protocol === protocol &&
+        endpoint.healthy !== false
+      )
+      .map((endpoint: any) => ({
         service: serviceName,
-        instance_id: "",
-        reason: "scan_failed",
-        error: error.message || String(error)
-      });
+        instanceId: instance.id,
+        instance_id: instance.id,
+        endpointName: endpoint.name,
+        endpoint_name: endpoint.name,
+        protocol: endpoint.protocol,
+        host: endpoint.host,
+        port: endpoint.port,
+        healthy: instance.healthy !== false && heartbeat.status === "alive",
+        weight: instance.weight,
+        metadata: endpoint.metadata || {},
+        fallback: false,
+        source: "registry",
+        reason: "discovered"
+      }))
+  ).sort((left, right) => String(left.instance_id).localeCompare(String(right.instance_id)));
+}
+
+function buildRegistryLifecycleMetricAlertsFromRecords(observations: any[]): any[] {
+  const alerts = [];
+  for (const observation of observations) {
+    for (const record of observation.metrics.records) {
+      const instanceId = record.instanceId || record.data?._instance_id || "";
+      for (const spec of REGISTRY_LIFECYCLE_METRIC_ALERTS) {
+        const count = parseMetricInt(record.data?.[spec.field]);
+        if (count <= 0) continue;
+        alerts.push({
+          kind: spec.kind,
+          service: observation.name,
+          endpoint: "",
+          instance_id: instanceId,
+          severity: "critical",
+          message: registryLifecycleMetricMessage({ kind: spec.kind, service: observation.name, instance_id: instanceId }),
+          source: "metrics",
+          reason: "reported_total",
+          count
+        });
+      }
     }
-
-    return failures;
   }
-
-  private async scanRedisKeys(pattern: string): Promise<string[]> {
-    const keys = [];
-    let cursor = "0";
-
-    do {
-      const [nextCursor, batch] = await this.redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-      cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== "0");
-
-    return keys;
-  }
+  return alerts;
 }
 
 function buildServiceDiscoveryAlerts(service: any, schemaParseFailures: any[]): any[] {

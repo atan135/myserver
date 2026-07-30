@@ -59,38 +59,98 @@ function createServiceRedis(instances, options = {}) {
   const hashes = new Map();
   const keys = new Set();
   const ttls = new Map(Object.entries(options.ttls || {}));
+  const zsets = new Map();
+  const scanCalls = [];
+  const commandCounts = new Map();
+  const now = Math.floor(Date.now() / 1000);
+
+  const count = (name) => commandCounts.set(name, (commandCounts.get(name) || 0) + 1);
+
+  const zadd = (key, score, member) => {
+    const members = zsets.get(key) || new Map();
+    members.set(String(member), Number(score));
+    zsets.set(key, members);
+  };
 
   for (const instance of instances) {
     hashes.set(`service:${instance.name}:instances:${instance.id}:data`, JSON.stringify(instance));
     keys.add(`heartbeat:${instance.name}:${instance.id}`);
+    zadd(`service:${instance.name}:instance-index`, now, instance.id);
   }
 
   for (const entry of options.rawEntries || []) {
     hashes.set(`${entry.key}:data`, entry.data);
     if (entry.heartbeatKey) {
       keys.add(entry.heartbeatKey);
+      const match = /^service:([^:]+):instances:([^:]+)$/.exec(entry.key);
+      if (match) {
+        zadd(`service:${match[1]}:instance-index`, now, match[2]);
+      }
     }
   }
 
   for (const entry of options.metricEntries || []) {
-    hashes.set(entry.key, Object.fromEntries(
-      Object.entries(entry.data || {}).map(([key, value]) => [key, String(value)])
-    ));
+    const parsed = /^metrics:([^:]+):(.+):(\d+)$/.exec(entry.key);
+    if (!parsed) continue;
+    const [, serviceName, instanceId, bucketText] = parsed;
+    const bucket = Number(bucketText);
+    const data = Object.fromEntries(Object.entries(entry.data || {}).map(([key, value]) => [key, String(value)]));
+    data._schema = "metrics-v2";
+    data._service = serviceName;
+    data._instance_id = instanceId;
+    data._bucket = String(bucket);
+    data._reported_at = String(bucket);
+    data._received_at = String(bucket);
+    data.instance_id = instanceId;
+    hashes.set(`metrics:v2:latest:${serviceName}:${instanceId}`, data);
+    zadd(`metrics:v2:latest-index:${serviceName}`, bucket, instanceId);
+    hashes.set(`metrics:v2:history:${serviceName}:${bucket}`, {
+      [instanceId]: JSON.stringify(data)
+    });
+    zadd(`metrics:v2:history-index:${serviceName}`, bucket, String(bucket));
   }
 
-  return {
+  const zrangebyscore = (key, min, max, ...rest) => {
+    const minValue = parseScore(min, Number.NEGATIVE_INFINITY);
+    const maxValue = parseScore(max, Number.POSITIVE_INFINITY);
+    const members = [...(zsets.get(key) || new Map()).entries()]
+      .filter(([, score]) => score >= minValue && score <= maxValue)
+      .sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
+    const limitIndex = rest.findIndex((value) => String(value).toUpperCase() === "LIMIT");
+    if (limitIndex >= 0) {
+      const offset = Number(rest[limitIndex + 1]) || 0;
+      const count = Number(rest[limitIndex + 2]) || members.length;
+      return members.slice(offset, offset + count).map(([member]) => member);
+    }
+    return members.map(([member]) => member);
+  };
+
+  const executePipeline = async (commands) => Promise.all(commands.map(async ([command, args]) => {
+    try {
+      if (command === "hget") return [null, await redis.hget(...args)];
+      if (command === "hgetall") return [null, await redis.hgetall(...args)];
+      if (command === "exists") return [null, await redis.exists(...args)];
+      if (command === "ttl") return [null, await redis.ttl(...args)];
+      if (command === "unlink") return [null, 1];
+      if (command === "zrem") return [null, 1];
+      throw new Error(`unsupported pipeline command: ${command}`);
+    } catch (error) {
+      return [error, null];
+    }
+  }));
+
+  const redis = {
     async get(key) {
-      if (key === "metrics:heartbeat:game-server") {
-        return String(Math.floor(Date.now() / 1000));
-      }
       return null;
     },
     async hget(key, field) {
+      const value = hashes.get(key);
+      if (value && typeof value === "object") return value[field] || null;
       return hashes.get(`${key}:${field}`) || null;
     },
     async hgetall(key) {
       const value = hashes.get(key);
-      return value && typeof value === "object" ? value : {};
+      return value && typeof value === "object" ? { ...value } : {};
     },
     async exists(key) {
       return keys.has(key) ? 1 : 0;
@@ -101,30 +161,41 @@ function createServiceRedis(instances, options = {}) {
       }
       return keys.has(key) ? 30 : -2;
     },
-    async scan(cursor, _match, pattern) {
-      if (cursor !== "0") {
-        return ["0", []];
-      }
-      if (pattern.startsWith("service:")) {
-        const prefix = pattern.replace("*", "");
-        return [
-          "0",
-          [...hashes.keys()]
-            .map((key) => key.slice(0, -5))
-            .filter((key) => key.startsWith(prefix))
-        ];
-      }
-      if (pattern.startsWith("metrics:")) {
-        const prefix = pattern.replace("*", "");
-        return [
-          "0",
-          [...hashes.keys()]
-            .filter((key) => typeof key === "string" && key.startsWith(prefix))
-        ];
-      }
-      return ["0", []];
+    async zrangebyscore(...args) {
+      count("zrangebyscore");
+      return zrangebyscore(...args);
+    },
+    pipeline() {
+      const commands = [];
+      const pipeline = {
+        hget(...args) { commands.push(["hget", args]); return pipeline; },
+        hgetall(...args) { commands.push(["hgetall", args]); return pipeline; },
+        exists(...args) { commands.push(["exists", args]); return pipeline; },
+        ttl(...args) { commands.push(["ttl", args]); return pipeline; },
+        unlink(...args) { commands.push(["unlink", args]); return pipeline; },
+        zrem(...args) { commands.push(["zrem", args]); return pipeline; },
+        exec() { return executePipeline(commands); }
+      };
+      return pipeline;
+    },
+    async scan(...args) {
+      scanCalls.push(args);
+      throw new Error("SCAN must not be called by monitoring request paths");
     }
   };
+  redis.scanCalls = scanCalls;
+  redis.commandCounts = commandCounts;
+  return redis;
+}
+
+function parseScore(raw, fallback) {
+  const value = String(raw);
+  if (value === "+inf") return Number.POSITIVE_INFINITY;
+  if (value === "-inf") return Number.NEGATIVE_INFINITY;
+  const exclusive = value.startsWith("(");
+  const score = Number(exclusive ? value.slice(1) : value);
+  if (!Number.isFinite(score)) return fallback;
+  return exclusive ? score - Number.EPSILON : score;
 }
 
 function createServiceRedisWithoutTtl(instances) {
@@ -903,4 +974,64 @@ test("registry returns lifecycle alerts from latest Redis metrics by instance", 
     alert.source === "metrics" &&
     alert.count === 1
   ));
+});
+
+test("monitoring services, registry, and historical metrics use bounded v2 indexes without scan", async () => {
+  const bucket = Math.floor(Date.now() / 5000) * 5;
+  const redis = createServiceRedis(
+    [gameServerInstance("game-server-a", "10.0.0.1", 7500)],
+    {
+      metricEntries: [
+        {
+          key: `metrics:game-server:game-server-a:${bucket}`,
+          data: { qps: 7, latency_ms: 12, online_players: 3 }
+        }
+      ]
+    }
+  );
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const [first, concurrent] = await Promise.all([service.registry(), service.registry()]);
+  const readsAfterFlight = redis.commandCounts.get("zrangebyscore");
+  const cached = await service.registry();
+  const services = await service.services();
+  const history = await service.metrics("game-server", "1m");
+
+  assert.equal(first.ok, true);
+  assert.equal(concurrent.ok, true);
+  assert.equal(cached.cached, true);
+  assert.equal(redis.commandCounts.get("zrangebyscore"), readsAfterFlight + 17);
+  assert.equal(services.services.find((item) => item.name === "game-server").qps, 7);
+  assert.equal(history.points.length, 1);
+  assert.equal(history.points[0].qps, 7);
+  assert.deepEqual(redis.scanCalls, []);
+});
+
+test("registry isolates a single service metrics read failure as a partial response", async () => {
+  const redis = createServiceRedis([
+    gameServerInstance("game-server-a", "10.0.0.1", 7500)
+  ]);
+  const originalZrangebyscore = redis.zrangebyscore;
+  redis.zrangebyscore = async (key, ...args) => {
+    if (key === "metrics:v2:latest-index:game-server") {
+      throw new Error("metrics read unavailable");
+    }
+    return originalZrangebyscore(key, ...args);
+  };
+  const service = makeMonitoringServiceWithRedis(
+    { registryDiscoveryEnabled: true, registryDiscoveryRequired: true },
+    redis
+  );
+
+  const result = await service.registry();
+  const gameServer = result.services.find((item) => item.name === "game-server");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.partial, true);
+  assert.equal(gameServer.partial, true);
+  assert.ok(gameServer.errors.some((error) => error.error_code === "METRICS_LATEST_INDEX_READ_FAILED"));
+  assert.deepEqual(redis.scanCalls, []);
 });

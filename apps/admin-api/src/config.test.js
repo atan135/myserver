@@ -45,6 +45,15 @@ const CONFIG_ENV_KEYS = [
   "REGISTRY_DISCOVERY_CACHE_TTL_MS",
   "REGISTRY_DISCOVERY_REFRESH_INTERVAL_MS",
   "REDIS_KEY_PREFIX",
+  "METRICS_KEY_PREFIX",
+  "MONITORING_SNAPSHOT_CACHE_TTL_MS",
+  "MONITORING_SERVICE_READ_CONCURRENCY",
+  "MONITORING_REDIS_TIMEOUT_MS",
+  "METRICS_LATEST_TTL_SECONDS",
+  "METRICS_MAX_INSTANCES_PER_SERVICE",
+  "METRICS_HISTORY_RETENTION_SECONDS",
+  "METRICS_ARCHIVE_AFTER_SECONDS",
+  "METRICS_ARCHIVE_BATCH_SIZE",
   "APP_ENV",
   "SERVICE_NAME",
   "SERVICE_INSTANCE_ID",
@@ -707,7 +716,38 @@ test("admin-api reads registry key prefix with Redis prefix fallback", async () 
 
   await withEnv({ REDIS_KEY_PREFIX: "redis:" }, (config) => {
     assert.equal(config.registryKeyPrefix, "redis:");
+    assert.equal(config.metricsKeyPrefix, "redis:");
   });
+});
+
+test("admin-api validates bounded monitoring v2 read model configuration", async () => {
+  await withEnv({
+    METRICS_KEY_PREFIX: "metrics:",
+    MONITORING_SNAPSHOT_CACHE_TTL_MS: "3000",
+    MONITORING_SERVICE_READ_CONCURRENCY: "4",
+    MONITORING_REDIS_TIMEOUT_MS: "1000",
+    METRICS_LATEST_TTL_SECONDS: "180",
+    METRICS_MAX_INSTANCES_PER_SERVICE: "64",
+    METRICS_HISTORY_RETENTION_SECONDS: "4500",
+    METRICS_ARCHIVE_AFTER_SECONDS: "3600",
+    METRICS_ARCHIVE_BATCH_SIZE: "128"
+  }, (config) => {
+    assert.equal(config.metricsKeyPrefix, "metrics:");
+    assert.equal(config.monitoringSnapshotCacheTtlMs, 3000);
+    assert.equal(config.monitoringServiceReadConcurrency, 4);
+    assert.equal(config.monitoringRedisTimeoutMs, 1000);
+    assert.equal(config.metricsArchiveAfterSeconds, 3600);
+    assert.equal(config.metricsArchiveBatchSize, 128);
+  });
+
+  await assert.rejects(
+    withEnv({ METRICS_ARCHIVE_AFTER_SECONDS: "4500", METRICS_HISTORY_RETENTION_SECONDS: "4500" }, () => {}),
+    /METRICS_ARCHIVE_AFTER_SECONDS/
+  );
+  await assert.rejects(
+    withEnv({ MONITORING_SERVICE_READ_CONCURRENCY: "0" }, () => {}),
+    /MONITORING_SERVICE_READ_CONCURRENCY/
+  );
 });
 
 test("admin-api reads discovery cache ttl and refresh interval", async () => {
