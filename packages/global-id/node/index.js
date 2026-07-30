@@ -10,8 +10,11 @@ export const WORKER_SHIFT = SEQUENCE_BITS;
 export const ORIGIN_SHIFT = WORKER_BITS + SEQUENCE_BITS;
 export const TIME_SHIFT = ORIGIN_BITS + WORKER_BITS + SEQUENCE_BITS;
 export const MAX_CLOCK_BACKWARD_MS = 5n;
-export const DEFAULT_WORKER_LEASE_TTL_SECONDS = 30;
-export const DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS = 10000;
+// Keep enough headroom for short Redis persistence stalls while still detecting
+// ownership loss promptly. Renewal runs once per third of the lease lifetime.
+export const DEFAULT_WORKER_LEASE_TTL_SECONDS = 90;
+export const DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS =
+  (DEFAULT_WORKER_LEASE_TTL_SECONDS * 1000) / 3;
 
 const BASE32_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 const KIND_BY_PREFIX = new Map([
@@ -125,7 +128,8 @@ export async function acquireRedisWorkerLease({
   serviceInstanceId = `${serviceName}-${process.pid}`,
   redisKeyPrefix = "",
   ttlSeconds = DEFAULT_WORKER_LEASE_TTL_SECONDS,
-  renewIntervalMs = DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS
+  renewIntervalMs,
+  onLeaseLost
 } = {}) {
   if (!redis || typeof redis.set !== "function") {
     throw new GlobalIdError("WORKER_LEASE_REDIS_UNAVAILABLE", "redis client is required for worker lease");
@@ -137,7 +141,9 @@ export async function acquireRedisWorkerLease({
     ? [parseWorkerId(workerId)]
     : Array.from({ length: Number(MAX_WORKER_ID) + 1 }, (_, index) => BigInt(index));
   const ttl = parsePositiveInteger(ttlSeconds, "INVALID_WORKER_LEASE_TTL_SECONDS");
-  const renewMs = parsePositiveInteger(renewIntervalMs, "INVALID_WORKER_LEASE_RENEW_INTERVAL_MS");
+  const renewMs = renewIntervalMs === undefined
+    ? workerLeaseRenewIntervalMs(ttl)
+    : parsePositiveInteger(renewIntervalMs, "INVALID_WORKER_LEASE_RENEW_INTERVAL_MS");
   const token = `${serviceName}:${serviceInstanceId}:${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
   const acquiredAt = new Date().toISOString();
 
@@ -161,7 +167,8 @@ export async function acquireRedisWorkerLease({
         originId: origin,
         workerId: candidate,
         ttlSeconds: ttl,
-        renewIntervalMs: renewMs
+        renewIntervalMs: renewMs,
+        onLeaseLost
       });
     }
   }
@@ -175,7 +182,7 @@ export async function acquireRedisWorkerLease({
 }
 
 export class RedisWorkerLease {
-  constructor({ redis, key, value, originId, workerId, ttlSeconds, renewIntervalMs }) {
+  constructor({ redis, key, value, originId, workerId, ttlSeconds, renewIntervalMs, onLeaseLost }) {
     this.redis = redis;
     this.key = key;
     this.value = value;
@@ -183,6 +190,8 @@ export class RedisWorkerLease {
     this.workerId = workerId;
     this.ttlSeconds = ttlSeconds;
     this.active = true;
+    this.onLeaseLost = onLeaseLost;
+    this.leaseLossNotified = false;
     this.renewTimer = setInterval(() => {
       this.renew().catch(() => {});
     }, renewIntervalMs);
@@ -215,11 +224,13 @@ export class RedisWorkerLease {
       result = await this.redis.eval(script, 1, this.key, this.value, String(this.ttlSeconds));
     } catch (error) {
       this.deactivate();
+      this.notifyLeaseLost(error);
       throw error;
     }
     const renewed = Number(result) === 1;
     if (!renewed) {
       this.deactivate();
+      this.notifyLeaseLost();
     }
     return renewed;
   }
@@ -246,6 +257,29 @@ export class RedisWorkerLease {
     this.active = false;
     clearInterval(this.renewTimer);
   }
+
+  notifyLeaseLost(error) {
+    if (this.leaseLossNotified) {
+      return;
+    }
+    this.leaseLossNotified = true;
+    if (typeof this.onLeaseLost !== "function") {
+      return;
+    }
+    Promise.resolve(this.onLeaseLost({
+      key: this.key,
+      originId: this.originId,
+      workerId: this.workerId,
+      error
+    })).catch((handlerError) => {
+      console.error("global id worker lease loss handler failed", handlerError);
+    });
+  }
+}
+
+export function workerLeaseRenewIntervalMs(ttlSeconds) {
+  const ttl = parsePositiveInteger(ttlSeconds, "INVALID_WORKER_LEASE_TTL_SECONDS");
+  return Math.max(1, Math.floor((ttl * 1000) / 3));
 }
 
 export function workerLeaseKey(originId, workerId) {

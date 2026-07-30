@@ -2,6 +2,11 @@ import { acquireRedisWorkerLease, createGlobalIdGeneratorFromEnv } from "../../.
 
 let announcementIdGenerator = null;
 let workerLease = null;
+let leaseLossHandler = null;
+
+export function setGlobalIdLeaseLossHandler(handler) {
+  leaseLossHandler = handler;
+}
 
 export async function initializeGlobalIdLease(config, redis) {
   if (workerLease) {
@@ -14,10 +19,19 @@ export async function initializeGlobalIdLease(config, redis) {
     workerId: config.globalIdWorkerId,
     serviceName: config.serviceName || config.appName || "announce-service",
     serviceInstanceId: config.serviceInstanceId || "announce-service",
-    redisKeyPrefix: config.redisKeyPrefix || ""
+    redisKeyPrefix: config.redisKeyPrefix || "",
+    onLeaseLost: handleLeaseLost
   });
   announcementIdGenerator = workerLease.createGenerator({ prefix: "ann" });
   return workerLease;
+}
+
+function handleLeaseLost(details) {
+  if (typeof leaseLossHandler === "function") {
+    return leaseLossHandler(details);
+  }
+  console.error("global id worker lease lost before announce-service shutdown handler was installed", details);
+  process.exit(1);
 }
 
 export async function releaseGlobalIdLease() {

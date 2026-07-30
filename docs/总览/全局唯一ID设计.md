@@ -192,9 +192,9 @@ id:origin:<origin_id>
 1. 读取 `GLOBAL_ID_ORIGIN_ID`。
 2. 若显式配置 `GLOBAL_ID_WORKER_ID`，尝试抢占对应 worker lease。
 3. 若未配置 worker，则在允许范围内寻找空闲 worker。
-4. 抢占成功后定期续租。
+4. 抢占成功后以 90 秒 TTL 持有 lease，并每 30 秒续租一次。
 5. 抢占失败或 Redis 不可用时，生产环境应启动失败。
-6. 运行中若续租失败或发现 lease 已被其它实例抢占，发号器必须立即 fail-closed，拒绝继续生成业务 ID。
+6. 运行中若续租失败、Redis 连接失败或发现 lease 已被其它实例抢占，发号器必须立即 fail-closed，拒绝继续生成业务 ID；服务停止接收新请求、完成受控清理后以非零状态退出，由编排器重启并重新申请 lease。不得在原进程内重新启用旧发号器。
 
 本地开发可允许手动配置固定 worker，例如：
 

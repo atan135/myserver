@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
+use global_id::{
+    DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS, DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease,
+};
 use interprocess::local_socket::traits::tokio::Listener as _;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc, watch};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
@@ -436,23 +438,39 @@ pub async fn run(
     );
     let lease_renew_client = redis_client.clone();
     let lease_for_renewal = worker_lease.clone();
+    let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
     let lease_renew_task = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            match lease_renew_client.get_multiplexed_async_connection().await {
-                Ok(mut redis) => {
-                    if !lease_for_renewal
-                        .renew_redis(&mut redis)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        warn!(lease_key = %lease_for_renewal.key, "global id worker lease renewal lost ownership");
+            tokio::time::sleep(Duration::from_secs(
+                DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+            ))
+            .await;
+            let lease_is_active = match lease_renew_client.get_multiplexed_async_connection().await
+            {
+                Ok(mut redis) => match lease_for_renewal.renew_redis(&mut redis).await {
+                    Ok(active) => active,
+                    Err(error) => {
+                        warn!(
+                            lease_key = %lease_for_renewal.key,
+                            error = %error,
+                            "global id worker lease renewal failed"
+                        );
+                        false
                     }
-                }
+                },
                 Err(error) => {
                     lease_for_renewal.deactivate();
                     warn!(lease_key = %lease_for_renewal.key, error = %error, "global id worker lease renewal failed");
+                    false
                 }
+            };
+            if !lease_is_active {
+                warn!(
+                    lease_key = %lease_for_renewal.key,
+                    "global id worker lease lost; requesting process shutdown"
+                );
+                let _ = lease_loss_tx.send(true);
+                break;
             }
         }
     });
@@ -616,16 +634,27 @@ pub async fn run(
     let readiness_task = service_registry::readiness::spawn_from_env(&config.service_name).await?;
 
     let mut next_session_id: u64 = 1;
+    let mut lease_lost = false;
 
     loop {
         let accept_result = tokio::select! {
             result = tcp_listener.accept() => Some(result),
             _ = shared_state.shutdown_signal.notified() => None,
             _ = tokio::signal::ctrl_c() => None,
+            changed = lease_loss_rx.changed() => {
+                if changed.is_err() || *lease_loss_rx.borrow_and_update() {
+                    lease_lost = true;
+                }
+                None
+            },
         };
 
         let Some((socket, peer_addr)) = accept_result.transpose()? else {
-            info!("shutdown signal received, stopping game server accept loop");
+            if lease_lost {
+                warn!("global id worker lease lost, stopping game server accept loop");
+            } else {
+                info!("shutdown signal received, stopping game server accept loop");
+            }
             break;
         };
 
@@ -691,7 +720,11 @@ pub async fn run(
     services.title_service.close().await;
 
     info!("game server shutdown completed");
-    Ok(())
+    if lease_lost {
+        Err(std::io::Error::other("global id worker lease lost").into())
+    } else {
+        Ok(())
+    }
 }
 
 async fn run_local_socket_listener(

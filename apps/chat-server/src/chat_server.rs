@@ -7,7 +7,7 @@ use prost::Message;
 use redis::AsyncCommands;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -320,6 +320,7 @@ pub async fn run(
     config: Config,
     chat_store: ChatStore,
     chat_sessions: ChatSessionMap,
+    mut lease_loss_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
 
@@ -336,14 +337,25 @@ pub async fn run(
     ));
     let readiness_task = service_registry::readiness::spawn_from_env("chat-server").await?;
 
+    let mut lease_lost = false;
     loop {
         let accept_result = tokio::select! {
             result = listener.accept() => Some(result),
             _ = tokio::signal::ctrl_c() => None,
+            changed = lease_loss_rx.changed() => {
+                if changed.is_err() || *lease_loss_rx.borrow_and_update() {
+                    lease_lost = true;
+                }
+                None
+            },
         };
 
         let Some((socket, peer_addr)) = accept_result.transpose()? else {
-            info!("shutdown signal received, stopping chat server");
+            if lease_lost {
+                warn!("global id worker lease lost, stopping chat server");
+            } else {
+                info!("shutdown signal received, stopping chat server");
+            }
             break;
         };
 
@@ -375,7 +387,11 @@ pub async fn run(
         let _ = task.await;
     }
 
-    Ok(())
+    if lease_lost {
+        Err(std::io::Error::other("global id worker lease lost").into())
+    } else {
+        Ok(())
+    }
 }
 
 pub fn ticket_key(prefix: &str, ticket: &str) -> String {

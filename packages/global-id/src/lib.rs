@@ -17,7 +17,10 @@ pub const WORKER_SHIFT: u8 = SEQUENCE_BITS;
 pub const ORIGIN_SHIFT: u8 = WORKER_BITS + SEQUENCE_BITS;
 pub const TIME_SHIFT: u8 = ORIGIN_BITS + WORKER_BITS + SEQUENCE_BITS;
 pub const MAX_CLOCK_BACKWARD_MS: u64 = 5;
-pub const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 30;
+// A longer lease tolerates short Redis persistence stalls. Renewing every third
+// of the TTL still makes a genuine ownership loss visible within one interval.
+pub const DEFAULT_WORKER_LEASE_TTL_SECONDS: u64 = 90;
+pub const DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS: u64 = DEFAULT_WORKER_LEASE_TTL_SECONDS / 3;
 
 const BASE32_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 

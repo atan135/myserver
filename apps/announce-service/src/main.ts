@@ -1,6 +1,7 @@
 import log4js from "log4js";
 
 import { createNestApp, closeNestApp } from "./nest-app.js";
+import { setGlobalIdLeaseLossHandler } from "./global-id.js";
 import { log } from "./logger.js";
 import { ANNOUNCE_CONFIG, ANNOUNCE_REGISTRY } from "./tokens.js";
 
@@ -8,25 +9,17 @@ export async function bootstrap() {
   const app = await createNestApp();
   const config = app.get<any>(ANNOUNCE_CONFIG);
   const registryClient = app.get<any>(ANNOUNCE_REGISTRY, { strict: false });
-
-  try {
-    await registryClient.register();
-    registryClient.startHeartbeat(10);
-  } catch (error: any) {
-    log("error", "startup.registry_failed", { error: error.message });
-  }
-
-  const httpServer = await app.listen(config.port, config.host);
+  let httpServer: any;
   let shuttingDown = false;
 
-  const shutdown = async (signal: string) => {
+  const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
 
     log("info", "shutdown.start", { signal });
 
     try {
-      if (typeof httpServer.close === "function") {
+      if (typeof httpServer?.close === "function") {
         await httpServer.close();
       }
       log("info", "shutdown.http_server_closed");
@@ -37,11 +30,28 @@ export async function bootstrap() {
     await closeNestApp(app);
     log("info", "shutdown.complete", { signal });
     await new Promise((resolve) => log4js.shutdown(resolve));
-    process.exit(0);
+    process.exit(exitCode);
   };
+
+  setGlobalIdLeaseLossHandler(({ key, error }) => {
+    log("error", "global_id.lease_lost", {
+      leaseKey: key,
+      error: error instanceof Error ? error.message : undefined
+    });
+    void shutdown("GLOBAL_ID_LEASE_LOST", 1);
+  });
 
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
+
+  httpServer = await app.listen(config.port, config.host);
+
+  try {
+    await registryClient.register();
+    registryClient.startHeartbeat(10);
+  } catch (error: any) {
+    log("error", "startup.registry_failed", { error: error.message });
+  }
 
   log("info", "server.started", {
     host: config.host,

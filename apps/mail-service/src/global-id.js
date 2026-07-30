@@ -2,6 +2,11 @@ import { acquireRedisWorkerLease, createGlobalIdGeneratorFromEnv } from "../../.
 
 let mailIdGenerator = null;
 let workerLease = null;
+let leaseLossHandler = null;
+
+export function setGlobalIdLeaseLossHandler(handler) {
+  leaseLossHandler = handler;
+}
 
 export async function initializeGlobalIdLease(config, redis) {
   if (workerLease) {
@@ -14,10 +19,19 @@ export async function initializeGlobalIdLease(config, redis) {
     workerId: config.globalIdWorkerId,
     serviceName: config.serviceName || config.appName || "mail-service",
     serviceInstanceId: config.serviceInstanceId || "mail-service",
-    redisKeyPrefix: config.redisKeyPrefix || ""
+    redisKeyPrefix: config.redisKeyPrefix || "",
+    onLeaseLost: handleLeaseLost
   });
   mailIdGenerator = workerLease.createGenerator({ prefix: "mail" });
   return workerLease;
+}
+
+function handleLeaseLost(details) {
+  if (typeof leaseLossHandler === "function") {
+    return leaseLossHandler(details);
+  }
+  console.error("global id worker lease lost before mail-service shutdown handler was installed", details);
+  process.exit(1);
 }
 
 export async function releaseGlobalIdLease() {

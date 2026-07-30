@@ -183,6 +183,12 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 - Node HTTP `/healthz`、后续 Rust readiness endpoint 和数据库 postflight 均通过；管理口仅能从受控网络访问。
 - 内存限制、Redis `noeviction`、PostgreSQL 参数、日志轮转和备份任务已实际加载，而非只存在于配置文件。
 
+### 3.5 Redis 持久化与全局 ID lease
+
+本单机部署中，Redis 是 session、ticket、route、registry 和 worker lease 的运行时存储，PostgreSQL 才是业务数据的权威持久化来源。`deploy/docker/config/redis.conf` 必须保留 `appendonly yes` 和 `appendfsync everysec`，并显式设置 `save ""` 禁用默认 RDB snapshot 规则。这样避免高频 RDB fork/save 与 AOF fsync 争抢磁盘 I/O，导致 worker lease 在 TTL 内无法续租。
+
+全局 ID worker lease 使用 90 秒 TTL、每 30 秒续租。任一续租 Redis 错误或 ownership 丢失都会令对应服务以非零状态退出；Compose 的 `restart: unless-stopped` 会在 Redis 恢复后重新启动服务并重新申请 lease。出现这类重启时，先检查 Redis AOF 延迟、磁盘空间和 I/O，再恢复或扩大流量；不要在运行中的旧进程里手工恢复发号。
+
 ## 4. 日常镜像更新
 
 ### 4.1 更新前
@@ -221,7 +227,7 @@ DISALLOW_LEGACY_DIRECT_CONFIG=true
 ## 5. 备份、恢复和巡检
 
 - PostgreSQL：至少每日逻辑备份或物理备份，保留异机副本；定期在隔离环境执行恢复演练。备份成功不等于可恢复，必须记录恢复时长和校验结果。
-- Redis：根据 AOF/RDB 策略备份持久文件；其恢复不能替代 PostgreSQL 恢复。恢复后须核对 registry、session/ticket 失效策略和 route store 一致性。
+- Redis：本部署以 AOF 为恢复来源，RDB snapshot 已禁用；备份 AOF 持久文件。其恢复不能替代 PostgreSQL 恢复。恢复后须核对 registry、session/ticket 失效策略和 route store 一致性。
 - NATS：当前使用 Core NATS，不应把它当作持久业务队列或备份来源。
 - 配置与 release bundle：备份受版本控制的非敏感配置和 `images.lock.json`；secret 按 secret manager 的独立恢复流程处理。
 - 每日巡检：磁盘、inode、Docker 日志、容器重启次数、OOM、CPU steal、内存/Swap、PostgreSQL 连接和慢查询、Redis 内存、NATS 连接、registry heartbeat、备份最近成功时间。

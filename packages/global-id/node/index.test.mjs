@@ -10,6 +10,9 @@ import {
   decodeBase32,
   encodeGlobalId,
   acquireRedisWorkerLease,
+  DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS,
+  DEFAULT_WORKER_LEASE_TTL_SECONDS,
+  workerLeaseRenewIntervalMs,
   workerLeaseKey,
   lastTimestampKey,
   originMetadataKey
@@ -76,6 +79,12 @@ test("redis key helpers use bounded ids", () => {
   assert.equal(workerLeaseKey(1, 2), "id:worker:1:2");
   assert.equal(lastTimestampKey(1, 2), "id:last-ts:1:2");
   assert.equal(originMetadataKey(1), "id:origin:1");
+});
+
+test("worker lease renewal interval follows its TTL", () => {
+  assert.equal(DEFAULT_WORKER_LEASE_TTL_SECONDS, 90);
+  assert.equal(DEFAULT_WORKER_LEASE_RENEW_INTERVAL_MS, 30_000);
+  assert.equal(workerLeaseRenewIntervalMs(9), 3_000);
 });
 
 test("redis worker lease claims, rejects conflict, and releases by token", async () => {
@@ -163,4 +172,82 @@ test("redis worker lease generator rejects after lease release", async () => {
   assert.match(generator.generateString(), /^plr_/);
   assert.equal(await lease.release(), true);
   assert.throws(() => generator.generateString(), /worker lease is no longer active/);
+});
+
+test("redis worker lease reports ownership loss once and never on normal release", async () => {
+  const values = new Map();
+  let ownershipLost = false;
+  const losses = [];
+  const redis = {
+    async set(key, value, _ex, _ttl, mode) {
+      if (mode === "NX" && values.has(key)) {
+        return null;
+      }
+      values.set(key, value);
+      return "OK";
+    },
+    async eval(script, _keyCount, key, value) {
+      if (script.includes('redis.call("SET"')) {
+        return ownershipLost || values.get(key) !== value ? 0 : 1;
+      }
+      if (values.get(key) !== value) {
+        return 0;
+      }
+      values.delete(key);
+      return 1;
+    }
+  };
+
+  const lease = await acquireRedisWorkerLease({
+    redis,
+    originId: 1,
+    workerId: 2,
+    serviceName: "test",
+    serviceInstanceId: "test-1",
+    onLeaseLost: (details) => losses.push(details)
+  });
+
+  ownershipLost = true;
+  assert.equal(await lease.renew(), false);
+  await Promise.resolve();
+  assert.equal(losses.length, 1);
+  assert.equal(losses[0].key, "id:worker:1:2");
+  assert.equal(await lease.renew(), false);
+  assert.equal(losses.length, 1);
+
+  const healthyLease = await acquireRedisWorkerLease({
+    redis,
+    originId: 1,
+    workerId: 3,
+    serviceName: "test",
+    serviceInstanceId: "test-2",
+    onLeaseLost: (details) => losses.push(details)
+  });
+  assert.equal(await healthyLease.release(), true);
+  assert.equal(losses.length, 1);
+});
+
+test("redis worker lease reports a Redis renewal error", async () => {
+  const redis = {
+    async set() {
+      return "OK";
+    },
+    async eval() {
+      throw new Error("Redis unavailable");
+    }
+  };
+  const losses = [];
+  const lease = await acquireRedisWorkerLease({
+    redis,
+    originId: 1,
+    workerId: 2,
+    serviceName: "test",
+    serviceInstanceId: "test-1",
+    onLeaseLost: (details) => losses.push(details)
+  });
+
+  await assert.rejects(() => lease.renew(), /Redis unavailable/);
+  await Promise.resolve();
+  assert.equal(losses.length, 1);
+  assert.match(losses[0].error.message, /Redis unavailable/);
 });

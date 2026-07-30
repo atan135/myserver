@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
+use global_id::{
+    DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS, DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease,
+};
+use tokio::sync::watch;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
@@ -55,7 +58,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         "global id worker lease acquired"
     );
 
-    let lease_renew_task = spawn_worker_lease_renewal(redis_client.clone(), worker_lease.clone());
+    let (lease_loss_tx, mut lease_loss_rx) = watch::channel(false);
+    let lease_renew_task =
+        spawn_worker_lease_renewal(redis_client.clone(), worker_lease.clone(), lease_loss_tx);
 
     let result = async {
         let room_id_generator = Arc::new(worker_lease.generator()?);
@@ -86,16 +91,30 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
         let addr = config.bind_addr.parse()?;
         let reflection = tonic_reflection::server::Builder::configure().build()?;
+        let mut shutdown_lease_loss_rx = lease_loss_rx.clone();
 
         Server::builder()
             .add_service(reflection)
             .add_service(MatchServiceServer::new(match_service))
             .add_service(MatchInternalServer::new(match_internal))
             .serve_with_shutdown(addr, async {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    warn!(error = %error, "failed to wait for shutdown signal");
+                if *shutdown_lease_loss_rx.borrow_and_update() {
+                    warn!("global id worker lease lost, stopping match-service gRPC server");
+                } else {
+                    tokio::select! {
+                        result = tokio::signal::ctrl_c() => {
+                            if let Err(error) = result {
+                                warn!(error = %error, "failed to wait for shutdown signal");
+                            }
+                            info!("shutdown signal received, stopping match-service gRPC server");
+                        }
+                        changed = shutdown_lease_loss_rx.changed() => {
+                            if changed.is_err() || *shutdown_lease_loss_rx.borrow_and_update() {
+                                warn!("global id worker lease lost, stopping match-service gRPC server");
+                            }
+                        }
+                    }
                 }
-                info!("shutdown signal received, stopping match-service gRPC server");
             })
             .await?;
 
@@ -107,25 +126,36 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let _ = lease_renew_task.await;
     release_worker_lease(redis_client, &worker_lease).await;
 
-    result
+    if *lease_loss_rx.borrow_and_update() {
+        Err(std::io::Error::other("global id worker lease lost").into())
+    } else {
+        result
+    }
 }
 
 fn spawn_worker_lease_renewal(
     redis_client: redis::Client,
     worker_lease: WorkerLease,
+    lease_loss_tx: watch::Sender<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            match redis_client.get_multiplexed_async_connection().await {
-                Ok(mut redis) => {
-                    if !worker_lease.renew_redis(&mut redis).await.unwrap_or(false) {
+            tokio::time::sleep(Duration::from_secs(
+                DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+            ))
+            .await;
+            let lease_is_active = match redis_client.get_multiplexed_async_connection().await {
+                Ok(mut redis) => match worker_lease.renew_redis(&mut redis).await {
+                    Ok(active) => active,
+                    Err(error) => {
                         warn!(
                             lease_key = %worker_lease.key,
-                            "global id worker lease renewal lost ownership"
+                            error = %error,
+                            "global id worker lease renewal failed"
                         );
+                        false
                     }
-                }
+                },
                 Err(error) => {
                     worker_lease.deactivate();
                     warn!(
@@ -133,7 +163,16 @@ fn spawn_worker_lease_renewal(
                         error = %error,
                         "global id worker lease renewal failed"
                     );
+                    false
                 }
+            };
+            if !lease_is_active {
+                warn!(
+                    lease_key = %worker_lease.key,
+                    "global id worker lease lost; requesting process shutdown"
+                );
+                let _ = lease_loss_tx.send(true);
+                break;
             }
         }
     })

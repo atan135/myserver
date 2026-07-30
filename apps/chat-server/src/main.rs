@@ -11,7 +11,9 @@ mod ticket;
 use std::fs;
 use std::net::SocketAddr;
 
-use global_id::{DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease};
+use global_id::{
+    DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS, DEFAULT_WORKER_LEASE_TTL_SECONDS, WorkerLease,
+};
 use service_registry::{RegistryClient, ServiceEndpoint, ServiceInstance};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt;
@@ -522,7 +524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         bind_addr = %config.bind_addr,
         db_enabled = config.db_enabled,
-        redis_url = %config.redis_url,
+        redis_configured = true,
         global_id_origin_id = config.global_id_origin_id,
         global_id_worker_id = ?config.global_id_worker_id,
         registry_enabled = config.registry_enabled,
@@ -570,22 +572,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     chat_service::initialize_global_id_generator(worker_lease.generator()?)?;
     let lease_for_renewal = worker_lease.clone();
     let lease_renew_client = redis_client.clone();
+    let (lease_loss_tx, lease_loss_rx) = tokio::sync::watch::channel(false);
     let lease_renew_task = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            match lease_renew_client.get_multiplexed_async_connection().await {
-                Ok(mut redis) => {
-                    if !lease_for_renewal
-                        .renew_redis(&mut redis)
-                        .await
-                        .unwrap_or(false)
-                    {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                DEFAULT_WORKER_LEASE_RENEW_INTERVAL_SECONDS,
+            ))
+            .await;
+            let lease_is_active = match lease_renew_client.get_multiplexed_async_connection().await
+            {
+                Ok(mut redis) => match lease_for_renewal.renew_redis(&mut redis).await {
+                    Ok(active) => active,
+                    Err(error) => {
                         tracing::warn!(
                             lease_key = %lease_for_renewal.key,
-                            "global id worker lease renewal lost ownership"
+                            error = %error,
+                            "global id worker lease renewal failed"
                         );
+                        false
                     }
-                }
+                },
                 Err(error) => {
                     lease_for_renewal.deactivate();
                     tracing::warn!(
@@ -593,7 +599,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error = %error,
                         "global id worker lease renewal failed"
                     );
+                    false
                 }
+            };
+            if !lease_is_active {
+                tracing::warn!(
+                    lease_key = %lease_for_renewal.key,
+                    "global id worker lease lost; requesting process shutdown"
+                );
+                let _ = lease_loss_tx.send(true);
+                break;
             }
         }
     });
@@ -713,7 +728,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("mail notification subscriber started");
 
-    let result = chat_server::run(server_config, chat_store.clone(), chat_sessions).await;
+    let result = chat_server::run(
+        server_config,
+        chat_store.clone(),
+        chat_sessions,
+        lease_loss_rx,
+    )
+    .await;
 
     let _ = mail_shutdown_tx.send(true);
     match tokio::time::timeout(
