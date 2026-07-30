@@ -556,7 +556,7 @@ pub async fn run(
         admin_addr = %config.admin_bind_addr(),
         local_socket_name = %config.local_socket_name,
         internal_socket_name = %config.internal_socket_name,
-        redis = %config.redis_url,
+        redis_configured = true,
         db_enabled = db_store.enabled(),
         "game server listening"
     );
