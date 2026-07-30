@@ -13,9 +13,21 @@ function logSecurity(level: string, message: string, extra: Record<string, unkno
   }
 }
 
+function requestUrl(req: any) {
+  return String(req?.raw?.url ?? req?.originalUrl ?? req?.url ?? "");
+}
+
+function requestPath(req: any) {
+  return requestUrl(req).split("?")[0];
+}
+
 function isDockerHealthCheck(req: any) {
-  const requestUrl = req?.raw?.url ?? req?.originalUrl ?? req?.url;
-  return requestUrl === "/healthz";
+  return requestUrl(req) === "/healthz";
+}
+
+function isInternalServiceRequest(req: any) {
+  const path = requestPath(req);
+  return path === "/api/v1/internal" || path.startsWith("/api/v1/internal/");
 }
 
 @Injectable()
@@ -27,7 +39,12 @@ export class TlsRequiredMiddleware implements NestMiddleware {
 
   async use(req: any, _res: any, next: () => void) {
     // The application port is Docker-internal; Caddy remains responsible for public TLS.
-    if (isDockerHealthCheck(req) || !this.config.authRequireTls || isRequestSecure(req, this.config)) {
+    if (
+      isDockerHealthCheck(req) ||
+      isInternalServiceRequest(req) ||
+      !this.config.authRequireTls ||
+      isRequestSecure(req, this.config)
+    ) {
       next();
       return;
     }

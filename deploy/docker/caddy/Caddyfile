@@ -9,6 +9,10 @@
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
     }
+
+    @internal_api path /api/v1/internal /api/v1/internal/*
+    respond @internal_api 404
+
     reverse_proxy auth-http:3000
 }
 

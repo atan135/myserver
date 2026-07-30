@@ -2,7 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 
 import { AuthService } from "../auth/auth.service.js";
 import { getClientIp } from "../common/client-ip.js";
-import { badRequest, forbidden, serviceUnavailable, unauthorized } from "../common/http-exception.js";
+import { ApiHttpException, badRequest, forbidden, serviceUnavailable, unauthorized } from "../common/http-exception.js";
 import { AUTH_CHARACTER_STORE, AUTH_CONFIG, AUTH_STORE } from "../tokens.js";
 
 const LOGINABLE_CHARACTER_STATUSES = new Set(["active"]);
@@ -158,6 +158,82 @@ export class CharactersService {
       }
       if (error?.code === "CHARACTER_NAME_DUPLICATE") {
         throw forbidden("CHARACTER_NAME_DUPLICATE", "character name already exists");
+      }
+      if (error?.code === "CHARACTER_STORE_DISABLED") {
+        throw serviceUnavailable("CHARACTER_STORE_UNAVAILABLE", "character store is unavailable");
+      }
+      throw error;
+    }
+  }
+
+  async createForAdmin(body: any) {
+    this.assertCharacterStoreEnabled();
+
+    const accountPlayerId = this.normalizeAdminAccountPlayerId(
+      body?.accountPlayerId ?? body?.account_player_id ?? body?.targetAccountPlayerId
+    );
+    const account = await this.authStore.findPlayerAuthStateByPlayerId(accountPlayerId);
+    if (!account) {
+      throw new ApiHttpException(404, {
+        ok: false,
+        error: "PLAYER_NOT_FOUND",
+        message: "Player not found"
+      });
+    }
+
+    const defaults = this.getCreateDefaults();
+    const name = this.normalizeCharacterName(body?.name);
+    const appearance = this.normalizeAppearance(body?.appearance ?? body?.appearance_json ?? {});
+    const worldId = this.normalizeAdminInteger(
+      body?.worldId ?? body?.world_id,
+      defaults.worldId,
+      "worldId"
+    );
+    const position = this.normalizeAdminPosition(body?.position, defaults.position);
+    const affinity = this.normalizeAdminElements(body?.affinity, defaults.affinity, "affinity");
+    const mastery = this.normalizeAdminElements(body?.mastery, defaults.mastery, "mastery");
+    if (Object.values(affinity).reduce((total, value) => total + value, 0) !== 10000) {
+      throw badRequest("INVALID_CHARACTER_PAYLOAD", "affinity values must total 10000");
+    }
+
+    try {
+      const character = await this.characterStore.createCharacterForAdmin({
+        accountPlayerId,
+        worldId,
+        name,
+        appearance,
+        position,
+        affinity,
+        mastery
+      }, {
+        bypassCharacterLimit: true,
+        adminActor: this.normalizeAdminActor(body?.adminActor ?? body?.admin_actor),
+        reason: this.normalizeAdminReason(body?.reason),
+        targetAccountPlayerId: accountPlayerId,
+        action: "admin_character_create"
+      });
+
+      return {
+        ok: true,
+        character: {
+          ...toSnakeCharacter(character),
+          account_player_id: character.accountPlayerId
+        }
+      };
+    } catch (error: any) {
+      if (error?.code === "CHARACTER_NAME_DUPLICATE") {
+        throw new ApiHttpException(409, {
+          ok: false,
+          error: error.code,
+          message: "character name already exists"
+        });
+      }
+      if (error?.code === "CHARACTER_ID_EXISTS") {
+        throw new ApiHttpException(409, {
+          ok: false,
+          error: error.code,
+          message: "generated character ID already exists"
+        });
       }
       if (error?.code === "CHARACTER_STORE_DISABLED") {
         throw serviceUnavailable("CHARACTER_STORE_UNAVAILABLE", "character store is unavailable");
@@ -524,6 +600,76 @@ export class CharactersService {
     }
 
     return input;
+  }
+
+  normalizeAdminAccountPlayerId(input: unknown) {
+    if (typeof input !== "string" || input.trim().length === 0 || input.trim().length > 64) {
+      throw badRequest("INVALID_PLAYER_ID", "accountPlayerId must be a non-empty string of at most 64 characters");
+    }
+    return input.trim();
+  }
+
+  normalizeAdminActor(input: unknown) {
+    if (typeof input !== "string" || input.trim().length === 0 || input.trim().length > 128) {
+      throw badRequest("INVALID_ADMIN_ACTOR", "adminActor must be a non-empty string of at most 128 characters");
+    }
+    return input.trim();
+  }
+
+  normalizeAdminReason(input: unknown) {
+    if (typeof input !== "string" || input.trim().length === 0 || input.trim().length > 255) {
+      throw badRequest("INVALID_ADMIN_REASON", "reason must be a non-empty string of at most 255 characters");
+    }
+    return input.trim();
+  }
+
+  normalizeAdminInteger(input: unknown, fallback: number, fieldName: string) {
+    if (input === undefined || input === null || input === "") {
+      return fallback;
+    }
+    const value = Number(input);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw badRequest("INVALID_CHARACTER_PAYLOAD", `${fieldName} must be a non-negative integer`);
+    }
+    return value;
+  }
+
+  normalizeAdminNumber(input: unknown, fallback: number, fieldName: string) {
+    if (input === undefined || input === null || input === "") {
+      return fallback;
+    }
+    const value = Number(input);
+    if (!Number.isFinite(value)) {
+      throw badRequest("INVALID_CHARACTER_PAYLOAD", `${fieldName} must be a finite number`);
+    }
+    return value;
+  }
+
+  normalizeAdminPosition(input: unknown, defaults: any) {
+    if (input !== undefined && input !== null && !isPlainObject(input)) {
+      throw badRequest("INVALID_CHARACTER_PAYLOAD", "position must be a JSON object");
+    }
+    const position = (input || {}) as Record<string, unknown>;
+    return {
+      sceneId: this.normalizeAdminInteger(position.sceneId ?? position.scene_id, defaults.sceneId, "position.sceneId"),
+      x: this.normalizeAdminNumber(position.x, defaults.x, "position.x"),
+      y: this.normalizeAdminNumber(position.y, defaults.y, "position.y"),
+      dirX: this.normalizeAdminNumber(position.dirX ?? position.dir_x, defaults.dirX, "position.dirX"),
+      dirY: this.normalizeAdminNumber(position.dirY ?? position.dir_y, defaults.dirY, "position.dirY")
+    };
+  }
+
+  normalizeAdminElements(input: unknown, defaults: any, fieldName: string) {
+    if (input !== undefined && input !== null && !isPlainObject(input)) {
+      throw badRequest("INVALID_CHARACTER_PAYLOAD", `${fieldName} must be a JSON object`);
+    }
+    const elements = (input || {}) as Record<string, unknown>;
+    return {
+      earth: this.normalizeAdminInteger(elements.earth, defaults.earth, `${fieldName}.earth`),
+      fire: this.normalizeAdminInteger(elements.fire, defaults.fire, `${fieldName}.fire`),
+      water: this.normalizeAdminInteger(elements.water, defaults.water, `${fieldName}.water`),
+      wind: this.normalizeAdminInteger(elements.wind, defaults.wind, `${fieldName}.wind`)
+    };
   }
 
   assertAppearanceValue(value: unknown, depth: number) {

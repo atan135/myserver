@@ -175,6 +175,7 @@ write_secret_file admin-api.env \
   "GAME_DATABASE_URL=$(postgres_url myserver_game)" \
   "JWT_SECRET=$jwt_secret" \
   "GAME_ADMIN_TOKEN=$game_admin_token" \
+  "INTERNAL_API_TOKEN=$internal_api_token" \
   "GAME_PROXY_ADMIN_READ_TOKEN=$proxy_admin_read_token" \
   "ADMIN_ASSERTION_PRIVATE_KEY_BASE64=$admin_assertion_private_key" \
   "ADMIN_API_IP_ALLOWLIST=$admin_ip_allowlist" \

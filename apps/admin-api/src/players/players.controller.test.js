@@ -15,7 +15,6 @@ function storeFixture() {
   return {
     status: null,
     audits: [],
-    createdCharacters: [],
     restoredCharacters: [],
     characters: new Map(),
     titleQuery: null,
@@ -137,23 +136,6 @@ function storeFixture() {
     async updatePlayerStatus(playerId, status) {
       this.status = { playerId, status };
     },
-    async createCharacterForAdmin(input) {
-      this.createdCharacters.push(input);
-      const character = {
-        characterId: "chr_0000000000009",
-        character_id: "chr_0000000000009",
-        accountPlayerId: input.accountPlayerId,
-        account_player_id: input.accountPlayerId,
-        worldId: input.worldId,
-        world_id: input.worldId,
-        name: input.name,
-        status: "active",
-        deletedAt: null,
-        deleted_at: null
-      };
-      this.characters.set(character.character_id, character);
-      return character;
-    },
     async findCharacterById(characterId) {
       return this.characters.get(characterId) ?? null;
     },
@@ -174,6 +156,23 @@ function storeFixture() {
   };
 }
 
+function authHttpClientFixture() {
+  return {
+    calls: [],
+    async createCharacterForAdmin(input, options) {
+      this.calls.push({ input, options });
+      return {
+        character_id: "chr_0000000000009",
+        account_player_id: input.accountPlayerId,
+        world_id: input.worldId,
+        name: input.name,
+        status: "active",
+        deleted_at: null
+      };
+    }
+  };
+}
+
 function request(role) {
   return {
     admin: {
@@ -184,7 +183,7 @@ function request(role) {
     socket: {
       remoteAddress: "127.0.0.1"
     },
-    headers: {}
+    headers: { "x-request-id": "request-1" }
   };
 }
 
@@ -304,7 +303,8 @@ test("invalid character title query writes failed audit", async () => {
 
 test("operator can create character for player bypassing ordinary limit and writes audit", async () => {
   const store = storeFixture();
-  const controller = new PlayersController({}, store);
+  const authHttpClient = authHttpClientFixture();
+  const controller = new PlayersController({}, store, undefined, authHttpClient);
 
   const response = await controller.createCharacterForPlayer(
     "player-1",
@@ -319,14 +319,19 @@ test("operator can create character for player bypassing ordinary limit and writ
 
   assert.equal(response.ok, true);
   assert.equal(response.character.character_id, "chr_0000000000009");
-  assert.deepEqual(store.createdCharacters, [{
-    accountPlayerId: "player-1",
-    name: "Echo",
-    worldId: 9,
-    appearance: { body: "default" },
-    position: { scene_id: 100, x: 0, y: 0, dir_x: 0, dir_y: 1 },
-    affinity: { earth: 2500, fire: 2500, water: 2500, wind: 2500 },
-    mastery: { earth: 0, fire: 0, water: 0, wind: 0 }
+  assert.deepEqual(authHttpClient.calls, [{
+    input: {
+      accountPlayerId: "player-1",
+      name: "Echo",
+      worldId: 9,
+      appearance: { body: "default" },
+      position: undefined,
+      affinity: undefined,
+      mastery: undefined,
+      adminActor: "worker",
+      reason: "support restore"
+    },
+    options: { requestId: "request-1" }
   }]);
   assert.equal(store.audits.length, 1);
   assert.equal(store.audits[0].action, "admin_character_create");
@@ -387,7 +392,8 @@ test("operator can restore deleted character bypassing ordinary limit and writes
 
 test("admin character create missing reason writes failed audit", async () => {
   const store = storeFixture();
-  const controller = new PlayersController({}, store);
+  const authHttpClient = authHttpClientFixture();
+  const controller = new PlayersController({}, store, undefined, authHttpClient);
 
   await assert.rejects(
     () => controller.createCharacterForPlayer("player-1", { name: "Echo" }, request("operator")),
@@ -402,13 +408,46 @@ test("admin character create missing reason writes failed audit", async () => {
     }
   );
 
-  assert.equal(store.createdCharacters.length, 0);
+  assert.equal(authHttpClient.calls.length, 0);
   assert.equal(store.audits.length, 1);
   assert.equal(store.audits[0].action, "admin_character_create_failed");
   assert.equal(store.audits[0].targetType, "character");
   assert.equal(store.audits[0].targetValue, null);
   assert.equal(store.audits[0].details.error, "MISSING_REASON");
   assert.equal(store.audits[0].details.bypassCharacterLimit, true);
+});
+
+test("admin character create preserves auth-http error status and code", async () => {
+  const store = storeFixture();
+  const authHttpClient = {
+    async createCharacterForAdmin() {
+      const error = new Error("character name already exists");
+      error.code = "CHARACTER_NAME_DUPLICATE";
+      error.statusCode = 409;
+      throw error;
+    }
+  };
+  const controller = new PlayersController({}, store, undefined, authHttpClient);
+
+  await assert.rejects(
+    () => controller.createCharacterForPlayer(
+      "player-1",
+      { name: "Echo", reason: "support request" },
+      request("operator")
+    ),
+    (error) => {
+      assert.equal(error.getStatus(), 409);
+      assert.deepEqual(error.getResponse(), {
+        ok: false,
+        error: "CHARACTER_NAME_DUPLICATE",
+        message: "character name already exists"
+      });
+      return true;
+    }
+  );
+
+  assert.equal(store.audits[0].action, "admin_character_create_failed");
+  assert.equal(store.audits[0].details.error, "CHARACTER_NAME_DUPLICATE");
 });
 
 test("admin character restore invalid state writes failed audit", async () => {
@@ -570,89 +609,6 @@ test("AdminStore maps character title overview by character_id", async () => {
   assert.equal(mainQueries.length, 1);
   assert.match(mainQueries[0].query, /INSERT INTO admin_audit_logs/);
   assert.equal(gameQueries.length, 3);
-});
-
-test("AdminStore admin character create writes characters table without ordinary limit query and allows duplicate names", async () => {
-  const mainQueries = [];
-  const gameQueries = [];
-  const mainPool = {
-    async query(query, params) {
-      mainQueries.push({ query, params });
-      if (query.includes("INSERT INTO admin_audit_logs")) {
-        return { rowCount: 1, rows: [] };
-      }
-      throw new Error("UNEXPECTED_MAIN_DB_QUERY");
-    }
-  };
-  const gamePool = {
-    rows: [],
-    async query(query, params) {
-      gameQueries.push({ query, params });
-      if (query.includes("INSERT INTO characters")) {
-        const row = {
-          character_id: params[0],
-          account_player_id: params[1],
-          world_id: params[2],
-          name: params[3],
-          status: params[4],
-          appearance_json: JSON.parse(params[5]),
-          scene_id: params[6],
-          x: params[7],
-          y: params[8],
-          dir_x: params[9],
-          dir_y: params[10],
-          affinity_earth: params[11],
-          affinity_fire: params[12],
-          affinity_water: params[13],
-          affinity_wind: params[14],
-          mastery_earth: params[15],
-          mastery_fire: params[16],
-          mastery_water: params[17],
-          mastery_wind: params[18],
-          created_at: new Date("2026-06-25T12:00:00.000Z"),
-          last_login_at: null,
-          deleted_at: null
-        };
-        this.rows.push(row);
-        return { rows: [row], rowCount: 1 };
-      }
-      throw new Error(`UNEXPECTED_GAME_DB_QUERY: ${query}`);
-    }
-  };
-  const store = new AdminStore(mainPool, null, {
-    characterIdGenerator: (() => {
-      let next = 0;
-      return () => `chr_${String(++next).padStart(13, "0")}`;
-    })()
-  }, gamePool);
-
-  const first = await store.createCharacterForAdmin({
-    accountPlayerId: "player-1",
-    name: "Echo",
-    worldId: 9,
-    appearance: { body: "default" }
-  });
-  const second = await store.createCharacterForAdmin({
-    accountPlayerId: "player-1",
-    name: "Echo",
-    worldId: 9
-  });
-
-  assert.equal(mainQueries.length, 0);
-  assert.equal(gameQueries.length, 2);
-  assert.ok(gameQueries.every((entry) => entry.query.includes("INSERT INTO characters")));
-  assert.equal(gameQueries.some((entry) => entry.query.includes("COUNT(*)")), false);
-  assert.equal(first.character_id, "chr_0000000000001");
-  assert.equal(second.character_id, "chr_0000000000002");
-  assert.equal(first.account_player_id, "player-1");
-  assert.equal(first.name, "Echo");
-  assert.deepEqual(first.attributes.affinity, {
-    earth: 2500,
-    fire: 2500,
-    water: 2500,
-    wind: 2500
-  });
-  assert.equal(gamePool.rows.length, 2);
 });
 
 test("AdminStore admin character restore updates deleted character without ordinary limit query", async () => {

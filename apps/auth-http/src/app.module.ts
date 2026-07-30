@@ -20,6 +20,7 @@ import { CharactersController } from "./characters/characters.controller.js";
 import { CharactersService } from "./characters/characters.service.js";
 import { GameTicketController } from "./game-ticket/game-ticket.controller.js";
 import { initializeGlobalIdLease } from "./global-id.js";
+import { InternalCharactersController } from "./internal/internal-characters.controller.js";
 import { InternalController } from "./internal/internal.controller.js";
 import { MetaController } from "./meta.controller.js";
 import { RateLimitMiddleware } from "./common/rate-limit.middleware.js";
@@ -47,7 +48,14 @@ import {
 } from "./tokens.js";
 
 @Module({
-  controllers: [AuthController, CharactersController, GameTicketController, InternalController, MetaController],
+  controllers: [
+    AuthController,
+    CharactersController,
+    GameTicketController,
+    InternalCharactersController,
+    InternalController,
+    MetaController
+  ],
   providers: [
     AuthService,
     CharactersService,

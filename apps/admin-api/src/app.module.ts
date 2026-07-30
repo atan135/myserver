@@ -2,6 +2,7 @@ import { Inject, MiddlewareConsumer, Module, NestModule, OnModuleDestroy } from 
 import { JwtModule } from "@nestjs/jwt";
 
 import { AdminStore } from "./admin-store.js";
+import { AuthHttpClient } from "./auth-http-client.js";
 import { AdminSessionStore } from "./auth/admin-session-store.js";
 import { AdminPolicyService } from "./auth/admin-policy.service.js";
 import { createMetricsCollector } from "./metrics.js";
@@ -41,6 +42,7 @@ import { HealthController } from "./health.controller.js";
 import { RequestLogMiddleware } from "./common/request-log.middleware.js";
 import {
   ADMIN_CONFIG,
+  ADMIN_AUTH_HTTP_CLIENT,
   ADMIN_DB_POOL,
   ADMIN_GAME_DB_POOL,
   ADMIN_GAME_ADMIN_CLIENT,
@@ -200,6 +202,11 @@ class GameDbPoolShutdown implements OnModuleDestroy {
       provide: ADMIN_GAME_ADMIN_CLIENT,
       inject: [ADMIN_CONFIG, ADMIN_REDIS, ADMIN_OPERATION_ASSERTIONS],
       useFactory: (config: any, redis: any, assertions: any) => new GameAdminClient(config, redis, assertions)
+    },
+    {
+      provide: ADMIN_AUTH_HTTP_CLIENT,
+      inject: [ADMIN_CONFIG, ADMIN_REDIS],
+      useFactory: (config: any, redis: any) => new AuthHttpClient(config, redis)
     },
     {
       provide: ADMIN_REGISTRY,

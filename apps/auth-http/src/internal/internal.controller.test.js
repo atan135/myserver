@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { InternalController } from "./internal.controller.js";
+process.env.TS_NODE_TRANSPILE_ONLY ??= "true";
+
+const { InternalCharactersController } = await import("./internal-characters.controller.js");
+const { InternalController } = await import("./internal.controller.js");
 
 const request = { headers: { "x-service-token": "internal-test-token" } };
 
@@ -37,4 +40,44 @@ test("auth-http retired shutdown route never calls game-server", async () => {
 
 test("auth-http retired config route never calls game-server", async () => {
   await expectControlPlaneOnly(() => createController().updateConfig(request));
+});
+
+test("auth-http internal character creation requires a valid service token", async () => {
+  const controller = new InternalCharactersController(
+    { internalApiToken: "internal-test-token", strictSecurity: true },
+    { createForAdmin: async () => ({ ok: true }) }
+  );
+
+  await assert.rejects(
+    () => controller.create({ headers: {} }, {}),
+    (error) => {
+      assert.equal(error.getStatus(), 401);
+      assert.equal(error.getResponse().error, "INVALID_SERVICE_TOKEN");
+      return true;
+    }
+  );
+});
+
+test("auth-http internal character creation delegates trusted payload to CharactersService", async () => {
+  const calls = [];
+  const controller = new InternalCharactersController(
+    { internalApiToken: "internal-test-token", strictSecurity: true },
+    {
+      async createForAdmin(body) {
+        calls.push(body);
+        return { ok: true, character: { character_id: "chr_0000000000001" } };
+      }
+    }
+  );
+  const body = {
+    accountPlayerId: "plr_0000000000001",
+    name: "Echo",
+    adminActor: "operator",
+    reason: "support request"
+  };
+
+  const result = await controller.create(request, body);
+
+  assert.deepEqual(calls, [body]);
+  assert.equal(result.character.character_id, "chr_0000000000001");
 });

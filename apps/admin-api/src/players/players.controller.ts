@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 
@@ -6,14 +7,14 @@ import { PermissionResolver, Permissions } from "../auth/roles.decorator.js";
 import { AdminPolicyGuard } from "../auth/admin-policy.guard.js";
 import { getClientIp } from "../common/client-ip.js";
 import { ApiHttpException, badRequest, notFound } from "../common/http-exception.js";
-import { ADMIN_CONFIG, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_STORE } from "../tokens.js";
+import { ADMIN_AUTH_HTTP_CLIENT, ADMIN_CONFIG, ADMIN_HIGH_RISK_OPERATIONS, ADMIN_STORE } from "../tokens.js";
 import { getTitleDefinitions } from "./title-table.js";
 
 const PLAYER_STATUSES = ["active", "disabled", "banned", "pending_review"];
 const DEFAULT_TITLE_LOG_LIMIT = 20;
 const MAX_TITLE_LOG_LIMIT = 100;
 const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
-const CHARACTER_NAME_PATTERN = /^[\p{Script=Han}A-Za-z0-9_-]+$/u;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function pageLimit(value: any) {
   return Math.min(Number(value) || 50, 100);
@@ -61,49 +62,32 @@ function requiredReason(value: any) {
   return reason;
 }
 
-function optionalSafeObject(value: any, fallback: Record<string, unknown> = {}) {
-  if (value === undefined || value === null) {
-    return fallback;
-  }
-
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw badRequest("INVALID_CHARACTER_PAYLOAD", "character object fields must be JSON objects");
-  }
-  return value;
-}
-
-function optionalInteger(value: any, fallback: number, fieldName: string) {
-  if (value === undefined || value === null || value === "") {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isSafeInteger(parsed)) {
-    throw badRequest("INVALID_CHARACTER_PAYLOAD", `${fieldName} must be an integer`);
-  }
-  return parsed;
-}
-
-function normalizeCharacterName(value: any) {
-  if (typeof value !== "string") {
-    throw badRequest("INVALID_CHARACTER_NAME", "name is required");
-  }
-
-  const name = value.trim();
-  if (name.length === 0) {
-    throw badRequest("INVALID_CHARACTER_NAME", "name is required");
-  }
-  if (Array.from(name).length > 64) {
-    throw badRequest("INVALID_CHARACTER_NAME", "name must be 64 characters or fewer");
-  }
-  if (/\s/u.test(name) || !CHARACTER_NAME_PATTERN.test(name)) {
-    throw badRequest("INVALID_CHARACTER_NAME", "name may only contain Chinese characters, letters, numbers, underscore, and hyphen");
-  }
-  return name;
-}
-
 function errorCodeOf(error: any) {
   return error?.getResponse?.().error || error?.code || error?.message || "UNKNOWN_ERROR";
+}
+
+function requestIdFor(req: any) {
+  const header = req?.headers?.["x-request-id"];
+  if (typeof header === "string" && REQUEST_ID_PATTERN.test(header.trim())) {
+    return header.trim();
+  }
+  return crypto.randomUUID();
+}
+
+function toAuthHttpException(error: any) {
+  if (typeof error?.getStatus === "function") {
+    return error;
+  }
+
+  const statusCode = Number(error?.statusCode);
+  const status = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599
+    ? statusCode
+    : 502;
+  return new ApiHttpException(status, {
+    ok: false,
+    error: error?.code || "AUTH_HTTP_UNAVAILABLE",
+    message: error?.message || "auth-http request failed"
+  });
 }
 
 function titleLogLimit(value: any) {
@@ -148,7 +132,8 @@ export class PlayersController {
   constructor(
     @Inject(ADMIN_CONFIG) private readonly config: any,
     @Inject(ADMIN_STORE) private readonly adminStore: any,
-    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any
+    @Inject(ADMIN_HIGH_RISK_OPERATIONS) private readonly highRiskOperations: any,
+    @Inject(ADMIN_AUTH_HTTP_CLIENT) private readonly authHttpClient: any
   ) {}
 
   @Get()
@@ -337,8 +322,9 @@ export class PlayersController {
         throw notFound("PLAYER_NOT_FOUND", "Player not found");
       }
 
-      const input = this.normalizeAdminCharacterCreateInput(playerId, body);
-      const character = await this.adminStore.createCharacterForAdmin(input);
+      const requestId = requestIdFor(req);
+      const input = this.buildAdminCharacterCreateInput(playerId, body, req, reason);
+      const character = await this.authHttpClient.createCharacterForAdmin(input, { requestId });
       targetCharacterId = character.character_id || character.characterId;
 
       await this.appendCharacterLifecycleAudit(req, {
@@ -378,7 +364,7 @@ export class PlayersController {
           permission: "players.status.update"
         }
       });
-      throw error;
+      throw toAuthHttpException(error);
     }
   }
 
@@ -617,31 +603,17 @@ export class PlayersController {
     return requiredReason(body?.reason);
   }
 
-  private normalizeAdminCharacterCreateInput(playerId: string, body: any) {
+  private buildAdminCharacterCreateInput(playerId: string, body: any, req: any, reason: string) {
     return {
       accountPlayerId: playerId,
-      name: normalizeCharacterName(body?.name),
-      worldId: optionalInteger(body?.worldId ?? body?.world_id, 0, "worldId"),
-      appearance: optionalSafeObject(body?.appearance ?? body?.appearance_json, {}),
-      position: optionalSafeObject(body?.position, {
-        scene_id: 100,
-        x: 0,
-        y: 0,
-        dir_x: 0,
-        dir_y: 1
-      }),
-      affinity: optionalSafeObject(body?.affinity, {
-        earth: 2500,
-        fire: 2500,
-        water: 2500,
-        wind: 2500
-      }),
-      mastery: optionalSafeObject(body?.mastery, {
-        earth: 0,
-        fire: 0,
-        water: 0,
-        wind: 0
-      })
+      name: body?.name,
+      worldId: body?.worldId ?? body?.world_id,
+      appearance: body?.appearance ?? body?.appearance_json,
+      position: body?.position,
+      affinity: body?.affinity,
+      mastery: body?.mastery,
+      adminActor: String(req?.admin?.username || req?.admin?.sub || ""),
+      reason
     };
   }
 

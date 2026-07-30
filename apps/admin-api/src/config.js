@@ -446,6 +446,10 @@ function validateProductionConfig(config) {
     errors.push("GAME_ADMIN_TOKEN must be set to a non-default value in production");
   }
 
+  if (!String(config.internalApiToken || "").trim()) {
+    errors.push("INTERNAL_API_TOKEN must be configured in production");
+  }
+
   if (!String(config.adminAssertionPrivateKey || "").trim()) {
     errors.push("ADMIN_ASSERTION_PRIVATE_KEY must be configured in production");
   }
@@ -621,6 +625,11 @@ export function getConfig() {
     gameAdminWriteTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_WRITE_TIMEOUT_MS, 3000),
     gameAdminReadTimeoutMs: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_READ_TIMEOUT_MS, 3000),
     gameAdminMaxResponseBytes: parsePositiveIntegerWithFallback(process.env.GAME_ADMIN_MAX_RESPONSE_BYTES, 1048576),
+    internalApiToken: process.env.INTERNAL_API_TOKEN || "",
+    authHttpRequestTimeoutMs: parsePositiveIntegerWithFallback(
+      process.env.AUTH_HTTP_REQUEST_TIMEOUT_MS,
+      3000
+    ),
     gameProxyAdminHost: localDiscoveryFallbackEnabled
       ? process.env.GAME_PROXY_ADMIN_HOST || "127.0.0.1"
       : "127.0.0.1",

@@ -1,13 +1,11 @@
 import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 
-import { createGlobalIdGeneratorFromEnv } from "../../../packages/global-id/node/index.js";
 import { redactAuditReason } from "./operations/audit-reason.js";
 
 const SALT_ROUNDS = 10;
 const MAINTENANCE_STATE_KEY = "maintenance:global";
 const UNIQUE_VIOLATION = "23505";
-const CHARACTER_ID_PATTERN = /^chr_[0-9a-hjkmnp-tv-z]+$/;
 const ELEMENT_KEYS = ["earth", "fire", "water", "wind"];
 const AFFINITY_TOTAL = 10000;
 const DISCIPLINE_TIER_ORDER = [
@@ -348,48 +346,6 @@ function createAdminStoreError(code, message = code, details = {}) {
   error.code = code;
   Object.assign(error, details);
   return error;
-}
-
-function normalizedPosition(position = {}) {
-  return {
-    sceneId: position.sceneId ?? position.scene_id ?? 100,
-    x: position.x ?? 0,
-    y: position.y ?? 0,
-    dirX: position.dirX ?? position.dir_x ?? 0,
-    dirY: position.dirY ?? position.dir_y ?? 1
-  };
-}
-
-function normalizedElements(elements = {}, defaults) {
-  return {
-    earth: elements.earth ?? defaults.earth,
-    fire: elements.fire ?? defaults.fire,
-    water: elements.water ?? defaults.water,
-    wind: elements.wind ?? defaults.wind
-  };
-}
-
-function normalizeCharacterCreateInput(input = {}) {
-  return {
-    accountPlayerId: input.accountPlayerId,
-    worldId: input.worldId ?? input.world_id ?? 0,
-    name: input.name,
-    status: input.status || "active",
-    appearance: input.appearance ?? input.appearance_json ?? {},
-    position: normalizedPosition(input.position),
-    affinity: normalizedElements(input.affinity, {
-      earth: 2500,
-      fire: 2500,
-      water: 2500,
-      wind: 2500
-    }),
-    mastery: normalizedElements(input.mastery, {
-      earth: 0,
-      fire: 0,
-      water: 0,
-      wind: 0
-    })
-  };
 }
 
 function characterElementSnapshot(character) {
@@ -845,7 +801,6 @@ export class AdminStore {
     this.gamePool = gamePool || pool;
     this.redis = redis;
     this.redisKeyPrefix = config.redisKeyPrefix || "";
-    this.characterIdGenerator = config.characterIdGenerator || createGlobalIdGeneratorFromEnv({ prefix: "chr" });
   }
 
   prefixedKey(key) {
@@ -3163,75 +3118,6 @@ export class AdminStore {
     };
   }
 
-  async createCharacterForAdmin(input) {
-    const normalized = normalizeCharacterCreateInput(input);
-    const characterId = this.generateCharacterId();
-
-    if (!CHARACTER_ID_PATTERN.test(characterId)) {
-      throw createAdminStoreError("CHARACTER_ID_GENERATION_FAILED", "generated characterId has invalid format", {
-        generatedCharacterId: characterId
-      });
-    }
-
-    try {
-      const { rows } = await this.gamePool.query(
-        `INSERT INTO characters (
-           character_id,
-           account_player_id,
-           world_id,
-           name,
-           status,
-           appearance_json,
-           scene_id,
-           x,
-           y,
-           dir_x,
-           dir_y,
-           affinity_earth,
-           affinity_fire,
-           affinity_water,
-           affinity_wind,
-           mastery_earth,
-           mastery_fire,
-           mastery_water,
-           mastery_wind
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10,
-           $11, $12, $13, $14, $15, $16, $17, $18, $19
-         )
-         RETURNING ${characterSelectColumns()}`,
-        [
-          characterId,
-          normalized.accountPlayerId,
-          normalized.worldId,
-          normalized.name,
-          normalized.status,
-          toRequiredJsonb(normalized.appearance),
-          normalized.position.sceneId,
-          normalized.position.x,
-          normalized.position.y,
-          normalized.position.dirX,
-          normalized.position.dirY,
-          normalized.affinity.earth,
-          normalized.affinity.fire,
-          normalized.affinity.water,
-          normalized.affinity.wind,
-          normalized.mastery.earth,
-          normalized.mastery.fire,
-          normalized.mastery.water,
-          normalized.mastery.wind
-        ]
-      );
-
-      return toCharacter(rows[0]);
-    } catch (error) {
-      if (error?.code === UNIQUE_VIOLATION) {
-        throw createAdminStoreError("CHARACTER_ID_EXISTS", "characterId already exists");
-      }
-      throw error;
-    }
-  }
-
   async restoreCharacterForAdmin(characterId) {
     const { rows } = await this.gamePool.query(
       `UPDATE characters
@@ -3245,14 +3131,6 @@ export class AdminStore {
     );
 
     return rows.length > 0 ? toCharacter(rows[0]) : null;
-  }
-
-  generateCharacterId() {
-    if (typeof this.characterIdGenerator === "function") {
-      return this.characterIdGenerator();
-    }
-
-    return this.characterIdGenerator.generateString("chr");
   }
 
   async findCharacterTitleOverview({ characterId, logLimit = 20 } = {}) {

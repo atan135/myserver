@@ -51,6 +51,27 @@ test("TLS middleware keeps non-exact healthcheck paths behind HTTPS", async () =
   assert.equal(auditEvents[0].eventType, "auth_tls_required");
 });
 
+test("TLS middleware allows token-protected internal service routes on the private application port", async () => {
+  const auditEvents = [];
+  const middleware = createMiddleware(auditEvents);
+  let nextCalled = false;
+
+  await middleware.use(
+    {
+      url: "/api/v1/internal/characters",
+      raw: { url: "/api/v1/internal/characters" },
+      socket: { remoteAddress: "172.30.0.20" }
+    },
+    {},
+    () => {
+      nextCalled = true;
+    }
+  );
+
+  assert.equal(nextCalled, true);
+  assert.deepEqual(auditEvents, []);
+});
+
 test("auth HTTP exception filter writes JSON through a Fastify raw response", () => {
   const response = {
     headers: {},

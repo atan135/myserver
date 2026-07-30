@@ -356,6 +356,10 @@ export class AuthStore {
     });
   }
 
+  async findPlayerAuthStateByPlayerId(playerId) {
+    return this.dbStore?.findPlayerAuthStateByPlayerId?.(playerId) || null;
+  }
+
   async assertPlayerNotBlocked(playerId, clientIp = null, source = null) {
     const decision = await this.blocklist.checkPlayer(playerId);
     if (!decision.blocked) {

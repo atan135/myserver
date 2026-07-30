@@ -13,6 +13,8 @@ const CONFIG_ENV_KEYS = [
   "DB_POOL_SIZE",
   "JWT_SECRET",
   "GAME_ADMIN_TOKEN",
+  "INTERNAL_API_TOKEN",
+  "AUTH_HTTP_REQUEST_TIMEOUT_MS",
   "ADMIN_ASSERTION_PRIVATE_KEY",
   "ADMIN_ASSERTION_PRIVATE_KEY_BASE64",
   "ADMIN_OPERATION_PREFLIGHT_TTL_MS",
@@ -396,6 +398,7 @@ test("admin-api requires TLS by default in production", async () => {
     REGISTRY_ENABLED: "true",
     JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
     GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+    INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
     ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
     GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
     ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
@@ -444,6 +447,31 @@ test("admin-api game admin network limits read positive values", async () => {
     assert.equal(config.gameAdminReadTimeoutMs, 300);
     assert.equal(config.gameAdminMaxResponseBytes, 4096);
   });
+});
+
+test("admin-api auth-http internal client config reads token and timeout", async () => {
+  await withEnv({
+    INTERNAL_API_TOKEN: "internal-test-token",
+    AUTH_HTTP_REQUEST_TIMEOUT_MS: "1500"
+  }, (config) => {
+    assert.equal(config.internalApiToken, "internal-test-token");
+    assert.equal(config.authHttpRequestTimeoutMs, 1500);
+  });
+});
+
+test("admin-api production config requires auth-http internal token", async () => {
+  await assert.rejects(
+    withEnv({
+      NODE_ENV: "production",
+      REGISTRY_ENABLED: "true",
+      JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
+      GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
+      GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
+      ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
+    }, () => {}),
+    /INTERNAL_API_TOKEN must be configured in production/
+  );
 });
 
 test("admin-api derives game database URL from main database URL by default", async () => {
@@ -707,6 +735,7 @@ test("admin-api strict discovery requires registry in production", async () => {
       REGISTRY_ENABLED: "false",
       JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
       GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
       ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
       GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
       ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"
@@ -755,6 +784,7 @@ test("admin-api production environment ignores DISCOVERY_REQUIRED=false override
       REGISTRY_ENABLED: "false",
       JWT_SECRET: "prod-jwt-secret-with-enough-entropy",
       GAME_ADMIN_TOKEN: "prod-game-admin-token-with-enough-entropy",
+      INTERNAL_API_TOKEN: "prod-internal-api-token-with-enough-entropy",
       ADMIN_ASSERTION_PRIVATE_KEY: "test-only-production-signing-key",
       GAME_PROXY_ADMIN_TOKEN: "prod-proxy-admin-token-with-enough-entropy",
       ADMIN_PASSWORD: "prod-admin-password-with-enough-entropy"

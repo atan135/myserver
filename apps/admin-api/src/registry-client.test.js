@@ -7,7 +7,12 @@ import {
   validateServiceInstance
 } from "../../../packages/service-registry/node/registry-schema.js";
 import { configureLogger } from "./logger.js";
-import { RegistryClient, discoverGameProxyAdminEndpoints, discoverGameServerAdminEndpoints } from "./registry-client.js";
+import {
+  RegistryClient,
+  discoverAuthHttpInternalEndpoints,
+  discoverGameProxyAdminEndpoints,
+  discoverGameServerAdminEndpoints
+} from "./registry-client.js";
 
 configureLogger({
   appName: "admin-api-registry-test",
@@ -491,6 +496,23 @@ test("discoverGameProxyAdminEndpoints requires admin visibility and never falls 
 
   assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
     { instanceId: "game-proxy-admin", endpointName: "admin", port: 7101 }
+  ]);
+});
+
+test("discoverAuthHttpInternalEndpoints returns only internal HTTP endpoints", async () => {
+  const redis = createRedisCapture();
+  putInstance(redis, registryInstance("auth-http", "auth-http-a", [
+    networkEndpoint("http", "http", "public", "10.0.2.1", 3000),
+    networkEndpoint("internal", "http", "internal", "10.0.2.1", 3000)
+  ], { port: 3000 }));
+  putInstance(redis, registryInstance("auth-http", "auth-http-public-only", [
+    networkEndpoint("internal", "http", "public", "10.0.2.2", 3000)
+  ], { port: 3000 }));
+
+  const endpoints = await discoverAuthHttpInternalEndpoints(redis);
+
+  assert.deepEqual(endpoints.map(({ instanceId, endpointName, port }) => ({ instanceId, endpointName, port })), [
+    { instanceId: "auth-http-a", endpointName: "internal", port: 3000 }
   ]);
 });
 

@@ -19,6 +19,10 @@ const ADMIN_ENDPOINT_VISIBILITY = "admin";
 const GAME_PROXY_SERVICE_NAME = "game-proxy";
 const GAME_PROXY_ADMIN_ENDPOINT_NAME = "admin";
 const GAME_PROXY_ADMIN_PROTOCOLS = new Set(["http"]);
+const AUTH_HTTP_SERVICE_NAME = "auth-http";
+const AUTH_HTTP_INTERNAL_ENDPOINT_NAME = "internal";
+const AUTH_HTTP_INTERNAL_PROTOCOLS = new Set(["http", "https"]);
+const INTERNAL_ENDPOINT_VISIBILITY = "internal";
 const UNSAFE_ADVERTISED_HOSTS = new Set(["", "0.0.0.0", "::", "[::]"]);
 
 function publishedHostFromConfig(config) {
@@ -203,12 +207,18 @@ export class RegistryClient {
         kind: "all_endpoints",
         refreshIntervalMs,
         onError
+      }),
+      this.discoveryClient.startRefresh(AUTH_HTTP_SERVICE_NAME, {
+        endpointName: AUTH_HTTP_INTERNAL_ENDPOINT_NAME,
+        kind: "all_endpoints",
+        refreshIntervalMs,
+        onError
       })
     ];
 
     log("info", "registry.discovery_refresh_started", {
       interval_ms: refreshIntervalMs,
-      services: [GAME_SERVER_SERVICE_NAME, GAME_PROXY_SERVICE_NAME]
+      services: [GAME_SERVER_SERVICE_NAME, GAME_PROXY_SERVICE_NAME, AUTH_HTTP_SERVICE_NAME]
     });
 
     return this.discoveryRefreshHandles;
@@ -221,6 +231,10 @@ export class RegistryClient {
     });
     this.discoveryClient.stop(GAME_PROXY_SERVICE_NAME, {
       endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
+      kind: "all_endpoints"
+    });
+    this.discoveryClient.stop(AUTH_HTTP_SERVICE_NAME, {
+      endpointName: AUTH_HTTP_INTERNAL_ENDPOINT_NAME,
       kind: "all_endpoints"
     });
     this.discoveryRefreshHandles = [];
@@ -298,6 +312,45 @@ export async function discoverGameProxyAdminEndpoints(redis, registryKeyPrefix =
   emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
     serviceName: GAME_PROXY_SERVICE_NAME,
     endpointName: GAME_PROXY_ADMIN_ENDPOINT_NAME,
+    source: "registry",
+    reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
+    instance_count: endpoints.length
+  });
+  return endpoints;
+}
+
+export async function discoverAuthHttpInternalEndpoints(redis, registryKeyPrefix = "") {
+  const options = normalizeAdminDiscoveryOptions(registryKeyPrefix);
+  const candidates = await discoverAdminEndpointCandidates(
+    redis,
+    options,
+    AUTH_HTTP_SERVICE_NAME,
+    AUTH_HTTP_INTERNAL_ENDPOINT_NAME
+  );
+  const endpoints = candidates
+    .filter(({ endpoint }) =>
+      endpoint.visibility === INTERNAL_ENDPOINT_VISIBILITY &&
+      AUTH_HTTP_INTERNAL_PROTOCOLS.has(endpoint.protocol)
+    )
+    .map(({ instance, endpoint }) => ({
+      service: AUTH_HTTP_SERVICE_NAME,
+      instanceId: instance.id,
+      instance_id: instance.id,
+      endpointName: endpoint.name,
+      endpoint_name: endpoint.name,
+      protocol: endpoint.protocol,
+      host: endpoint.host,
+      port: endpoint.port,
+      healthy: instance.healthy !== false && endpoint.healthy !== false,
+      weight: instance.weight,
+      metadata: endpoint.metadata || {},
+      fallback: false,
+      source: "registry",
+      reason: "discovered"
+    }));
+  emitDiscoveryLog(options, endpoints.length > 0 ? "info" : "warn", "registry.discovery_all_endpoints", {
+    serviceName: AUTH_HTTP_SERVICE_NAME,
+    endpointName: AUTH_HTTP_INTERNAL_ENDPOINT_NAME,
     source: "registry",
     reason: endpoints.length > 0 ? "discovered" : "endpoint_missing",
     instance_count: endpoints.length

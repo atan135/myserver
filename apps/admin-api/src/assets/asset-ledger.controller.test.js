@@ -90,7 +90,7 @@ test("asset ledger store query keeps limit and offset as distinct parameterized 
       return { rows: [] };
     }
   };
-  const store = new AdminStore(gamePool, null, { characterIdGenerator: {} }, gamePool);
+  const store = new AdminStore(gamePool, null, {}, gamePool);
 
   const entries = await store.getAssetLedger({
     characterId: "chr_1",
