@@ -20,12 +20,13 @@
 
 ## 2. 生产公网暴露边界
 
-生产默认只允许公网暴露两个入口：
+当前已实现的生产玩家主链路只暴露 `auth-http` 和 `game-proxy`；公网聊天目标态会在同一公网边缘增加一个专用 Caddy WSS 域名入口。这里的“增加入口”只表示复用 Caddy `443/TCP` 的域名路由，不表示公开 `chat-server` 原始端口：
 
 | 入口 | 协议 | 生产职责 |
 |------|------|----------|
 | `auth-http` | HTTP/HTTPS | 登录、session、access token、game ticket、入口服务地址下发 |
 | `game-proxy` | KCP/TCP fallback 或后续网关协议 | 客户端游戏长连接入口、ticket 接入鉴权、路由到内部 `game-server` |
+| `chat.game.zergzerg.cn`（目标态） | WSS over `443/TCP` | Caddy 终止 TLS 并把 WebSocket 转发到 internal `chat-server:9011`；不解析聊天包或 Protobuf |
 
 其它服务默认内网化：
 
@@ -35,13 +36,13 @@
 | `game-server admin` | 内网控制面；只允许 `auth-http`、`admin-api` 或控制面访问 |
 | `game-proxy admin` | 内网控制面；已有 token 鉴权、生产默认 token 拒绝和写操作日志审计，生产仍需网络隔离、RBAC 和持久审计 |
 | `admin-api` / `admin-web` | 运营控制面，需独立鉴权、网络隔离和权限收口；不属于玩家公网主入口 |
-| `chat-server` | 内网能力服务；生产不作为客户端直连接口默认值 |
+| `chat-server` | `9001/TCP` 与规划 `9011/WS` 均为内网原始 listener，不直接公开；正式客户端只使用 Caddy 提供的专用 WSS 边缘入口 |
 | `match-service` | 内网能力服务；生产不作为客户端直连 gRPC 默认值 |
 | `announce-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | `mail-service` | 内网能力服务；生产不作为客户端直连 HTTP 默认值 |
 | Redis / NATS / PostgreSQL | 只允许内网服务访问 |
 
-仅本地开发或手工调试可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题。测试、预发和线上必须通过部署入口、registry endpoint 或 instance id 解析目标；固定 host/port 不进入测试或线上准入，也不应写入正式客户端依赖。
+仅本地开发或手工调试可以临时直连 `game-server:7000`、`chat-server:9001`、`match-service:9002`、`announce-service:9004`、`mail-service:9003` 来定位协议或服务问题。测试、预发和线上的正式客户端必须使用部署提供的公网入口；内部消费者才通过 registry endpoint 或 instance id 解析目标。固定内部 host/port 不进入正式客户端依赖，公网聊天也不得绕过 Caddy 直连 `9001/9011`。
 
 ## 3. 客户端生产接入模型
 
@@ -53,11 +54,11 @@
 2. `mybevy` 从 `auth-http` 获取 access token、game ticket 和 `game-proxy` 地址。
 3. `mybevy` 使用 ticket 连接 `game-proxy`。
 4. 游戏房间、输入、快照、重连、观战、迁移通知都通过 `game-proxy -> game-server` 主链路完成。
-5. 聊天、邮件、公告、匹配等能力通过服务端入口收敛，或后续通过游戏协议 / BFF / 内部聚合接口暴露给客户端。
+5. 聊天使用 `auth-http` 按部署配置下发的专用 Caddy WSS 入口；邮件、公告、匹配等其他能力仍通过服务端入口收敛，或后续通过游戏协议 / BFF / 内部聚合接口暴露给客户端。
 
 生产不采用以下默认模型：
 
-- 客户端直连 `chat-server`。
+- 客户端直连 `chat-server:9001/9011` 原始 listener 或使用 internal registry endpoint；专用 Caddy WSS 边缘入口不属于这里禁止的“原始直连”。
 - 客户端直连 `mail-service`。
 - 客户端直连 `announce-service`。
 - 客户端直连 `match-service`。
@@ -85,7 +86,7 @@
 | `auth-http` | 单实例可运行；使用 Redis/PostgreSQL 处理 session、ticket、审计 | 多实例生产可用；HTTP 层可水平扩展，ticket/session 依赖共享 Redis/PostgreSQL | 网关层限流、统一配置、灰度和完整安全审计 |
 | `game-proxy` | 多 upstream 发现和切换基础能力；route store 默认内存态，可选 Redis 持久化 rollout session、room route、player route；admin HTTP 口已有 token 鉴权和基础输入校验；`complete-if-drained` 可选经 `auth-http` 校验旧服真实 drain status 后再结束 rollout | 多实例生产可用；route store 持久化，共享 room/player route，支持 sticky 或共享路由 | 多 proxy 一致性、admin RBAC/持久审计、L7 session relay、生产部署平台 stop hook 接入 |
 | `game-server` | 单实例稳定运行；已有 server id、注册中心接入、room runtime、drain 基础和受控 graceful shutdown 安全闸 | 多实例生产可用；room ownership 唯一、room route 可恢复、room transfer 可校验 | transfer payload 闭环、唯一 owner 仲裁、room route 持久化、故障恢复 |
-| `chat-server` | 独立服务；当前可作为内部聊天能力 | 内网多实例服务；由服务端入口或聚合层调用，不作为生产客户端直连默认 | 协议收敛、会话路由、服务发现和横向扩展策略 |
+| `chat-server` | 独立服务；当前可作为内部聊天能力 | 原始 listener 内网化，正式客户端经专用 Caddy WSS 入口接入；多实例前维持单副本约束 | WebSocket 适配、会话路由、服务发现和横向扩展策略 |
 | `match-service` | gRPC 匹配服务；可与 `game-server` 协作建房 | 内网多实例服务；匹配池状态可分片或共享，建房目标可路由 | 匹配池分片、跨实例一致性、目标 game-server 选择策略 |
 | `announce-service` | 独立 HTTP 服务；接入服务注册 | 内网多实例服务；公告读写经 API/BFF 或服务端入口收敛 | 缓存一致性、权限、对客户端暴露路径收敛 |
 | `mail-service` | 独立 HTTP 服务；通过 NATS 通知 `chat-server` | 内网多实例服务；邮件读写经 API/BFF 或服务端入口收敛 | 幂等投递、通知去重、客户端入口收敛 |
@@ -453,9 +454,9 @@ client session
 
 ### 11.1 生产边界验收
 
-- 生产网络策略只暴露 `auth-http` 和 `game-proxy` 玩家入口。
+- 生产网络策略公开 `auth-http`、`game-proxy`，以及目标态 Caddy `443/TCP` 上的专用聊天 WSS 域名路由；不为聊天增加原始端口暴露。
 - `game-server` 玩家协议口不能被公网直连。
-- `chat-server`、`match-service`、`announce-service`、`mail-service` 不作为生产客户端直连默认入口。
+- `chat-server:9001/9011` 原始 listener、internal registry endpoint、`match-service`、`announce-service` 和 `mail-service` 不作为生产客户端直连默认入口；聊天客户端只接 Caddy WSS 边缘入口。
 - admin 和内部端口有网络隔离、鉴权、权限和审计方案。
 
 ### 11.2 多实例验收
