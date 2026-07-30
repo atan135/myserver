@@ -341,7 +341,7 @@ impl ServiceEndpoint {
 fn is_supported_protocol(protocol: &str) -> bool {
     matches!(
         protocol,
-        "http" | "tcp" | "udp" | "kcp" | "grpc" | "local_socket"
+        "http" | "tcp" | "udp" | "kcp" | "grpc" | "ws" | "local_socket"
     )
 }
 

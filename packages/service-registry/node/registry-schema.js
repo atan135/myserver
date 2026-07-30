@@ -26,7 +26,7 @@ export const SERVICE_ENDPOINT_FIELDS = [
 ];
 
 export const SERVICE_INSTANCE_SCHEMA_VERSION = 2;
-export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "local_socket"];
+export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "ws", "local_socket"];
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
 export const REGISTRY_INSTANCE_TTL_SECONDS = 90;
 export const REGISTRY_HEARTBEAT_TTL_SECONDS = 30;

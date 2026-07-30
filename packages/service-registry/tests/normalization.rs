@@ -165,6 +165,41 @@ fn endpoint_normalization_accepts_supported_visibilities() {
 }
 
 #[test]
+fn endpoint_normalization_accepts_internal_websocket_transport() {
+    let json = r#"{
+        "schema_version": 2,
+        "id": "chat-001",
+        "name": "chat-server",
+        "host": "chat-server",
+        "port": 9001,
+        "endpoints": [
+            {
+                "name": "ws",
+                "protocol": "ws",
+                "host": "chat-server",
+                "port": 9011,
+                "socket": "",
+                "visibility": "internal",
+                "metadata": {"transport": "websocket"},
+                "healthy": true
+            }
+        ],
+        "healthy": true
+    }"#;
+
+    let instance = serde_json::from_str::<ServiceInstance>(json)
+        .expect("chat websocket instance")
+        .normalized();
+    let websocket = endpoint(&instance, "ws").expect("websocket endpoint");
+
+    assert_eq!(websocket.protocol, "ws");
+    assert_eq!(websocket.host, "chat-server");
+    assert_eq!(websocket.port, 9011);
+    assert_eq!(websocket.visibility, "internal");
+    assert_eq!(websocket.metadata["transport"], "websocket");
+}
+
+#[test]
 fn invalid_endpoint_visibility_is_rejected_by_validation() {
     let invalid = ServiceEndpoint::tcp("private-http", "127.0.0.1", 9000, "private");
     assert!(!invalid.is_valid());

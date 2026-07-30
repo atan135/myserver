@@ -19,6 +19,7 @@ import {
   RegistryCapacityError,
   deregisterRegistryInstance,
   registryInstanceIndexKey,
+  SERVICE_ENDPOINT_PROTOCOLS,
   SERVICE_ENDPOINT_VISIBILITIES,
   normalizeEndpoint,
   normalizeServiceInstance,
@@ -65,6 +66,20 @@ test("validateServiceEndpoint accepts supported endpoint visibilities", () => {
       errors: []
     });
   }
+});
+
+test("validateServiceEndpoint accepts internal WebSocket endpoints", () => {
+  assert.ok(SERVICE_ENDPOINT_PROTOCOLS.includes("ws"));
+  assert.deepEqual(validateServiceEndpoint(networkEndpoint({
+    name: "ws",
+    protocol: "ws",
+    host: "chat-server",
+    port: 9011,
+    metadata: { transport: "websocket" }
+  })), {
+    ok: true,
+    errors: []
+  });
 });
 
 test("validateServiceEndpoint rejects unsupported endpoint visibility", () => {
