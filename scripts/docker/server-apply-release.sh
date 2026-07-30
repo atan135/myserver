@@ -46,7 +46,7 @@ sha256sum --check --status SHA256SUMS
 compose=(docker compose --env-file compose.production.env -f compose.production.yml)
 "${compose[@]}" config --quiet
 "${compose[@]}" pull
-"${compose[@]}" --profile ops pull migration-runne
+"${compose[@]}" --profile ops pull migration-runner
 
 "${compose[@]}" up -d postgres redis nats
 wait_healthy() {
@@ -72,7 +72,7 @@ wait_healthy nats
 "${compose[@]}" --profile ops run --rm migration-runner preflight --environment production
 "${compose[@]}" --profile ops run --rm migration-runner apply --environment production --actor "$actor"
 
-"${compose[@]}" up -d game-server match-service chat-server mail-service announce-service metrics-collecto
+"${compose[@]}" up -d game-server match-service chat-server mail-service announce-service metrics-collector
 "${compose[@]}" up -d game-proxy auth-http admin-api
 "${compose[@]}" --profile ops run --rm migration-runner \
   postflight --environment production --check-readiness --require-readiness

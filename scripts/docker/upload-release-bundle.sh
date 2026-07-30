@@ -137,7 +137,7 @@ scp_options=(
 )
 
 scp "${scp_options[@]}" \
-  "$archive" "$worktree/scripts/docker/server-apply-release.sh" \
+  "$archive" "$root/scripts/docker/server-apply-release.sh" \
   "$ssh_target:/tmp/"
 
 ssh "${ssh_options[@]}" "$ssh_target" \
