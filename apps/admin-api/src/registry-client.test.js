@@ -6,6 +6,7 @@ import {
   resetRegistryLifecycleMetrics,
   validateServiceInstance
 } from "../../../packages/service-registry/node/registry-schema.js";
+import { createRegistryRedisCapture } from "../../../packages/service-registry/node/test-registry-redis.js";
 import { configureLogger } from "./logger.js";
 import {
   RegistryClient,
@@ -23,65 +24,12 @@ configureLogger({
 });
 
 function createRedisCapture() {
-  const hashes = new Map();
-  const keys = new Map();
-
-  return {
-    hashes,
-    keys,
-    stats: { scanCount: 0 },
-    failScan: false,
-    async hset(key, field, value) {
-      hashes.set(`${key}:${field}`, value);
-    },
-    async hget(key, field) {
-      return hashes.get(`${key}:${field}`) || null;
-    },
-    async exists(key) {
-      return keys.has(key) ? 1 : 0;
-    },
-    async scan(cursor, _match, pattern) {
-      if (this.failScan) {
-        throw new Error("SCAN_FAILED");
-      }
-      this.stats.scanCount += 1;
-      if (cursor !== "0") {
-        return ["0", []];
-      }
-      const prefix = pattern.replace("*", "");
-      const found = [...hashes.keys()]
-        .filter((key) => key.endsWith(":data"))
-        .map((key) => key.slice(0, -5))
-        .filter((key) => key.startsWith(prefix));
-      return ["0", found];
-    },
-    async setex(key, ttl, value) {
-      keys.set(key, { ttl, value });
-    },
-    async del(key) {
-      hashes.delete(`${key}:data`);
-      keys.delete(key);
-    }
-  };
+  return createRegistryRedisCapture();
 }
 
 function createFailingRedis(operation) {
   const redis = createRedisCapture();
-  if (operation === "hset") {
-    redis.hset = async () => {
-      throw new Error("HSET_FAILED");
-    };
-  }
-  if (operation === "setex") {
-    redis.setex = async () => {
-      throw new Error("SETEX_FAILED");
-    };
-  }
-  if (operation === "del") {
-    redis.del = async () => {
-      throw new Error("DEL_FAILED");
-    };
-  }
+  redis.failEval = `${operation.toUpperCase()}_FAILED`;
   return redis;
 }
 
@@ -583,8 +531,8 @@ test("admin discovery endpoints can be served from refresh snapshots", async () 
   const handles = client.startDiscoveryRefresh();
   try {
     await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
-    const scanCountAfterRefresh = redis.stats.scanCount;
-    redis.failScan = true;
+    const pipelineCountAfterRefresh = redis.stats.pipelineCount;
+    redis.failPipeline = "PIPELINE_FAILED";
 
     const endpoints = await discoverGameServerAdminEndpoints(redis, {
       registryKeyPrefix: "",
@@ -598,7 +546,7 @@ test("admin discovery endpoints can be served from refresh snapshots", async () 
         ["game-server-b", "10.0.0.2", 7501]
       ]
     );
-    assert.equal(redis.stats.scanCount, scanCountAfterRefresh);
+    assert.equal(redis.stats.pipelineCount, pipelineCountAfterRefresh);
   } finally {
     client.stopDiscoveryRefresh();
   }
@@ -643,13 +591,13 @@ test("admin discovery endpoints use refresh snapshot with non-default cache ttl 
   const handles = client.startDiscoveryRefresh();
   try {
     await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
-    const scanCountAfterRefresh = redis.stats.scanCount;
-    redis.failScan = true;
+    const pipelineCountAfterRefresh = redis.stats.pipelineCount;
+    redis.failPipeline = "PIPELINE_FAILED";
 
     const endpoints = await discoverGameServerAdminEndpoints(redis, config);
 
     assert.deepEqual(endpoints.map((endpoint) => endpoint.instanceId), ["game-server-a"]);
-    assert.equal(redis.stats.scanCount, scanCountAfterRefresh);
+    assert.equal(redis.stats.pipelineCount, pipelineCountAfterRefresh);
   } finally {
     client.stopDiscoveryRefresh();
   }
@@ -692,15 +640,15 @@ test("admin discovery refresh failure does not serve stale snapshot endpoints", 
   const handles = client.startDiscoveryRefresh();
   try {
     await Promise.allSettled(handles.map((handle) => handle.refreshSnapshot()));
-    redis.failScan = true;
-    await assert.rejects(() => handles[0].refreshSnapshot(), /SCAN_FAILED/);
+    redis.failPipeline = "PIPELINE_FAILED";
+    await assert.rejects(() => handles[0].refreshSnapshot(), /PIPELINE_FAILED/);
 
     await assert.rejects(
       () => discoverGameServerAdminEndpoints(redis, {
         registryKeyPrefix: "",
         registryDiscoveryCacheTtlMs: 1000
       }),
-      /SCAN_FAILED/
+      /PIPELINE_FAILED/
     );
   } finally {
     client.stopDiscoveryRefresh();
@@ -753,20 +701,20 @@ test("RegistryClient records lifecycle metrics for register heartbeat and deregi
   resetRegistryLifecycleMetrics();
 
   await assert.rejects(
-    () => new RegistryClient(createFailingRedis("hset"), createConfig()).register(),
-    /HSET_FAILED/
+    () => new RegistryClient(createFailingRedis("eval"), createConfig()).register(),
+    /EVAL_FAILED/
   );
 
-  const heartbeatRedis = createFailingRedis("setex");
+  const heartbeatRedis = createFailingRedis("eval");
   const heartbeatClient = new RegistryClient(heartbeatRedis, createConfig());
   heartbeatClient.startHeartbeat(60);
   await new Promise((resolve) => setImmediate(resolve));
   heartbeatClient.stopHeartbeat();
 
-  const deregisterRedis = createFailingRedis("del");
+  const deregisterRedis = createFailingRedis("eval");
   await assert.rejects(
     () => new RegistryClient(deregisterRedis, createConfig()).deregister(),
-    /DEL_FAILED/
+    /EVAL_FAILED/
   );
 
   assert.deepEqual(

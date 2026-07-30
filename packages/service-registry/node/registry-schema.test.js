@@ -4,12 +4,21 @@ import test from "node:test";
 import {
   collectRegistryCapacityMetricFields,
   collectRegistryLifecycleMetricFields,
+  createServiceInstancePayload,
   getRegistryCapacityMetricsSnapshot,
   getRegistryLifecycleMetricsSnapshot,
+  heartbeatRegistryInstance,
+  REGISTRY_HEARTBEAT_TTL_SECONDS,
+  REGISTRY_INSTANCE_TTL_SECONDS,
+  REGISTRY_MAX_INSTANCES_PER_SERVICE,
+  registerRegistryInstance,
   recordRegistryCapacityCacheHit,
   recordRegistryCapacityCacheMiss,
   recordRegistryCapacityScan,
   recordRegistryLifecycleMetric,
+  RegistryCapacityError,
+  deregisterRegistryInstance,
+  registryInstanceIndexKey,
   SERVICE_ENDPOINT_VISIBILITIES,
   normalizeEndpoint,
   normalizeServiceInstance,
@@ -17,6 +26,7 @@ import {
   resetRegistryLifecycleMetrics,
   validateServiceEndpoint
 } from "./registry-schema.js";
+import { createRegistryRedisCapture } from "./test-registry-redis.js";
 
 function networkEndpoint(overrides = {}) {
   return {
@@ -260,4 +270,123 @@ test("registry capacity metrics aggregate scan and cache fields", () => {
     registry_discovery_cache_miss_total: "0",
     registry_discovery_cache_hit_rate_basis_points: "0"
   });
+});
+
+test("registry lifecycle maintains bounded index, TTLs, and never scans", async () => {
+  let now = 1_000;
+  const redis = createRegistryRedisCapture({ nowSeconds: () => now });
+  const serviceName = "game-server";
+  const instanceId = "game-a";
+  const data = createServiceInstancePayload({
+    id: instanceId,
+    name: serviceName,
+    host: "127.0.0.1",
+    port: 7000,
+    endpoints: [networkEndpoint()]
+  });
+
+  await registerRegistryInstance(redis, {
+    serviceName,
+    instanceId,
+    data,
+    nowSeconds: () => now
+  });
+
+  const indexKey = registryInstanceIndexKey("", serviceName);
+  const instanceKey = `service:${serviceName}:instances:${instanceId}`;
+  assert.equal(redis.indexes.get(indexKey).get(instanceId), now);
+  assert.equal(redis.hashTtls.get(instanceKey), REGISTRY_INSTANCE_TTL_SECONDS);
+  assert.deepEqual(redis.keys.get(`heartbeat:${serviceName}:${instanceId}`), {
+    ttl: REGISTRY_HEARTBEAT_TTL_SECONDS,
+    value: "1"
+  });
+
+  now += 10;
+  await heartbeatRegistryInstance(redis, {
+    serviceName,
+    instanceId,
+    nowSeconds: () => now
+  });
+  assert.equal(redis.indexes.get(indexKey).get(instanceId), now);
+
+  await deregisterRegistryInstance(redis, { serviceName, instanceId });
+  assert.equal(redis.hashes.has(`${instanceKey}:data`), false);
+  assert.equal(redis.keys.has(`heartbeat:${serviceName}:${instanceId}`), false);
+  assert.equal(redis.indexes.get(indexKey).has(instanceId), false);
+  assert.equal(redis.stats.scanCount, 0);
+});
+
+test("registry registration rejects the sixty-fifth live instance without evicting healthy members", async () => {
+  const redis = createRegistryRedisCapture({ nowSeconds: () => 2_000 });
+  const serviceName = "match-service";
+  for (let number = 0; number < REGISTRY_MAX_INSTANCES_PER_SERVICE; number += 1) {
+    const instanceId = `match-${number}`;
+    await registerRegistryInstance(redis, {
+      serviceName,
+      instanceId,
+      data: createServiceInstancePayload({
+        id: instanceId,
+        name: serviceName,
+        host: "127.0.0.1",
+        port: 9002,
+        endpoints: [networkEndpoint({ port: 9002 })]
+      }),
+      nowSeconds: () => 2_000
+    });
+  }
+
+  await assert.rejects(
+    () => registerRegistryInstance(redis, {
+      serviceName,
+      instanceId: "match-overflow",
+      data: createServiceInstancePayload({
+        id: "match-overflow",
+        name: serviceName,
+        host: "127.0.0.1",
+        port: 9002,
+        endpoints: [networkEndpoint({ port: 9002 })]
+      }),
+      nowSeconds: () => 2_000
+    }),
+    RegistryCapacityError
+  );
+  assert.equal(redis.indexes.get(registryInstanceIndexKey("", serviceName)).size, REGISTRY_MAX_INSTANCES_PER_SERVICE);
+  assert.equal(redis.stats.scanCount, 0);
+});
+
+test("registry lifecycle removes expired index members and their orphan keys before admitting a new instance", async () => {
+  let now = 3_000;
+  const redis = createRegistryRedisCapture({ nowSeconds: () => now });
+  const serviceName = "chat-server";
+  const oldInstanceId = "chat-old";
+  const instanceData = (instanceId) => createServiceInstancePayload({
+    id: instanceId,
+    name: serviceName,
+    host: "127.0.0.1",
+    port: 9001,
+    endpoints: [networkEndpoint({ port: 9001 })]
+  });
+
+  await registerRegistryInstance(redis, {
+    serviceName,
+    instanceId: oldInstanceId,
+    data: instanceData(oldInstanceId),
+    nowSeconds: () => now
+  });
+  now += REGISTRY_INSTANCE_TTL_SECONDS + 1;
+  const newInstanceId = "chat-new";
+  await registerRegistryInstance(redis, {
+    serviceName,
+    instanceId: newInstanceId,
+    data: instanceData(newInstanceId),
+    nowSeconds: () => now
+  });
+
+  assert.equal(redis.hashes.has(`service:${serviceName}:instances:${oldInstanceId}:data`), false);
+  assert.equal(redis.keys.has(`heartbeat:${serviceName}:${oldInstanceId}`), false);
+  assert.deepEqual(
+    [...redis.indexes.get(registryInstanceIndexKey("", serviceName)).keys()],
+    [newInstanceId]
+  );
+  assert.equal(redis.stats.scanCount, 0);
 });

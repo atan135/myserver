@@ -6,6 +6,7 @@ import {
   resetRegistryLifecycleMetrics,
   validateServiceInstance
 } from "../../../packages/service-registry/node/registry-schema.js";
+import { createRegistryRedisCapture } from "../../../packages/service-registry/node/test-registry-redis.js";
 import { configureLogger } from "./logger.js";
 import { RegistryClient, discoverGameServerAdminEndpoints } from "./registry-client.js";
 
@@ -18,59 +19,12 @@ configureLogger({
 });
 
 function createRedisCapture() {
-  const hashes = new Map();
-  const keys = new Map();
-
-  return {
-    hashes,
-    keys,
-    async hset(key, field, value) {
-      hashes.set(`${key}:${field}`, value);
-    },
-    async hget(key, field) {
-      return hashes.get(`${key}:${field}`) || null;
-    },
-    async exists(key) {
-      return keys.has(key) ? 1 : 0;
-    },
-    async scan(cursor, _match, pattern) {
-      if (cursor !== "0") {
-        return ["0", []];
-      }
-      const prefix = pattern.replace("*", "");
-      const found = [...hashes.keys()]
-        .filter((key) => key.endsWith(":data"))
-        .map((key) => key.slice(0, -5))
-        .filter((key) => key.startsWith(prefix));
-      return ["0", found];
-    },
-    async setex(key, ttl, value) {
-      keys.set(key, { ttl, value });
-    },
-    async del(key) {
-      hashes.delete(`${key}:data`);
-      keys.delete(key);
-    }
-  };
+  return createRegistryRedisCapture();
 }
 
 function createFailingRedis(operation) {
   const redis = createRedisCapture();
-  if (operation === "hset") {
-    redis.hset = async () => {
-      throw new Error("HSET_FAILED");
-    };
-  }
-  if (operation === "setex") {
-    redis.setex = async () => {
-      throw new Error("SETEX_FAILED");
-    };
-  }
-  if (operation === "del") {
-    redis.del = async () => {
-      throw new Error("DEL_FAILED");
-    };
-  }
+  redis.failEval = `${operation.toUpperCase()}_FAILED`;
   return redis;
 }
 
@@ -284,18 +238,18 @@ test("RegistryClient records lifecycle metrics for register heartbeat and deregi
   resetRegistryLifecycleMetrics();
 
   await assert.rejects(
-    () => new RegistryClient(createFailingRedis("hset"), createConfig()).register(),
-    /HSET_FAILED/
+    () => new RegistryClient(createFailingRedis("eval"), createConfig()).register(),
+    /EVAL_FAILED/
   );
 
-  const heartbeatClient = new RegistryClient(createFailingRedis("setex"), createConfig());
+  const heartbeatClient = new RegistryClient(createFailingRedis("eval"), createConfig());
   heartbeatClient.startHeartbeat(60);
   await new Promise((resolve) => setImmediate(resolve));
   heartbeatClient.stopHeartbeat();
 
   await assert.rejects(
-    () => new RegistryClient(createFailingRedis("del"), createConfig()).deregister(),
-    /DEL_FAILED/
+    () => new RegistryClient(createFailingRedis("eval"), createConfig()).deregister(),
+    /EVAL_FAILED/
   );
 
   assert.deepEqual(

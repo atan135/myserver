@@ -28,6 +28,10 @@ export const SERVICE_ENDPOINT_FIELDS = [
 export const SERVICE_INSTANCE_SCHEMA_VERSION = 2;
 export const SERVICE_ENDPOINT_PROTOCOLS = ["http", "tcp", "udp", "kcp", "grpc", "local_socket"];
 export const SERVICE_ENDPOINT_VISIBILITIES = ["public", "internal", "admin", "local"];
+export const REGISTRY_INSTANCE_TTL_SECONDS = 90;
+export const REGISTRY_HEARTBEAT_TTL_SECONDS = 30;
+export const REGISTRY_INSTANCE_INDEX_TTL_SECONDS = 300;
+export const REGISTRY_MAX_INSTANCES_PER_SERVICE = 64;
 export const DEFAULT_DISCOVERY_CACHE_TTL_MS = 1000;
 export const DEFAULT_DISCOVERY_REFRESH_INTERVAL_MS = 5000;
 const DISCOVERY_LOG_SOURCES = new Set(["registry", "fallback"]);
@@ -89,8 +93,96 @@ export function registryHeartbeatKey(prefix, serviceName, instanceId) {
   return `${normalizeRegistryKeyPrefix(prefix)}heartbeat:${serviceName}:${instanceId}`;
 }
 
+export function registryInstanceIndexKey(prefix, serviceName) {
+  return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instance-index`;
+}
+
+// This remains an offline-only helper for the explicit legacy bootstrap tool.
+// It must not be used by service discovery or request paths.
 export function registryInstanceScanPattern(prefix, serviceName) {
   return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instances:*`;
+}
+
+export class RegistryCapacityError extends Error {
+  constructor(serviceName) {
+    super(`REGISTRY_CAPACITY_EXCEEDED: service=${serviceName}`);
+    this.name = "RegistryCapacityError";
+    this.code = "REGISTRY_CAPACITY_EXCEEDED";
+  }
+}
+
+const REGISTRY_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function isValidRegistryIdentifier(value) {
+  return typeof value === "string" && REGISTRY_IDENTIFIER_PATTERN.test(value);
+}
+
+export async function registerRegistryInstance(redis, {
+  registryKeyPrefix = "",
+  serviceName,
+  instanceId,
+  data,
+  nowSeconds = unixNowSeconds
+}) {
+  assertRegistryIdentity(serviceName, instanceId);
+  const normalized = normalizeServiceInstance(data);
+  if (!normalized || normalized.name !== serviceName || normalized.id !== instanceId) {
+    throw new Error("registry instance payload does not match its service and instance identifiers");
+  }
+
+  const result = await evalRegistryLifecycleScript(redis, REGISTRY_REGISTER_SCRIPT, [
+    registryInstanceIndexKey(registryKeyPrefix, serviceName),
+    registryInstanceKey(registryKeyPrefix, serviceName, instanceId),
+    registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId)
+  ], [
+    instanceId,
+    JSON.stringify(normalized),
+    String(normalizeUnixSeconds(nowSeconds())),
+    String(REGISTRY_INSTANCE_TTL_SECONDS),
+    String(REGISTRY_HEARTBEAT_TTL_SECONDS),
+    String(REGISTRY_INSTANCE_INDEX_TTL_SECONDS),
+    String(REGISTRY_MAX_INSTANCES_PER_SERVICE),
+    registryInstanceKeyPrefix(registryKeyPrefix, serviceName),
+    registryHeartbeatKeyPrefix(registryKeyPrefix, serviceName)
+  ]);
+  assertRegistryScriptSuccess(result, serviceName);
+}
+
+export async function heartbeatRegistryInstance(redis, {
+  registryKeyPrefix = "",
+  serviceName,
+  instanceId,
+  nowSeconds = unixNowSeconds
+}) {
+  assertRegistryIdentity(serviceName, instanceId);
+  const result = await evalRegistryLifecycleScript(redis, REGISTRY_HEARTBEAT_SCRIPT, [
+    registryInstanceIndexKey(registryKeyPrefix, serviceName),
+    registryInstanceKey(registryKeyPrefix, serviceName, instanceId),
+    registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId)
+  ], [
+    instanceId,
+    String(normalizeUnixSeconds(nowSeconds())),
+    String(REGISTRY_INSTANCE_TTL_SECONDS),
+    String(REGISTRY_HEARTBEAT_TTL_SECONDS),
+    String(REGISTRY_INSTANCE_INDEX_TTL_SECONDS),
+    String(REGISTRY_MAX_INSTANCES_PER_SERVICE),
+    registryInstanceKeyPrefix(registryKeyPrefix, serviceName),
+    registryHeartbeatKeyPrefix(registryKeyPrefix, serviceName)
+  ]);
+  assertRegistryScriptSuccess(result, serviceName);
+}
+
+export async function deregisterRegistryInstance(redis, {
+  registryKeyPrefix = "",
+  serviceName,
+  instanceId
+}) {
+  assertRegistryIdentity(serviceName, instanceId);
+  await evalRegistryLifecycleScript(redis, REGISTRY_DEREGISTER_SCRIPT, [
+    registryInstanceIndexKey(registryKeyPrefix, serviceName),
+    registryInstanceKey(registryKeyPrefix, serviceName, instanceId),
+    registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId)
+  ], [instanceId]);
 }
 
 export function discoveryLogContext(context = {}) {
@@ -679,7 +771,7 @@ export class RegistryDiscoveryClient {
     }
 
     try {
-      const instances = await scanServiceInstances(
+      const instances = await discoverIndexedServiceInstances(
         this.redis,
         serviceName,
         this.registryKeyPrefix,
@@ -865,7 +957,7 @@ export class RegistryDiscoveryClient {
   }
 
   async refreshInstancesUncached(serviceName) {
-    const instances = await scanServiceInstances(
+    const instances = await discoverIndexedServiceInstances(
       this.redis,
       serviceName,
       this.registryKeyPrefix,
@@ -1204,64 +1296,167 @@ function stableHash(value) {
   return (hash >>> 0) / 4294967295;
 }
 
-async function scanServiceInstances(redis, serviceName, registryKeyPrefix, onParseError = null) {
-  const startedAt = monotonicNowMs();
-  let instanceKeyCount = 0;
-  let visibleInstanceCount = 0;
+async function discoverIndexedServiceInstances(redis, serviceName, registryKeyPrefix, onParseError = null) {
+  assertRegistryServiceName(serviceName);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const instanceIds = await redis.zrangebyscore(
+    registryInstanceIndexKey(registryKeyPrefix, serviceName),
+    nowSeconds - REGISTRY_HEARTBEAT_TTL_SECONDS,
+    "+inf",
+    "LIMIT",
+    0,
+    REGISTRY_MAX_INSTANCES_PER_SERVICE
+  );
+  const uniqueInstanceIds = [...new Set(instanceIds)]
+    .filter(isValidRegistryIdentifier)
+    .slice(0, REGISTRY_MAX_INSTANCES_PER_SERVICE);
+  if (uniqueInstanceIds.length === 0) {
+    return [];
+  }
 
-  try {
-    const keys = await scanKeys(redis, registryInstanceScanPattern(registryKeyPrefix, serviceName));
-    instanceKeyCount = keys.length;
-    const instances = [];
+  const pipeline = redis.pipeline();
+  for (const instanceId of uniqueInstanceIds) {
+    pipeline.hget(registryInstanceKey(registryKeyPrefix, serviceName, instanceId), "data");
+    pipeline.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
+  }
+  const values = await pipeline.exec();
+  const instances = [];
 
-    for (const key of keys.sort()) {
-      const instanceId = key.split(":").at(-1);
-      if (!instanceId) {
-        continue;
-      }
-
-      const heartbeatExists = await redis.exists(registryHeartbeatKey(registryKeyPrefix, serviceName, instanceId));
-      if (!heartbeatExists) {
-        continue;
-      }
-
-      const data = await redis.hget(key, "data");
-      if (!data) {
-        continue;
-      }
-
-      try {
-        const instance = normalizeServiceInstance(JSON.parse(data));
-        if (instance) {
-          instances.push(instance);
-        }
-      } catch (error) {
-        onParseError?.(error, { serviceName, instanceId });
-      }
+  for (let offset = 0; offset < uniqueInstanceIds.length; offset += 1) {
+    const instanceId = uniqueInstanceIds[offset];
+    const data = pipelineResultValue(values[offset * 2]);
+    const heartbeatExists = pipelineResultValue(values[offset * 2 + 1]);
+    if (!heartbeatExists || !data) {
+      continue;
     }
 
-    visibleInstanceCount = instances.length;
-    return instances;
-  } finally {
-    recordRegistryCapacityScan({
-      durationMs: monotonicNowMs() - startedAt,
-      instanceKeyCount,
-      visibleInstanceCount
-    });
+    try {
+      const instance = normalizeServiceInstance(JSON.parse(data));
+      if (instance && instance.id === instanceId && instance.name === serviceName && isHealthyInstance(instance)) {
+        instances.push(instance);
+      } else if (instance) {
+        onParseError?.(new Error("registry index payload identity mismatch"), { serviceName, instanceId });
+      }
+    } catch (error) {
+      onParseError?.(error, { serviceName, instanceId });
+    }
+  }
+
+  return instances.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+const REGISTRY_REGISTER_SCRIPT = `
+local cutoff = tonumber(ARGV[3]) - tonumber(ARGV[4])
+local stale = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+for _, stale_id in ipairs(stale) do
+  redis.call('DEL', ARGV[8] .. stale_id)
+  redis.call('DEL', ARGV[9] .. stale_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[7]) then
+  return { 'REGISTRY_CAPACITY_EXCEEDED' }
+end
+redis.call('HSET', KEYS[2], 'data', ARGV[2])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[5])
+redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return { 'OK', #stale }
+`;
+
+const REGISTRY_HEARTBEAT_SCRIPT = `
+local cutoff = tonumber(ARGV[2]) - tonumber(ARGV[3])
+local stale = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+for _, stale_id in ipairs(stale) do
+  redis.call('DEL', ARGV[7] .. stale_id)
+  redis.call('DEL', ARGV[8] .. stale_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  return { 'REGISTRY_INSTANCE_MISSING' }
+end
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[6]) then
+  return { 'REGISTRY_CAPACITY_EXCEEDED' }
+end
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[4])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return { 'OK', #stale }
+`;
+
+const REGISTRY_DEREGISTER_SCRIPT = `
+redis.call('DEL', KEYS[2])
+redis.call('DEL', KEYS[3])
+redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZCARD', KEYS[1]) == 0 then
+  redis.call('DEL', KEYS[1])
+end
+return { 'OK' }
+`;
+
+async function evalRegistryLifecycleScript(redis, script, keys, args) {
+  if (typeof redis?.eval !== "function") {
+    throw new Error("Redis client must support EVAL for atomic Registry lifecycle updates");
+  }
+  return redis.eval(script, keys.length, ...keys, ...args);
+}
+
+function assertRegistryScriptSuccess(result, serviceName) {
+  const code = String(Array.isArray(result) ? result[0] : result ?? "");
+  if (code === "OK") {
+    return;
+  }
+  if (code === "REGISTRY_CAPACITY_EXCEEDED") {
+    throw new RegistryCapacityError(serviceName);
+  }
+  const error = new Error(code || "registry lifecycle script failed");
+  error.code = code || "REGISTRY_LIFECYCLE_FAILED";
+  throw error;
+}
+
+function assertRegistryIdentity(serviceName, instanceId) {
+  assertRegistryServiceName(serviceName);
+  if (!isValidRegistryIdentifier(instanceId)) {
+    throw new Error("registry instance id must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
   }
 }
 
-async function scanKeys(redis, pattern) {
-  const keys = [];
-  let cursor = "0";
+function assertRegistryServiceName(serviceName) {
+  if (!isValidRegistryIdentifier(serviceName)) {
+    throw new Error("registry service name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+  }
+}
 
-  do {
-    const [nextCursor, batch] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
-    cursor = nextCursor;
-    keys.push(...batch);
-  } while (cursor !== "0");
+function registryInstanceKeyPrefix(prefix, serviceName) {
+  return `${normalizeRegistryKeyPrefix(prefix)}service:${serviceName}:instances:`;
+}
 
-  return keys;
+function registryHeartbeatKeyPrefix(prefix, serviceName) {
+  return `${normalizeRegistryKeyPrefix(prefix)}heartbeat:${serviceName}:`;
+}
+
+function unixNowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function normalizeUnixSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 0) {
+    throw new Error("registry lifecycle timestamp must be a non-negative Unix second");
+  }
+  return seconds;
+}
+
+function pipelineResultValue(result) {
+  if (Array.isArray(result)) {
+    const [error, value] = result;
+    if (error) {
+      throw error;
+    }
+    return value;
+  }
+  return result;
 }
 
 function normalizeDiscoveryCacheTtlMs(value) {
@@ -1270,7 +1465,9 @@ function normalizeDiscoveryCacheTtlMs(value) {
   }
 
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DISCOVERY_CACHE_TTL_MS;
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.min(parsed, REGISTRY_HEARTBEAT_TTL_SECONDS * 1000)
+    : DEFAULT_DISCOVERY_CACHE_TTL_MS;
 }
 
 function normalizeDiscoveryRefreshIntervalMs(value) {

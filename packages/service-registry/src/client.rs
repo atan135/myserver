@@ -4,17 +4,38 @@ use std::{
     time::{Duration, Instant},
 };
 
-use redis::AsyncCommands;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::discovery_metrics::record_discovery_metric;
 use crate::types::{ServiceEndpoint, ServiceInstance};
+
+pub const REGISTRY_INSTANCE_TTL_SECONDS: u64 = 90;
+pub const REGISTRY_HEARTBEAT_TTL_SECONDS: u64 = 30;
+pub const REGISTRY_INSTANCE_INDEX_TTL_SECONDS: u64 = 300;
+pub const REGISTRY_MAX_INSTANCES_PER_SERVICE: usize = 64;
 
 const DEFAULT_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(1);
 const INSTANCE_DISCOVERY_STRATEGY: &str = "healthy_instances_sorted_v1";
 const INSTANCE_PICK_STRATEGY: &str = "weighted_stable_instance_v1";
 const ENDPOINT_PICK_STRATEGY: &str = "weighted_stable_endpoint_v1";
 const ALL_ENDPOINTS_STRATEGY: &str = "all_healthy_endpoints_sorted_v1";
+
+#[derive(Debug)]
+pub struct RegistryCapacityError {
+    pub service_name: String,
+}
+
+impl std::fmt::Display for RegistryCapacityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "REGISTRY_CAPACITY_EXCEEDED: service={}",
+            self.service_name
+        )
+    }
+}
+
+impl std::error::Error for RegistryCapacityError {}
 
 /// 服务注册中心客户端
 pub struct RegistryClient {
@@ -24,6 +45,9 @@ pub struct RegistryClient {
     key_prefix: String,
     heartbeat_interval_secs: u64,
     heartbeat_ttl_secs: u64,
+    instance_ttl_secs: u64,
+    instance_index_ttl_secs: u64,
+    max_instances_per_service: usize,
     discovery_cache_ttl: Duration,
     discovery_cache: Mutex<DiscoveryCache>,
 }
@@ -151,7 +175,10 @@ impl RegistryClient {
             service_name: service_name.to_string(),
             key_prefix: default_key_prefix(),
             heartbeat_interval_secs: 10,
-            heartbeat_ttl_secs: 30,
+            heartbeat_ttl_secs: REGISTRY_HEARTBEAT_TTL_SECONDS,
+            instance_ttl_secs: REGISTRY_INSTANCE_TTL_SECONDS,
+            instance_index_ttl_secs: REGISTRY_INSTANCE_INDEX_TTL_SECONDS,
+            max_instances_per_service: REGISTRY_MAX_INSTANCES_PER_SERVICE,
             discovery_cache_ttl: default_discovery_cache_ttl(),
             discovery_cache: Mutex::new(DiscoveryCache::default()),
         })
@@ -166,7 +193,7 @@ impl RegistryClient {
 
     /// 设置服务发现缓存 TTL。传入 0 可禁用缓存。
     pub fn with_discovery_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.discovery_cache_ttl = ttl;
+        self.discovery_cache_ttl = ttl.min(Duration::from_secs(REGISTRY_HEARTBEAT_TTL_SECONDS));
         self.discovery_cache = Mutex::new(DiscoveryCache::default());
         self
     }
@@ -182,34 +209,41 @@ impl RegistryClient {
         self
     }
 
-    /// 设置心跳 TTL（秒）
-    pub fn with_heartbeat_ttl(mut self, secs: u64) -> Self {
-        self.heartbeat_ttl_secs = secs;
-        self
-    }
-
     /// 注册服务实例
     pub async fn register(
         &self,
         instance: &ServiceInstance,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        validate_registry_identity(&self.service_name, &self.instance_id, instance)?;
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = self.instance_key();
         let json = serde_json::to_string(&instance.clone().normalized())?;
-
-        // 使用 HSET 存储 JSON 数据
-        let _: () = redis::cmd("HSET")
+        let heartbeat_key = self.heartbeat_key();
+        let index_key = self.instance_index_key();
+        let response: Vec<String> = redis::cmd("EVAL")
+            .arg(REGISTRY_REGISTER_SCRIPT)
+            .arg(3)
+            .arg(&index_key)
             .arg(&key)
-            .arg("data")
+            .arg(&heartbeat_key)
+            .arg(&self.instance_id)
             .arg(&json)
+            .arg(unix_now_seconds())
+            .arg(self.instance_ttl_secs)
+            .arg(self.heartbeat_ttl_secs)
+            .arg(self.instance_index_ttl_secs)
+            .arg(self.max_instances_per_service)
+            .arg(registry_instance_key_prefix(
+                &self.key_prefix,
+                &self.service_name,
+            ))
+            .arg(registry_heartbeat_key_prefix(
+                &self.key_prefix,
+                &self.service_name,
+            ))
             .query_async(&mut conn)
             .await?;
-
-        // 创建心跳 Key
-        let heartbeat_key = self.heartbeat_key();
-        let _: () = conn
-            .set_ex(&heartbeat_key, "1", self.heartbeat_ttl_secs)
-            .await?;
+        ensure_registry_script_success(&response, &self.service_name)?;
 
         tracing::info!(
             service = %self.service_name,
@@ -227,9 +261,16 @@ impl RegistryClient {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = self.instance_key();
         let heartbeat_key = self.heartbeat_key();
-
-        conn.del::<_, ()>(&key).await?;
-        conn.del::<_, ()>(&heartbeat_key).await?;
+        let index_key = self.instance_index_key();
+        let _: Vec<String> = redis::cmd("EVAL")
+            .arg(REGISTRY_DEREGISTER_SCRIPT)
+            .arg(3)
+            .arg(&index_key)
+            .arg(&key)
+            .arg(&heartbeat_key)
+            .arg(&self.instance_id)
+            .query_async(&mut conn)
+            .await?;
 
         tracing::info!(
             service = %self.service_name,
@@ -244,45 +285,65 @@ impl RegistryClient {
 
     /// 发送心跳
     pub async fn heartbeat(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let heartbeat_key = self.heartbeat_key();
-
-        let _: () = conn
-            .set_ex(&heartbeat_key, "1", self.heartbeat_ttl_secs)
-            .await?;
-
-        Ok(())
+        heartbeat_registry_instance(
+            &self.redis,
+            &self.key_prefix,
+            &self.service_name,
+            &self.instance_id,
+            self.instance_ttl_secs,
+            self.heartbeat_ttl_secs,
+            self.instance_index_ttl_secs,
+            self.max_instances_per_service,
+        )
+        .await
     }
 
     /// 启动心跳任务
     pub fn start_heartbeat_task(&self) -> tokio::task::JoinHandle<()> {
         let heartbeat_ttl = self.heartbeat_ttl_secs;
         let heartbeat_interval = self.heartbeat_interval_secs;
+        let instance_ttl = self.instance_ttl_secs;
+        let index_ttl = self.instance_index_ttl_secs;
+        let max_instances = self.max_instances_per_service;
         let redis = self.redis.clone();
         let instance_id = self.instance_id.clone();
         let service_name = self.service_name.clone();
         let key_prefix = self.key_prefix.clone();
 
         tokio::spawn(async move {
-            let heartbeat_key = registry_heartbeat_key(&key_prefix, &service_name, &instance_id);
             let ttl = heartbeat_ttl;
             let interval = heartbeat_interval;
 
             // 立即发送一次心跳
-            if let Ok(mut conn) = redis.get_multiplexed_async_connection().await {
-                let _: Result<(), _> = conn.set_ex::<_, _, ()>(&heartbeat_key, "1", ttl).await;
-            }
+            let _ = heartbeat_registry_instance(
+                &redis,
+                &key_prefix,
+                &service_name,
+                &instance_id,
+                instance_ttl,
+                ttl,
+                index_ttl,
+                max_instances,
+            )
+            .await;
 
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval));
             loop {
                 ticker.tick().await;
 
-                if let Ok(mut conn) = redis.get_multiplexed_async_connection().await {
-                    let result: Result<(), _> =
-                        conn.set_ex::<_, _, ()>(&heartbeat_key, "1", ttl).await;
-                    if result.is_err() {
-                        tracing::warn!("failed to send heartbeat");
-                    }
+                let result = heartbeat_registry_instance(
+                    &redis,
+                    &key_prefix,
+                    &service_name,
+                    &instance_id,
+                    instance_ttl,
+                    ttl,
+                    index_ttl,
+                    max_instances,
+                )
+                .await;
+                if result.is_err() {
+                    tracing::warn!("failed to send heartbeat");
                 }
             }
         })
@@ -403,50 +464,58 @@ impl RegistryClient {
         service_name: &str,
     ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let pattern = registry_instance_scan_pattern(&self.key_prefix, service_name);
-
-        // 使用 SCAN 而不是 KEYS（生产环境更安全）
-        let mut cursor = 0_isize;
-        let mut keys = Vec::new();
-
-        loop {
-            let (new_cursor, batch): (isize, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await?;
-
-            keys.extend(batch);
-            cursor = new_cursor;
-
-            if cursor == 0 {
-                break;
-            }
+        validate_registry_identifier(service_name, "service name")?;
+        let active_after = unix_now_seconds().saturating_sub(self.heartbeat_ttl_secs);
+        let instance_ids: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+            .arg(registry_instance_index_key(&self.key_prefix, service_name))
+            .arg(active_after)
+            .arg("+inf")
+            .arg("LIMIT")
+            .arg(0)
+            .arg(self.max_instances_per_service)
+            .query_async(&mut conn)
+            .await?;
+        let instance_ids = instance_ids
+            .into_iter()
+            .filter(|instance_id| is_valid_registry_identifier(instance_id))
+            .take(self.max_instances_per_service)
+            .collect::<Vec<_>>();
+        if instance_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
+        let mut pipeline = redis::pipe();
+        for instance_id in &instance_ids {
+            pipeline
+                .cmd("HGET")
+                .arg(registry_instance_key(
+                    &self.key_prefix,
+                    service_name,
+                    instance_id,
+                ))
+                .arg("data")
+                .cmd("EXISTS")
+                .arg(registry_heartbeat_key(
+                    &self.key_prefix,
+                    service_name,
+                    instance_id,
+                ));
+        }
+        let values: Vec<redis::Value> = pipeline.query_async(&mut conn).await?;
         let mut instances = Vec::new();
 
-        for key in keys {
-            let instance_id = key.split(':').last().unwrap_or("");
-            let heartbeat_key = registry_heartbeat_key(&self.key_prefix, service_name, instance_id);
-
-            // 检查心跳是否存在
-            let exists: bool = conn.exists(&heartbeat_key).await?;
-            if !exists {
+        for (offset, instance_id) in instance_ids.iter().enumerate() {
+            let data: Option<String> = redis::from_redis_value(&values[offset * 2])?;
+            let exists: bool = redis::from_redis_value(&values[offset * 2 + 1])?;
+            if !exists || data.is_none() {
                 continue;
             }
-
-            // 获取实例数据
-            let data: Option<String> = conn.hget(&key, "data").await?;
-            if let Some(json) = data {
-                if let Ok(instance) = serde_json::from_str::<ServiceInstance>(&json) {
-                    let instance = instance.normalized();
-                    if !instance.healthy {
-                        continue;
-                    }
+            if let Ok(instance) =
+                serde_json::from_str::<ServiceInstance>(data.as_deref().unwrap_or_default())
+            {
+                let instance = instance.normalized();
+                if instance.id == *instance_id && instance.name == service_name && instance.healthy
+                {
                     instances.push(instance);
                 }
             }
@@ -754,6 +823,10 @@ impl RegistryClient {
         registry_heartbeat_key(&self.key_prefix, &self.service_name, &self.instance_id)
     }
 
+    fn instance_index_key(&self) -> String {
+        registry_instance_index_key(&self.key_prefix, &self.service_name)
+    }
+
     /// 获取服务名称
     pub fn service_name(&self) -> &str {
         &self.service_name
@@ -845,7 +918,9 @@ fn default_discovery_cache_ttl() -> Duration {
     std::env::var("REGISTRY_DISCOVERY_CACHE_TTL_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
+        .map(|milliseconds| {
+            Duration::from_millis(milliseconds.min(REGISTRY_HEARTBEAT_TTL_SECONDS * 1000))
+        })
         .unwrap_or(DEFAULT_DISCOVERY_CACHE_TTL)
 }
 
@@ -857,9 +932,167 @@ fn registry_heartbeat_key(prefix: &str, service_name: &str, instance_id: &str) -
     format!("{prefix}heartbeat:{service_name}:{instance_id}")
 }
 
-fn registry_instance_scan_pattern(prefix: &str, service_name: &str) -> String {
-    format!("{prefix}service:{service_name}:instances:*")
+fn registry_instance_index_key(prefix: &str, service_name: &str) -> String {
+    format!("{prefix}service:{service_name}:instance-index")
 }
+
+fn registry_instance_key_prefix(prefix: &str, service_name: &str) -> String {
+    format!("{prefix}service:{service_name}:instances:")
+}
+
+fn registry_heartbeat_key_prefix(prefix: &str, service_name: &str) -> String {
+    format!("{prefix}heartbeat:{service_name}:")
+}
+
+async fn heartbeat_registry_instance(
+    redis: &redis::Client,
+    key_prefix: &str,
+    service_name: &str,
+    instance_id: &str,
+    instance_ttl_secs: u64,
+    heartbeat_ttl_secs: u64,
+    instance_index_ttl_secs: u64,
+    max_instances_per_service: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_registry_identifier(service_name, "service name")?;
+    validate_registry_identifier(instance_id, "instance id")?;
+    let mut conn = redis.get_multiplexed_async_connection().await?;
+    let response: Vec<String> = redis::cmd("EVAL")
+        .arg(REGISTRY_HEARTBEAT_SCRIPT)
+        .arg(3)
+        .arg(registry_instance_index_key(key_prefix, service_name))
+        .arg(registry_instance_key(key_prefix, service_name, instance_id))
+        .arg(registry_heartbeat_key(
+            key_prefix,
+            service_name,
+            instance_id,
+        ))
+        .arg(instance_id)
+        .arg(unix_now_seconds())
+        .arg(instance_ttl_secs)
+        .arg(heartbeat_ttl_secs)
+        .arg(instance_index_ttl_secs)
+        .arg(max_instances_per_service)
+        .arg(registry_instance_key_prefix(key_prefix, service_name))
+        .arg(registry_heartbeat_key_prefix(key_prefix, service_name))
+        .query_async(&mut conn)
+        .await?;
+    ensure_registry_script_success(&response, service_name)
+}
+
+fn validate_registry_identity(
+    service_name: &str,
+    instance_id: &str,
+    instance: &ServiceInstance,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_registry_identifier(service_name, "service name")?;
+    validate_registry_identifier(instance_id, "instance id")?;
+    if instance.name != service_name || instance.id != instance_id {
+        return Err(registry_lifecycle_error(
+            "REGISTRY_INSTANCE_IDENTITY_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_registry_identifier(
+    value: &str,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if is_valid_registry_identifier(value) {
+        return Ok(());
+    }
+    Err(registry_lifecycle_error(&format!(
+        "invalid registry {label}: must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}$"
+    )))
+}
+
+fn is_valid_registry_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() || value.len() > 64 {
+        return false;
+    }
+    characters
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn ensure_registry_script_success(
+    response: &[String],
+    service_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match response.first().map(String::as_str) {
+        Some("OK") => Ok(()),
+        Some("REGISTRY_CAPACITY_EXCEEDED") => Err(Box::new(RegistryCapacityError {
+            service_name: service_name.to_string(),
+        })),
+        Some(code) => Err(registry_lifecycle_error(code)),
+        None => Err(registry_lifecycle_error("REGISTRY_LIFECYCLE_FAILED")),
+    }
+}
+
+fn registry_lifecycle_error(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::other(message.to_string()))
+}
+
+const REGISTRY_REGISTER_SCRIPT: &str = r#"
+local cutoff = tonumber(ARGV[3]) - tonumber(ARGV[4])
+local stale = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+for _, stale_id in ipairs(stale) do
+  redis.call('DEL', ARGV[8] .. stale_id)
+  redis.call('DEL', ARGV[9] .. stale_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[7]) then
+  return { 'REGISTRY_CAPACITY_EXCEEDED' }
+end
+redis.call('HSET', KEYS[2], 'data', ARGV[2])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[5])
+redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+return { 'OK', #stale }
+"#;
+
+const REGISTRY_HEARTBEAT_SCRIPT: &str = r#"
+local cutoff = tonumber(ARGV[2]) - tonumber(ARGV[3])
+local stale = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+for _, stale_id in ipairs(stale) do
+  redis.call('DEL', ARGV[7] .. stale_id)
+  redis.call('DEL', ARGV[8] .. stale_id)
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', '(' .. cutoff)
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  return { 'REGISTRY_INSTANCE_MISSING' }
+end
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[6]) then
+  return { 'REGISTRY_CAPACITY_EXCEEDED' }
+end
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+redis.call('SET', KEYS[3], '1', 'EX', ARGV[4])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return { 'OK', #stale }
+"#;
+
+const REGISTRY_DEREGISTER_SCRIPT: &str = r#"
+redis.call('DEL', KEYS[2])
+redis.call('DEL', KEYS[3])
+redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('ZCARD', KEYS[1]) == 0 then
+  redis.call('DEL', KEYS[1])
+end
+return { 'OK' }
+"#;
 
 fn pick_weighted_stable(instances: &[ServiceInstance]) -> Option<&ServiceInstance> {
     instances
@@ -1139,9 +1372,24 @@ mod tests {
             "test:heartbeat:game-server:game-a"
         );
         assert_eq!(
-            registry_instance_scan_pattern("test:", "game-server"),
-            "test:service:game-server:instances:*"
+            registry_instance_index_key("test:", "game-server"),
+            "test:service:game-server:instance-index"
         );
+    }
+
+    #[test]
+    fn registry_index_contract_is_bounded_and_contains_no_scan_fallback() {
+        assert_eq!(REGISTRY_INSTANCE_TTL_SECONDS, 90);
+        assert_eq!(REGISTRY_HEARTBEAT_TTL_SECONDS, 30);
+        assert_eq!(REGISTRY_INSTANCE_INDEX_TTL_SECONDS, 300);
+        assert_eq!(REGISTRY_MAX_INSTANCES_PER_SERVICE, 64);
+        assert!(REGISTRY_REGISTER_SCRIPT.contains("ZREMRANGEBYSCORE"));
+        assert!(REGISTRY_HEARTBEAT_SCRIPT.contains("REGISTRY_CAPACITY_EXCEEDED"));
+        assert!(!REGISTRY_REGISTER_SCRIPT.contains("SCAN"));
+        assert!(!REGISTRY_HEARTBEAT_SCRIPT.contains("SCAN"));
+        assert!(is_valid_registry_identifier("game-server.v2_1"));
+        assert!(!is_valid_registry_identifier("game:server"));
+        assert!(!is_valid_registry_identifier(" game-server"));
     }
 
     #[test]

@@ -12,10 +12,12 @@ import {
   getRegistryDiscoveryClient,
   recordDiscoveryMetric,
   registryHeartbeatKey,
+  registryInstanceIndexKey,
   registryInstanceKey,
   resetDiscoveryMetrics,
   resetRegistryCapacityMetrics
 } from "./registry-schema.js";
+import { createRegistryRedisCapture } from "./test-registry-redis.js";
 
 function createInstance(serviceName, instanceId, endpointName, port) {
   return createServiceInstancePayload({
@@ -39,47 +41,20 @@ function createInstance(serviceName, instanceId, endpointName, port) {
 }
 
 function createRedisCapture() {
-  const hashes = new Map();
-  const heartbeats = new Set();
-  const stats = { scanCount: 0 };
-
-  return {
-    hashes,
-    heartbeats,
-    stats,
-    failScan: false,
-    addInstance(prefix, serviceName, instance) {
-      hashes.set(registryInstanceKey(prefix, serviceName, instance.id), JSON.stringify(instance));
-      heartbeats.add(registryHeartbeatKey(prefix, serviceName, instance.id));
-    },
-    replaceInstance(prefix, serviceName, instance) {
-      this.addInstance(prefix, serviceName, instance);
-    },
-    removeInstance(prefix, serviceName, instanceId) {
-      hashes.delete(registryInstanceKey(prefix, serviceName, instanceId));
-      heartbeats.delete(registryHeartbeatKey(prefix, serviceName, instanceId));
-    },
-    async scan(cursor, _match, pattern) {
-      if (this.failScan) {
-        throw new Error("SCAN_FAILED");
-      }
-      stats.scanCount += 1;
-      if (cursor !== "0") {
-        return ["0", []];
-      }
-      const prefix = pattern.replace("*", "");
-      return ["0", [...hashes.keys()].filter((key) => key.startsWith(prefix))];
-    },
-    async exists(key) {
-      return heartbeats.has(key) ? 1 : 0;
-    },
-    async hget(key, field) {
-      return field === "data" ? hashes.get(key) ?? null : null;
-    }
+  const redis = createRegistryRedisCapture();
+  redis.addInstance = (prefix, serviceName, instance) => {
+    redis.hashes.set(`${registryInstanceKey(prefix, serviceName, instance.id)}:data`, JSON.stringify(instance));
+    redis.keys.set(registryHeartbeatKey(prefix, serviceName, instance.id), { ttl: 30, value: "1" });
   };
+  redis.replaceInstance = redis.addInstance;
+  redis.removeInstance = (prefix, serviceName, instanceId) => {
+    redis.hashes.delete(`${registryInstanceKey(prefix, serviceName, instanceId)}:data`);
+    redis.keys.delete(registryHeartbeatKey(prefix, serviceName, instanceId));
+  };
+  return redis;
 }
 
-test("RegistryDiscoveryClient reuses cached service scan before ttl expires", async () => {
+test("RegistryDiscoveryClient reuses cached indexed lookup before ttl expires", async () => {
   let now = 1000;
   const redis = createRedisCapture();
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
@@ -89,21 +64,21 @@ test("RegistryDiscoveryClient reuses cached service scan before ttl expires", as
   });
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 1);
 
   redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
   now += 99;
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 1);
 });
 
-test("RegistryDiscoveryClient records registry scan capacity and cache hit rate", async () => {
+test("RegistryDiscoveryClient performs no scan and records cache hit rate", async () => {
   resetRegistryCapacityMetrics();
   const redis = createRedisCapture();
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
   redis.hashes.set(
-    registryInstanceKey("", "game-server", "game-stale"),
+    `${registryInstanceKey("", "game-server", "game-stale")}:data`,
     JSON.stringify(createInstance("game-server", "game-stale", "admin", 7501))
   );
   const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 1000 });
@@ -112,22 +87,22 @@ test("RegistryDiscoveryClient records registry scan capacity and cache hit rate"
   assert.equal((await client.discoverInstances("game-server")).length, 1);
 
   const snapshot = getRegistryCapacityMetricsSnapshot();
-  assert.equal(snapshot.registry_scan_total, 1);
-  assert.equal(snapshot.registry_scan_instance_keys_total, 2);
-  assert.equal(snapshot.registry_scan_instance_keys_last, 2);
-  assert.equal(snapshot.registry_scan_visible_instances_total, 1);
-  assert.equal(snapshot.registry_scan_visible_instances_last, 1);
+  assert.equal(snapshot.registry_scan_total, 0);
+  assert.equal(snapshot.registry_scan_instance_keys_total, 0);
+  assert.equal(snapshot.registry_scan_instance_keys_last, 0);
+  assert.equal(snapshot.registry_scan_visible_instances_total, 0);
+  assert.equal(snapshot.registry_scan_visible_instances_last, 0);
   assert.equal(snapshot.registry_discovery_cache_hit_total, 1);
   assert.equal(snapshot.registry_discovery_cache_miss_total, 1);
   assert.equal(snapshot.registry_discovery_cache_hit_rate_basis_points, 5000);
-  assert.ok(snapshot.registry_scan_duration_ms_total >= 0);
-  assert.ok(snapshot.registry_scan_duration_ms_max >= 0);
+  assert.equal(redis.stats.scanCount, 0);
+  assert.equal(redis.stats.pipelineCount, 1);
 
-  assert.equal(collectRegistryCapacityMetricFields({ reset: true }).registry_scan_total, "1");
+  assert.equal(collectRegistryCapacityMetricFields({ reset: true }).registry_scan_total, "0");
   assert.equal(getRegistryCapacityMetricsSnapshot().registry_scan_total, 0);
 });
 
-test("RegistryDiscoveryClient refreshes Redis scan after ttl expires", async () => {
+test("RegistryDiscoveryClient refreshes indexed Redis reads after ttl expires", async () => {
   let now = 2000;
   const redis = createRedisCapture();
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
@@ -137,13 +112,13 @@ test("RegistryDiscoveryClient refreshes Redis scan after ttl expires", async () 
   });
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 1);
 
   redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
   now += 100;
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7501);
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 2);
 });
 
 test("RegistryDiscoveryClient separates service and endpoint cache keys", async () => {
@@ -156,7 +131,7 @@ test("RegistryDiscoveryClient separates service and endpoint cache keys", async 
   assert.equal((await client.discoverEndpoint("game-server", "client")), null);
   assert.equal((await client.discoverEndpoint("chat-server", "client")).endpoint.port, 9001);
 
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 2);
 });
 
 test("RegistryDiscoveryClient separates registry key prefixes", async () => {
@@ -174,7 +149,7 @@ test("RegistryDiscoveryClient separates registry key prefixes", async () => {
 
   assert.equal((await defaultClient.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
   assert.equal((await prefixedClient.discoverEndpoint("game-server", "admin")).endpoint.port, 7600);
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 2);
 });
 
 test("RegistryDiscoveryClient caches required discovery miss only until ttl expires", async () => {
@@ -189,19 +164,19 @@ test("RegistryDiscoveryClient caches required discovery miss only until ttl expi
     () => client.discoverRequiredEndpoint("game-server", "admin"),
     /service endpoint not found: service=game-server, endpoint=admin/
   );
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 0);
 
   redis.addInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7500));
   await assert.rejects(
     () => client.discoverRequiredEndpoint("game-server", "admin"),
     /service endpoint not found: service=game-server, endpoint=admin/
   );
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 0);
 
   now += 100;
 
   assert.equal((await client.discoverRequiredEndpoint("game-server", "admin")).endpoint.port, 7500);
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 1);
 });
 
 test("RegistryDiscoveryClient can disable discovery cache", async () => {
@@ -211,7 +186,18 @@ test("RegistryDiscoveryClient can disable discovery cache", async () => {
 
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
   assert.equal((await client.discoverEndpoint("game-server", "admin")).endpoint.port, 7500);
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 2);
+});
+
+test("RegistryDiscoveryClient does not scan legacy payload keys when the index is absent", async () => {
+  const redis = createRedisCapture();
+  redis.addInstance("", "game-server", createInstance("game-server", "legacy-only", "admin", 7500));
+  redis.indexes.delete(registryInstanceIndexKey("", "game-server"));
+  const client = new RegistryDiscoveryClient(redis, { discoveryCacheTtlMs: 0 });
+
+  assert.deepEqual(await client.discoverInstances("game-server"), []);
+  assert.equal(redis.stats.scanCount, 0);
+  assert.equal(redis.stats.pipelineCount, 0);
 });
 
 test("RegistryDiscoveryClient refreshSnapshot updates watched endpoint snapshots", async () => {
@@ -225,7 +211,7 @@ test("RegistryDiscoveryClient refreshSnapshot updates watched endpoint snapshots
   });
   assert.equal(snapshot.ok, true);
   assert.deepEqual(snapshot.value.map(({ endpoint }) => endpoint.port), [7500]);
-  assert.equal(redis.stats.scanCount, 1);
+  assert.equal(redis.stats.pipelineCount, 1);
 
   redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
   redis.addInstance("", "game-server", createInstance("game-server", "game-b", "admin", 7502));
@@ -238,7 +224,7 @@ test("RegistryDiscoveryClient refreshSnapshot updates watched endpoint snapshots
     ["game-a", 7501],
     ["game-b", 7502]
   ]);
-  assert.equal(redis.stats.scanCount, 2);
+  assert.equal(redis.stats.pipelineCount, 2);
 });
 
 test("RegistryDiscoveryClient stop prevents further interval refreshes", async () => {
@@ -252,14 +238,14 @@ test("RegistryDiscoveryClient stop prevents further interval refreshes", async (
   });
 
   await sleep(35);
-  assert.ok(redis.stats.scanCount > 0);
+  assert.ok(redis.stats.pipelineCount > 0);
   handle.stop();
-  const scanCountAfterStop = redis.stats.scanCount;
+  const pipelineCountAfterStop = redis.stats.pipelineCount;
   redis.replaceInstance("", "game-server", createInstance("game-server", "game-a", "admin", 7501));
 
   await sleep(35);
 
-  assert.equal(redis.stats.scanCount, scanCountAfterStop);
+  assert.equal(redis.stats.pipelineCount, pipelineCountAfterStop);
   assert.equal(handle.isRunning(), false);
   assert.notEqual(handle.getSnapshot()?.value?.[0]?.endpoint?.port, 7501);
 });
@@ -273,14 +259,14 @@ test("RegistryDiscoveryClient refresh failure clears watched snapshot by default
     endpointName: "admin",
     kind: "all_endpoints"
   });
-  redis.failScan = true;
+  redis.failPipeline = "PIPELINE_FAILED";
 
   await assert.rejects(
     () => client.refreshSnapshot("game-server", {
       endpointName: "admin",
       kind: "all_endpoints"
     }),
-    /SCAN_FAILED/
+    /PIPELINE_FAILED/
   );
 
   const snapshot = client.getRefreshSnapshot("game-server", {
@@ -289,7 +275,7 @@ test("RegistryDiscoveryClient refresh failure clears watched snapshot by default
   });
   assert.equal(snapshot.ok, false);
   assert.equal(snapshot.value, undefined);
-  assert.equal(snapshot.error.message, "SCAN_FAILED");
+  assert.equal(snapshot.error.message, "PIPELINE_FAILED");
 });
 
 test("RegistryDiscoveryClient can retain watched snapshot on refresh failure", async () => {
@@ -302,7 +288,7 @@ test("RegistryDiscoveryClient can retain watched snapshot on refresh failure", a
     kind: "all_endpoints",
     retainStaleOnError: true
   });
-  redis.failScan = true;
+  redis.failPipeline = "PIPELINE_FAILED";
 
   await assert.rejects(
     () => client.refreshSnapshot("game-server", {
@@ -310,7 +296,7 @@ test("RegistryDiscoveryClient can retain watched snapshot on refresh failure", a
       kind: "all_endpoints",
       retainStaleOnError: true
     }),
-    /SCAN_FAILED/
+    /PIPELINE_FAILED/
   );
 
   const snapshot = client.getRefreshSnapshot("game-server", {
