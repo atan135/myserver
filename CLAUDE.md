@@ -149,6 +149,24 @@ Node.js 服务使用 `log4js`，Rust 异步服务使用 `tracing + tracing-subsc
 - 根 npm 脚本：`package.json`
 - 本地 PowerShell 辅助脚本：`scripts/`
 
+## 本地 Docker 构建环境
+
+本机 Docker 构建统一使用迁移到 H 盘的 WSL Ubuntu 发行版内原生 `dockerd`，不使用也不依赖 Docker Desktop。项目应位于 WSL 原生文件系统中，例如 `~/src/MyServer`，不要从 `/mnt/c` 或 `/mnt/h` 挂载路径执行 Docker 构建，以避免文件系统性能和 Git 换行符问题。
+
+`/etc/docker/daemon.json` 必须保留以下网络配置；如文件已有其他有效配置，应合并字段，不要直接覆盖：
+
+```json
+{
+  "dns": ["223.5.5.5", "119.29.29.29"],
+  "registry-mirrors": ["https://docker.m.daocloud.io"]
+}
+```
+
+- `dns` 避免 BuildKit 继承 WSL `systemd-resolved` 的 `127.0.0.53` stub 后发生间歇性 Docker Hub DNS 超时。
+- `docker.m.daocloud.io` 是当前已验证可用的 Docker Hub mirror。不要加入未经当前网络验证的 mirror。
+- 修改 daemon 配置后使用 `sudo systemctl restart docker` 重启 WSL 内 Docker 服务，再用 `docker info` 确认 `Registry Mirrors` 已生效；不要为此启动 Docker Desktop。
+- 本地发布镜像使用干净的 WSL 原生 Git worktree 执行 `./scripts/docker/build-and-push.sh --release-tag <tag>`。只有明确要求发布时才添加 `--push`。
+
 ## 开发协作约定
 
 - 修改功能前先看对应代码和专题文档，不要从 `docs/历史归档/初始设计稿/` 推断当前行为。
