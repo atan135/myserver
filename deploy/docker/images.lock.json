@@ -1,77 +1,77 @@
 {
   "schemaVersion": 2,
-  "releaseId": "v0.1.0-d6420ea4aeb1",
-  "revision": "d6420ea4aeb11c321720542af08a1304a77023ca",
-  "createdAt": "2026-07-30T03:42:52Z",
+  "releaseId": "v0.1.0-ee1525dc310d",
+  "revision": "ee1525dc310dd51980e5dff8855b6d500ed594ee",
+  "createdAt": "2026-07-30T06:02:15Z",
   "source": "git@github.com:atan135/myserver.git",
   "platform": "linux/amd64",
   "dirtyWorktree": false,
   "images": {
     "game-server": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:e6e8c8437ce2ce3accb9a51c2cb16b01e1a6b1e016ce399292bd6f5f20f6da19",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server@sha256:e6e8c8437ce2ce3accb9a51c2cb16b01e1a6b1e016ce399292bd6f5f20f6da19"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:49084a62a99229944d8214ade2e844affe86bd5cb48c0737e28b30005d3a09c0",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-server@sha256:49084a62a99229944d8214ade2e844affe86bd5cb48c0737e28b30005d3a09c0"
     },
     "game-proxy": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-proxy",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:b39539622a76b8f8bf5ada9a50e036cca902aaea3aaa33df42c0328c56cba004",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-proxy@sha256:b39539622a76b8f8bf5ada9a50e036cca902aaea3aaa33df42c0328c56cba004"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:4987fdd0af2a164736a3a247709f775008bb24dfd1bc016c2df3e211ca21d223",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/game-proxy@sha256:4987fdd0af2a164736a3a247709f775008bb24dfd1bc016c2df3e211ca21d223"
     },
     "chat-server": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/chat-server",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:64e7ba05dda195e1f2093d3db2db585803fd359f5517651426d37a500ac8a544",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/chat-server@sha256:64e7ba05dda195e1f2093d3db2db585803fd359f5517651426d37a500ac8a544"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:7f2cb553c3d0ac838c1aa67a76c885afb0559a9088f99d88bc2a0fe41c380ea7",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/chat-server@sha256:7f2cb553c3d0ac838c1aa67a76c885afb0559a9088f99d88bc2a0fe41c380ea7"
     },
     "match-service": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/match-service",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:0ad5702c568c44b1f094bd9630fa29fcc3156fc543ecd4303c581d8f6a204162",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/match-service@sha256:0ad5702c568c44b1f094bd9630fa29fcc3156fc543ecd4303c581d8f6a204162"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:70ee678440681c37e797eaf205755333ef9d57a945b54d686492328b68579f1e",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/match-service@sha256:70ee678440681c37e797eaf205755333ef9d57a945b54d686492328b68579f1e"
     },
     "auth-http": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/auth-http",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:e5c0fd43dee1fac03d5d919f3779be723a8dbaf554d59e587ff0272a07809021",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/auth-http@sha256:e5c0fd43dee1fac03d5d919f3779be723a8dbaf554d59e587ff0272a07809021"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:f0489d30330e5a04944ea539f7e8e0cfa3aea7e8e0aa9e60567beb8fecadfd61",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/auth-http@sha256:f0489d30330e5a04944ea539f7e8e0cfa3aea7e8e0aa9e60567beb8fecadfd61"
     },
     "admin-api": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/admin-api",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:08a03642b9d42b1d4a192c4cc9a049aaaad4f28aaf2fac7bffd9a7c781e9a190",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/admin-api@sha256:08a03642b9d42b1d4a192c4cc9a049aaaad4f28aaf2fac7bffd9a7c781e9a190"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:baf3a6b000c47f51ae4b38243d9c9a7015e4e599ea3a0045eaee76de8e275f85",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/admin-api@sha256:baf3a6b000c47f51ae4b38243d9c9a7015e4e599ea3a0045eaee76de8e275f85"
     },
     "announce-service": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/announce-service",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:3f3cc5459ec97bc0c758f3f7a4aa23c9ab38a719e65aa3ddd8a3ac06e5b910f6",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/announce-service@sha256:3f3cc5459ec97bc0c758f3f7a4aa23c9ab38a719e65aa3ddd8a3ac06e5b910f6"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:bcd0be1d7b98e40b025f5990016a44bc564b89ad3a97d2267fb7f6618ea244d1",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/announce-service@sha256:bcd0be1d7b98e40b025f5990016a44bc564b89ad3a97d2267fb7f6618ea244d1"
     },
     "mail-service": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/mail-service",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:2a9a06c9e57779d89e6b2c90ffe64984d632813a64490d3c111888f44e1078f3",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/mail-service@sha256:2a9a06c9e57779d89e6b2c90ffe64984d632813a64490d3c111888f44e1078f3"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:4cfdd27c85f11283e9f68ab013cb2a6f66e1e196586f25071473c28190a87771",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/mail-service@sha256:4cfdd27c85f11283e9f68ab013cb2a6f66e1e196586f25071473c28190a87771"
     },
     "metrics-collector": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/metrics-collector",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:8aa03865f0b4eb307a76c2e75af2ea84f66337689688a01178481d47a3782394",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/metrics-collector@sha256:8aa03865f0b4eb307a76c2e75af2ea84f66337689688a01178481d47a3782394"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:9d0c33b972260442f8c64cfc8c6b10c461d3f2ad766bf4c494b745f9fe78a36b",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/metrics-collector@sha256:9d0c33b972260442f8c64cfc8c6b10c461d3f2ad766bf4c494b745f9fe78a36b"
     },
     "caddy": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/caddy",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:94ddc6a5858e912a006239c46b50e273210f52c2892e0b68af83f6586775d895",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/caddy@sha256:94ddc6a5858e912a006239c46b50e273210f52c2892e0b68af83f6586775d895"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:212a0628ed07a16af5a1e2c28320c28625a03eeb2dca542e45dde4bc2347037d",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/caddy@sha256:212a0628ed07a16af5a1e2c28320c28625a03eeb2dca542e45dde4bc2347037d"
     },
     "migration-runner": {
       "repository": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/migration-runner",
-      "tag": "v0.1.0-d6420ea4aeb1",
-      "digest": "sha256:41862c8e549b7a7397839ff64e102e18e8ba37e10a20ec4ccbdf6d07dccf472a",
-      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/migration-runner@sha256:41862c8e549b7a7397839ff64e102e18e8ba37e10a20ec4ccbdf6d07dccf472a"
+      "tag": "v0.1.0-ee1525dc310d",
+      "digest": "sha256:d8453e0951ab9b2d40ea230d3561a2304ec445b7ea7a344c1b35d845d507ae3b",
+      "reference": "crpi-aag02un1ijrswhes.cn-shenzhen.personal.cr.aliyuncs.com/zerg-myserver/migration-runner@sha256:d8453e0951ab9b2d40ea230d3561a2304ec445b7ea7a344c1b35d845d507ae3b"
     }
   },
   "infrastructure": {
