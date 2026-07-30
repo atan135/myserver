@@ -26,6 +26,7 @@ const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_TICKET_SECRET: &str = "default_secret_change_in_production";
 const DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_WS_HANDSHAKE_MAX_BYTES: usize = 16 * 1024;
+const DEFAULT_WS_MAX_PENDING_HANDSHAKES: usize = 64;
 const DEFAULT_WS_BRIDGE_CAPACITY: usize = 8 * 1024;
 
 struct Config {
@@ -37,6 +38,8 @@ struct Config {
     ws_bind_addr: String,
     ws_handshake_timeout_secs: u64,
     ws_handshake_max_bytes: usize,
+    ws_max_pending_handshakes: usize,
+    ws_trusted_proxies: websocket::TrustedProxySet,
     ws_max_frame_len: usize,
     ws_bridge_capacity: usize,
     heartbeat_timeout_secs: u64,
@@ -116,6 +119,14 @@ impl Config {
                 "CHAT_WS_HANDSHAKE_MAX_BYTES",
                 DEFAULT_WS_HANDSHAKE_MAX_BYTES,
             ),
+            ws_max_pending_handshakes: parse_positive_usize_env(
+                "CHAT_WS_MAX_PENDING_HANDSHAKES",
+                DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+            ),
+            ws_trusted_proxies: websocket::TrustedProxySet::parse_csv(
+                &std::env::var("CHAT_WS_TRUSTED_PROXY_CIDRS").unwrap_or_default(),
+            )
+            .unwrap_or_else(|error| panic!("invalid CHAT_WS_TRUSTED_PROXY_CIDRS: {error}")),
             ws_max_frame_len: parse_positive_usize_env(
                 "CHAT_WS_MAX_FRAME_LEN",
                 default_ws_max_frame_len,
@@ -711,6 +722,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_bind_addr: config.ws_bind_addr.clone(),
         ws_handshake_timeout_secs: config.ws_handshake_timeout_secs,
         ws_handshake_max_bytes: config.ws_handshake_max_bytes,
+        ws_max_pending_handshakes: config.ws_max_pending_handshakes,
+        ws_trusted_proxies: config.ws_trusted_proxies.clone(),
         ws_max_frame_len: config.ws_max_frame_len,
         ws_bridge_capacity: config.ws_bridge_capacity,
         heartbeat_timeout_secs: config.heartbeat_timeout_secs,
@@ -1116,6 +1129,8 @@ mod tests {
             "CHAT_WS_BIND_ADDR",
             "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
             "CHAT_WS_HANDSHAKE_MAX_BYTES",
+            "CHAT_WS_MAX_PENDING_HANDSHAKES",
+            "CHAT_WS_TRUSTED_PROXY_CIDRS",
             "CHAT_WS_MAX_FRAME_LEN",
             "CHAT_WS_BRIDGE_CAPACITY",
             "MAX_BODY_LEN",
@@ -1127,6 +1142,8 @@ mod tests {
             env::remove_var("CHAT_WS_BIND_ADDR");
             env::remove_var("CHAT_WS_HANDSHAKE_TIMEOUT_SECS");
             env::remove_var("CHAT_WS_HANDSHAKE_MAX_BYTES");
+            env::remove_var("CHAT_WS_MAX_PENDING_HANDSHAKES");
+            env::remove_var("CHAT_WS_TRUSTED_PROXY_CIDRS");
             env::remove_var("CHAT_WS_MAX_FRAME_LEN");
             env::remove_var("CHAT_WS_BRIDGE_CAPACITY");
             env::remove_var("MAX_BODY_LEN");
@@ -1142,6 +1159,10 @@ mod tests {
         assert_eq!(
             config.ws_handshake_max_bytes,
             DEFAULT_WS_HANDSHAKE_MAX_BYTES
+        );
+        assert_eq!(
+            config.ws_max_pending_handshakes,
+            DEFAULT_WS_MAX_PENDING_HANDSHAKES
         );
         assert_eq!(config.ws_bridge_capacity, DEFAULT_WS_BRIDGE_CAPACITY);
     }
@@ -1160,6 +1181,48 @@ mod tests {
 
         assert_eq!(config.max_body_len, 128);
         assert_eq!(config.ws_max_frame_len, protocol::HEADER_LEN + 128);
+    }
+
+    #[test]
+    fn websocket_handshake_and_trusted_proxy_security_config_accepts_valid_values() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_WS_MAX_PENDING_HANDSHAKES",
+            "CHAT_WS_TRUSTED_PROXY_CIDRS",
+        ]);
+
+        unsafe {
+            env::set_var("CHAT_WS_MAX_PENDING_HANDSHAKES", "12");
+            env::set_var("CHAT_WS_TRUSTED_PROXY_CIDRS", "10.20.0.0/16,::1");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.ws_max_pending_handshakes, 12);
+        assert!(
+            config
+                .ws_trusted_proxies
+                .contains("10.20.4.8".parse().unwrap())
+        );
+        assert!(config.ws_trusted_proxies.contains("::1".parse().unwrap()));
+        assert!(
+            !config
+                .ws_trusted_proxies
+                .contains("10.21.0.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn websocket_trusted_proxy_security_config_rejects_invalid_cidr() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["CHAT_WS_TRUSTED_PROXY_CIDRS"]);
+
+        unsafe {
+            env::set_var("CHAT_WS_TRUSTED_PROXY_CIDRS", "10.20.0.0/99");
+        }
+
+        let error = panic_message(catch_config_from_env());
+        assert!(error.contains("invalid CHAT_WS_TRUSTED_PROXY_CIDRS"));
     }
 
     #[test]
@@ -1271,6 +1334,8 @@ mod tests {
             ws_bind_addr: "0.0.0.0:9011".to_string(),
             ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
             ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+            ws_max_pending_handshakes: DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+            ws_trusted_proxies: websocket::TrustedProxySet::default(),
             ws_max_frame_len: protocol::HEADER_LEN + 4096,
             ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
             heartbeat_timeout_secs: 30,
@@ -1351,6 +1416,8 @@ mod tests {
             ws_bind_addr: "0.0.0.0:9011".to_string(),
             ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
             ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+            ws_max_pending_handshakes: DEFAULT_WS_MAX_PENDING_HANDSHAKES,
+            ws_trusted_proxies: websocket::TrustedProxySet::default(),
             ws_max_frame_len: protocol::HEADER_LEN + 4096,
             ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
             heartbeat_timeout_secs: 30,

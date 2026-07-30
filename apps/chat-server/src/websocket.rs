@@ -1,23 +1,170 @@
 use std::fmt;
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message, WebSocketConfig};
-use tokio_tungstenite::{WebSocketStream, accept_async_with_config};
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use crate::protocol::{HEADER_LEN, parse_header};
 
 const OUTBOUND_BRIDGE_QUEUE_CAPACITY: usize = 1;
 const WEBSOCKET_FRAME_OVERHEAD_BUDGET: usize = 256;
+
+#[derive(Clone, Debug, Default)]
+pub struct TrustedProxySet {
+    entries: Vec<IpNetwork>,
+}
+
+impl TrustedProxySet {
+    pub fn parse_csv(value: &str) -> Result<Self, String> {
+        let entries = value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(IpNetwork::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { entries })
+    }
+
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
+        let ip = normalize_ip(ip);
+        self.entries.iter().any(|entry| entry.contains(ip))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IpNetwork {
+    V4 { network: u32, prefix: u8 },
+    V6 { network: u128, prefix: u8 },
+}
+
+impl IpNetwork {
+    fn parse(value: &str) -> Result<Self, String> {
+        let (address, prefix) = match value.split_once('/') {
+            Some((address, prefix)) if !prefix.contains('/') => (address, Some(prefix)),
+            Some(_) => return Err(format!("invalid trusted proxy CIDR: {value}")),
+            None => (value, None),
+        };
+        let ip = address
+            .parse::<IpAddr>()
+            .map(normalize_ip)
+            .map_err(|_| format!("invalid trusted proxy IP or CIDR: {value}"))?;
+
+        match ip {
+            IpAddr::V4(ip) => {
+                let prefix = parse_prefix(prefix, 32, value)?;
+                let mask = prefix_mask_v4(prefix);
+                Ok(Self::V4 {
+                    network: u32::from(ip) & mask,
+                    prefix,
+                })
+            }
+            IpAddr::V6(ip) => {
+                let prefix = parse_prefix(prefix, 128, value)?;
+                let mask = prefix_mask_v6(prefix);
+                Ok(Self::V6 {
+                    network: u128::from(ip) & mask,
+                    prefix,
+                })
+            }
+        }
+    }
+
+    fn contains(self, ip: IpAddr) -> bool {
+        match (self, normalize_ip(ip)) {
+            (Self::V4 { network, prefix }, IpAddr::V4(ip)) => {
+                u32::from(ip) & prefix_mask_v4(prefix) == network
+            }
+            (Self::V6 { network, prefix }, IpAddr::V6(ip)) => {
+                u128::from(ip) & prefix_mask_v6(prefix) == network
+            }
+            _ => false,
+        }
+    }
+}
+
+fn parse_prefix(prefix: Option<&str>, max: u8, value: &str) -> Result<u8, String> {
+    let Some(prefix) = prefix else {
+        return Ok(max);
+    };
+    let parsed = prefix
+        .parse::<u8>()
+        .map_err(|_| format!("invalid trusted proxy CIDR prefix: {value}"))?;
+    if parsed > max {
+        return Err(format!("invalid trusted proxy CIDR prefix: {value}"));
+    }
+    Ok(parsed)
+}
+
+fn prefix_mask_v4(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
+}
+
+fn prefix_mask_v6(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    }
+}
+
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
+fn resolve_client_ip(
+    peer_ip: IpAddr,
+    trusted_proxies: &TrustedProxySet,
+    forwarded_for: Option<&str>,
+) -> IpAddr {
+    let mut client_ip = normalize_ip(peer_ip);
+    if !trusted_proxies.contains(client_ip) {
+        return client_ip;
+    }
+
+    let Some(forwarded_for) = forwarded_for else {
+        return client_ip;
+    };
+    let forwarded = forwarded_for
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::parse::<IpAddr>)
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(forwarded) = forwarded else {
+        return client_ip;
+    };
+
+    for forwarded_ip in forwarded.into_iter().rev().map(normalize_ip) {
+        if !trusted_proxies.contains(client_ip) {
+            break;
+        }
+        client_ip = forwarded_ip;
+    }
+    client_ip
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdapterConfig {
@@ -78,6 +225,36 @@ impl CloseSpec {
             code: CloseCode::Error,
             reason,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplicationClose(CloseSpec);
+
+impl ApplicationClose {
+    pub const fn normal(reason: &'static str) -> Self {
+        Self(CloseSpec {
+            code: CloseCode::Normal,
+            reason,
+        })
+    }
+
+    pub const fn policy(reason: &'static str) -> Self {
+        Self(CloseSpec {
+            code: CloseCode::Policy,
+            reason,
+        })
+    }
+
+    pub const fn overloaded(reason: &'static str) -> Self {
+        Self(CloseSpec {
+            code: CloseCode::Again,
+            reason,
+        })
+    }
+
+    pub const fn internal(reason: &'static str) -> Self {
+        Self(CloseSpec::internal(reason))
     }
 }
 
@@ -177,15 +354,23 @@ where
 pub async fn serve<F, Fut>(
     socket: TcpStream,
     config: AdapterConfig,
+    peer_ip: IpAddr,
+    trusted_proxies: TrustedProxySet,
+    handshake_permit: OwnedSemaphorePermit,
     handler: F,
 ) -> Result<(), AdapterError>
 where
-    F: FnOnce(DuplexStream) -> Fut,
-    Fut: Future<Output = ()> + Send + 'static,
+    F: FnOnce(DuplexStream, IpAddr) -> Fut + Send + 'static,
+    Fut: Future<Output = ApplicationClose> + Send + 'static,
 {
-    let websocket = upgrade(socket, config).await?;
+    let upgraded = upgrade(socket, config, peer_ip, trusted_proxies).await?;
+    drop(handshake_permit);
     let (handler_stream, adapter_stream) = tokio::io::duplex(config.bridge_capacity);
-    let mut handler_task = tokio::spawn(handler(handler_stream));
+    let (handler_close_tx, mut handler_close_rx) = oneshot::channel();
+    let mut handler_task = tokio::spawn(async move {
+        let close = handler(handler_stream, upgraded.client_ip).await;
+        let _ = handler_close_tx.send(close);
+    });
     let (adapter_reader, mut adapter_writer) = tokio::io::split(adapter_stream);
     let (outbound_tx, mut outbound_rx) = mpsc::channel(OUTBOUND_BRIDGE_QUEUE_CAPACITY);
     let outbound_task = tokio::spawn(pump_outbound_packets(
@@ -195,8 +380,14 @@ where
         config.max_frame_len,
     ));
 
-    let adapter_result =
-        run_adapter_loop(websocket, &mut adapter_writer, &mut outbound_rx, config).await;
+    let adapter_result = run_adapter_loop(
+        upgraded.websocket,
+        &mut adapter_writer,
+        &mut outbound_rx,
+        &mut handler_close_rx,
+        config,
+    )
+    .await;
 
     let _ = adapter_writer.shutdown().await;
     outbound_task.abort();
@@ -215,14 +406,36 @@ where
     adapter_result
 }
 
+struct UpgradeResult {
+    websocket: WebSocketStream<HandshakeLimitedStream<TcpStream>>,
+    client_ip: IpAddr,
+}
+
+#[allow(clippy::result_large_err)]
 async fn upgrade(
     socket: TcpStream,
     config: AdapterConfig,
-) -> Result<WebSocketStream<HandshakeLimitedStream<TcpStream>>, AdapterError> {
+    peer_ip: IpAddr,
+    trusted_proxies: TrustedProxySet,
+) -> Result<UpgradeResult, AdapterError> {
     let limited_socket = HandshakeLimitedStream::new(socket, config.handshake_max_bytes);
+    let client_ip = Arc::new(Mutex::new(normalize_ip(peer_ip)));
+    let resolved_client_ip = Arc::clone(&client_ip);
     let upgraded = timeout(
         config.handshake_timeout,
-        accept_async_with_config(limited_socket, Some(websocket_config(config))),
+        accept_hdr_async_with_config(
+            limited_socket,
+            move |request: &Request, response: Response| {
+                let forwarded_for = request
+                    .headers()
+                    .get("x-forwarded-for")
+                    .and_then(|value| value.to_str().ok());
+                let resolved = resolve_client_ip(peer_ip, &trusted_proxies, forwarded_for);
+                *resolved_client_ip.lock().expect("client IP mutex poisoned") = resolved;
+                Ok(response)
+            },
+            Some(websocket_config(config)),
+        ),
     )
     .await
     .map_err(|_| AdapterError::new("handshake_timeout"))?
@@ -230,7 +443,11 @@ async fn upgrade(
 
     let mut upgraded = upgraded;
     upgraded.get_mut().complete_handshake();
-    Ok(upgraded)
+    let client_ip = *client_ip.lock().expect("client IP mutex poisoned");
+    Ok(UpgradeResult {
+        websocket: upgraded,
+        client_ip,
+    })
 }
 
 fn websocket_config(config: AdapterConfig) -> WebSocketConfig {
@@ -250,6 +467,7 @@ async fn run_adapter_loop<S>(
     mut websocket: WebSocketStream<S>,
     bridge_writer: &mut tokio::io::WriteHalf<DuplexStream>,
     outbound_rx: &mut mpsc::Receiver<OutboundBridgeItem>,
+    handler_close_rx: &mut oneshot::Receiver<ApplicationClose>,
     config: AdapterConfig,
 ) -> Result<(), AdapterError>
 where
@@ -318,12 +536,14 @@ where
                         return Err(AdapterError::new("outbound_bridge_failed"));
                     }
                     None => {
+                        let close = timeout(config.io_timeout, handler_close_rx)
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_else(|| ApplicationClose::internal("handler_exit_failed"));
                         let _ = send_close(
                             &mut websocket,
-                            CloseSpec {
-                                code: CloseCode::Normal,
-                                reason: "handler_exit",
-                            },
+                            close.0,
                             config.io_timeout,
                         )
                         .await;
@@ -483,6 +703,9 @@ where
 mod tests {
     use super::*;
     use crate::protocol::encode_packet;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Semaphore;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
     const MAX_BODY_LEN: usize = 32;
@@ -577,6 +800,43 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_client_ip_requires_a_trusted_socket_peer_and_valid_ip() {
+        let trusted = TrustedProxySet::parse_csv("10.20.0.0/16,2001:db8::/32").unwrap();
+        let caddy_peer = IpAddr::V4(Ipv4Addr::new(10, 20, 1, 4));
+        let direct_peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+        let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+
+        assert_eq!(
+            resolve_client_ip(
+                caddy_peer,
+                &trusted,
+                Some("192.0.2.200, 198.51.100.9, 10.20.1.4")
+            ),
+            client
+        );
+        assert_eq!(
+            resolve_client_ip(direct_peer, &trusted, Some("198.51.100.9")),
+            direct_peer
+        );
+        assert_eq!(
+            resolve_client_ip(caddy_peer, &trusted, Some("not-an-ip")),
+            caddy_peer
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_parser_supports_exact_ipv4_ipv6_and_rejects_bad_cidr() {
+        let trusted = TrustedProxySet::parse_csv("127.0.0.1,::1,192.0.2.0/24").unwrap();
+
+        assert!(trusted.contains(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(trusted.contains(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(trusted.contains(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))));
+        assert!(!trusted.contains(IpAddr::V4(Ipv4Addr::new(192, 0, 3, 1))));
+        assert!(TrustedProxySet::parse_csv("10.0.0.0/33").is_err());
+        assert!(TrustedProxySet::parse_csv("garbage").is_err());
+    }
+
+    #[test]
     fn websocket_library_limits_frame_message_and_write_buffers() {
         let config = AdapterConfig {
             handshake_timeout: Duration::from_secs(5),
@@ -597,9 +857,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_packets_remain_separate_binary_messages() {
-        let first = encode_packet(20002, 7, &[1]);
-        let second = encode_packet(20210, 8, &[2, 3]);
+    async fn chat_and_mail_push_packets_remain_separate_binary_messages() {
+        let first = encode_packet(20105, 0, &[1]);
+        let second = encode_packet(20301, 0, &[2, 3]);
         let (mut writer, reader) = tokio::io::duplex(256);
         writer.write_all(&first).await.unwrap();
         writer.write_all(&second).await.unwrap();
@@ -643,6 +903,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handshake_permit_is_released_after_upgrade_not_after_session_exit() {
+        let config = AdapterConfig {
+            handshake_timeout: Duration::from_secs(1),
+            handshake_max_bytes: 1024,
+            max_frame_len: MAX_FRAME_LEN,
+            max_body_len: MAX_BODY_LEN,
+            bridge_capacity: 256,
+            io_timeout: Duration::from_secs(1),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            serve(
+                socket,
+                config,
+                peer.ip(),
+                TrustedProxySet::default(),
+                permit,
+                |mut stream, _client_ip| async move {
+                    let mut byte = [0; 1];
+                    let _ = stream.read(&mut byte).await;
+                    ApplicationClose::normal("test_complete")
+                },
+            )
+            .await
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = [0; 1024];
+        let response_len = timeout(Duration::from_secs(1), client.read(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&response[..response_len])
+                .unwrap()
+                .starts_with("HTTP/1.1 101")
+        );
+        assert_eq!(slots.available_permits(), 1);
+
+        drop(client);
+        let _ = server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn adapter_bridges_one_packet_per_binary_message_and_flushes_pong() {
         let config = AdapterConfig {
             handshake_timeout: Duration::from_secs(1),
@@ -664,12 +978,14 @@ mod tests {
         let (mut handler_stream, adapter_stream) = tokio::io::duplex(config.bridge_capacity);
         let (adapter_reader, mut adapter_writer) = tokio::io::split(adapter_stream);
         let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        let (_handler_close_tx, mut handler_close_rx) = oneshot::channel();
         let adapter_task = tokio::spawn(async move {
             let _adapter_reader = adapter_reader;
             run_adapter_loop(
                 server_websocket,
                 &mut adapter_writer,
                 &mut outbound_rx,
+                &mut handler_close_rx,
                 config,
             )
             .await

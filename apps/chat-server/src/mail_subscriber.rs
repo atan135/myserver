@@ -603,8 +603,8 @@ async fn push_mail_to_player(
 
     match sender.try_send(message) {
         Ok(()) => PushOutcome::Pushed,
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PushOutcome::QueueFull,
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => PushOutcome::QueueClosed,
+        Err(crate::chat_service::OutboundQueueError::Full) => PushOutcome::QueueFull,
+        Err(crate::chat_service::OutboundQueueError::Closed) => PushOutcome::QueueClosed,
     }
 }
 
@@ -834,14 +834,16 @@ mod tests {
         let sessions = crate::chat_service::new_chat_session_map();
         let (target_tx, mut target_rx) = tokio::sync::mpsc::channel(1);
         let (other_tx, mut other_rx) = tokio::sync::mpsc::channel(1);
-        sessions
-            .write()
-            .await
-            .insert("player_001".to_string(), target_tx);
-        sessions
-            .write()
-            .await
-            .insert("player_002".to_string(), other_tx);
+        let (target_shutdown, _target_shutdown_rx) = tokio::sync::watch::channel(None);
+        let (other_shutdown, _other_shutdown_rx) = tokio::sync::watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            crate::chat_service::ChatSession::new(target_tx, target_shutdown),
+        );
+        sessions.write().await.insert(
+            "player_002".to_string(),
+            crate::chat_service::ChatSession::new(other_tx, other_shutdown),
+        );
         let notification = parse_notification(&envelope(), DEFAULT_MAX_PAYLOAD_BYTES).unwrap();
 
         assert_eq!(
@@ -859,10 +861,11 @@ mod tests {
     async fn both_subject_routes_share_event_id_deduplication() {
         let sessions = crate::chat_service::new_chat_session_map();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        sessions
-            .write()
-            .await
-            .insert("player_001".to_string(), sender);
+        let (shutdown, _shutdown_rx) = tokio::sync::watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            crate::chat_service::ChatSession::new(sender, shutdown),
+        );
         let mut deduplicator =
             EventDeduplicator::new(DEFAULT_DEDUP_CAPACITY, Duration::from_secs(60));
         let payload = envelope();
@@ -905,21 +908,28 @@ mod tests {
                 body: vec![],
             })
             .unwrap();
-        sessions
-            .write()
-            .await
-            .insert("player_001".to_string(), full_tx);
+        let (full_shutdown, mut full_shutdown_rx) = tokio::sync::watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            crate::chat_service::ChatSession::new(full_tx, full_shutdown),
+        );
         assert_eq!(
             push_mail_to_player(&sessions, "player_001", &notification).await,
             PushOutcome::QueueFull
         );
+        full_shutdown_rx.changed().await.unwrap();
+        assert_eq!(
+            *full_shutdown_rx.borrow(),
+            Some(crate::chat_service::SessionCloseReason::OutboundQueueFull)
+        );
 
         let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
         drop(closed_rx);
-        sessions
-            .write()
-            .await
-            .insert("player_001".to_string(), closed_tx);
+        let (closed_shutdown, _closed_shutdown_rx) = tokio::sync::watch::channel(None);
+        sessions.write().await.insert(
+            "player_001".to_string(),
+            crate::chat_service::ChatSession::new(closed_tx, closed_shutdown),
+        );
         assert_eq!(
             push_mail_to_player(&sessions, "player_001", &notification).await,
             PushOutcome::QueueClosed

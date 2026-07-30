@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use global_id::{GlobalIdError, GlobalIdGenerator};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, watch};
 
 use crate::chat_server::MessageType;
 use crate::chat_store::{ChatGroup, ChatMessage};
@@ -16,7 +16,86 @@ use crate::proto::chat::{
 use crate::protocol::{OutboundMessage, Packet, encode_body};
 
 pub type ChatOutboundSender = mpsc::Sender<OutboundMessage>;
-pub type ChatSessionMap = Arc<RwLock<HashMap<String, ChatOutboundSender>>>;
+pub type ChatSessionMap = Arc<RwLock<HashMap<String, ChatSession>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCloseReason {
+    Replaced,
+    OutboundQueueFull,
+}
+
+impl SessionCloseReason {
+    pub fn error_code(self) -> &'static str {
+        match self {
+            Self::Replaced => "SESSION_REPLACED",
+            Self::OutboundQueueFull => "OUTBOUND_QUEUE_FULL",
+        }
+    }
+
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::Replaced => "session_replaced",
+            Self::OutboundQueueFull => "outbound_queue_full",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutboundQueueError {
+    Full,
+    Closed,
+}
+
+impl OutboundQueueError {
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::Full => "outbound_queue_full",
+            Self::Closed => "outbound_queue_closed",
+        }
+    }
+}
+
+impl std::fmt::Display for OutboundQueueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.category())
+    }
+}
+
+impl std::error::Error for OutboundQueueError {}
+
+#[derive(Clone)]
+pub struct ChatSession {
+    sender: ChatOutboundSender,
+    shutdown: watch::Sender<Option<SessionCloseReason>>,
+}
+
+impl ChatSession {
+    pub fn new(
+        sender: ChatOutboundSender,
+        shutdown: watch::Sender<Option<SessionCloseReason>>,
+    ) -> Self {
+        Self { sender, shutdown }
+    }
+
+    pub fn try_send(&self, message: OutboundMessage) -> Result<(), OutboundQueueError> {
+        match self.sender.try_send(message) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.request_shutdown(SessionCloseReason::OutboundQueueFull);
+                Err(OutboundQueueError::Full)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(OutboundQueueError::Closed),
+        }
+    }
+
+    fn request_shutdown(&self, reason: SessionCloseReason) {
+        let _ = self.shutdown.send(Some(reason));
+    }
+
+    fn same_channel(&self, sender: &ChatOutboundSender) -> bool {
+        self.sender.same_channel(sender)
+    }
+}
 
 pub fn new_chat_session_map() -> ChatSessionMap {
     Arc::new(RwLock::new(HashMap::new()))
@@ -133,8 +212,12 @@ pub async fn handle_chat_private(
         group_id: String::new(),
     };
 
-    if let Err(e) = chat_store.save_private_message(&msg).await {
-        tracing::warn!("failed to save private message: {}", e);
+    if chat_store.save_private_message(&msg).await.is_err() {
+        tracing::warn!(
+            message_type = MessageType::ChatPrivateReq as u16,
+            error_category = "chat_store_save_failed",
+            "failed to save private message"
+        );
     }
 
     // 发送响应给发送者
@@ -153,10 +236,10 @@ pub async fn handle_chat_private(
     // 如果目标玩家在线，推送消息
     if let Some(sender) = sessions.read().await.get(&request.target_id) {
         let push = build_chat_push(&msg, player_id);
-        if let Err(e) = sender.try_send(push) {
+        if let Err(error) = sender.try_send(push) {
             tracing::warn!(
-                target_id = %request.target_id,
-                error = %e,
+                message_type = MessageType::ChatPush as u16,
+                error_category = error.category(),
                 "failed to queue private chat push"
             );
         }
@@ -220,8 +303,12 @@ pub async fn handle_chat_group(
         group_id: request.group_id.clone(),
     };
 
-    if let Err(e) = chat_store.save_group_message(&msg).await {
-        tracing::warn!("failed to save group message: {}", e);
+    if chat_store.save_group_message(&msg).await.is_err() {
+        tracing::warn!(
+            message_type = MessageType::ChatGroupReq as u16,
+            error_category = "chat_store_save_failed",
+            "failed to save group message"
+        );
     }
 
     // 发送响应给发送者
@@ -244,11 +331,10 @@ pub async fn handle_chat_group(
         if member_id != player_id {
             if let Some(sender) = sessions.read().await.get(&member_id) {
                 let push = build_chat_push(&msg, player_id);
-                if let Err(e) = sender.try_send(push) {
+                if let Err(error) = sender.try_send(push) {
                     tracing::warn!(
-                        target_id = %member_id,
-                        group_id = %request.group_id,
-                        error = %e,
+                        message_type = MessageType::ChatPush as u16,
+                        error_category = error.category(),
                         "failed to queue group chat push"
                     );
                 }
@@ -292,8 +378,12 @@ pub async fn handle_group_create(
         created_at: timestamp,
     };
 
-    if let Err(e) = chat_store.create_group(&group).await {
-        tracing::warn!("failed to create group: {}", e);
+    if chat_store.create_group(&group).await.is_err() {
+        tracing::warn!(
+            message_type = MessageType::GroupCreateReq as u16,
+            error_category = "chat_store_write_failed",
+            "failed to create group"
+        );
         let res = GroupCreateRes {
             ok: false,
             group_id: String::new(),
@@ -378,11 +468,16 @@ pub async fn handle_group_join(
     }
 
     let timestamp = current_unix_ms();
-    if let Err(e) = chat_store
+    if chat_store
         .add_group_member(&request.group_id, player_id, timestamp)
         .await
+        .is_err()
     {
-        tracing::warn!("failed to join group: {}", e);
+        tracing::warn!(
+            message_type = MessageType::GroupJoinReq as u16,
+            error_category = "chat_store_write_failed",
+            "failed to join group"
+        );
         let res = GroupJoinRes {
             ok: false,
             error_code: "JOIN_FAILED".to_string(),
@@ -450,11 +545,16 @@ pub async fn handle_group_leave(
         return Ok(());
     }
 
-    if let Err(e) = chat_store
+    if chat_store
         .remove_group_member(&request.group_id, player_id)
         .await
+        .is_err()
     {
-        tracing::warn!("failed to leave group: {}", e);
+        tracing::warn!(
+            message_type = MessageType::GroupLeaveReq as u16,
+            error_category = "chat_store_write_failed",
+            "failed to leave group"
+        );
         let res = crate::proto::chat::GroupLeaveRes {
             ok: false,
             error_code: "LEAVE_FAILED".to_string(),
@@ -522,8 +622,12 @@ pub async fn handle_group_dismiss(
         return Ok(());
     }
 
-    if let Err(e) = chat_store.delete_group(&request.group_id).await {
-        tracing::warn!("failed to dismiss group: {}", e);
+    if chat_store.delete_group(&request.group_id).await.is_err() {
+        tracing::warn!(
+            message_type = MessageType::GroupDismissReq as u16,
+            error_category = "chat_store_write_failed",
+            "failed to dismiss group"
+        );
         let res = GroupDismissRes {
             ok: false,
             error_code: "DISMISS_FAILED".to_string(),
@@ -695,12 +799,16 @@ pub async fn register_session(
     sessions: &ChatSessionMap,
     player_id: String,
     sender: ChatOutboundSender,
+    shutdown: watch::Sender<Option<SessionCloseReason>>,
 ) {
-    let online_players = {
+    let (online_players, replaced) = {
         let mut guard = sessions.write().await;
-        guard.insert(player_id, sender);
-        guard.len() as u64
+        let replaced = guard.insert(player_id, ChatSession::new(sender, shutdown));
+        (guard.len() as u64, replaced)
     };
+    if let Some(replaced) = replaced {
+        replaced.request_shutdown(SessionCloseReason::Replaced);
+    }
     METRICS.set_online_players(online_players);
 }
 
@@ -735,7 +843,7 @@ pub(crate) fn queue_error(
     seq: u32,
     error_code: &str,
     message: &str,
-) -> Result<(), std::io::Error> {
+) -> Result<(), OutboundQueueError> {
     let res = ErrorRes {
         error_code: error_code.to_string(),
         message: message.to_string(),
@@ -748,14 +856,17 @@ fn queue_message<M: prost::Message>(
     message_type: u16,
     seq: u32,
     message: &M,
-) -> Result<(), std::io::Error> {
+) -> Result<(), OutboundQueueError> {
     let body = encode_body(message);
-    tx.try_send(OutboundMessage {
+    match tx.try_send(OutboundMessage {
         message_type,
         seq,
         body,
-    })
-    .map_err(|error| std::io::Error::other(format!("failed to queue outbound: {}", error)))
+    }) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => Err(OutboundQueueError::Full),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(OutboundQueueError::Closed),
+    }
 }
 
 #[cfg(test)]
@@ -779,9 +890,28 @@ mod tests {
         let sessions = new_chat_session_map();
         let (old_sender, _old_receiver) = mpsc::channel(1);
         let (current_sender, _current_receiver) = mpsc::channel(1);
+        let (old_shutdown, mut old_shutdown_rx) = watch::channel(None);
+        let (current_shutdown, current_shutdown_rx) = watch::channel(None);
 
-        register_session(&sessions, "player_001".to_string(), old_sender.clone()).await;
-        register_session(&sessions, "player_001".to_string(), current_sender.clone()).await;
+        register_session(
+            &sessions,
+            "player_001".to_string(),
+            old_sender.clone(),
+            old_shutdown,
+        )
+        .await;
+        register_session(
+            &sessions,
+            "player_001".to_string(),
+            current_sender.clone(),
+            current_shutdown,
+        )
+        .await;
+        old_shutdown_rx.changed().await.unwrap();
+        assert_eq!(
+            *old_shutdown_rx.borrow(),
+            Some(SessionCloseReason::Replaced)
+        );
         assert!(!unregister_session(&sessions, "player_001", &old_sender).await);
 
         assert!(
@@ -794,5 +924,26 @@ mod tests {
 
         assert!(unregister_session(&sessions, "player_001", &current_sender).await);
         assert!(!sessions.read().await.contains_key("player_001"));
+        assert_eq!(*current_shutdown_rx.borrow(), None);
+    }
+
+    #[tokio::test]
+    async fn full_session_queue_requests_connection_shutdown() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let (shutdown, mut shutdown_rx) = watch::channel(None);
+        let session = ChatSession::new(sender, shutdown);
+        let message = OutboundMessage {
+            message_type: MessageType::ChatPush as u16,
+            seq: 0,
+            body: vec![],
+        };
+
+        session.try_send(message.clone()).unwrap();
+        assert_eq!(session.try_send(message), Err(OutboundQueueError::Full));
+        shutdown_rx.changed().await.unwrap();
+        assert_eq!(
+            *shutdown_rx.borrow(),
+            Some(SessionCloseReason::OutboundQueueFull)
+        );
     }
 }
