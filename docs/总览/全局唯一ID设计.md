@@ -209,6 +209,8 @@ GLOBAL_ID_WORKER_ID=1
 - `GLOBAL_ID_WORKER_ID=3` 只用于 ID 生成。
 - 二者不要混用。
 
+角色 ID 的发号所有权固定在 `auth-http`：玩家自助创角和运营后台代创角色都进入 `auth-http` 的 `CharacterStore`，复用同一套 worker lease 和全局 ID 生成器。`admin-api` 只负责控制面鉴权、审计和调用 `auth-http.internal`，不配置角色发号 worker，不直接生成 `character_id`，也不直接插入 `characters`。未来后台复制角色时也必须沿用该入口，并另行定义复制字段范围和幂等策略。
+
 ## 7. 合服追溯模型
 
 合服时不改历史 ID，不新建 `origin_id`。合服后新 ID 复用目标世界的 `active_origin_id`。
@@ -364,6 +366,7 @@ GET /api/v1/global-id/merge-events?world_id=&origin_id=&limit=&offset=
 - `game-server` 物品实例 `uid` 的时间戳生成。
 - GM 发物品 `next_item_uid`。
 - `auth-http` 新玩家 `player_id`。
+- `auth-http` 玩家自助创角和后台代创角色的 `character_id`。
 - `mail-service` `mail_id`。
 - `announce-service` `announce_id`。
 - `chat-server` `msg_id` / `group_id`。
