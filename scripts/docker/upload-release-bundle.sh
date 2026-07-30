@@ -149,14 +149,17 @@ target="$release_root/$RELEASE_ID"
 runner_source=/tmp/server-apply-release.sh
 
 [[ ! -e "$target" ]] || { echo "Release directory already exists: $target" >&2; exit 65; }
-install -d -m 0755 "$release_root"
+[[ -d "$release_root" && -w "$release_root" ]] || {
+  echo "Release root must already exist and be writable by the deployment user: $release_root" >&2
+  exit 77
+}
 printf '%s  %s\n' "$BUNDLE_SHA256" "$archive" | sha256sum --check --status -
 tar -xzf "$archive" -C "$release_root"
 (
   cd "$target"
   sha256sum --check --status SHA256SUMS
 )
-install -m 0755 "$runner_source" /data/myserver/apply-release.sh
+sudo -n install -m 0755 "$runner_source" /data/myserver/apply-release.sh
 rm -f "$archive" "$runner_source"
 printf 'uploaded_release=%s\nserver_command=/data/myserver/apply-release.sh --release-id %s\n' "$target" "$RELEASE_ID"
 REMOTE
