@@ -7,6 +7,7 @@ mod online_route;
 mod proto;
 mod protocol;
 mod ticket;
+mod websocket;
 
 use std::fs;
 use std::net::SocketAddr;
@@ -23,12 +24,21 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_TICKET_SECRET: &str = "default_secret_change_in_production";
+const DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_WS_HANDSHAKE_MAX_BYTES: usize = 16 * 1024;
+const DEFAULT_WS_BRIDGE_CAPACITY: usize = 8 * 1024;
 
 struct Config {
     db_enabled: bool,
     database_url: String,
     db_pool_size: u32,
     bind_addr: String,
+    ws_enabled: bool,
+    ws_bind_addr: String,
+    ws_handshake_timeout_secs: u64,
+    ws_handshake_max_bytes: usize,
+    ws_max_frame_len: usize,
+    ws_bridge_capacity: usize,
     heartbeat_timeout_secs: u64,
     max_body_len: usize,
     msg_rate_window_ms: u64,
@@ -69,6 +79,12 @@ struct Config {
 impl Config {
     fn from_env() -> Self {
         let bind_addr = bind_addr_from_env("CHAT_BIND_ADDR", "0.0.0.0:9001");
+        let ws_bind_addr = bind_addr_from_env("CHAT_WS_BIND_ADDR", "0.0.0.0:9011");
+        let max_body_len = std::env::var("MAX_BODY_LEN")
+            .unwrap_or_else(|_| "4096".to_string())
+            .parse()
+            .unwrap_or(4096);
+        let default_ws_max_frame_len = protocol::HEADER_LEN.saturating_add(max_body_len);
         let legacy_compatibility = resolve_mail_legacy_compatibility(
             mail_legacy_strict_policy_from_env(),
             std::env::var("CHAT_MAIL_ACCEPT_LEGACY_PAYLOAD")
@@ -90,14 +106,30 @@ impl Config {
                 .parse()
                 .unwrap_or(5),
             bind_addr: bind_addr.clone(),
+            ws_enabled: parse_bool_env("CHAT_WS_ENABLED", false),
+            ws_bind_addr,
+            ws_handshake_timeout_secs: parse_positive_u64_env(
+                "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
+                DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
+            ),
+            ws_handshake_max_bytes: parse_positive_usize_env(
+                "CHAT_WS_HANDSHAKE_MAX_BYTES",
+                DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+            ),
+            ws_max_frame_len: parse_positive_usize_env(
+                "CHAT_WS_MAX_FRAME_LEN",
+                default_ws_max_frame_len,
+            )
+            .min(default_ws_max_frame_len),
+            ws_bridge_capacity: parse_positive_usize_env(
+                "CHAT_WS_BRIDGE_CAPACITY",
+                DEFAULT_WS_BRIDGE_CAPACITY,
+            ),
             heartbeat_timeout_secs: std::env::var("HEARTBEAT_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
-            max_body_len: std::env::var("MAX_BODY_LEN")
-                .unwrap_or_else(|_| "4096".to_string())
-                .parse()
-                .unwrap_or(4096),
+            max_body_len,
             msg_rate_window_ms: parse_u64_env("CHAT_MSG_RATE_WINDOW_MS", 1000),
             msg_rate_max: parse_u64_env("CHAT_MSG_RATE_MAX", 0),
             max_connections_per_player: parse_u64_env("CHAT_MAX_CONNECTIONS_PER_PLAYER", 0),
@@ -675,6 +707,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_config = chat_server::Config {
         bind_addr: config.bind_addr.clone(),
+        ws_enabled: config.ws_enabled,
+        ws_bind_addr: config.ws_bind_addr.clone(),
+        ws_handshake_timeout_secs: config.ws_handshake_timeout_secs,
+        ws_handshake_max_bytes: config.ws_handshake_max_bytes,
+        ws_max_frame_len: config.ws_max_frame_len,
+        ws_bridge_capacity: config.ws_bridge_capacity,
         heartbeat_timeout_secs: config.heartbeat_timeout_secs,
         max_body_len: config.max_body_len,
         msg_rate_window_ms: config.msg_rate_window_ms,
@@ -1071,6 +1109,60 @@ mod tests {
     }
 
     #[test]
+    fn websocket_adapter_defaults_to_disabled_on_independent_port() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&[
+            "CHAT_WS_ENABLED",
+            "CHAT_WS_BIND_ADDR",
+            "CHAT_WS_HANDSHAKE_TIMEOUT_SECS",
+            "CHAT_WS_HANDSHAKE_MAX_BYTES",
+            "CHAT_WS_MAX_FRAME_LEN",
+            "CHAT_WS_BRIDGE_CAPACITY",
+            "MAX_BODY_LEN",
+            "SERVICE_BIND_HOST",
+        ]);
+
+        unsafe {
+            env::remove_var("CHAT_WS_ENABLED");
+            env::remove_var("CHAT_WS_BIND_ADDR");
+            env::remove_var("CHAT_WS_HANDSHAKE_TIMEOUT_SECS");
+            env::remove_var("CHAT_WS_HANDSHAKE_MAX_BYTES");
+            env::remove_var("CHAT_WS_MAX_FRAME_LEN");
+            env::remove_var("CHAT_WS_BRIDGE_CAPACITY");
+            env::remove_var("MAX_BODY_LEN");
+            env::remove_var("SERVICE_BIND_HOST");
+        }
+
+        let config = Config::from_env();
+
+        assert!(!config.ws_enabled);
+        assert_eq!(config.bind_addr, "0.0.0.0:9001");
+        assert_eq!(config.ws_bind_addr, "0.0.0.0:9011");
+        assert_eq!(config.ws_max_frame_len, protocol::HEADER_LEN + 4096);
+        assert_eq!(
+            config.ws_handshake_max_bytes,
+            DEFAULT_WS_HANDSHAKE_MAX_BYTES
+        );
+        assert_eq!(config.ws_bridge_capacity, DEFAULT_WS_BRIDGE_CAPACITY);
+    }
+
+    #[test]
+    fn websocket_frame_limit_cannot_exceed_protocol_packet_limit() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvGuard::capture(&["CHAT_WS_MAX_FRAME_LEN", "MAX_BODY_LEN"]);
+
+        unsafe {
+            env::set_var("CHAT_WS_MAX_FRAME_LEN", "65536");
+            env::set_var("MAX_BODY_LEN", "128");
+        }
+
+        let config = Config::from_env();
+
+        assert_eq!(config.max_body_len, 128);
+        assert_eq!(config.ws_max_frame_len, protocol::HEADER_LEN + 128);
+    }
+
+    #[test]
     fn service_build_version_defaults_to_dev() {
         let _guard = env_lock().lock().unwrap();
         let _env = EnvGuard::capture(&["SERVICE_BUILD_VERSION", "SERVICE_ZONE"]);
@@ -1175,6 +1267,12 @@ mod tests {
             database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string(),
             db_pool_size: 5,
             bind_addr: "0.0.0.0:9001".to_string(),
+            ws_enabled: false,
+            ws_bind_addr: "0.0.0.0:9011".to_string(),
+            ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
+            ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+            ws_max_frame_len: protocol::HEADER_LEN + 4096,
+            ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
             msg_rate_window_ms: 1000,
@@ -1249,6 +1347,12 @@ mod tests {
             database_url: "postgres://postgres:password@127.0.0.1:5432/myserver_chat".to_string(),
             db_pool_size: 5,
             bind_addr: "0.0.0.0:9001".to_string(),
+            ws_enabled: false,
+            ws_bind_addr: "0.0.0.0:9011".to_string(),
+            ws_handshake_timeout_secs: DEFAULT_WS_HANDSHAKE_TIMEOUT_SECS,
+            ws_handshake_max_bytes: DEFAULT_WS_HANDSHAKE_MAX_BYTES,
+            ws_max_frame_len: protocol::HEADER_LEN + 4096,
+            ws_bridge_capacity: DEFAULT_WS_BRIDGE_CAPACITY,
             heartbeat_timeout_secs: 30,
             max_body_len: 4096,
             msg_rate_window_ms: 1000,

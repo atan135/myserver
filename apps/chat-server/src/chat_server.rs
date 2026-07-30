@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use prost::Message;
 use redis::AsyncCommands;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -18,6 +18,7 @@ use crate::online_route;
 use crate::proto::chat::{ChatAuthReq, ChatAuthRes};
 use crate::protocol::{HEADER_LEN, OutboundMessage, Packet, encode_packet, parse_header};
 use crate::ticket::{hash_ticket, verify_ticket};
+use crate::websocket::{self, AdapterConfig};
 
 const PLAYER_CONNECTION_LIMIT_EXCEEDED: &str = "PLAYER_CONNECTION_LIMIT_EXCEEDED";
 const IP_CONNECTION_LIMIT_EXCEEDED: &str = "IP_CONNECTION_LIMIT_EXCEEDED";
@@ -302,6 +303,12 @@ fn decrement_ip_count(counts: &mut HashMap<IpAddr, u64>, ip: IpAddr) {
 #[derive(Clone)]
 pub struct Config {
     pub bind_addr: String,
+    pub ws_enabled: bool,
+    pub ws_bind_addr: String,
+    pub ws_handshake_timeout_secs: u64,
+    pub ws_handshake_max_bytes: usize,
+    pub ws_max_frame_len: usize,
+    pub ws_bridge_capacity: usize,
     pub heartbeat_timeout_secs: u64,
     pub max_body_len: usize,
     pub msg_rate_window_ms: u64,
@@ -323,6 +330,11 @@ pub async fn run(
     mut lease_loss_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
+    let ws_listener = if config.ws_enabled {
+        Some(TcpListener::bind(&config.ws_bind_addr).await?)
+    } else {
+        None
+    };
 
     info!(
         addr = %config.bind_addr,
@@ -330,6 +342,11 @@ pub async fn run(
         max_connections_per_ip = config.max_connections_per_ip,
         "chat server listening"
     );
+    if ws_listener.is_some() {
+        info!(addr = %config.ws_bind_addr, "chat WebSocket adapter listening");
+    } else {
+        info!("chat WebSocket adapter disabled");
+    }
 
     let connection_limits = Arc::new(ConnectionLimitTracker::new(
         config.max_connections_per_player,
@@ -340,7 +357,8 @@ pub async fn run(
     let mut lease_lost = false;
     loop {
         let accept_result = tokio::select! {
-            result = listener.accept() => Some(result),
+            result = listener.accept() => Some(("tcp", result)),
+            result = accept_optional(ws_listener.as_ref()) => Some(("websocket", result)),
             _ = tokio::signal::ctrl_c() => None,
             changed = lease_loss_rx.changed() => {
                 if changed.is_err() || *lease_loss_rx.borrow_and_update() {
@@ -350,7 +368,7 @@ pub async fn run(
             },
         };
 
-        let Some((socket, peer_addr)) = accept_result.transpose()? else {
+        let Some((transport, accepted)) = accept_result else {
             if lease_lost {
                 warn!("global id worker lease lost, stopping chat server");
             } else {
@@ -358,6 +376,7 @@ pub async fn run(
             }
             break;
         };
+        let (socket, peer_addr) = accepted?;
 
         let chat_store = chat_store.clone();
         let chat_sessions = chat_sessions.clone();
@@ -365,21 +384,65 @@ pub async fn run(
         let connection_limits = Arc::clone(&connection_limits);
         let peer_ip = peer_addr.ip();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(
-                socket,
-                peer_addr.to_string(),
-                peer_ip,
-                chat_store,
-                chat_sessions,
-                config,
-                connection_limits,
-            )
-            .await
-            {
-                warn!(peer = %peer_addr, error = %e, "connection handler error");
+        match transport {
+            "tcp" => {
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(
+                        socket,
+                        peer_addr.to_string(),
+                        peer_ip,
+                        chat_store,
+                        chat_sessions,
+                        config,
+                        connection_limits,
+                    )
+                    .await
+                    {
+                        warn!(peer = %peer_addr, transport = "tcp", error = %e, "connection handler error");
+                    }
+                });
             }
-        });
+            "websocket" => {
+                tokio::spawn(async move {
+                    let adapter_config = AdapterConfig {
+                        handshake_timeout: Duration::from_secs(config.ws_handshake_timeout_secs),
+                        handshake_max_bytes: config.ws_handshake_max_bytes,
+                        max_frame_len: config.ws_max_frame_len,
+                        max_body_len: config.max_body_len,
+                        bridge_capacity: config.ws_bridge_capacity,
+                        io_timeout: Duration::from_secs(config.heartbeat_timeout_secs.max(1)),
+                    };
+                    let handler_peer = peer_addr.to_string();
+                    let handler_log_peer = handler_peer.clone();
+                    let handler_config = config.clone();
+                    let result = websocket::serve(socket, adapter_config, move |stream| async move {
+                        if let Err(error) = handle_connection(
+                            stream,
+                            handler_peer,
+                            peer_ip,
+                            chat_store,
+                            chat_sessions,
+                            handler_config,
+                            connection_limits,
+                        )
+                        .await
+                        {
+                            warn!(peer = %handler_log_peer, transport = "websocket", error = %error, "connection handler error");
+                        }
+                    })
+                    .await;
+                    if let Err(error) = result {
+                        warn!(
+                            peer = %peer_addr,
+                            transport = "websocket",
+                            error_category = error.category(),
+                            "WebSocket connection ended with adapter error"
+                        );
+                    }
+                });
+            }
+            _ => unreachable!("listener transport is fixed"),
+        }
     }
 
     if let Some(task) = readiness_task {
@@ -391,6 +454,15 @@ pub async fn run(
         Err(std::io::Error::other("global id worker lease lost").into())
     } else {
         Ok(())
+    }
+}
+
+async fn accept_optional(
+    listener: Option<&TcpListener>,
+) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
     }
 }
 
