@@ -36,6 +36,10 @@ const environmentPattern = /^[a-z][a-z0-9-]{0,63}$/;
 const actorPattern = /^[A-Za-z0-9_.@-]{1,128}$/;
 const backupIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const backupChecksumPattern = /^(?:[a-f0-9]{64}|[a-f0-9]{128})$/i;
+const defaultReadinessTimeoutMs = 120_000;
+const maximumReadinessTimeoutMs = 300_000;
+const readinessPollIntervalMs = 1_000;
+const readinessRequestTimeoutMs = 5_000;
 
 export function parseDeploymentArguments(argv) {
   const [command, ...rest] = argv;
@@ -141,6 +145,8 @@ function deploymentRuntime(overrides = {}) {
     executeDatabase: overrides.executeDatabase || executeDatabase,
     executeDrift: overrides.executeDrift || executeDrift,
     fetch: overrides.fetch || globalThis.fetch,
+    now: overrides.now || Date.now,
+    sleep: overrides.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
     randomToken: overrides.randomToken || (() => randomBytes(8).toString("hex"))
   };
 }
@@ -509,15 +515,42 @@ function readinessEndpoint(value) {
 
 function readinessTimeout(environment) {
   const raw = environment.MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS;
-  if (raw === undefined || raw === "") return 5000;
-  if (!/^\d{3,5}$/.test(raw)) throw new Error("MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS must be an integer from 100 to 60000");
+  if (raw === undefined || raw === "") return defaultReadinessTimeoutMs;
+  if (!/^\d{3,6}$/.test(raw)) throw new Error(`MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS must be an integer from 100 to ${maximumReadinessTimeoutMs}`);
   const value = Number(raw);
-  if (value < 100 || value > 60000) throw new Error("MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS must be an integer from 100 to 60000");
+  if (value < 100 || value > maximumReadinessTimeoutMs) throw new Error(`MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS must be an integer from 100 to ${maximumReadinessTimeoutMs}`);
   return value;
 }
 
-async function readinessReport(plan, options, runtime) {
-  const timeout = options.checkReadiness ? readinessTimeout(runtime.environment) : undefined;
+async function probeReadiness(endpoint, timeout, runtime) {
+  try {
+    const response = await runtime.fetch(endpoint, {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(timeout),
+      headers: { accept: "application/json" }
+    });
+    let healthy = response.ok;
+    const contentType = response.headers?.get?.("content-type") || "";
+    if (healthy && /application\/json/i.test(contentType)) {
+      const body = await response.text();
+      if (body.length <= 8192) {
+        try {
+          const payload = JSON.parse(body);
+          if (payload && typeof payload === "object" && payload.ok === false) healthy = false;
+        } catch { /* a 2xx non-JSON-compatible health response still has a successful transport status */ }
+      }
+    }
+    return {
+      state: healthy ? "healthy" : "unhealthy",
+      status: response.status
+    };
+  } catch {
+    return { state: "unreachable" };
+  }
+}
+
+async function readinessReport(plan, options, runtime, deadline) {
   const reports = [];
   for (const readiness of plan.gate.readiness) {
     const rawEndpoint = runtime.environment[readiness.urlEnvironment];
@@ -536,38 +569,40 @@ async function readinessReport(plan, options, runtime) {
       reports.push({ service: readiness.service, endpointEnvironment: readiness.urlEnvironment, state: "not-checked" });
       continue;
     }
-    try {
-      const response = await runtime.fetch(endpoint, {
-        method: "GET",
-        redirect: "error",
-        signal: AbortSignal.timeout(timeout),
-        headers: { accept: "application/json" }
-      });
-      let healthy = response.ok;
-      const contentType = response.headers?.get?.("content-type") || "";
-      if (healthy && /application\/json/i.test(contentType)) {
-        const body = await response.text();
-        if (body.length <= 8192) {
-          try {
-            const payload = JSON.parse(body);
-            if (payload && typeof payload === "object" && payload.ok === false) healthy = false;
-          } catch { /* a 2xx non-JSON-compatible health response still has a successful transport status */ }
-        }
-      }
-      reports.push({
-        service: readiness.service,
-        endpointEnvironment: readiness.urlEnvironment,
-        state: healthy ? "healthy" : "unhealthy",
-        status: response.status
-      });
-    } catch {
-      reports.push({ service: readiness.service, endpointEnvironment: readiness.urlEnvironment, state: "unreachable" });
-    }
+    reports.push({ service: readiness.service, endpointEnvironment: readiness.urlEnvironment, endpoint, state: "pending" });
   }
-  return reports;
+
+  const configured = reports.filter(({ state }) => state === "pending");
+  if (configured.length === 0) return reports;
+
+  const startedAt = runtime.now();
+  let attempts = 0;
+  const complete = () => {
+    const waitedMs = runtime.now() - startedAt;
+    return reports.map(({ endpoint, ...report }) => ({ ...report, attempts, waitedMs }));
+  };
+  while (true) {
+    if (attempts > 0 && runtime.now() >= deadline) return complete();
+    attempts += 1;
+    const remaining = Math.max(1, deadline - runtime.now());
+    const requestTimeout = Math.min(remaining, readinessRequestTimeoutMs);
+    await Promise.all(configured
+      .filter(({ state }) => state !== "healthy")
+      .map(async (report) => {
+        const result = await probeReadiness(report.endpoint, requestTimeout, runtime);
+        report.state = result.state;
+        if (result.status !== undefined) report.status = result.status;
+        else delete report.status;
+      }));
+
+    if (configured.every(({ state }) => state === "healthy") || runtime.now() >= deadline) {
+      return complete();
+    }
+    await runtime.sleep(Math.min(readinessPollIntervalMs, deadline - runtime.now()));
+  }
 }
 
-async function postflightDatabase(plan, options, runtime) {
+async function postflightDatabase(plan, options, runtime, readinessDeadline) {
   const inspection = await inspectDeploymentDatabase(plan, { includeKeyTables: true }, runtime);
   if (!inspection.ok) {
     return {
@@ -608,7 +643,7 @@ async function postflightDatabase(plan, options, runtime) {
   }
   let readiness = [];
   if (issues.length === 0) {
-    readiness = await readinessReport(plan, options, runtime);
+    readiness = await readinessReport(plan, options, runtime, readinessDeadline);
     if (readiness.some(({ state }) => state === "invalid-config")) {
       issues.push(issue(EXIT.CONFIG, "readiness", "a configured readiness endpoint is invalid"));
     }
@@ -642,14 +677,16 @@ async function postflightDatabase(plan, options, runtime) {
 export async function runPostflight(options, overrides = {}) {
   const runtime = deploymentRuntime(overrides);
   let plans;
+  let readinessDeadline;
   try {
     plans = deploymentPlans({ ...runtime, environment: runtime.environment });
+    if (options.checkReadiness) readinessDeadline = runtime.now() + readinessTimeout(runtime.environment);
   } catch (error) {
     return reportError("postflight", options.environment, error, "postflight");
   }
   const reports = [];
   for (const plan of plans) {
-    const report = await postflightDatabase(plan, options, runtime);
+    const report = await postflightDatabase(plan, options, runtime, readinessDeadline);
     reports.push(report);
     if (!report.ok) {
       return {

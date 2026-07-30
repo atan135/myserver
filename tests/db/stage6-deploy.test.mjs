@@ -56,6 +56,11 @@ function healthyClient(database, options = {}) {
 function fakeRuntime(options = {}) {
   return {
     environment: options.environment || {},
+    databases: options.databases,
+    loadGateConfig: options.loadGateConfig,
+    loadDriftTarget: options.loadDriftTarget,
+    sqlxMigrationMetadata: options.sqlxMigrationMetadata,
+    migrationSafetyForDirectory: options.migrationSafetyForDirectory,
     connectionUrl: () => "postgresql://deployment-test@localhost:5432/deployment_test",
     connect: options.connect || (async (_url, database) => healthyClient(database, options.databaseOptions?.[database.key] || {})),
     executeDatabase: options.executeDatabase || (() => ({ ok: true, code: EXIT.OK })),
@@ -71,8 +76,37 @@ function fakeRuntime(options = {}) {
     fetch: options.fetch || (async () => {
       throw new Error("fetch must not run without --check-readiness");
     }),
+    now: options.now,
+    sleep: options.sleep,
     randomToken: options.randomToken
   };
+}
+
+const authDatabase = {
+  key: "auth",
+  defaultDatabase: "myserver_auth",
+  migrationDirectory: "db/migrations/auth",
+  logicalOwner: "auth-http"
+};
+
+const authGate = {
+  keyTables: ["public.player_accounts", "public.admin_accounts"],
+  services: [
+    { name: "auth-http", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260729173000" },
+    { name: "admin-api", minimumMigrationVersion: "20260718161350", maximumMigrationVersion: "20260729173000" }
+  ],
+  readiness: [
+    { service: "auth-http", urlEnvironment: "MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL" },
+    { service: "admin-api", urlEnvironment: "MYSERVER_DB_DEPLOY_ADMIN_API_READINESS_URL" }
+  ]
+};
+
+function authOnlyRuntime(options = {}) {
+  return fakeRuntime({
+    ...options,
+    databases: [authDatabase],
+    loadGateConfig: () => ({ schema: 1, databases: { auth: authGate } })
+  });
 }
 
 test("deployment CLI requires explicit environment, actor and temporary rebuild confirmation", () => {
@@ -185,22 +219,59 @@ test("postflight keeps readiness explicitly unknown until an operator asks to pr
   assert.equal(report.reports[0].readiness.every(({ state }) => state === "not-configured"), true);
 });
 
-test("explicit unhealthy readiness response blocks postflight without starting a service", async () => {
-  const report = await runPostflight({ environment: "ci", checkReadiness: true, requireReadiness: false }, fakeRuntime({
+test("postflight retries an unreachable readiness endpoint until it becomes healthy", async () => {
+  let now = 0;
+  let calls = 0;
+  const report = await runPostflight({ environment: "ci", checkReadiness: true, requireReadiness: false }, authOnlyRuntime({
     environment: {
-      MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL: "http://127.0.0.1:39999/healthz"
+      MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL: "http://127.0.0.1:39999/healthz",
+      MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "2000"
     },
-    fetch: async () => ({
-      ok: true,
-      status: 200,
-      headers: { get: () => "application/json" },
-      text: async () => "{\"ok\":false}"
-    })
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("service is still starting");
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        text: async () => "{\"ok\":true}"
+      };
+    }
+  }));
+  assert.equal(report.ok, true, JSON.stringify(report));
+  assert.equal(calls, 2);
+  assert.equal(report.reports[0].readiness[0].state, "healthy");
+  assert.equal(report.reports[0].readiness[0].waitedMs, 1000);
+});
+
+test("an endpoint that stays unhealthy blocks postflight after the total readiness timeout", async () => {
+  let now = 0;
+  let calls = 0;
+  const report = await runPostflight({ environment: "ci", checkReadiness: true, requireReadiness: false }, authOnlyRuntime({
+    environment: {
+      MYSERVER_DB_DEPLOY_AUTH_HTTP_READINESS_URL: "http://127.0.0.1:39999/healthz",
+      MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "1000"
+    },
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    fetch: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        text: async () => "{\"ok\":false}"
+      };
+    }
   }));
   assert.equal(report.ok, false);
   assert.equal(report.code, EXIT.EXECUTION);
   assert.equal(report.reports.length, 1);
   assert.equal(report.reports[0].readiness[0].state, "unhealthy");
+  assert.equal(calls, 1);
+  assert.equal(report.reports[0].readiness[0].waitedMs, 1000);
   assert.match(report.recovery.join(" "), /last compatible service version/);
 });
 

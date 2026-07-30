@@ -386,7 +386,8 @@ services:
       MYSERVER_DB_DEPLOY_CHAT_SERVER_READINESS_URL: http://chat-server:7602/readyz
       MYSERVER_DB_DEPLOY_ANNOUNCE_SERVICE_READINESS_URL: http://announce-service:9004/healthz
       MYSERVER_DB_DEPLOY_MAIL_SERVICE_READINESS_URL: http://mail-service:9003/healthz
-      MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "5000"
+      # Total startup allowance shared by every postflight readiness endpoint.
+      MYSERVER_DB_DEPLOY_READINESS_TIMEOUT_MS: "120000"
     depends_on:
       postgres:
         condition: service_healthy
